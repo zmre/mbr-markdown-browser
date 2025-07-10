@@ -1,0 +1,37 @@
+[package]
+name = "mbr"
+version = "0.1.0"
+edition = "2024"
+authors = ["zmre"]
+license = "MIT"
+readme = "README.md"
+description = "A markdown viewer and browser"
+repository = "https://github.com/zmre/mbr"
+keywords = ["static", "site", "generator"]
+
+include = ["src/**/*", "LICENSE", "README.md"]
+
+[dependencies]
+axum = { version = "0.8.4", features = ["http1", "http2", "json", "tokio", "tracing"] }
+clap = { version = "4.5.40", features = ["derive"] }
+tokio = {version="1.46.0", features = ["full"]}
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
+pulldown-cmark-escape = { version = "0.11", default-features = false }
+walkdir = "2.5.0"
+wry = "0.52.1"
+winit = "0.30.11"
+tera = "1"
+futures = "0.3.31"
+reqwest = "0.12.22"
+scraper = "0.23.1"
+html-escape = "0.2.13"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = { version = "0.5.2", features = ["util"] }
+tower-http = { version = "0.6.1", features = ["fs", "trace"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+pathdiff = "0.2.3"
+url = "2.5.4"
