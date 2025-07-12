@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let file_absolute_path = Path::new(&args.file)
         .canonicalize()
-        .expect("Failed to canonicalize path");
+        .expect("Failed to canonicalize path for provided folder");
 
     let config = Config::read(&file_absolute_path)?;
 
@@ -31,40 +31,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if args.gui {
+        let config_copy = config.clone();
         let handle = tokio::spawn(async move {
-            let server = server::Server::init(config.ip.0, config.port);
+            let server = server::Server::init(
+                config_copy.ip.0,
+                config_copy.port,
+                config_copy.root_dir.clone(),
+                &config_copy.static_folder,
+                &config_copy.markdown_extensions.clone(),
+            );
             server.start().await;
         });
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
 
         let url = url.join(
-            file_relative_to_root
-                .to_str()
-                .unwrap()
-                .replace(".md", "/")
-                .as_str(),
+            replace_markdown_extension_with_slash(
+                file_relative_to_root.to_str().unwrap(),
+                &config.markdown_extensions,
+            )
+            .as_str(),
         )?;
 
-        browser::Gui::launch_url(url.as_str());
-        handle.abort(); // after the browser window quits, we can exit the server
+        browser::launch_url(url.as_str())?;
+        handle.abort(); // after the browser window quits, we can exit the http server
     } else if args.server {
-        let server = server::Server::init(config.ip.0, config.port);
+        let server = server::Server::init(
+            config.ip.0,
+            config.port,
+            &config.root_dir,
+            &config.static_folder,
+            &config.markdown_extensions,
+        );
         println!(
             "http://{}:{}/{}",
             config.ip,
             config.port,
-            file_relative_to_root
-                .display()
-                .to_string()
-                .replace(".md", "/")
+            replace_markdown_extension_with_slash(
+                file_relative_to_root.to_str().unwrap(),
+                &config.markdown_extensions
+            )
         );
 
         server.start().await;
     } else {
         let html_output = markdown::render(args.file).await?;
-        let templates = templates::Templates::new();
+        let templates = templates::Templates::new(&config.root_dir)?;
         let html_output = templates.render_markdown(&html_output).await?;
         println!("{}", &html_output);
     }
     Ok(())
+}
+
+fn replace_markdown_extension_with_slash(s: &str, extensions: &[String]) -> String {
+    if let Some((base, extension)) = s.rsplit_once('.') {
+        match extensions
+            .iter()
+            .find(|cur_ext| extension == cur_ext.as_str())
+        {
+            Some(_) => format!("{}/", base), // one of the sought extensions is there, replace with a "/"
+            None => s.to_string(), // no sought extensions found, just return input as provided
+        }
+    } else {
+        s.to_string() // no extension, so return input as provided
+    }
 }

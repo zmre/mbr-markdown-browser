@@ -1,3 +1,4 @@
+use reqwest::IntoUrl;
 use scraper::{Html, Selector};
 
 // TODO: use actual oembed for some links and make a visual link for others with image and title and description

@@ -14,6 +14,17 @@ use figment::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IpArray(pub [u8; 4]);
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Config {
+    pub root_dir: PathBuf,
+    pub ip: IpArray,
+    pub port: u16,
+    pub static_folder: String,
+    pub enable_writes: bool,
+    pub markdown_extensions: Vec<String>,
+    pub theme: String,
+}
+
 impl std::fmt::Display for IpArray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let [a, b, c, d] = self.0;
@@ -44,17 +55,6 @@ impl Serialize for IpArray {
         let ip = std::net::Ipv4Addr::from(self.0);
         serializer.serialize_str(&ip.to_string())
     }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub root_dir: PathBuf,
-    pub ip: IpArray,
-    pub port: u16,
-    pub static_folder: String,
-    pub enable_writes: bool,
-    pub markdown_extensions: Vec<String>,
-    pub theme: String,
 }
 
 impl Default for Config {
@@ -102,7 +102,11 @@ impl Config {
             .map(|x| x.to_path_buf())
     }
 
-    fn search_folder_in_ancestors(start_path: &PathBuf, search_folder: &str) -> Option<PathBuf> {
+    fn search_folder_in_ancestors<P: AsRef<Path>>(
+        start_path: &PathBuf,
+        search_folder: P, // the folder I'm looking for (usually .mbr)
+    ) -> Option<PathBuf> {
+        let search_folder = search_folder.as_ref();
         let dir = if start_path.is_dir() {
             start_path
         } else {

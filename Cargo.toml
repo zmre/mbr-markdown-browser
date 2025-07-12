@@ -20,8 +20,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
 walkdir = "2.5.0"
-wry = "0.52.1"
-winit = "0.30.11"
+wry = {version = "0.52.1", default-features=true, features = ["devtools", "fullscreen"]}
+# winit = "0.30.11"
 tera = "1"
 futures = "0.3.31"
 reqwest = "0.12.22"
@@ -35,3 +35,4 @@ tower-http = { version = "0.6.1", features = ["fs", "trace"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 pathdiff = "0.2.3"
 url = "2.5.4"
+tao = "0.34.0"

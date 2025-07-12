@@ -1,70 +1,69 @@
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    window::{Window, WindowId},
+// use winit::{
+//     application::ApplicationHandler,
+//     event::WindowEvent,
+//     event_loop::{ActiveEventLoop, EventLoop},
+//     window::{Window, WindowId},
+// };
+use tao::{
+    event::{DeviceEvent, Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    platform::macos::WindowBuilderExtMacOS,
+    window::{Window, WindowBuilder},
 };
 use wry::WebViewBuilder;
 
-pub enum BrowserContents {
-    Url(String),
-    Html(String),
-}
+pub fn launch_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("mbr")
+        .with_titlebar_transparent(true)
+        .build(&event_loop)?;
 
-impl Default for BrowserContents {
-    fn default() -> Self {
-        BrowserContents::Url("https://well.com/".to_string())
-    }
-}
+    // with_window_icon(self, window_icon: Option<Icon>) -> Self
+    // window.set_title("New Window Title");
+    // window_builder.with_decorations(false);
 
-#[derive(Default)]
-pub struct Gui {
-    window: Option<Window>,
-    webview: Option<wry::WebView>,
-    content: BrowserContents,
-}
+    let builder = WebViewBuilder::new().with_devtools(true).with_url(url);
 
-impl Gui {
-    pub fn launch_url(url: &str) {
-        let event_loop = EventLoop::new().unwrap();
-        let mut app = Gui::default();
-        app.content = BrowserContents::Url(url.to_string());
-        event_loop.run_app(&mut app).unwrap();
-    }
-    pub fn launch_html(html: &str) {
-        let event_loop = EventLoop::new().unwrap();
-        let mut app = Gui::default();
-        app.content = BrowserContents::Html(html.to_string());
-        event_loop.run_app(&mut app).expect("error in run_app");
-    }
-}
+    #[cfg(not(target_os = "linux"))]
+    let webview = builder.build(&window)?;
+    #[cfg(target_os = "linux")]
+    let webview = builder.build_gtk(window.gtk_window())?;
 
-impl ApplicationHandler for Gui {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = event_loop
-            .create_window(Window::default_attributes())
-            .unwrap();
-        window.set_title("mbr");
-        let webview = WebViewBuilder::new();
-        let webview = match &self.content {
-            BrowserContents::Url(url) => webview.with_url(url).build(&window).unwrap(),
-            BrowserContents::Html(html) => webview.with_html(html).build(&window).unwrap(),
-        };
+    // webview.open_devtools();
 
-        self.window = Some(window);
-        self.webview = Some(webview);
-    }
-
-    // fn window_event(&mut self, _event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {}
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        if event == WindowEvent::CloseRequested {
-            println!("The close button was pressed; stopping");
-            event_loop.exit();
+    event_loop.run(|event, _target, control_flow| {
+        // ControlFlow::Wait pauses the event loop if no events are available to process.
+        // This is ideal for non-game applications that only update in response to user
+        // input, and uses significantly less power/CPU time than ControlFlow::Poll.
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                println!("The close button was pressed; stopping");
+                *control_flow = ControlFlow::Exit
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        device_id,
+                        event,
+                        is_synthetic,
+                        ..
+                    },
+                ..
+            } => {
+                println!("Window keyboard input: {:?}", &event);
+            }
+            Event::DeviceEvent {
+                event: DeviceEvent::Key(key),
+                ..
+            } => {
+                println!("Device keyboard input: {:?}", &key);
+            }
+            _ => (),
         }
-    }
+    });
 }
