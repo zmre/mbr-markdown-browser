@@ -39,8 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config_copy.root_dir.clone(),
                 &config_copy.static_folder,
                 &config_copy.markdown_extensions.clone(),
+                &config_copy.index_file.clone(),
             );
-            server.start().await;
+            server
+                .expect("Couldn't initialize the server. Try with -s for more info")
+                .start()
+                .await;
         });
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
 
@@ -61,7 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.root_dir,
             &config.static_folder,
             &config.markdown_extensions,
-        );
+            &config.index_file.clone(),
+        )?;
         println!(
             "http://{}:{}/{}",
             config.ip,

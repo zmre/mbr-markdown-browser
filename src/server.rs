@@ -1,13 +1,13 @@
 use axum::{
     body::Body,
-    extract::{self, Path, Request, State},
+    extract::{self, State},
     handler::HandlerWithoutStateExt,
     http::StatusCode,
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::Path};
 
 use crate::markdown;
 use crate::templates;
@@ -29,6 +29,8 @@ pub struct ServerState {
     pub base_dir: std::path::PathBuf,
     pub static_folder: String,
     pub markdown_extensions: Vec<String>,
+    pub index_file: String,
+    pub templates: crate::templates::Templates,
 }
 
 impl Server {
@@ -38,9 +40,12 @@ impl Server {
         base_dir: P,
         static_folder: S,
         markdown_extensions: &[String],
-    ) -> Self {
+        index_file: S,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
+        let index_file = index_file.into();
+
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -50,51 +55,30 @@ impl Server {
             .with(tracing_subscriber::fmt::layer())
             .init();
 
-        async fn handle_404() -> (StatusCode, &'static str) {
-            println!("non mbr 404");
-            (StatusCode::NOT_FOUND, "Not found")
-        }
-        let handle_404_service = handle_404.into_service();
-
-        async fn handle_mbr_404(
-            extract::Path(path): extract::Path<String>,
-            request: Request,
-        ) -> impl IntoResponse {
-            // TODO: need to fall back to builtin css/image/template stuff here
-            if let Some((name, bytes)) = DEFAULT_FILES.iter().find(|(name, _)| {
-                println!("Comparing path ({}) to name ({})", path, name);
-                path.as_str() == *name
-            }) {
-                (StatusCode::OK, (*bytes).into_response())
-            } else {
-                println!("no default found");
-                (
-                    StatusCode::NOT_FOUND,
-                    "404 Not found in fallback".into_response(),
-                )
-            }
-        }
-        let mbr_builtins = handle_mbr_404.into_service();
-
-        let serve_mbr = ServeDir::new(base_dir.join(".mbr")).not_found_service(mbr_builtins);
-        let serve_static_then_404 =
-            ServeDir::new(base_dir.join(&static_folder)).not_found_service(handle_404_service);
+        let templates = templates::Templates::new(base_dir.as_path())?;
 
         let config = ServerState {
             base_dir,
             static_folder,
             markdown_extensions: markdown_extensions.to_owned(),
+            index_file,
+            templates,
         };
 
+        let mbr_builtins = Self::serve_default_mbr.into_service();
+        let serve_mbr =
+            ServeDir::new(config.base_dir.as_path().join(".mbr")).fallback(mbr_builtins);
+
         let router = Router::new()
+            // .route("/favicon.ico", ServeFile::new())
             .route("/", get(Self::home_page))
             .nest_service("/.mbr", serve_mbr)
             .route("/{*path}", get(Self::handle))
-            .fallback_service(serve_static_then_404)
+            // .fallback_service(handle_static)
             .layer(TraceLayer::new_for_http())
             .with_state(config);
 
-        Server { router, ip, port }
+        Ok(Server { router, ip, port })
     }
 
     pub async fn start(&self) {
@@ -104,18 +88,51 @@ impl Server {
         axum::serve(listener, self.router.clone()).await.unwrap();
     }
 
+    // This is the fallback if the file isn't in the runtime .mbr dir
+    pub async fn serve_default_mbr(
+        // extract::Path(path): extract::Path<String>,
+        request: extract::Request,
+    ) -> Result<impl IntoResponse, StatusCode> {
+        tracing::debug!("handle_mb4_404");
+        let path = request.uri().path().replace("/.mbr", "");
+        if let Some((_name, bytes, mime)) = DEFAULT_FILES.iter().find(|(name, _, _)| {
+            tracing::debug!("Comparing path ({}) to name ({})", path, name);
+            path.as_str() == *name
+        }) {
+            tracing::debug!("found default");
+            let resp = Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", *mime)
+                .body(axum::body::Body::from(*bytes))
+                .unwrap();
+
+            println!("{:?}", &resp);
+            // (StatusCode::OK, resp)
+            Ok(resp.into_response())
+        } else {
+            tracing::debug!("no default found");
+            // let resp = Response::builder()
+            //     .status(StatusCode::NOT_FOUND)
+            //     .body(axum::body::Body::from("404 Not Found in fallback"))
+            //     .unwrap();
+            // resp.into_response()
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
+
     async fn handle(
         extract::Path(path): extract::Path<String>,
         State(config): State<ServerState>,
-        req: Request<Body>,
+        req: extract::Request<Body>,
     ) -> Result<impl IntoResponse, StatusCode> {
-        tracing::debug!("got request: {}", &path);
+        tracing::debug!("handle: {}", &path);
 
         let candidate_path = config.base_dir.join(&path);
 
         // I need to look at the path, then join it to the base_dir and if there's a matching
         // file, deliver it as-is (yes, this means delivering raw markdown, too, for now)
         if candidate_path.is_file() {
+            tracing::debug!("found file in root as requested");
             let static_service = ServeFile::new(candidate_path);
             return static_service
                 .oneshot(req)
@@ -126,15 +143,14 @@ impl Server {
 
         // if the candidate path is a dir, look for index.md or equiv inside it
         if candidate_path.is_dir() {
-            // TODO: really need to check for each of the markdown extensions
-            let index = candidate_path.join("index.md");
+            let index = candidate_path.join(config.index_file);
+            tracing::debug!("checking for folder with index.md in it: {:?}", &index);
             if index.is_file() {
-                let static_service = ServeFile::new(index);
-                return static_service
-                    .oneshot(req)
+                tracing::debug!("...found");
+                return Ok(Self::markdown_to_html(&index, &config.templates)
                     .await
-                    .map(|r| r.into_response())
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .into_response());
             }
         }
 
@@ -150,29 +166,65 @@ impl Server {
             let mut md_path = candidate_base.clone();
             md_path.set_extension(ext);
             if md_path.is_file() {
-                let html_output = markdown::render(md_path)
+                return Ok(Self::markdown_to_html(&md_path, &config.templates)
                     .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                let templates = templates::Templates::new(&config.base_dir)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                let html_output = templates
-                    .render_markdown(&html_output)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                return Ok(Html(html_output).into_response());
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .into_response());
             }
         }
+
+        let static_dir = config
+            .base_dir
+            .as_path()
+            .join(&config.static_folder)
+            .canonicalize()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let candidate_static_file = static_dir.join(&path);
+        if candidate_static_file.is_file() {
+            tracing::debug!("found file in static folder");
+            let handle_static = ServeDir::new(static_dir);
+            return handle_static
+                .oneshot(req)
+                .await
+                .map(|r| r.into_response())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        tracing::debug!("going with a not found code");
 
         Err(StatusCode::NOT_FOUND)
     }
 
+    async fn markdown_to_html(
+        md_path: &Path,
+        templates: &crate::templates::Templates,
+    ) -> Result<Html<String>, Box<dyn std::error::Error>> {
+        let inner_html_output = markdown::render(md_path.to_path_buf()).await?;
+        let full_html_output = templates.render_markdown(&inner_html_output).await?;
+        Ok(Html(full_html_output))
+    }
+
     async fn home_page() -> impl IntoResponse {
         // TODO: look for index.{markdown extensions} then index.html then finally fall back to some hard coded html maybe with a list of markdown files in the same dir and immediate children?
+        tracing::debug!("home");
         format!("Home")
     }
 }
 
-pub const DEFAULT_FILES: &[(&str, &[u8])] = &[
-    ("theme.css", include_bytes!("../templates/theme.css")),
-    ("user.css", include_bytes!("../templates/user.css")),
+pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
+    (
+        "/theme.css",
+        include_bytes!("../templates/theme.css"),
+        "text/css",
+    ),
+    (
+        "/user.css",
+        include_bytes!("../templates/user.css"),
+        "text/css",
+    ),
+    (
+        "/pico.min.css",
+        include_bytes!("../templates/pico.min.css"),
+        "text/css",
+    ),
 ];

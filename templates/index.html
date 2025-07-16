@@ -1,11 +1,76 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
-    <title>Templates Work!</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="stylesheet" href="/.mbr/pico.min.css" />
+    <title>mbr</title>
+    <link href="/.mbr/pico.min.css" rel="stylesheet" />
     <link href="/.mbr/theme.css" rel="stylesheet" />
     <link href="/.mbr/user.css" rel="stylesheet" />
   </head>
   <body>
-    <main id="wrapper">{{ markdown | safe}}</main>
+    <header class="container">
+      <nav aria-label="breadcrumb" role="navigation">
+        <ul>
+          <li>
+            <small><a href="#">Home</a></small>
+          </li>
+          <li>
+            <small><a href="#">Services</a></small>
+          </li>
+          <li><small>Design</small></li>
+        </ul>
+      </nav>
+      <nav role="navigation" aria-label="Main menu">
+        <ul>
+          <li>
+            <details class="dropdown">
+              <summary role="button" class="outline contrast">
+                <div class="mbr-hamburger" />
+              </summary>
+              <ul>
+                <li>Browse</li>
+                <li>Tags</li>
+              </ul>
+            </details>
+          </li>
+        </ul>
+        <ul>
+          <li><strong>{{title | default(value="")}}</strong></li>
+        </ul>
+        <ul>
+          <details class="dropdown">
+            <summary role="button" class="outline contrast">
+              <div class="mbr-search" />
+            </summary>
+            <ul style="width: 35ch" dir="rtl">
+              <li>
+                <input
+                  type="search"
+                  name="search"
+                  placeholder="Search"
+                  aria-label="Search"
+                />
+              </li>
+            </ul>
+          </details>
+        </ul>
+      </nav>
+    </header>
+    <main id="wrapper" class="container">{{ markdown | safe}}</main>
+    <footer class="container">
+      <nav>
+        <ul>
+          <li>
+            <button disabled class="outline secondary">&lt; Previous</button>
+          </li>
+        </ul>
+        <ul>
+          <li><button disabled class="outline secondary">Next &gt;</button></li>
+        </ul>
+      </nav>
+    </footer>
   </body>
 </html>

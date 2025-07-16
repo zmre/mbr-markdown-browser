@@ -23,6 +23,7 @@ pub struct Config {
     pub enable_writes: bool,
     pub markdown_extensions: Vec<String>,
     pub theme: String,
+    pub index_file: String,
 }
 
 impl std::fmt::Display for IpArray {
@@ -67,6 +68,7 @@ impl Default for Config {
             enable_writes: false,
             markdown_extensions: vec!["md".to_string()],
             theme: "default".to_string(),
+            index_file: "index.md".to_string(),
         }
     }
 }
@@ -78,8 +80,9 @@ impl Config {
         let mut config: Config = Figment::new()
             .merge(Serialized::defaults(default_config))
             .merge(Env::prefixed("MBR_"))
-            .merge(Toml::file(".mbr/config.toml"))
+            .merge(Toml::file(root_dir.join(".mbr/config.toml")))
             .extract()?;
+        println!("config: {:?}", &config);
         config.root_dir = root_dir;
         Ok(config)
     }

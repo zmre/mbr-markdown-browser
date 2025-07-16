@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tera::{Context, Tera};
 
+#[derive(Clone)]
 pub struct Templates {
     tera: Tera,
 }
@@ -13,6 +14,7 @@ impl Templates {
 
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {
+                println!("Adding default template {}", name);
                 tera.add_raw_template(name, tpl)?;
             }
         }
