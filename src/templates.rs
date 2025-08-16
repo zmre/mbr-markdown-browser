@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use tera::{Context, Tera};
 
@@ -22,8 +26,16 @@ impl Templates {
         Ok(Templates { tera })
     }
 
-    pub async fn render_markdown(&self, html: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn render_markdown(
+        &self,
+        html: &str,
+        frontmatter: HashMap<String, String>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        eprintln!("frontmatter: {:?}", &frontmatter);
         let mut context = Context::new();
+        frontmatter.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
         context.insert("markdown", html);
         let html_output = self.tera.render("index.html", &context)?;
         Ok(html_output)

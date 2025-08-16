@@ -39,6 +39,8 @@
           [
             rusttoolchain
             pkgs.nodejs-slim_24
+            pkgs.pkg-config
+            pkgs.ffmpeg-headless
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
             # libiconv

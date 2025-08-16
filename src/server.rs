@@ -7,10 +7,14 @@ use axum::{
     routing::get,
     Router,
 };
-use std::{net::SocketAddr, path::Path};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
-use crate::markdown;
 use crate::templates;
+use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -31,6 +35,7 @@ pub struct ServerState {
     pub markdown_extensions: Vec<String>,
     pub index_file: String,
     pub templates: crate::templates::Templates,
+    pub repo: Arc<Mutex<Repo>>,
 }
 
 impl Server {
@@ -57,12 +62,20 @@ impl Server {
 
         let templates = templates::Templates::new(base_dir.as_path())?;
 
+        let repo = Arc::new(Mutex::new(Repo::init(
+            &base_dir,
+            &static_folder,
+            markdown_extensions,
+            &index_file,
+        )));
+
         let config = ServerState {
             base_dir,
             static_folder,
             markdown_extensions: markdown_extensions.to_owned(),
             index_file,
             templates,
+            repo,
         };
 
         let mbr_builtins = Self::serve_default_mbr.into_service();
@@ -138,7 +151,7 @@ impl Server {
                 .oneshot(req)
                 .await
                 .map(|r| r.into_response())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+                .map_err(|_| StatusCode::BAD_REQUEST);
         }
 
         // if the candidate path is a dir, look for index.md or equiv inside it
@@ -147,10 +160,14 @@ impl Server {
             tracing::debug!("checking for folder with index.md in it: {:?}", &index);
             if index.is_file() {
                 tracing::debug!("...found");
-                return Ok(Self::markdown_to_html(&index, &config.templates)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .into_response());
+                return Ok(Self::markdown_to_html(
+                    &index,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                )
+                .await
+                .map_err(|_| StatusCode::PAYMENT_REQUIRED)?
+                .into_response());
             }
         }
 
@@ -162,14 +179,25 @@ impl Server {
             std::path::PathBuf::from(trimmed)
         };
 
+        // TODO: if i map the markdown extensions and run find on it will this look cleaner?
         for ext in config.markdown_extensions.iter() {
             let mut md_path = candidate_base.clone();
             md_path.set_extension(ext);
             if md_path.is_file() {
-                return Ok(Self::markdown_to_html(&md_path, &config.templates)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .into_response());
+                {
+                    let mut repo = config.repo.lock().expect("Lock issue with repo");
+                    let parent_folder = md_path.parent().unwrap_or(Path::new("."));
+                    repo.scan_folder(&parent_folder);
+                }
+
+                return Ok(Self::markdown_to_html(
+                    &md_path,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                )
+                .await
+                .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
+                .into_response());
             }
         }
 
@@ -177,8 +205,8 @@ impl Server {
             .base_dir
             .as_path()
             .join(&config.static_folder)
-            .canonicalize()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .canonicalize() // if this fails, basically we're in a 404 situation
+            .map_err(|_| StatusCode::NOT_FOUND)?;
         let candidate_static_file = static_dir.join(&path);
         if candidate_static_file.is_file() {
             tracing::debug!("found file in static folder");
@@ -187,20 +215,50 @@ impl Server {
                 .oneshot(req)
                 .await
                 .map(|r| r.into_response())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+                .map_err(|_| StatusCode::CONFLICT);
+        }
+
+        // is this an index file / directory browse situation?
+        // See if we hit a directory and if so, look for an index file and if that fails, generate a default index page
+        if candidate_base.is_dir() {
+            let mut dir_and_index = candidate_base.clone();
+            dir_and_index.push("index");
+            for ext in config.markdown_extensions.iter() {
+                let mut md_path = dir_and_index.clone();
+                md_path.set_extension(ext);
+                if md_path.is_file() {
+                    return Ok(Self::markdown_to_html(
+                        &md_path,
+                        &config.templates,
+                        config.base_dir.as_path(),
+                    )
+                    .await
+                    .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
+                    .into_response());
+                }
+            }
+
+            // TODO: return a default section
+            //
+            //
         }
 
         tracing::debug!("going with a not found code");
-
         Err(StatusCode::NOT_FOUND)
     }
 
     async fn markdown_to_html(
         md_path: &Path,
         templates: &crate::templates::Templates,
+        root_path: &Path,
     ) -> Result<Html<String>, Box<dyn std::error::Error>> {
-        let inner_html_output = markdown::render(md_path.to_path_buf()).await?;
-        let full_html_output = templates.render_markdown(&inner_html_output).await?;
+        let (frontmatter, inner_html_output) = markdown::render(md_path.to_path_buf(), root_path)
+            .await
+            .inspect_err(|e| eprintln!("Error rendering markdown: {e}"))?;
+        let full_html_output = templates
+            .render_markdown(&inner_html_output, frontmatter)
+            .await
+            .inspect_err(|e| eprintln!("Error rendering template: {e}"))?;
         Ok(Html(full_html_output))
     }
 
@@ -219,12 +277,32 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/user.css",
-        include_bytes!("../templates/user.css"),
+        &[], // the idea of this is for users to override and for us to leave blank
         "text/css",
     ),
     (
         "/pico.min.css",
         include_bytes!("../templates/pico.min.css"),
         "text/css",
+    ),
+    (
+        "/vid.js",
+        include_bytes!("../templates/vid.js"),
+        "application/javascript",
+    ),
+    (
+        "/vidstack.player.css",
+        include_bytes!("../templates/vidstack.player.1.11.21.css"),
+        "text/css",
+    ),
+    (
+        "/vidstack.plyr.css",
+        include_bytes!("../templates/vidstack.plyr.1.11.21.css"),
+        "text/css",
+    ),
+    (
+        "/vidstack.player.js",
+        include_bytes!("../templates/vidstack.player.1.12.13.js"),
+        "application/javascript",
     ),
 ];

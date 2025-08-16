@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
-    fmt::Display,
     net::IpAddr,
-    ops::Deref,
     path::{Path, PathBuf},
 };
 
@@ -24,12 +22,13 @@ pub struct Config {
     pub markdown_extensions: Vec<String>,
     pub theme: String,
     pub index_file: String,
+    // TODO: need to add some sort order stuff to determine how to arrange files -- by filename, title, last modified or whatever
 }
 
 impl std::fmt::Display for IpArray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let [a, b, c, d] = self.0;
-        write!(f, "{}.{}.{}.{}", a, b, c, d)
+        write!(f, "{a}.{b}.{c}.{d}")
     }
 }
 

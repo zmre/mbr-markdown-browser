@@ -3,13 +3,17 @@ use std::path::Path;
 use clap::Parser;
 use config::Config;
 
-mod browser;
-mod cli;
-mod config;
-mod markdown;
-mod oembed;
-mod server;
-mod templates;
+mod browser; // this could be called (should be?) GUI as it pops up a local browser window
+mod cli; // handle command line params
+mod config; // handle config file and env stuff
+mod html; // turn markdown into html; TODO: remove this? don't think I actually need it custom
+mod markdown; // parse and process markdown
+mod oembed; // handling for bare links in markdown to make auto-embeds
+mod repo; // process a folder of files for navigation (and search?) purposes
+mod server; // serve up local files live
+mod templates; // product html wrapper
+mod vid; // manage video references and html gen // process files over the whole root
+         // TOOD: mod static; // generate static files to be deployed -- should this somehow work in tandem with server or be a mode thereof?
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,9 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         server.start().await;
     } else {
-        let html_output = markdown::render(args.file).await?;
-        let templates = templates::Templates::new(&config.root_dir)?;
-        let html_output = templates.render_markdown(&html_output).await?;
+        let (frontmatter, html_output) = markdown::render(args.file, &config.root_dir.as_path())
+            .await
+            .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
+        let templates = templates::Templates::new(&config.root_dir)
+            .inspect_err(|e| eprintln!("Error parsing template: {e}"))?;
+        let html_output = templates.render_markdown(&html_output, frontmatter).await?;
         println!("{}", &html_output);
     }
     Ok(())

@@ -9,6 +9,24 @@
     <link href="/.mbr/pico.min.css" rel="stylesheet" />
     <link href="/.mbr/theme.css" rel="stylesheet" />
     <link href="/.mbr/user.css" rel="stylesheet" />
+    <link rel="stylesheet" href="/.mbr/vidstack.player.css" />
+    <link rel="stylesheet" href="/.mbr/vidstack.plyr.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/dark.min.css">
+
+    {% if tags %}
+    <meta name="keywords" content="{{tags | safe}}" />
+    {% elif taxonomy.tags %}
+    <meta name="keywords" content="{{taxonomy.tags | safe}}" />
+    {% endif %}
+    <title>{{title | default(value="") | safe}}</title>
+    <meta name="title" content="{{title | default(value="") | safe}}" />
+    <meta name="description" content="{{description | default(value="") | safe}}" />
+    <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" />
+    <script>
+      // Allow page scripts to see all the frontmatter to use as they see fit
+      window.frontmatter = {{ __tera_context | safe }} ;
+      window.frontmatter.markdown = null; // can't filter this out except after the fact, but this will save memory
+    </script>
   </head>
   <body>
     <header class="container">
@@ -28,7 +46,7 @@
           <li>
             <details class="dropdown">
               <summary role="button" class="outline contrast">
-                <div class="mbr-hamburger" />
+                <div class="mbr-hamburger-button" />
               </summary>
               <ul>
                 <li>Browse</li>
@@ -43,7 +61,7 @@
         <ul>
           <details class="dropdown">
             <summary role="button" class="outline contrast">
-              <div class="mbr-search" />
+              <div class="mbr-search-button" />
             </summary>
             <ul style="width: 35ch" dir="rtl">
               <li>
@@ -73,4 +91,12 @@
       </nav>
     </footer>
   </body>
+  <script defer type="module" src="/.mbr/vid.js"></script>
+  <script defer type="module">
+    import hljs from 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/es/highlight.min.js';
+    //  and it's easy to individually load additional languages
+    import css from 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/es/languages/css.min.js';
+    hljs.registerLanguage('css', css);
+    hljs.highlightAll();
+  </script>
 </html>

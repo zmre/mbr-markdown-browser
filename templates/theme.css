@@ -4,7 +4,7 @@
   --mbr-icon-hamburger: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221.05em%22%20height%3D%221.2em%22%20viewBox%3D%220%200%20448%20512%22%3E%3Cpath%20fill%3D%22currentColor%22%20d%3D%22M0%2096c0-17.7%2014.3-32%2032-32h384c17.7%200%2032%2014.3%2032%2032s-14.3%2032-32%2032H32c-17.7%200-32-14.3-32-32m0%20160c0-17.7%2014.3-32%2032-32h384c17.7%200%2032%2014.3%2032%2032s-14.3%2032-32%2032H32c-17.7%200-32-14.3-32-32m448%20160c0%2017.7-14.3%2032-32%2032H32c-17.7%200-32-14.3-32-32s14.3-32%2032-32h384c17.7%200%2032%2014.3%2032%2032%22%2F%3E%3C%2Fsvg%3E");
 }
 
-.mbr-hamburger {
+.mbr-hamburger-button {
   width: 1.2em;
   height: 1.2em;
   mask-size: cover;
@@ -13,7 +13,7 @@
   margin-left: -14px;
 }
 
-.mbr-search {
+.mbr-search-button {
   width: 1.2em;
   height: 1.2em;
   mask-size: cover;
@@ -51,4 +51,20 @@ body > header nav details[class="dropdown"] summary::after {
 
 body > footer {
   border-top: 1px solid var(--pico-secondary-border);
+}
+
+figure > video {
+  width: 100%;
+  height: auto;
+  align-items: center;
+  /* display: inline-flex; */
+  user-select: none;
+}
+figure > video::cue {
+  font-size: 0.875em;
+  margin: 1em;
+  padding: 0.5em;
+}
+media-provider > video::cue {
+  display: none;
 }
