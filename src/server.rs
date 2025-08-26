@@ -45,6 +45,8 @@ impl Server {
         base_dir: P,
         static_folder: S,
         markdown_extensions: &[String],
+        ignore_dirs: &[String],
+        ignore_globs: &[String],
         index_file: S,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let base_dir = base_dir.into();
@@ -66,6 +68,8 @@ impl Server {
             &base_dir,
             &static_folder,
             markdown_extensions,
+            ignore_dirs,
+            ignore_globs,
             &index_file,
         )));
 
@@ -79,12 +83,14 @@ impl Server {
         };
 
         let mbr_builtins = Self::serve_default_mbr.into_service();
+        // let mbr_builtins = get(Self::serve_default_mbr);
         let serve_mbr =
             ServeDir::new(config.base_dir.as_path().join(".mbr")).fallback(mbr_builtins);
 
         let router = Router::new()
             // .route("/favicon.ico", ServeFile::new())
             .route("/", get(Self::home_page))
+            .route("/.mbr/site.json", get(Self::get_site_info))
             .nest_service("/.mbr", serve_mbr)
             .route("/{*path}", get(Self::handle))
             // .fallback_service(handle_static)
@@ -101,9 +107,33 @@ impl Server {
         axum::serve(listener, self.router.clone()).await.unwrap();
     }
 
+    pub async fn get_site_info<'a>(
+        State(config): State<ServerState>,
+    ) -> Result<impl IntoResponse, StatusCode> {
+        let repo = config
+            .repo
+            .lock()
+            .inspect_err(|e| tracing::error!("Lock issue with config.repo: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        repo.scan_all()
+            .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(
+                repo.to_json()
+                    .inspect_err(|e| tracing::error!("Error creating json: {e}"))
+                    .map_err(|e| StatusCode::INTERNAL_SERVER_ERROR)?,
+            )
+            .inspect_err(|e| tracing::error!("Error rendering site file: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(resp.into_response())
+    }
+
     // This is the fallback if the file isn't in the runtime .mbr dir
     pub async fn serve_default_mbr(
-        // extract::Path(path): extract::Path<String>,
         request: extract::Request,
     ) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("handle_mb4_404");
@@ -117,10 +147,8 @@ impl Server {
                 .status(StatusCode::OK)
                 .header("Content-Type", *mime)
                 .body(axum::body::Body::from(*bytes))
-                .unwrap();
-
-            println!("{:?}", &resp);
-            // (StatusCode::OK, resp)
+                .inspect_err(|e| tracing::error!("Error rendering default file: {e}"))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok(resp.into_response())
         } else {
             tracing::debug!("no default found");
@@ -184,12 +212,6 @@ impl Server {
             let mut md_path = candidate_base.clone();
             md_path.set_extension(ext);
             if md_path.is_file() {
-                {
-                    let mut repo = config.repo.lock().expect("Lock issue with repo");
-                    let parent_folder = md_path.parent().unwrap_or(Path::new("."));
-                    repo.scan_folder(&parent_folder);
-                }
-
                 return Ok(Self::markdown_to_html(
                     &md_path,
                     &config.templates,
@@ -252,9 +274,11 @@ impl Server {
         templates: &crate::templates::Templates,
         root_path: &Path,
     ) -> Result<Html<String>, Box<dyn std::error::Error>> {
-        let (frontmatter, inner_html_output) = markdown::render(md_path.to_path_buf(), root_path)
-            .await
-            .inspect_err(|e| eprintln!("Error rendering markdown: {e}"))?;
+        let (mut frontmatter, inner_html_output) =
+            markdown::render(md_path.to_path_buf(), root_path)
+                .await
+                .inspect_err(|e| eprintln!("Error rendering markdown: {e}"))?;
+        frontmatter.insert("markdown_source".into(), md_path.to_string_lossy().into());
         let full_html_output = templates
             .render_markdown(&inner_html_output, frontmatter)
             .await

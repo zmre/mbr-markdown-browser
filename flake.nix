@@ -19,13 +19,25 @@
       pkgs = import nixpkgs {inherit system overlays;};
       rusttoolchain =
         pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      # ffmpeglibs = pkgs.ffmpeg-headless.override {
+      #   buildAvcodec = true;
+      #   buildAvdevice = true;
+      #   buildAvfilter = true;
+      #   buildAvformat = true;
+      #   buildAvutil = true;
+      # };
     in rec {
       # `nix build`
-      packages.mbr-cli = pkgs.rustPlatform.buildRustPackage {
+      packages.mbr-cli = pkgs.rustPlatform.buildRustPackage rec {
         pname = "mbr";
         version = "0.1";
         cargoLock.lockFile = ./Cargo.lock;
         src = pkgs.lib.cleanSource ./.;
+        nativeBuildInputs = with pkgs; [
+          pkg-config
+          ffmpeg-headless.dev
+        ];
+        PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
       };
       defaultPackage = packages.mbr-cli;
 
@@ -35,17 +47,12 @@
 
       # nix develop
       devShell = pkgs.mkShell {
-        buildInputs =
-          [
-            rusttoolchain
-            pkgs.nodejs-slim_24
-            pkgs.pkg-config
-            pkgs.ffmpeg-headless
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
-            # libiconv
-            darwin.apple_sdk.frameworks.Security
-          ]);
+        buildInputs = [
+          rusttoolchain
+          pkgs.nodejs-slim_24
+          pkgs.ffmpeg-headless
+          pkgs.pkg-config
+        ];
         LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
       };
     });

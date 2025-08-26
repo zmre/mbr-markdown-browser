@@ -13,35 +13,37 @@ include = ["src/**/*", "LICENSE", "README.md"]
 
 [dependencies]
 # winit = "0.30.11"
-axum = { version = "0.8.4", features = ["http1", "http2", "json", "tokio", "tracing"] }
-clap = { version = "4.5.40", features = ["derive"] }
+axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing"] }
+clap = { version = "4.5", features = ["derive"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 futures = "0.3.31"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+glob = "0.3.3"
 html-escape = "0.2.13"
 itertools = "0.14.0"
 metadata = "0.1.10"
 papaya = "0.2.3"
 pathdiff = "0.2.3"
-pdf-extract = "0.9.0"
-percent-encoding = "2.3.1"
+pdf-extract = "0.9"
+percent-encoding = "2.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
-rayon = "1.11.0"
-regex = "1.11.1"
-reqwest = "0.12.22"
-scraper = "0.23.1"
+rayon = "1.11"
+regex = "1.11"
+reqwest = "0.12"
+scraper = "0.24"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tao = "0.34.0"
-tera = { version = "1.2", features = ["preserve_order", "date-locale"] }
+tera = { version = "1.20", features = ["preserve_order", "date-locale"] }
 time = "0.3"
-tokio = {version="1.46.0", features = ["full"]}
+tokio = {version="1.47", features = ["full"]}
 tokio-util = { version = "0.7", features = ["io"] }
-tower = { version = "0.5.2", features = ["util"] }
-tower-http = { version = "0.6.1", features = ["fs", "trace"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = "2.5.4"
-walkdir = "2.5.0"
-wry = {version = "0.52.1", default-features=true, features = ["devtools", "fullscreen"]}
+url = "2.5"
+walkdir = "2.5"
+wry = {version = "0.53", default-features=true, features = ["devtools", "fullscreen"]}
 yaml-rust2 = "0.10"

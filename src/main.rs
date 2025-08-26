@@ -43,6 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config_copy.root_dir.clone(),
                 &config_copy.static_folder,
                 &config_copy.markdown_extensions.clone(),
+                &config_copy.ignore_dirs.clone(),
+                &config_copy.ignore_globs.clone(),
                 &config_copy.index_file.clone(),
             );
             server
@@ -69,6 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.root_dir,
             &config.static_folder,
             &config.markdown_extensions,
+            &config.ignore_dirs,
+            &config.ignore_globs,
             &config.index_file.clone(),
         )?;
         println!(

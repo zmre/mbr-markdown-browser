@@ -1,44 +1,99 @@
 use std::{
+    ops::Deref,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 use papaya::{HashMap, HashSet};
 use rayon::prelude::*;
+use serde::{ser::SerializeMap, Serialize, Serializer};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::Config;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct Repo {
+    #[serde(skip)]
     root_dir: PathBuf,
+    #[serde(skip)]
     static_folder: String,
+    #[serde(skip)]
     markdown_extensions: Vec<String>,
+    #[serde(skip)]
     index_file: String,
+    #[serde(skip)]
+    ignore_dirs: Vec<String>,
+    #[serde(skip)]
+    ignore_globs: Vec<String>,
+    #[serde(skip)]
     pub scanned_folders: HashSet<PathBuf>,
+    #[serde(skip)]
     pub queued_folders: HashMap<PathBuf, PathBuf>,
-    pub markdown_files: HashMap<PathBuf, MarkdownInfo>,
-    pub other_files: HashMap<PathBuf, OtherFileInfo>,
+    pub markdown_files: MarkdownFiles,
+    pub other_files: OtherFiles,
 }
 
 #[derive(Clone)]
-struct MarkdownInfo {
+pub struct MarkdownFiles(HashMap<PathBuf, MarkdownInfo>);
+impl Deref for MarkdownFiles {
+    type Target = HashMap<PathBuf, MarkdownInfo>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Serialize for MarkdownFiles {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_map(Some(self.len()))?;
+        for (k, v) in self.pin().iter() {
+            s.serialize_entry(k, v)?;
+        }
+        s.end()
+    }
+}
+
+#[derive(Clone)]
+pub struct OtherFiles(HashMap<PathBuf, OtherFileInfo>);
+impl Deref for OtherFiles {
+    type Target = HashMap<PathBuf, OtherFileInfo>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Serialize for OtherFiles {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_map(Some(self.len()))?;
+        for (k, v) in self.pin().iter() {
+            s.serialize_entry(k, v)?;
+        }
+        s.end()
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct MarkdownInfo {
     raw_path: PathBuf,
     url_path: String,
     created: u64,
     modified: u64,
-    pub metadata: Option<crate::markdown::SimpleMetadata>,
+    pub frontmatter: Option<crate::markdown::SimpleMetadata>,
 }
 
-#[derive(Clone)]
-struct OtherFileInfo {
+#[derive(Clone, Serialize)]
+pub struct OtherFileInfo {
     raw_path: PathBuf,
     url_path: String,
     metadata: StaticFileMetadata,
 }
 
-#[derive(Clone, Default)]
-struct StaticFileMetadata {
+#[derive(Clone, Default, Serialize)]
+pub struct StaticFileMetadata {
     path: PathBuf,
     created: Option<u64>,
     modified: Option<u64>,
@@ -46,7 +101,7 @@ struct StaticFileMetadata {
     kind: StaticFileKind,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize)]
 enum StaticFileKind {
     Pdf {
         description: Option<String>,
@@ -73,6 +128,31 @@ enum StaticFileKind {
     #[default]
     Other,
 }
+
+/* impl Serialize for Repo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_struct("Site", 2)?;
+        s.serialize_field("markdown", &self.markdown_files)?;
+        s.serialize_field("other", &self.other_files)?;
+        s.end()
+    }
+}
+
+impl Serialize for papaya::HashMap<PathBuf, MarkdownInfo> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.x.len()))?;
+        for (k, v) in &self.x {
+            map.serialize_entry(&k.to_string(), &v)?;
+        }
+        map.end()
+    }
+} */
 
 impl StaticFileMetadata {
     pub fn empty<P: Into<std::path::PathBuf>>(file: P) -> Self {
@@ -186,7 +266,7 @@ impl StaticFileMetadata {
         me
     }
 
-    pub async fn from<P: Into<std::path::PathBuf>>(file: P) -> Self {
+    pub fn from<P: Into<std::path::PathBuf>>(file: P) -> Self {
         let empty = Self::empty(file);
         empty.populate()
     }
@@ -198,6 +278,8 @@ impl Repo {
             c.root_dir.clone(),
             c.static_folder.clone(),
             &c.markdown_extensions[..],
+            &c.ignore_dirs[..],
+            &c.ignore_globs[..],
             c.index_file.clone(),
         )
     }
@@ -206,17 +288,21 @@ impl Repo {
         root_dir: P,
         static_folder: S,
         markdown_extensions: &[String],
+        ignore_dirs: &[String],
+        ignore_globs: &[String],
         index_file: S,
     ) -> Self {
         Self {
             root_dir: root_dir.into(),
             static_folder: static_folder.into(),
             markdown_extensions: markdown_extensions.to_vec(),
+            ignore_dirs: ignore_dirs.to_vec(),
+            ignore_globs: ignore_globs.to_vec(),
             index_file: index_file.into(),
             scanned_folders: HashSet::new(),
             queued_folders: HashMap::new(),
-            markdown_files: HashMap::new(),
-            other_files: HashMap::new(),
+            markdown_files: MarkdownFiles(HashMap::new()),
+            other_files: OtherFiles(HashMap::new()),
         }
     }
 
@@ -232,9 +318,26 @@ impl Repo {
         if self.scanned_folders.pin().contains(&start_folder) {
             return Ok(());
         }
+        println!("relative_folder: {:?}", relative_folder_path_ref);
 
         self.scanned_folders.pin().insert(start_folder.clone());
-        let dir_walker = WalkDir::new(start_folder).follow_links(true).into_iter();
+        let dir_walker = WalkDir::new(start_folder.clone())
+            .follow_links(true)
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .filter_entry(|e| {
+                let path = e.path();
+                let file_name = path.file_name().map(|x| x.to_str().unwrap()).unwrap_or("");
+                // false skips
+                !(file_name.starts_with('.')
+                    || (path.is_dir() && self.ignore_dirs.iter().any(|x| x.as_str() == file_name))
+                    || self.ignore_globs.iter().any(|pat| {
+                        glob::Pattern::new(pat)
+                            .map(|pat| pat.matches_path(path))
+                            .unwrap_or(false)
+                    }))
+            });
         let mut markdown = std::collections::HashMap::new();
         let mut other = std::collections::HashMap::new();
 
@@ -246,33 +349,35 @@ impl Repo {
                 Ok(en) => en,
             };
             let path = entry.path();
-            let file_name = path.file_name().map(|x| x.to_str().unwrap()).unwrap_or("");
             let extension = path.extension().map(|x| x.to_str().unwrap()).unwrap_or("");
 
-            if file_name.starts_with('.') {
-                continue;
-            } else if path.is_dir() {
+            if path.is_dir() {
+                let relative_entry =
+                    pathdiff::diff_paths(path, &self.root_dir).unwrap_or(path.to_path_buf());
                 self.queued_folders
                     .pin()
-                    .insert(path.to_path_buf(), relative_folder_path_ref.join(file_name));
+                    .insert(path.to_path_buf(), relative_entry);
             } else if self
                 .markdown_extensions
                 .iter()
-                .find(|x| x.as_str() == extension)
-                .is_some()
+                .any(|x| x.as_str() == extension)
             {
-                if let Ok((filesize, created, modified)) = file_details_from_path(path) {
-                    let url = PathBuf::from("/")
-                        .join(relative_folder_path_ref)
-                        .to_string_lossy()
-                        .to_string();
+                if let Ok((_filesize, created, modified)) = file_details_from_path(path) {
+                    // let url = PathBuf::from("/")
+                    //     .join(relative_folder_path_ref)
+                    //     .to_string_lossy()
+                    //     .to_string();
+
+                    let url = pathdiff::diff_paths(path, &self.root_dir)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or("".to_string());
 
                     let mdfile = MarkdownInfo {
                         raw_path: path.to_path_buf(),
                         url_path: url,
                         created,
                         modified,
-                        metadata: None,
+                        frontmatter: None,
                     };
                     markdown.insert(path.to_path_buf(), mdfile);
                 } else {
@@ -280,10 +385,13 @@ impl Repo {
                     eprintln!("Couldn't process markdown file at {:?}", path);
                 }
             } else {
-                let url = PathBuf::from("/")
-                    .join(relative_folder_path_ref)
-                    .to_string_lossy()
-                    .replace(("/".to_string() + self.static_folder.as_str()).as_str(), "");
+                // let url = PathBuf::from("/")
+                //     .join(relative_folder_path_ref)
+                //     .to_string_lossy()
+                //     .replace(("/".to_string() + self.static_folder.as_str()).as_str(), "");
+                let url = pathdiff::diff_paths(path, &self.root_dir)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or("".to_string());
 
                 let other_file = OtherFileInfo {
                     raw_path: path.to_path_buf(),
@@ -302,7 +410,7 @@ impl Repo {
                 let metadata = crate::markdown::extract_metadata_from_file(&mdfile).ok();
                 if metadata.is_some() {
                     let mut new_details = mddetails;
-                    new_details.metadata = metadata;
+                    new_details.frontmatter = metadata;
                     self.markdown_files.pin().insert(mdfile, new_details);
                 } else {
                     self.markdown_files.pin().insert(mdfile, mddetails);
@@ -316,14 +424,10 @@ impl Repo {
             self.other_files.pin().insert(file, other_file);
         });
 
-        // TODO: rayon recurse into each found subfolder; note: would love to just return, but think I need to block on the recursion :(
-        //       other option would be to have a self.queue_folders to add to so I can return and those can be processed by scan_all
-        //       so that this function only ever scans one dir and can be maximally fast; could then have a scan_folder_recurse()
-        //       function that processes subdirs as an option
         Ok(())
     }
 
-    pub async fn scan_all(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn scan_all(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.scan_folder(&PathBuf::from("."))?; // the . is relative to the root_dir, so this scans the root dir
         while !self.queued_folders.is_empty() {
             // TODO: make sure this doesn't deadlock
@@ -331,17 +435,22 @@ impl Repo {
                 .queued_folders
                 .pin()
                 .iter()
-                .map(|(_, path)| path.clone())
+                .map(|(absolute, relative)| relative.clone())
                 .collect();
             self.queued_folders.pin().clear();
             assert!(self.queued_folders.is_empty());
+            eprintln!("Parallel batch: {:?}", &vec_folders);
             vec_folders.into_par_iter().for_each(|rel_path| {
-                self.scan_folder(&rel_path.as_path()).unwrap_or_else(|e| {
+                self.scan_folder(&rel_path).unwrap_or_else(|e| {
                     eprintln!("Failed to scan folder {:?} with error {e}", &rel_path)
                 }) // ignores errors
             });
         }
         Ok(())
+    }
+
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(self)
     }
 }
 
