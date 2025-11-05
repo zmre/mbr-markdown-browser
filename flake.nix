@@ -33,11 +33,20 @@
         version = "0.1";
         cargoLock.lockFile = ./Cargo.lock;
         src = pkgs.lib.cleanSource ./.;
+        preBuild = ''
+          cd components
+          npm install
+          npm run build
+          cp dist/*.js ../templates/components
+          cd ..
+        '';
         nativeBuildInputs = with pkgs; [
           pkg-config
           ffmpeg-headless.dev
+          nodejs_24
         ];
         PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
+        # TODO: auto build and copy in components
       };
       defaultPackage = packages.mbr-cli;
 
@@ -49,9 +58,10 @@
       devShell = pkgs.mkShell {
         buildInputs = [
           rusttoolchain
-          pkgs.nodejs-slim_24
+          pkgs.nodejs_24
           pkgs.ffmpeg-headless
           pkgs.pkg-config
+          pkgs.cargo-watch
         ];
         LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
       };
