@@ -192,6 +192,14 @@ async fn process_event(
                 state.metadata_parsed =
                     YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
                 (event, state)
+            } else if text.starts_with("[-] ") {
+                // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`
+                let remaining_text = &text[4..]; // Skip "[-] "
+                let html = format!(
+                    r#"<input disabled type="checkbox" class="canceled-checkbox"/><s>{}</s>"#,
+                    html_escape::encode_text(remaining_text)
+                );
+                (Event::Html(html.into()), state)
             } else if !state.in_link && text.starts_with("http") && !text.contains(" ") {
                 // Only process bare URLs that are NOT inside a link element.
                 // URLs in <http://...> autolinks or [text](url) links are already
