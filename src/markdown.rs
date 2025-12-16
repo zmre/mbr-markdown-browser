@@ -14,6 +14,7 @@ struct EventState {
     root_path: PathBuf,
     in_vid: bool,
     in_metadata: bool,
+    in_link: bool, // Track when inside a link (including autolinks like <http://...>)
     metadata_source: Option<MetadataBlockKind>,
     metadata_parsed: Option<Yaml>,
 }
@@ -35,6 +36,7 @@ pub async fn render(
         root_path: root_path.to_path_buf(),
         in_vid: false,
         in_metadata: false,
+        in_link: false,
         metadata_source: None,
         metadata_parsed: None,
     };
@@ -172,18 +174,29 @@ async fn process_event(
                 (event, state)
             }
         }
+        // Track when we're inside a link (including autolinks like <http://...>)
+        Event::Start(Tag::Link { .. }) => {
+            state.in_link = true;
+            (event.clone(), state)
+        }
+        Event::End(TagEnd::Link) => {
+            state.in_link = false;
+            (event, state)
+        }
         Event::Text(text) => {
             // println!("Text: {}", &text);
             if state.in_metadata {
                 state.metadata_parsed =
                     YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
                 (event, state)
-            } else if text.starts_with("http") && !text.contains(" ") {
+            } else if !state.in_link && text.starts_with("http") && !text.contains(" ") {
+                // Only process bare URLs that are NOT inside a link element.
+                // URLs in <http://...> autolinks or [text](url) links are already
+                // handled by markdown and shouldn't trigger oembed fetching.
                 let info = PageInfo::new_from_url(text).await.unwrap_or(PageInfo {
                     url: text.clone().to_string(),
                     ..Default::default()
                 });
-                // Event::Text(info.text().into())
                 (Event::Html(info.html().into()), state)
             } else if text.trim_start().starts_with("{{") {
                 if let Some(vid) = Vid::from_vid(text) {

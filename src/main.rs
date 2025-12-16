@@ -52,6 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .start()
                 .await;
         });
+        // Give the server a moment to start listening before opening the browser
+        // TODO: find a better way to know when server is ready
+        std::thread::sleep(std::time::Duration::from_millis(100));
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
 
         let url = url.join(

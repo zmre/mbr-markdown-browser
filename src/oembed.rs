@@ -1,9 +1,5 @@
-use reqwest::IntoUrl;
+use regex::Regex;
 use scraper::{Html, Selector};
-
-// TODO: use actual oembed for some links and make a visual link for others with image and title and description
-// draw inspiration from https://crates.io/crates/oembed-rs but it needs to be redone
-// I think I just need a few things like the youtube endpoint (and I can use their html directly) and maybe giphy
 
 #[derive(Default)]
 pub struct PageInfo {
@@ -11,10 +7,66 @@ pub struct PageInfo {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
+    pub embed_html: Option<String>, // For YouTube and other embeddable content
 }
 
 impl PageInfo {
+    /// Extract YouTube video ID from various YouTube URL formats
+    fn extract_youtube_id(url: &str) -> Option<String> {
+        // Matches:
+        // - https://www.youtube.com/watch?v=VIDEO_ID
+        // - https://youtube.com/watch?v=VIDEO_ID
+        // - https://youtu.be/VIDEO_ID
+        // - https://www.youtube.com/embed/VIDEO_ID
+        // - https://www.youtube.com/v/VIDEO_ID
+        let patterns = [
+            r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})",
+        ];
+
+        for pattern in patterns {
+            if let Ok(re) = Regex::new(pattern) {
+                if let Some(caps) = re.captures(url) {
+                    if let Some(id) = caps.get(1) {
+                        return Some(id.as_str().to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if URL is a YouTube URL and create embed HTML
+    fn youtube_embed(url: &str) -> Option<String> {
+        Self::extract_youtube_id(url).map(|video_id| {
+            format!(
+                r#"<figure class="video-embed youtube-embed">
+                    <iframe
+                        width="560"
+                        height="315"
+                        src="https://www.youtube.com/embed/{}"
+                        title="YouTube video player"
+                        frameborder="0"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        referrerpolicy="strict-origin-when-cross-origin"
+                        allowfullscreen>
+                    </iframe>
+                </figure>"#,
+                video_id
+            )
+        })
+    }
+
     pub async fn new_from_url(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        // Check for YouTube first - no need to fetch the page
+        if let Some(embed_html) = Self::youtube_embed(url) {
+            return Ok(PageInfo {
+                url: url.to_string(),
+                embed_html: Some(embed_html),
+                ..Default::default()
+            });
+        }
+
+        // For other URLs, fetch and parse OpenGraph metadata
         let response = reqwest::get(url).await?;
         let body = response.text().await?;
         let document = Html::parse_document(&body);
@@ -49,6 +101,7 @@ impl PageInfo {
             title,
             description,
             image,
+            embed_html: None,
         })
     }
 
@@ -61,8 +114,12 @@ impl PageInfo {
     }
 
     pub fn html(&self) -> String {
-        // TODO: make this a table with image on left, title on right, and description under title.  Or else use a custom element and
-        // just pass all the things to the custom-element web component to let something else handle it
+        // If we have embed HTML (e.g., YouTube), use that
+        if let Some(embed) = &self.embed_html {
+            return embed.clone();
+        }
+
+        // Otherwise, create a link (TODO: make this a rich card with image/description)
         format!(
             "<a href='{}'>{}</a>",
             &self.url,

@@ -1,17 +1,46 @@
 ---
 title: something
 keyword: supercalifragilistic
-tags:
-    - x
-    - y
-    - z
 ---
 
 # mbr - markdown browser
 
-The goal of this is to preview markdown under an assumption that there are other markdown files around and we want to be able to jump around between them by following links, browsing tags, browsing folders, and searching. Ultimately things like backlinks, in-document table of contents, and more.
+The goal of this is to preview markdown under an assumption that there are other markdown files around and we want to be able to jump around between them by following links, browsing tags, browsing folders, and searching. Ultimately, things like backlinks, in-document table of contents, and more will be available.  So first it's a markdown previewer, but then a markdown browser for navigating markdown files. And finally, I want it to be an optional static site generator.
+
+A key principle is that any given repo of markdown files can have the UI for browsing it customized -- not just styling but pretty much everything.  Users customize by creating a `.mbr/` folder in the root of their markdown file project.  Inside that, there can be a `config.toml` file for customizing.  Additionally, all javascript, css, and html components are fetched from a URL that is `/.mbr/something` and it will look in the local `.mbr/` folder for the files before falling back to compiled-in defaults.
+
+Also, some of my notes have a lot of embedded videos in them so I want these to work out of the box without much effort or any ugly syntax.  I'm adding some extensions to standard github flavored markdown to enable these things.
+
+## Technical approach
+
+1. Markdown will convert to HTML on the fly
+2. HTML will be served up from a local private web server
+3. The UI is HTML+JavaScript+CSS with Lit web components
+
+Performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.
+
+## Running
+
+For now, you always need to specify a markdown file, even if starting in server mode.
+
+* `mbr README.md` will process the markdown and print it to the terminal
+* `mbr -s README.md` will start the web server and point you at <http://127.0.0.1:5200/README/>
+* `mbr -g README.md` will launch a window and the web server with the window automatically showing the correct URL
+
+https://www.youtube.com/watch?v=gz9BRl7DVSM
+
+## Developing
+
+There's the rust dev and the html/javascript dev.
+
+For the rust side, try: `cargo watch -q -c -x 'run --release -- -s README.md'`
+
+Then in another tab, you need to run vite.  But you need vite to connect to rust...
 
 ## TODO
+
+* App
+  * Need an app shell on Mac so we can have nice icons, menus, etc.
 
 * Web server
 	* [x] Establish the root directory
@@ -27,6 +56,8 @@ The goal of this is to preview markdown under an assumption that there are other
 	* [ ] **Serve sections (default index files)**
 	* [ ] tls? [see the axum tls-rustls example](https://github.com/tokio-rs/axum/tree/main/examples/tls-rustls)
 	* [ ] Websockets route to push when active file is changed on disk
+  * [ ] Add a "multi-server" option to serve up multiple different note routes; might require an architecture change and definitely requires a path prefix concept
+    * would let me host my personal notes as well as magic notes as well as whatever
 
 * Videos
 	* [ ] Serve captions, chapters, and posters automatically
@@ -45,6 +76,7 @@ The goal of this is to preview markdown under an assumption that there are other
 	* [x] theme.css
 
 * Markdown parsing
+  * [ ] Allow unordered bullets under ordered and vice versa
 	* [ ] Make all links relative so for example from `/xyz` to `../../xyz` as needed which will handle static generation hosted mode and prefixes and more
         * All links that are relative will need to be converted 
         * in arbitrary subfolders
@@ -91,3 +123,5 @@ The goal of this is to preview markdown under an assumption that there are other
 		* [ ] Track links out and links in between files
 * Misc
 	* [ ] Auto handle address already in use error by incrementing the port if we're running in GUI mode
+
+* [ ] Might want to look into https://github.com/longbridge/gpui-component?tab=readme-ov-file and https://github.com/zed-industries/zed/tree/main/crates/gpui

@@ -1,16 +1,14 @@
-import { defineConfig } from 'vite'
-import { svelte } from '@sveltejs/vite-plugin-svelte'
+import type { UserConfig } from 'vite'
+import { dirname, resolve } from 'node:path'
 
-// https://vite.dev/config/
-export default defineConfig({
-  plugins: [svelte()],
+export default {
   build: {
+    sourcemap: true,
+    minify: "esbuild",
     lib: {
-      // entry: 'src/main.ts',
-      entry: ['src/components/Link.svelte'],
-      fileName: (format, entryName) => `mbr-${entryName.toLowerCase()}.${format}.js`,
-      name: "components",
-      formats: ['iife'],
+      entry: resolve(__dirname, 'src/main.js'),
+      fileName: 'mbr-components',
+      name: 'MBR',
     }
-  },
-})
+  }
+} satisfies UserConfig

@@ -20,6 +20,7 @@ futures = "0.3.31"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 glob = "0.3.3"
 html-escape = "0.2.13"
+image = "0.25.8"
 itertools = "0.14.0"
 metadata = "0.1.10"
 papaya = "0.2.3"

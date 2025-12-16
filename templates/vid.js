@@ -1,5 +1,6 @@
 // import "https://cdn.vidstack.io/player@1.12.13";
 import { PlyrLayout, VidstackPlayer, VidstackPlayerLayout } from "/.mbr/vidstack.player.js";
+// import { PlyrLayout, VidstackPlayer, VidstackPlayerLayout } from "vidstack";
 
 // let layout = new VidstackPlayerLayout({});
 let layout2 = new PlyrLayout({});

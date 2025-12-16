@@ -283,6 +283,7 @@ impl Server {
             .render_markdown(&inner_html_output, frontmatter)
             .await
             .inspect_err(|e| eprintln!("Error rendering template: {e}"))?;
+        tracing::debug!("generated the html");
         Ok(Html(full_html_output))
     }
 
@@ -329,4 +330,54 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         include_bytes!("../templates/vidstack.player.1.12.13.js"),
         "application/javascript",
     ),
+    (
+        "/components/mbr-components.js",
+        include_bytes!("../components/dist/mbr-components.js"),
+        "application/javascript",
+    ),
+    (
+        "/components/mbr-components.css",
+        include_bytes!("../components/dist/mbr-components.css"),
+        "application/javascript",
+    ),
+    // (
+    //     "/components/legacy.js",
+    //     include_bytes!("../templates/components/legacy.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/disclose-version.js",
+    //     include_bytes!("../templates/components/disclose-version.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/mbr-browse.es.js",
+    //     include_bytes!("../templates/components/mbr-browse.es.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/mbr-jump.es.js",
+    //     include_bytes!("../templates/components/mbr-jump.es.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/mbr-info.es.js",
+    //     include_bytes!("../templates/components/mbr-info.es.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/mbr-search.es.js",
+    //     include_bytes!("../templates/components/mbr-search.es.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/mbr-navloader.es.js",
+    //     include_bytes!("../templates/components/mbr-navloader.es.js"),
+    //     "application/javascript",
+    // ),
+    // (
+    //     "/components/svelte.js",
+    //     include_bytes!("../templates/components/svelte.js"),
+    //     "application/javascript",
+    // ),
 ];

@@ -1,22 +1,21 @@
-// use winit::{
-//     application::ApplicationHandler,
-//     event::WindowEvent,
-//     event_loop::{ActiveEventLoop, EventLoop},
-//     window::{Window, WindowId},
-// };
+extern crate image;
 use tao::{
     event::{DeviceEvent, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     platform::macos::WindowBuilderExtMacOS,
-    window::{Window, WindowBuilder},
+    window::{Icon, Window, WindowBuilder},
 };
 use wry::WebViewBuilder;
 
 pub fn launch_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new();
+    let icon = load_icon();
     let window = WindowBuilder::new()
         .with_title("mbr")
-        .with_titlebar_transparent(true)
+        // At present, this only does anything on Windows and Linux, so if you want to save load
+        // time, you can put icon loading behind a function that returns `None` on other platforms.
+        .with_window_icon(Some(icon))
+        // .with_titlebar_transparent(true) // requires a feature that uses private apis
         .build(&event_loop)?;
 
     // with_window_icon(self, window_icon: Option<Icon>) -> Self
@@ -66,4 +65,21 @@ pub fn launch_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
             _ => (),
         }
     });
+}
+
+fn load_icon() -> Icon {
+    let (icon_rgba, icon_width, icon_height) = {
+        // alternatively, you can embed the icon in the binary through `include_bytes!` macro and use `image::load_from_memory`
+        let image_bytes = include_bytes!("../mbr-icon.png");
+        let image = image::load_from_memory(image_bytes)
+            .expect("Couldn't load icon")
+            .into_rgba8();
+        // let image = image::open(path)
+        //     .expect("Failed to open icon path")
+        //     .into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+    Icon::from_rgba(icon_rgba, icon_width, icon_height).expect("Failed to open icon")
 }

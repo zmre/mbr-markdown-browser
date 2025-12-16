@@ -25,7 +25,7 @@
     <script>
       // Allow page scripts to see all the frontmatter to use as they see fit
       window.frontmatter = {{ __tera_context | safe }} ;
-      window.frontmatter.markdown = null; // can't filter this out except after the fact, but this will save memory
+      window.frontmatter.markdown = null; // cannot filter this out except after the fact, but this will save memory
     </script>
   </head>
   <body>
@@ -90,12 +90,18 @@
         </ul>
       </nav>
     </footer>
+    <mbr-browse></mbr-browse>
   </body>
   <script defer type="module" src="/.mbr/vid.js"></script>
+  <script defer type="module" src="/.mbr/components/mbr-components.js"></script>
+
   <script defer type="module">
     import hljs from 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/es/highlight.min.js';
     //  and it's easy to individually load additional languages
     import css from 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/es/languages/css.min.js';
+    //import mbr-browse from '/.mbr/components/mbr-browse.es.js';
+
+    
     hljs.registerLanguage('css', css);
     hljs.highlightAll();
   </script>

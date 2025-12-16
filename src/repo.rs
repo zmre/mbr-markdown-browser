@@ -6,7 +6,10 @@ use std::{
 
 use papaya::{HashMap, HashSet};
 use rayon::prelude::*;
-use serde::{ser::SerializeMap, Serialize, Serializer};
+use serde::{
+    ser::{SerializeMap, SerializeSeq},
+    Serialize, Serializer,
+};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::Config;
@@ -47,9 +50,9 @@ impl Serialize for MarkdownFiles {
     where
         S: Serializer,
     {
-        let mut s = serializer.serialize_map(Some(self.len()))?;
-        for (k, v) in self.pin().iter() {
-            s.serialize_entry(k, v)?;
+        let mut s = serializer.serialize_seq(Some(self.len()))?;
+        for (_, v) in self.pin().iter() {
+            s.serialize_element(v)?;
         }
         s.end()
     }
@@ -68,9 +71,9 @@ impl Serialize for OtherFiles {
     where
         S: Serializer,
     {
-        let mut s = serializer.serialize_map(Some(self.len()))?;
-        for (k, v) in self.pin().iter() {
-            s.serialize_entry(k, v)?;
+        let mut s = serializer.serialize_seq(Some(self.len()))?;
+        for (_, v) in self.pin().iter() {
+            s.serialize_element(v)?;
         }
         s.end()
     }
@@ -368,9 +371,20 @@ impl Repo {
                     //     .to_string_lossy()
                     //     .to_string();
 
-                    let url = pathdiff::diff_paths(path, &self.root_dir)
+                    let mut url = pathdiff::diff_paths(path, &self.root_dir)
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or("".to_string());
+                    if !url.starts_with('/') {
+                        url = "/".to_string() + &url;
+                    }
+                    if url.ends_with(&self.index_file) {
+                        url = url.replace(&self.index_file, "");
+                    }
+                    if let Some((base, extension)) = url.rsplit_once('.') {
+                        if !extension.contains('/') {
+                            url = base.to_string() + "/";
+                        }
+                    }
 
                     let mdfile = MarkdownInfo {
                         raw_path: path.to_path_buf(),
@@ -389,9 +403,13 @@ impl Repo {
                 //     .join(relative_folder_path_ref)
                 //     .to_string_lossy()
                 //     .replace(("/".to_string() + self.static_folder.as_str()).as_str(), "");
-                let url = pathdiff::diff_paths(path, &self.root_dir)
+                let mut url = pathdiff::diff_paths(path, &self.root_dir)
                     .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or("".to_string());
+                    .unwrap_or("".to_string())
+                    .replace(&self.static_folder, "");
+                if !url.starts_with('/') {
+                    url = "/".to_string() + &url;
+                }
 
                 let other_file = OtherFileInfo {
                     raw_path: path.to_path_buf(),
@@ -429,6 +447,13 @@ impl Repo {
 
     pub fn scan_all(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.scan_folder(&PathBuf::from("."))?; // the . is relative to the root_dir, so this scans the root dir
+
+        // Only scan static folder if it exists
+        let static_path = self.root_dir.join(&self.static_folder);
+        if static_path.is_dir() {
+            self.scan_folder(&PathBuf::from(&self.static_folder))?;
+        }
+
         while !self.queued_folders.is_empty() {
             // TODO: make sure this doesn't deadlock
             let vec_folders: Vec<_> = self
