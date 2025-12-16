@@ -36,6 +36,7 @@ pub struct ServerState {
     pub index_file: String,
     pub templates: crate::templates::Templates,
     pub repo: Arc<Mutex<Repo>>,
+    pub oembed_timeout_ms: u64,
 }
 
 impl Server {
@@ -48,6 +49,7 @@ impl Server {
         ignore_dirs: &[String],
         ignore_globs: &[String],
         index_file: S,
+        oembed_timeout_ms: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
@@ -80,6 +82,7 @@ impl Server {
             index_file,
             templates,
             repo,
+            oembed_timeout_ms,
         };
 
         let mbr_builtins = Self::serve_default_mbr.into_service();
@@ -192,6 +195,7 @@ impl Server {
                     &index,
                     &config.templates,
                     config.base_dir.as_path(),
+                    config.oembed_timeout_ms,
                 )
                 .await
                 .map_err(|_| StatusCode::PAYMENT_REQUIRED)?
@@ -216,6 +220,7 @@ impl Server {
                     &md_path,
                     &config.templates,
                     config.base_dir.as_path(),
+                    config.oembed_timeout_ms,
                 )
                 .await
                 .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
@@ -253,6 +258,7 @@ impl Server {
                         &md_path,
                         &config.templates,
                         config.base_dir.as_path(),
+                        config.oembed_timeout_ms,
                     )
                     .await
                     .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
@@ -273,9 +279,10 @@ impl Server {
         md_path: &Path,
         templates: &crate::templates::Templates,
         root_path: &Path,
+        oembed_timeout_ms: u64,
     ) -> Result<Html<String>, Box<dyn std::error::Error>> {
         let (mut frontmatter, inner_html_output) =
-            markdown::render(md_path.to_path_buf(), root_path)
+            markdown::render(md_path.to_path_buf(), root_path, oembed_timeout_ms)
                 .await
                 .inspect_err(|e| eprintln!("Error rendering markdown: {e}"))?;
         frontmatter.insert("markdown_source".into(), md_path.to_string_lossy().into());

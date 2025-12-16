@@ -23,7 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .canonicalize()
         .expect("Failed to canonicalize path for provided folder");
 
-    let config = Config::read(&file_absolute_path)?;
+    let mut config = Config::read(&file_absolute_path)?;
+
+    // Apply CLI overrides
+    if let Some(timeout) = args.oembed_timeout {
+        config.oembed_timeout_ms = timeout;
+    }
 
     let file_relative_to_root = pathdiff::diff_paths(file_absolute_path, &config.root_dir)
         .expect("Failed to calculate diff between CWD and file");
@@ -46,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config_copy.ignore_dirs.clone(),
                 &config_copy.ignore_globs.clone(),
                 &config_copy.index_file.clone(),
+                config_copy.oembed_timeout_ms,
             );
             server
                 .expect("Couldn't initialize the server. Try with -s for more info")
@@ -77,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.ignore_dirs,
             &config.ignore_globs,
             &config.index_file.clone(),
+            config.oembed_timeout_ms,
         )?;
         println!(
             "http://{}:{}/{}",
@@ -90,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         server.start().await;
     } else {
-        let (frontmatter, html_output) = markdown::render(args.file, &config.root_dir.as_path())
+        let (frontmatter, html_output) = markdown::render(args.file, &config.root_dir.as_path(), config.oembed_timeout_ms)
             .await
             .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
         let templates = templates::Templates::new(&config.root_dir)

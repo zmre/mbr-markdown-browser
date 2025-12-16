@@ -1,5 +1,7 @@
 use regex::Regex;
+use reqwest::Client;
 use scraper::{Html, Selector};
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct PageInfo {
@@ -56,7 +58,7 @@ impl PageInfo {
         })
     }
 
-    pub async fn new_from_url(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new_from_url(url: &str, timeout_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
         // Check for YouTube first - no need to fetch the page
         if let Some(embed_html) = Self::youtube_embed(url) {
             return Ok(PageInfo {
@@ -66,8 +68,26 @@ impl PageInfo {
             });
         }
 
+        // Build a client with the configured timeout
+        let client = Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()?;
+
         // For other URLs, fetch and parse OpenGraph metadata
-        let response = reqwest::get(url).await?;
+        match Self::fetch_page_info(&client, url).await {
+            Ok(info) => Ok(info),
+            Err(_) => {
+                // Any error (timeout, network, etc.) - return a plain link
+                Ok(PageInfo {
+                    url: url.to_string(),
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    async fn fetch_page_info(client: &Client, url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let response = client.get(url).send().await?;
         let body = response.text().await?;
         let document = Html::parse_document(&body);
         let mut title: Option<String> = None;

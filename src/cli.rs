@@ -16,4 +16,9 @@ pub struct Args {
     /// Markdown file to render
     //#[clap(short, long, default_value = "index.md")]
     pub file: PathBuf,
+
+    /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
+    /// Falls back to plain link if fetch doesn't complete in time.
+    #[arg(long)]
+    pub oembed_timeout: Option<u64>,
 }

@@ -17,6 +17,7 @@ struct EventState {
     in_link: bool, // Track when inside a link (including autolinks like <http://...>)
     metadata_source: Option<MetadataBlockKind>,
     metadata_parsed: Option<Yaml>,
+    oembed_timeout_ms: u64,
 }
 
 pub type SimpleMetadata = HashMap<String, String>;
@@ -24,6 +25,7 @@ pub type SimpleMetadata = HashMap<String, String>;
 pub async fn render(
     file: PathBuf,
     root_path: &Path,
+    oembed_timeout_ms: u64,
 ) -> Result<(SimpleMetadata, String), Box<dyn std::error::Error>> {
     // Create parser with example Markdown text.
     let markdown_input = fs::read_to_string(file)?;
@@ -39,6 +41,7 @@ pub async fn render(
         in_link: false,
         metadata_source: None,
         metadata_parsed: None,
+        oembed_timeout_ms,
     };
     let mut processed_events = Vec::new();
 
@@ -193,7 +196,7 @@ async fn process_event(
                 // Only process bare URLs that are NOT inside a link element.
                 // URLs in <http://...> autolinks or [text](url) links are already
                 // handled by markdown and shouldn't trigger oembed fetching.
-                let info = PageInfo::new_from_url(text).await.unwrap_or(PageInfo {
+                let info = PageInfo::new_from_url(text, state.oembed_timeout_ms).await.unwrap_or(PageInfo {
                     url: text.clone().to_string(),
                     ..Default::default()
                 });
