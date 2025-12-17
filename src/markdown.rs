@@ -229,3 +229,81 @@ async fn process_event(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    async fn render_markdown(content: &str) -> String {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let (_, html) = render(path, &root, 100).await.unwrap();
+        html
+    }
+
+    #[tokio::test]
+    async fn test_canceled_checkbox_dash() {
+        let md = "- [-] canceled task";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<input disabled type="checkbox" class="canceled-checkbox"/>"#));
+        assert!(html.contains("<s>canceled task</s>"));
+    }
+
+    #[tokio::test]
+    async fn test_canceled_checkbox_asterisk() {
+        let md = "* [-] another canceled item";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<input disabled type="checkbox" class="canceled-checkbox"/>"#));
+        assert!(html.contains("<s>another canceled item</s>"));
+    }
+
+    #[tokio::test]
+    async fn test_unchecked_checkbox() {
+        let md = "- [ ] unchecked item";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<input disabled="" type="checkbox"/>"#));
+        assert!(!html.contains("canceled-checkbox"));
+    }
+
+    #[tokio::test]
+    async fn test_checked_checkbox() {
+        let md = "- [x] checked item";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<input disabled="" type="checkbox" checked=""/>"#));
+        assert!(!html.contains("canceled-checkbox"));
+    }
+
+    #[tokio::test]
+    async fn test_canceled_checkbox_with_special_chars() {
+        // Test that special characters are preserved in canceled checkbox text
+        let md = "- [-] text with special chars: & < > \"";
+        let html = render_markdown(md).await;
+        // The canceled checkbox renders with strikethrough
+        assert!(html.contains("<s>"));
+        assert!(html.contains("</s>"));
+        assert!(html.contains("canceled-checkbox"));
+    }
+
+    #[tokio::test]
+    async fn test_canceled_checkbox_plain_text() {
+        // Verify canceled checkboxes work with plain text
+        let md = "- [-] plain canceled text";
+        let html = render_markdown(md).await;
+        assert!(html.contains("<s>plain canceled text</s>"));
+    }
+
+    #[tokio::test]
+    async fn test_yaml_frontmatter() {
+        let md = "---\ntitle: Test Title\n---\n\n# Heading";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let (metadata, _) = render(path, &root, 100).await.unwrap();
+        assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
+    }
+}

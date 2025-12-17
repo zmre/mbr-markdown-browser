@@ -123,5 +123,3 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 		* [ ] Track links out and links in between files
 * Misc
 	* [ ] Auto handle address already in use error by incrementing the port if we're running in GUI mode
-
-* [ ] Might want to look into https://github.com/longbridge/gpui-component?tab=readme-ov-file and https://github.com/zed-industries/zed/tree/main/crates/gpui

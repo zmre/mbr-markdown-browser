@@ -13,6 +13,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::errors::ServerError;
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
@@ -50,7 +51,7 @@ impl Server {
         ignore_globs: &[String],
         index_file: S,
         oembed_timeout_ms: u64,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
         let index_file = index_file.into();
@@ -64,7 +65,8 @@ impl Server {
             .with(tracing_subscriber::fmt::layer())
             .init();
 
-        let templates = templates::Templates::new(base_dir.as_path())?;
+        let templates = templates::Templates::new(base_dir.as_path())
+            .map_err(ServerError::TemplateInit)?;
 
         let repo = Arc::new(Mutex::new(Repo::init(
             &base_dir,
@@ -103,11 +105,20 @@ impl Server {
         Ok(Server { router, ip, port })
     }
 
-    pub async fn start(&self) {
+    pub async fn start(&self) -> Result<(), ServerError> {
         let addr = SocketAddr::from((self.ip, self.port));
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        tracing::debug!("listening on {}", listener.local_addr().unwrap());
-        axum::serve(listener, self.router.clone()).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            ServerError::BindFailed {
+                addr: addr.to_string(),
+                source: e,
+            }
+        })?;
+        let local_addr = listener.local_addr().map_err(ServerError::LocalAddrFailed)?;
+        tracing::debug!("listening on {}", local_addr);
+        axum::serve(listener, self.router.clone())
+            .await
+            .map_err(ServerError::StartFailed)?;
+        Ok(())
     }
 
     pub async fn get_site_info<'a>(
@@ -211,21 +222,25 @@ impl Server {
             std::path::PathBuf::from(trimmed)
         };
 
-        // TODO: if i map the markdown extensions and run find on it will this look cleaner?
-        for ext in config.markdown_extensions.iter() {
-            let mut md_path = candidate_base.clone();
-            md_path.set_extension(ext);
-            if md_path.is_file() {
-                return Ok(Self::markdown_to_html(
-                    &md_path,
-                    &config.templates,
-                    config.base_dir.as_path(),
-                    config.oembed_timeout_ms,
-                )
-                .await
-                .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
-                .into_response());
-            }
+        if let Some(md_path) = config
+            .markdown_extensions
+            .iter()
+            .map(|ext| {
+                let mut path = candidate_base.clone();
+                path.set_extension(ext);
+                path
+            })
+            .find(|path| path.is_file())
+        {
+            return Ok(Self::markdown_to_html(
+                &md_path,
+                &config.templates,
+                config.base_dir.as_path(),
+                config.oembed_timeout_ms,
+            )
+            .await
+            .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
+            .into_response());
         }
 
         let static_dir = config
@@ -250,20 +265,25 @@ impl Server {
         if candidate_base.is_dir() {
             let mut dir_and_index = candidate_base.clone();
             dir_and_index.push("index");
-            for ext in config.markdown_extensions.iter() {
-                let mut md_path = dir_and_index.clone();
-                md_path.set_extension(ext);
-                if md_path.is_file() {
-                    return Ok(Self::markdown_to_html(
-                        &md_path,
-                        &config.templates,
-                        config.base_dir.as_path(),
-                        config.oembed_timeout_ms,
-                    )
-                    .await
-                    .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
-                    .into_response());
-                }
+            if let Some(md_path) = config
+                .markdown_extensions
+                .iter()
+                .map(|ext| {
+                    let mut path = dir_and_index.clone();
+                    path.set_extension(ext);
+                    path
+                })
+                .find(|path| path.is_file())
+            {
+                return Ok(Self::markdown_to_html(
+                    &md_path,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                    config.oembed_timeout_ms,
+                )
+                .await
+                .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
+                .into_response());
             }
 
             // TODO: return a default section

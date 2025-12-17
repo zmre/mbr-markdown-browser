@@ -1,5 +1,22 @@
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use regex::Regex;
+use std::sync::LazyLock;
+
+// Compile regexes once at startup
+static TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?x)^\s*\{\{\s*vid\s*\((?P<params>.*?)\)\s*\}\}\s*$"#)
+        .expect("Invalid TAG_RE regex pattern")
+});
+static KV_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\b(?P<key>\w+)\s*=\s*["'"](?P<val>[^'""]*)["'"]"#)
+        .expect("Invalid KV_RE regex pattern")
+});
+static EXTENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\.([0-9a-zA-Z]+)([?#].*)?$").expect("Invalid EXTENSION_RE regex pattern")
+});
+static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"#t=([0-9]+(:[0-9]+)*)(,([0-9]+(:[0-9]+)*))?$").expect("Invalid TIME_RE regex pattern")
+});
 
 #[derive(Debug, PartialEq, Default)]
 pub struct Vid {
@@ -31,18 +48,14 @@ impl Vid {
     pub fn from_vid(input: &str) -> Option<Self> {
         // 1) match the whole tag {{ vid( … ) }}
         // 2) capture everything inside the parens as "params"
-        let tag_re = Regex::new(r#"(?x)^\s*\{\{\s*vid\s*\((?P<params>.*?)\)\s*\}\}\s*$"#).unwrap();
-
         // 3) match individual key="value" pairs
-        let kv_re = Regex::new(r#"\b(?P<key>\w+)\s*=\s*["'“](?P<val>[^'"”]*)["'”]"#).unwrap();
-
-        let caps = tag_re.captures(input)?;
+        let caps = TAG_RE.captures(input)?;
         let params_str = &caps["params"];
 
         let mut vid: Vid = Default::default();
         let mut path: Option<String> = None;
 
-        for kv in kv_re.captures_iter(params_str) {
+        for kv in KV_RE.captures_iter(params_str) {
             let key = &kv["key"];
             let val = &kv["val"];
             match key {
@@ -133,13 +146,11 @@ impl Vid {
     }
 
     fn extension_from_url(url: &str) -> Option<String> {
-        let extension_re = Regex::new(r"\.([0-9a-zA-Z]+)([?#].*)?$").unwrap();
-        extension_re.captures(url).map(|cap| cap[1].to_string())
+        EXTENSION_RE.captures(url).map(|cap| cap[1].to_string())
     }
 
     fn start_stop_from_url(url: &str) -> (Option<String>, Option<String>, &str) {
-        let time_re = Regex::new(r"#t=([0-9]+(:[0-9]+)*)(,([0-9]+(:[0-9]+)*))?$").unwrap();
-        match time_re.captures(url) {
+        match TIME_RE.captures(url) {
             Some(cap) => {
                 let url = match url.rsplit_once('#') {
                     Some((base, _)) => base,

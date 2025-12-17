@@ -1,7 +1,11 @@
 use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
+use std::sync::LazyLock;
 use std::time::Duration;
+
+static META_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("meta").expect("Invalid meta selector"));
 
 #[derive(Default)]
 pub struct PageInfo {
@@ -25,16 +29,13 @@ impl PageInfo {
             r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})",
         ];
 
-        for pattern in patterns {
-            if let Ok(re) = Regex::new(pattern) {
-                if let Some(caps) = re.captures(url) {
-                    if let Some(id) = caps.get(1) {
-                        return Some(id.as_str().to_string());
-                    }
-                }
-            }
-        }
-        None
+        patterns.iter().find_map(|pattern| {
+            Regex::new(pattern)
+                .ok()
+                .and_then(|re| re.captures(url))
+                .and_then(|caps| caps.get(1))
+                .map(|id| id.as_str().to_string())
+        })
     }
 
     /// Check if URL is a YouTube URL and create embed HTML
@@ -93,8 +94,7 @@ impl PageInfo {
         let mut title: Option<String> = None;
         let mut image: Option<String> = None;
         let mut description: Option<String> = None;
-        let meta_selector = Selector::parse("meta").unwrap();
-        for element in document.select(&meta_selector) {
+        for element in document.select(&META_SELECTOR) {
             if let Some(property) = element.value().attr("property") {
                 match property {
                     "og:title" => {

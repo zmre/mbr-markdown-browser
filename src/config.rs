@@ -9,6 +9,8 @@ use figment::{
     Figment,
 };
 
+use crate::errors::ConfigError;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IpArray(pub [u8; 4]);
 
@@ -65,7 +67,7 @@ impl Serialize for IpArray {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            root_dir: std::env::current_dir().unwrap(),
+            root_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ip: IpArray([127, 0, 0, 1]),
             port: 5200,
             static_folder: "static".to_string(),
@@ -89,14 +91,15 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn read(search_config_from: &PathBuf) -> Result<Self, figment::Error> {
+    pub fn read(search_config_from: &PathBuf) -> Result<Self, crate::MbrError> {
         let default_config = Config::default();
         let root_dir = Self::find_root_dir(search_config_from);
         let mut config: Config = Figment::new()
             .merge(Serialized::defaults(default_config))
             .merge(Env::prefixed("MBR_"))
             .merge(Toml::file(root_dir.join(".mbr/config.toml")))
-            .extract()?;
+            .extract()
+            .map_err(ConfigError::ParseFailed)?;
         println!("config: {:?}", &config);
         config.root_dir = root_dir;
         Ok(config)
@@ -104,19 +107,19 @@ impl Config {
 
     fn find_root_dir(start_dir: &PathBuf) -> PathBuf {
         Self::search_folder_in_ancestors(start_dir, ".mbr")
-            .or(Self::cwd_if_ancestor(start_dir))
-            .unwrap_or(start_dir.clone())
+            .or_else(|| Self::cwd_if_ancestor(start_dir))
+            .unwrap_or_else(|| start_dir.clone())
     }
 
     fn cwd_if_ancestor(start_path: &PathBuf) -> Option<PathBuf> {
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = std::env::current_dir().ok()?;
         let dir = if start_path.is_dir() {
             start_path
         } else {
             start_path.parent()?
         };
         dir.ancestors()
-            .find(|candidate| candidate == &cwd)
+            .find(|candidate| *candidate == cwd)
             .map(|x| x.to_path_buf())
     }
 
@@ -134,6 +137,6 @@ impl Config {
         dir.ancestors()
             .map(|ancestor| ancestor.join(search_folder))
             .find(|candidate| candidate.as_path().is_dir())
-            .map(|mbr_dir| mbr_dir.parent().unwrap().to_path_buf())
+            .and_then(|mbr_dir| mbr_dir.parent().map(|p| p.to_path_buf()))
     }
 }

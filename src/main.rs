@@ -3,9 +3,11 @@ use std::path::Path;
 use clap::Parser;
 use config::Config;
 
-mod browser; // this could be called (should be?) GUI as it pops up a local browser window
+mod browser;
+
 mod cli; // handle command line params
 mod config; // handle config file and env stuff
+mod errors; // centralized error types
 mod html; // turn markdown into html; TODO: remove this? don't think I actually need it custom
 mod markdown; // parse and process markdown
 mod oembed; // handling for bare links in markdown to make auto-embeds
@@ -13,15 +15,21 @@ mod repo; // process a folder of files for navigation (and search?) purposes
 mod server; // serve up local files live
 mod templates; // product html wrapper
 mod vid; // manage video references and html gen // process files over the whole root
+
+pub use errors::{ConfigError, MbrError};
          // TOOD: mod static; // generate static files to be deployed -- should this somehow work in tandem with server or be a mode thereof?
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), MbrError> {
     let args = cli::Args::parse();
 
-    let file_absolute_path = Path::new(&args.file)
-        .canonicalize()
-        .expect("Failed to canonicalize path for provided folder");
+    let file_path = Path::new(&args.file);
+    let file_absolute_path = file_path.canonicalize().map_err(|e| {
+        ConfigError::CanonicalizeFailed {
+            path: file_path.to_path_buf(),
+            source: e,
+        }
+    })?;
 
     let mut config = Config::read(&file_absolute_path)?;
 
@@ -30,8 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.oembed_timeout_ms = timeout;
     }
 
-    let file_relative_to_root = pathdiff::diff_paths(file_absolute_path, &config.root_dir)
-        .expect("Failed to calculate diff between CWD and file");
+    let file_relative_to_root =
+        pathdiff::diff_paths(&file_absolute_path, &config.root_dir).ok_or_else(|| {
+            ConfigError::RelativePathFailed {
+                from: config.root_dir.clone(),
+                to: file_absolute_path.clone(),
+            }
+        })?;
 
     println!(
         "Root dir: {}; File relative to root: {}",
@@ -53,22 +66,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config_copy.index_file.clone(),
                 config_copy.oembed_timeout_ms,
             );
-            server
-                .expect("Couldn't initialize the server. Try with -s for more info")
-                .start()
-                .await;
+            match server {
+                Ok(s) => {
+                    if let Err(e) = s.start().await {
+                        eprintln!("Server error: {e}");
+                    }
+                }
+                Err(e) => eprintln!("Couldn't initialize the server: {e}. Try with -s for more info"),
+            }
         });
         // Give the server a moment to start listening before opening the browser
         // TODO: find a better way to know when server is ready
         std::thread::sleep(std::time::Duration::from_millis(100));
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
 
+        let relative_str = file_relative_to_root
+            .to_str()
+            .unwrap_or_default();
         let url = url.join(
-            replace_markdown_extension_with_slash(
-                file_relative_to_root.to_str().unwrap(),
-                &config.markdown_extensions,
-            )
-            .as_str(),
+            replace_markdown_extension_with_slash(relative_str, &config.markdown_extensions)
+                .as_str(),
         )?;
 
         browser::launch_url(url.as_str())?;
@@ -90,12 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.ip,
             config.port,
             replace_markdown_extension_with_slash(
-                file_relative_to_root.to_str().unwrap(),
+                file_relative_to_root.to_str().unwrap_or_default(),
                 &config.markdown_extensions
             )
         );
 
-        server.start().await;
+        server.start().await?;
     } else {
         let (frontmatter, html_output) = markdown::render(args.file, &config.root_dir.as_path(), config.oembed_timeout_ms)
             .await

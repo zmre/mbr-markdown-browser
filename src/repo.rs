@@ -331,7 +331,10 @@ impl Repo {
             .into_iter()
             .filter_entry(|e| {
                 let path = e.path();
-                let file_name = path.file_name().map(|x| x.to_str().unwrap()).unwrap_or("");
+                let file_name = path
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("");
                 // false skips
                 !(file_name.starts_with('.')
                     || (path.is_dir() && self.ignore_dirs.iter().any(|x| x.as_str() == file_name))
@@ -352,7 +355,7 @@ impl Repo {
                 Ok(en) => en,
             };
             let path = entry.path();
-            let extension = path.extension().map(|x| x.to_str().unwrap()).unwrap_or("");
+            let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
 
             if path.is_dir() {
                 let relative_entry =
