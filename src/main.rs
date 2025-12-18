@@ -1,22 +1,7 @@
 use std::path::Path;
 
 use clap::Parser;
-use config::Config;
-
-mod browser;
-
-mod cli; // handle command line params
-mod config; // handle config file and env stuff
-mod errors; // centralized error types
-mod html; // turn markdown into html; TODO: remove this? don't think I actually need it custom
-mod markdown; // parse and process markdown
-mod oembed; // handling for bare links in markdown to make auto-embeds
-mod repo; // process a folder of files for navigation (and search?) purposes
-mod server; // serve up local files live
-mod templates; // product html wrapper
-mod vid; // manage video references and html gen // process files over the whole root
-
-pub use errors::{ConfigError, MbrError};
+use mbr::{browser, cli, markdown, server, templates, Config, ConfigError, MbrError};
          // TOOD: mod static; // generate static files to be deployed -- should this somehow work in tandem with server or be a mode thereof?
 
 #[tokio::main]
@@ -81,18 +66,7 @@ async fn main() -> Result<(), MbrError> {
         // TODO: find a better way to know when server is ready
         std::thread::sleep(std::time::Duration::from_millis(100));
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
-
-        let relative_str = path_relative_to_root.to_str().unwrap_or_default();
-        let url_path = if is_directory {
-            // For directories, ensure trailing slash
-            if relative_str.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", relative_str)
-            }
-        } else {
-            replace_markdown_extension_with_slash(relative_str, &config.markdown_extensions)
-        };
+        let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
         let url = url.join(&url_path)?;
 
         browser::launch_url(url.as_str())?;
@@ -110,16 +84,7 @@ async fn main() -> Result<(), MbrError> {
             config.oembed_timeout_ms,
         )?;
 
-        let relative_str = path_relative_to_root.to_str().unwrap_or_default();
-        let url_path = if is_directory {
-            if relative_str.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", relative_str)
-            }
-        } else {
-            replace_markdown_extension_with_slash(relative_str, &config.markdown_extensions)
-        };
+        let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
         println!("http://{}:{}/{}", config.ip, config.port, url_path);
 
         server.start().await?;
@@ -145,6 +110,29 @@ async fn main() -> Result<(), MbrError> {
     Ok(())
 }
 
+/// Builds a URL path from a relative filesystem path.
+///
+/// - For directories: returns the path with a trailing slash
+/// - For markdown files: replaces the extension with a trailing slash
+/// - For other files: returns the path as-is
+pub fn build_url_path(
+    relative_path: &std::path::Path,
+    is_directory: bool,
+    markdown_extensions: &[String],
+) -> String {
+    let relative_str = relative_path.to_str().unwrap_or_default();
+
+    if is_directory {
+        if relative_str.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", relative_str)
+        }
+    } else {
+        replace_markdown_extension_with_slash(relative_str, markdown_extensions)
+    }
+}
+
 fn replace_markdown_extension_with_slash(s: &str, extensions: &[String]) -> String {
     if let Some((base, extension)) = s.rsplit_once('.') {
         match extensions
@@ -156,5 +144,69 @@ fn replace_markdown_extension_with_slash(s: &str, extensions: &[String]) -> Stri
         }
     } else {
         s.to_string() // no extension, so return input as provided
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_build_url_path_root_directory() {
+        let path = Path::new("");
+        let extensions = vec!["md".to_string()];
+        assert_eq!(build_url_path(path, true, &extensions), "");
+    }
+
+    #[test]
+    fn test_build_url_path_subdirectory() {
+        let path = Path::new("docs/api");
+        let extensions = vec!["md".to_string()];
+        assert_eq!(build_url_path(path, true, &extensions), "docs/api/");
+    }
+
+    #[test]
+    fn test_build_url_path_markdown_file() {
+        let path = Path::new("readme.md");
+        let extensions = vec!["md".to_string()];
+        assert_eq!(build_url_path(path, false, &extensions), "readme/");
+    }
+
+    #[test]
+    fn test_build_url_path_markdown_file_in_subdir() {
+        let path = Path::new("docs/guide.md");
+        let extensions = vec!["md".to_string()];
+        assert_eq!(build_url_path(path, false, &extensions), "docs/guide/");
+    }
+
+    #[test]
+    fn test_build_url_path_alternate_extension() {
+        let path = Path::new("notes.markdown");
+        let extensions = vec!["md".to_string(), "markdown".to_string()];
+        assert_eq!(build_url_path(path, false, &extensions), "notes/");
+    }
+
+    #[test]
+    fn test_build_url_path_non_markdown_file() {
+        let path = Path::new("image.png");
+        let extensions = vec!["md".to_string()];
+        assert_eq!(build_url_path(path, false, &extensions), "image.png");
+    }
+
+    #[test]
+    fn test_replace_markdown_extension_with_slash() {
+        assert_eq!(
+            replace_markdown_extension_with_slash("test.md", &vec!["md".to_string()]),
+            "test/"
+        );
+        assert_eq!(
+            replace_markdown_extension_with_slash("test.txt", &vec!["md".to_string()]),
+            "test.txt"
+        );
+        assert_eq!(
+            replace_markdown_extension_with_slash("noext", &vec!["md".to_string()]),
+            "noext"
+        );
     }
 }

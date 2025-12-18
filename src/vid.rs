@@ -255,7 +255,7 @@ mod tests {
     fn test_mimetype_from_url() {
         let title = "Whatever";
         let url = "x/y/video.mp4#t=10,20";
-        let vid = Vid::from_url_and_title(url, title.clone()).unwrap();
+        let vid = Vid::from_url_and_title(url, title).unwrap();
         let url2 = "x/y/video.ogv#t=10,20";
         let vid2 = Vid::from_url_and_title(url2, title).unwrap();
 

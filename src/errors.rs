@@ -188,18 +188,12 @@ impl From<Box<dyn std::error::Error>> for MbrError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
         // This is a fallback for gradual migration
         // In practice, we should use specific error types
-        MbrError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            err.to_string(),
-        ))
+        MbrError::Io(std::io::Error::other(err.to_string()))
     }
 }
 
 impl From<Box<dyn std::error::Error + Send + Sync>> for MbrError {
     fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        MbrError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            err.to_string(),
-        ))
+        MbrError::Io(std::io::Error::other(err.to_string()))
     }
 }

@@ -7,10 +7,10 @@ use std::{
 use papaya::{HashMap, HashSet};
 use rayon::prelude::*;
 use serde::{
-    ser::{SerializeMap, SerializeSeq},
+    ser::SerializeSeq,
     Serialize, Serializer,
 };
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 use crate::Config;
 
@@ -241,16 +241,16 @@ impl StaticFileMetadata {
                     metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
 
                 StaticFileKind::Image {
-                    width: metadata.as_ref().map(|m| m.width).flatten(),
-                    height: metadata.as_ref().map(|m| m.height).flatten(),
+                    width: metadata.as_ref().and_then(|m| m.width),
+                    height: metadata.as_ref().and_then(|m| m.height),
                 }
             }
             StaticFileKind::Audio { .. } => {
                 let metadata =
                     metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
                 StaticFileKind::Audio {
-                    duration: metadata.as_ref().map(|m| m.duration.clone()).flatten(),
-                    title: metadata.as_ref().map(|m| m.title.clone()).flatten(),
+                    duration: metadata.as_ref().and_then(|m| m.duration.clone()),
+                    title: metadata.as_ref().and_then(|m| m.title.clone()),
                 }
             }
             StaticFileKind::Video { .. } => {
@@ -258,10 +258,10 @@ impl StaticFileMetadata {
                     metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
 
                 StaticFileKind::Video {
-                    width: metadata.as_ref().map(|m| m.width).flatten(),
-                    height: metadata.as_ref().map(|m| m.height).flatten(),
-                    duration: metadata.as_ref().map(|m| m.duration.clone()).flatten(),
-                    title: metadata.as_ref().map(|m| m.title.clone()).flatten(),
+                    width: metadata.as_ref().and_then(|m| m.width),
+                    height: metadata.as_ref().and_then(|m| m.height),
+                    duration: metadata.as_ref().and_then(|m| m.duration.clone()),
+                    title: metadata.as_ref().and_then(|m| m.title.clone()),
                 }
             }
             _ => me.kind,
@@ -318,77 +318,40 @@ impl Repo {
             .root_dir
             .join(relative_folder_path_ref)
             .canonicalize()?;
+
+        // Skip if already scanned
         if self.scanned_folders.pin().contains(&start_folder) {
             return Ok(());
         }
         println!("relative_folder: {:?}", relative_folder_path_ref);
-
         self.scanned_folders.pin().insert(start_folder.clone());
+
+        // Walk directory with filtering
         let dir_walker = WalkDir::new(start_folder.clone())
             .follow_links(true)
             .min_depth(1)
             .max_depth(1)
             .into_iter()
-            .filter_entry(|e| {
-                let path = e.path();
-                let file_name = path
-                    .file_name()
-                    .and_then(|x| x.to_str())
-                    .unwrap_or("");
-                // false skips
-                !(file_name.starts_with('.')
-                    || (path.is_dir() && self.ignore_dirs.iter().any(|x| x.as_str() == file_name))
-                    || self.ignore_globs.iter().any(|pat| {
-                        glob::Pattern::new(pat)
-                            .map(|pat| pat.matches_path(path))
-                            .unwrap_or(false)
-                    }))
-            });
+            .filter_entry(|e| !should_ignore(e.path(), &self.ignore_dirs, &self.ignore_globs));
+
         let mut markdown = std::collections::HashMap::new();
         let mut other = std::collections::HashMap::new();
 
-        for entry in dir_walker {
-            // TODO handle ignores and also ignore paths and files with leading dots
-            // no use doing this in parallel since Mac makes you single thread operations on a single folder
-            let entry: DirEntry = match entry {
-                Err(_) => continue,
-                Ok(en) => en,
-            };
+        for entry in dir_walker.filter_map(|e| e.ok()) {
             let path = entry.path();
             let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
 
             if path.is_dir() {
+                // Queue subdirectory for later scanning
                 let relative_entry =
                     pathdiff::diff_paths(path, &self.root_dir).unwrap_or(path.to_path_buf());
                 self.queued_folders
                     .pin()
                     .insert(path.to_path_buf(), relative_entry);
-            } else if self
-                .markdown_extensions
-                .iter()
-                .any(|x| x.as_str() == extension)
-            {
+            } else if is_markdown_extension(extension, &self.markdown_extensions) {
+                // Process markdown file
                 if let Ok((_filesize, created, modified)) = file_details_from_path(path) {
-                    // let url = PathBuf::from("/")
-                    //     .join(relative_folder_path_ref)
-                    //     .to_string_lossy()
-                    //     .to_string();
-
-                    let mut url = pathdiff::diff_paths(path, &self.root_dir)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or("".to_string());
-                    if !url.starts_with('/') {
-                        url = "/".to_string() + &url;
-                    }
-                    if url.ends_with(&self.index_file) {
-                        url = url.replace(&self.index_file, "");
-                    }
-                    if let Some((base, extension)) = url.rsplit_once('.') {
-                        if !extension.contains('/') {
-                            url = base.to_string() + "/";
-                        }
-                    }
-
+                    let url = build_markdown_url_path(path, &self.root_dir, &self.index_file);
                     let mdfile = MarkdownInfo {
                         raw_path: path.to_path_buf(),
                         url_path: url,
@@ -398,22 +361,11 @@ impl Repo {
                     };
                     markdown.insert(path.to_path_buf(), mdfile);
                 } else {
-                    // we're going to ignore errors, but if we can't get basic file info, we aren't adding it. just warn
                     eprintln!("Couldn't process markdown file at {:?}", path);
                 }
             } else {
-                // let url = PathBuf::from("/")
-                //     .join(relative_folder_path_ref)
-                //     .to_string_lossy()
-                //     .replace(("/".to_string() + self.static_folder.as_str()).as_str(), "");
-                let mut url = pathdiff::diff_paths(path, &self.root_dir)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or("".to_string())
-                    .replace(&self.static_folder, "");
-                if !url.starts_with('/') {
-                    url = "/".to_string() + &url;
-                }
-
+                // Process static file
+                let url = build_static_url_path(path, &self.root_dir, &self.static_folder);
                 let other_file = OtherFileInfo {
                     raw_path: path.to_path_buf(),
                     url_path: url,
@@ -423,25 +375,28 @@ impl Repo {
             }
         }
 
-        // use rayon to run through all found markdown files and flesh out details (did i use papaya and rayon together properly?)
-        // add to the collection of markdown files in self
+        // Parallel processing: extract frontmatter from markdown files
         markdown
             .into_par_iter()
             .for_each(|(mdfile, mddetails): (PathBuf, MarkdownInfo)| {
                 let metadata = crate::markdown::extract_metadata_from_file(&mdfile).ok();
-                if metadata.is_some() {
-                    let mut new_details = mddetails;
-                    new_details.frontmatter = metadata;
-                    self.markdown_files.pin().insert(mdfile, new_details);
+                let details = if metadata.is_some() {
+                    MarkdownInfo {
+                        frontmatter: metadata,
+                        ..mddetails
+                    }
                 } else {
-                    self.markdown_files.pin().insert(mdfile, mddetails);
-                }
+                    mddetails
+                };
+                self.markdown_files.pin().insert(mdfile, details);
             });
 
-        // use rayon to run through the static files and flesh out details then add to the main collection
+        // Parallel processing: populate static file metadata
         other.into_par_iter().for_each(|(file, other_file)| {
-            let mut other_file = other_file;
-            other_file.metadata = other_file.metadata.populate();
+            let other_file = OtherFileInfo {
+                metadata: other_file.metadata.populate(),
+                ..other_file
+            };
             self.other_files.pin().insert(file, other_file);
         });
 
@@ -463,7 +418,7 @@ impl Repo {
                 .queued_folders
                 .pin()
                 .iter()
-                .map(|(absolute, relative)| relative.clone())
+                .map(|(_, relative)| relative.clone())
                 .collect();
             self.queued_folders.pin().clear();
             assert!(self.queued_folders.is_empty());
@@ -500,4 +455,331 @@ pub fn file_details_from_path<P: AsRef<Path>>(
     let created_secs = created.duration_since(UNIX_EPOCH)?.as_secs();
 
     Ok((file_size, created_secs, modified_secs))
+}
+
+// ============================================================================
+// Pure helper functions for repo scanning (extracted for testability)
+// ============================================================================
+
+/// Checks if a path should be ignored based on the given rules.
+///
+/// A path is ignored if:
+/// - Its name starts with '.'
+/// - It's a directory matching one of the ignore_dirs
+/// - It matches one of the ignore_globs patterns
+pub fn should_ignore(path: &Path, ignore_dirs: &[String], ignore_globs: &[String]) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or("");
+
+    // Hidden files/dirs (starting with .)
+    if file_name.starts_with('.') {
+        return true;
+    }
+
+    // Directory matching ignore list
+    if path.is_dir() && ignore_dirs.iter().any(|x| x.as_str() == file_name) {
+        return true;
+    }
+
+    // Glob pattern match
+    ignore_globs.iter().any(|pat| {
+        glob::Pattern::new(pat)
+            .map(|pat| pat.matches_path(path))
+            .unwrap_or(false)
+    })
+}
+
+/// Builds a URL path for a markdown file.
+///
+/// Converts a filesystem path relative to root into a URL path:
+/// - Ensures leading slash
+/// - Removes index file from path (e.g., /docs/index.md → /docs/)
+/// - Replaces file extension with trailing slash
+pub fn build_markdown_url_path(
+    path: &Path,
+    root_dir: &Path,
+    index_file: &str,
+) -> String {
+    let mut url = pathdiff::diff_paths(path, root_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Ensure leading slash
+    if !url.starts_with('/') {
+        url = "/".to_string() + &url;
+    }
+
+    // Remove index file from path
+    if url.ends_with(index_file) {
+        url = url.replace(index_file, "");
+    }
+
+    // Replace extension with trailing slash
+    if let Some((base, extension)) = url.rsplit_once('.')
+        && !extension.contains('/')
+    {
+        url = base.to_string() + "/";
+    }
+
+    url
+}
+
+/// Builds a URL path for a static file.
+///
+/// Converts a filesystem path relative to root into a URL path:
+/// - Removes static folder prefix
+/// - Ensures leading slash
+pub fn build_static_url_path(
+    path: &Path,
+    root_dir: &Path,
+    static_folder: &str,
+) -> String {
+    let mut url = pathdiff::diff_paths(path, root_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+        .replace(static_folder, "");
+
+    // Ensure leading slash
+    if !url.starts_with('/') {
+        url = "/".to_string() + &url;
+    }
+
+    url
+}
+
+/// Checks if a file has a markdown extension.
+pub fn is_markdown_extension(extension: &str, markdown_extensions: &[String]) -> bool {
+    markdown_extensions.iter().any(|x| x.as_str() == extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_ignore_hidden_file() {
+        let path = Path::new(".hidden");
+        assert!(should_ignore(path, &[], &[]));
+    }
+
+    #[test]
+    fn test_should_ignore_hidden_dir() {
+        let path = Path::new(".git");
+        assert!(should_ignore(path, &[], &[]));
+    }
+
+    #[test]
+    fn test_should_ignore_normal_file() {
+        let path = Path::new("readme.md");
+        assert!(!should_ignore(path, &[], &[]));
+    }
+
+    #[test]
+    fn test_should_ignore_glob_pattern() {
+        let path = Path::new("test.log");
+        let globs = vec!["*.log".to_string()];
+        assert!(should_ignore(path, &[], &globs));
+    }
+
+    #[test]
+    fn test_should_ignore_glob_no_match() {
+        let path = Path::new("test.md");
+        let globs = vec!["*.log".to_string()];
+        assert!(!should_ignore(path, &[], &globs));
+    }
+
+    #[test]
+    fn test_build_markdown_url_path_simple() {
+        let root = Path::new("/root");
+        let path = Path::new("/root/readme.md");
+        assert_eq!(build_markdown_url_path(path, root, "index.md"), "/readme/");
+    }
+
+    #[test]
+    fn test_build_markdown_url_path_nested() {
+        let root = Path::new("/root");
+        let path = Path::new("/root/docs/guide.md");
+        assert_eq!(build_markdown_url_path(path, root, "index.md"), "/docs/guide/");
+    }
+
+    #[test]
+    fn test_build_markdown_url_path_index() {
+        let root = Path::new("/root");
+        let path = Path::new("/root/docs/index.md");
+        assert_eq!(build_markdown_url_path(path, root, "index.md"), "/docs/");
+    }
+
+    #[test]
+    fn test_build_markdown_url_path_root_index() {
+        let root = Path::new("/root");
+        let path = Path::new("/root/index.md");
+        assert_eq!(build_markdown_url_path(path, root, "index.md"), "/");
+    }
+
+    #[test]
+    fn test_build_static_url_path_in_static() {
+        let root = Path::new("/root");
+        let path = Path::new("/root/static/image.png");
+        assert_eq!(build_static_url_path(path, root, "static"), "/image.png");
+    }
+
+    #[test]
+    fn test_build_static_url_path_not_in_static() {
+        let root = Path::new("/root");
+        let path = Path::new("/root/assets/image.png");
+        assert_eq!(build_static_url_path(path, root, "static"), "/assets/image.png");
+    }
+
+    #[test]
+    fn test_is_markdown_extension_true() {
+        let extensions = vec!["md".to_string(), "markdown".to_string()];
+        assert!(is_markdown_extension("md", &extensions));
+        assert!(is_markdown_extension("markdown", &extensions));
+    }
+
+    #[test]
+    fn test_is_markdown_extension_false() {
+        let extensions = vec!["md".to_string()];
+        assert!(!is_markdown_extension("txt", &extensions));
+        assert!(!is_markdown_extension("html", &extensions));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Strategy for valid file/directory names (no path separators or special chars)
+    fn valid_name_strategy() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,20}"
+    }
+
+    // Strategy for valid extensions
+    fn extension_strategy() -> impl Strategy<Value = String> {
+        "[a-z]{1,10}"
+    }
+
+    proptest! {
+        /// should_ignore is deterministic - same input always gives same output
+        #[test]
+        fn prop_should_ignore_deterministic(
+            name in valid_name_strategy(),
+            ignore_dirs in proptest::collection::vec(valid_name_strategy(), 0..3),
+            ignore_globs in proptest::collection::vec("[*][.][a-z]{1,5}", 0..3),
+        ) {
+            let path = Path::new(&name);
+            let result1 = should_ignore(path, &ignore_dirs, &ignore_globs);
+            let result2 = should_ignore(path, &ignore_dirs, &ignore_globs);
+            prop_assert_eq!(result1, result2);
+        }
+
+        /// Hidden files (starting with .) are always ignored
+        #[test]
+        fn prop_hidden_files_always_ignored(name in "[.][a-zA-Z0-9]{1,15}") {
+            let path = Path::new(&name);
+            prop_assert!(should_ignore(path, &[], &[]));
+        }
+
+        /// Non-hidden files without matching globs are not ignored
+        #[test]
+        fn prop_normal_files_not_ignored(name in "[a-zA-Z][a-zA-Z0-9]{0,15}") {
+            let path = Path::new(&name);
+            // No ignore patterns configured
+            prop_assert!(!should_ignore(path, &[], &[]));
+        }
+
+        /// is_markdown_extension is deterministic
+        #[test]
+        fn prop_is_markdown_extension_deterministic(
+            ext in extension_strategy(),
+            extensions in proptest::collection::vec(extension_strategy(), 1..5)
+        ) {
+            let result1 = is_markdown_extension(&ext, &extensions);
+            let result2 = is_markdown_extension(&ext, &extensions);
+            prop_assert_eq!(result1, result2);
+        }
+
+        /// Extension in list returns true
+        #[test]
+        fn prop_extension_in_list_returns_true(
+            extensions in proptest::collection::vec(extension_strategy(), 1..5)
+        ) {
+            // Pick the first extension from the list
+            if let Some(ext) = extensions.first() {
+                prop_assert!(is_markdown_extension(ext, &extensions));
+            }
+        }
+
+        /// build_markdown_url_path always returns path starting with /
+        #[test]
+        fn prop_markdown_url_starts_with_slash(
+            subpath in proptest::collection::vec(valid_name_strategy(), 1..4),
+            filename in valid_name_strategy(),
+        ) {
+            let root = PathBuf::from("/root");
+            let mut full_path = root.clone();
+            for component in &subpath {
+                full_path.push(component);
+            }
+            full_path.push(format!("{}.md", filename));
+
+            let url = build_markdown_url_path(&full_path, &root, "index.md");
+            prop_assert!(url.starts_with('/'), "URL should start with /: {}", url);
+        }
+
+        /// build_markdown_url_path always returns path ending with /
+        #[test]
+        fn prop_markdown_url_ends_with_slash(
+            subpath in proptest::collection::vec(valid_name_strategy(), 0..4),
+            filename in valid_name_strategy(),
+        ) {
+            let root = PathBuf::from("/root");
+            let mut full_path = root.clone();
+            for component in &subpath {
+                full_path.push(component);
+            }
+            full_path.push(format!("{}.md", filename));
+
+            let url = build_markdown_url_path(&full_path, &root, "index.md");
+            prop_assert!(url.ends_with('/'), "URL should end with /: {}", url);
+        }
+
+        /// build_static_url_path always returns path starting with /
+        #[test]
+        fn prop_static_url_starts_with_slash(
+            subpath in proptest::collection::vec(valid_name_strategy(), 0..4),
+            filename in valid_name_strategy(),
+            ext in extension_strategy(),
+        ) {
+            let root = PathBuf::from("/root");
+            let mut full_path = root.clone();
+            for component in &subpath {
+                full_path.push(component);
+            }
+            full_path.push(format!("{}.{}", filename, ext));
+
+            let url = build_static_url_path(&full_path, &root, "static");
+            prop_assert!(url.starts_with('/'), "URL should start with /: {}", url);
+        }
+
+        /// URL paths don't contain double slashes
+        #[test]
+        fn prop_no_double_slashes_in_markdown_url(
+            subpath in proptest::collection::vec(valid_name_strategy(), 0..4),
+            filename in valid_name_strategy(),
+        ) {
+            let root = PathBuf::from("/root");
+            let mut full_path = root.clone();
+            for component in &subpath {
+                full_path.push(component);
+            }
+            full_path.push(format!("{}.md", filename));
+
+            let url = build_markdown_url_path(&full_path, &root, "index.md");
+            prop_assert!(!url.contains("//"), "URL should not contain //: {}", url);
+        }
+    }
 }

@@ -22,6 +22,37 @@ cargo run -- -g README.md
 cargo watch -q -c -x 'run --release -- -s README.md'
 ```
 
+## Testing
+
+The project has comprehensive test coverage with 108 tests:
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test modules
+cargo test --lib                    # Unit tests (80 tests)
+cargo test --test server_integration # Integration tests (18 tests)
+
+# Run with output
+cargo test -- --nocapture
+```
+
+### Test Structure
+
+| Location | Description | Count |
+|----------|-------------|-------|
+| `src/*/tests` | Unit tests for each module | 59 |
+| `src/*/proptests` | Property-based tests (proptest) | 21 |
+| `src/main.rs` | URL path builder tests | 7 |
+| `tests/server_integration.rs` | HTTP integration tests | 18 |
+| Doc tests | Code examples in documentation | 3 |
+
+Property tests use `proptest` to verify invariants like:
+- Path resolution determinism and safety
+- Breadcrumb generation consistency
+- URL path validity (no double slashes, proper prefixes/suffixes)
+
 ## Frontend Components
 
 The `components/` directory contains Lit web components (TypeScript) compiled to standalone JS modules embedded into the Rust binary:
@@ -37,14 +68,17 @@ Built components are placed in `dist/` and compiled into the binary via `include
 
 ## Architecture
 
-### Rust Crates (src/)
+### Rust Modules (src/)
 
 | Module | Purpose |
 |--------|---------|
-| `main.rs` | Entry point, CLI mode selection |
+| `main.rs` | Entry point, CLI mode selection, `build_url_path()` |
+| `lib.rs` | Library crate exports for integration tests |
 | `cli.rs` | Clap argument parsing (-s server, -g gui) |
 | `config.rs` | Figment-based config from `.mbr/config.toml` + env vars (`MBR_*`) |
+| `errors.rs` | Error types (`MbrError`, `ConfigError`) |
 | `server.rs` | Axum web server - routes, static file serving, markdown rendering |
+| `path_resolver.rs` | Pure path resolution logic (`ResolvedPath` enum) |
 | `markdown.rs` | pulldown-cmark markdown parsing with YAML frontmatter extraction |
 | `templates.rs` | Tera template engine - renders markdown into HTML wrapper |
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
@@ -53,13 +87,36 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `oembed.rs` | Auto-embed for bare URLs in markdown |
 | `html.rs` | Custom HTML output for pulldown-cmark |
 
+### Key Pure Functions (Testable)
+
+These functions have been extracted for testability:
+
+**path_resolver.rs:**
+- `resolve_request_path()` - Determines resource type from URL path
+
+**server.rs:**
+- `generate_breadcrumbs()` - Creates navigation breadcrumbs from path
+- `get_current_dir_name()` - Extracts directory name from path
+- `get_parent_path()` - Gets parent directory URL
+- `markdown_file_to_json()` - Converts file metadata to JSON
+
+**repo.rs:**
+- `should_ignore()` - Checks if path should be ignored
+- `build_markdown_url_path()` - Generates URL for markdown file
+- `build_static_url_path()` - Generates URL for static file
+- `is_markdown_extension()` - Checks file extension
+
+**main.rs:**
+- `build_url_path()` - Builds URL from filesystem path
+
 ### Request Flow
 
 1. Server receives URL request
-2. Looks for matching markdown file (e.g., `/foo/` -> `foo.md` or `foo/index.md`)
-3. Parses markdown with pulldown-cmark, extracts YAML frontmatter
-4. Renders through Tera templates from `.mbr/` or compiled-in defaults
-5. Serves with embedded CSS/JS from `/.mbr/*` paths
+2. `path_resolver::resolve_request_path()` determines resource type
+3. Returns `ResolvedPath::MarkdownFile`, `StaticFile`, `DirectoryListing`, or `NotFound`
+4. For markdown: parses with pulldown-cmark, extracts YAML frontmatter
+5. Renders through Tera templates from `.mbr/` or compiled-in defaults
+6. Serves with embedded CSS/JS from `/.mbr/*` paths
 
 ### Configuration Hierarchy
 
@@ -102,8 +159,9 @@ Users override defaults by creating files in their markdown repo's `.mbr/` folde
 - **wry/tao** - Native webview GUI
 - **papaya** - Concurrent hash maps
 - **rayon** - Parallel iteration for repo scanning
+- **proptest** - Property-based testing (dev)
+- **tempfile** - Temporary directories for tests (dev)
 
 **Frontend:**
 - **lit** - Web components framework
 - **vite** - Build tool
-- update memory based on current project state

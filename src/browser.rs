@@ -3,8 +3,7 @@ use crate::errors::BrowserError;
 use tao::{
     event::{DeviceEvent, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    platform::macos::WindowBuilderExtMacOS,
-    window::{Icon, Window, WindowBuilder},
+    window::{Icon, WindowBuilder},
 };
 use wry::WebViewBuilder;
 
@@ -27,11 +26,11 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     let builder = WebViewBuilder::new().with_devtools(true).with_url(url);
 
     #[cfg(not(target_os = "linux"))]
-    let webview = builder
+    let _webview = builder
         .build(&window)
         .map_err(BrowserError::WebViewCreationFailed)?;
     #[cfg(target_os = "linux")]
-    let webview = builder
+    let _webview = builder
         .build_gtk(window.gtk_window())
         .map_err(BrowserError::WebViewCreationFailed)?;
 
@@ -53,9 +52,9 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
             Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
-                        device_id,
+                        device_id: _,
                         event,
-                        is_synthetic,
+                        is_synthetic: _,
                         ..
                     },
                 ..

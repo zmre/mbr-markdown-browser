@@ -11,6 +11,7 @@ use std::{
 use yaml_rust2::{Yaml, YamlLoader};
 
 struct EventState {
+    #[allow(dead_code)] // Reserved for future use (resolving relative paths)
     root_path: PathBuf,
     in_vid: bool,
     in_metadata: bool,
@@ -125,7 +126,6 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
                 in_metadata = true;
             }
             Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                in_metadata = false;
                 break;
             }
             Event::Text(text) => {
@@ -145,13 +145,13 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
 async fn process_event(
     event: pulldown_cmark::Event<'_>,
     mut state: EventState,
-) -> (pulldown_cmark::Event, EventState) {
+) -> (pulldown_cmark::Event<'_>, EventState) {
     match &event {
         Event::Start(Tag::Image {
-            link_type,
+            link_type: _,
             dest_url,
             title,
-            id,
+            id: _,
         }) => match Vid::from_url_and_title(dest_url, title) {
             Some(vid) => {
                 // the link title is actually the next Text event so need to split this to only produce the open tags
@@ -161,11 +161,11 @@ async fn process_event(
             _ => (event.clone(), state),
         },
         Event::Start(Tag::MetadataBlock(v)) => {
-            state.metadata_source = Some(v.clone());
+            state.metadata_source = Some(*v);
             state.in_metadata = true;
             (event.clone(), state)
         }
-        Event::End(TagEnd::MetadataBlock(v)) => {
+        Event::End(TagEnd::MetadataBlock(_)) => {
             state.in_metadata = false;
             (event.clone(), state)
         }
@@ -192,9 +192,8 @@ async fn process_event(
                 state.metadata_parsed =
                     YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
                 (event, state)
-            } else if text.starts_with("[-] ") {
+            } else if let Some(remaining_text) = text.strip_prefix("[-] ") {
                 // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`
-                let remaining_text = &text[4..]; // Skip "[-] "
                 let html = format!(
                     r#"<input disabled type="checkbox" class="canceled-checkbox"/><s>{}</s>"#,
                     html_escape::encode_text(remaining_text)

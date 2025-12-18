@@ -14,6 +14,8 @@ use std::{
 };
 
 use crate::errors::ServerError;
+use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
+use crate::repo::MarkdownInfo;
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
@@ -56,14 +58,15 @@ impl Server {
         let static_folder = static_folder.into();
         let index_file = index_file.into();
 
-        tracing_subscriber::registry()
+        // Use try_init to allow multiple server instances in tests
+        let _ = tracing_subscriber::registry()
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                     format!("{}=debug,tower_http=debug", env!("CARGO_CRATE_NAME")).into()
                 }),
             )
             .with(tracing_subscriber::fmt::layer())
-            .init();
+            .try_init();
 
         let templates = templates::Templates::new(base_dir.as_path())
             .map_err(ServerError::TemplateInit)?;
@@ -121,7 +124,7 @@ impl Server {
         Ok(())
     }
 
-    pub async fn get_site_info<'a>(
+    pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
         let repo = config
@@ -139,7 +142,7 @@ impl Server {
             .body(
                 repo.to_json()
                     .inspect_err(|e| tracing::error!("Error creating json: {e}"))
-                    .map_err(|e| StatusCode::INTERNAL_SERVER_ERROR)?,
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             )
             .inspect_err(|e| tracing::error!("Error rendering site file: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -182,129 +185,64 @@ impl Server {
     ) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("handle: {}", &path);
 
-        let candidate_path = config.base_dir.join(&path);
-
-        // I need to look at the path, then join it to the base_dir and if there's a matching
-        // file, deliver it as-is (yes, this means delivering raw markdown, too, for now)
-        if candidate_path.is_file() {
-            tracing::debug!("found file in root as requested");
-            let static_service = ServeFile::new(candidate_path);
-            return static_service
-                .oneshot(req)
-                .await
-                .map(|r| r.into_response())
-                .map_err(|_| StatusCode::BAD_REQUEST);
-        }
-
-        // if the candidate path is a dir, look for index.md or equiv inside it
-        if candidate_path.is_dir() {
-            let index = candidate_path.join(&config.index_file);
-            tracing::debug!("checking for folder with index.md in it: {:?}", &index);
-            if index.is_file() {
-                tracing::debug!("...found");
-                return Ok(Self::markdown_to_html(
-                    &index,
-                    &config.templates,
-                    config.base_dir.as_path(),
-                    config.oembed_timeout_ms,
-                )
-                .await
-                .map_err(|_| StatusCode::PAYMENT_REQUIRED)?
-                .into_response());
-            }
-        }
-
-        // If there isn't a matching file and the path ends in a slash, then I must look to see
-        // if there's a corresponding markdown file using each of the configured markdown extensions in order
-        let candidate_base = {
-            let s = candidate_path.to_string_lossy();
-            let trimmed = s.trim_end_matches(std::path::MAIN_SEPARATOR);
-            std::path::PathBuf::from(trimmed)
+        let resolver_config = PathResolverConfig {
+            base_dir: config.base_dir.as_path(),
+            static_folder: &config.static_folder,
+            markdown_extensions: &config.markdown_extensions,
+            index_file: &config.index_file,
         };
 
-        if let Some(md_path) = config
-            .markdown_extensions
-            .iter()
-            .map(|ext| {
-                let mut path = candidate_base.clone();
-                path.set_extension(ext);
-                path
-            })
-            .find(|path| path.is_file())
-        {
-            return Ok(Self::markdown_to_html(
-                &md_path,
-                &config.templates,
-                config.base_dir.as_path(),
-                config.oembed_timeout_ms,
-            )
-            .await
-            .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
-            .into_response());
-        }
-
-        // Check static folder if it exists (don't fail if it doesn't)
-        if let Ok(static_dir) = config
-            .base_dir
-            .as_path()
-            .join(&config.static_folder)
-            .canonicalize()
-        {
-            let candidate_static_file = static_dir.join(&path);
-            if candidate_static_file.is_file() {
-                tracing::debug!("found file in static folder");
-                let handle_static = ServeDir::new(static_dir);
-                return handle_static
-                    .oneshot(req)
-                    .await
-                    .map(|r| r.into_response())
-                    .map_err(|_| StatusCode::CONFLICT);
+        match resolve_request_path(&resolver_config, &path) {
+            ResolvedPath::StaticFile(file_path) => {
+                tracing::debug!("serving static file: {:?}", &file_path);
+                Self::serve_static_file(file_path, req).await
             }
-        }
-
-        // is this an index file / directory browse situation?
-        // See if we hit a directory and if so, look for an index file and if that fails, generate a default index page
-        if candidate_base.is_dir() {
-            let mut dir_and_index = candidate_base.clone();
-            dir_and_index.push("index");
-            if let Some(md_path) = config
-                .markdown_extensions
-                .iter()
-                .map(|ext| {
-                    let mut path = dir_and_index.clone();
-                    path.set_extension(ext);
-                    path
-                })
-                .find(|path| path.is_file())
-            {
-                return Ok(Self::markdown_to_html(
+            ResolvedPath::MarkdownFile(md_path) => {
+                tracing::debug!("rendering markdown: {:?}", &md_path);
+                Self::markdown_to_html(
                     &md_path,
                     &config.templates,
                     config.base_dir.as_path(),
                     config.oembed_timeout_ms,
                 )
                 .await
-                .map_err(|_| StatusCode::METHOD_NOT_ALLOWED)?
-                .into_response());
+                .map(|html| html.into_response())
+                .map_err(|e| {
+                    tracing::error!("Error rendering markdown: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
             }
-
-            // Return directory listing
-            return Ok(Self::directory_to_html(
-                &candidate_base,
-                &config.templates,
-                config.base_dir.as_path(),
-                &config,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("Error generating directory listing: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .into_response());
+            ResolvedPath::DirectoryListing(dir_path) => {
+                tracing::debug!("generating directory listing: {:?}", &dir_path);
+                Self::directory_to_html(&dir_path, &config.templates, config.base_dir.as_path(), &config)
+                    .await
+                    .map(|html| html.into_response())
+                    .map_err(|e| {
+                        tracing::error!("Error generating directory listing: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
+            }
+            ResolvedPath::NotFound => {
+                tracing::debug!("resource not found: {}", &path);
+                Err(StatusCode::NOT_FOUND)
+            }
         }
+    }
 
-        tracing::debug!("going with a not found code");
-        Err(StatusCode::NOT_FOUND)
+    /// Serves a static file using tower's ServeFile service.
+    async fn serve_static_file(
+        file_path: std::path::PathBuf,
+        req: extract::Request<Body>,
+    ) -> Result<Response, StatusCode> {
+        let static_service = ServeFile::new(file_path);
+        static_service
+            .oneshot(req)
+            .await
+            .map(|r| r.into_response())
+            .map_err(|e| {
+                tracing::error!("Error serving static file: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
     }
 
     async fn markdown_to_html(
@@ -365,52 +303,12 @@ impl Server {
             .scan_folder(&relative_path)
             .inspect_err(|e| tracing::error!("Error scanning directory: {e}"))?;
 
-        // Extract markdown files and sort by modified date (newest first)
+        // Extract markdown files and transform to JSON using helper
         let mut files: Vec<_> = temp_repo
             .markdown_files
             .pin()
             .iter()
-            .map(|(_, file_info)| {
-                let title = file_info
-                    .frontmatter
-                    .as_ref()
-                    .and_then(|fm| fm.get("title"))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        file_info
-                            .raw_path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("Untitled")
-                            .to_string()
-                    });
-
-                let description = file_info
-                    .frontmatter
-                    .as_ref()
-                    .and_then(|fm| fm.get("description"))
-                    .cloned();
-
-                let tags = file_info
-                    .frontmatter
-                    .as_ref()
-                    .and_then(|fm| fm.get("tags"))
-                    .cloned();
-
-                let modified_date = chrono::DateTime::from_timestamp(file_info.modified as i64, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-
-                json!({
-                    "title": title,
-                    "url_path": file_info.url_path,
-                    "description": description,
-                    "tags": tags,
-                    "modified_date": modified_date,
-                    "modified": file_info.modified,
-                    "name": file_info.raw_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
-                })
-            })
+            .map(|(_, file_info)| markdown_file_to_json(file_info))
             .collect();
 
         // Sort by modified timestamp, newest first
@@ -447,65 +345,21 @@ impl Server {
             })
             .collect();
 
-        // Build breadcrumbs
-        let path_components: Vec<_> = relative_path
-            .components()
-            .filter_map(|c| {
-                if let std::path::Component::Normal(s) = c {
-                    s.to_str()
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let breadcrumbs: Vec<_> = path_components
+        // Use helper functions for navigation elements
+        let breadcrumbs = generate_breadcrumbs(&relative_path);
+        let breadcrumbs_json: Vec<_> = breadcrumbs
             .iter()
-            .enumerate()
-            .map(|(idx, _)| {
-                let partial_path: std::path::PathBuf =
-                    path_components.iter().take(idx + 1).collect();
-                let url = "/".to_string()
-                    + &partial_path.to_string_lossy().to_string()
-                    + "/";
-                let name = path_components[idx].to_string();
-                json!({
-                    "name": name,
-                    "url": url,
-                })
-            })
+            .map(|b| json!({"name": b.name, "url": b.url}))
             .collect();
 
-        // Add root breadcrumb at the beginning
-        let mut all_breadcrumbs = vec![json!({
-            "name": "Home",
-            "url": "/",
-        })];
-        let breadcrumbs_len = breadcrumbs.len();
-        all_breadcrumbs.extend(breadcrumbs.into_iter().take(breadcrumbs_len.saturating_sub(1)));
-
-        // Current directory name
-        let current_dir_name = path_components
-            .last()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "Home".to_string());
-
-        // Parent path for "up" navigation
-        let parent_path = if path_components.len() > 1 {
-            let parent_components: std::path::PathBuf =
-                path_components.iter().take(path_components.len() - 1).collect();
-            Some("/".to_string() + &parent_components.to_string_lossy().to_string() + "/")
-        } else if !path_components.is_empty() {
-            Some("/".to_string())
-        } else {
-            None
-        };
+        let current_dir_name = get_current_dir_name(&relative_path);
+        let parent_path = get_parent_path(&relative_path);
 
         // Build context
         let mut context = std::collections::HashMap::new();
         context.insert("files".to_string(), json!(files));
         context.insert("subdirs".to_string(), json!(subdirs));
-        context.insert("breadcrumbs".to_string(), json!(all_breadcrumbs));
+        context.insert("breadcrumbs".to_string(), json!(breadcrumbs_json));
         context.insert("current_dir_name".to_string(), json!(current_dir_name));
         context.insert(
             "current_path".to_string(),
@@ -527,8 +381,135 @@ impl Server {
     async fn home_page() -> impl IntoResponse {
         // TODO: look for index.{markdown extensions} then index.html then finally fall back to some hard coded html maybe with a list of markdown files in the same dir and immediate children?
         tracing::debug!("home");
-        format!("Home")
+        "Home".to_string()
     }
+}
+
+// ============================================================================
+// Pure helper functions for directory listing (extracted for testability)
+// ============================================================================
+
+/// A breadcrumb entry for navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Breadcrumb {
+    pub name: String,
+    pub url: String,
+}
+
+impl Breadcrumb {
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+        }
+    }
+}
+
+/// Generates breadcrumb navigation from a relative path.
+///
+/// Always starts with "Home" → "/" and includes all path components.
+/// The last component is not included in the returned breadcrumbs (it's the current page).
+pub fn generate_breadcrumbs(relative_path: &Path) -> Vec<Breadcrumb> {
+    let path_components: Vec<_> = relative_path
+        .components()
+        .filter_map(|c| {
+            if let std::path::Component::Normal(s) = c {
+                s.to_str()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Start with Home
+    let mut breadcrumbs = vec![Breadcrumb::new("Home", "/")];
+
+    // Add all but the last component (last is current directory)
+    for (idx, _) in path_components.iter().enumerate().take(path_components.len().saturating_sub(1)) {
+        let partial_path: std::path::PathBuf = path_components.iter().take(idx + 1).collect();
+        let url = format!("/{}/", partial_path.to_string_lossy());
+        let name = path_components[idx].to_string();
+        breadcrumbs.push(Breadcrumb::new(name, url));
+    }
+
+    breadcrumbs
+}
+
+/// Gets the current directory name from a relative path.
+pub fn get_current_dir_name(relative_path: &Path) -> String {
+    relative_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(String::from)
+        .unwrap_or_else(|| "Home".to_string())
+}
+
+/// Gets the parent path URL for "up" navigation.
+pub fn get_parent_path(relative_path: &Path) -> Option<String> {
+    let path_components: Vec<_> = relative_path
+        .components()
+        .filter_map(|c| {
+            if let std::path::Component::Normal(s) = c {
+                s.to_str()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if path_components.len() > 1 {
+        let parent: std::path::PathBuf = path_components.iter().take(path_components.len() - 1).collect();
+        Some(format!("/{}/", parent.to_string_lossy()))
+    } else if !path_components.is_empty() {
+        Some("/".to_string())
+    } else {
+        None
+    }
+}
+
+/// Transforms markdown file info into a JSON value for template rendering.
+pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
+    use serde_json::json;
+
+    let title = file_info
+        .frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get("title"))
+        .cloned()
+        .unwrap_or_else(|| {
+            file_info
+                .raw_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled")
+                .to_string()
+        });
+
+    let description = file_info
+        .frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get("description"))
+        .cloned();
+
+    let tags = file_info
+        .frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get("tags"))
+        .cloned();
+
+    let modified_date = chrono::DateTime::from_timestamp(file_info.modified as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    json!({
+        "title": title,
+        "url_path": file_info.url_path,
+        "description": description,
+        "tags": tags,
+        "modified_date": modified_date,
+        "modified": file_info.modified,
+        "name": file_info.raw_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+    })
 }
 
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
@@ -618,3 +599,326 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     //     "application/javascript",
     // ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_generate_breadcrumbs_root() {
+        let path = Path::new("");
+        let breadcrumbs = generate_breadcrumbs(path);
+
+        assert_eq!(breadcrumbs.len(), 1);
+        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
+    }
+
+    #[test]
+    fn test_generate_breadcrumbs_single_level() {
+        let path = Path::new("docs");
+        let breadcrumbs = generate_breadcrumbs(path);
+
+        // Home only - "docs" is the current directory, not shown in breadcrumbs
+        assert_eq!(breadcrumbs.len(), 1);
+        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
+    }
+
+    #[test]
+    fn test_generate_breadcrumbs_two_levels() {
+        let path = Path::new("docs/api");
+        let breadcrumbs = generate_breadcrumbs(path);
+
+        assert_eq!(breadcrumbs.len(), 2);
+        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
+        assert_eq!(breadcrumbs[1], Breadcrumb::new("docs", "/docs/"));
+    }
+
+    #[test]
+    fn test_generate_breadcrumbs_deep_nesting() {
+        let path = Path::new("a/b/c/d");
+        let breadcrumbs = generate_breadcrumbs(path);
+
+        assert_eq!(breadcrumbs.len(), 4);
+        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
+        assert_eq!(breadcrumbs[1], Breadcrumb::new("a", "/a/"));
+        assert_eq!(breadcrumbs[2], Breadcrumb::new("b", "/a/b/"));
+        assert_eq!(breadcrumbs[3], Breadcrumb::new("c", "/a/b/c/"));
+    }
+
+    #[test]
+    fn test_get_current_dir_name_root() {
+        let path = Path::new("");
+        assert_eq!(get_current_dir_name(path), "Home");
+    }
+
+    #[test]
+    fn test_get_current_dir_name_single_level() {
+        let path = Path::new("docs");
+        assert_eq!(get_current_dir_name(path), "docs");
+    }
+
+    #[test]
+    fn test_get_current_dir_name_nested() {
+        let path = Path::new("a/b/c");
+        assert_eq!(get_current_dir_name(path), "c");
+    }
+
+    #[test]
+    fn test_get_parent_path_root() {
+        let path = Path::new("");
+        assert_eq!(get_parent_path(path), None);
+    }
+
+    #[test]
+    fn test_get_parent_path_single_level() {
+        let path = Path::new("docs");
+        assert_eq!(get_parent_path(path), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_get_parent_path_two_levels() {
+        let path = Path::new("docs/api");
+        assert_eq!(get_parent_path(path), Some("/docs/".to_string()));
+    }
+
+    #[test]
+    fn test_get_parent_path_deep() {
+        let path = Path::new("a/b/c/d");
+        assert_eq!(get_parent_path(path), Some("/a/b/c/".to_string()));
+    }
+
+    #[test]
+    fn test_markdown_file_to_json_with_frontmatter() {
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert("title".to_string(), "My Title".to_string());
+        frontmatter.insert("description".to_string(), "My description".to_string());
+        frontmatter.insert("tags".to_string(), "rust, testing".to_string());
+
+        let file_info = MarkdownInfo {
+            raw_path: PathBuf::from("/root/test.md"),
+            url_path: "/test/".to_string(),
+            frontmatter: Some(frontmatter),
+            created: 1699000000,
+            modified: 1700000000,
+        };
+
+        let json = markdown_file_to_json(&file_info);
+
+        assert_eq!(json["title"], "My Title");
+        assert_eq!(json["url_path"], "/test/");
+        assert_eq!(json["description"], "My description");
+        assert_eq!(json["tags"], "rust, testing");
+        assert_eq!(json["modified"], 1700000000);
+        assert_eq!(json["name"], "test.md");
+    }
+
+    #[test]
+    fn test_markdown_file_to_json_without_frontmatter() {
+        let file_info = MarkdownInfo {
+            raw_path: PathBuf::from("/root/my-document.md"),
+            url_path: "/my-document/".to_string(),
+            frontmatter: None,
+            created: 1699000000,
+            modified: 1700000000,
+        };
+
+        let json = markdown_file_to_json(&file_info);
+
+        // Should use file stem as title when no frontmatter
+        assert_eq!(json["title"], "my-document");
+        assert_eq!(json["url_path"], "/my-document/");
+        assert!(json["description"].is_null());
+        assert!(json["tags"].is_null());
+    }
+
+    #[test]
+    fn test_markdown_file_to_json_partial_frontmatter() {
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert("title".to_string(), "Only Title".to_string());
+        // No description or tags
+
+        let file_info = MarkdownInfo {
+            raw_path: PathBuf::from("/root/partial.md"),
+            url_path: "/partial/".to_string(),
+            frontmatter: Some(frontmatter),
+            created: 1699000000,
+            modified: 1700000000,
+        };
+
+        let json = markdown_file_to_json(&file_info);
+
+        assert_eq!(json["title"], "Only Title");
+        assert!(json["description"].is_null());
+        assert!(json["tags"].is_null());
+    }
+
+    #[test]
+    fn test_breadcrumb_equality() {
+        let b1 = Breadcrumb::new("Home", "/");
+        let b2 = Breadcrumb::new("Home", "/");
+        let b3 = Breadcrumb::new("Docs", "/docs/");
+
+        assert_eq!(b1, b2);
+        assert_ne!(b1, b3);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Strategy for valid path component names
+    fn path_component_strategy() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,15}"
+    }
+
+    proptest! {
+        /// Breadcrumb count: Home + all components except the last (current dir)
+        /// For 0 components: [Home] = 1
+        /// For 1 component: [Home] = 1 (last component is current dir, not a link)
+        /// For 2+ components: [Home, c1, c2, ...] = components.len()
+        #[test]
+        fn prop_breadcrumb_count_matches_path_depth(
+            components in proptest::collection::vec(path_component_strategy(), 0..5)
+        ) {
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+            let breadcrumbs = generate_breadcrumbs(path);
+
+            // Breadcrumbs = "Home" + all components except the last (which is current dir)
+            let expected_count = if components.is_empty() {
+                1  // Just Home
+            } else {
+                components.len()  // Home + all but last = components.len()
+            };
+            prop_assert_eq!(
+                breadcrumbs.len(),
+                expected_count,
+                "Path {:?} should have {} breadcrumbs, got {}",
+                path,
+                expected_count,
+                breadcrumbs.len()
+            );
+        }
+
+        /// First breadcrumb is always "Home" with url "/"
+        #[test]
+        fn prop_first_breadcrumb_is_home(
+            components in proptest::collection::vec(path_component_strategy(), 0..5)
+        ) {
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+            let breadcrumbs = generate_breadcrumbs(path);
+
+            prop_assert!(!breadcrumbs.is_empty(), "Should always have at least Home breadcrumb");
+            prop_assert_eq!(&breadcrumbs[0].name, "Home");
+            prop_assert_eq!(&breadcrumbs[0].url, "/");
+        }
+
+        /// For 2+ components, last breadcrumb is second-to-last path component
+        #[test]
+        fn prop_last_breadcrumb_matches_parent_component(
+            components in proptest::collection::vec(path_component_strategy(), 2..5)
+        ) {
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+            let breadcrumbs = generate_breadcrumbs(path);
+
+            let last_breadcrumb = breadcrumbs.last().unwrap();
+            // The second-to-last component is the parent dir
+            let parent_component = &components[components.len() - 2];
+            prop_assert_eq!(
+                &last_breadcrumb.name,
+                parent_component,
+                "Last breadcrumb should be {:?}, got {:?}",
+                parent_component,
+                last_breadcrumb.name
+            );
+        }
+
+        /// All breadcrumb URLs end with /
+        #[test]
+        fn prop_breadcrumb_urls_end_with_slash(
+            components in proptest::collection::vec(path_component_strategy(), 0..5)
+        ) {
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+            let breadcrumbs = generate_breadcrumbs(path);
+
+            for bc in &breadcrumbs {
+                prop_assert!(
+                    bc.url.ends_with('/'),
+                    "Breadcrumb URL {:?} should end with /",
+                    bc.url
+                );
+            }
+        }
+
+        /// get_current_dir_name returns the last path component
+        #[test]
+        fn prop_current_dir_name_is_last_component(
+            components in proptest::collection::vec(path_component_strategy(), 1..5)
+        ) {
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+            let name = get_current_dir_name(path);
+
+            let expected = components.last().unwrap();
+            prop_assert_eq!(
+                &name,
+                expected,
+                "Current dir name should be {:?}, got {:?}",
+                expected,
+                name
+            );
+        }
+
+        /// get_parent_path returns None for root, Some for others
+        #[test]
+        fn prop_parent_path_behavior(
+            components in proptest::collection::vec(path_component_strategy(), 0..5)
+        ) {
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+            let parent = get_parent_path(path);
+
+            if components.is_empty() {
+                prop_assert!(parent.is_none(), "Root should have no parent");
+            } else {
+                prop_assert!(parent.is_some(), "Non-root should have parent");
+                let parent_str = parent.unwrap();
+                prop_assert!(
+                    parent_str.ends_with('/'),
+                    "Parent path should end with /: {:?}",
+                    parent_str
+                );
+            }
+        }
+
+        /// Parent path is shorter than original path (fewer characters)
+        #[test]
+        fn prop_parent_path_shorter_than_original(
+            components in proptest::collection::vec(path_component_strategy(), 2..5)
+        ) {
+            // Need at least 2 components - for single component, parent is "/"
+            // which is hard to compare meaningfully
+            let path_str = components.join("/");
+            let path = Path::new(&path_str);
+
+            if let Some(parent) = get_parent_path(path) {
+                // Parent path should be shorter in character length
+                // (excluding the trailing slash we add)
+                let parent_trimmed = parent.trim_end_matches('/');
+                prop_assert!(
+                    parent_trimmed.len() < path_str.len(),
+                    "Parent {:?} should be shorter than {:?}",
+                    parent_trimmed,
+                    path_str
+                );
+            }
+        }
+    }
+}
