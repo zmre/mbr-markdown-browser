@@ -1,5 +1,5 @@
 ---
-title: something
+title: README for mbr, the markdown browser
 keyword: supercalifragilistic
 ---
 

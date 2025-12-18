@@ -5,13 +5,17 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
-    /// Launch GUI (otherwise print html to STDOUT)
-    #[arg(short, long, conflicts_with = "server")]
+    /// Launch GUI window (default if no mode specified)
+    #[arg(short, long, conflicts_with_all = ["server", "stdout"])]
     pub gui: bool,
 
-    /// Launch server
-    #[arg(short, long, conflicts_with = "gui")]
+    /// Launch HTTP server only (no GUI)
+    #[arg(short, long, conflicts_with_all = ["gui", "stdout"])]
     pub server: bool,
+
+    /// Render single markdown file to stdout (CLI mode)
+    #[arg(short = 'o', long, conflicts_with_all = ["gui", "server"])]
+    pub stdout: bool,
 
     /// Markdown file or folder to serve (defaults to current directory)
     #[arg(default_value = ".")]

@@ -369,19 +369,81 @@ impl Server {
             context.insert("parent_path".to_string(), json!(parent));
         }
 
-        let full_html_output = templates
-            .render_section(context)
-            .await
-            .inspect_err(|e| eprintln!("Error rendering section template: {e}"))?;
+        // Detect if we're at the root directory
+        let is_root = relative_path.as_os_str().is_empty()
+            || relative_path == std::path::Path::new(".");
+
+        // Add is_home to context for template conditional rendering
+        context.insert("is_home".to_string(), json!(is_root));
+
+        let full_html_output = if is_root {
+            templates
+                .render_home(context)
+                .await
+                .inspect_err(|e| eprintln!("Error rendering home template: {e}"))?
+        } else {
+            templates
+                .render_section(context)
+                .await
+                .inspect_err(|e| eprintln!("Error rendering section template: {e}"))?
+        };
 
         tracing::debug!("generated directory listing html");
         Ok(Html(full_html_output))
     }
 
-    async fn home_page() -> impl IntoResponse {
-        // TODO: look for index.{markdown extensions} then index.html then finally fall back to some hard coded html maybe with a list of markdown files in the same dir and immediate children?
-        tracing::debug!("home");
-        "Home".to_string()
+    /// Handler for the root path "/" - renders the home page using the same
+    /// logic as other directories but with the home.html template.
+    async fn home_page(
+        State(config): State<ServerState>,
+    ) -> Result<impl IntoResponse, StatusCode> {
+        tracing::debug!("home_page handler");
+
+        let resolver_config = PathResolverConfig {
+            base_dir: config.base_dir.as_path(),
+            static_folder: &config.static_folder,
+            markdown_extensions: &config.markdown_extensions,
+            index_file: &config.index_file,
+        };
+
+        // Resolve empty path (root)
+        match resolve_request_path(&resolver_config, "") {
+            ResolvedPath::MarkdownFile(md_path) => {
+                tracing::debug!("home: rendering index markdown: {:?}", &md_path);
+                Self::markdown_to_html(
+                    &md_path,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                    config.oembed_timeout_ms,
+                )
+                .await
+                .map(|html| html.into_response())
+                .map_err(|e| {
+                    tracing::error!("Error rendering home markdown: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
+            }
+            ResolvedPath::DirectoryListing(dir_path) => {
+                tracing::debug!("home: generating directory listing: {:?}", &dir_path);
+                Self::directory_to_html(&dir_path, &config.templates, config.base_dir.as_path(), &config)
+                    .await
+                    .map(|html| html.into_response())
+                    .map_err(|e| {
+                        tracing::error!("Error generating home directory listing: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
+            }
+            _ => {
+                tracing::debug!("home: unexpected resolution, showing directory listing");
+                Self::directory_to_html(&config.base_dir, &config.templates, config.base_dir.as_path(), &config)
+                    .await
+                    .map(|html| html.into_response())
+                    .map_err(|e| {
+                        tracing::error!("Error generating home directory listing: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
+            }
+        }
     }
 }
 

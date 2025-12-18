@@ -60,9 +60,29 @@ impl Templates {
         })?;
         Ok(html_output)
     }
+
+    /// Renders the home page (root directory) using home.html template.
+    /// This allows users to customize their home page differently from section pages.
+    pub async fn render_home(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let mut context = Context::new();
+        context_data.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        let html_output = self.tera.render("home.html", &context).map_err(|e| {
+            TemplateError::RenderFailed {
+                template_name: "home.html".to_string(),
+                source: e,
+            }
+        })?;
+        Ok(html_output)
+    }
 }
 
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     ("index.html", include_str!("../templates/index.html")),
     ("section.html", include_str!("../templates/section.html")),
+    ("home.html", include_str!("../templates/home.html")),
 ];

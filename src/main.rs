@@ -39,7 +39,44 @@ async fn main() -> Result<(), MbrError> {
         &path_relative_to_root.display()
     );
 
-    if args.gui {
+    if args.stdout {
+        // CLI mode - render markdown to stdout (explicit -o/--stdout flag)
+        if is_directory {
+            eprintln!(
+                "Cannot render a directory to stdout. Use -s to start a server or omit -o for GUI mode."
+            );
+            eprintln!("  mbr -s {}  # Start server", args.path.display());
+            eprintln!("  mbr {}     # Open in GUI (default)", args.path.display());
+            std::process::exit(1);
+        }
+        let (frontmatter, html_output) =
+            markdown::render(args.path, config.root_dir.as_path(), config.oembed_timeout_ms)
+                .await
+                .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
+        let templates = templates::Templates::new(&config.root_dir)
+            .inspect_err(|e| eprintln!("Error parsing template: {e}"))?;
+        let html_output = templates.render_markdown(&html_output, frontmatter).await?;
+        println!("{}", &html_output);
+    } else if args.server {
+        // Server mode - HTTP server only, no GUI
+        let server = server::Server::init(
+            config.ip.0,
+            config.port,
+            &config.root_dir,
+            &config.static_folder,
+            &config.markdown_extensions,
+            &config.ignore_dirs,
+            &config.ignore_globs,
+            &config.index_file.clone(),
+            config.oembed_timeout_ms,
+        )?;
+
+        let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
+        println!("http://{}:{}/{}", config.ip, config.port, url_path);
+
+        server.start().await?;
+    } else {
+        // GUI mode - default when no flags specified (or explicit -g)
         let config_copy = config.clone();
         let handle = tokio::spawn(async move {
             let server = server::Server::init(
@@ -71,41 +108,6 @@ async fn main() -> Result<(), MbrError> {
 
         browser::launch_url(url.as_str())?;
         handle.abort(); // after the browser window quits, we can exit the http server
-    } else if args.server {
-        let server = server::Server::init(
-            config.ip.0,
-            config.port,
-            &config.root_dir,
-            &config.static_folder,
-            &config.markdown_extensions,
-            &config.ignore_dirs,
-            &config.ignore_globs,
-            &config.index_file.clone(),
-            config.oembed_timeout_ms,
-        )?;
-
-        let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
-        println!("http://{}:{}/{}", config.ip, config.port, url_path);
-
-        server.start().await?;
-    } else if is_directory {
-        // CLI mode with directory - can't render a directory to stdout, suggest using -s
-        eprintln!(
-            "Cannot render a directory to stdout. Use -s to start a server or -g for GUI mode."
-        );
-        eprintln!("  mbr -s {}  # Start server", args.path.display());
-        eprintln!("  mbr -g {}  # Open in GUI", args.path.display());
-        std::process::exit(1);
-    } else {
-        // CLI mode with file - render markdown to stdout
-        let (frontmatter, html_output) =
-            markdown::render(args.path, config.root_dir.as_path(), config.oembed_timeout_ms)
-                .await
-                .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
-        let templates = templates::Templates::new(&config.root_dir)
-            .inspect_err(|e| eprintln!("Error parsing template: {e}"))?;
-        let html_output = templates.render_markdown(&html_output, frontmatter).await?;
-        println!("{}", &html_output);
     }
     Ok(())
 }
