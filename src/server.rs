@@ -198,7 +198,7 @@ impl Server {
 
         // if the candidate path is a dir, look for index.md or equiv inside it
         if candidate_path.is_dir() {
-            let index = candidate_path.join(config.index_file);
+            let index = candidate_path.join(&config.index_file);
             tracing::debug!("checking for folder with index.md in it: {:?}", &index);
             if index.is_file() {
                 tracing::debug!("...found");
@@ -243,21 +243,23 @@ impl Server {
             .into_response());
         }
 
-        let static_dir = config
+        // Check static folder if it exists (don't fail if it doesn't)
+        if let Ok(static_dir) = config
             .base_dir
             .as_path()
             .join(&config.static_folder)
-            .canonicalize() // if this fails, basically we're in a 404 situation
-            .map_err(|_| StatusCode::NOT_FOUND)?;
-        let candidate_static_file = static_dir.join(&path);
-        if candidate_static_file.is_file() {
-            tracing::debug!("found file in static folder");
-            let handle_static = ServeDir::new(static_dir);
-            return handle_static
-                .oneshot(req)
-                .await
-                .map(|r| r.into_response())
-                .map_err(|_| StatusCode::CONFLICT);
+            .canonicalize()
+        {
+            let candidate_static_file = static_dir.join(&path);
+            if candidate_static_file.is_file() {
+                tracing::debug!("found file in static folder");
+                let handle_static = ServeDir::new(static_dir);
+                return handle_static
+                    .oneshot(req)
+                    .await
+                    .map(|r| r.into_response())
+                    .map_err(|_| StatusCode::CONFLICT);
+            }
         }
 
         // is this an index file / directory browse situation?
@@ -286,9 +288,19 @@ impl Server {
                 .into_response());
             }
 
-            // TODO: return a default section
-            //
-            //
+            // Return directory listing
+            return Ok(Self::directory_to_html(
+                &candidate_base,
+                &config.templates,
+                config.base_dir.as_path(),
+                &config,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Error generating directory listing: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .into_response());
         }
 
         tracing::debug!("going with a not found code");
@@ -311,6 +323,204 @@ impl Server {
             .await
             .inspect_err(|e| eprintln!("Error rendering template: {e}"))?;
         tracing::debug!("generated the html");
+        Ok(Html(full_html_output))
+    }
+
+    async fn directory_to_html(
+        dir_path: &Path,
+        templates: &crate::templates::Templates,
+        root_path: &Path,
+        config: &ServerState,
+    ) -> Result<Html<String>, Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        // Create a temporary repo instance to scan this directory
+        let ignore_dirs = vec![
+            "target".to_string(),
+            "result".to_string(),
+            "build".to_string(),
+            "node_modules".to_string(),
+            "ci".to_string(),
+        ];
+        let ignore_globs = vec![
+            "*.log".to_string(),
+            "*.bak".to_string(),
+            "*.lock".to_string(),
+        ];
+        let temp_repo = Repo::init(
+            root_path,
+            &config.static_folder,
+            &config.markdown_extensions,
+            &ignore_dirs,
+            &ignore_globs,
+            &config.index_file,
+        );
+
+        // Calculate relative path from root
+        let relative_path = pathdiff::diff_paths(dir_path, root_path)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        // Scan this directory only (non-recursive)
+        temp_repo
+            .scan_folder(&relative_path)
+            .inspect_err(|e| tracing::error!("Error scanning directory: {e}"))?;
+
+        // Extract markdown files and sort by modified date (newest first)
+        let mut files: Vec<_> = temp_repo
+            .markdown_files
+            .pin()
+            .iter()
+            .map(|(_, file_info)| {
+                let title = file_info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("title"))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        file_info
+                            .raw_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string()
+                    });
+
+                let description = file_info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("description"))
+                    .cloned();
+
+                let tags = file_info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("tags"))
+                    .cloned();
+
+                let modified_date = chrono::DateTime::from_timestamp(file_info.modified as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                json!({
+                    "title": title,
+                    "url_path": file_info.url_path,
+                    "description": description,
+                    "tags": tags,
+                    "modified_date": modified_date,
+                    "modified": file_info.modified,
+                    "name": file_info.raw_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+                })
+            })
+            .collect();
+
+        // Sort by modified timestamp, newest first
+        files.sort_by(|a, b| {
+            let a_modified = a["modified"].as_u64().unwrap_or(0);
+            let b_modified = b["modified"].as_u64().unwrap_or(0);
+            b_modified.cmp(&a_modified)
+        });
+
+        // Extract subdirectories
+        let subdirs: Vec<_> = temp_repo
+            .queued_folders
+            .pin()
+            .iter()
+            .filter_map(|(abs_path, rel_path)| {
+                // Only include immediate children
+                let parent = abs_path.parent()?;
+                if parent == dir_path {
+                    let name = abs_path.file_name()?.to_str()?.to_string();
+                    let mut url_path = rel_path.to_str()?.to_string();
+                    if !url_path.starts_with('/') {
+                        url_path = "/".to_string() + &url_path;
+                    }
+                    if !url_path.ends_with('/') {
+                        url_path.push('/');
+                    }
+                    Some(json!({
+                        "name": name,
+                        "url_path": url_path,
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Build breadcrumbs
+        let path_components: Vec<_> = relative_path
+            .components()
+            .filter_map(|c| {
+                if let std::path::Component::Normal(s) = c {
+                    s.to_str()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let breadcrumbs: Vec<_> = path_components
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| {
+                let partial_path: std::path::PathBuf =
+                    path_components.iter().take(idx + 1).collect();
+                let url = "/".to_string()
+                    + &partial_path.to_string_lossy().to_string()
+                    + "/";
+                let name = path_components[idx].to_string();
+                json!({
+                    "name": name,
+                    "url": url,
+                })
+            })
+            .collect();
+
+        // Add root breadcrumb at the beginning
+        let mut all_breadcrumbs = vec![json!({
+            "name": "Home",
+            "url": "/",
+        })];
+        let breadcrumbs_len = breadcrumbs.len();
+        all_breadcrumbs.extend(breadcrumbs.into_iter().take(breadcrumbs_len.saturating_sub(1)));
+
+        // Current directory name
+        let current_dir_name = path_components
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Home".to_string());
+
+        // Parent path for "up" navigation
+        let parent_path = if path_components.len() > 1 {
+            let parent_components: std::path::PathBuf =
+                path_components.iter().take(path_components.len() - 1).collect();
+            Some("/".to_string() + &parent_components.to_string_lossy().to_string() + "/")
+        } else if !path_components.is_empty() {
+            Some("/".to_string())
+        } else {
+            None
+        };
+
+        // Build context
+        let mut context = std::collections::HashMap::new();
+        context.insert("files".to_string(), json!(files));
+        context.insert("subdirs".to_string(), json!(subdirs));
+        context.insert("breadcrumbs".to_string(), json!(all_breadcrumbs));
+        context.insert("current_dir_name".to_string(), json!(current_dir_name));
+        context.insert(
+            "current_path".to_string(),
+            json!(relative_path.to_string_lossy()),
+        );
+        if let Some(parent) = parent_path {
+            context.insert("parent_path".to_string(), json!(parent));
+        }
+
+        let full_html_output = templates
+            .render_section(context)
+            .await
+            .inspect_err(|e| eprintln!("Error rendering section template: {e}"))?;
+
+        tracing::debug!("generated directory listing html");
         Ok(Html(full_html_output))
     }
 

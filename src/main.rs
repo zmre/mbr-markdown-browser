@@ -23,33 +23,35 @@ pub use errors::{ConfigError, MbrError};
 async fn main() -> Result<(), MbrError> {
     let args = cli::Args::parse();
 
-    let file_path = Path::new(&args.file);
-    let file_absolute_path = file_path.canonicalize().map_err(|e| {
+    let input_path = Path::new(&args.path);
+    let absolute_path = input_path.canonicalize().map_err(|e| {
         ConfigError::CanonicalizeFailed {
-            path: file_path.to_path_buf(),
+            path: input_path.to_path_buf(),
             source: e,
         }
     })?;
 
-    let mut config = Config::read(&file_absolute_path)?;
+    let is_directory = absolute_path.is_dir();
+
+    let mut config = Config::read(&absolute_path)?;
 
     // Apply CLI overrides
     if let Some(timeout) = args.oembed_timeout {
         config.oembed_timeout_ms = timeout;
     }
 
-    let file_relative_to_root =
-        pathdiff::diff_paths(&file_absolute_path, &config.root_dir).ok_or_else(|| {
+    let path_relative_to_root =
+        pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
             ConfigError::RelativePathFailed {
                 from: config.root_dir.clone(),
-                to: file_absolute_path.clone(),
+                to: absolute_path.clone(),
             }
         })?;
 
     println!(
         "Root dir: {}; File relative to root: {}",
         &config.root_dir.display(),
-        &file_relative_to_root.display()
+        &path_relative_to_root.display()
     );
 
     if args.gui {
@@ -80,13 +82,18 @@ async fn main() -> Result<(), MbrError> {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
 
-        let relative_str = file_relative_to_root
-            .to_str()
-            .unwrap_or_default();
-        let url = url.join(
+        let relative_str = path_relative_to_root.to_str().unwrap_or_default();
+        let url_path = if is_directory {
+            // For directories, ensure trailing slash
+            if relative_str.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", relative_str)
+            }
+        } else {
             replace_markdown_extension_with_slash(relative_str, &config.markdown_extensions)
-                .as_str(),
-        )?;
+        };
+        let url = url.join(&url_path)?;
 
         browser::launch_url(url.as_str())?;
         handle.abort(); // after the browser window quits, we can exit the http server
@@ -102,21 +109,34 @@ async fn main() -> Result<(), MbrError> {
             &config.index_file.clone(),
             config.oembed_timeout_ms,
         )?;
-        println!(
-            "http://{}:{}/{}",
-            config.ip,
-            config.port,
-            replace_markdown_extension_with_slash(
-                file_relative_to_root.to_str().unwrap_or_default(),
-                &config.markdown_extensions
-            )
-        );
+
+        let relative_str = path_relative_to_root.to_str().unwrap_or_default();
+        let url_path = if is_directory {
+            if relative_str.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", relative_str)
+            }
+        } else {
+            replace_markdown_extension_with_slash(relative_str, &config.markdown_extensions)
+        };
+        println!("http://{}:{}/{}", config.ip, config.port, url_path);
 
         server.start().await?;
+    } else if is_directory {
+        // CLI mode with directory - can't render a directory to stdout, suggest using -s
+        eprintln!(
+            "Cannot render a directory to stdout. Use -s to start a server or -g for GUI mode."
+        );
+        eprintln!("  mbr -s {}  # Start server", args.path.display());
+        eprintln!("  mbr -g {}  # Open in GUI", args.path.display());
+        std::process::exit(1);
     } else {
-        let (frontmatter, html_output) = markdown::render(args.file, &config.root_dir.as_path(), config.oembed_timeout_ms)
-            .await
-            .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
+        // CLI mode with file - render markdown to stdout
+        let (frontmatter, html_output) =
+            markdown::render(args.path, config.root_dir.as_path(), config.oembed_timeout_ms)
+                .await
+                .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
         let templates = templates::Templates::new(&config.root_dir)
             .inspect_err(|e| eprintln!("Error parsing template: {e}"))?;
         let html_output = templates.render_markdown(&html_output, frontmatter).await?;

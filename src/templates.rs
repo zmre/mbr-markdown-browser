@@ -43,7 +43,26 @@ impl Templates {
         })?;
         Ok(html_output)
     }
+
+    pub async fn render_section(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let mut context = Context::new();
+        context_data.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        let html_output = self.tera.render("section.html", &context).map_err(|e| {
+            TemplateError::RenderFailed {
+                template_name: "section.html".to_string(),
+                source: e,
+            }
+        })?;
+        Ok(html_output)
+    }
 }
 
-const DEFAULT_TEMPLATES: &[(&str, &str)] =
-    &[("index.html", include_str!("../templates/index.html"))];
+const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
+    ("index.html", include_str!("../templates/index.html")),
+    ("section.html", include_str!("../templates/section.html")),
+];

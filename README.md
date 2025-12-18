@@ -123,3 +123,4 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 		* [ ] Track links out and links in between files
 * Misc
 	* [ ] Auto handle address already in use error by incrementing the port if we're running in GUI mode
+  * [ ] Make a quicklook plugin that shows this!  That would be epic. Might need to inline all the dependencies?

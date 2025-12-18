@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-/// Simple program to render a markdown file
+/// Markdown browser and previewer
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
@@ -13,9 +13,9 @@ pub struct Args {
     #[arg(short, long, conflicts_with = "gui")]
     pub server: bool,
 
-    /// Markdown file to render
-    //#[clap(short, long, default_value = "index.md")]
-    pub file: PathBuf,
+    /// Markdown file or folder to serve (defaults to current directory)
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
 
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// Falls back to plain link if fetch doesn't complete in time.

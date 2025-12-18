@@ -81,10 +81,10 @@ impl Serialize for OtherFiles {
 
 #[derive(Clone, Serialize)]
 pub struct MarkdownInfo {
-    raw_path: PathBuf,
-    url_path: String,
-    created: u64,
-    modified: u64,
+    pub raw_path: PathBuf,
+    pub url_path: String,
+    pub created: u64,
+    pub modified: u64,
     pub frontmatter: Option<crate::markdown::SimpleMetadata>,
 }
 
