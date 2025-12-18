@@ -12,11 +12,18 @@ impl Templates {
     pub fn new(root_path: &Path) -> Result<Self, TemplateError> {
         let globs = root_path.join(".mbr/**/*.html");
         let globs_str = globs.to_str().ok_or(TemplateError::InvalidPathEncoding)?;
-        let mut tera = Tera::new(globs_str).unwrap_or_default();
+        let mut tera = Tera::new(globs_str).unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to load user templates from {}: {}. Using built-in defaults.",
+                globs_str,
+                e
+            );
+            Tera::default()
+        });
 
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {
-                println!("Adding default template {}", name);
+                tracing::debug!("Adding default template {}", name);
                 tera.add_raw_template(name, tpl)?;
             }
         }
@@ -29,7 +36,7 @@ impl Templates {
         html: &str,
         frontmatter: HashMap<String, String>,
     ) -> Result<String, TemplateError> {
-        eprintln!("frontmatter: {:?}", &frontmatter);
+        tracing::debug!("frontmatter: {:?}", &frontmatter);
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
             context.insert(k, v);

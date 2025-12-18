@@ -7,11 +7,7 @@ use axum::{
     routing::get,
     Router,
 };
-use std::{
-    net::SocketAddr,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use crate::errors::ServerError;
 use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
@@ -36,9 +32,11 @@ pub struct ServerState {
     pub base_dir: std::path::PathBuf,
     pub static_folder: String,
     pub markdown_extensions: Vec<String>,
+    pub ignore_dirs: Vec<String>,
+    pub ignore_globs: Vec<String>,
     pub index_file: String,
     pub templates: crate::templates::Templates,
-    pub repo: Arc<Mutex<Repo>>,
+    pub repo: Arc<Repo>,
     pub oembed_timeout_ms: u64,
 }
 
@@ -71,19 +69,21 @@ impl Server {
         let templates = templates::Templates::new(base_dir.as_path())
             .map_err(ServerError::TemplateInit)?;
 
-        let repo = Arc::new(Mutex::new(Repo::init(
+        let repo = Arc::new(Repo::init(
             &base_dir,
             &static_folder,
             markdown_extensions,
             ignore_dirs,
             ignore_globs,
             &index_file,
-        )));
+        ));
 
         let config = ServerState {
             base_dir,
             static_folder,
             markdown_extensions: markdown_extensions.to_owned(),
+            ignore_dirs: ignore_dirs.to_owned(),
+            ignore_globs: ignore_globs.to_owned(),
             index_file,
             templates,
             repo,
@@ -109,6 +109,15 @@ impl Server {
     }
 
     pub async fn start(&self) -> Result<(), ServerError> {
+        self.start_with_ready_signal(None).await
+    }
+
+    /// Starts the server and optionally signals when ready to accept connections.
+    /// If a sender is provided, it will receive `()` once the server is bound and listening.
+    pub async fn start_with_ready_signal(
+        &self,
+        ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), ServerError> {
         let addr = SocketAddr::from((self.ip, self.port));
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             ServerError::BindFailed {
@@ -118,6 +127,12 @@ impl Server {
         })?;
         let local_addr = listener.local_addr().map_err(ServerError::LocalAddrFailed)?;
         tracing::debug!("listening on {}", local_addr);
+
+        // Signal that server is ready before starting to serve
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(());
+        }
+
         axum::serve(listener, self.router.clone())
             .await
             .map_err(ServerError::StartFailed)?;
@@ -127,12 +142,7 @@ impl Server {
     pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
-        let repo = config
-            .repo
-            .lock()
-            .inspect_err(|e| tracing::error!("Lock issue with config.repo: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        repo.scan_all()
+        config.repo.scan_all()
             .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -140,7 +150,7 @@ impl Server {
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(
-                repo.to_json()
+                config.repo.to_json()
                     .inspect_err(|e| tracing::error!("Error creating json: {e}"))
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             )
@@ -254,12 +264,12 @@ impl Server {
         let (mut frontmatter, inner_html_output) =
             markdown::render(md_path.to_path_buf(), root_path, oembed_timeout_ms)
                 .await
-                .inspect_err(|e| eprintln!("Error rendering markdown: {e}"))?;
+                .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
         frontmatter.insert("markdown_source".into(), md_path.to_string_lossy().into());
         let full_html_output = templates
             .render_markdown(&inner_html_output, frontmatter)
             .await
-            .inspect_err(|e| eprintln!("Error rendering template: {e}"))?;
+            .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?;
         tracing::debug!("generated the html");
         Ok(Html(full_html_output))
     }
@@ -273,24 +283,12 @@ impl Server {
         use serde_json::json;
 
         // Create a temporary repo instance to scan this directory
-        let ignore_dirs = vec![
-            "target".to_string(),
-            "result".to_string(),
-            "build".to_string(),
-            "node_modules".to_string(),
-            "ci".to_string(),
-        ];
-        let ignore_globs = vec![
-            "*.log".to_string(),
-            "*.bak".to_string(),
-            "*.lock".to_string(),
-        ];
         let temp_repo = Repo::init(
             root_path,
             &config.static_folder,
             &config.markdown_extensions,
-            &ignore_dirs,
-            &ignore_globs,
+            &config.ignore_dirs,
+            &config.ignore_globs,
             &config.index_file,
         );
 
@@ -380,12 +378,12 @@ impl Server {
             templates
                 .render_home(context)
                 .await
-                .inspect_err(|e| eprintln!("Error rendering home template: {e}"))?
+                .inspect_err(|e| tracing::error!("Error rendering home template: {e}"))?
         } else {
             templates
                 .render_section(context)
                 .await
-                .inspect_err(|e| eprintln!("Error rendering section template: {e}"))?
+                .inspect_err(|e| tracing::error!("Error rendering section template: {e}"))?
         };
 
         tracing::debug!("generated directory listing html");
@@ -618,48 +616,8 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/components/mbr-components.css",
         include_bytes!("../components/dist/mbr-components.css"),
-        "application/javascript",
+        "text/css",
     ),
-    // (
-    //     "/components/legacy.js",
-    //     include_bytes!("../templates/components/legacy.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/disclose-version.js",
-    //     include_bytes!("../templates/components/disclose-version.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/mbr-browse.es.js",
-    //     include_bytes!("../templates/components/mbr-browse.es.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/mbr-jump.es.js",
-    //     include_bytes!("../templates/components/mbr-jump.es.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/mbr-info.es.js",
-    //     include_bytes!("../templates/components/mbr-info.es.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/mbr-search.es.js",
-    //     include_bytes!("../templates/components/mbr-search.es.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/mbr-navloader.es.js",
-    //     include_bytes!("../templates/components/mbr-navloader.es.js"),
-    //     "application/javascript",
-    // ),
-    // (
-    //     "/components/svelte.js",
-    //     include_bytes!("../templates/components/svelte.js"),
-    //     "application/javascript",
-    // ),
 ];
 
 #[cfg(test)]

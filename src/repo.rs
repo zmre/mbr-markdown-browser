@@ -27,7 +27,10 @@ pub struct Repo {
     #[serde(skip)]
     ignore_dirs: Vec<String>,
     #[serde(skip)]
+    #[allow(dead_code)] // Kept for debugging/logging; compiled version used for matching
     ignore_globs: Vec<String>,
+    #[serde(skip)]
+    compiled_ignore_globs: Vec<glob::Pattern>,
     #[serde(skip)]
     pub scanned_folders: HashSet<PathBuf>,
     #[serde(skip)]
@@ -295,12 +298,23 @@ impl Repo {
         ignore_globs: &[String],
         index_file: S,
     ) -> Self {
+        // Pre-compile glob patterns for efficient matching during scans
+        let compiled_ignore_globs: Vec<glob::Pattern> = ignore_globs
+            .iter()
+            .filter_map(|pat| {
+                glob::Pattern::new(pat)
+                    .map_err(|e| tracing::warn!("Invalid ignore glob pattern '{}': {}", pat, e))
+                    .ok()
+            })
+            .collect();
+
         Self {
             root_dir: root_dir.into(),
             static_folder: static_folder.into(),
             markdown_extensions: markdown_extensions.to_vec(),
             ignore_dirs: ignore_dirs.to_vec(),
             ignore_globs: ignore_globs.to_vec(),
+            compiled_ignore_globs,
             index_file: index_file.into(),
             scanned_folders: HashSet::new(),
             queued_folders: HashMap::new(),
@@ -323,16 +337,18 @@ impl Repo {
         if self.scanned_folders.pin().contains(&start_folder) {
             return Ok(());
         }
-        println!("relative_folder: {:?}", relative_folder_path_ref);
+        tracing::debug!("Scanning folder: {:?}", relative_folder_path_ref);
         self.scanned_folders.pin().insert(start_folder.clone());
 
-        // Walk directory with filtering
+        // Walk directory with filtering (using pre-compiled patterns for efficiency)
         let dir_walker = WalkDir::new(start_folder.clone())
             .follow_links(true)
             .min_depth(1)
             .max_depth(1)
             .into_iter()
-            .filter_entry(|e| !should_ignore(e.path(), &self.ignore_dirs, &self.ignore_globs));
+            .filter_entry(|e| {
+                !should_ignore_compiled(e.path(), &self.ignore_dirs, &self.compiled_ignore_globs)
+            });
 
         let mut markdown = std::collections::HashMap::new();
         let mut other = std::collections::HashMap::new();
@@ -361,7 +377,7 @@ impl Repo {
                     };
                     markdown.insert(path.to_path_buf(), mdfile);
                 } else {
-                    eprintln!("Couldn't process markdown file at {:?}", path);
+                    tracing::warn!("Couldn't process markdown file at {:?}", path);
                 }
             } else {
                 // Process static file
@@ -422,10 +438,10 @@ impl Repo {
                 .collect();
             self.queued_folders.pin().clear();
             assert!(self.queued_folders.is_empty());
-            eprintln!("Parallel batch: {:?}", &vec_folders);
+            tracing::debug!("Parallel batch: {:?}", &vec_folders);
             vec_folders.into_par_iter().for_each(|rel_path| {
                 self.scan_folder(&rel_path).unwrap_or_else(|e| {
-                    eprintln!("Failed to scan folder {:?} with error {e}", &rel_path)
+                    tracing::error!("Failed to scan folder {:?}: {e}", &rel_path)
                 }) // ignores errors
             });
         }
@@ -489,6 +505,32 @@ pub fn should_ignore(path: &Path, ignore_dirs: &[String], ignore_globs: &[String
             .map(|pat| pat.matches_path(path))
             .unwrap_or(false)
     })
+}
+
+/// Checks if a path should be ignored using pre-compiled glob patterns.
+/// This is more efficient than `should_ignore` when processing many files.
+fn should_ignore_compiled(
+    path: &Path,
+    ignore_dirs: &[String],
+    compiled_patterns: &[glob::Pattern],
+) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or("");
+
+    // Hidden files/dirs (starting with .)
+    if file_name.starts_with('.') {
+        return true;
+    }
+
+    // Directory matching ignore list
+    if path.is_dir() && ignore_dirs.iter().any(|x| x.as_str() == file_name) {
+        return true;
+    }
+
+    // Pre-compiled glob pattern match
+    compiled_patterns.iter().any(|pat| pat.matches_path(path))
 }
 
 /// Builds a URL path for a markdown file.

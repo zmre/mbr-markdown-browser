@@ -33,7 +33,7 @@ async fn main() -> Result<(), MbrError> {
             }
         })?;
 
-    println!(
+    tracing::info!(
         "Root dir: {}; File relative to root: {}",
         &config.root_dir.display(),
         &path_relative_to_root.display()
@@ -52,9 +52,9 @@ async fn main() -> Result<(), MbrError> {
         let (frontmatter, html_output) =
             markdown::render(args.path, config.root_dir.as_path(), config.oembed_timeout_ms)
                 .await
-                .inspect_err(|e| eprintln!("Error rendering markdown: {:?}", e))?;
+                .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
         let templates = templates::Templates::new(&config.root_dir)
-            .inspect_err(|e| eprintln!("Error parsing template: {e}"))?;
+            .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
         let html_output = templates.render_markdown(&html_output, frontmatter).await?;
         println!("{}", &html_output);
     } else if args.server {
@@ -72,12 +72,13 @@ async fn main() -> Result<(), MbrError> {
         )?;
 
         let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
-        println!("http://{}:{}/{}", config.ip, config.port, url_path);
+        tracing::info!("Server running at http://{}:{}/{}", config.ip, config.port, url_path);
 
         server.start().await?;
     } else {
         // GUI mode - default when no flags specified (or explicit -g)
         let config_copy = config.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
             let server = server::Server::init(
                 config_copy.ip.0,
@@ -92,16 +93,22 @@ async fn main() -> Result<(), MbrError> {
             );
             match server {
                 Ok(s) => {
-                    if let Err(e) = s.start().await {
-                        eprintln!("Server error: {e}");
+                    if let Err(e) = s.start_with_ready_signal(Some(ready_tx)).await {
+                        tracing::error!("Server error: {e}");
                     }
                 }
-                Err(e) => eprintln!("Couldn't initialize the server: {e}. Try with -s for more info"),
+                Err(e) => {
+                    tracing::error!("Couldn't initialize the server: {e}. Try with -s for more info");
+                    // Drop the sender to signal failure
+                    drop(ready_tx);
+                }
             }
         });
-        // Give the server a moment to start listening before opening the browser
-        // TODO: find a better way to know when server is ready
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait for server to be ready before opening browser
+        if ready_rx.await.is_err() {
+            tracing::error!("Server failed to start");
+            return Ok(());
+        }
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
         let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
         let url = url.join(&url_path)?;

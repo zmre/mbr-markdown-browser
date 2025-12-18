@@ -46,7 +46,7 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                println!("The close button was pressed; stopping");
+                tracing::debug!("The close button was pressed; stopping");
                 *control_flow = ControlFlow::Exit
             }
             Event::WindowEvent {
@@ -59,13 +59,13 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                     },
                 ..
             } => {
-                println!("Window keyboard input: {:?}", &event);
+                tracing::trace!("Window keyboard input: {:?}", &event);
             }
             Event::DeviceEvent {
                 event: DeviceEvent::Key(key),
                 ..
             } => {
-                println!("Device keyboard input: {:?}", &key);
+                tracing::trace!("Device keyboard input: {:?}", &key);
             }
             _ => (),
         }

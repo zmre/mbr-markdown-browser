@@ -5,7 +5,8 @@ use pulldown_cmark::{
 };
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
 };
 use yaml_rust2::{Yaml, YamlLoader};
@@ -68,7 +69,7 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
             for (k, v) in y.iter() {
                 match (k, v) {
                     (Yaml::String(key), Yaml::String(value)) => {
-                        println!("Got {key}, {value}");
+                        tracing::trace!("Frontmatter: {key} = {value}");
                         hm.insert(key.to_string(), value.to_string());
                     }
                     (Yaml::String(key), Yaml::Array(vals)) => {
@@ -79,11 +80,11 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
                                 let join = if !accum.is_empty() { ", " } else { "" };
                                 accum + join + i.as_str()
                             });
-                        println!("Got {key}, hash: {vals}");
+                        tracing::trace!("Frontmatter: {key} = [{vals}]");
                         hm.insert(key.to_string(), vals);
                     }
                     (Yaml::String(key), Yaml::Hash(hash)) => {
-                        println!("Got {key}, recursive");
+                        tracing::trace!("Frontmatter: {key} = (nested hash)");
                         // TODO: recursively parse this, then modify all keys
                         // to have a leading `key.` before inserting
                         let hash = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
@@ -92,14 +93,13 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
                         }
                     }
                     (Yaml::String(key), other_val) => {
-                        println!("Got {key}, {:?}", &other_val);
+                        tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
                         if let Some(str_val) = other_val.clone().into_string() {
                             hm.insert(key.to_string(), str_val);
                         }
                     }
                     (k, v) => {
-                        eprintln!("Got unknown {:?}, {:?}", k, v);
-                        // no op -- silent ignore though I could print a warn? TODO
+                        tracing::warn!("Unexpected frontmatter key-value: {:?} = {:?}", k, v);
                     }
                 }
             }
@@ -109,13 +109,21 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
     }
 }
 
+/// Maximum bytes to read when extracting frontmatter metadata.
+/// Frontmatter should always be at the top of the file, so 8KB is plenty.
+const FRONTMATTER_MAX_BYTES: usize = 8 * 1024;
+
 pub fn extract_metadata_from_file<P: AsRef<Path>>(
     path: P,
 ) -> Result<SimpleMetadata, Box<dyn std::error::Error>> {
     let path = path.as_ref();
-    // TODO: in case of super long markdown files, I expect we can/should cap the string length
-    // using some kind of buffer reader and max of ... 5000 bytes?  something like that is probably ample enough
-    let markdown_input = fs::read_to_string(path)?;
+    // Only read the first 8KB - frontmatter is always at the top
+    let mut file = File::open(path)?;
+    let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+    let read_len = file_len.min(FRONTMATTER_MAX_BYTES);
+    let mut buffer = vec![0u8; read_len];
+    file.read_exact(&mut buffer)?;
+    let markdown_input = String::from_utf8_lossy(&buffer);
     let parser = MDParser::new_ext(&markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
     let mut in_metadata = false;
