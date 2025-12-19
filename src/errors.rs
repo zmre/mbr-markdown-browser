@@ -30,6 +30,9 @@ pub enum MbrError {
     #[error("Browser error: {0}")]
     Browser(#[from] BrowserError),
 
+    #[error("Watcher error: {0}")]
+    Watcher(#[from] WatcherError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -178,6 +181,23 @@ pub enum BrowserError {
 
     #[error("Failed to create icon from RGBA data")]
     IconCreationFailed(#[source] tao::window::BadIcon),
+}
+
+/// Errors related to file watching.
+#[derive(Debug, Error)]
+pub enum WatcherError {
+    #[error("Failed to initialize file watcher")]
+    WatcherInit(#[source] notify::Error),
+
+    #[error("Failed to watch path: {path}")]
+    WatchFailed {
+        path: PathBuf,
+        #[source]
+        source: notify::Error,
+    },
+
+    #[error("Failed to send file change event")]
+    BroadcastFailed,
 }
 
 // Convenience type alias for Results using MbrError

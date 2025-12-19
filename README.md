@@ -53,9 +53,9 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 		* In .mbr as well as in the static dir
 		* I want to serve files looking first for markdown for a URL, then static inline with the markdown files, then finally the static folder fallback
 		* How to handle index.md files?
-	* [ ] **Serve sections (default index files)**
+	* [x] **Serve sections (default index files)** @done(2025-12-18 9:10 PM)
 	* [ ] tls? [see the axum tls-rustls example](https://github.com/tokio-rs/axum/tree/main/examples/tls-rustls)
-	* [ ] Websockets route to push when active file is changed on disk
+	* [x] Websockets route to push when active file is changed on disk @done(2025-12-18 10:39 PM)
   * [ ] Add a "multi-server" option to serve up multiple different note routes; might require an architecture change and definitely requires a path prefix concept
     * would let me host my personal notes as well as magic notes as well as whatever
 
@@ -63,7 +63,7 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 	* [ ] Serve captions, chapters, and posters automatically
 	* [ ] Serve ranged requests for videos (info: <https://github.com/tokio-rs/axum/pull/3047> and <https://github.com/tokio-rs/axum/blob/main/examples/static-file-server/src/main.rs>)
 		* [ ] Need to figure out if this is already happening -- how to test?
-	* [ ] Not sure if I'll need hls but <https://docs.rs/hls/0.5.5/hls/> is something I might look at
+	* [-] Not sure if I'll need hls but <https://docs.rs/hls/0.5.5/hls/> is something I might look at
 
 * Configs
 	* [x] Listen IP

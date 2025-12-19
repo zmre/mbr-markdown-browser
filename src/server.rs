@@ -1,13 +1,15 @@
 use axum::{
     body::Body,
-    extract::{self, State},
+    extract::{self, ws::WebSocketUpgrade, State},
     handler::HandlerWithoutStateExt,
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, path::Path, sync::Arc};
+use tokio::sync::broadcast;
 
 use crate::errors::ServerError;
 use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
@@ -38,6 +40,7 @@ pub struct ServerState {
     pub templates: crate::templates::Templates,
     pub repo: Arc<Repo>,
     pub oembed_timeout_ms: u64,
+    pub file_change_tx: Option<broadcast::Sender<crate::watcher::FileChangeEvent>>,
 }
 
 impl Server {
@@ -78,6 +81,25 @@ impl Server {
             &index_file,
         ));
 
+        // Initialize file watcher
+        let file_change_tx = match crate::watcher::FileWatcher::new(
+            &base_dir,
+            ignore_dirs,
+            ignore_globs,
+        ) {
+            Ok((watcher, _rx)) => {
+                tracing::info!("File watcher initialized successfully");
+                // Keep the watcher alive by leaking it (it runs in background thread)
+                let tx = watcher.sender.clone();
+                std::mem::forget(watcher);
+                Some(tx)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize file watcher: {}. Live reload disabled.", e);
+                None
+            }
+        };
+
         let config = ServerState {
             base_dir,
             static_folder,
@@ -88,6 +110,7 @@ impl Server {
             templates,
             repo,
             oembed_timeout_ms,
+            file_change_tx,
         };
 
         let mbr_builtins = Self::serve_default_mbr.into_service();
@@ -99,6 +122,7 @@ impl Server {
             // .route("/favicon.ico", ServeFile::new())
             .route("/", get(Self::home_page))
             .route("/.mbr/site.json", get(Self::get_site_info))
+            .route("/.mbr/ws/changes", get(Self::websocket_handler))
             .nest_service("/.mbr", serve_mbr)
             .route("/{*path}", get(Self::handle))
             // .fallback_service(handle_static)
@@ -137,6 +161,101 @@ impl Server {
             .await
             .map_err(ServerError::StartFailed)?;
         Ok(())
+    }
+
+    /// WebSocket handler for live reload file change notifications.
+    pub async fn websocket_handler(
+        ws: WebSocketUpgrade,
+        State(config): State<ServerState>,
+    ) -> impl IntoResponse {
+        ws.on_upgrade(|socket| Self::handle_websocket(socket, config))
+    }
+
+    async fn handle_websocket(
+        socket: axum::extract::ws::WebSocket,
+        config: ServerState,
+    ) {
+        let (mut sender, mut receiver) = socket.split();
+
+        // If file watcher is not initialized, close the connection
+        let Some(file_change_tx) = config.file_change_tx else {
+            tracing::warn!("WebSocket connection attempted but file watcher is disabled");
+            let _ = sender
+                .send(axum::extract::ws::Message::Text(
+                    r#"{"error":"File watcher not available"}"#.to_string().into(),
+                ))
+                .await;
+            return;
+        };
+
+        // Subscribe to file change events
+        let mut rx = file_change_tx.subscribe();
+
+        tracing::info!("WebSocket client connected for live reload");
+
+        // Send initial connection confirmation
+        if sender
+            .send(axum::extract::ws::Message::Text(
+                r#"{"status":"connected"}"#.to_string().into(),
+            ))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // Handle bidirectional communication
+        loop {
+            tokio::select! {
+                // Forward file change events to the client
+                Ok(change_event) = rx.recv() => {
+                    let json = match serde_json::to_string(&change_event) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize change event: {}", e);
+                            continue;
+                        }
+                    };
+
+                    if sender
+                        .send(axum::extract::ws::Message::Text(json.into()))
+                        .await
+                        .is_err()
+                    {
+                        tracing::info!("WebSocket client disconnected");
+                        break;
+                    }
+                }
+
+                // Handle incoming messages from client (mostly for connection health)
+                msg = receiver.next() => {
+                    match msg {
+                        Some(Ok(axum::extract::ws::Message::Close(_))) => {
+                            tracing::info!("WebSocket client closed connection");
+                            break;
+                        }
+                        Some(Ok(axum::extract::ws::Message::Ping(data))) => {
+                            if sender
+                                .send(axum::extract::ws::Message::Pong(data))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("WebSocket error: {}", e);
+                            break;
+                        }
+                        None => {
+                            tracing::info!("WebSocket stream ended");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     pub async fn get_site_info(
@@ -265,7 +384,10 @@ impl Server {
             markdown::render(md_path.to_path_buf(), root_path, oembed_timeout_ms)
                 .await
                 .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
-        frontmatter.insert("markdown_source".into(), md_path.to_string_lossy().into());
+        // Use relative path for markdown_source so live reload can match it
+        let relative_md_path = pathdiff::diff_paths(md_path, root_path)
+            .unwrap_or_else(|| md_path.to_path_buf());
+        frontmatter.insert("markdown_source".into(), relative_md_path.to_string_lossy().into());
         let full_html_output = templates
             .render_markdown(&inner_html_output, frontmatter)
             .await

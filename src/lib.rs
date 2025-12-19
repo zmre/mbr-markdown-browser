@@ -14,6 +14,7 @@ pub mod repo;
 pub mod server;
 pub mod templates;
 pub mod vid;
+pub mod watcher;
 
 pub use config::Config;
 pub use errors::{ConfigError, MbrError};
