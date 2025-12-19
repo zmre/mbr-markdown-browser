@@ -59,9 +59,31 @@ impl FileWatcher {
     pub fn new(
         base_dir: &Path,
         ignore_dirs: &[String],
-        _ignore_globs: &[String],
+        ignore_globs: &[String],
     ) -> Result<(Self, broadcast::Receiver<FileChangeEvent>), WatcherError> {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let watcher = Self::new_with_sender(base_dir, ignore_dirs, ignore_globs, tx)?;
+        Ok((watcher, rx))
+    }
+
+    /// Creates a new file watcher using an existing broadcast sender.
+    ///
+    /// This variant is useful when you want to create the broadcast channel ahead of time
+    /// (e.g., to avoid blocking during watcher initialization).
+    ///
+    /// # Arguments
+    ///
+    /// * `base_dir` - The root directory to watch
+    /// * `ignore_dirs` - Directory names to ignore (e.g., "target", ".git")
+    /// * `ignore_globs` - Glob patterns to ignore (e.g., "*.log")
+    /// * `sender` - An existing broadcast sender to use for file change events
+    pub fn new_with_sender(
+        base_dir: &Path,
+        ignore_dirs: &[String],
+        _ignore_globs: &[String],
+        sender: broadcast::Sender<FileChangeEvent>,
+    ) -> Result<Self, WatcherError> {
+        let tx = sender;
         let base_dir = base_dir.to_path_buf();
 
         // Standard directories to always ignore
@@ -152,13 +174,10 @@ impl FileWatcher {
 
         info!("File watcher started for {:?} (polling every 1s)", base_dir);
 
-        Ok((
-            FileWatcher {
-                _watcher: watcher,
-                sender: tx,
-            },
-            rx,
-        ))
+        Ok(FileWatcher {
+            _watcher: watcher,
+            sender: tx,
+        })
     }
 
     /// Subscribes to file change events.

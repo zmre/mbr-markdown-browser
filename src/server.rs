@@ -81,24 +81,32 @@ impl Server {
             &index_file,
         ));
 
-        // Initialize file watcher
-        let file_change_tx = match crate::watcher::FileWatcher::new(
-            &base_dir,
-            ignore_dirs,
-            ignore_globs,
-        ) {
-            Ok((watcher, _rx)) => {
-                tracing::info!("File watcher initialized successfully");
-                // Keep the watcher alive by leaking it (it runs in background thread)
-                let tx = watcher.sender.clone();
-                std::mem::forget(watcher);
-                Some(tx)
+        // Create a broadcast channel for file changes - watcher will be initialized in background
+        let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<crate::watcher::FileChangeEvent>(100);
+        let tx_for_watcher = file_change_tx.clone();
+
+        // Initialize file watcher in background to avoid blocking server startup
+        // PollWatcher's recursive scan can take 10+ seconds for large directories
+        let base_dir_for_watcher = base_dir.clone();
+        let ignore_dirs_for_watcher = ignore_dirs.to_vec();
+        let ignore_globs_for_watcher = ignore_globs.to_vec();
+        std::thread::spawn(move || {
+            match crate::watcher::FileWatcher::new_with_sender(
+                &base_dir_for_watcher,
+                &ignore_dirs_for_watcher,
+                &ignore_globs_for_watcher,
+                tx_for_watcher,
+            ) {
+                Ok(watcher) => {
+                    tracing::info!("File watcher initialized successfully (background)");
+                    // Keep the watcher alive by leaking it (it runs in background thread)
+                    std::mem::forget(watcher);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize file watcher: {}. Live reload disabled.", e);
+                }
             }
-            Err(e) => {
-                tracing::warn!("Failed to initialize file watcher: {}. Live reload disabled.", e);
-                None
-            }
-        };
+        });
 
         let config = ServerState {
             base_dir,
@@ -110,7 +118,7 @@ impl Server {
             templates,
             repo,
             oembed_timeout_ms,
-            file_change_tx,
+            file_change_tx: Some(file_change_tx),
         };
 
         let mbr_builtins = Self::serve_default_mbr.into_service();
