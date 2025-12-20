@@ -1,3 +1,4 @@
+use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::vid::Vid;
 use pulldown_cmark::{
@@ -14,7 +15,8 @@ use yaml_rust2::{Yaml, YamlLoader};
 struct EventState {
     #[allow(dead_code)] // Reserved for future use (resolving relative paths)
     root_path: PathBuf,
-    in_vid: bool,
+    /// Track the current media embed type (if any) for proper closing tags
+    current_media: Option<MediaEmbed>,
     in_metadata: bool,
     in_link: bool, // Track when inside a link (including autolinks like <http://...>)
     metadata_source: Option<MetadataBlockKind>,
@@ -38,7 +40,7 @@ pub async fn render(
     let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
     let mut state = EventState {
         root_path: root_path.to_path_buf(),
-        in_vid: false,
+        current_media: None,
         in_metadata: false,
         in_link: false,
         metadata_source: None,
@@ -160,11 +162,12 @@ async fn process_event(
             dest_url,
             title,
             id: _,
-        }) => match Vid::from_url_and_title(dest_url, title) {
-            Some(vid) => {
+        }) => match MediaEmbed::from_url_and_title(dest_url, title) {
+            Some(media) => {
                 // the link title is actually the next Text event so need to split this to only produce the open tags
-                state.in_vid = true;
-                (Event::Html(vid.to_html(true).into()), state)
+                let html = media.to_html(true);
+                state.current_media = Some(media);
+                (Event::Html(html.into()), state)
             }
             _ => (event.clone(), state),
         },
@@ -178,9 +181,8 @@ async fn process_event(
             (event.clone(), state)
         }
         Event::End(TagEnd::Image) => {
-            if state.in_vid {
-                state.in_vid = false;
-                (Event::Html(Vid::html_close().into()), state)
+            if let Some(media) = state.current_media.take() {
+                (Event::Html(media.html_close().into()), state)
             } else {
                 (event, state)
             }
@@ -312,5 +314,100 @@ mod tests {
         let root = path.parent().unwrap().to_path_buf();
         let (metadata, _) = render(path, &root, 100).await.unwrap();
         assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
+    }
+
+    // Media embed tests
+    #[tokio::test]
+    async fn test_video_embed_from_image_syntax() {
+        let md = "![My Video](video.mp4)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("<video"));
+        assert!(html.contains("video.mp4"));
+        assert!(html.contains("<figcaption>"));
+        assert!(html.contains("My Video"));
+        assert!(html.contains("</figcaption></figure>"));
+    }
+
+    #[tokio::test]
+    async fn test_audio_embed_from_image_syntax() {
+        let md = "![Episode 1](podcast.mp3)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("<audio"));
+        assert!(html.contains("audio-embed"));
+        assert!(html.contains("podcast.mp3"));
+        assert!(html.contains("<figcaption>"));
+        assert!(html.contains("Episode 1"));
+        assert!(html.contains("</figcaption></figure>"));
+    }
+
+    #[tokio::test]
+    async fn test_youtube_embed_from_image_syntax() {
+        let md = "![Watch this](https://www.youtube.com/watch?v=dQw4w9WgXcQ)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("youtube-embed"));
+        assert!(html.contains("youtube.com/embed/dQw4w9WgXcQ"));
+        assert!(html.contains("<figcaption>"));
+        assert!(html.contains("Watch this"));
+        assert!(html.contains("</figcaption></figure>"));
+    }
+
+    #[tokio::test]
+    async fn test_youtube_short_url_embed() {
+        let md = "![](https://youtu.be/dQw4w9WgXcQ)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("youtube-embed"));
+        assert!(html.contains("youtube.com/embed/dQw4w9WgXcQ"));
+    }
+
+    #[tokio::test]
+    async fn test_pdf_embed_from_image_syntax() {
+        let md = "![Important Document](report.pdf)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("pdf-embed"));
+        assert!(html.contains(r#"data="report.pdf""#));
+        assert!(html.contains(r#"type="application/pdf""#));
+        assert!(html.contains("data-pdf-fallback"));
+        assert!(html.contains("<figcaption>"));
+        assert!(html.contains("Important Document"));
+        assert!(html.contains("</figcaption></figure>"));
+    }
+
+    #[tokio::test]
+    async fn test_pdf_embed_with_path() {
+        let md = "![](docs/manual.pdf)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("pdf-embed"));
+        assert!(html.contains(r#"data="docs/manual.pdf""#));
+    }
+
+    #[tokio::test]
+    async fn test_regular_image_not_converted() {
+        let md = "![Alt text](photo.jpg)";
+        let html = render_markdown(md).await;
+        assert!(html.contains("<img"));
+        assert!(html.contains("photo.jpg"));
+        assert!(!html.contains("<video"));
+        assert!(!html.contains("<audio"));
+        assert!(!html.contains("pdf-embed"));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_media_types_in_document() {
+        let md = r#"
+# My Media
+
+![Video](clip.mp4)
+
+![Audio](song.mp3)
+
+![PDF](doc.pdf)
+
+![Image](photo.png)
+"#;
+        let html = render_markdown(md).await;
+        assert!(html.contains("<video"));
+        assert!(html.contains("<audio"));
+        assert!(html.contains("pdf-embed"));
+        assert!(html.contains("<img"));
     }
 }

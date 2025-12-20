@@ -2,12 +2,14 @@
 //!
 //! A markdown previewer, browser, and static site generator.
 
+pub mod audio;
 pub mod browser;
 pub mod cli;
 pub mod config;
 pub mod errors;
 pub mod html;
 pub mod markdown;
+pub mod media;
 pub mod oembed;
 pub mod path_resolver;
 pub mod repo;

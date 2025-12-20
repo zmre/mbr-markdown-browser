@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **mbr** (markdown browser) is a Rust application that serves as a markdown previewer, browser, and (eventually) static site generator. It renders markdown files on-the-fly via a local web server, supports navigation between markdown files, browsing by tags/folders, and searching. The key principle is that any markdown repository can customize its UI via a `.mbr/` folder.
 
+## READ SKILLS (MANDATORY)
+
+This is a rust project and a serious engineering work.  ALWAYS USE the engineer subagent unless expressly told otherwise.  Always read the rust language skill.
+
 ## Build Commands
 
 ```bash
