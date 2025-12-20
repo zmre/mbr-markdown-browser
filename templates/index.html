@@ -11,7 +11,7 @@
     <link href="/.mbr/user.css" rel="stylesheet" />
     <link rel="stylesheet" href="/.mbr/vidstack.player.css" />
     <link rel="stylesheet" href="/.mbr/vidstack.plyr.css" />
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/dark.min.css">
+    <link rel="stylesheet" href="/.mbr/hljs.dark.css" />
 
     {% if tags %}
     <meta name="keywords" content="{{tags | safe}}" />
@@ -95,17 +95,33 @@
   </body>
   <script defer type="module" src="/.mbr/vid.js"></script>
   <script defer type="module" src="/.mbr/components/mbr-components.js"></script>
-
-  <script defer type="module">
-    import hljs from 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/es/highlight.min.js';
-    //  and it's easy to individually load additional languages
-    import css from 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/es/languages/css.min.js';
-    //import mbr-browse from '/.mbr/components/mbr-browse.es.js';
-    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-
-    
-    hljs.registerLanguage('css', css);
-    hljs.highlightAll();
-    mermaid.initialize({ startOnLoad: true });
+  <script defer src="/.mbr/hljs.js"></script>
+  <script defer src="/.mbr/hljs.lang.javascript.js"></script>
+  <script defer src="/.mbr/hljs.lang.typescript.js"></script>
+  <script defer src="/.mbr/hljs.lang.rust.js"></script>
+  <script defer src="/.mbr/hljs.lang.python.js"></script>
+  <script defer src="/.mbr/hljs.lang.bash.js"></script>
+  <script defer src="/.mbr/hljs.lang.java.js"></script>
+  <script defer src="/.mbr/hljs.lang.scala.js"></script>
+  <script defer src="/.mbr/hljs.lang.go.js"></script>
+  <script defer src="/.mbr/hljs.lang.ruby.js"></script>
+  <script defer src="/.mbr/hljs.lang.css.js"></script>
+  <script defer src="/.mbr/hljs.lang.json.js"></script>
+  <script defer src="/.mbr/hljs.lang.yaml.js"></script>
+  <script defer src="/.mbr/hljs.lang.xml.js"></script>
+  <script defer src="/.mbr/hljs.lang.sql.js"></script>
+  <script defer src="/.mbr/hljs.lang.dockerfile.js"></script>
+  <script defer src="/.mbr/hljs.lang.markdown.js"></script>
+  <script defer src="/.mbr/mermaid.min.js"></script>
+  <script>
+    // Wait for all deferred scripts to load before initializing
+    document.addEventListener('DOMContentLoaded', function() {
+      if (typeof hljs !== 'undefined') {
+        hljs.highlightAll();
+      }
+      if (typeof mermaid !== 'undefined') {
+        mermaid.initialize({ startOnLoad: true });
+      }
+    });
   </script>
 </html>
