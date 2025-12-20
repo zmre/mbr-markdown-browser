@@ -213,10 +213,12 @@ async fn process_event(
                 // Only process bare URLs that are NOT inside a link element.
                 // URLs in <http://...> autolinks or [text](url) links are already
                 // handled by markdown and shouldn't trigger oembed fetching.
-                let info = PageInfo::new_from_url(text, state.oembed_timeout_ms).await.unwrap_or(PageInfo {
-                    url: text.clone().to_string(),
-                    ..Default::default()
-                });
+                let info = PageInfo::new_from_url(text, state.oembed_timeout_ms)
+                    .await
+                    .unwrap_or(PageInfo {
+                        url: text.clone().to_string(),
+                        ..Default::default()
+                    });
                 (Event::Html(info.html().into()), state)
             } else if text.trim_start().starts_with("{{") {
                 if let Some(vid) = Vid::from_vid(text) {
@@ -228,10 +230,11 @@ async fn process_event(
                 (event, state)
             }
         }
-        //Event::Code(code) => {
-        // println!("code: {}", &code);
-        //(event, state)
-        //}
+        // Event::Code(code) => {
+        //     // TODO: detect mermaid
+        //     println!("****** code: {}", &code);
+        //     (event, state)
+        // }
         _ => {
             // println!("Event: {:?}", &event);
             (event, state)

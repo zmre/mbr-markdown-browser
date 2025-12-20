@@ -10,6 +10,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a rust project and a serious engineering work.  ALWAYS USE the engineer subagent unless expressly told otherwise.  Always read the rust language skill.
 
+## Goals
+
+In this tool, performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.  Everything should be near instantaneous and we should be constantly looking for safe ways to make things fast, but without using local cache files.
+
 ## Build Commands
 
 ```bash

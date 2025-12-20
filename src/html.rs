@@ -54,6 +54,7 @@ struct HtmlWriter<'a, I, W> {
     /// Whether if inside a metadata block (text should not be written)
     in_non_writing_block: bool,
 
+    codeblock_state: Option<CowStr<'a>>,
     table_state: TableState,
     table_alignments: Vec<Alignment>,
     table_cell_index: usize,
@@ -71,6 +72,7 @@ where
             writer,
             end_newline: true,
             in_non_writing_block: false,
+            codeblock_state: None,
             table_state: TableState::Head,
             table_alignments: vec![],
             table_cell_index: 0,
@@ -263,11 +265,15 @@ where
                 if !self.end_newline {
                     self.write_newline()?;
                 }
+                self.codeblock_state = Some("</code></pre>".into());
                 match info {
                     CodeBlockKind::Fenced(info) => {
                         let lang = info.split(' ').next().unwrap_or_default();
                         if lang.is_empty() {
                             self.write("<pre><code>")
+                        } else if lang == "mermaid" {
+                            self.codeblock_state = Some("</pre>".into());
+                            self.write("<pre class=\"mermaid\">")
                         } else {
                             self.write("<pre><code class=\"language-")?;
                             escape_html(&mut self.writer, lang)?;
@@ -433,7 +439,11 @@ where
                 self.write("</blockquote>\n")?;
             }
             TagEnd::CodeBlock => {
-                self.write("</code></pre>\n")?;
+                match self.codeblock_state.take() {
+                    Some(closing) => self.write(closing.as_ref())?,
+                    None => self.write("</code></pre>")?,
+                }
+                self.write("\n")?;
             }
             TagEnd::List(true) => {
                 self.write("</ol>\n")?;

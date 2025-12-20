@@ -19,6 +19,18 @@ Also, some of my notes have a lot of embedded videos in them so I want these to 
 
 Performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.
 
+```mermaid
+graph TD
+    A[Enter Chart Definition] --> B(Preview)
+    B --> C{decide}
+    C --> D[Keep]
+    C --> E[Edit Definition]
+    E --> B
+    D --> F[Save Image and Code]
+    F --> B
+
+```
+
 ## Running
 
 For now, you always need to specify a markdown file, even if starting in server mode.
@@ -84,11 +96,11 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 		* Hmmm, what about those `/.mbr/whatever` files?  I'd have to change those differently on every page -- how to do this in the template?  ie, not just from markdown so maybe **need to post process the output html**
 	* [x] Parse YAML frontmatter and make it available as JSON in the HTML doc and also as template vars @done(2025-08-12 5:21 PM)
 	* [ ] For image links, check the suffix for known audio and video and use different embeds for those
-		* [ ] audio
+		* [x] audio @done(2025-12-19 6:35 PM)
 		* [x] video @done(2025-08-12 5:22 PM)
-		* [ ] pdf -- show the first page as image and click to open the whole pdf
-	* [ ] For youtube, use a youtube component (instead of oembed?  yeah, I think so)
-	* [ ] For bare links on their own lines, use a component and pass as much info as possible
+		* [x] pdf -- show the first page as image and click to open the whole pdf @done(2025-12-19 6:35 PM)
+	* [x] For youtube, use a youtube component (instead of oembed?  yeah, I think so) @done(2025-12-19 6:36 PM)
+	* [x] For bare links on their own lines, use a component and pass as much info as possible @done(2025-12-19 6:36 PM)
 		* Bother with oembed at all?
 	* [ ] Add code block special handling
 		* ~~Figure out code syntax highlighting -- client side? maybe a `<mbr-code language="[language]">` component.~~
