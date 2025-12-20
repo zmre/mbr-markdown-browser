@@ -78,7 +78,7 @@ async fn main() -> Result<(), MbrError> {
     } else {
         // GUI mode - default when no flags specified (or explicit -g)
         let config_copy = config.clone();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
         let handle = tokio::spawn(async move {
             let server = server::Server::init(
                 config_copy.ip.0,
@@ -92,8 +92,9 @@ async fn main() -> Result<(), MbrError> {
                 config_copy.oembed_timeout_ms,
             );
             match server {
-                Ok(s) => {
-                    if let Err(e) = s.start_with_ready_signal(Some(ready_tx)).await {
+                Ok(mut s) => {
+                    // Try up to 10 port increments if address is in use
+                    if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
                         tracing::error!("Server error: {e}");
                     }
                 }
@@ -105,11 +106,14 @@ async fn main() -> Result<(), MbrError> {
             }
         });
         // Wait for server to be ready before opening browser
-        if ready_rx.await.is_err() {
-            tracing::error!("Server failed to start");
-            return Ok(());
-        }
-        let url = url::Url::parse(format!("http://{}:{}/", config.ip, config.port,).as_str())?;
+        let actual_port = match ready_rx.await {
+            Ok(port) => port,
+            Err(_) => {
+                tracing::error!("Server failed to start");
+                return Ok(());
+            }
+        };
+        let url = url::Url::parse(format!("http://{}:{}/", config.ip, actual_port).as_str())?;
         let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
         let url = url.join(&url_path)?;
 

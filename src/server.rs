@@ -171,6 +171,61 @@ impl Server {
         Ok(())
     }
 
+    /// Starts the server with automatic port retry on address-in-use errors.
+    ///
+    /// If the configured port is already in use, this method will try incrementing
+    /// the port (up to `max_retries` times) until it finds an available port.
+    /// A warning is printed to stderr when the port is incremented.
+    ///
+    /// If a sender is provided, it will receive the actual bound port once the
+    /// server is listening.
+    pub async fn start_with_port_retry(
+        &mut self,
+        ready_tx: Option<tokio::sync::oneshot::Sender<u16>>,
+        max_retries: u16,
+    ) -> Result<(), ServerError> {
+        let mut attempts = 0;
+
+        loop {
+            let addr = SocketAddr::from((self.ip, self.port));
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    let local_addr = listener.local_addr().map_err(ServerError::LocalAddrFailed)?;
+                    tracing::debug!("listening on {}", local_addr);
+
+                    // Signal that server is ready with the actual port
+                    if let Some(tx) = ready_tx {
+                        let _ = tx.send(self.port);
+                    }
+
+                    axum::serve(listener, self.router.clone())
+                        .await
+                        .map_err(ServerError::StartFailed)?;
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < max_retries => {
+                    let old_port = self.port;
+                    self.port = self.port.saturating_add(1);
+                    attempts += 1;
+                    eprintln!(
+                        "Warning: Port {} already in use, trying port {}",
+                        old_port, self.port
+                    );
+                    tracing::warn!(
+                        "Port {} already in use, trying port {}",
+                        old_port, self.port
+                    );
+                }
+                Err(e) => {
+                    return Err(ServerError::BindFailed {
+                        addr: addr.to_string(),
+                        source: e,
+                    });
+                }
+            }
+        }
+    }
+
     /// WebSocket handler for live reload file change notifications.
     pub async fn websocket_handler(
         ws: WebSocketUpgrade,
