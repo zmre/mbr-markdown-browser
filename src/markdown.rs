@@ -413,4 +413,22 @@ mod tests {
         assert!(html.contains("pdf-embed"));
         assert!(html.contains("<img"));
     }
+
+    #[tokio::test]
+    async fn test_vid_shortcode() {
+        let md = r#"{{ vid(path="test/video.mp4") }}"#;
+        let html = render_markdown(md).await;
+        println!("Output HTML: {}", &html);
+        assert!(html.contains("<video"), "Should contain video element");
+        assert!(html.contains("/videos/test/video.mp4"), "Should contain video path");
+    }
+
+    #[tokio::test]
+    async fn test_vid_shortcode_with_spaces() {
+        let md = r#"{{ vid(path="Eric Jones/Eric Jones - Metal 3.mp4")}}"#;
+        let html = render_markdown(md).await;
+        println!("Output HTML: {}", &html);
+        assert!(html.contains("<video"), "Should contain video element");
+        assert!(html.contains("/videos/Eric%20Jones"), "Should contain URL-encoded path");
+    }
 }

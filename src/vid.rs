@@ -8,7 +8,9 @@ static TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Invalid TAG_RE regex pattern")
 });
 static KV_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\b(?P<key>\w+)\s*=\s*["'"](?P<val>[^'""]*)["'"]"#)
+    // Match key="value" pairs, supporting both straight quotes (") and
+    // curly/smart quotes (" " U+201C/U+201D) from pulldown-cmark's smart punctuation
+    Regex::new(r#"\b(?P<key>\w+)\s*=\s*["'""\u{201C}\u{201D}](?P<val>[^'""]*?)["'""\u{201C}\u{201D}]"#)
         .expect("Invalid KV_RE regex pattern")
 });
 static EXTENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -284,5 +286,19 @@ mod tests {
         assert!(start.is_none());
         assert!(end.is_none());
         assert_eq!(url, "foo.mp4");
+    }
+}
+
+#[cfg(test)]
+mod markdown_integration_tests {
+    use super::*;
+    
+    #[test]
+    fn test_from_vid_with_spaces_in_path() {
+        let input = r#"{{ vid(path="Eric Jones/Eric Jones - Metal 3.mp4")}}"#;
+        let vid = Vid::from_vid(input).unwrap();
+        println!("URL: {}", &vid.url);
+        assert!(vid.url.contains("/videos/"));
+        assert!(vid.url.contains("Eric%20Jones"));  // spaces should be URL-encoded
     }
 }

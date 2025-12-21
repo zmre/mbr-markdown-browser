@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**mbr** (markdown browser) is a Rust application that serves as a markdown previewer, browser, and (eventually) static site generator. It renders markdown files on-the-fly via a local web server, supports navigation between markdown files, browsing by tags/folders, and searching. The key principle is that any markdown repository can customize its UI via a `.mbr/` folder.
+**mbr** (markdown browser) is a Rust application that serves as a markdown previewer, browser, and static site generator. It renders markdown files on-the-fly via a local web server, supports navigation between markdown files, browsing by tags/folders, and searching. The key principle is that any markdown repository can customize its UI via a `.mbr/` folder.
 
 ## READ SKILLS (MANDATORY)
 
@@ -26,20 +26,26 @@ cargo run -- -s README.md
 # Run with GUI window (launches native browser via wry/tao)
 cargo run -- -g README.md
 
+# Generate static site (outputs to build/ folder)
+cargo run -- -b /path/to/markdown/repo
+
+# Generate static site to custom output directory
+cargo run -- -b --output ./public /path/to/markdown/repo
+
 # Development with auto-reload
 cargo watch -q -c -x 'run --release -- -s README.md'
 ```
 
 ## Testing
 
-The project has comprehensive test coverage with 108 tests:
+The project has comprehensive test coverage with ~150 tests:
 
 ```bash
 # Run all tests
 cargo test
 
 # Run specific test modules
-cargo test --lib                    # Unit tests (80 tests)
+cargo test --lib                    # Unit tests (~120 tests)
 cargo test --test server_integration # Integration tests (18 tests)
 
 # Run with output
@@ -50,8 +56,8 @@ cargo test -- --nocapture
 
 | Location | Description | Count |
 |----------|-------------|-------|
-| `src/*/tests` | Unit tests for each module | 59 |
-| `src/*/proptests` | Property-based tests (proptest) | 21 |
+| `src/*/tests` | Unit tests for each module | ~80 |
+| `src/*/proptests` | Property-based tests (proptest) | ~25 |
 | `src/main.rs` | URL path builder tests | 7 |
 | `tests/server_integration.rs` | HTTP integration tests | 18 |
 | Doc tests | Code examples in documentation | 3 |
@@ -82,16 +88,17 @@ Built components are placed in `dist/` and compiled into the binary via `include
 |--------|---------|
 | `main.rs` | Entry point, CLI mode selection, `build_url_path()` |
 | `lib.rs` | Library crate exports for integration tests |
-| `cli.rs` | Clap argument parsing (-s server, -g gui) |
+| `cli.rs` | Clap argument parsing (-s server, -g gui, -b build) |
 | `config.rs` | Figment-based config from `.mbr/config.toml` + env vars (`MBR_*`) |
-| `errors.rs` | Error types (`MbrError`, `ConfigError`) |
+| `errors.rs` | Error types (`MbrError`, `ConfigError`, `BuildError`) |
 | `server.rs` | Axum web server - routes, static file serving, markdown rendering |
+| `build.rs` | Static site generator - parallel HTML generation, asset symlinking |
 | `path_resolver.rs` | Pure path resolution logic (`ResolvedPath` enum) |
 | `markdown.rs` | pulldown-cmark markdown parsing with YAML frontmatter extraction |
 | `templates.rs` | Tera template engine - renders markdown into HTML wrapper |
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
 | `browser.rs` | Native GUI window using wry/tao with devtools |
-| `vid.rs` | Video embed handling with VidStack player |
+| `vid.rs` | Video embed handling with VidStack player and shortcodes |
 | `oembed.rs` | Auto-embed for bare URLs in markdown |
 | `html.rs` | Custom HTML output for pulldown-cmark |
 
@@ -186,6 +193,55 @@ Users override defaults by creating files in their markdown repo's `.mbr/` folde
 - `.mbr/theme.css` - CSS theme
 - `.mbr/user.css` - Additional user styles
 - `.mbr/components/*.js` - Component overrides
+
+### Markdown Extensions
+
+**Vid Shortcode:**
+Embed videos with the `{{ vid(...) }}` shortcode:
+```markdown
+{{ vid(path="videos/demo.mp4") }}
+{{ vid(path="Eric Jones/Eric Jones - Metal 3.mp4", start="10", end="30", caption="Great performance") }}
+```
+
+The shortcode supports:
+- `path` - Video path relative to `/videos/` folder (required)
+- `start` / `end` - Playback timestamps (optional)
+- `caption` - Figure caption (optional)
+
+**Note:** Pulldown-cmark's smart punctuation converts `"` to curly quotes (`"` `"`), so the regex supports both straight and curly quotes.
+
+### Static Site Generation
+
+The `-b/--build` flag generates a complete static site:
+
+```bash
+mbr -b /path/to/markdown/repo              # Output to ./build
+mbr -b --output ./public /path/to/repo      # Custom output directory
+```
+
+**Build process:**
+1. Renders all markdown files to HTML
+2. Generates section pages for directories
+3. Symlinks assets (images, PDFs, videos) - macOS/Linux only
+4. Copies `.mbr/` folder with default files
+5. Creates `.mbr/site.json` with full site metadata
+
+**Output structure:**
+```
+build/
+├── index.html              # Home page
+├── README/index.html       # /README/ → README.md
+├── docs/
+│   ├── index.html          # Section page
+│   └── guide/index.html    # docs/guide.md
+├── images/ → ../images     # Symlinked assets
+└── .mbr/
+    ├── site.json           # Generated site metadata
+    ├── theme.css           # Default or custom
+    └── *.js/*.css          # Built-in assets
+```
+
+**Note:** Static site generation is not supported on Windows (symlinks require admin).
 
 ## Key Dependencies
 

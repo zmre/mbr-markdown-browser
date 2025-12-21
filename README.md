@@ -20,13 +20,51 @@ Also, some of my notes have a lot of embedded videos in them so I want these to 
 Performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.
 
 
+## Installation
+
+### Using Nix (Recommended)
+
+```bash
+# Run directly without installing
+nix run github:zmre/mbr -- -s /path/to/your/notes
+
+# Build and install
+nix build github:zmre/mbr
+./result/bin/mbr -g /path/to/your/notes
+
+# Add to your flake
+{
+  inputs.mbr.url = "github:zmre/mbr";
+}
+# Then use inputs.mbr.packages.${system}.default
+```
+
+### Using Cargo
+
+```bash
+cargo install --git https://github.com/zmre/mbr
+```
+
 ## Running
 
-For now, you always need to specify a markdown file, even if starting in server mode.
+Specify a markdown file or directory to start:
 
-* `mbr README.md` will process the markdown and print it to the terminal
-* `mbr -s README.md` will start the web server and point you at <http://127.0.0.1:5200/README/>
-* `mbr -g README.md` will launch a window and the web server with the window automatically showing the correct URL
+```bash
+# Print rendered HTML to stdout
+mbr README.md
+
+# Start web server at http://127.0.0.1:5200/
+mbr -s /path/to/notes
+
+# Launch native GUI window with web server
+mbr -g /path/to/notes
+
+# Generate static site to ./build folder
+mbr -b /path/to/notes
+
+# Generate static site to custom output
+mbr -b --output ./public /path/to/notes
+```
 
 https://www.youtube.com/watch?v=gz9BRl7DVSM
 
@@ -45,7 +83,7 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 1. [x] Investigate adding a menubar on mac and allowing for shortcut keys like cmd-q and cmd-w to work.  If all that works okay, see about setting up an About screen and application icon.  We want to be able to launch our markdown viewer both from the commandline (eg, `mbr /path/to/repo/or/md/file`) or via GUI.  But this is cross platform so we want it to work in expected ways on mac, linux, and windows using compile time flags to manage what code is needed for the application wrapper on each platform.  If there are multiple possible approaches to this, please research deeply and present pro's and con's and recommendations before moving forward.
 2. [x] Refactor the html template files a bit so we don't have duplicated code making use of includes for common portions (header, footer, etc.) via tera. The shared files don't need to be exposed as URLs.
 3. [x] Right now, if we load a markdown file, in the html head we have json with details about the underlying markdown in json, which can be used by components on the page. But the raw markdown is included in that json and we try to then delete it after the fact on page load to free memory, but this is inefficient. We should filter out the markdown before adding the file details to the header.
-4. [x] Site build functionality: in addition to being a live mardown previewer and browser, this tool can be used as a static site builder.  We want to be able to generate html for all markdown and every folder (section that has any markdown in it or in a folder below it) in a repo.  When calling the command line tool, it will generate html for every markdown file and assemble them into a `build/` folder which could be copied somewhere else.  We will fail for now if this is called on Windows, but on MacOS and Linux, we will symlink all assets in the build directory back to their originals. In this way any and all images, pdfs, videos, etc., will be accessible if serving the build dir or if copying it to a server, but we won't waste precious disk space (or time) copying those files.  If a repo being built has a `.mbr` folder, it is also linked in to the build. Things in the static folder, if any, are symlinked but overlayed in the folder hierarchy. If there's a conflict, static folder loses.
+4. [x] Site build functionality: in addition to being a live markdown previewer and browser, this tool can be used as a static site builder. Generates HTML for all markdown files and directories, symlinks assets (macOS/Linux only), copies `.mbr/` folder with defaults, and creates `site.json`. Use `-b/--build` flag with optional `--output` for custom directory. @done(2025-12-20)
 5. [ ] Search functionality: this app is not just a markdown previewer, but a repository browser. We want to be able to link between files, browse, and search the repo.  Search is the first time we will have a divergence in build behavior versus live server or gui behavior. We also need to give the frontend a way to discern whether there's a dynamic server available (probably as part of the JSON in the <head>) or not so the frontend search widget can adjust as needed.  We want faceted search with prioritized fields basically amounting to: markdown filename/path and title are highest priority. Next highest are the frontmatter fields (tags or category or date or anything else that is there). Finally the contents. As a nice to have, headers inside markdown should be considered more important than other text, but as runtime performance is critical, this may not be possible.  Additionally, we want to be able to search just markdown files and, optionally, ALL files, especially including searchable PDFs, VTT files with captions or chapters, and paths of other files like images. Filetype therefore should be another search facet. Never shell out to other tools. Despite there being two different ways to search depending on mode, search syntax and user experience must be the same. Another facet would be to search just under the current folder (for the file being viewed) or the whole repo.
   a. **Live Server Behavior**: For searching titles, for example, or pathnames, could simply use the preloaded (possibly -- or when it finishes loading) index of repo files and metadata. That may be possible for other frontmatter like tags, too. For body content, use the [ripgrep](https://crates.io/crates/ripgrep) crate to search through specified files / file types. There will be a POST endpoint for `/search?q=` which returns json for ordered results (with some limit, default 50) that returns URL path, title, and other frontmatter info for each file and, if available, a snippet excerpt.  Note: there may be a crate that handles some of these concerns well, but lets research it for how active the repo is, how well maintained, how broadly used, how long issues linger, and so forth before making decisions on build vs. using a crate.
   b. **Built Site Behavior**: In this case, search will be local. In fact, we can make parts of search local with live server behavior, too, to keep the experiences as similar as possible.  For full content search where the server will use ripgrep in the repo, the built site will make use of a client-side index that is created at site build time using [Microsoft Docfind](https://github.com/microsoft/docfind/tree/main).
@@ -136,5 +174,5 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 				* Or just make the client-side search really good?
 		* [ ] Track links out and links in between files
 * Misc
-	* [ ] Auto handle address already in use error by incrementing the port if we're running in GUI mode
+	* [x] Auto handle address already in use error by incrementing the port if we're running in GUI mode @done(2025-12-19)
   * [ ] Make a quicklook plugin that shows this!  That would be epic. Might need to inline all the dependencies?
