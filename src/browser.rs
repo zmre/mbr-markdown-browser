@@ -1,47 +1,239 @@
 extern crate image;
 use crate::errors::BrowserError;
+use muda::{
+    accelerator::{Accelerator, Code, Modifiers},
+    AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tao::{
-    event::{DeviceEvent, Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
 use wry::WebViewBuilder;
 
+/// Custom user events for the event loop
+enum UserEvent {
+    MenuEvent(MenuEvent),
+}
+
+/// About metadata for the application
+fn about_metadata() -> AboutMetadata {
+    AboutMetadata {
+        name: Some("mbr".to_string()),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        short_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        authors: Some(vec!["zmre".to_string()]),
+        comments: Some("A markdown viewer and browser".to_string()),
+        copyright: Some("Copyright © 2025".to_string()),
+        license: Some("MIT".to_string()),
+        website: Some("https://github.com/zmre/mbr".to_string()),
+        website_label: Some("GitHub".to_string()),
+        ..Default::default()
+    }
+}
+
+/// Build the application menu bar with standard menus
+/// On macOS, creates proper app menu with About, Services, Hide, Quit
+/// On Windows/Linux, puts About in Help menu and Quit in File menu
+fn build_menu_bar() -> (Menu, MenuItem, Submenu) {
+    let menu_bar = Menu::new();
+
+    // macOS: First menu is the app menu (named after the app)
+    // Contains About, Services, Hide, Hide Others, Show All, Quit
+    #[cfg(target_os = "macos")]
+    let app_menu = {
+        let app_menu = Submenu::new("mbr", true);
+        app_menu
+            .append_items(&[
+                &PredefinedMenuItem::about(None, Some(about_metadata())),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::services(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::hide(None),
+                &PredefinedMenuItem::hide_others(None),
+                &PredefinedMenuItem::show_all(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::quit(None),
+            ])
+            .expect("Failed to append app menu items");
+        app_menu
+    };
+
+    // File menu
+    let file_menu = Submenu::new("&File", true);
+    let reload_item = MenuItem::with_id(
+        "reload",
+        "&Reload",
+        true,
+        Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyR)),
+    );
+
+    #[cfg(target_os = "macos")]
+    file_menu
+        .append_items(&[
+            &reload_item,
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::close_window(Some("Close Window")),
+        ])
+        .expect("Failed to append file menu items");
+
+    #[cfg(not(target_os = "macos"))]
+    file_menu
+        .append_items(&[
+            &reload_item,
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::close_window(Some("Close Window")),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::quit(None),
+        ])
+        .expect("Failed to append file menu items");
+
+    // Edit menu with standard clipboard operations
+    let edit_menu = Submenu::new("&Edit", true);
+    edit_menu
+        .append_items(&[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ])
+        .expect("Failed to append edit menu items");
+
+    // View menu
+    let view_menu = Submenu::new("&View", true);
+    let devtools_item = MenuItem::with_id(
+        "devtools",
+        "Toggle Developer Tools",
+        true,
+        Some(Accelerator::new(
+            Some(Modifiers::SUPER | Modifiers::ALT),
+            Code::KeyI,
+        )),
+    );
+    view_menu
+        .append_items(&[
+            &PredefinedMenuItem::fullscreen(None),
+            &PredefinedMenuItem::separator(),
+            &devtools_item,
+        ])
+        .expect("Failed to append view menu items");
+
+    // Window menu
+    let window_menu = Submenu::new("&Window", true);
+    window_menu
+        .append_items(&[
+            &PredefinedMenuItem::minimize(None),
+            &PredefinedMenuItem::maximize(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::bring_all_to_front(None),
+        ])
+        .expect("Failed to append window menu items");
+
+    // Help menu - only needed on non-macOS for About
+    #[cfg(not(target_os = "macos"))]
+    let help_menu = {
+        let help_menu = Submenu::new("&Help", true);
+        help_menu
+            .append_items(&[&PredefinedMenuItem::about(None, Some(about_metadata()))])
+            .expect("Failed to append help menu items");
+        help_menu
+    };
+
+    // Build menu bar - order matters, especially on macOS
+    #[cfg(target_os = "macos")]
+    menu_bar
+        .append_items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
+        .expect("Failed to append menus to menu bar");
+
+    #[cfg(not(target_os = "macos"))]
+    menu_bar
+        .append_items(&[
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ])
+        .expect("Failed to append menus to menu bar");
+
+    // On macOS, set the Window menu as the windows menu for proper window management
+    #[cfg(target_os = "macos")]
+    window_menu.set_as_windows_menu_for_nsapp();
+
+    (menu_bar, reload_item, window_menu)
+}
+
 pub fn launch_url(url: &str) -> Result<(), BrowserError> {
-    let event_loop = EventLoop::new();
+    // Create event loop with user events for menu handling
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+
+    // Set up menu event handler
+    let proxy = event_loop.create_proxy();
+    MenuEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::MenuEvent(event));
+    }));
+
+    // Build the menu bar
+    let (menu_bar, reload_item, _window_menu) = build_menu_bar();
+
+    // Initialize menu for macOS (global app menu)
+    #[cfg(target_os = "macos")]
+    menu_bar.init_for_nsapp();
+
     let icon = load_icon()?;
     let window = WindowBuilder::new()
         .with_title("mbr")
-        // At present, this only does anything on Windows and Linux, so if you want to save load
-        // time, you can put icon loading behind a function that returns `None` on other platforms.
         .with_window_icon(Some(icon))
-        // .with_titlebar_transparent(true) // requires a feature that uses private apis
         .build(&event_loop)
         .map_err(BrowserError::WindowCreationFailed)?;
 
-    // with_window_icon(self, window_icon: Option<Icon>) -> Self
-    // window.set_title("New Window Title");
-    // window_builder.with_decorations(false);
+    // Initialize menu for Windows (per-window menu bar)
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use tao::platform::windows::WindowExtWindows;
+        menu_bar.init_for_hwnd(window.hwnd() as isize);
+    }
 
-    let builder = WebViewBuilder::new().with_devtools(true).with_url(url);
+    // Initialize menu for Linux (GTK-based)
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix;
+        menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
+    }
+
+    let url_owned = url.to_string();
+    let builder = WebViewBuilder::new().with_devtools(true).with_url(&url_owned);
 
     #[cfg(not(target_os = "linux"))]
-    let _webview = builder
+    let webview = builder
         .build(&window)
         .map_err(BrowserError::WebViewCreationFailed)?;
     #[cfg(target_os = "linux")]
-    let _webview = builder
-        .build_gtk(window.gtk_window())
-        .map_err(BrowserError::WebViewCreationFailed)?;
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        builder
+            .build_gtk(window.gtk_window())
+            .map_err(BrowserError::WebViewCreationFailed)?
+    };
 
-    // webview.open_devtools();
+    // Store reload item ID for event matching
+    let reload_id = reload_item.id().clone();
 
-    event_loop.run(|event, _target, control_flow| {
-        // ControlFlow::Wait pauses the event loop if no events are available to process.
-        // This is ideal for non-game applications that only update in response to user
-        // input, and uses significantly less power/CPU time than ControlFlow::Poll.
+    event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
+
         match event {
+            Event::UserEvent(UserEvent::MenuEvent(menu_event)) => {
+                // Handle custom menu items
+                if menu_event.id == reload_id {
+                    tracing::debug!("Reload requested via menu");
+                    let _ = webview.load_url(&url_owned);
+                }
+                // Note: PredefinedMenuItem events (quit, close, etc.) are handled automatically
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
@@ -61,12 +253,6 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
             } => {
                 tracing::trace!("Window keyboard input: {:?}", &event);
             }
-            Event::DeviceEvent {
-                event: DeviceEvent::Key(key),
-                ..
-            } => {
-                tracing::trace!("Device keyboard input: {:?}", &key);
-            }
             _ => (),
         }
     });
@@ -74,14 +260,10 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
 
 fn load_icon() -> Result<Icon, BrowserError> {
     let (icon_rgba, icon_width, icon_height) = {
-        // alternatively, you can embed the icon in the binary through `include_bytes!` macro and use `image::load_from_memory`
         let image_bytes = include_bytes!("../mbr-icon.png");
         let image = image::load_from_memory(image_bytes)
             .map_err(|e| BrowserError::IconLoadFailed(e.to_string()))?
             .into_rgba8();
-        // let image = image::open(path)
-        //     .expect("Failed to open icon path")
-        //     .into_rgba8();
         let (width, height) = image.dimensions();
         let rgba = image.into_raw();
         (rgba, width, height)

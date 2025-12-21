@@ -53,6 +53,10 @@ wry = {version = "0.53", default-features=true, features = ["devtools", "fullscr
 
 image = "0.25.8"
 tao = "0.34.0"
+muda = "0.17"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+muda = { version = "0.17", features = ["gtk", "libxdo"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
