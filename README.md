@@ -1,9 +1,10 @@
 ---
 title: README for mbr, the markdown browser
-keyword: supercalifragilistic
 ---
 
-# mbr - markdown browser
+# mbr - markdown browser - ALPHA
+
+**THIS IS A WORK IN PROGRESS AND NOT YET STABLE**
 
 The goal of this is to preview markdown under an assumption that there are other markdown files around and we want to be able to jump around between them by following links, browsing tags, browsing folders, and searching. Ultimately, things like backlinks, in-document table of contents, and more will be available.  So first it's a markdown previewer, but then a markdown browser for navigating markdown files. And finally, I want it to be an optional static site generator.
 
