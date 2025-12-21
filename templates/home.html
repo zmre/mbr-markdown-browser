@@ -1,65 +1,13 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="/.mbr/pico.min.css" />
-    <title>{{current_path | default(value="Directory") | safe}}</title>
-    <link href="/.mbr/pico.min.css" rel="stylesheet" />
-    <link href="/.mbr/theme.css" rel="stylesheet" />
-    <link href="/.mbr/user.css" rel="stylesheet" />
+{% include "_head.html" %}
+    <title>{{current_path | default(value="Home") | safe}}</title>
   </head>
   <body>
-    <header class="container">
-      <nav aria-label="breadcrumb" role="navigation">
-        <ul>
-          {% for crumb in breadcrumbs %}
-          <li>
-            <small><a href="{{ crumb.url }}">{{ crumb.name }}</a></small>
-          </li>
-          {% endfor %}
-          <li><small>{{ current_dir_name | default(value="Directory") }}</small></li>
-        </ul>
-      </nav>
-      <nav role="navigation" aria-label="Main menu">
-        <ul>
-          <li>
-            <details class="dropdown">
-              <summary role="button" class="outline contrast">
-                <div class="mbr-hamburger-button" />
-              </summary>
-              <ul>
-                <li>Browse</li>
-                <li>Tags</li>
-              </ul>
-            </details>
-          </li>
-        </ul>
-        <ul>
-          <li><strong>{{ current_dir_name | default(value="Directory Listing") }}</strong></li>
-        </ul>
-        <ul>
-          <details class="dropdown">
-            <summary role="button" class="outline contrast">
-              <div class="mbr-search-button" />
-            </summary>
-            <ul style="width: 35ch" dir="rtl">
-              <li>
-                <input
-                  type="search"
-                  name="search"
-                  placeholder="Search"
-                  aria-label="Search"
-                />
-              </li>
-            </ul>
-          </details>
-        </ul>
-      </nav>
-    </header>
+{% include "_nav.html" %}
     <main id="wrapper" class="container">
-      <h1>{{ current_dir_name | default(value="Directory") }}</h1>
+      <h1>{{ current_dir_name | default(value="Home") }}</h1>
 
       {% if subdirs %}
       <section>
@@ -68,7 +16,7 @@
           {% for subdir in subdirs %}
           <li>
             <a href="{{ subdir.url_path }}">
-              <strong>📁 {{ subdir.name }}</strong>
+              <strong>{{ subdir.name }}</strong>
             </a>
           </li>
           {% endfor %}
@@ -119,8 +67,7 @@
         </ul>
       </nav>
     </footer>
-    <mbr-browse></mbr-browse>
-    <mbr-live-reload></mbr-live-reload>
+{% include "_footer.html" %}
   </body>
-  <script defer type="module" src="/.mbr/components/mbr-components.js"></script>
+{% include "_scripts.html" %}
 </html>

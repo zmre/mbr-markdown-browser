@@ -148,11 +148,41 @@ Components in `components/src/`:
 
 These are Lit-based custom elements using decorators (`@customElement`, `@state`, etc.) and compile to ES modules loaded by the HTML template.
 
+### Template System
+
+The project uses Tera templates with a partial-based architecture. Templates are in `templates/`:
+
+**Main Templates:**
+- `index.html` - Markdown page template
+- `section.html` - Directory listing template (subdirectories)
+- `home.html` - Home/root directory listing template
+
+**Partial Templates (underscore prefix, not exposed as URLs):**
+- `_head.html` - Base head with meta tags and core CSS
+- `_head_markdown.html` - Extended head for markdown pages (includes `_head.html`)
+- `_nav.html` - Navigation header with breadcrumbs and menus
+- `_footer.html` - Page footer with web components
+- `_scripts.html` - Base script includes
+- `_scripts_markdown.html` - Extended scripts for markdown (hljs, mermaid, vidstack)
+
+**Tera Template Gotchas:**
+- Chained `default()` filters don't work as expected for variable fallbacks. Use conditionals instead:
+  ```jinja
+  {# BAD - fails if current_dir_name doesn't exist #}
+  {{ title | default(value=current_dir_name) | default(value="") }}
+
+  {# GOOD - handles missing variables properly #}
+  {% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}
+  ```
+- Use `{% if varname %}` to check variable existence before using
+- `{{ __tera_context | safe }}` outputs the full render context as JSON
+
 ### Customization Points
 
 Users override defaults by creating files in their markdown repo's `.mbr/` folder:
 - `.mbr/config.toml` - Configuration overrides
 - `.mbr/index.html` - Main template
+- `.mbr/*.html` - Any partial templates
 - `.mbr/theme.css` - CSS theme
 - `.mbr/user.css` - Additional user styles
 - `.mbr/components/*.js` - Component overrides
@@ -165,6 +195,7 @@ Users override defaults by creating files in their markdown repo's `.mbr/` folde
 - **tera** - Template engine
 - **figment** - Configuration management
 - **wry/tao** - Native webview GUI
+- **muda** - Native menu bar (macOS)
 - **papaya** - Concurrent hash maps
 - **rayon** - Parallel iteration for repo scanning
 - **proptest** - Property-based testing (dev)
@@ -173,3 +204,31 @@ Users override defaults by creating files in their markdown repo's `.mbr/` folde
 **Frontend:**
 - **lit** - Web components framework
 - **vite** - Build tool
+
+## macOS App Bundle
+
+The project includes a native macOS app bundle in `macos/`:
+- `MBR.app/Contents/MacOS/mbr` - Binary (symlinked/copied during build)
+- `MBR.app/Contents/Resources/AppIcon.icns` - Application icon
+- `MBR.app/Contents/Info.plist` - App metadata
+
+The app uses **muda** crate for native menubar with standard macOS keyboard shortcuts (Cmd+Q quit, Cmd+W close window). Platform-specific code is gated with `#[cfg(target_os = "macos")]`.
+
+## Nix Packaging
+
+The project uses Nix flakes for reproducible builds:
+
+```bash
+# Build the binary and macOS app bundle
+nix build .#mbr
+
+# Create release archives (tar.gz for all platforms, zip for macOS)
+nix run .#release
+
+# Check flake validity
+nix flake check
+```
+
+The flake uses `rustPlatform.buildRustPackage` with a `postInstall` phase that copies the macOS app bundle and performs ad-hoc code signing. Release archives are created in `release/`.
+
+**Note:** Code signing verification may fail in Nix sandbox environment due to metadata changes, but the app still runs correctly.

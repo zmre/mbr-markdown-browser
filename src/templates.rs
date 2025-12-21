@@ -89,6 +89,20 @@ impl Templates {
 }
 
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
+    // Partials (underscore prefix indicates internal-only templates)
+    ("_head.html", include_str!("../templates/_head.html")),
+    (
+        "_head_markdown.html",
+        include_str!("../templates/_head_markdown.html"),
+    ),
+    ("_nav.html", include_str!("../templates/_nav.html")),
+    ("_footer.html", include_str!("../templates/_footer.html")),
+    ("_scripts.html", include_str!("../templates/_scripts.html")),
+    (
+        "_scripts_markdown.html",
+        include_str!("../templates/_scripts_markdown.html"),
+    ),
+    // Main templates
     ("index.html", include_str!("../templates/index.html")),
     ("section.html", include_str!("../templates/section.html")),
     ("home.html", include_str!("../templates/home.html")),

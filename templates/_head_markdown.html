@@ -1,0 +1,18 @@
+{% include "_head.html" %}
+    <link rel="stylesheet" href="/.mbr/vidstack.player.css" />
+    <link rel="stylesheet" href="/.mbr/vidstack.plyr.css" />
+    <link rel="stylesheet" href="/.mbr/hljs.dark.css" />
+    {% if tags %}
+    <meta name="keywords" content="{{tags | safe}}" />
+    {% elif taxonomy.tags %}
+    <meta name="keywords" content="{{taxonomy.tags | safe}}" />
+    {% endif %}
+    <title>{{title | default(value="") | safe}}</title>
+    <meta name="title" content="{{title | default(value="") | safe}}" />
+    <meta name="description" content="{{description | default(value="") | safe}}" />
+    <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" />
+    <script>
+      // Allow page scripts to see all the frontmatter to use as they see fit
+      window.frontmatter = {{ __tera_context | safe }} ;
+      window.frontmatter.markdown = null; // cannot filter this out except after the fact, but this will save memory
+    </script>

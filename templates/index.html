@@ -1,82 +1,10 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="/.mbr/pico.min.css" />
-    <title>mbr</title>
-    <link href="/.mbr/pico.min.css" rel="stylesheet" />
-    <link href="/.mbr/theme.css" rel="stylesheet" />
-    <link href="/.mbr/user.css" rel="stylesheet" />
-    <link rel="stylesheet" href="/.mbr/vidstack.player.css" />
-    <link rel="stylesheet" href="/.mbr/vidstack.plyr.css" />
-    <link rel="stylesheet" href="/.mbr/hljs.dark.css" />
-
-    {% if tags %}
-    <meta name="keywords" content="{{tags | safe}}" />
-    {% elif taxonomy.tags %}
-    <meta name="keywords" content="{{taxonomy.tags | safe}}" />
-    {% endif %}
-    <title>{{title | default(value="") | safe}}</title>
-    <meta name="title" content="{{title | default(value="") | safe}}" />
-    <meta name="description" content="{{description | default(value="") | safe}}" />
-    <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" />
-    <script>
-      // Allow page scripts to see all the frontmatter to use as they see fit
-      window.frontmatter = {{ __tera_context | safe }} ;
-      window.frontmatter.markdown = null; // cannot filter this out except after the fact, but this will save memory
-    </script>
+{% include "_head_markdown.html" %}
   </head>
   <body>
-    <header class="container">
-      <nav aria-label="breadcrumb" role="navigation">
-        <ul>
-          <li>
-            <small><a href="#">Home</a></small>
-          </li>
-          <li>
-            <small><a href="#">Services</a></small>
-          </li>
-          <li><small>Design</small></li>
-        </ul>
-      </nav>
-      <nav role="navigation" aria-label="Main menu">
-        <ul>
-          <li>
-            <details class="dropdown">
-              <summary role="button" class="outline contrast">
-                <div class="mbr-hamburger-button" />
-              </summary>
-              <ul>
-                <li>Browse</li>
-                <li>Tags</li>
-              </ul>
-            </details>
-          </li>
-        </ul>
-        <ul>
-          <li><strong>{{title | default(value="")}}</strong></li>
-        </ul>
-        <ul>
-          <details class="dropdown">
-            <summary role="button" class="outline contrast">
-              <div class="mbr-search-button" />
-            </summary>
-            <ul style="width: 35ch" dir="rtl">
-              <li>
-                <input
-                  type="search"
-                  name="search"
-                  placeholder="Search"
-                  aria-label="Search"
-                />
-              </li>
-            </ul>
-          </details>
-        </ul>
-      </nav>
-    </header>
+{% include "_nav.html" %}
     <main id="wrapper" class="container">{{ markdown | safe}}</main>
     <footer class="container">
       <nav>
@@ -90,38 +18,7 @@
         </ul>
       </nav>
     </footer>
-    <mbr-browse></mbr-browse>
-    <mbr-live-reload></mbr-live-reload>
+{% include "_footer.html" %}
   </body>
-  <script defer type="module" src="/.mbr/vid.js"></script>
-  <script defer type="module" src="/.mbr/components/mbr-components.js"></script>
-  <script defer src="/.mbr/hljs.js"></script>
-  <script defer src="/.mbr/hljs.lang.javascript.js"></script>
-  <script defer src="/.mbr/hljs.lang.typescript.js"></script>
-  <script defer src="/.mbr/hljs.lang.rust.js"></script>
-  <script defer src="/.mbr/hljs.lang.python.js"></script>
-  <script defer src="/.mbr/hljs.lang.bash.js"></script>
-  <script defer src="/.mbr/hljs.lang.java.js"></script>
-  <script defer src="/.mbr/hljs.lang.scala.js"></script>
-  <script defer src="/.mbr/hljs.lang.go.js"></script>
-  <script defer src="/.mbr/hljs.lang.ruby.js"></script>
-  <script defer src="/.mbr/hljs.lang.css.js"></script>
-  <script defer src="/.mbr/hljs.lang.json.js"></script>
-  <script defer src="/.mbr/hljs.lang.yaml.js"></script>
-  <script defer src="/.mbr/hljs.lang.xml.js"></script>
-  <script defer src="/.mbr/hljs.lang.sql.js"></script>
-  <script defer src="/.mbr/hljs.lang.dockerfile.js"></script>
-  <script defer src="/.mbr/hljs.lang.markdown.js"></script>
-  <script defer src="/.mbr/mermaid.min.js"></script>
-  <script>
-    // Wait for all deferred scripts to load before initializing
-    document.addEventListener('DOMContentLoaded', function() {
-      if (typeof hljs !== 'undefined') {
-        hljs.highlightAll();
-      }
-      if (typeof mermaid !== 'undefined') {
-        mermaid.initialize({ startOnLoad: true });
-      }
-    });
-  </script>
+{% include "_scripts_markdown.html" %}
 </html>

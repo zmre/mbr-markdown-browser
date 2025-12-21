@@ -1,0 +1,49 @@
+    <header class="container">
+      <nav aria-label="breadcrumb" role="navigation">
+        <ul>
+          {% if breadcrumbs %}
+          {% for crumb in breadcrumbs %}
+          <li>
+            <small><a href="{{ crumb.url }}">{{ crumb.name }}</a></small>
+          </li>
+          {% endfor %}
+          {% endif %}
+          <li><small>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</small></li>
+        </ul>
+      </nav>
+      <nav role="navigation" aria-label="Main menu">
+        <ul>
+          <li>
+            <details class="dropdown">
+              <summary role="button" class="outline contrast">
+                <div class="mbr-hamburger-button" />
+              </summary>
+              <ul>
+                <li>Browse</li>
+                <li>Tags</li>
+              </ul>
+            </details>
+          </li>
+        </ul>
+        <ul>
+          <li><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>
+        </ul>
+        <ul>
+          <details class="dropdown">
+            <summary role="button" class="outline contrast">
+              <div class="mbr-search-button" />
+            </summary>
+            <ul style="width: 35ch" dir="rtl">
+              <li>
+                <input
+                  type="search"
+                  name="search"
+                  placeholder="Search"
+                  aria-label="Search"
+                />
+              </li>
+            </ul>
+          </details>
+        </ul>
+      </nav>
+    </header>
