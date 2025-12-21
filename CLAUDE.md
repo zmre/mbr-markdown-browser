@@ -175,7 +175,7 @@ The project uses Tera templates with a partial-based architecture. Templates are
   {% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}
   ```
 - Use `{% if varname %}` to check variable existence before using
-- `{{ __tera_context | safe }}` outputs the full render context as JSON
+- `{{ frontmatter_json | safe }}` outputs frontmatter as JSON (excludes rendered markdown for efficiency)
 
 ### Customization Points
 

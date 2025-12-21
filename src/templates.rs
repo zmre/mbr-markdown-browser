@@ -37,11 +37,18 @@ impl Templates {
         frontmatter: HashMap<String, String>,
     ) -> Result<String, TemplateError> {
         tracing::debug!("frontmatter: {:?}", &frontmatter);
+
+        // Create JSON from frontmatter BEFORE adding markdown to context
+        // This avoids including the large markdown HTML in the frontmatter JSON
+        let frontmatter_json = serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string());
+
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
         context.insert("markdown", html);
+        context.insert("frontmatter_json", &frontmatter_json);
+
         let html_output = self.tera.render("index.html", &context).map_err(|e| {
             TemplateError::RenderFailed {
                 template_name: "index.html".to_string(),

@@ -12,7 +12,6 @@
     <meta name="description" content="{{description | default(value="") | safe}}" />
     <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" />
     <script>
-      // Allow page scripts to see all the frontmatter to use as they see fit
-      window.frontmatter = {{ __tera_context | safe }} ;
-      window.frontmatter.markdown = null; // cannot filter this out except after the fact, but this will save memory
+      // Frontmatter available to page scripts (excludes rendered markdown for efficiency)
+      window.frontmatter = {{ frontmatter_json | safe }};
     </script>
