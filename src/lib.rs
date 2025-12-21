@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod browser;
+pub mod build;
 pub mod cli;
 pub mod config;
 pub mod errors;
@@ -18,5 +19,6 @@ pub mod templates;
 pub mod vid;
 pub mod watcher;
 
+pub use build::{BuildStats, Builder};
 pub use config::Config;
-pub use errors::{ConfigError, MbrError};
+pub use errors::{BuildError, ConfigError, MbrError};

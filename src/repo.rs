@@ -93,8 +93,8 @@ pub struct MarkdownInfo {
 
 #[derive(Clone, Serialize)]
 pub struct OtherFileInfo {
-    raw_path: PathBuf,
-    url_path: String,
+    pub raw_path: PathBuf,
+    pub url_path: String,
     metadata: StaticFileMetadata,
 }
 

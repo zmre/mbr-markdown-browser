@@ -1,0 +1,535 @@
+//! Static site generation module for mbr.
+//!
+//! Generates static HTML files from markdown, creating a deployable site.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use walkdir::WalkDir;
+
+use crate::{
+    config::Config,
+    errors::BuildError,
+    markdown,
+    repo::{MarkdownInfo, Repo},
+    server::{generate_breadcrumbs, get_current_dir_name, get_parent_path, markdown_file_to_json, DEFAULT_FILES},
+    templates::Templates,
+};
+
+/// Statistics from a build run.
+#[derive(Debug, Default)]
+pub struct BuildStats {
+    pub markdown_pages: usize,
+    pub section_pages: usize,
+    pub assets_linked: usize,
+    pub duration: Duration,
+}
+
+/// Static site builder.
+pub struct Builder {
+    config: Config,
+    templates: Templates,
+    output_dir: PathBuf,
+    repo: Repo,
+}
+
+impl Builder {
+    /// Creates a new Builder instance.
+    pub fn new(config: Config, output_dir: PathBuf) -> Result<Self, BuildError> {
+        let templates = Templates::new(&config.root_dir)?;
+        let repo = Repo::init_from_config(&config);
+
+        Ok(Builder {
+            config,
+            templates,
+            output_dir,
+            repo,
+        })
+    }
+
+    /// Builds the static site.
+    pub async fn build(&self) -> Result<BuildStats, BuildError> {
+        let start = Instant::now();
+        let mut stats = BuildStats::default();
+
+        // Scan repository for all files
+        self.repo.scan_all().map_err(|e| {
+            crate::errors::RepoError::ScanFailed {
+                path: self.config.root_dir.clone(),
+                source: std::io::Error::other(e.to_string()),
+            }
+        })?;
+
+        // Prepare output directory
+        self.prepare_output_dir()?;
+
+        // Render all markdown files
+        stats.markdown_pages = self.render_markdown_files().await?;
+
+        // Generate directory/section pages
+        stats.section_pages = self.render_directory_pages().await?;
+
+        // Symlink assets (images, PDFs, etc.)
+        stats.assets_linked = self.symlink_assets()?;
+
+        // Handle static folder overlay
+        self.handle_static_folder()?;
+
+        // Handle .mbr folder (copy, write defaults, generate site.json)
+        self.handle_mbr_folder()?;
+
+        stats.duration = start.elapsed();
+        Ok(stats)
+    }
+
+    /// Creates or cleans the output directory.
+    fn prepare_output_dir(&self) -> Result<(), BuildError> {
+        if self.output_dir.exists() {
+            fs::remove_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: e,
+            })?;
+        }
+        fs::create_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
+            path: self.output_dir.clone(),
+            source: e,
+        })?;
+        Ok(())
+    }
+
+    /// Renders all markdown files to HTML.
+    async fn render_markdown_files(&self) -> Result<usize, BuildError> {
+        let markdown_files: Vec<_> = self.repo.markdown_files.pin().iter()
+            .map(|(path, info)| (path.clone(), info.clone()))
+            .collect();
+
+        let count = markdown_files.len();
+
+        for (path, info) in markdown_files {
+            self.render_single_markdown(&path, &info).await?;
+        }
+
+        Ok(count)
+    }
+
+    /// Renders a single markdown file.
+    async fn render_single_markdown(&self, path: &Path, info: &MarkdownInfo) -> Result<(), BuildError> {
+        // Render markdown to HTML
+        let (mut frontmatter, html) = markdown::render(
+            path.to_path_buf(),
+            &self.config.root_dir,
+            self.config.oembed_timeout_ms,
+        )
+        .await
+        .map_err(|e| BuildError::RenderFailed {
+            path: path.to_path_buf(),
+            source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
+        })?;
+
+        // Add markdown_source to frontmatter
+        frontmatter.insert(
+            "markdown_source".to_string(),
+            info.url_path.clone(),
+        );
+
+        // Render through template
+        let html_output = self.templates.render_markdown(&html, frontmatter).await?;
+
+        // Determine output path: url_path → build/{url_path}/index.html
+        let url_path = info.url_path.trim_start_matches('/');
+        let output_path = if url_path.is_empty() || url_path == "/" {
+            self.output_dir.join("index.html")
+        } else {
+            self.output_dir.join(url_path).join("index.html")
+        };
+
+        // Create parent directories
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+
+        // Write HTML file
+        fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
+            path: output_path,
+            source: e,
+        })?;
+
+        Ok(())
+    }
+
+    /// Generates directory/section pages.
+    async fn render_directory_pages(&self) -> Result<usize, BuildError> {
+        // Collect all directories that need section pages
+        let mut directories: HashSet<PathBuf> = HashSet::new();
+
+        // Add root directory
+        directories.insert(PathBuf::new());
+
+        // Add all parent directories of markdown files
+        for (_, info) in self.repo.markdown_files.pin().iter() {
+            let url_path = info.url_path.trim_start_matches('/').trim_end_matches('/');
+            if !url_path.is_empty() {
+                let mut current = PathBuf::new();
+                for component in Path::new(url_path).parent().into_iter().flat_map(|p| p.components()) {
+                    if let std::path::Component::Normal(s) = component {
+                        current.push(s);
+                        directories.insert(current.clone());
+                    }
+                }
+            }
+        }
+
+        let count = directories.len();
+
+        for dir in directories {
+            self.render_directory_page(&dir).await?;
+        }
+
+        Ok(count)
+    }
+
+    /// Renders a single directory page.
+    async fn render_directory_page(&self, relative_dir: &Path) -> Result<(), BuildError> {
+        let is_root = relative_dir.as_os_str().is_empty();
+
+        // Build context for template
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Breadcrumbs
+        let breadcrumbs = generate_breadcrumbs(relative_dir);
+        context.insert("breadcrumbs".to_string(), serde_json::to_value(&breadcrumbs).unwrap_or_default());
+
+        // Current directory name
+        let current_dir_name = if is_root {
+            "Home".to_string()
+        } else {
+            get_current_dir_name(relative_dir)
+        };
+        context.insert("current_dir_name".to_string(), serde_json::Value::String(current_dir_name));
+
+        // Parent path
+        if let Some(parent) = get_parent_path(relative_dir) {
+            context.insert("parent_path".to_string(), serde_json::Value::String(parent));
+        }
+
+        // Collect files in this directory
+        let dir_prefix = if is_root {
+            "/".to_string()
+        } else {
+            format!("/{}/", relative_dir.to_string_lossy())
+        };
+
+        let mut files: Vec<serde_json::Value> = Vec::new();
+        let mut subdirs: HashSet<String> = HashSet::new();
+
+        for (_, info) in self.repo.markdown_files.pin().iter() {
+            let url_path = &info.url_path;
+
+            // Check if this file is in the current directory
+            if url_path.starts_with(&dir_prefix) {
+                let remainder = url_path.strip_prefix(&dir_prefix).unwrap_or(url_path);
+
+                // If there's no / in remainder, it's a direct child
+                if !remainder.trim_end_matches('/').contains('/') {
+                    files.push(markdown_file_to_json(&info));
+                } else {
+                    // It's in a subdirectory
+                    if let Some(subdir) = remainder.split('/').next() {
+                        if !subdir.is_empty() {
+                            subdirs.insert(subdir.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort files by title
+        files.sort_by(|a, b| {
+            let title_a = a.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let title_b = b.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            title_a.cmp(title_b)
+        });
+
+        context.insert("files".to_string(), serde_json::Value::Array(files));
+
+        // Convert subdirs to JSON array with name and url_path
+        let subdirs_json: Vec<serde_json::Value> = subdirs
+            .into_iter()
+            .map(|name| {
+                let url_path = if is_root {
+                    format!("/{}/", name)
+                } else {
+                    format!("{}{}/", dir_prefix, name)
+                };
+                serde_json::json!({
+                    "name": name,
+                    "url_path": url_path
+                })
+            })
+            .collect();
+        context.insert("subdirs".to_string(), serde_json::Value::Array(subdirs_json));
+
+        // Render template
+        let html_output = if is_root {
+            self.templates.render_home(context).await?
+        } else {
+            self.templates.render_section(context).await?
+        };
+
+        // Determine output path
+        let output_path = if is_root {
+            self.output_dir.join("index.html")
+        } else {
+            self.output_dir.join(relative_dir).join("index.html")
+        };
+
+        // Only write if file doesn't exist (markdown files take precedence)
+        if !output_path.exists() {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Creates symlinks for static assets.
+    fn symlink_assets(&self) -> Result<usize, BuildError> {
+        let other_files: Vec<_> = self.repo.other_files.pin().iter()
+            .map(|(_, info)| info.clone())
+            .collect();
+
+        let count = other_files.len();
+
+        for file_info in other_files {
+            let url_path = file_info.url_path.trim_start_matches('/');
+            let output_path = self.output_dir.join(url_path);
+
+            // Create parent directories
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            // Calculate relative path from output location to original file
+            let target = self.calculate_relative_symlink(&output_path, &file_info.raw_path)?;
+
+            // Create symlink (skip if already exists)
+            if !output_path.exists() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| BuildError::SymlinkFailed {
+                    target: target.clone(),
+                    link: output_path.clone(),
+                    source: e,
+                })?;
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Calculates a relative path for symlinking.
+    fn calculate_relative_symlink(&self, from: &Path, to: &Path) -> Result<PathBuf, BuildError> {
+        // Get the directory containing the symlink
+        let from_dir = from.parent().unwrap_or(from);
+
+        // Calculate how many levels up we need to go
+        let from_components: Vec<_> = from_dir.components().collect();
+        let to_components: Vec<_> = to.components().collect();
+
+        // Find common prefix length
+        let common_len = from_components.iter()
+            .zip(to_components.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        // Build the relative path
+        let mut relative = PathBuf::new();
+
+        // Add "../" for each level we need to go up
+        for _ in common_len..from_components.len() {
+            relative.push("..");
+        }
+
+        // Add the remaining path components from target
+        for component in to_components.iter().skip(common_len) {
+            relative.push(component.as_os_str());
+        }
+
+        Ok(relative)
+    }
+
+    /// Handles static folder overlay.
+    fn handle_static_folder(&self) -> Result<(), BuildError> {
+        let static_path = self.config.root_dir.join(&self.config.static_folder);
+
+        if !static_path.exists() || !static_path.is_dir() {
+            return Ok(());
+        }
+
+        for entry in WalkDir::new(&static_path)
+            .follow_links(true)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                let relative = entry.path().strip_prefix(&static_path)
+                    .map_err(|_| BuildError::CreateDirFailed {
+                        path: entry.path().to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::Other, "strip prefix failed"),
+                    })?;
+
+                let output_path = self.output_dir.join(relative);
+
+                // Only symlink if path doesn't already exist (asset wins over static)
+                if !output_path.exists() {
+                    if let Some(parent) = output_path.parent() {
+                        fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                            path: parent.to_path_buf(),
+                            source: e,
+                        })?;
+                    }
+
+                    let target = self.calculate_relative_symlink(&output_path, entry.path())?;
+
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&target, &output_path).map_err(|e| BuildError::SymlinkFailed {
+                        target,
+                        link: output_path,
+                        source: e,
+                    })?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handles .mbr folder: copy user files, write defaults, generate site.json.
+    fn handle_mbr_folder(&self) -> Result<(), BuildError> {
+        let mbr_output = self.output_dir.join(".mbr");
+
+        // Step 1: Create .mbr directory
+        fs::create_dir_all(&mbr_output).map_err(|e| BuildError::CreateDirFailed {
+            path: mbr_output.clone(),
+            source: e,
+        })?;
+
+        // Step 2: Copy repo's .mbr folder if it exists
+        let mbr_source = self.config.root_dir.join(".mbr");
+        if mbr_source.exists() && mbr_source.is_dir() {
+            self.copy_dir_recursive(&mbr_source, &mbr_output)?;
+        }
+
+        // Step 3: Write DEFAULT_FILES using route names (skip if file exists)
+        for (route, content, _mime_type) in DEFAULT_FILES.iter() {
+            // Skip empty files (like /user.css)
+            if content.is_empty() {
+                continue;
+            }
+
+            // Strip leading / from route to get filename
+            let filename = route.trim_start_matches('/');
+            let output_path = mbr_output.join(filename);
+
+            // Only write if file doesn't already exist (repo's .mbr/ wins)
+            if !output_path.exists() {
+                // Create parent directories for nested paths (e.g., components/mbr-components.js)
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
+                }
+
+                fs::write(&output_path, content).map_err(|e| BuildError::WriteFailed {
+                    path: output_path,
+                    source: e,
+                })?;
+            }
+        }
+
+        // Step 4: Generate site.json
+        let site_json = self.repo.to_json().map_err(|e| BuildError::RepoScan(
+            crate::errors::RepoError::JsonSerializeFailed(e)
+        ))?;
+        let site_json_path = mbr_output.join("site.json");
+        fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
+            path: site_json_path,
+            source: e,
+        })?;
+
+        Ok(())
+    }
+
+    /// Recursively copies a directory.
+    fn copy_dir_recursive(&self, from: &Path, to: &Path) -> Result<(), BuildError> {
+        for entry in WalkDir::new(from)
+            .follow_links(true)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let relative = entry.path().strip_prefix(from)
+                .map_err(|_| BuildError::CopyFailed {
+                    from: entry.path().to_path_buf(),
+                    to: to.to_path_buf(),
+                    source: std::io::Error::new(std::io::ErrorKind::Other, "strip prefix failed"),
+                })?;
+
+            let dest = to.join(relative);
+
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest).map_err(|e| BuildError::CreateDirFailed {
+                    path: dest.clone(),
+                    source: e,
+                })?;
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
+                }
+                fs::copy(entry.path(), &dest).map_err(|e| BuildError::CopyFailed {
+                    from: entry.path().to_path_buf(),
+                    to: dest.clone(),
+                    source: e,
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_stats_default() {
+        let stats = BuildStats::default();
+        assert_eq!(stats.markdown_pages, 0);
+        assert_eq!(stats.section_pages, 0);
+        assert_eq!(stats.assets_linked, 0);
+    }
+}

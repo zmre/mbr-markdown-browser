@@ -33,6 +33,9 @@ pub enum MbrError {
     #[error("Watcher error: {0}")]
     Watcher(#[from] WatcherError),
 
+    #[error("Build error: {0}")]
+    Build(#[from] BuildError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -198,6 +201,62 @@ pub enum WatcherError {
 
     #[error("Failed to send file change event")]
     BroadcastFailed,
+}
+
+/// Errors related to static site building.
+#[derive(Debug, Error)]
+pub enum BuildError {
+    #[error("Static site generation is not supported on Windows")]
+    UnsupportedPlatform,
+
+    #[error("Failed to create output directory: {}", path.display())]
+    CreateDirFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Failed to render markdown: {}", path.display())]
+    RenderFailed {
+        path: PathBuf,
+        #[source]
+        source: Box<MbrError>,
+    },
+
+    #[error("Failed to write output file: {}", path.display())]
+    WriteFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Failed to create symlink: {} -> {}", link.display(), target.display())]
+    SymlinkFailed {
+        target: PathBuf,
+        link: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Failed to copy file: {} -> {}", from.display(), to.display())]
+    CopyFailed {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Repository scan failed")]
+    RepoScan(#[from] RepoError),
+
+    #[error("Template error")]
+    Template(#[from] TemplateError),
+
+    #[error("Markdown error")]
+    Markdown(#[from] MarkdownError),
+
+    #[error("Configuration error")]
+    Config(#[from] ConfigError),
 }
 
 // Convenience type alias for Results using MbrError

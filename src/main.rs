@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use clap::Parser;
-use mbr::{browser, cli, markdown, server, templates, Config, ConfigError, MbrError};
-         // TOOD: mod static; // generate static files to be deployed -- should this somehow work in tandem with server or be a mode thereof?
+use mbr::{browser, build::Builder, cli, markdown, server, templates, Config, ConfigError, MbrError};
 
 #[tokio::main]
 async fn main() -> Result<(), MbrError> {
@@ -39,7 +38,36 @@ async fn main() -> Result<(), MbrError> {
         &path_relative_to_root.display()
     );
 
-    if args.stdout {
+    if args.build {
+        // Build mode - generate static site
+        #[cfg(target_os = "windows")]
+        {
+            eprintln!("Error: Static site generation is not supported on Windows");
+            std::process::exit(1);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let output_dir = if args.output.is_absolute() {
+                args.output.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| ConfigError::CurrentDirFailed(e))?
+                    .join(&args.output)
+            };
+
+            tracing::info!("Building static site to: {}", output_dir.display());
+
+            let builder = Builder::new(config, output_dir)?;
+            let stats = builder.build().await?;
+
+            println!(
+                "Build complete: {} markdown pages, {} section pages, {} assets linked in {:?}",
+                stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.duration
+            );
+            return Ok(());
+        }
+    } else if args.stdout {
         // CLI mode - render markdown to stdout (explicit -o/--stdout flag)
         if is_directory {
             eprintln!(

@@ -635,7 +635,7 @@ impl Server {
 // ============================================================================
 
 /// A breadcrumb entry for navigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Breadcrumb {
     pub name: String,
     pub url: String,
