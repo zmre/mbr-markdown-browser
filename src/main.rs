@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use clap::Parser;
-use mbr::{browser, build::Builder, cli, markdown, server, templates, Config, ConfigError, MbrError};
+use mbr::{
+    browser, build::Builder, cli, link_transform::LinkTransformConfig, markdown, server, templates,
+    Config, ConfigError, MbrError,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), MbrError> {
@@ -65,10 +68,17 @@ async fn main() -> Result<(), MbrError> {
             let builder = Builder::new(config, output_dir)?;
             let stats = builder.build().await?;
 
-            println!(
-                "Build complete: {} markdown pages, {} section pages, {} assets linked in {:?}",
-                stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.duration
-            );
+            if stats.broken_links > 0 {
+                println!(
+                    "Build complete: {} markdown pages, {} section pages, {} assets linked, {} broken links in {:?}",
+                    stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.broken_links, stats.duration
+                );
+            } else {
+                println!(
+                    "Build complete: {} markdown pages, {} section pages, {} assets linked in {:?}",
+                    stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.duration
+                );
+            }
             return Ok(());
         }
     } else if args.stdout {
@@ -81,10 +91,28 @@ async fn main() -> Result<(), MbrError> {
             eprintln!("  mbr {}     # Open in GUI (default)", args.path.display());
             std::process::exit(1);
         }
-        let (frontmatter, html_output) =
-            markdown::render(args.path, config.root_dir.as_path(), config.oembed_timeout_ms)
-                .await
-                .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
+
+        // Determine if this is an index file (which doesn't need ../ prefix for links)
+        let is_index_file = args
+            .path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f == config.index_file);
+
+        let link_transform_config = LinkTransformConfig {
+            markdown_extensions: config.markdown_extensions.clone(),
+            index_file: config.index_file.clone(),
+            is_index_file,
+        };
+
+        let (frontmatter, html_output) = markdown::render(
+            args.path,
+            config.root_dir.as_path(),
+            config.oembed_timeout_ms,
+            link_transform_config,
+        )
+        .await
+        .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
         let templates = templates::Templates::new(&config.root_dir)
             .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
         let html_output = templates.render_markdown(&html_output, frontmatter).await?;

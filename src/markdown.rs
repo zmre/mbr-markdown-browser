@@ -1,8 +1,9 @@
+use crate::link_transform::{transform_link, LinkTransformConfig};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::vid::Vid;
 use pulldown_cmark::{
-    Event, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd, TextMergeStream,
+    CowStr, Event, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd, TextMergeStream,
 };
 use std::{
     collections::HashMap,
@@ -22,6 +23,8 @@ struct EventState {
     metadata_source: Option<MetadataBlockKind>,
     metadata_parsed: Option<Yaml>,
     oembed_timeout_ms: u64,
+    /// Configuration for transforming relative links
+    link_transform_config: LinkTransformConfig,
 }
 
 pub type SimpleMetadata = HashMap<String, String>;
@@ -30,6 +33,7 @@ pub async fn render(
     file: PathBuf,
     root_path: &Path,
     oembed_timeout_ms: u64,
+    link_transform_config: LinkTransformConfig,
 ) -> Result<(SimpleMetadata, String), Box<dyn std::error::Error>> {
     // Create parser with example Markdown text.
     let markdown_input = fs::read_to_string(file)?;
@@ -46,6 +50,7 @@ pub async fn render(
         metadata_source: None,
         metadata_parsed: None,
         oembed_timeout_ms,
+        link_transform_config,
     };
     let mut processed_events = Vec::new();
 
@@ -158,10 +163,10 @@ async fn process_event(
 ) -> (pulldown_cmark::Event<'_>, EventState) {
     match &event {
         Event::Start(Tag::Image {
-            link_type: _,
+            link_type,
             dest_url,
             title,
-            id: _,
+            id,
         }) => match MediaEmbed::from_url_and_title(dest_url, title) {
             Some(media) => {
                 // the link title is actually the next Text event so need to split this to only produce the open tags
@@ -169,7 +174,17 @@ async fn process_event(
                 state.current_media = Some(media);
                 (Event::Html(html.into()), state)
             }
-            _ => (event.clone(), state),
+            _ => {
+                // Transform the image URL for trailing-slash URL convention
+                let transformed_url = transform_link(dest_url, &state.link_transform_config);
+                let new_event = Event::Start(Tag::Image {
+                    link_type: *link_type,
+                    dest_url: CowStr::from(transformed_url),
+                    title: title.clone(),
+                    id: id.clone(),
+                });
+                (new_event, state)
+            }
         },
         Event::Start(Tag::MetadataBlock(v)) => {
             state.metadata_source = Some(*v);
@@ -188,9 +203,22 @@ async fn process_event(
             }
         }
         // Track when we're inside a link (including autolinks like <http://...>)
-        Event::Start(Tag::Link { .. }) => {
+        // and transform the link URL for trailing-slash URL convention
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
             state.in_link = true;
-            (event.clone(), state)
+            let transformed_url = transform_link(dest_url, &state.link_transform_config);
+            let new_event = Event::Start(Tag::Link {
+                link_type: *link_type,
+                dest_url: CowStr::from(transformed_url),
+                title: title.clone(),
+                id: id.clone(),
+            });
+            (new_event, state)
         }
         Event::End(TagEnd::Link) => {
             state.in_link = false;
@@ -249,11 +277,20 @@ mod tests {
     use tempfile::NamedTempFile;
 
     async fn render_markdown(content: &str) -> String {
+        render_markdown_with_config(content, false).await
+    }
+
+    async fn render_markdown_with_config(content: &str, is_index_file: bool) -> String {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
         let root = path.parent().unwrap().to_path_buf();
-        let (_, html) = render(path, &root, 100).await.unwrap();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file,
+        };
+        let (_, html) = render(path, &root, 100, config).await.unwrap();
         html
     }
 
@@ -315,7 +352,12 @@ mod tests {
         file.write_all(md.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
         let root = path.parent().unwrap().to_path_buf();
-        let (metadata, _) = render(path, &root, 100).await.unwrap();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _) = render(path, &root, 100, config).await.unwrap();
         assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
     }
 
@@ -430,5 +472,74 @@ mod tests {
         println!("Output HTML: {}", &html);
         assert!(html.contains("<video"), "Should contain video element");
         assert!(html.contains("/videos/Eric%20Jones"), "Should contain URL-encoded path");
+    }
+
+    // Link transformation tests
+    #[tokio::test]
+    async fn test_link_transformation_regular_markdown() {
+        // Regular markdown file (not index) - links get ../ prefix
+        let md = "[Other Doc](other.md)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains(r#"href="../other/""#),
+            "Regular markdown should transform other.md to ../other/. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_link_transformation_index_file() {
+        // Index file - links don't get ../ prefix
+        let md = "[Other Doc](other.md)";
+        let html = render_markdown_with_config(md, true).await;
+        assert!(
+            html.contains(r#"href="other/""#),
+            "Index file should transform other.md to other/. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_link_transformation_preserves_absolute_urls() {
+        let md = "[External](https://example.com)";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"href="https://example.com""#),
+            "Absolute URLs should remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_link_transformation_with_anchor() {
+        let md = "[Section](other.md#section)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains(r#"href="../other/#section""#),
+            "Links with anchors should transform correctly. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_image_transformation_regular_markdown() {
+        // Regular images (not media embeds) should also be transformed
+        let md = "![Alt](images/photo.jpg)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains(r#"src="../images/photo.jpg""#),
+            "Image URLs should be transformed. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_image_transformation_index_file() {
+        let md = "![Alt](images/photo.jpg)";
+        let html = render_markdown_with_config(md, true).await;
+        assert!(
+            html.contains(r#"src="images/photo.jpg""#),
+            "Index file image URLs shouldn't get ../. Got: {}",
+            html
+        );
     }
 }

@@ -9,6 +9,7 @@ pub mod cli;
 pub mod config;
 pub mod errors;
 pub mod html;
+pub mod link_transform;
 pub mod markdown;
 pub mod media;
 pub mod oembed;

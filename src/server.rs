@@ -12,6 +12,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::errors::ServerError;
+use crate::link_transform::LinkTransformConfig;
 use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
 use crate::repo::MarkdownInfo;
 use crate::search::{search_other_files, SearchEngine, SearchQuery, SearchResponse};
@@ -471,6 +472,8 @@ impl Server {
                     &config.templates,
                     config.base_dir.as_path(),
                     config.oembed_timeout_ms,
+                    &config.markdown_extensions,
+                    &config.index_file,
                 )
                 .await
                 .map(|html| html.into_response())
@@ -517,9 +520,23 @@ impl Server {
         templates: &crate::templates::Templates,
         root_path: &Path,
         oembed_timeout_ms: u64,
+        markdown_extensions: &[String],
+        index_file: &str,
     ) -> Result<Html<String>, Box<dyn std::error::Error>> {
+        // Determine if this is an index file (which doesn't need ../ prefix for links)
+        let is_index_file = md_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f == index_file);
+
+        let link_transform_config = LinkTransformConfig {
+            markdown_extensions: markdown_extensions.to_vec(),
+            index_file: index_file.to_string(),
+            is_index_file,
+        };
+
         let (mut frontmatter, inner_html_output) =
-            markdown::render(md_path.to_path_buf(), root_path, oembed_timeout_ms)
+            markdown::render(md_path.to_path_buf(), root_path, oembed_timeout_ms, link_transform_config)
                 .await
                 .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
         // Use relative path for markdown_source so live reload can match it
@@ -677,6 +694,8 @@ impl Server {
                     &config.templates,
                     config.base_dir.as_path(),
                     config.oembed_timeout_ms,
+                    &config.markdown_extensions,
+                    &config.index_file,
                 )
                 .await
                 .map(|html| html.into_response())

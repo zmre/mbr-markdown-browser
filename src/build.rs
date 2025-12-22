@@ -11,14 +11,39 @@ use std::{
 
 use walkdir::WalkDir;
 
+use scraper::{Html, Selector};
+
 use crate::{
     config::Config,
     errors::BuildError,
+    link_transform::LinkTransformConfig,
     markdown,
     repo::{MarkdownInfo, Repo},
     server::{generate_breadcrumbs, get_current_dir_name, get_parent_path, markdown_file_to_json, DEFAULT_FILES},
     templates::Templates,
 };
+
+/// Normalize a path by resolving `.` and `..` components without requiring the path to exist.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Pop the last component if we can (and it's not also a parent dir)
+                if !components.is_empty() {
+                    components.pop();
+                }
+            }
+            std::path::Component::CurDir => {
+                // Skip "." components
+            }
+            _ => {
+                components.push(component);
+            }
+        }
+    }
+    components.iter().collect()
+}
 
 /// Statistics from a build run.
 #[derive(Debug, Default)]
@@ -29,6 +54,17 @@ pub struct BuildStats {
     pub duration: Duration,
     /// Whether Pagefind search indexing succeeded (None = not attempted)
     pub pagefind_indexed: Option<bool>,
+    /// Number of broken links detected
+    pub broken_links: usize,
+}
+
+/// A broken link detected during build.
+#[derive(Debug, Clone)]
+pub struct BrokenLink {
+    /// The source page containing the broken link
+    pub source_page: String,
+    /// The broken link URL
+    pub link_url: String,
 }
 
 /// Static site builder.
@@ -84,6 +120,18 @@ impl Builder {
         // Handle .mbr folder (copy, write defaults, generate site.json)
         self.handle_mbr_folder()?;
 
+        // Validate internal links and report broken ones
+        let broken_links = self.validate_links();
+        stats.broken_links = broken_links.len();
+
+        if !broken_links.is_empty() {
+            eprintln!("\n⚠️  Broken links detected ({} total):", broken_links.len());
+            for link in &broken_links {
+                eprintln!("   {} → {}", link.source_page, link.link_url);
+            }
+            eprintln!();
+        }
+
         // Run Pagefind to generate search index
         stats.pagefind_indexed = Some(self.run_pagefind().await);
 
@@ -123,11 +171,24 @@ impl Builder {
 
     /// Renders a single markdown file.
     async fn render_single_markdown(&self, path: &Path, info: &MarkdownInfo) -> Result<(), BuildError> {
+        // Determine if this is an index file (which doesn't need ../ prefix for links)
+        let is_index_file = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f == self.config.index_file);
+
+        let link_transform_config = LinkTransformConfig {
+            markdown_extensions: self.config.markdown_extensions.clone(),
+            index_file: self.config.index_file.clone(),
+            is_index_file,
+        };
+
         // Render markdown to HTML
         let (mut frontmatter, html) = markdown::render(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
+            link_transform_config,
         )
         .await
         .map_err(|e| BuildError::RenderFailed {
@@ -602,6 +663,139 @@ impl Builder {
         true
     }
 
+    /// Validates internal links in all generated HTML files.
+    ///
+    /// Scans all HTML files for `<a href="...">` links, filters to internal links
+    /// (excluding external URLs, mailto:, tel:, etc.), and checks if each link
+    /// resolves to an existing file or directory in the output.
+    ///
+    /// Returns a list of broken links found.
+    fn validate_links(&self) -> Vec<BrokenLink> {
+        let mut broken_links = Vec::new();
+
+        // Create selector for anchor tags
+        let selector = match Selector::parse("a[href]") {
+            Ok(s) => s,
+            Err(_) => return broken_links, // Should never fail with this simple selector
+        };
+
+        // Walk through all HTML files in output directory
+        for entry in WalkDir::new(&self.output_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
+        {
+            let path = entry.path();
+
+            // Skip .mbr directory (Pagefind UI, etc.)
+            if path.starts_with(self.output_dir.join(".mbr")) {
+                continue;
+            }
+
+            // Read HTML content
+            let html_content = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+
+            // Calculate source page path for error reporting
+            let source_page = path
+                .strip_prefix(&self.output_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+
+            // Parse HTML and find all links
+            let document = Html::parse_document(&html_content);
+
+            for element in document.select(&selector) {
+                if let Some(href) = element.value().attr("href") {
+                    // Skip external links and special protocols
+                    if href.starts_with("http://")
+                        || href.starts_with("https://")
+                        || href.starts_with("//")
+                        || href.starts_with("mailto:")
+                        || href.starts_with("tel:")
+                        || href.starts_with("javascript:")
+                        || href.starts_with("data:")
+                        || href.starts_with("#")
+                    {
+                        continue;
+                    }
+
+                    // Resolve the link relative to the current file's directory
+                    if let Some(resolved) = self.resolve_link(path, href) {
+                        if !self.link_target_exists(&resolved) {
+                            broken_links.push(BrokenLink {
+                                source_page: source_page.clone(),
+                                link_url: href.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        broken_links
+    }
+
+    /// Resolves a link URL relative to the source file's directory.
+    ///
+    /// Returns the absolute path within the output directory, or None if the link
+    /// cannot be resolved.
+    fn resolve_link(&self, source_file: &Path, href: &str) -> Option<PathBuf> {
+        // Strip anchor from href (e.g., "/page/#section" -> "/page/")
+        let href = href.split('#').next().unwrap_or(href);
+        // Strip query string (e.g., "/page/?foo=bar" -> "/page/")
+        let href = href.split('?').next().unwrap_or(href);
+
+        if href.is_empty() {
+            return None;
+        }
+
+        if href.starts_with('/') {
+            // Absolute path within site
+            let path = href.trim_start_matches('/');
+            Some(self.output_dir.join(path))
+        } else {
+            // Relative path - resolve from source file's parent directory
+            let source_dir = source_file.parent()?;
+            let resolved = source_dir.join(href);
+            // Normalize the path manually (handle ../ without requiring existence)
+            Some(normalize_path(&resolved))
+        }
+    }
+
+    /// Checks if a link target exists in the output directory.
+    ///
+    /// Handles both files and directories (checking for index.html in directories).
+    fn link_target_exists(&self, path: &Path) -> bool {
+        if path.exists() {
+            return true;
+        }
+
+        // If path ends with /, check for index.html
+        let path_str = path.to_string_lossy();
+        if path_str.ends_with('/') || path_str.ends_with(std::path::MAIN_SEPARATOR) {
+            return path.join("index.html").exists();
+        }
+
+        // Check if it's a directory with index.html
+        if path.is_dir() {
+            return path.join("index.html").exists();
+        }
+
+        // Try adding index.html for directory-style paths
+        let with_index = path.join("index.html");
+        if with_index.exists() {
+            return true;
+        }
+
+        false
+    }
+
     /// Recursively copies a directory.
     fn copy_dir_recursive(&self, from: &Path, to: &Path) -> Result<(), BuildError> {
         for entry in WalkDir::new(from)
@@ -654,5 +848,46 @@ mod tests {
         assert_eq!(stats.section_pages, 0);
         assert_eq!(stats.assets_linked, 0);
         assert_eq!(stats.pagefind_indexed, None);
+        assert_eq!(stats.broken_links, 0);
+    }
+
+    #[test]
+    fn test_broken_link_struct() {
+        let link = BrokenLink {
+            source_page: "docs/index.html".to_string(),
+            link_url: "../missing/".to_string(),
+        };
+        assert_eq!(link.source_page, "docs/index.html");
+        assert_eq!(link.link_url, "../missing/");
+    }
+
+    #[test]
+    fn test_normalize_path_simple() {
+        let path = PathBuf::from("/foo/bar/baz");
+        assert_eq!(normalize_path(&path), PathBuf::from("/foo/bar/baz"));
+    }
+
+    #[test]
+    fn test_normalize_path_with_parent() {
+        let path = PathBuf::from("/foo/bar/../baz");
+        assert_eq!(normalize_path(&path), PathBuf::from("/foo/baz"));
+    }
+
+    #[test]
+    fn test_normalize_path_with_multiple_parents() {
+        let path = PathBuf::from("/foo/bar/qux/../../baz");
+        assert_eq!(normalize_path(&path), PathBuf::from("/foo/baz"));
+    }
+
+    #[test]
+    fn test_normalize_path_with_current_dir() {
+        let path = PathBuf::from("/foo/./bar/./baz");
+        assert_eq!(normalize_path(&path), PathBuf::from("/foo/bar/baz"));
+    }
+
+    #[test]
+    fn test_normalize_path_mixed() {
+        let path = PathBuf::from("/foo/./bar/../baz/./qux");
+        assert_eq!(normalize_path(&path), PathBuf::from("/foo/baz/qux"));
     }
 }

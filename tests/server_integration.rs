@@ -298,3 +298,133 @@ async fn test_search_includes_duration() {
     assert!(body["duration_ms"].is_number(), "Expected duration_ms in response");
     assert!(body["query"].as_str().unwrap() == "test", "Expected query echo in response");
 }
+
+// ==================== Link Transformation Tests ====================
+
+#[tokio::test]
+async fn test_link_transform_regular_markdown() {
+    // Regular markdown file (not index) - relative links get ../ prefix
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/guide.md", "# Guide\n\n[Other Doc](other.md)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/docs/guide/").await;
+
+    // guide.md becomes /docs/guide/, so link to other.md should be ../other/
+    assert!(
+        html.contains(r#"href="../other/""#),
+        "Regular markdown should transform other.md to ../other/. Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_link_transform_index_file() {
+    // Index file - relative links do NOT get ../ prefix
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/index.md", "# Docs Index\n\n[Guide](guide.md)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/docs/").await;
+
+    // index.md becomes /docs/, so link to guide.md should be guide/
+    assert!(
+        html.contains(r#"href="guide/""#),
+        "Index file should transform guide.md to guide/ (no ../). Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_link_transform_root_index() {
+    // Root index.md - links to subdirectory files
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home\n\n[Docs Guide](docs/guide.md)");
+    repo.create_dir("docs");
+    repo.create_markdown("docs/guide.md", "# Guide");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/").await;
+
+    // Root index.md - link should be docs/guide/
+    assert!(
+        html.contains(r#"href="docs/guide/""#),
+        "Root index should transform docs/guide.md to docs/guide/. Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_link_transform_preserves_anchors() {
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/page.md", "# Page\n\n[Other Section](other.md#section)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/docs/page/").await;
+
+    assert!(
+        html.contains(r#"href="../other/#section""#),
+        "Anchors should be preserved. Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_link_transform_preserves_absolute_urls() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "page.md",
+        "# Page\n\n[External](https://example.com)\n\n[Root](/about/)",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/page/").await;
+
+    assert!(
+        html.contains(r#"href="https://example.com""#),
+        "Absolute URLs should remain unchanged. Got: {}",
+        html
+    );
+    assert!(
+        html.contains(r#"href="/about/""#),
+        "Root-relative URLs should remain unchanged. Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_link_transform_static_files() {
+    // Static file links (images, etc.) should also be transformed
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/page.md", "# Page\n\n![Image](images/photo.jpg)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/docs/page/").await;
+
+    assert!(
+        html.contains(r#"src="../images/photo.jpg""#),
+        "Image paths should be transformed. Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_link_transform_index_collapse() {
+    // Link to folder/index.md should collapse to folder/
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/page.md", "# Page\n\n[Subfolder](subfolder/index.md)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/docs/page/").await;
+
+    assert!(
+        html.contains(r#"href="../subfolder/""#),
+        "Links to index.md should collapse to folder/. Got: {}",
+        html
+    );
+}
