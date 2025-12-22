@@ -66,6 +66,7 @@ muda = { version = "0.17", features = ["gtk", "libxdo"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+flate2 = "1.0"
 proptest = "1.5"
 tempfile = "3.14"
 

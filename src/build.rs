@@ -543,10 +543,11 @@ impl Builder {
                 .replace("/index.html", "/")
                 .replace("\\", "/");
 
-            // Add to index
+            // Add to index - parameters are: source_path, url, content
+            // We use url (2nd param) since we have the explicit URL path
             match index.add_html_file(
-                Some(url_path.clone()),
                 None,
+                Some(url_path.clone()),
                 html_content,
             ).await {
                 Ok(_) => {

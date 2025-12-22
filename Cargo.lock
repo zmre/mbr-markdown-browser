@@ -3453,6 +3453,7 @@ dependencies = [
  "clap 4.5.53",
  "criterion",
  "figment",
+ "flate2",
  "futures",
  "futures-util",
  "glob",

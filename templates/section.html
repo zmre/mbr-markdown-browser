@@ -6,8 +6,8 @@
   </head>
   <body>
 {% include "_nav.html" %}
-    <main id="wrapper" class="container">
-      <h1>{{ current_dir_name | default(value="Directory") }}</h1>
+    <main id="wrapper" class="container" data-pagefind-body>
+      <h1 data-pagefind-meta="title">{{ current_dir_name | default(value="Directory") }}</h1>
 
       {% if subdirs %}
       <section>
@@ -54,7 +54,7 @@
         {% endif %}
       {% endif %}
     </main>
-    <footer class="container">
+    <footer class="container" data-pagefind-ignore>
       <nav>
         <ul>
           <li>

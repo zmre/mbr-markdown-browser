@@ -3,14 +3,14 @@
     <link rel="stylesheet" href="/.mbr/vidstack.plyr.css" />
     <link rel="stylesheet" href="/.mbr/hljs.dark.css" />
     {% if tags %}
-    <meta name="keywords" content="{{tags | safe}}" />
+    <meta name="keywords" content="{{tags | safe}}" data-pagefind-filter="tag[content]" />
     {% elif taxonomy.tags %}
-    <meta name="keywords" content="{{taxonomy.tags | safe}}" />
+    <meta name="keywords" content="{{taxonomy.tags | safe}}" data-pagefind-filter="tag[content]" />
     {% endif %}
     <title>{{title | default(value="") | safe}}</title>
-    <meta name="title" content="{{title | default(value="") | safe}}" />
-    <meta name="description" content="{{description | default(value="") | safe}}" />
-    <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" />
+    <meta name="title" content="{{title | default(value="") | safe}}" data-pagefind-meta="title[content]" />
+    <meta name="description" content="{{description | default(value="") | safe}}" data-pagefind-meta="description[content]" />
+    <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" data-pagefind-sort="date[content]" />
     <script>
       // Frontmatter available to page scripts (excludes rendered markdown for efficiency)
       window.frontmatter = {{ frontmatter_json | safe }};

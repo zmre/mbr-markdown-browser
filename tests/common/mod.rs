@@ -16,7 +16,11 @@ impl TestRepo {
     /// Creates a new empty test repository with .mbr directory.
     pub fn new() -> Self {
         let dir = TempDir::new().expect("Failed to create temp directory");
-        let root = dir.path().to_path_buf();
+        // Canonicalize the path to resolve symlinks (e.g., /var -> /private/var on macOS)
+        // This prevents path diffing issues when computing relative paths
+        let root = dir.path()
+            .canonicalize()
+            .expect("Failed to canonicalize temp directory");
 
         // Create .mbr directory (required for config detection)
         std::fs::create_dir(root.join(".mbr")).expect("Failed to create .mbr directory");

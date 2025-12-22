@@ -63,6 +63,7 @@ interface PagefindSearchResponse {
 
 interface Pagefind {
   init: () => Promise<void>;
+  options: (opts: { baseUrl?: string; [key: string]: any }) => Promise<void>;
   search: (query: string) => Promise<PagefindSearchResponse>;
   debouncedSearch: (query: string, options?: { debounceTimeoutMs?: number }) => Promise<PagefindSearchResponse | null>;
 }
@@ -166,6 +167,8 @@ export class MbrSearchElement extends LitElement {
       try {
         // Load Pagefind from the .mbr assets location
         const pagefind = await import('/.mbr/pagefind/pagefind.js' as any) as Pagefind;
+        // Configure baseUrl to "/" so result URLs are not prefixed with the module path
+        await pagefind.options({ baseUrl: "/" });
         await pagefind.init();
         this._pagefind = pagefind;
         return pagefind;

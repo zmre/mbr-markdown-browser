@@ -75,7 +75,10 @@ impl Default for Config {
             markdown_extensions: vec!["md".to_string()],
             theme: "default".to_string(),
             index_file: "index.md".to_string(),
-            ignore_dirs: ["target", "result", "build", "node_modules", "ci", "build"]
+            ignore_dirs: [
+                "target", "result", "build", "node_modules", "ci",
+                "templates", ".git", ".github", "dist", "out", "coverage",
+            ]
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
