@@ -25,6 +25,7 @@ notify = { version = "7.0", default-features = false, features = ["macos_kqueue"
 html-escape = "0.2.13"
 itertools = "0.14.0"
 metadata = "0.1.10" # Requires ffmpeg for video/audio metadata extraction
+ffmpeg-next = "7.1"  # Direct dep to control log level (suppress warnings from metadata crate)
 papaya = "0.2.3"
 pathdiff = "0.2.3"
 pdf-extract = "0.10"

@@ -3452,6 +3452,7 @@ dependencies = [
  "chrono",
  "clap 4.5.53",
  "criterion",
+ "ffmpeg-next",
  "figment",
  "flate2",
  "futures",

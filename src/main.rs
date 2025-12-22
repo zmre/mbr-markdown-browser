@@ -5,6 +5,10 @@ use mbr::{browser, build::Builder, cli, markdown, server, templates, Config, Con
 
 #[tokio::main]
 async fn main() -> Result<(), MbrError> {
+    // Suppress ffmpeg warnings/info messages from the metadata crate
+    // These would otherwise clutter stdout/stderr when processing video files
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Error);
+
     let args = cli::Args::parse();
 
     let input_path = Path::new(&args.path);
