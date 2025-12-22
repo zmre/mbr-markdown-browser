@@ -17,9 +17,8 @@ Also, some of my notes have a lot of embedded videos in them so I want these to 
 1. Markdown will convert to HTML on the fly
 2. HTML will be served up from a local private web server
 3. The UI is HTML+JavaScript+CSS with Lit web components
-
-Performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.
-
+4. Everything (style, behavior) is highly configurable and selectively overrideable
+5. Performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.
 
 ## Installation
 
@@ -88,7 +87,7 @@ Then in another tab, you need to run vite.  But you need vite to connect to rust
 5. [ ] Search functionality: this app is not just a markdown previewer, but a repository browser. We want to be able to link between files, browse, and search the repo.  Search is the first time we will have a divergence in build behavior versus live server or gui behavior. We also need to give the frontend a way to discern whether there's a dynamic server available (probably as part of the JSON in the <head>) or not so the frontend search widget can adjust as needed.  We want faceted search with prioritized fields basically amounting to: markdown filename/path and title are highest priority. Next highest are the frontmatter fields (tags or category or date or anything else that is there). Finally the contents. As a nice to have, headers inside markdown should be considered more important than other text, but as runtime performance is critical, this may not be possible.  Additionally, we want to be able to search just markdown files and, optionally, ALL files, especially including searchable PDFs, VTT files with captions or chapters, and paths of other files like images. Filetype therefore should be another search facet. Never shell out to other tools. Despite there being two different ways to search depending on mode, search syntax and user experience must be the same. Another facet would be to search just under the current folder (for the file being viewed) or the whole repo.
   a. **Live Server Behavior**: For searching titles, for example, or pathnames, could simply use the preloaded (possibly -- or when it finishes loading) index of repo files and metadata. That may be possible for other frontmatter like tags, too. For body content, use the [ripgrep](https://crates.io/crates/ripgrep) crate to search through specified files / file types. There will be a POST endpoint for `/search?q=` which returns json for ordered results (with some limit, default 50) that returns URL path, title, and other frontmatter info for each file and, if available, a snippet excerpt.  Note: there may be a crate that handles some of these concerns well, but lets research it for how active the repo is, how well maintained, how broadly used, how long issues linger, and so forth before making decisions on build vs. using a crate.
   b. **Built Site Behavior**: In this case, search will be local. In fact, we can make parts of search local with live server behavior, too, to keep the experiences as similar as possible.  For full content search where the server will use ripgrep in the repo, the built site will make use of a client-side index that is created at site build time using [Microsoft Docfind](https://github.com/microsoft/docfind/tree/main).
-6. [ ] Get serious about the UI complete with vim-like shortcut keys (j/k, space, H/L, /, maybe ctrl-p, -, etc.)
+6. [ ] Get serious about the UI complete with vim-like shortcut keys (j/k, space, H/L, /, maybe ctrl-p, ctrl-f/b, ctrl-d/u, -, etc.)
 
 
 ### Full List

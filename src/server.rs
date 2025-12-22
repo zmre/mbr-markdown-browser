@@ -3,8 +3,8 @@ use axum::{
     extract::{self, ws::WebSocketUpgrade, State},
     handler::HandlerWithoutStateExt,
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
-    routing::get,
+    response::{Html, IntoResponse, Json, Response},
+    routing::{get, post},
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 use crate::errors::ServerError;
 use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
 use crate::repo::MarkdownInfo;
+use crate::search::{search_other_files, SearchEngine, SearchQuery, SearchResponse};
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
@@ -130,6 +131,7 @@ impl Server {
             // .route("/favicon.ico", ServeFile::new())
             .route("/", get(Self::home_page))
             .route("/.mbr/site.json", get(Self::get_site_info))
+            .route("/.mbr/search", post(Self::search_handler))
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
             .nest_service("/.mbr", serve_mbr)
             .route("/{*path}", get(Self::handle))
@@ -341,6 +343,79 @@ impl Server {
         Ok(resp.into_response())
     }
 
+    /// Search endpoint for finding files by metadata and content.
+    ///
+    /// POST /.mbr/search
+    ///
+    /// Request body (JSON):
+    /// ```json
+    /// {
+    ///   "q": "search query",
+    ///   "limit": 50,           // optional, default 50
+    ///   "scope": "all",        // "metadata", "content", or "all"
+    ///   "filetype": "markdown",// optional filter
+    ///   "folder": "/docs"      // optional folder scope
+    /// }
+    /// ```
+    ///
+    /// Response (JSON):
+    /// ```json
+    /// {
+    ///   "query": "search query",
+    ///   "total_matches": 42,
+    ///   "results": [...],
+    ///   "duration_ms": 15
+    /// }
+    /// ```
+    pub async fn search_handler(
+        State(config): State<ServerState>,
+        Json(query): Json<SearchQuery>,
+    ) -> Result<Json<SearchResponse>, StatusCode> {
+        tracing::debug!("Search request: q={:?}, scope={:?}", query.q, query.scope);
+
+        // Ensure repo is scanned (may already be from background scan)
+        config
+            .repo
+            .scan_all()
+            .inspect_err(|e| tracing::error!("Error scanning repo for search: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Create search engine and execute search
+        let engine = SearchEngine::new(config.repo.clone(), config.base_dir.clone());
+
+        let mut response = engine
+            .search(&query)
+            .inspect_err(|e| tracing::error!("Search error: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // If searching all filetypes or non-markdown, also search other files
+        if query.filetype.as_deref() == Some("all")
+            || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown"))
+        {
+            let other_results = search_other_files(
+                &config.repo,
+                &query.q,
+                query.folder.as_deref(),
+                query.filetype.as_deref(),
+                query.limit,
+            );
+
+            // Merge and re-sort
+            response.results.extend(other_results);
+            response.results.sort_by(|a, b| b.score.cmp(&a.score));
+            response.results.truncate(query.limit);
+            response.total_matches = response.results.len();
+        }
+
+        tracing::debug!(
+            "Search completed: {} results in {}ms",
+            response.total_matches,
+            response.duration_ms
+        );
+
+        Ok(Json(response))
+    }
+
     // This is the fallback if the file isn't in the runtime .mbr dir
     pub async fn serve_default_mbr(
         request: extract::Request,
@@ -451,6 +526,8 @@ impl Server {
         let relative_md_path = pathdiff::diff_paths(md_path, root_path)
             .unwrap_or_else(|| md_path.to_path_buf());
         frontmatter.insert("markdown_source".into(), relative_md_path.to_string_lossy().into());
+        // Indicate server mode for frontend search functionality
+        frontmatter.insert("server_mode".into(), "true".into());
         let full_html_output = templates
             .render_markdown(&inner_html_output, frontmatter)
             .await
@@ -551,6 +628,8 @@ impl Server {
         if let Some(parent) = parent_path {
             context.insert("parent_path".to_string(), json!(parent));
         }
+        // Indicate server mode for frontend search functionality
+        context.insert("server_mode".to_string(), json!(true));
 
         // Detect if we're at the root directory
         let is_root = relative_path.as_os_str().is_empty()

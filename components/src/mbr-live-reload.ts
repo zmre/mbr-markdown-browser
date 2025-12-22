@@ -98,6 +98,13 @@ export class MbrLiveReloadElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
 
+    // Only enable live reload in server mode (not for static sites)
+    const config = (window as any).__MBR_CONFIG__;
+    if (!config?.serverMode) {
+      console.log('[mbr-live-reload] Disabled (static mode)');
+      return;
+    }
+
     // Get the current markdown file from frontmatter or URL
     this._currentMarkdownFile = this._detectCurrentMarkdownFile();
 

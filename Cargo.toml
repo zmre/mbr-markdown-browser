@@ -51,6 +51,12 @@ thiserror = "2.0"
 yaml-rust2 = "0.11"
 wry = {version = "0.53", default-features=true, features = ["devtools", "fullscreen"]}
 
+# Search functionality
+nucleo-matcher = "0.3"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+pagefind = "1.4"
+
 image = "0.25.8"
 tao = "0.34.0"
 muda = "0.17"

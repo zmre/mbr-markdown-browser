@@ -27,6 +27,8 @@ pub struct BuildStats {
     pub section_pages: usize,
     pub assets_linked: usize,
     pub duration: Duration,
+    /// Whether Pagefind search indexing succeeded (None = not attempted)
+    pub pagefind_indexed: Option<bool>,
 }
 
 /// Static site builder.
@@ -82,6 +84,9 @@ impl Builder {
         // Handle .mbr folder (copy, write defaults, generate site.json)
         self.handle_mbr_folder()?;
 
+        // Run Pagefind to generate search index
+        stats.pagefind_indexed = Some(self.run_pagefind().await);
+
         stats.duration = start.elapsed();
         Ok(stats)
     }
@@ -135,6 +140,10 @@ impl Builder {
             "markdown_source".to_string(),
             info.url_path.clone(),
         );
+
+        // Indicate static mode (no dynamic search endpoint)
+        // Empty string is falsy in Tera templates
+        frontmatter.insert("server_mode".to_string(), String::new());
 
         // Render through template
         let html_output = self.templates.render_markdown(&html, frontmatter).await?;
@@ -275,6 +284,9 @@ impl Builder {
             })
             .collect();
         context.insert("subdirs".to_string(), serde_json::Value::Array(subdirs_json));
+
+        // Indicate static mode (no dynamic search endpoint)
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
 
         // Render template
         let html_output = if is_root {
@@ -480,6 +492,115 @@ impl Builder {
         Ok(())
     }
 
+    /// Runs Pagefind to generate the search index using the native Rust library.
+    ///
+    /// Returns true if Pagefind ran successfully, false otherwise.
+    async fn run_pagefind(&self) -> bool {
+        use pagefind::api::PagefindIndex;
+        use pagefind::options::PagefindServiceConfig;
+
+        // Create Pagefind index with default options
+        let options = PagefindServiceConfig::builder()
+            .force_language("en".to_string())
+            .build();
+
+        let mut index = match PagefindIndex::new(Some(options)) {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!("Failed to create Pagefind index: {}", e);
+                return false;
+            }
+        };
+
+        // Walk through all HTML files in output directory
+        let mut files_indexed = 0;
+        for entry in WalkDir::new(&self.output_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "html"))
+        {
+            let path = entry.path();
+
+            // Skip .mbr directory
+            if path.starts_with(self.output_dir.join(".mbr")) {
+                continue;
+            }
+
+            // Read HTML content
+            let html_content = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(e) => {
+                    tracing::debug!("Failed to read {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            // Calculate URL path from file path
+            let relative_path = path.strip_prefix(&self.output_dir).unwrap_or(path);
+            let url_path = format!("/{}", relative_path.display())
+                .replace("/index.html", "/")
+                .replace("\\", "/");
+
+            // Add to index
+            match index.add_html_file(
+                Some(url_path.clone()),
+                None,
+                html_content,
+            ).await {
+                Ok(_) => {
+                    files_indexed += 1;
+                    tracing::debug!("Indexed: {}", url_path);
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to index {}: {}", url_path, e);
+                }
+            }
+        }
+
+        if files_indexed == 0 {
+            tracing::warn!("No HTML files found to index");
+            return false;
+        }
+
+        // Get the generated index files
+        let files = match index.get_files().await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to get Pagefind files: {}", e);
+                return false;
+            }
+        };
+
+        // Write files to .mbr/pagefind/
+        let pagefind_dir = self.output_dir.join(".mbr").join("pagefind");
+        if let Err(e) = fs::create_dir_all(&pagefind_dir) {
+            tracing::warn!("Failed to create pagefind directory: {}", e);
+            return false;
+        }
+
+        for file in files {
+            let file_path = pagefind_dir.join(&file.filename);
+
+            // Create parent directories if needed
+            if let Some(parent) = file_path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    tracing::debug!("Failed to create dir {}: {}", parent.display(), e);
+                    continue;
+                }
+            }
+
+            if let Err(e) = fs::write(&file_path, &file.contents) {
+                tracing::debug!("Failed to write {}: {}", file_path.display(), e);
+                continue;
+            }
+        }
+
+        tracing::info!("Pagefind search index generated: {} pages indexed", files_indexed);
+        true
+    }
+
     /// Recursively copies a directory.
     fn copy_dir_recursive(&self, from: &Path, to: &Path) -> Result<(), BuildError> {
         for entry in WalkDir::new(from)
@@ -531,5 +652,6 @@ mod tests {
         assert_eq!(stats.markdown_pages, 0);
         assert_eq!(stats.section_pages, 0);
         assert_eq!(stats.assets_linked, 0);
+        assert_eq!(stats.pagefind_indexed, None);
     }
 }

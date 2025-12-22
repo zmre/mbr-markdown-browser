@@ -67,6 +67,16 @@ impl TestServer {
             .await
             .expect("Failed to get response text")
     }
+
+    async fn post_json(&self, path: &str, body: &str) -> reqwest::Response {
+        self.client
+            .post(self.url(path))
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .expect("Request failed")
+    }
 }
 
 #[tokio::test]
@@ -199,4 +209,92 @@ async fn test_default_css_served() {
     assert_eq!(response.status(), 200);
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("text/css"));
+}
+
+// ============================================================================
+// Search endpoint tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_search_endpoint_returns_json() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test Page\n\nSome searchable content.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.post_json("/.mbr/search", r#"{"q": "test"}"#).await;
+
+    assert_eq!(response.status(), 200);
+    let content_type = response.headers().get("content-type").unwrap();
+    assert!(content_type.to_str().unwrap().contains("application/json"));
+}
+
+#[tokio::test]
+async fn test_search_finds_by_title() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("title", "Unique Search Title");
+    repo.create_markdown_with_frontmatter("findme.md", &frontmatter, "Some content.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.post_json("/.mbr/search", r#"{"q": "Unique Search"}"#).await;
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert!(body["total_matches"].as_i64().unwrap() >= 1);
+    let results = body["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+
+    // Check that our file was found
+    let found = results.iter().any(|r| r["url_path"].as_str().unwrap().contains("findme"));
+    assert!(found, "Expected to find 'findme' in results: {:?}", results);
+}
+
+#[tokio::test]
+async fn test_search_with_scope_metadata() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("title", "Metadata Only Title");
+    repo.create_markdown_with_frontmatter("meta.md", &frontmatter, "Body text without match.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.post_json("/.mbr/search", r#"{"q": "Metadata Only", "scope": "metadata"}"#).await;
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert!(body["total_matches"].as_i64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn test_search_with_limit() {
+    let repo = TestRepo::new();
+    // Create multiple files
+    for i in 1..=5 {
+        repo.create_markdown(&format!("file{}.md", i), &format!("# File {} content", i));
+    }
+
+    let server = TestServer::start(&repo).await;
+    let response = server.post_json("/.mbr/search", r#"{"q": "file", "limit": 2}"#).await;
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    let results = body["results"].as_array().unwrap();
+    assert!(results.len() <= 2, "Expected at most 2 results, got {}", results.len());
+}
+
+#[tokio::test]
+async fn test_search_includes_duration() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.post_json("/.mbr/search", r#"{"q": "test"}"#).await;
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert!(body["duration_ms"].is_number(), "Expected duration_ms in response");
+    assert!(body["query"].as_str().unwrap() == "test", "Expected query echo in response");
 }

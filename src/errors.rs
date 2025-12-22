@@ -203,6 +203,23 @@ pub enum WatcherError {
     BroadcastFailed,
 }
 
+/// Errors related to search functionality.
+#[derive(Debug, Error)]
+pub enum SearchError {
+    #[error("Invalid search pattern: {pattern}")]
+    PatternInvalid { pattern: String, reason: String },
+
+    #[error("Search failed: {0}")]
+    SearchFailed(String),
+
+    #[error("File read error during search: {}", path.display())]
+    FileReadError {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 /// Errors related to static site building.
 #[derive(Debug, Error)]
 pub enum BuildError {

@@ -189,48 +189,49 @@
       packages.default = packages.mbr;
 
       # Release package: creates distributable archives from the built package
-      packages.release = pkgs.runCommand "mbr-release-${version}" {
-        nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
-      } (
-        if pkgs.stdenv.isDarwin
-        then ''
-          mkdir -p $out
+      packages.release =
+        pkgs.runCommand "mbr-release-${version}" {
+          nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
+        } (
+          if pkgs.stdenv.isDarwin
+          then ''
+            mkdir -p $out
 
-          # Create .app bundle archive
-          tar -czvf $out/mbr-${archString}.tar.gz \
-            -C ${packages.mbr}/Applications \
-            MBR.app
+            # Create .app bundle archive
+            tar -czvf $out/mbr-${archString}.tar.gz \
+              -C ${packages.mbr}/Applications \
+              MBR.app
 
-          # Create CLI-only archive
-          tar -czvf $out/mbr-cli-${archString}.tar.gz \
-            -C ${packages.mbr}/bin \
-            mbr
+            # Create CLI-only archive
+            tar -czvf $out/mbr-cli-${archString}.tar.gz \
+              -C ${packages.mbr}/bin \
+              mbr
 
-          # Create checksums
-          cd $out
-          sha256sum *.tar.gz > SHA256SUMS
+            # Create checksums
+            cd $out
+            sha256sum *.tar.gz > SHA256SUMS
 
-          echo ""
-          echo "Release artifacts:"
-          ls -lh $out/
-        ''
-        else ''
-          mkdir -p $out
+            echo ""
+            echo "Release artifacts:"
+            ls -lh $out/
+          ''
+          else ''
+            mkdir -p $out
 
-          # Create CLI archive (Linux)
-          tar -czvf $out/mbr-${archString}.tar.gz \
-            -C ${packages.mbr}/bin \
-            mbr
+            # Create CLI archive (Linux)
+            tar -czvf $out/mbr-${archString}.tar.gz \
+              -C ${packages.mbr}/bin \
+              mbr
 
-          # Create checksums
-          cd $out
-          sha256sum *.tar.gz > SHA256SUMS
+            # Create checksums
+            cd $out
+            sha256sum *.tar.gz > SHA256SUMS
 
-          echo ""
-          echo "Release artifacts:"
-          ls -lh $out/
-        ''
-      );
+            echo ""
+            echo "Release artifacts:"
+            ls -lh $out/
+          ''
+        );
 
       # Apps
       apps.default = flake-utils.lib.mkApp {drv = packages.mbr;};

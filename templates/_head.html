@@ -4,3 +4,10 @@
     <link rel="stylesheet" href="/.mbr/pico.min.css" />
     <link href="/.mbr/theme.css" rel="stylesheet" />
     <link href="/.mbr/user.css" rel="stylesheet" />
+    <script>
+      // MBR configuration - serverMode indicates if dynamic search endpoint is available
+      window.__MBR_CONFIG__ = {
+        serverMode: {% if server_mode %}true{% else %}false{% endif %},
+        searchEndpoint: "/.mbr/search"
+      };
+    </script>
