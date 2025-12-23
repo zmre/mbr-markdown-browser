@@ -26,6 +26,9 @@ pub struct Config {
     pub index_file: String,
     pub ignore_dirs: Vec<String>,
     pub ignore_globs: Vec<String>,
+    /// Directories to ignore in the file watcher. These directories will not trigger
+    /// live reload events when files inside them change.
+    pub watcher_ignore_dirs: Vec<String>,
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// If the fetch doesn't complete in time, falls back to a plain link.
     pub oembed_timeout_ms: u64,
@@ -88,6 +91,10 @@ impl Default for Config {
             .into_iter()
             .map(|x| x.to_string())
             .collect(),
+            watcher_ignore_dirs: [".direnv", ".git", "result", "target", "build"]
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect(),
             oembed_timeout_ms: 300,
         }
     }

@@ -74,6 +74,16 @@ interface Pagefind {
 type SearchScope = 'all' | 'metadata' | 'content';
 
 /**
+ * Folder scope options.
+ */
+type FolderScope = 'current' | 'everywhere';
+
+/**
+ * Filetype options.
+ */
+type FiletypeFilter = 'markdown' | 'all';
+
+/**
  * Get MBR configuration from the global scope.
  */
 function getMbrConfig(): MbrConfig {
@@ -81,6 +91,26 @@ function getMbrConfig(): MbrConfig {
     serverMode: false,
     searchEndpoint: '/.mbr/search'
   };
+}
+
+/**
+ * Get the current folder context from the URL path.
+ * - Section pages (ending with /) search from current path
+ * - Markdown pages (not ending with / after navigation) search from parent
+ */
+function getCurrentFolder(): string {
+  const path = window.location.pathname;
+  // If path ends with /, it's a section page - search from current folder
+  if (path.endsWith('/')) {
+    return path;
+  }
+  // Otherwise it's a markdown file rendered at a trailing-slash URL,
+  // so search from parent directory
+  const lastSlash = path.lastIndexOf('/');
+  if (lastSlash > 0) {
+    return path.substring(0, lastSlash + 1);
+  }
+  return '/';
 }
 
 /**
@@ -114,6 +144,12 @@ export class MbrSearchElement extends LitElement {
 
   @state()
   private _scope: SearchScope = 'all';
+
+  @state()
+  private _folderScope: FolderScope = 'everywhere';
+
+  @state()
+  private _filetypeFilter: FiletypeFilter = 'markdown';
 
   @state()
   private _error: string | null = null;
@@ -260,6 +296,22 @@ export class MbrSearchElement extends LitElement {
     }
   }
 
+  private _handleFolderScopeChange(e: Event) {
+    const target = e.target as HTMLInputElement;
+    this._folderScope = target.checked ? 'current' : 'everywhere';
+    if (this._query.length >= 2) {
+      this._performSearch();
+    }
+  }
+
+  private _handleFiletypeChange(e: Event) {
+    const target = e.target as HTMLInputElement;
+    this._filetypeFilter = target.checked ? 'all' : 'markdown';
+    if (this._query.length >= 2) {
+      this._performSearch();
+    }
+  }
+
   private async _performSearch() {
     const config = getMbrConfig();
 
@@ -286,16 +338,30 @@ export class MbrSearchElement extends LitElement {
     this._error = null;
 
     try {
+      // Build search request with folder context
+      const searchBody: Record<string, any> = {
+        q: this._query,
+        limit: 20,
+        scope: this._scope,
+        folder_scope: this._folderScope,
+      };
+
+      // Add folder path when searching current folder
+      if (this._folderScope === 'current') {
+        searchBody.folder = getCurrentFolder();
+      }
+
+      // Add filetype filter
+      if (this._filetypeFilter === 'all') {
+        searchBody.filetype = 'all';
+      }
+
       const response = await fetch(config.searchEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          q: this._query,
-          limit: 20,
-          scope: this._scope,
-        }),
+        body: JSON.stringify(searchBody),
         signal: this._abortController.signal,
       });
 
@@ -456,6 +522,27 @@ export class MbrSearchElement extends LitElement {
             ` : nothing}
           </div>
 
+          ${showScopeSelector ? html`
+            <div class="search-options">
+              <label class="option-toggle">
+                <input
+                  type="checkbox"
+                  ?checked=${this._folderScope === 'current'}
+                  @change=${this._handleFolderScopeChange}
+                />
+                <span>Current folder only</span>
+              </label>
+              <label class="option-toggle">
+                <input
+                  type="checkbox"
+                  ?checked=${this._filetypeFilter === 'all'}
+                  @change=${this._handleFiletypeChange}
+                />
+                <span>Include PDFs & text files</span>
+              </label>
+            </div>
+          ` : nothing}
+
           <div class="results-container">
             ${this._error ? html`
               <div class="error">${this._error}</div>
@@ -473,7 +560,12 @@ export class MbrSearchElement extends LitElement {
             ` : nothing}
 
             ${this._query.length < 2 && !this._error ? html`
-              <div class="hint">Type at least 2 characters to search</div>
+              <div class="hint">
+                <p>Type at least 2 characters to search</p>
+                ${showScopeSelector ? html`
+                  <p class="hint-facets">Tip: Use <code>field:value</code> for faceted search (e.g., <code>tags:rust</code> or <code>category:guide</code>)</p>
+                ` : nothing}
+              </div>
             ` : nothing}
           </div>
 
@@ -628,6 +720,36 @@ export class MbrSearchElement extends LitElement {
       cursor: pointer;
     }
 
+    /* Search options toggles */
+    .search-options {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--pico-muted-border-color, #eee);
+      font-size: 0.8rem;
+    }
+
+    .option-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      cursor: pointer;
+      color: var(--pico-muted-color, #666);
+      user-select: none;
+    }
+
+    .option-toggle input[type="checkbox"] {
+      margin: 0;
+      width: 14px;
+      height: 14px;
+      cursor: pointer;
+    }
+
+    .option-toggle:hover {
+      color: var(--pico-color, #333);
+    }
+
     /* Results container */
     .results-container {
       flex: 1;
@@ -740,6 +862,26 @@ export class MbrSearchElement extends LitElement {
       padding: 1.5rem;
       text-align: center;
       color: var(--pico-muted-color, #666);
+    }
+
+    .hint p {
+      margin: 0 0 0.5rem 0;
+    }
+
+    .hint p:last-child {
+      margin-bottom: 0;
+    }
+
+    .hint-facets {
+      font-size: 0.8rem;
+      opacity: 0.8;
+    }
+
+    .hint-facets code {
+      padding: 0.1rem 0.3rem;
+      border-radius: 3px;
+      background: var(--pico-secondary-background, #f5f5f5);
+      font-size: 0.75rem;
     }
 
     .error {

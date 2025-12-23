@@ -96,6 +96,97 @@ pub struct OtherFileInfo {
     pub raw_path: PathBuf,
     pub url_path: String,
     metadata: StaticFileMetadata,
+    /// Extracted text content for searchable files (PDFs, text files).
+    /// Only populated for files under the size limit.
+    #[serde(skip)]
+    pub extracted_text: Option<String>,
+}
+
+/// Maximum file size (in bytes) for text extraction (10 MB).
+const MAX_TEXT_EXTRACTION_SIZE: u64 = 10 * 1024 * 1024;
+
+impl OtherFileInfo {
+    /// Returns the file type as a string for search results.
+    pub fn filetype(&self) -> &'static str {
+        match &self.metadata.kind {
+            StaticFileKind::Pdf { .. } => "pdf",
+            StaticFileKind::Image { .. } => "image",
+            StaticFileKind::Video { .. } => "video",
+            StaticFileKind::Audio { .. } => "audio",
+            StaticFileKind::Text => "text",
+            StaticFileKind::Other => "other",
+        }
+    }
+
+    /// Returns true if this file type is searchable (has extractable text).
+    pub fn is_searchable(&self) -> bool {
+        matches!(
+            &self.metadata.kind,
+            StaticFileKind::Pdf { .. } | StaticFileKind::Text
+        )
+    }
+
+    /// Extract text content from the file if it's a searchable type.
+    /// Respects file size limit for performance.
+    fn extract_text(&self) -> Option<String> {
+        // Check file size first
+        if let Some(size) = self.metadata.file_size_bytes {
+            if size > MAX_TEXT_EXTRACTION_SIZE {
+                tracing::debug!(
+                    "Skipping text extraction for {:?}: file too large ({} bytes)",
+                    self.raw_path,
+                    size
+                );
+                return None;
+            }
+        }
+
+        match &self.metadata.kind {
+            StaticFileKind::Pdf { .. } => self.extract_pdf_text(),
+            StaticFileKind::Text => self.extract_plain_text(),
+            _ => None,
+        }
+    }
+
+    /// Extract text from a PDF file.
+    fn extract_pdf_text(&self) -> Option<String> {
+        match pdf_extract::extract_text(&self.raw_path) {
+            Ok(text) => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to extract PDF text from {:?}: {}", self.raw_path, e);
+                None
+            }
+        }
+    }
+
+    /// Extract text from a plain text file.
+    fn extract_plain_text(&self) -> Option<String> {
+        match std::fs::read_to_string(&self.raw_path) {
+            Ok(text) => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to read text file {:?}: {}",
+                    self.raw_path,
+                    e
+                );
+                None
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -386,6 +477,7 @@ impl Repo {
                     raw_path: path.to_path_buf(),
                     url_path: url,
                     metadata: StaticFileMetadata::empty(path),
+                    extracted_text: None,
                 };
                 other.insert(path.to_path_buf(), other_file);
             }
@@ -407,12 +499,16 @@ impl Repo {
                 self.markdown_files.pin().insert(mdfile, details);
             });
 
-        // Parallel processing: populate static file metadata
+        // Parallel processing: populate static file metadata and extract text from searchable files
         other.into_par_iter().for_each(|(file, other_file)| {
-            let other_file = OtherFileInfo {
+            let mut other_file = OtherFileInfo {
                 metadata: other_file.metadata.populate(),
                 ..other_file
             };
+            // Extract text from PDFs and text files for search indexing
+            if other_file.is_searchable() {
+                other_file.extracted_text = other_file.extract_text();
+            }
             self.other_files.pin().insert(file, other_file);
         });
 

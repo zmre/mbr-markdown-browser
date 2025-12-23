@@ -27,6 +27,7 @@ impl TestServer {
                 &["md".to_string()],
                 &["target".to_string(), "node_modules".to_string()],
                 &["*.log".to_string()],
+                &[".direnv".to_string(), ".git".to_string(), "result".to_string(), "target".to_string(), "build".to_string()],
                 "index.md",
                 100,
             )
@@ -427,4 +428,147 @@ async fn test_link_transform_index_collapse() {
         "Links to index.md should collapse to folder/. Got: {}",
         html
     );
+}
+
+// ==================== Faceted Search Tests ====================
+
+#[tokio::test]
+async fn test_search_with_facet() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("category", "programming");
+    frontmatter.insert("title", "Rust Guide");
+    repo.create_markdown_with_frontmatter("rust.md", &frontmatter, "Learn Rust programming.");
+
+    let mut other_fm = HashMap::new();
+    other_fm.insert("category", "cooking");
+    other_fm.insert("title", "Recipe Book");
+    repo.create_markdown_with_frontmatter("recipe.md", &other_fm, "Cooking recipes.");
+
+    let server = TestServer::start(&repo).await;
+
+    // Search with facet should only find matching file
+    let response = server.post_json("/.mbr/search", r#"{"q": "category:programming"}"#).await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+
+    // Should find rust.md but not recipe.md
+    assert!(results.iter().any(|r| r["url_path"].as_str().unwrap().contains("rust")),
+        "Expected to find 'rust' in results: {:?}", results);
+    assert!(!results.iter().any(|r| r["url_path"].as_str().unwrap().contains("recipe")),
+        "Should not find 'recipe' in results: {:?}", results);
+}
+
+#[tokio::test]
+async fn test_search_facet_contains_match() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("category", "systems programming");
+    repo.create_markdown_with_frontmatter("systems.md", &frontmatter, "Low-level code.");
+
+    let server = TestServer::start(&repo).await;
+
+    // Facet should use contains match
+    let response = server.post_json("/.mbr/search", r#"{"q": "category:programming"}"#).await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+
+    assert!(!results.is_empty(), "Should find file with 'systems programming' category");
+}
+
+#[tokio::test]
+async fn test_search_facet_case_insensitive() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("language", "RUST");
+    repo.create_markdown_with_frontmatter("code.md", &frontmatter, "Some code.");
+
+    let server = TestServer::start(&repo).await;
+
+    // Facet should be case-insensitive
+    let response = server.post_json("/.mbr/search", r#"{"q": "language:rust"}"#).await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["total_matches"].as_i64().unwrap() >= 1,
+        "Should find file with case-insensitive facet match");
+}
+
+#[tokio::test]
+async fn test_search_with_folder_scope() {
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_dir("blog");
+    repo.create_markdown("docs/guide.md", "# Guide\n\nDocumentation guide.");
+    repo.create_markdown("blog/post.md", "# Post\n\nBlog post about guides.");
+
+    let server = TestServer::start(&repo).await;
+
+    // Search everywhere
+    let response = server.post_json("/.mbr/search", r#"{"q": "guide", "folder_scope": "everywhere"}"#).await;
+    let body: serde_json::Value = response.json().await.unwrap();
+    let all_results = body["results"].as_array().unwrap().len();
+
+    // Search in docs folder only
+    let response = server.post_json("/.mbr/search", r#"{"q": "guide", "folder": "/docs/", "folder_scope": "current"}"#).await;
+    let body: serde_json::Value = response.json().await.unwrap();
+    let docs_results = body["results"].as_array().unwrap();
+
+    // Docs-only search should return fewer results
+    assert!(docs_results.len() < all_results || all_results == 1,
+        "Folder-scoped search should be more specific");
+
+    // Docs-only search should only contain /docs/ paths
+    for r in docs_results {
+        assert!(r["url_path"].as_str().unwrap().starts_with("/docs/"),
+            "Result should be in /docs/: {}", r["url_path"]);
+    }
+}
+
+#[tokio::test]
+async fn test_search_arbitrary_frontmatter_field() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("author", "Alice Smith");
+    frontmatter.insert("title", "An Article");
+    repo.create_markdown_with_frontmatter("article.md", &frontmatter, "Content.");
+
+    let server = TestServer::start(&repo).await;
+
+    // Should be able to search custom frontmatter fields
+    let response = server.post_json("/.mbr/search", r#"{"q": "author:alice"}"#).await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["total_matches"].as_i64().unwrap() >= 1,
+        "Should find file by custom frontmatter field 'author'");
+}
+
+#[tokio::test]
+async fn test_search_mixed_terms_and_facets() {
+    let repo = TestRepo::new();
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("category", "tutorial");
+    frontmatter.insert("title", "Rust Async Tutorial");
+    repo.create_markdown_with_frontmatter("async.md", &frontmatter, "Learn async in Rust.");
+
+    let mut other_fm = HashMap::new();
+    other_fm.insert("category", "tutorial");
+    other_fm.insert("title", "Python Basics");
+    repo.create_markdown_with_frontmatter("python.md", &other_fm, "Learn Python basics.");
+
+    let server = TestServer::start(&repo).await;
+
+    // Search with both term and facet
+    let response = server.post_json("/.mbr/search", r#"{"q": "rust category:tutorial"}"#).await;
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+
+    // Should find rust tutorial but not python tutorial
+    assert!(results.iter().any(|r| r["url_path"].as_str().unwrap().contains("async")),
+        "Expected to find Rust tutorial: {:?}", results);
 }

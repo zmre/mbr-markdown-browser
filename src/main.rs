@@ -127,6 +127,7 @@ async fn main() -> Result<(), MbrError> {
             &config.markdown_extensions,
             &config.ignore_dirs,
             &config.ignore_globs,
+            &config.watcher_ignore_dirs,
             &config.index_file.clone(),
             config.oembed_timeout_ms,
         )?;
@@ -148,6 +149,7 @@ async fn main() -> Result<(), MbrError> {
                 &config_copy.markdown_extensions.clone(),
                 &config_copy.ignore_dirs.clone(),
                 &config_copy.ignore_globs.clone(),
+                &config_copy.watcher_ignore_dirs.clone(),
                 &config_copy.index_file.clone(),
                 config_copy.oembed_timeout_ms,
             );

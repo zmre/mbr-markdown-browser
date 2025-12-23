@@ -54,6 +54,7 @@ impl Server {
         markdown_extensions: &[String],
         ignore_dirs: &[String],
         ignore_globs: &[String],
+        watcher_ignore_dirs: &[String],
         index_file: S,
         oembed_timeout_ms: u64,
     ) -> Result<Self, ServerError> {
@@ -90,12 +91,12 @@ impl Server {
         // Initialize file watcher in background to avoid blocking server startup
         // PollWatcher's recursive scan can take 10+ seconds for large directories
         let base_dir_for_watcher = base_dir.clone();
-        let ignore_dirs_for_watcher = ignore_dirs.to_vec();
+        let watcher_ignore_dirs = watcher_ignore_dirs.to_vec();
         let ignore_globs_for_watcher = ignore_globs.to_vec();
         std::thread::spawn(move || {
             match crate::watcher::FileWatcher::new_with_sender(
                 &base_dir_for_watcher,
-                &ignore_dirs_for_watcher,
+                &watcher_ignore_dirs,
                 &ignore_globs_for_watcher,
                 tx_for_watcher,
             ) {

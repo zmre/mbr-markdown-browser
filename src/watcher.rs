@@ -86,17 +86,8 @@ impl FileWatcher {
         let tx = sender;
         let base_dir = base_dir.to_path_buf();
 
-        // Standard directories to always ignore
-        let mut ignore_set: HashSet<String> =
-            ["target", "result", ".git", ".direnv", "node_modules"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-
-        // Add user-specified ignore directories
-        for dir in ignore_dirs {
-            ignore_set.insert(dir.clone());
-        }
+        // Use configured ignore directories (defaults are set in Config)
+        let ignore_set: HashSet<String> = ignore_dirs.iter().cloned().collect();
 
         let tx_clone = tx.clone();
         let base_dir_clone = base_dir.clone();
@@ -223,8 +214,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path();
 
-        // Create watcher first (before any subdirectories)
-        let (_watcher, mut rx) = FileWatcher::new(base_path, &[], &[]).unwrap();
+        // Create watcher with target in ignore list
+        let ignore_dirs = vec!["target".to_string()];
+        let (_watcher, mut rx) = FileWatcher::new(base_path, &ignore_dirs, &[]).unwrap();
 
         // Create a file in the base directory - this should be visible
         let visible_file = base_path.join("visible.md");
