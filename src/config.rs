@@ -32,6 +32,10 @@ pub struct Config {
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// If the fetch doesn't complete in time, falls back to a plain link.
     pub oembed_timeout_ms: u64,
+    /// Optional template folder that overrides the default .mbr/ and compiled defaults.
+    /// Files found here take precedence; missing files fall back to compiled defaults.
+    #[serde(skip)]
+    pub template_folder: Option<PathBuf>,
     // TODO: need to add some sort order stuff to determine how to arrange files -- by filename, title, last modified or whatever
 }
 
@@ -96,6 +100,7 @@ impl Default for Config {
                 .map(|x| x.to_string())
                 .collect(),
             oembed_timeout_ms: 300,
+            template_folder: None,
         }
     }
 }

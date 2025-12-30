@@ -47,6 +47,8 @@ export default {
     },
   ],
   build: {
+    outDir: '../templates/components-js',
+    emptyOutDir: true,
     sourcemap: true,
     minify: "esbuild",
     lib: {

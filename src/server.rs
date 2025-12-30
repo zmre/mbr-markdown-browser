@@ -1,9 +1,8 @@
 use axum::{
     body::Body,
     extract::{self, ws::WebSocketUpgrade, State},
-    handler::HandlerWithoutStateExt,
-    http::StatusCode,
-    response::{Html, IntoResponse, Json, Response},
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -20,7 +19,7 @@ use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
 use tower_http::{
-    services::{ServeDir, ServeFile},
+    services::ServeFile,
     trace::TraceLayer,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -43,6 +42,8 @@ pub struct ServerState {
     pub repo: Arc<Repo>,
     pub oembed_timeout_ms: u64,
     pub file_change_tx: Option<broadcast::Sender<crate::watcher::FileChangeEvent>>,
+    /// Optional template folder that overrides default .mbr/ and compiled defaults
+    pub template_folder: Option<std::path::PathBuf>,
 }
 
 impl Server {
@@ -57,6 +58,7 @@ impl Server {
         watcher_ignore_dirs: &[String],
         index_file: S,
         oembed_timeout_ms: u64,
+        template_folder: Option<std::path::PathBuf>,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
@@ -72,7 +74,7 @@ impl Server {
             .with(tracing_subscriber::fmt::layer())
             .try_init();
 
-        let templates = templates::Templates::new(base_dir.as_path())
+        let templates = templates::Templates::new(base_dir.as_path(), template_folder.as_deref())
             .map_err(ServerError::TemplateInit)?;
 
         let repo = Arc::new(Repo::init(
@@ -91,11 +93,13 @@ impl Server {
         // Initialize file watcher in background to avoid blocking server startup
         // PollWatcher's recursive scan can take 10+ seconds for large directories
         let base_dir_for_watcher = base_dir.clone();
+        let template_folder_for_watcher = template_folder.clone();
         let watcher_ignore_dirs = watcher_ignore_dirs.to_vec();
         let ignore_globs_for_watcher = ignore_globs.to_vec();
         std::thread::spawn(move || {
             match crate::watcher::FileWatcher::new_with_sender(
                 &base_dir_for_watcher,
+                template_folder_for_watcher.as_deref(),
                 &watcher_ignore_dirs,
                 &ignore_globs_for_watcher,
                 tx_for_watcher,
@@ -122,22 +126,16 @@ impl Server {
             repo,
             oembed_timeout_ms,
             file_change_tx: Some(file_change_tx),
+            template_folder,
         };
 
-        let mbr_builtins = Self::serve_default_mbr.into_service();
-        // let mbr_builtins = get(Self::serve_default_mbr);
-        let serve_mbr =
-            ServeDir::new(config.base_dir.as_path().join(".mbr")).fallback(mbr_builtins);
-
         let router = Router::new()
-            // .route("/favicon.ico", ServeFile::new())
             .route("/", get(Self::home_page))
             .route("/.mbr/site.json", get(Self::get_site_info))
             .route("/.mbr/search", post(Self::search_handler))
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
-            .nest_service("/.mbr", serve_mbr)
+            .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
-            // .fallback_service(handle_static)
             .layer(TraceLayer::new_for_http())
             .with_state(config);
 
@@ -438,31 +436,133 @@ impl Server {
         (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
     }
 
-    // This is the fallback if the file isn't in the runtime .mbr dir
-    pub async fn serve_default_mbr(
-        request: extract::Request,
+    /// Serves assets from /.mbr/* path.
+    ///
+    /// Priority:
+    /// 1. If template_folder is set, serve from there (js/ for components, rest from root)
+    /// 2. Otherwise, check .mbr/ directory in base_dir
+    /// 3. Fall back to compiled-in DEFAULT_FILES
+    pub async fn serve_mbr_assets(
+        extract::Path(path): extract::Path<String>,
+        State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
-        tracing::debug!("handle_mb4_404");
-        let path = request.uri().path().replace("/.mbr", "");
+        tracing::debug!("serve_mbr_assets: {}", path);
+
+        // Normalize path: add leading slash if missing
+        let asset_path = if path.starts_with('/') {
+            path.clone()
+        } else {
+            format!("/{}", path)
+        };
+
+        // Try template_folder first if set
+        if let Some(ref template_folder) = config.template_folder {
+            // Map components/* -> js/* in template folder
+            let file_path = if asset_path.starts_with("/components/") {
+                let component_name = asset_path.strip_prefix("/components/").unwrap_or(&asset_path);
+                template_folder.join("components-js").join(component_name)
+            } else {
+                // Strip leading slash for joining
+                template_folder.join(asset_path.trim_start_matches('/'))
+            };
+
+            tracing::debug!("Checking template folder: {}", file_path.display());
+
+            if file_path.is_file() {
+                return Self::serve_file_from_path(&file_path).await;
+            }
+        }
+
+        // Try .mbr/ directory in base_dir
+        let mbr_dir = config.base_dir.join(".mbr");
+        let file_path = mbr_dir.join(asset_path.trim_start_matches('/'));
+        tracing::debug!("Checking .mbr dir: {}", file_path.display());
+
+        if file_path.is_file() {
+            return Self::serve_file_from_path(&file_path).await;
+        }
+
+        // Fall back to compiled-in defaults
+        Self::serve_default_file(&asset_path)
+    }
+
+    /// Serve a file from the filesystem with appropriate MIME type and cache headers.
+    async fn serve_file_from_path(path: &std::path::Path) -> Result<Response<Body>, StatusCode> {
+        let mime = Self::guess_mime_type(path);
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to read file {}: {}", path.display(), e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        // Generate ETag from content
+        let etag = generate_etag(&bytes);
+
+        // Get Last-Modified from file metadata
+        let last_modified = tokio::fs::metadata(path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| generate_last_modified(d.as_secs()));
+
+        let mut builder = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .header(header::ETAG, etag);
+
+        if let Some(lm) = last_modified {
+            builder = builder.header(header::LAST_MODIFIED, lm);
+        }
+
+        builder
+            .body(axum::body::Body::from(bytes))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    /// Guess MIME type from file extension
+    fn guess_mime_type(path: &std::path::Path) -> &'static str {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("html") => "text/html",
+            Some("css") => "text/css",
+            Some("js") => "application/javascript",
+            Some("json") => "application/json",
+            Some("map") => "application/json",
+            Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("woff") => "font/woff",
+            Some("woff2") => "font/woff2",
+            Some("ttf") => "font/ttf",
+            Some("eot") => "application/vnd.ms-fontobject",
+            _ => "application/octet-stream",
+        }
+    }
+
+    /// Serve from compiled-in DEFAULT_FILES with cache headers.
+    fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
         if let Some((_name, bytes, mime)) = DEFAULT_FILES.iter().find(|(name, _, _)| {
             tracing::debug!("Comparing path ({}) to name ({})", path, name);
-            path.as_str() == *name
+            path == *name
         }) {
-            tracing::debug!("found default");
-            let resp = Response::builder()
+            tracing::debug!("found default file");
+
+            // Generate ETag from content
+            let etag = generate_etag(bytes);
+
+            Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", *mime)
+                .header(header::CONTENT_TYPE, *mime)
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .header(header::ETAG, etag)
                 .body(axum::body::Body::from(*bytes))
                 .inspect_err(|e| tracing::error!("Error rendering default file: {e}"))
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(resp.into_response())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         } else {
-            tracing::debug!("no default found");
-            // let resp = Response::builder()
-            //     .status(StatusCode::NOT_FOUND)
-            //     .body(axum::body::Body::from("404 Not Found in fallback"))
-            //     .unwrap();
-            // resp.into_response()
+            tracing::debug!("no default found for: {}", path);
             Err(StatusCode::NOT_FOUND)
         }
     }
@@ -497,7 +597,6 @@ impl Server {
                     &config.index_file,
                 )
                 .await
-                .map(|html| html.into_response())
                 .map_err(|e| {
                     tracing::error!("Error rendering markdown: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -507,7 +606,6 @@ impl Server {
                 tracing::debug!("generating directory listing: {:?}", &dir_path);
                 Self::directory_to_html(&dir_path, &config.templates, config.base_dir.as_path(), &config)
                     .await
-                    .map(|html| html.into_response())
                     .map_err(|e| {
                         tracing::error!("Error generating directory listing: {e}");
                         StatusCode::INTERNAL_SERVER_ERROR
@@ -520,20 +618,29 @@ impl Server {
         }
     }
 
-    /// Serves a static file using tower's ServeFile service.
+    /// Serves a static file using tower's ServeFile service with cache headers.
+    /// ServeFile already provides Last-Modified and ETag headers.
     async fn serve_static_file(
         file_path: std::path::PathBuf,
         req: extract::Request<Body>,
     ) -> Result<Response, StatusCode> {
         let static_service = ServeFile::new(file_path);
-        static_service
+        let mut response = static_service
             .oneshot(req)
             .await
             .map(|r| r.into_response())
             .map_err(|e| {
                 tracing::error!("Error serving static file: {e}");
                 StatusCode::INTERNAL_SERVER_ERROR
-            })
+            })?;
+
+        // Add Cache-Control header for browser revalidation
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(CACHE_CONTROL_NO_CACHE),
+        );
+
+        Ok(response)
     }
 
     async fn markdown_to_html(
@@ -543,7 +650,7 @@ impl Server {
         oembed_timeout_ms: u64,
         markdown_extensions: &[String],
         index_file: &str,
-    ) -> Result<Html<String>, Box<dyn std::error::Error>> {
+    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = md_path
             .file_name()
@@ -571,7 +678,31 @@ impl Server {
             .await
             .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?;
         tracing::debug!("generated the html");
-        Ok(Html(full_html_output))
+
+        // Generate ETag from rendered content
+        let etag = generate_etag(full_html_output.as_bytes());
+
+        // Get Last-Modified from markdown file
+        let last_modified = tokio::fs::metadata(md_path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| generate_last_modified(d.as_secs()));
+
+        let mut builder = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .header(header::ETAG, etag);
+
+        if let Some(lm) = last_modified {
+            builder = builder.header(header::LAST_MODIFIED, lm);
+        }
+
+        builder
+            .body(Body::from(full_html_output))
+            .map_err(|e| e.into())
     }
 
     async fn directory_to_html(
@@ -579,7 +710,7 @@ impl Server {
         templates: &crate::templates::Templates,
         root_path: &Path,
         config: &ServerState,
-    ) -> Result<Html<String>, Box<dyn std::error::Error>> {
+    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
         use serde_json::json;
 
         // Create a temporary repo instance to scan this directory
@@ -689,7 +820,18 @@ impl Server {
         };
 
         tracing::debug!("generated directory listing html");
-        Ok(Html(full_html_output))
+
+        // Generate ETag from rendered content
+        let etag = generate_etag(full_html_output.as_bytes());
+
+        // Directory listings are dynamic - use no-store to always fetch fresh
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+            .header(header::ETAG, etag)
+            .body(Body::from(full_html_output))
+            .map_err(|e| e.into())
     }
 
     /// Handler for the root path "/" - renders the home page using the same
@@ -719,7 +861,6 @@ impl Server {
                     &config.index_file,
                 )
                 .await
-                .map(|html| html.into_response())
                 .map_err(|e| {
                     tracing::error!("Error rendering home markdown: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -729,7 +870,6 @@ impl Server {
                 tracing::debug!("home: generating directory listing: {:?}", &dir_path);
                 Self::directory_to_html(&dir_path, &config.templates, config.base_dir.as_path(), &config)
                     .await
-                    .map(|html| html.into_response())
                     .map_err(|e| {
                         tracing::error!("Error generating home directory listing: {e}");
                         StatusCode::INTERNAL_SERVER_ERROR
@@ -739,7 +879,6 @@ impl Server {
                 tracing::debug!("home: unexpected resolution, showing directory listing");
                 Self::directory_to_html(&config.base_dir, &config.templates, config.base_dir.as_path(), &config)
                     .await
-                    .map(|html| html.into_response())
                     .map_err(|e| {
                         tracing::error!("Error generating home directory listing: {e}");
                         StatusCode::INTERNAL_SERVER_ERROR
@@ -876,6 +1015,35 @@ pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
     })
 }
 
+// ============================================================================
+// Cache header helpers (extracted for testability and reuse)
+// ============================================================================
+
+/// Generates a weak ETag from content bytes using a simple hash.
+/// Weak ETags (W/"...") indicate semantic equivalence, not byte-for-byte identity.
+fn generate_etag(content: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("W/\"{:x}\"", hash)
+}
+
+/// Generates a Last-Modified header value from a Unix timestamp.
+fn generate_last_modified(timestamp: u64) -> Option<String> {
+    chrono::DateTime::from_timestamp(timestamp as i64, 0)
+        .map(|dt| dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+}
+
+/// Standard cache control header value for development mode.
+/// `no-cache` allows the browser to cache but requires revalidation on every request.
+const CACHE_CONTROL_NO_CACHE: &str = "no-cache";
+
+/// Standard cache control header for truly dynamic content that shouldn't be cached.
+const CACHE_CONTROL_NO_STORE: &str = "no-store";
+
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/theme.css",
@@ -914,12 +1082,12 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/components/mbr-components.js",
-        include_bytes!("../components/dist/mbr-components.js"),
+        include_bytes!("../templates/components-js/mbr-components.js"),
         "application/javascript",
     ),
     (
         "/components/mbr-components.css",
-        include_bytes!("../components/dist/mbr-components.css"),
+        include_bytes!("../templates/components-js/mbr-components.css"),
         "text/css",
     ),
     (

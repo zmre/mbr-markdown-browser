@@ -30,6 +30,22 @@ async fn main() -> Result<(), MbrError> {
     if let Some(timeout) = args.oembed_timeout {
         config.oembed_timeout_ms = timeout;
     }
+    if let Some(ref template_folder) = args.template_folder {
+        // Canonicalize and validate the template folder path
+        let template_path = template_folder.canonicalize().map_err(|e| {
+            ConfigError::CanonicalizeFailed {
+                path: template_folder.clone(),
+                source: e,
+            }
+        })?;
+        if !template_path.is_dir() {
+            return Err(ConfigError::TemplateFolderNotDirectory {
+                path: template_path,
+            }
+            .into());
+        }
+        config.template_folder = Some(template_path);
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -113,7 +129,7 @@ async fn main() -> Result<(), MbrError> {
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
-        let templates = templates::Templates::new(&config.root_dir)
+        let templates = templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
             .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
         let html_output = templates.render_markdown(&html_output, frontmatter).await?;
         println!("{}", &html_output);
@@ -130,6 +146,7 @@ async fn main() -> Result<(), MbrError> {
             &config.watcher_ignore_dirs,
             &config.index_file.clone(),
             config.oembed_timeout_ms,
+            config.template_folder.clone(),
         )?;
 
         let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
@@ -152,6 +169,7 @@ async fn main() -> Result<(), MbrError> {
                 &config_copy.watcher_ignore_dirs.clone(),
                 &config_copy.index_file.clone(),
                 config_copy.oembed_timeout_ms,
+                config_copy.template_folder.clone(),
             );
             match server {
                 Ok(mut s) => {

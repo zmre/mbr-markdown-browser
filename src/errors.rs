@@ -90,6 +90,9 @@ pub enum ConfigError {
 
     #[error("Failed to calculate relative path from {from} to {to}")]
     RelativePathFailed { from: PathBuf, to: PathBuf },
+
+    #[error("Template folder is not a directory: {}", path.display())]
+    TemplateFolderNotDirectory { path: PathBuf },
 }
 
 /// Errors related to markdown parsing and rendering.

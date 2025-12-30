@@ -78,7 +78,7 @@ pub struct Builder {
 impl Builder {
     /// Creates a new Builder instance.
     pub fn new(config: Config, output_dir: PathBuf) -> Result<Self, BuildError> {
-        let templates = Templates::new(&config.root_dir)?;
+        let templates = Templates::new(&config.root_dir, config.template_folder.as_deref())?;
         let repo = Repo::init_from_config(&config);
 
         Ok(Builder {

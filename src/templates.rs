@@ -9,13 +9,24 @@ pub struct Templates {
 }
 
 impl Templates {
-    pub fn new(root_path: &Path) -> Result<Self, TemplateError> {
-        let globs = root_path.join(".mbr/**/*.html");
+    /// Creates a new Templates instance.
+    ///
+    /// Template loading priority:
+    /// 1. If `template_folder` is provided, load from `{template_folder}/**/*.html`
+    /// 2. Otherwise, load from `{root_path}/.mbr/**/*.html`
+    /// 3. Fall back to compiled defaults for any missing templates
+    pub fn new(root_path: &Path, template_folder: Option<&Path>) -> Result<Self, TemplateError> {
+        let (globs, source_desc) = if let Some(tf) = template_folder {
+            (tf.join("**/*.html"), format!("template folder {}", tf.display()))
+        } else {
+            (root_path.join(".mbr/**/*.html"), format!(".mbr in {}", root_path.display()))
+        };
+
         let globs_str = globs.to_str().ok_or(TemplateError::InvalidPathEncoding)?;
         let mut tera = Tera::new(globs_str).unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to load user templates from {}: {}. Using built-in defaults.",
-                globs_str,
+                source_desc,
                 e
             );
             Tera::default()

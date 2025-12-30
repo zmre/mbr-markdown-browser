@@ -10,7 +10,8 @@
   mask-size: cover;
   mask: var(--mbr-icon-hamburger) no-repeat 100% 100%;
   background-color: var(--pico-color);
-  margin-left: -14px;
+  mask-position: 0.2em 0.2em;
+  mask-border: none;
 }
 
 .mbr-search-button {
@@ -19,7 +20,6 @@
   mask-size: cover;
   mask: var(--mbr-icon-search) no-repeat 100% 100%;
   background-color: var(--pico-color);
-  margin-right: -14px;
   border: none;
   outline: none;
 }

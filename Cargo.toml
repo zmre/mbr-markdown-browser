@@ -43,7 +43,7 @@ time = "0.3"
 tokio = {version="1.47", features = ["full"]}
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
@@ -71,10 +71,13 @@ flate2 = "1.0"
 proptest = "1.5"
 tempfile = "3.14"
 
+[build]
+jobs = 8
+
 [profile.release]
 opt-level = 3
 lto = true
-codegen-units = 1
+codegen-units = 16
 # Use 'unwind' to allow catch_unwind for handling panics from dependencies (e.g., pdf-extract)
 panic = 'unwind'
 strip = 'debuginfo'

@@ -234,10 +234,9 @@ export class MbrLiveReloadElement extends LitElement {
 
   private _shouldReloadForFile(changedPath: string): boolean {
     // Always reload for template and CSS changes
-    if (changedPath.includes('.mbr/') &&
-        (changedPath.endsWith('.html') ||
-         changedPath.endsWith('.css') ||
-         changedPath.endsWith('.js'))) {
+    if (changedPath.endsWith('.html') ||
+      changedPath.endsWith('.css') ||
+      changedPath.endsWith('.js')) {
       return true;
     }
 
@@ -273,6 +272,8 @@ export class MbrLiveReloadElement extends LitElement {
 
   private _showReloadNotification(_file: string) {
     this._showNotification = true;
+
+    console.log("[mbr-live-reload]     reloading");
 
     // Auto-hide after reload begins
     setTimeout(() => {

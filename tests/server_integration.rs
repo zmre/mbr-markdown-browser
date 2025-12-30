@@ -30,6 +30,7 @@ impl TestServer {
                 &[".direnv".to_string(), ".git".to_string(), "result".to_string(), "target".to_string(), "build".to_string()],
                 "index.md",
                 100,
+                None, // template_folder
             )
             .expect("Failed to initialize server");
 
@@ -571,4 +572,258 @@ async fn test_search_mixed_terms_and_facets() {
     // Should find rust tutorial but not python tutorial
     assert!(results.iter().any(|r| r["url_path"].as_str().unwrap().contains("async")),
         "Expected to find Rust tutorial: {:?}", results);
+}
+
+// ============================================================================
+// Template Folder Tests
+// ============================================================================
+
+/// Helper to start a test server with template_folder option.
+struct TestServerWithTemplates {
+    port: u16,
+    client: reqwest::Client,
+    _handle: tokio::task::JoinHandle<()>,
+}
+
+impl TestServerWithTemplates {
+    async fn start(repo: &TestRepo, template_folder: Option<std::path::PathBuf>) -> Self {
+        let port = find_available_port();
+        let root_dir = repo.path().to_path_buf();
+
+        let handle = tokio::spawn(async move {
+            let server = mbr::server::Server::init(
+                [127, 0, 0, 1],
+                port,
+                root_dir,
+                "static",
+                &["md".to_string()],
+                &["target".to_string(), "node_modules".to_string()],
+                &["*.log".to_string()],
+                &[".direnv".to_string(), ".git".to_string(), "result".to_string(), "target".to_string(), "build".to_string()],
+                "index.md",
+                100,
+                template_folder,
+            )
+            .expect("Failed to initialize server");
+
+            let _ = server.start().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+
+        Self {
+            port,
+            client,
+            _handle: handle,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{}", self.port, path)
+    }
+
+    async fn get(&self, path: &str) -> reqwest::Response {
+        self.client
+            .get(self.url(path))
+            .send()
+            .await
+            .expect("Failed to make request")
+    }
+
+    async fn get_text(&self, path: &str) -> String {
+        self.get(path).await.text().await.expect("Failed to get text")
+    }
+}
+
+#[tokio::test]
+async fn test_template_folder_serves_css() {
+    let repo = TestRepo::new();
+
+    // Create a custom template folder with a custom CSS file
+    let template_dir = repo.path().join("custom-templates");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    std::fs::write(template_dir.join("theme.css"), "/* Custom theme CSS */\nbody { color: red; }").unwrap();
+
+    let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
+    let response = server.get("/.mbr/theme.css").await;
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Custom theme CSS"), "Should serve custom theme.css from template folder");
+}
+
+#[tokio::test]
+async fn test_template_folder_serves_js_from_js_subdir() {
+    let repo = TestRepo::new();
+
+    // Create a custom template folder with components-js/ subdirectory for components
+    let template_dir = repo.path().join("custom-templates");
+    std::fs::create_dir_all(template_dir.join("components-js")).unwrap();
+    std::fs::write(template_dir.join("components-js/mbr-components.js"), "// Custom components JS").unwrap();
+
+    let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
+    let response = server.get("/.mbr/components/mbr-components.js").await;
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Custom components JS"), "Should serve components from template_folder/components-js/");
+}
+
+#[tokio::test]
+async fn test_template_folder_falls_back_to_defaults() {
+    let repo = TestRepo::new();
+
+    // Create an empty template folder
+    let template_dir = repo.path().join("custom-templates");
+    std::fs::create_dir_all(&template_dir).unwrap();
+
+    let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
+
+    // Request a file that's NOT in the template folder - should fall back to compiled default
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    // pico.min.css is a compiled-in default, should be served
+    assert!(!body.is_empty(), "Should fall back to compiled default for missing files");
+}
+
+#[tokio::test]
+async fn test_template_folder_overrides_html_templates() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test Page");
+
+    // Create a custom template folder with custom HTML
+    let template_dir = repo.path().join("custom-templates");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    std::fs::write(
+        template_dir.join("index.html"),
+        r#"<!DOCTYPE html>
+<html>
+<head><title>Custom Template</title></head>
+<body>
+<div class="custom-wrapper">{{ markdown | safe }}</div>
+</body>
+</html>"#
+    ).unwrap();
+
+    let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
+    let html = server.get_text("/test/").await;
+
+    assert!(html.contains("Custom Template"), "Should use custom HTML template");
+    assert!(html.contains("custom-wrapper"), "Should render with custom wrapper");
+    assert!(html.contains("<h1>Test Page</h1>"), "Should still render markdown content");
+}
+
+// ============================================================================
+// Cache Headers Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_cache_headers_on_markdown() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Test Page");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/page/").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Check Cache-Control header
+    let cache_control = response.headers().get("cache-control");
+    assert!(cache_control.is_some(), "Markdown pages should have Cache-Control header");
+    assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-cache");
+
+    // Check ETag header
+    let etag = response.headers().get("etag");
+    assert!(etag.is_some(), "Markdown pages should have ETag header");
+    let etag_value = etag.unwrap().to_str().unwrap();
+    assert!(etag_value.starts_with("W/\""), "ETag should be weak (W/\"...\")");
+
+    // Check Last-Modified header
+    let last_modified = response.headers().get("last-modified");
+    assert!(last_modified.is_some(), "Markdown pages should have Last-Modified header");
+}
+
+#[tokio::test]
+async fn test_cache_headers_on_default_assets() {
+    let repo = TestRepo::new();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/.mbr/theme.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Check Cache-Control header
+    let cache_control = response.headers().get("cache-control");
+    assert!(cache_control.is_some(), "Default assets should have Cache-Control header");
+    assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-cache");
+
+    // Check ETag header
+    let etag = response.headers().get("etag");
+    assert!(etag.is_some(), "Default assets should have ETag header");
+}
+
+#[tokio::test]
+async fn test_cache_headers_on_static_files() {
+    let repo = TestRepo::new();
+    repo.create_static_file("test.txt", b"Static file content");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/test.txt").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Check Cache-Control header
+    let cache_control = response.headers().get("cache-control");
+    assert!(cache_control.is_some(), "Static files should have Cache-Control header");
+    assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-cache");
+}
+
+#[tokio::test]
+async fn test_cache_headers_on_directory_listing() {
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/one.md", "# One");
+    repo.create_markdown("docs/two.md", "# Two");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Directory listings should use no-store since they're truly dynamic
+    let cache_control = response.headers().get("cache-control");
+    assert!(cache_control.is_some(), "Directory listings should have Cache-Control header");
+    assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-store");
+
+    // Should still have ETag
+    let etag = response.headers().get("etag");
+    assert!(etag.is_some(), "Directory listings should have ETag header");
+}
+
+#[tokio::test]
+async fn test_etag_changes_with_content() {
+    let repo = TestRepo::new();
+    repo.create_markdown("mutable.md", "# Original Content");
+
+    let server = TestServer::start(&repo).await;
+
+    // Get first ETag
+    let response1 = server.get("/mutable/").await;
+    let etag1 = response1.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+    // Modify the file
+    std::fs::write(repo.path().join("mutable.md"), "# Modified Content").unwrap();
+
+    // Small delay to ensure file is written
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Get second ETag - should be different
+    let response2 = server.get("/mutable/").await;
+    let etag2 = response2.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+    assert_ne!(etag1, etag2, "ETag should change when content changes");
 }

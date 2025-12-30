@@ -33,4 +33,9 @@ pub struct Args {
     /// Falls back to plain link if fetch doesn't complete in time.
     #[arg(long)]
     pub oembed_timeout: Option<u64>,
+
+    /// Override template folder (replaces default .mbr/ and compiled defaults).
+    /// Files found in this folder take precedence; missing files fall back to defaults.
+    #[arg(long, value_name = "PATH")]
+    pub template_folder: Option<PathBuf>,
 }

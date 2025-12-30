@@ -31,7 +31,7 @@
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
-          <key>CFBundleDevelopmentRegion</key>
+          <key>CFBcargo watch -q -c -x 'run --release -- -s README.md'undleDevelopmentRegion</key>
           <string>en</string>
           <key>CFBundleDisplayName</key>
           <string>MBR</string>
@@ -262,6 +262,7 @@
           [
             rusttoolchain
             pkgs.nodejs_24
+            pkgs.bun
             pkgs.ffmpeg_7-full.dev
             pkgs.pkg-config
             pkgs.cargo-watch

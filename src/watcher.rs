@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 /// Capacity of the broadcast channel for file change events.
 /// If clients don't keep up, the oldest messages will be dropped.
@@ -50,6 +50,7 @@ impl FileWatcher {
     /// # Arguments
     ///
     /// * `base_dir` - The root directory to watch
+    /// * `template_folder` - Optional template folder to also watch for hot reload
     /// * `ignore_dirs` - Directory names to ignore (e.g., "target", ".git")
     /// * `ignore_globs` - Glob patterns to ignore (e.g., "*.log")
     ///
@@ -58,11 +59,13 @@ impl FileWatcher {
     /// Returns a FileWatcher instance and a receiver for subscribing to change events.
     pub fn new(
         base_dir: &Path,
+        template_folder: Option<&Path>,
         ignore_dirs: &[String],
         ignore_globs: &[String],
     ) -> Result<(Self, broadcast::Receiver<FileChangeEvent>), WatcherError> {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let watcher = Self::new_with_sender(base_dir, ignore_dirs, ignore_globs, tx)?;
+        let watcher =
+            Self::new_with_sender(base_dir, template_folder, ignore_dirs, ignore_globs, tx)?;
         Ok((watcher, rx))
     }
 
@@ -74,11 +77,13 @@ impl FileWatcher {
     /// # Arguments
     ///
     /// * `base_dir` - The root directory to watch
+    /// * `template_folder` - Optional template folder to also watch for hot reload
     /// * `ignore_dirs` - Directory names to ignore (e.g., "target", ".git")
     /// * `ignore_globs` - Glob patterns to ignore (e.g., "*.log")
     /// * `sender` - An existing broadcast sender to use for file change events
     pub fn new_with_sender(
         base_dir: &Path,
+        template_folder: Option<&Path>,
         ignore_dirs: &[String],
         _ignore_globs: &[String],
         sender: broadcast::Sender<FileChangeEvent>,
@@ -145,7 +150,22 @@ impl FileWatcher {
                         }
                     }
                     Err(e) => {
-                        error!("File watcher error: {}", e);
+                        // Process each path in the event
+                        for path in &e.paths {
+                            // Skip if path contains any ignored directory
+                            let path_str = path.to_string_lossy();
+                            let should_ignore = ignore_set.iter().any(|ignored| {
+                                path.components().any(|comp| {
+                                    comp.as_os_str().to_string_lossy() == ignored.as_str()
+                                })
+                            });
+
+                            if should_ignore {
+                                trace!("Ignoring error in: {}", path_str);
+                            } else {
+                                error!("File watcher error: {}", e);
+                            }
+                        }
                     }
                 }
             },
@@ -164,6 +184,20 @@ impl FileWatcher {
             })?;
 
         info!("File watcher started for {:?} (polling every 1s)", base_dir);
+
+        // Also watch template_folder if provided (for dev mode hot reload of templates/assets)
+        if let Some(template_path) = template_folder {
+            watcher
+                .watch(template_path, RecursiveMode::Recursive)
+                .map_err(|e| WatcherError::WatchFailed {
+                    path: template_path.to_path_buf(),
+                    source: e,
+                })?;
+            info!(
+                "File watcher also watching template folder {:?}",
+                template_path
+            );
+        }
 
         Ok(FileWatcher {
             _watcher: watcher,
@@ -193,15 +227,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path();
 
-        let (_watcher, mut rx) = FileWatcher::new(base_path, &[], &[]).unwrap();
+        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &[], &[]).unwrap();
 
         // Create a test file
         let test_file = base_path.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
         // Wait for the event (PollWatcher checks every 1 second)
-        let event =
-            tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
+        let event = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
 
         assert!(event.is_ok(), "Should receive file change event");
         let change = event.unwrap().unwrap();
@@ -216,15 +249,14 @@ mod tests {
 
         // Create watcher with target in ignore list
         let ignore_dirs = vec!["target".to_string()];
-        let (_watcher, mut rx) = FileWatcher::new(base_path, &ignore_dirs, &[]).unwrap();
+        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &ignore_dirs, &[]).unwrap();
 
         // Create a file in the base directory - this should be visible
         let visible_file = base_path.join("visible.md");
         fs::write(&visible_file, "visible content").unwrap();
 
         // Wait for the event (PollWatcher checks every 1 second)
-        let event =
-            tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
+        let event = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
         assert!(event.is_ok(), "Should receive event for visible.md");
         let change = event.unwrap().unwrap();
         assert!(
@@ -268,7 +300,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path();
 
-        let (watcher, mut rx1) = FileWatcher::new(base_path, &[], &[]).unwrap();
+        let (watcher, mut rx1) = FileWatcher::new(base_path, None, &[], &[]).unwrap();
         let mut rx2 = watcher.subscribe();
 
         // Create a test file
@@ -276,10 +308,8 @@ mod tests {
         fs::write(&test_file, "# Multi").unwrap();
 
         // Both receivers should get the event (PollWatcher checks every 1 second)
-        let event1 =
-            tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx1.recv()).await;
-        let event2 =
-            tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx2.recv()).await;
+        let event1 = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx1.recv()).await;
+        let event2 = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx2.recv()).await;
 
         assert!(event1.is_ok());
         assert!(event2.is_ok());
@@ -288,5 +318,37 @@ mod tests {
         let change2 = event2.unwrap().unwrap();
 
         assert_eq!(change1, change2);
+    }
+
+    #[tokio::test]
+    async fn test_watcher_watches_template_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create a separate template folder
+        let template_dir = TempDir::new().unwrap();
+        let template_path = template_dir.path();
+
+        let (_watcher, mut rx) =
+            FileWatcher::new(base_path, Some(template_path), &[], &[]).unwrap();
+
+        // Create a file in the template folder (not base dir)
+        let template_file = template_path.join("custom.css");
+        fs::write(&template_file, "/* custom css */").unwrap();
+
+        // Should receive the event from template folder
+        let event = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
+
+        assert!(
+            event.is_ok(),
+            "Should receive file change event from template folder"
+        );
+        let change = event.unwrap().unwrap();
+        assert_eq!(change.event, ChangeEventType::Created);
+        assert!(
+            change.path.contains("custom.css"),
+            "Event should be for custom.css, got: {}",
+            change.path
+        );
     }
 }
