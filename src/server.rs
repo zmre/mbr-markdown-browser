@@ -15,7 +15,7 @@ use crate::errors::ServerError;
 use crate::link_transform::LinkTransformConfig;
 use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
 use crate::repo::MarkdownInfo;
-use crate::search::{search_other_files, SearchEngine, SearchQuery, SearchResponse};
+use crate::search::{search_other_files, SearchEngine, SearchQuery};
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
@@ -372,23 +372,43 @@ impl Server {
     pub async fn search_handler(
         State(config): State<ServerState>,
         Json(query): Json<SearchQuery>,
-    ) -> Result<Json<SearchResponse>, StatusCode> {
+    ) -> impl IntoResponse {
         tracing::debug!("Search request: q={:?}, scope={:?}", query.q, query.scope);
 
         // Ensure repo is scanned (may already be from background scan)
-        config
-            .repo
-            .scan_all()
-            .inspect_err(|e| tracing::error!("Error scanning repo for search: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Err(e) = config.repo.scan_all() {
+            tracing::error!("Error scanning repo for search: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to scan repository: {}", e),
+                    "query": query.q,
+                    "total_matches": 0,
+                    "results": [],
+                    "duration_ms": 0
+                })),
+            );
+        }
 
         // Create search engine and execute search
         let engine = SearchEngine::new(config.repo.clone(), config.base_dir.clone());
 
-        let mut response = engine
-            .search(&query)
-            .inspect_err(|e| tracing::error!("Search error: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut response = match engine.search(&query) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Search error: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Search failed: {}", e),
+                        "query": query.q,
+                        "total_matches": 0,
+                        "results": [],
+                        "duration_ms": 0
+                    })),
+                );
+            }
+        };
 
         // If searching all filetypes or non-markdown, also search other files
         if query.filetype.as_deref() == Some("all")
@@ -415,7 +435,7 @@ impl Server {
             response.duration_ms
         );
 
-        Ok(Json(response))
+        (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
     }
 
     // This is the fallback if the file isn't in the runtime .mbr dir

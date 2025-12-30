@@ -5,12 +5,37 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vite + Lit + TS</title>
+    <meta name="color-scheme" content="light dark" />
     <link rel="stylesheet" href="./src/index.css" />
-    <script type="module" src="/src/my-element.ts"></script>
-    <script type="module" src="/src/my-element2.ts"></script>
-    <script type="module" src="/src/mbr-browse.ts"></script>
+    <link rel="stylesheet" href="/.mbr/pico.min.css" />
+    <link href="/.mbr/user.css" rel="stylesheet" />
+    <link rel="stylesheet" href="../templates/pico-main/css/pico.blue.css" />
   </head>
   <body>
+    <h1>Test page for components</h1>
+    <h2>Browse</h2>
+    <button
+      class="outline contrast browse-trigger"
+      onclick="document.querySelector('mbr-browse')?.open()"
+      aria-label="Browse files"
+    >
+      <div class="mbr-hamburger-button" />
+    </button>
     <mbr-browse></mbr-browse>
+    <h2>Info</h2>
+    <mbr-info></mbr-info>
+    <h2>Keys</h2>
+    <mbr-keys></mbr-keys>
+    <h2>Live Reload</h2>
+    omitting
+    <h2>Nav</h2>
+    <mbr-nav></mbr-nav>
+    <h2>Search</h2>
+    <mbr-search></mbr-search>
+    <script defer type="module" src="/src/mbr-browse.ts"></script>
+    <script defer type="module" src="/src/mbr-info.ts"></script>
+    <script defer type="module" src="/src/mbr-keys.ts"></script>
+    <script defer type="module" src="/src/mbr-nav.ts"></script>
+    <script defer type="module" src="/src/mbr-search.ts"></script>
   </body>
 </html>

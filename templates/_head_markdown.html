@@ -4,6 +4,8 @@
     <link rel="stylesheet" href="/.mbr/hljs.dark.css" />
     {% if tags %}
     <meta name="keywords" content="{{tags | safe}}" data-pagefind-filter="tag[content]" />
+    {% elif keywords %}
+    <meta name="keywords" content="{{keywords | safe}}" data-pagefind-filter="tag[content]" />
     {% elif taxonomy.tags %}
     <meta name="keywords" content="{{taxonomy.tags | safe}}" data-pagefind-filter="tag[content]" />
     {% endif %}

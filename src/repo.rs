@@ -149,9 +149,13 @@ impl OtherFileInfo {
     }
 
     /// Extract text from a PDF file.
+    /// Uses catch_unwind to handle panics from pdf-extract on malformed PDFs.
     fn extract_pdf_text(&self) -> Option<String> {
-        match pdf_extract::extract_text(&self.raw_path) {
-            Ok(text) => {
+        let path = self.raw_path.clone();
+        let result = std::panic::catch_unwind(|| pdf_extract::extract_text(&path));
+
+        match result {
+            Ok(Ok(text)) => {
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     None
@@ -159,8 +163,15 @@ impl OtherFileInfo {
                     Some(text)
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::debug!("Failed to extract PDF text from {:?}: {}", self.raw_path, e);
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "PDF extraction panicked for {:?}, skipping text extraction",
+                    self.raw_path
+                );
                 None
             }
         }

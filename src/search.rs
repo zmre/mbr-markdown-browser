@@ -508,7 +508,9 @@ impl SearchEngine {
                 .map(|(line_num, line)| {
                     let mut s = format!("Line {}: ", line_num);
                     if line.len() > MAX_SNIPPET_LENGTH {
-                        s.push_str(&line[..MAX_SNIPPET_LENGTH]);
+                        // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
+                        let end = line.floor_char_boundary(MAX_SNIPPET_LENGTH);
+                        s.push_str(&line[..end]);
                         s.push_str("...");
                     } else {
                         s.push_str(line);
@@ -664,9 +666,10 @@ impl SearchEngine {
 
         // Match against extracted text (lower weight since it's body content)
         if let Some(ref text) = info.extracted_text {
-            // Sample the text for matching (first 5000 chars for performance)
+            // Sample the text for matching (first ~5000 bytes for performance)
+            // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
             let sample = if text.len() > 5000 {
-                &text[..5000]
+                &text[..text.floor_char_boundary(5000)]
             } else {
                 text.as_str()
             };
@@ -678,12 +681,13 @@ impl SearchEngine {
         if best_score > 0 {
             // Build snippet from extracted text
             let snippet = info.extracted_text.as_ref().map(|text| {
-                let sample = if text.len() > MAX_SNIPPET_LENGTH {
-                    format!("{}...", &text[..MAX_SNIPPET_LENGTH])
+                if text.len() > MAX_SNIPPET_LENGTH {
+                    // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
+                    let end = text.floor_char_boundary(MAX_SNIPPET_LENGTH);
+                    format!("{}...", &text[..end])
                 } else {
                     text.clone()
-                };
-                sample
+                }
             });
 
             Some(SearchResult {

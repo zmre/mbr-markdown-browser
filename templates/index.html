@@ -7,16 +7,7 @@
 {% include "_nav.html" %}
     <main id="wrapper" class="container" data-pagefind-body>{{ markdown | safe}}</main>
     <footer class="container" data-pagefind-ignore>
-      <nav>
-        <ul>
-          <li>
-            <button disabled class="outline secondary">&lt; Previous</button>
-          </li>
-        </ul>
-        <ul>
-          <li><button disabled class="outline secondary">Next &gt;</button></li>
-        </ul>
-      </nav>
+      <mbr-nav></mbr-nav>
     </footer>
 {% include "_footer.html" %}
   </body>

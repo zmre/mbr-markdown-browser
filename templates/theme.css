@@ -20,6 +20,8 @@
   mask: var(--mbr-icon-search) no-repeat 100% 100%;
   background-color: var(--pico-color);
   margin-right: -14px;
+  border: none;
+  outline: none;
 }
 
 body > header {

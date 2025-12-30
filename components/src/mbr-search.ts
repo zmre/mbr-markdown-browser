@@ -33,6 +33,7 @@ interface SearchResponse {
   total_matches: number;
   results: SearchResult[];
   duration_ms: number;
+  error?: string;
 }
 
 /**
@@ -266,14 +267,46 @@ export class MbrSearchElement extends LitElement {
   }
 
   private _handleKeydown(e: KeyboardEvent) {
+    // Handle Ctrl key combinations for scrolling
+    if (e.ctrlKey) {
+      const resultsContainer = this.shadowRoot?.querySelector('.results-container');
+      if (!resultsContainer) return;
+
+      const halfPage = resultsContainer.clientHeight / 2;
+      const fullPage = resultsContainer.clientHeight - 50;
+
+      switch (e.key.toLowerCase()) {
+        case 'd': // Ctrl+d - half page down
+          e.preventDefault();
+          resultsContainer.scrollBy({ top: halfPage, behavior: 'smooth' });
+          return;
+        case 'u': // Ctrl+u - half page up
+          e.preventDefault();
+          resultsContainer.scrollBy({ top: -halfPage, behavior: 'smooth' });
+          return;
+        case 'f': // Ctrl+f - full page down
+          e.preventDefault();
+          resultsContainer.scrollBy({ top: fullPage, behavior: 'smooth' });
+          return;
+        case 'b': // Ctrl+b - full page up
+          e.preventDefault();
+          resultsContainer.scrollBy({ top: -fullPage, behavior: 'smooth' });
+          return;
+      }
+    }
+
     switch (e.key) {
       case 'ArrowDown':
+      case 'j': // vim-style down
         e.preventDefault();
         this._selectedIndex = Math.min(this._selectedIndex + 1, this._results.length - 1);
+        this._scrollSelectedIntoView();
         break;
       case 'ArrowUp':
+      case 'k': // vim-style up
         e.preventDefault();
         this._selectedIndex = Math.max(this._selectedIndex - 1, -1);
+        this._scrollSelectedIntoView();
         break;
       case 'Enter':
         e.preventDefault();
@@ -286,6 +319,19 @@ export class MbrSearchElement extends LitElement {
         this._closeSearch();
         break;
     }
+  }
+
+  /**
+   * Scroll the selected result into view if needed.
+   */
+  private _scrollSelectedIntoView() {
+    this.updateComplete.then(() => {
+      const resultsContainer = this.shadowRoot?.querySelector('.results-container');
+      const selectedEl = this.shadowRoot?.querySelector('.result.selected');
+      if (resultsContainer && selectedEl) {
+        selectedEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    });
   }
 
   private _handleScopeChange(e: Event) {
@@ -365,12 +411,12 @@ export class MbrSearchElement extends LitElement {
         signal: this._abortController.signal,
       });
 
-      if (!response.ok) {
-        throw new Error(`Search failed: ${response.status}`);
-      }
-
       const data: SearchResponse = await response.json();
-      this._results = data.results.map(r => ({ ...r, snippetHtml: null }));
+
+      if (!response.ok || data.error) {
+        throw new Error(data.error || `Search failed: ${response.status}`);
+      }
+      this._results = data.results.map((r: SearchResult) => ({ ...r, snippetHtml: null }));
       this._totalMatches = data.total_matches;
       this._durationMs = data.duration_ms;
     } catch (err) {
@@ -571,9 +617,10 @@ export class MbrSearchElement extends LitElement {
 
           <div class="search-footer">
             <span class="footer-hint">
-              <kbd>↑</kbd><kbd>↓</kbd> to navigate
-              <kbd>↵</kbd> to select
-              <kbd>esc</kbd> to close
+              <kbd>j</kbd><kbd>k</kbd> navigate
+              <kbd>↵</kbd> select
+              <kbd>esc</kbd> close
+              <kbd>^d</kbd><kbd>^u</kbd> scroll
             </span>
           </div>
         </div>

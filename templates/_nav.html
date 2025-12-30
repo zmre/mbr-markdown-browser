@@ -14,15 +14,11 @@
       <nav role="navigation" aria-label="Main menu">
         <ul>
           <li>
-            <details class="dropdown">
-              <summary role="button" class="outline contrast">
-                <div class="mbr-hamburger-button" />
-              </summary>
-              <ul>
-                <li>Browse</li>
-                <li>Tags</li>
-              </ul>
-            </details>
+            <button class="outline contrast browse-trigger"
+                    onclick="document.querySelector('mbr-browse')?.open()"
+                    aria-label="Browse files">
+              <div class="mbr-hamburger-button" />
+            </button>
           </li>
         </ul>
         <ul>
