@@ -46,6 +46,7 @@ impl Templates {
         &self,
         html: &str,
         frontmatter: HashMap<String, String>,
+        extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         tracing::debug!("frontmatter: {:?}", &frontmatter);
 
@@ -55,6 +56,10 @@ impl Templates {
 
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        // Add extra context (breadcrumbs, current_dir_name, etc.)
+        extra_context.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
         context.insert("markdown", html);

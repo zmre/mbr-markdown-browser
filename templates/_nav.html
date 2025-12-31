@@ -1,16 +1,4 @@
     <header class="container" data-pagefind-ignore>
-      <nav aria-label="breadcrumb" role="navigation">
-        <ul>
-          {% if breadcrumbs %}
-          {% for crumb in breadcrumbs %}
-          <li>
-            <small><a href="{{ crumb.url }}">{{ crumb.name }}</a></small>
-          </li>
-          {% endfor %}
-          {% endif %}
-          <li><small>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</small></li>
-        </ul>
-      </nav>
       <nav role="navigation" aria-label="Main menu">
         <ul>
           <li>
@@ -29,3 +17,15 @@
         </ul>
       </nav>
     </header>
+    <nav class="container" aria-label="breadcrumb" role="navigation">
+    <ul>
+        {% if breadcrumbs %}
+        {% for crumb in breadcrumbs %}
+        <li>
+        <small><a href="{{ crumb.url }}">{{ crumb.name }}</a></small>
+        </li>
+        {% endfor %}
+        {% endif %}
+        <li><small>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</small></li>
+    </ul>
+    </nav>

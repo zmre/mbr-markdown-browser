@@ -18,10 +18,7 @@ use crate::search::{search_other_files, SearchEngine, SearchQuery};
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
-use tower_http::{
-    services::ServeFile,
-    trace::TraceLayer,
-};
+use tower_http::{services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct Server {
@@ -87,7 +84,8 @@ impl Server {
         ));
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
-        let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<crate::watcher::FileChangeEvent>(100);
+        let (file_change_tx, _rx) =
+            tokio::sync::broadcast::channel::<crate::watcher::FileChangeEvent>(100);
         let tx_for_watcher = file_change_tx.clone();
 
         // Initialize file watcher in background to avoid blocking server startup
@@ -110,7 +108,10 @@ impl Server {
                     std::mem::forget(watcher);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to initialize file watcher: {}. Live reload disabled.", e);
+                    tracing::warn!(
+                        "Failed to initialize file watcher: {}. Live reload disabled.",
+                        e
+                    );
                 }
             }
         });
@@ -153,13 +154,16 @@ impl Server {
         ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<(), ServerError> {
         let addr = SocketAddr::from((self.ip, self.port));
-        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-            ServerError::BindFailed {
-                addr: addr.to_string(),
-                source: e,
-            }
-        })?;
-        let local_addr = listener.local_addr().map_err(ServerError::LocalAddrFailed)?;
+        let listener =
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| ServerError::BindFailed {
+                    addr: addr.to_string(),
+                    source: e,
+                })?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(ServerError::LocalAddrFailed)?;
         tracing::debug!("listening on {}", local_addr);
 
         // Signal that server is ready before starting to serve
@@ -192,7 +196,9 @@ impl Server {
             let addr = SocketAddr::from((self.ip, self.port));
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => {
-                    let local_addr = listener.local_addr().map_err(ServerError::LocalAddrFailed)?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(ServerError::LocalAddrFailed)?;
                     tracing::debug!("listening on {}", local_addr);
 
                     // Signal that server is ready with the actual port
@@ -215,7 +221,8 @@ impl Server {
                     );
                     tracing::warn!(
                         "Port {} already in use, trying port {}",
-                        old_port, self.port
+                        old_port,
+                        self.port
                     );
                 }
                 Err(e) => {
@@ -236,10 +243,7 @@ impl Server {
         ws.on_upgrade(|socket| Self::handle_websocket(socket, config))
     }
 
-    async fn handle_websocket(
-        socket: axum::extract::ws::WebSocket,
-        config: ServerState,
-    ) {
+    async fn handle_websocket(socket: axum::extract::ws::WebSocket, config: ServerState) {
         let (mut sender, mut receiver) = socket.split();
 
         // If file watcher is not initialized, close the connection
@@ -326,7 +330,9 @@ impl Server {
     pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
-        config.repo.scan_all()
+        config
+            .repo
+            .scan_all()
             .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -334,7 +340,9 @@ impl Server {
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(
-                config.repo.to_json()
+                config
+                    .repo
+                    .to_json()
                     .inspect_err(|e| tracing::error!("Error creating json: {e}"))
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             )
@@ -433,7 +441,10 @@ impl Server {
             response.duration_ms
         );
 
-        (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
+        (
+            StatusCode::OK,
+            Json(serde_json::to_value(response).unwrap()),
+        )
     }
 
     /// Serves assets from /.mbr/* path.
@@ -459,7 +470,9 @@ impl Server {
         if let Some(ref template_folder) = config.template_folder {
             // Map components/* -> js/* in template folder
             let file_path = if asset_path.starts_with("/components/") {
-                let component_name = asset_path.strip_prefix("/components/").unwrap_or(&asset_path);
+                let component_name = asset_path
+                    .strip_prefix("/components/")
+                    .unwrap_or(&asset_path);
                 template_folder.join("components-js").join(component_name)
             } else {
                 // Strip leading slash for joining
@@ -489,12 +502,10 @@ impl Server {
     /// Serve a file from the filesystem with appropriate MIME type and cache headers.
     async fn serve_file_from_path(path: &std::path::Path) -> Result<Response<Body>, StatusCode> {
         let mime = Self::guess_mime_type(path);
-        let bytes = tokio::fs::read(path)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to read file {}: {}", path.display(), e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        let bytes = tokio::fs::read(path).await.map_err(|e| {
+            tracing::error!("Failed to read file {}: {}", path.display(), e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         // Generate ETag from content
         let etag = generate_etag(&bytes);
@@ -604,12 +615,17 @@ impl Server {
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("generating directory listing: {:?}", &dir_path);
-                Self::directory_to_html(&dir_path, &config.templates, config.base_dir.as_path(), &config)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Error generating directory listing: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
+                Self::directory_to_html(
+                    &dir_path,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                    &config,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Error generating directory listing: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
             }
             ResolvedPath::NotFound => {
                 tracing::debug!("resource not found: {}", &path);
@@ -663,18 +679,57 @@ impl Server {
             is_index_file,
         };
 
-        let (mut frontmatter, inner_html_output) =
-            markdown::render(md_path.to_path_buf(), root_path, oembed_timeout_ms, link_transform_config)
-                .await
-                .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
+        let (mut frontmatter, inner_html_output) = markdown::render(
+            md_path.to_path_buf(),
+            root_path,
+            oembed_timeout_ms,
+            link_transform_config,
+        )
+        .await
+        .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
         // Use relative path for markdown_source so live reload can match it
-        let relative_md_path = pathdiff::diff_paths(md_path, root_path)
-            .unwrap_or_else(|| md_path.to_path_buf());
-        frontmatter.insert("markdown_source".into(), relative_md_path.to_string_lossy().into());
+        let relative_md_path =
+            pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
+        frontmatter.insert(
+            "markdown_source".into(),
+            relative_md_path.to_string_lossy().into(),
+        );
         // Indicate server mode for frontend search functionality
         frontmatter.insert("server_mode".into(), "true".into());
+
+        // Compute breadcrumbs based on the URL path, not the file path
+        // For a file like docs/guide.md, the URL is /docs/guide/ so breadcrumbs should include docs
+        let url_path_buf = if is_index_file {
+            // index.md -> use parent directory path
+            // e.g., docs/index.md -> /docs/ -> breadcrumbs path is "docs"
+            relative_md_path
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_path_buf()
+        } else {
+            // regular.md -> use parent + file stem
+            // e.g., docs/guide.md -> /docs/guide/ -> breadcrumbs path is "docs/guide"
+            let parent = relative_md_path.parent().unwrap_or(Path::new(""));
+            let stem = relative_md_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            parent.join(stem)
+        };
+        let breadcrumbs = generate_breadcrumbs(&url_path_buf);
+        let breadcrumbs_json: Vec<_> = breadcrumbs
+            .iter()
+            .map(|b| serde_json::json!({"name": b.name, "url": b.url}))
+            .collect();
+        let current_dir_name = get_current_dir_name(&url_path_buf);
+
+        // Build extra context for navigation elements
+        let mut extra_context = std::collections::HashMap::new();
+        extra_context.insert("breadcrumbs".to_string(), serde_json::json!(breadcrumbs_json));
+        extra_context.insert("current_dir_name".to_string(), serde_json::json!(current_dir_name));
+
         let full_html_output = templates
-            .render_markdown(&inner_html_output, frontmatter)
+            .render_markdown(&inner_html_output, frontmatter, extra_context)
             .await
             .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?;
         tracing::debug!("generated the html");
@@ -801,8 +856,8 @@ impl Server {
         context.insert("server_mode".to_string(), json!(true));
 
         // Detect if we're at the root directory
-        let is_root = relative_path.as_os_str().is_empty()
-            || relative_path == std::path::Path::new(".");
+        let is_root =
+            relative_path.as_os_str().is_empty() || relative_path == std::path::Path::new(".");
 
         // Add is_home to context for template conditional rendering
         context.insert("is_home".to_string(), json!(is_root));
@@ -836,9 +891,7 @@ impl Server {
 
     /// Handler for the root path "/" - renders the home page using the same
     /// logic as other directories but with the home.html template.
-    async fn home_page(
-        State(config): State<ServerState>,
-    ) -> Result<impl IntoResponse, StatusCode> {
+    async fn home_page(State(config): State<ServerState>) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("home_page handler");
 
         let resolver_config = PathResolverConfig {
@@ -868,21 +921,31 @@ impl Server {
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("home: generating directory listing: {:?}", &dir_path);
-                Self::directory_to_html(&dir_path, &config.templates, config.base_dir.as_path(), &config)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Error generating home directory listing: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
+                Self::directory_to_html(
+                    &dir_path,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                    &config,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Error generating home directory listing: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
             }
             _ => {
                 tracing::debug!("home: unexpected resolution, showing directory listing");
-                Self::directory_to_html(&config.base_dir, &config.templates, config.base_dir.as_path(), &config)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Error generating home directory listing: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
+                Self::directory_to_html(
+                    &config.base_dir,
+                    &config.templates,
+                    config.base_dir.as_path(),
+                    &config,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Error generating home directory listing: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
             }
         }
     }
@@ -924,11 +987,21 @@ pub fn generate_breadcrumbs(relative_path: &Path) -> Vec<Breadcrumb> {
         })
         .collect();
 
+    // For root (no path components), return empty breadcrumbs
+    // The current page name will be shown separately, avoiding "Home > Home"
+    if path_components.is_empty() {
+        return vec![];
+    }
+
     // Start with Home
     let mut breadcrumbs = vec![Breadcrumb::new("Home", "/")];
 
-    // Add all but the last component (last is current directory)
-    for (idx, _) in path_components.iter().enumerate().take(path_components.len().saturating_sub(1)) {
+    // Add all but the last component (last is current page/directory)
+    for (idx, _) in path_components
+        .iter()
+        .enumerate()
+        .take(path_components.len().saturating_sub(1))
+    {
         let partial_path: std::path::PathBuf = path_components.iter().take(idx + 1).collect();
         let url = format!("/{}/", partial_path.to_string_lossy());
         let name = path_components[idx].to_string();
@@ -961,7 +1034,10 @@ pub fn get_parent_path(relative_path: &Path) -> Option<String> {
         .collect();
 
     if path_components.len() > 1 {
-        let parent: std::path::PathBuf = path_components.iter().take(path_components.len() - 1).collect();
+        let parent: std::path::PathBuf = path_components
+            .iter()
+            .take(path_components.len() - 1)
+            .collect();
         Some(format!("/{}/", parent.to_string_lossy()))
     } else if !path_components.is_empty() {
         Some("/".to_string())
@@ -1198,8 +1274,9 @@ mod tests {
         let path = Path::new("");
         let breadcrumbs = generate_breadcrumbs(path);
 
-        assert_eq!(breadcrumbs.len(), 1);
-        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
+        // Root returns empty breadcrumbs to avoid "Home > Home" duplication
+        // The template handles showing just "Home" as the current page
+        assert_eq!(breadcrumbs.len(), 0);
     }
 
     #[test]
@@ -1224,7 +1301,7 @@ mod tests {
 
     #[test]
     fn test_generate_breadcrumbs_deep_nesting() {
-        let path = Path::new("a/b/c/d");
+        let path = Path::new("/a/b/c/d");
         let breadcrumbs = generate_breadcrumbs(path);
 
         assert_eq!(breadcrumbs.len(), 4);
@@ -1364,7 +1441,7 @@ mod proptests {
 
     proptest! {
         /// Breadcrumb count: Home + all components except the last (current dir)
-        /// For 0 components: [Home] = 1
+        /// For 0 components: [] = 0 (root page, no breadcrumbs to avoid "Home > Home")
         /// For 1 component: [Home] = 1 (last component is current dir, not a link)
         /// For 2+ components: [Home, c1, c2, ...] = components.len()
         #[test]
@@ -1376,8 +1453,9 @@ mod proptests {
             let breadcrumbs = generate_breadcrumbs(path);
 
             // Breadcrumbs = "Home" + all components except the last (which is current dir)
+            // For empty path (root), return empty to avoid "Home > Home"
             let expected_count = if components.is_empty() {
-                1  // Just Home
+                0  // Empty for root page
             } else {
                 components.len()  // Home + all but last = components.len()
             };
@@ -1391,16 +1469,16 @@ mod proptests {
             );
         }
 
-        /// First breadcrumb is always "Home" with url "/"
+        /// For non-empty paths, first breadcrumb is always "Home" with url "/"
         #[test]
         fn prop_first_breadcrumb_is_home(
-            components in proptest::collection::vec(path_component_strategy(), 0..5)
+            components in proptest::collection::vec(path_component_strategy(), 1..5)
         ) {
             let path_str = components.join("/");
             let path = Path::new(&path_str);
             let breadcrumbs = generate_breadcrumbs(path);
 
-            prop_assert!(!breadcrumbs.is_empty(), "Should always have at least Home breadcrumb");
+            prop_assert!(!breadcrumbs.is_empty(), "Non-root paths should have at least Home breadcrumb");
             prop_assert_eq!(&breadcrumbs[0].name, "Home");
             prop_assert_eq!(&breadcrumbs[0].url, "/");
         }

@@ -206,8 +206,21 @@ impl Builder {
         // Empty string is falsy in Tera templates
         frontmatter.insert("server_mode".to_string(), String::new());
 
+        // Compute breadcrumbs for the markdown file
+        let url_path_for_breadcrumbs = std::path::Path::new(&info.url_path);
+        let breadcrumbs = crate::server::generate_breadcrumbs(url_path_for_breadcrumbs);
+        let breadcrumbs_json: Vec<_> = breadcrumbs
+            .iter()
+            .map(|b| serde_json::json!({"name": b.name, "url": b.url}))
+            .collect();
+        let current_dir_name = crate::server::get_current_dir_name(url_path_for_breadcrumbs);
+
+        let mut extra_context = std::collections::HashMap::new();
+        extra_context.insert("breadcrumbs".to_string(), serde_json::json!(breadcrumbs_json));
+        extra_context.insert("current_dir_name".to_string(), serde_json::json!(current_dir_name));
+
         // Render through template
-        let html_output = self.templates.render_markdown(&html, frontmatter).await?;
+        let html_output = self.templates.render_markdown(&html, frontmatter, extra_context).await?;
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');

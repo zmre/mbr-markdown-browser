@@ -131,7 +131,7 @@ async fn main() -> Result<(), MbrError> {
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
         let templates = templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
             .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
-        let html_output = templates.render_markdown(&html_output, frontmatter).await?;
+        let html_output = templates.render_markdown(&html_output, frontmatter, std::collections::HashMap::new()).await?;
         println!("{}", &html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
