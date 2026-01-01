@@ -234,6 +234,77 @@ async fn test_build_excludes_hidden_directories() {
 }
 
 // ============================================================================
+// Static Mode Configuration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_build_includes_components() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("test").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    // Should include the components script
+    assert!(html.contains("mbr-components.js"),
+        "Expected mbr-components.js script reference in HTML");
+}
+
+#[tokio::test]
+async fn test_build_creates_site_json() {
+    let repo = TestRepo::new();
+    repo.create_markdown("one.md", "# One");
+    repo.create_markdown("two.md", "# Two");
+
+    let output = build_site(&repo).await;
+
+    // Should create site.json in .mbr directory
+    let site_json_path = output.join(".mbr").join("site.json");
+    assert!(site_json_path.exists(), "Expected site.json at {:?}", site_json_path);
+
+    let content = fs::read_to_string(&site_json_path).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    // Should have markdown_files array
+    assert!(body["markdown_files"].is_array(),
+        "Expected markdown_files array in site.json");
+
+    let files = body["markdown_files"].as_array().unwrap();
+    assert!(files.len() >= 2, "Expected at least 2 files in markdown_files");
+}
+
+#[tokio::test]
+async fn test_build_site_json_includes_frontmatter() {
+    let repo = TestRepo::new();
+
+    // Create file with frontmatter - use direct file creation to avoid HashMap key issues
+    let content = r#"---
+title: My Title
+tags: rust, web
+---
+
+Content here."#;
+    std::fs::write(repo.path().join("tagged.md"), content).unwrap();
+
+    let output = build_site(&repo).await;
+
+    let site_json_path = output.join(".mbr").join("site.json");
+    let content = fs::read_to_string(&site_json_path).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let files = body["markdown_files"].as_array().unwrap();
+    let tagged_file = files.iter().find(|f| f["url_path"].as_str().unwrap().contains("tagged"));
+
+    assert!(tagged_file.is_some(), "Expected to find tagged.md in site.json");
+
+    let tagged = tagged_file.unwrap();
+    assert!(tagged["frontmatter"].is_object(), "Expected frontmatter object");
+    assert_eq!(tagged["frontmatter"]["title"].as_str(), Some("My Title"));
+}
+
+// ============================================================================
 // Pagefind metadata tests
 // ============================================================================
 

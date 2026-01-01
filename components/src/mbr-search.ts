@@ -158,6 +158,9 @@ export class MbrSearchElement extends LitElement {
   @query('#search-input')
   private _input!: HTMLInputElement;
 
+  @state()
+  private _isPagefindLoading = false;
+
   private _debounceTimeout: number | null = null;
   private _abortController: AbortController | null = null;
   private _pagefind: Pagefind | null = null;
@@ -200,6 +203,8 @@ export class MbrSearchElement extends LitElement {
       return this._pagefindLoadPromise;
     }
 
+    this._isPagefindLoading = true;
+
     this._pagefindLoadPromise = (async () => {
       try {
         // Load Pagefind from the .mbr assets location
@@ -212,6 +217,8 @@ export class MbrSearchElement extends LitElement {
       } catch (err) {
         console.warn('Pagefind not available:', err);
         return null;
+      } finally {
+        this._isPagefindLoading = false;
       }
     })();
 
@@ -569,7 +576,7 @@ export class MbrSearchElement extends LitElement {
                 autocomplete="off"
                 spellcheck="false"
               />
-              ${this._isLoading ? html`<span class="loading-indicator">...</span>` : nothing}
+              ${this._isLoading ? html`<span class="loading-indicator" aria-busy="true">Searching...</span>` : nothing}
             </div>
             ${showScopeSelector ? html`
               <select class="scope-select" @change=${this._handleScopeChange}>
@@ -619,10 +626,14 @@ export class MbrSearchElement extends LitElement {
 
             ${this._query.length < 2 && !this._error ? html`
               <div class="hint">
-                <p>Type at least 2 characters to search</p>
-                ${showScopeSelector ? html`
-                  <p class="hint-facets">Tip: Use <code>field:value</code> for faceted search (e.g., <code>tags:rust</code> or <code>category:guide</code>)</p>
-                ` : nothing}
+                ${this._isPagefindLoading ? html`
+                  <p aria-busy="true">Loading search index...</p>
+                ` : html`
+                  <p>Type at least 2 characters to search</p>
+                  ${showScopeSelector ? html`
+                    <p class="hint-facets">Tip: Use <code>field:value</code> for faceted search (e.g., <code>tags:rust</code> or <code>category:guide</code>)</p>
+                  ` : nothing}
+                `}
               </div>
             ` : nothing}
           </div>

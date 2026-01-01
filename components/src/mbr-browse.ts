@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { siteNav } from './shared.js'
+import { subscribeSiteNav } from './shared.js'
 
 /**
  * Markdown file metadata from site.json.
@@ -11,14 +11,6 @@ interface MarkdownFile {
   created: number;
   modified: number;
   frontmatter: Record<string, any> | null;
-}
-
-/**
- * Site navigation data structure.
- */
-interface SiteNav {
-  markdown_files: MarkdownFile[];
-  other_files?: any[];
 }
 
 /**
@@ -72,16 +64,26 @@ export class MbrBrowseElement extends LitElement {
   @state()
   private _selectedPath: string | null = null;
 
+  @state()
+  private _isLoading = true;
+
+  @state()
+  private _loadError: string | null = null;
+
   private _keyboardHandler: ((e: KeyboardEvent) => void) | null = null;
+  private _unsubscribeSiteNav: (() => void) | null = null;
 
   override connectedCallback() {
     super.connectedCallback();
 
-    // Load site navigation data
-    siteNav.then((nav: SiteNav) => {
-      if (nav?.markdown_files) {
-        this._allFiles = nav.markdown_files;
-        this._allTags = this._extractTags(nav.markdown_files);
+    // Subscribe to site navigation data loading state
+    this._unsubscribeSiteNav = subscribeSiteNav((state) => {
+      this._isLoading = state.isLoading;
+      this._loadError = state.error;
+
+      if (state.data?.markdown_files) {
+        this._allFiles = state.data.markdown_files;
+        this._allTags = this._extractTags(state.data.markdown_files);
 
         // Auto-expand folders in the current path
         const currentPath = window.location.pathname;
@@ -311,6 +313,9 @@ export class MbrBrowseElement extends LitElement {
     super.disconnectedCallback();
     if (this._keyboardHandler) {
       document.removeEventListener('keydown', this._keyboardHandler);
+    }
+    if (this._unsubscribeSiteNav) {
+      this._unsubscribeSiteNav();
     }
   }
 
@@ -660,6 +665,29 @@ export class MbrBrowseElement extends LitElement {
   }
 
   /**
+   * Render loading state using PicoCSS patterns.
+   */
+  private _renderLoading() {
+    return html`
+      <div class="loading-container" aria-busy="true">
+        <p class="loading-text">Loading site data...</p>
+      </div>
+    `;
+  }
+
+  /**
+   * Render error state.
+   */
+  private _renderError() {
+    return html`
+      <div class="error-container">
+        <p class="error-text">Failed to load site data</p>
+        <p class="error-detail">${this._loadError}</p>
+      </div>
+    `;
+  }
+
+  /**
    * Render the browse panel.
    */
   private _renderPanel() {
@@ -679,18 +707,21 @@ export class MbrBrowseElement extends LitElement {
           </div>
 
           <div class="panel-content">
-            ${this._renderTags()}
+            ${this._isLoading ? this._renderLoading() :
+              this._loadError ? this._renderError() : html`
+              ${this._renderTags()}
 
-            <div class="tree-section">
-              <h3>Folder Tree</h3>
-              ${filteredFiles.length === 0 ? html`
-                <div class="no-results">No files match the selected tags</div>
-              ` : html`
-                <div class="tree-container">
-                  ${this._renderFolderNode(tree)}
-                </div>
-              `}
-            </div>
+              <div class="tree-section">
+                <h3>Folder Tree</h3>
+                ${filteredFiles.length === 0 ? html`
+                  <div class="no-results">No files match the selected tags</div>
+                ` : html`
+                  <div class="tree-container">
+                    ${this._renderFolderNode(tree)}
+                  </div>
+                `}
+              </div>
+            `}
           </div>
         </aside>
       </div>
@@ -783,6 +814,39 @@ export class MbrBrowseElement extends LitElement {
       flex: 1;
       overflow-y: auto;
       padding: 1rem 0;
+    }
+
+    /* Loading state */
+    .loading-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 1.25rem;
+      text-align: center;
+    }
+
+    .loading-text {
+      color: var(--pico-muted-color, #666);
+      margin: 0;
+    }
+
+    /* Error state */
+    .error-container {
+      padding: 2rem 1.25rem;
+      text-align: center;
+    }
+
+    .error-text {
+      color: var(--pico-del-color, #dc3545);
+      font-weight: 500;
+      margin: 0 0 0.5rem 0;
+    }
+
+    .error-detail {
+      color: var(--pico-muted-color, #666);
+      font-size: 0.875rem;
+      margin: 0;
     }
 
     /* Tags section */

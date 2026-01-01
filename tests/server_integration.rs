@@ -718,6 +718,88 @@ async fn test_template_folder_overrides_html_templates() {
 }
 
 // ============================================================================
+// Server Mode Configuration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_server_mode_sets_server_mode_true() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/test/").await;
+
+    // Server mode should have serverMode: true
+    assert!(html.contains("serverMode: true"),
+        "Expected serverMode: true in server mode. Got: {}", &html[..std::cmp::min(2000, html.len())]);
+    assert!(!html.contains("serverMode: false"),
+        "Should not have serverMode: false in server mode");
+}
+
+#[tokio::test]
+async fn test_server_mode_includes_components() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/test/").await;
+
+    // Should include the components script
+    assert!(html.contains("mbr-components.js"),
+        "Expected mbr-components.js script reference in HTML");
+}
+
+#[tokio::test]
+async fn test_site_json_returns_valid_structure() {
+    let repo = TestRepo::new();
+    repo.create_markdown("one.md", "# One");
+    repo.create_markdown("two.md", "# Two");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/.mbr/site.json").await;
+
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    // Should have markdown_files array
+    assert!(body["markdown_files"].is_array(),
+        "Expected markdown_files array in site.json");
+
+    let files = body["markdown_files"].as_array().unwrap();
+    assert!(files.len() >= 2, "Expected at least 2 files in markdown_files");
+
+    // Each file should have required fields
+    for file in files {
+        assert!(file["url_path"].is_string(), "Expected url_path in file");
+        assert!(file["raw_path"].is_string(), "Expected raw_path in file");
+        assert!(file["created"].is_number(), "Expected created timestamp in file");
+        assert!(file["modified"].is_number(), "Expected modified timestamp in file");
+    }
+}
+
+#[tokio::test]
+async fn test_site_json_includes_frontmatter() {
+    let repo = TestRepo::new();
+    let mut frontmatter = std::collections::HashMap::new();
+    frontmatter.insert("title", "My Title");
+    frontmatter.insert("tags", "rust, web");
+    repo.create_markdown_with_frontmatter("tagged.md", &frontmatter, "Content here.");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    let files = body["markdown_files"].as_array().unwrap();
+    let tagged_file = files.iter().find(|f| f["url_path"].as_str().unwrap().contains("tagged"));
+
+    assert!(tagged_file.is_some(), "Expected to find tagged.md in site.json");
+
+    let tagged = tagged_file.unwrap();
+    assert!(tagged["frontmatter"].is_object(), "Expected frontmatter object");
+    assert_eq!(tagged["frontmatter"]["title"].as_str(), Some("My Title"));
+}
+
+// ============================================================================
 // Cache Headers Tests
 // ============================================================================
 
