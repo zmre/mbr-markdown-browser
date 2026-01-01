@@ -49,6 +49,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
 walkdir = "2.5"
 thiserror = "2.0"
+parking_lot = "0.12"
 yaml-rust2 = "0.11"
 wry = {version = "0.53", default-features=true, features = ["devtools", "fullscreen"]}
 

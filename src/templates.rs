@@ -1,11 +1,18 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::errors::TemplateError;
+use parking_lot::RwLock;
 use tera::{Context, Tera};
 
 #[derive(Clone)]
 pub struct Templates {
-    tera: Tera,
+    tera: Arc<RwLock<Tera>>,
+    /// Path used for template loading (for hot reload)
+    template_path: PathBuf,
 }
 
 impl Templates {
@@ -16,11 +23,24 @@ impl Templates {
     /// 2. Otherwise, load from `{root_path}/.mbr/**/*.html`
     /// 3. Fall back to compiled defaults for any missing templates
     pub fn new(root_path: &Path, template_folder: Option<&Path>) -> Result<Self, TemplateError> {
-        let (globs, source_desc) = if let Some(tf) = template_folder {
-            (tf.join("**/*.html"), format!("template folder {}", tf.display()))
+        let template_path = if let Some(tf) = template_folder {
+            tf.to_path_buf()
         } else {
-            (root_path.join(".mbr/**/*.html"), format!(".mbr in {}", root_path.display()))
+            root_path.join(".mbr")
         };
+
+        let tera = Self::load_tera(&template_path)?;
+
+        Ok(Templates {
+            tera: Arc::new(RwLock::new(tera)),
+            template_path,
+        })
+    }
+
+    /// Load Tera templates from the given path, with fallback to compiled defaults.
+    fn load_tera(template_path: &Path) -> Result<Tera, TemplateError> {
+        let globs = template_path.join("**/*.html");
+        let source_desc = format!("{}", template_path.display());
 
         let globs_str = globs.to_str().ok_or(TemplateError::InvalidPathEncoding)?;
         let mut tera = Tera::new(globs_str).unwrap_or_else(|e| {
@@ -35,11 +55,24 @@ impl Templates {
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {
                 tracing::debug!("Adding default template {}", name);
-                tera.add_raw_template(name, tpl)?;
+                tera.add_raw_template(name, tpl)
+                    .map_err(|e| TemplateError::RenderFailed {
+                        template_name: name.to_string(),
+                        source: e,
+                    })?;
             }
         }
 
-        Ok(Templates { tera })
+        Ok(tera)
+    }
+
+    /// Reload all templates from disk. Call this when template files change.
+    pub fn reload(&self) -> Result<(), TemplateError> {
+        tracing::info!("Reloading templates from {:?}", self.template_path);
+        let new_tera = Self::load_tera(&self.template_path)?;
+        *self.tera.write() = new_tera;
+        tracing::debug!("Templates reloaded successfully");
+        Ok(())
     }
 
     pub async fn render_markdown(
@@ -52,7 +85,8 @@ impl Templates {
 
         // Create JSON from frontmatter BEFORE adding markdown to context
         // This avoids including the large markdown HTML in the frontmatter JSON
-        let frontmatter_json = serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string());
+        let frontmatter_json =
+            serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string());
 
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
@@ -65,12 +99,14 @@ impl Templates {
         context.insert("markdown", html);
         context.insert("frontmatter_json", &frontmatter_json);
 
-        let html_output = self.tera.render("index.html", &context).map_err(|e| {
-            TemplateError::RenderFailed {
+        let html_output = self
+            .tera
+            .read()
+            .render("index.html", &context)
+            .map_err(|e| TemplateError::RenderFailed {
                 template_name: "index.html".to_string(),
                 source: e,
-            }
-        })?;
+            })?;
         Ok(html_output)
     }
 
@@ -82,12 +118,14 @@ impl Templates {
         context_data.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
-        let html_output = self.tera.render("section.html", &context).map_err(|e| {
-            TemplateError::RenderFailed {
+        let html_output = self
+            .tera
+            .read()
+            .render("section.html", &context)
+            .map_err(|e| TemplateError::RenderFailed {
                 template_name: "section.html".to_string(),
                 source: e,
-            }
-        })?;
+            })?;
         Ok(html_output)
     }
 
@@ -101,12 +139,14 @@ impl Templates {
         context_data.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
-        let html_output = self.tera.render("home.html", &context).map_err(|e| {
-            TemplateError::RenderFailed {
+        let html_output = self
+            .tera
+            .read()
+            .render("home.html", &context)
+            .map_err(|e| TemplateError::RenderFailed {
                 template_name: "home.html".to_string(),
                 source: e,
-            }
-        })?;
+            })?;
         Ok(html_output)
     }
 }

@@ -3469,6 +3469,7 @@ dependencies = [
  "nucleo-matcher",
  "pagefind",
  "papaya",
+ "parking_lot",
  "pathdiff",
  "pdf-extract",
  "percent-encoding",

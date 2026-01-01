@@ -116,6 +116,34 @@ impl Server {
             }
         });
 
+        // Spawn background task to reload templates when .html files change
+        let templates_for_reload = templates.clone();
+        let template_folder_for_reload = template_folder.clone();
+        let mut template_change_rx = file_change_tx.subscribe();
+        tokio::spawn(async move {
+            while let Ok(event) = template_change_rx.recv().await {
+                // Only reload for .html files
+                if !event.path.ends_with(".html") {
+                    continue;
+                }
+
+                // If we have a template folder, only reload for changes in that folder
+                // Otherwise, only reload for changes in .mbr folder
+                let should_reload = if let Some(ref tf) = template_folder_for_reload {
+                    event.path.starts_with(&tf.to_string_lossy().to_string())
+                } else {
+                    event.path.contains("/.mbr/")
+                };
+
+                if should_reload {
+                    tracing::debug!("Template file changed: {}", event.path);
+                    if let Err(e) = templates_for_reload.reload() {
+                        tracing::error!("Failed to reload templates: {}", e);
+                    }
+                }
+            }
+        });
+
         let config = ServerState {
             base_dir,
             static_folder,
