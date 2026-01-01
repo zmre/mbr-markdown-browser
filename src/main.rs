@@ -1,10 +1,43 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use mbr::{
-    browser, build::Builder, cli, link_transform::LinkTransformConfig, markdown, server, templates,
-    Config, ConfigError, MbrError,
+    browser::{self, BrowserContext},
+    build::Builder,
+    cli,
+    link_transform::LinkTransformConfig,
+    markdown, server, templates, Config, ConfigError, MbrError,
 };
+
+/// Check if the given path requires a folder picker dialog.
+/// This is true when launched as an app without a valid working directory.
+fn needs_folder_picker(path: &Path) -> bool {
+    // Try to canonicalize, fall back to the path as-is
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    #[cfg(unix)]
+    {
+        // On Unix, check if path is root "/" or has only one component
+        canonical.components().count() <= 1
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, check for root drives or system directories
+        canonical.parent().is_none()
+            || canonical.starts_with(r"C:\Windows")
+            || canonical.starts_with(r"C:\Program Files")
+            || canonical.starts_with(r"C:\Program Files (x86)")
+    }
+}
+
+/// Show a folder picker dialog and return the selected path.
+/// Returns None if the user cancels.
+fn show_folder_picker() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Select Markdown Folder")
+        .pick_folder()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), MbrError> {
@@ -14,10 +47,26 @@ async fn main() -> Result<(), MbrError> {
 
     let args = cli::Args::parse();
 
-    let input_path = Path::new(&args.path);
-    let absolute_path = input_path.canonicalize().map_err(|e| {
+    // Determine if we're in GUI mode (no --server, --stdout, --build flags)
+    let is_gui_mode = !args.server && !args.stdout && !args.build;
+
+    // Check if we need to show a folder picker (only in GUI mode when path is root/system dir)
+    let input_path = if is_gui_mode && needs_folder_picker(&args.path) {
+        match show_folder_picker() {
+            Some(path) => path,
+            None => {
+                // User cancelled - exit gracefully
+                std::process::exit(0);
+            }
+        }
+    } else {
+        args.path.clone()
+    };
+
+    let input_path_ref = Path::new(&input_path);
+    let absolute_path = input_path_ref.canonicalize().map_err(|e| {
         ConfigError::CanonicalizeFailed {
-            path: input_path.to_path_buf(),
+            path: input_path_ref.to_path_buf(),
             source: e,
         }
     })?;
@@ -103,14 +152,13 @@ async fn main() -> Result<(), MbrError> {
             eprintln!(
                 "Cannot render a directory to stdout. Use -s to start a server or omit -o for GUI mode."
             );
-            eprintln!("  mbr -s {}  # Start server", args.path.display());
-            eprintln!("  mbr {}     # Open in GUI (default)", args.path.display());
+            eprintln!("  mbr -s {}  # Start server", input_path.display());
+            eprintln!("  mbr {}     # Open in GUI (default)", input_path.display());
             std::process::exit(1);
         }
 
         // Determine if this is an index file (which doesn't need ../ prefix for links)
-        let is_index_file = args
-            .path
+        let is_index_file = input_path
             .file_name()
             .and_then(|f| f.to_str())
             .is_some_and(|f| f == config.index_file);
@@ -122,16 +170,19 @@ async fn main() -> Result<(), MbrError> {
         };
 
         let (frontmatter, html_output) = markdown::render(
-            args.path,
+            input_path,
             config.root_dir.as_path(),
             config.oembed_timeout_ms,
             link_transform_config,
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
-        let templates = templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
-            .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
-        let html_output = templates.render_markdown(&html_output, frontmatter, std::collections::HashMap::new()).await?;
+        let templates =
+            templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
+                .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
+        let html_output = templates
+            .render_markdown(&html_output, frontmatter, std::collections::HashMap::new())
+            .await?;
         println!("{}", &html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
@@ -149,8 +200,17 @@ async fn main() -> Result<(), MbrError> {
             config.template_folder.clone(),
         )?;
 
-        let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
-        tracing::info!("Server running at http://{}:{}/{}", config.ip, config.port, url_path);
+        let url_path = build_url_path(
+            &path_relative_to_root,
+            is_directory,
+            &config.markdown_extensions,
+        );
+        tracing::info!(
+            "Server running at http://{}:{}/{}",
+            config.ip,
+            config.port,
+            url_path
+        );
 
         server.start().await?;
     } else {
@@ -185,6 +245,7 @@ async fn main() -> Result<(), MbrError> {
                 }
             }
         });
+
         // Wait for server to be ready before opening browser
         let actual_port = match ready_rx.await {
             Ok(port) => port,
@@ -193,12 +254,26 @@ async fn main() -> Result<(), MbrError> {
                 return Ok(());
             }
         };
+
         let url = url::Url::parse(format!("http://{}:{}/", config.ip, actual_port).as_str())?;
-        let url_path = build_url_path(&path_relative_to_root, is_directory, &config.markdown_extensions);
+        let url_path = build_url_path(
+            &path_relative_to_root,
+            is_directory,
+            &config.markdown_extensions,
+        );
         let url = url.join(&url_path)?;
 
-        browser::launch_url(url.as_str())?;
-        handle.abort(); // after the browser window quits, we can exit the http server
+        // Launch browser with full context for server management
+        let ctx = BrowserContext {
+            url: url.to_string(),
+            server_handle: handle,
+            config,
+            tokio_runtime: tokio::runtime::Handle::current(),
+        };
+
+        browser::launch_browser(ctx)?;
+        // Note: server handle is now managed by the browser context
+        // It will be aborted when the browser window closes or when switching folders
     }
     Ok(())
 }
@@ -301,5 +376,26 @@ mod tests {
             replace_markdown_extension_with_slash("noext", &vec!["md".to_string()]),
             "noext"
         );
+    }
+
+    #[test]
+    fn test_needs_folder_picker_root() {
+        assert!(needs_folder_picker(Path::new("/")));
+    }
+
+    #[test]
+    fn test_needs_folder_picker_normal_path() {
+        // A normal path like /Users/foo should not need folder picker
+        assert!(!needs_folder_picker(Path::new("/Users/foo")));
+    }
+
+    #[test]
+    fn test_needs_folder_picker_current_dir() {
+        // Current directory "." should not need folder picker when it resolves to a real path
+        // This test depends on where it's run from
+        let cwd = std::env::current_dir().unwrap();
+        if cwd.components().count() > 1 {
+            assert!(!needs_folder_picker(&cwd));
+        }
     }
 }

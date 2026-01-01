@@ -1,20 +1,33 @@
 extern crate image;
 use crate::errors::BrowserError;
+use crate::server::Server;
+use crate::Config;
 use muda::{
     accelerator::{Accelerator, Code, Modifiers},
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
+use std::path::PathBuf;
 use tao::{
     event::{ElementState, Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     keyboard::{KeyCode, ModifiersState},
     window::{Icon, WindowBuilder},
 };
+use tokio::task::JoinHandle;
 use wry::WebViewBuilder;
 
 /// Custom user events for the event loop
 enum UserEvent {
     MenuEvent(MenuEvent),
+    FolderSelected(PathBuf),
+}
+
+/// Context needed to launch and manage the browser window
+pub struct BrowserContext {
+    pub url: String,
+    pub server_handle: JoinHandle<()>,
+    pub config: Config,
+    pub tokio_runtime: tokio::runtime::Handle,
 }
 
 /// About metadata for the application
@@ -42,7 +55,7 @@ struct HistoryMenuItems {
 /// Build the application menu bar with standard menus
 /// On macOS, creates proper app menu with About, Services, Hide, Quit
 /// On Windows/Linux, puts About in Help menu and Quit in File menu
-fn build_menu_bar() -> (Menu, MenuItem, HistoryMenuItems, Submenu) {
+fn build_menu_bar() -> (Menu, MenuItem, MenuItem, HistoryMenuItems, Submenu) {
     let menu_bar = Menu::new();
 
     // macOS: First menu is the app menu (named after the app)
@@ -68,6 +81,14 @@ fn build_menu_bar() -> (Menu, MenuItem, HistoryMenuItems, Submenu) {
 
     // File menu
     let file_menu = Submenu::new("&File", true);
+
+    let open_item = MenuItem::with_id(
+        "open",
+        "&Open...",
+        true,
+        Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyO)),
+    );
+
     let reload_item = MenuItem::with_id(
         "reload",
         "&Reload",
@@ -78,6 +99,8 @@ fn build_menu_bar() -> (Menu, MenuItem, HistoryMenuItems, Submenu) {
     #[cfg(target_os = "macos")]
     file_menu
         .append_items(&[
+            &open_item,
+            &PredefinedMenuItem::separator(),
             &reload_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
@@ -87,6 +110,8 @@ fn build_menu_bar() -> (Menu, MenuItem, HistoryMenuItems, Submenu) {
     #[cfg(not(target_os = "macos"))]
     file_menu
         .append_items(&[
+            &open_item,
+            &PredefinedMenuItem::separator(),
             &reload_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
@@ -201,9 +226,241 @@ fn build_menu_bar() -> (Menu, MenuItem, HistoryMenuItems, Submenu) {
     #[cfg(target_os = "macos")]
     window_menu.set_as_windows_menu_for_nsapp();
 
-    (menu_bar, reload_item, history_items, window_menu)
+    (menu_bar, open_item, reload_item, history_items, window_menu)
 }
 
+/// Spawn a thread to show folder picker dialog and send result via event loop proxy
+fn spawn_folder_picker(proxy: EventLoopProxy<UserEvent>) {
+    std::thread::spawn(move || {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Open Markdown Folder")
+            .pick_folder()
+        {
+            let _ = proxy.send_event(UserEvent::FolderSelected(path));
+        }
+    });
+}
+
+/// Reinitialize the server with a new path
+fn reinit_server(
+    path: &std::path::Path,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(JoinHandle<()>, String, Config), BrowserError> {
+    let absolute_path = path.canonicalize().map_err(|e| {
+        tracing::error!("Failed to canonicalize path: {e}");
+        BrowserError::ServerStartFailed
+    })?;
+
+    let config = Config::read(&absolute_path).map_err(|e| {
+        tracing::error!("Failed to read config: {e}");
+        BrowserError::ServerStartFailed
+    })?;
+
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
+
+    let config_copy = config.clone();
+    let handle = runtime.spawn(async move {
+        let server = Server::init(
+            config_copy.ip.0,
+            config_copy.port,
+            config_copy.root_dir.clone(),
+            &config_copy.static_folder,
+            &config_copy.markdown_extensions,
+            &config_copy.ignore_dirs,
+            &config_copy.ignore_globs,
+            &config_copy.watcher_ignore_dirs,
+            &config_copy.index_file,
+            config_copy.oembed_timeout_ms,
+            config_copy.template_folder.clone(),
+        );
+        match server {
+            Ok(mut s) => {
+                if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
+                    tracing::error!("Server error: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Server init failed: {e}");
+                drop(ready_tx);
+            }
+        }
+    });
+
+    // Block briefly to get the port
+    let port = runtime
+        .block_on(ready_rx)
+        .map_err(|_| BrowserError::ServerStartFailed)?;
+
+    let url = format!("http://{}:{}/", config.ip, port);
+    Ok((handle, url, config))
+}
+
+/// Launch the browser window with full context for server management
+pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
+    // Create event loop with user events for menu handling
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+
+    // Set up menu event handler
+    let proxy = event_loop.create_proxy();
+    MenuEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::MenuEvent(event));
+    }));
+
+    // Build the menu bar
+    let (menu_bar, open_item, reload_item, history_items, _window_menu) = build_menu_bar();
+
+    // Initialize menu for macOS (global app menu)
+    #[cfg(target_os = "macos")]
+    menu_bar.init_for_nsapp();
+
+    let icon = load_icon()?;
+    let window = WindowBuilder::new()
+        .with_title("mbr")
+        .with_window_icon(Some(icon))
+        .build(&event_loop)
+        .map_err(BrowserError::WindowCreationFailed)?;
+
+    // Initialize menu for Windows (per-window menu bar)
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use tao::platform::windows::WindowExtWindows;
+        menu_bar.init_for_hwnd(window.hwnd() as isize);
+    }
+
+    // Initialize menu for Linux (GTK-based)
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix;
+        menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
+    }
+
+    let builder = WebViewBuilder::new()
+        .with_devtools(true)
+        .with_url(&ctx.url);
+
+    #[cfg(not(target_os = "linux"))]
+    let webview = builder
+        .build(&window)
+        .map_err(BrowserError::WebViewCreationFailed)?;
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        builder
+            .build_gtk(window.gtk_window())
+            .map_err(BrowserError::WebViewCreationFailed)?
+    };
+
+    // Store menu item IDs for event matching
+    let open_id = open_item.id().clone();
+    let reload_id = reload_item.id().clone();
+    let back_id = history_items.back.id().clone();
+    let forward_id = history_items.forward.id().clone();
+
+    // Track modifier state for Alt+arrow handling
+    let mut modifiers = ModifiersState::empty();
+
+    // Mutable state for server management
+    let mut server_handle = ctx.server_handle;
+    let mut current_url = ctx.url;
+    let tokio_runtime = ctx.tokio_runtime;
+
+    // Create proxy for folder picker
+    let event_proxy = event_loop.create_proxy();
+
+    event_loop.run(move |event, _target, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        match event {
+            Event::UserEvent(UserEvent::MenuEvent(menu_event)) => {
+                // Handle custom menu items
+                if menu_event.id == open_id {
+                    tracing::debug!("Open folder requested via menu");
+                    spawn_folder_picker(event_proxy.clone());
+                } else if menu_event.id == reload_id {
+                    tracing::debug!("Reload requested via menu");
+                    let _ = webview.load_url(&current_url);
+                } else if menu_event.id == back_id {
+                    tracing::debug!("History back via menu");
+                    let _ = webview.evaluate_script("history.back()");
+                } else if menu_event.id == forward_id {
+                    tracing::debug!("History forward via menu");
+                    let _ = webview.evaluate_script("history.forward()");
+                }
+                // Note: PredefinedMenuItem events (quit, close, etc.) are handled automatically
+            }
+            Event::UserEvent(UserEvent::FolderSelected(new_path)) => {
+                tracing::info!("Switching to new folder: {}", new_path.display());
+
+                // Abort current server
+                server_handle.abort();
+
+                // Reinitialize with new path
+                match reinit_server(&new_path, &tokio_runtime) {
+                    Ok((new_handle, new_url, _new_config)) => {
+                        server_handle = new_handle;
+                        current_url = new_url.clone();
+                        tracing::info!("Server restarted at {}", current_url);
+                        let _ = webview.load_url(&current_url);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to open folder: {e}");
+                        // Show error dialog
+                        std::thread::spawn(move || {
+                            rfd::MessageDialog::new()
+                                .set_level(rfd::MessageLevel::Error)
+                                .set_title("Failed to Open Folder")
+                                .set_description(format!(
+                                    "Could not open folder: {}\n\nThe current folder will remain active.",
+                                    new_path.display()
+                                ))
+                                .set_buttons(rfd::MessageButtons::Ok)
+                                .show();
+                        });
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                tracing::debug!("The close button was pressed; stopping");
+                *control_flow = ControlFlow::Exit
+            }
+            Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(new_modifiers),
+                ..
+            } => {
+                modifiers = new_modifiers;
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        event: key_event, ..
+                    },
+                ..
+            } => {
+                // Handle Alt+Left/Right for history navigation
+                if key_event.state == ElementState::Pressed && modifiers.alt_key() {
+                    match key_event.physical_key {
+                        KeyCode::ArrowLeft => {
+                            tracing::debug!("History back via Alt+Left");
+                            let _ = webview.evaluate_script("history.back()");
+                        }
+                        KeyCode::ArrowRight => {
+                            tracing::debug!("History forward via Alt+Right");
+                            let _ = webview.evaluate_script("history.forward()");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => (),
+        }
+    });
+}
+
+/// Legacy function for simple URL launch without server management
+/// Kept for backwards compatibility but launch_browser is preferred
 pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     // Create event loop with user events for menu handling
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -215,7 +472,7 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     }));
 
     // Build the menu bar
-    let (menu_bar, reload_item, history_items, _window_menu) = build_menu_bar();
+    let (menu_bar, _open_item, reload_item, history_items, _window_menu) = build_menu_bar();
 
     // Initialize menu for macOS (global app menu)
     #[cfg(target_os = "macos")]
@@ -243,7 +500,9 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     }
 
     let url_owned = url.to_string();
-    let builder = WebViewBuilder::new().with_devtools(true).with_url(&url_owned);
+    let builder = WebViewBuilder::new()
+        .with_devtools(true)
+        .with_url(&url_owned);
 
     #[cfg(not(target_os = "linux"))]
     let webview = builder
@@ -282,6 +541,9 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                     let _ = webview.evaluate_script("history.forward()");
                 }
                 // Note: PredefinedMenuItem events (quit, close, etc.) are handled automatically
+            }
+            Event::UserEvent(UserEvent::FolderSelected(_)) => {
+                // Not supported in legacy mode
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,

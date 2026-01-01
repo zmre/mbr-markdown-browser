@@ -126,7 +126,7 @@
         '';
         installPhase = ''
           mkdir -p $out
-          cp -r dist/* $out/
+          cp -r ../templates/components-js/* $out/
         '';
       };
 
@@ -138,8 +138,8 @@
         src = pkgs.lib.cleanSource ./.;
 
         preBuild = ''
-          mkdir -p components/dist
-          cp -r ${packages.mbr-components}/* components/dist/
+          mkdir -p templates/components-js
+          cp -r ${packages.mbr-components}/* templates/components-js/
         '';
 
         nativeBuildInputs = with pkgs;

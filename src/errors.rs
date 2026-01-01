@@ -187,6 +187,9 @@ pub enum BrowserError {
 
     #[error("Failed to create icon from RGBA data")]
     IconCreationFailed(#[source] tao::window::BadIcon),
+
+    #[error("Server failed to start for new folder")]
+    ServerStartFailed,
 }
 
 /// Errors related to file watching.
