@@ -169,7 +169,7 @@ async fn main() -> Result<(), MbrError> {
             is_index_file,
         };
 
-        let (frontmatter, html_output) = markdown::render(
+        let (frontmatter, _headings, html_output) = markdown::render(
             input_path,
             config.root_dir.as_path(),
             config.oembed_timeout_ms,

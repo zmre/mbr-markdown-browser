@@ -82,7 +82,7 @@ async fn test_build_creates_html_for_markdown() {
     assert!(html_path.exists(), "Expected {:?} to exist", html_path);
 
     let html = fs::read_to_string(&html_path).unwrap();
-    assert!(html.contains("<h1>Hello World</h1>"));
+    assert!(html.contains("<h1 id=\"hello-world\">Hello World</h1>"));
     assert!(html.contains("This is a test."));
 }
 

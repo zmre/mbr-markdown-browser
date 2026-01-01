@@ -3,7 +3,8 @@ use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::vid::Vid;
 use pulldown_cmark::{
-    CowStr, Event, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd, TextMergeStream,
+    CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd,
+    TextMergeStream,
 };
 use std::{
     collections::HashMap,
@@ -12,6 +13,14 @@ use std::{
     path::{Path, PathBuf},
 };
 use yaml_rust2::{Yaml, YamlLoader};
+
+/// Represents a heading in the document for table of contents generation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeadingInfo {
+    pub level: u8,
+    pub text: String,
+    pub id: String,
+}
 
 struct EventState {
     #[allow(dead_code)] // Reserved for future use (resolving relative paths)
@@ -29,19 +38,138 @@ struct EventState {
 
 pub type SimpleMetadata = HashMap<String, String>;
 
+/// First pass: extract headings and generate anchor IDs
+fn extract_headings(markdown_input: &str) -> (Vec<HeadingInfo>, HashMap<String, String>) {
+    let parser = MDParser::new_ext(markdown_input, Options::all());
+    let parser = TextMergeStream::new(parser);
+
+    let mut headings = Vec::new();
+    let mut anchor_ids: HashMap<String, usize> = HashMap::new();
+    let mut heading_id_map: HashMap<String, String> = HashMap::new(); // Maps heading text to ID
+    let mut in_heading: Option<(HeadingLevel, String)> = None;
+    let mut heading_index = 0;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading {
+                level,
+                id: _,
+                classes: _,
+                attrs: _,
+            }) => {
+                in_heading = Some((level, String::new()));
+            }
+            Event::Text(ref text) => {
+                if let Some((level, ref mut heading_text)) = in_heading {
+                    heading_text.push_str(text);
+                    in_heading = Some((level, heading_text.clone()));
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((heading_level, text)) = in_heading.take() {
+                    let id = generate_anchor_id(&text, &mut anchor_ids);
+                    let level_num = match heading_level {
+                        HeadingLevel::H1 => 1,
+                        HeadingLevel::H2 => 2,
+                        HeadingLevel::H3 => 3,
+                        HeadingLevel::H4 => 4,
+                        HeadingLevel::H5 => 5,
+                        HeadingLevel::H6 => 6,
+                    };
+
+                    headings.push(HeadingInfo {
+                        level: level_num,
+                        text: text.clone(),
+                        id: id.clone(),
+                    });
+
+                    // Store mapping for second pass
+                    heading_id_map.insert(format!("{}:{}", heading_index, text), id);
+                    heading_index += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (headings, heading_id_map)
+}
+
 pub async fn render(
     file: PathBuf,
     root_path: &Path,
     oembed_timeout_ms: u64,
     link_transform_config: LinkTransformConfig,
-) -> Result<(SimpleMetadata, String), Box<dyn std::error::Error>> {
-    // Create parser with example Markdown text.
+) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
+    // Read markdown input
     let markdown_input = fs::read_to_string(file)?;
+
+    // First pass: extract headings and generate IDs
+    let (headings, _heading_id_map) = extract_headings(&markdown_input);
+
+    // Second pass: collect and inject heading IDs into events
     let parser = MDParser::new_ext(&markdown_input, Options::all());
     let parser = TextMergeStream::new(parser);
 
-    // Write to a new String buffer.
-    let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
+    let mut events_with_ids = Vec::new();
+    let mut heading_index = 0;
+    let mut in_heading_text = None;
+
+    for event in parser {
+        match &event {
+            Event::Start(Tag::Heading {
+                level: _,
+                id: _,
+                classes: _,
+                attrs: _,
+            }) => {
+                in_heading_text = Some(String::new());
+                // We'll modify this event after we collect the text
+                events_with_ids.push(event);
+            }
+            Event::Text(text) if in_heading_text.is_some() => {
+                if let Some(ref mut heading_text) = in_heading_text {
+                    heading_text.push_str(text);
+                }
+                events_with_ids.push(event);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                // Now we have the full heading text, find the matching Start event and inject ID
+                if let Some(_text) = in_heading_text.take() {
+                    if heading_index < headings.len() {
+                        let heading_info = &headings[heading_index];
+                        // Go back and modify the Start(Heading) event
+                        // Find the last Start(Heading) event
+                        for i in (0..events_with_ids.len()).rev() {
+                            if let Event::Start(Tag::Heading {
+                                level,
+                                id: _,
+                                classes,
+                                attrs,
+                            }) = &events_with_ids[i]
+                            {
+                                // Replace it with one that has the ID
+                                events_with_ids[i] = Event::Start(Tag::Heading {
+                                    level: *level,
+                                    id: Some(CowStr::from(heading_info.id.clone())),
+                                    classes: classes.clone(),
+                                    attrs: attrs.clone(),
+                                });
+                                break;
+                            }
+                        }
+                        heading_index += 1;
+                    }
+                }
+                events_with_ids.push(event);
+            }
+            _ => {
+                events_with_ids.push(event);
+            }
+        }
+    }
+
+    // Third pass: process events through our custom logic
     let mut state = EventState {
         root_path: root_path.to_path_buf(),
         current_media: None,
@@ -54,15 +182,18 @@ pub async fn render(
     };
     let mut processed_events = Vec::new();
 
-    for event in parser {
+    for event in events_with_ids {
         let (processed, new_state) = process_event(event, state).await;
         state = new_state;
         processed_events.push(processed);
     }
 
+    // Write to a new String buffer.
+    let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
     crate::html::push_html(&mut html_output, processed_events.into_iter());
     Ok((
         yaml_frontmatter_simplified(&state.metadata_parsed),
+        headings,
         html_output,
     ))
 }
@@ -155,6 +286,46 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
         }
     }
     Ok(hm)
+}
+
+/// Generates a URL-safe anchor ID from heading text.
+/// Handles duplicates by appending -2, -3, etc.
+fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> String {
+    // Convert to lowercase and replace spaces and special chars with dashes
+    let base_id = text
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                // Remove special characters
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+
+    // Handle empty IDs
+    let base_id = if base_id.is_empty() {
+        "heading".to_string()
+    } else {
+        base_id
+    };
+
+    // Check for duplicates and increment counter
+    let count = anchor_ids.entry(base_id.clone()).or_insert(0);
+    *count += 1;
+
+    if *count == 1 {
+        base_id
+    } else {
+        format!("{}-{}", base_id, count)
+    }
 }
 
 async fn process_event(
@@ -290,7 +461,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file,
         };
-        let (_, html) = render(path, &root, 100, config).await.unwrap();
+        let (_, _, html) = render(path, &root, 100, config).await.unwrap();
         html
     }
 
@@ -357,7 +528,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _) = render(path, &root, 100, config).await.unwrap();
+        let (metadata, _, _) = render(path, &root, 100, config).await.unwrap();
         assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
     }
 

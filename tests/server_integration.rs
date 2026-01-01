@@ -92,7 +92,7 @@ async fn test_serve_markdown_file() {
     assert_eq!(response.status(), 200);
 
     let html = response.text().await.unwrap();
-    assert_html_contains(&html, "<h1>Hello World</h1>");
+    assert_html_contains(&html, "<h1 id=\"hello-world\">Hello World</h1>");
     assert_html_contains(&html, "This is a test.");
 }
 
@@ -108,7 +108,7 @@ async fn test_serve_index_at_subdirectory() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/home/").await;
 
-    assert_html_contains(&html, "<h1>Home Page</h1>");
+    assert_html_contains(&html, "<h1 id=\"home-page\">Home Page</h1>");
 }
 
 #[tokio::test]
@@ -120,7 +120,7 @@ async fn test_serve_directory_index() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/docs/").await;
 
-    assert_html_contains(&html, "<h1>Documentation</h1>");
+    assert_html_contains(&html, "<h1 id=\"documentation\">Documentation</h1>");
 }
 
 #[tokio::test]
@@ -131,7 +131,7 @@ async fn test_serve_nested_markdown() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/blog/posts/first/").await;
 
-    assert_html_contains(&html, "<h1>First Post</h1>");
+    assert_html_contains(&html, "<h1 id=\"first-post\">First Post</h1>");
 }
 
 #[tokio::test]
@@ -714,7 +714,7 @@ async fn test_template_folder_overrides_html_templates() {
 
     assert!(html.contains("Custom Template"), "Should use custom HTML template");
     assert!(html.contains("custom-wrapper"), "Should render with custom wrapper");
-    assert!(html.contains("<h1>Test Page</h1>"), "Should still render markdown content");
+    assert!(html.contains("<h1 id=\"test-page\">Test Page</h1>"), "Should still render markdown content");
 }
 
 // ============================================================================

@@ -707,7 +707,7 @@ impl Server {
             is_index_file,
         };
 
-        let (mut frontmatter, inner_html_output) = markdown::render(
+        let (mut frontmatter, headings, inner_html_output) = markdown::render(
             md_path.to_path_buf(),
             root_path,
             oembed_timeout_ms,
@@ -751,7 +751,7 @@ impl Server {
             .collect();
         let current_dir_name = get_current_dir_name(&url_path_buf);
 
-        // Build extra context for navigation elements
+        // Build extra context for navigation elements and heading TOC
         let mut extra_context = std::collections::HashMap::new();
         extra_context.insert(
             "breadcrumbs".to_string(),
@@ -761,6 +761,7 @@ impl Server {
             "current_dir_name".to_string(),
             serde_json::json!(current_dir_name),
         );
+        extra_context.insert("headings".to_string(), serde_json::json!(headings));
 
         let full_html_output = templates
             .render_markdown(&inner_html_output, frontmatter, extra_context)

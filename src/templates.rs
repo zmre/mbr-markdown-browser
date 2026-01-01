@@ -160,6 +160,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     ),
     ("_nav.html", include_str!("../templates/_nav.html")),
     ("_footer.html", include_str!("../templates/_footer.html")),
+    (
+        "_info_panel.html",
+        include_str!("../templates/_info_panel.html"),
+    ),
     ("_scripts.html", include_str!("../templates/_scripts.html")),
     (
         "_scripts_markdown.html",

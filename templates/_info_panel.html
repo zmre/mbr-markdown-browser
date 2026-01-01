@@ -1,0 +1,85 @@
+<!-- Info Panel - CSS-only drawer using checkbox pattern -->
+<input type="checkbox" id="info-panel-toggle" class="info-panel-checkbox" aria-label="Toggle info panel">
+<aside class="info-panel" aria-label="Document information">
+  <div class="info-panel-content">
+    <!-- Close button -->
+    <label for="info-panel-toggle" class="info-panel-close" aria-label="Close info panel">
+      <span class="info-panel-close-icon">&times;</span>
+    </label>
+
+    <h2>Info</h2>
+
+    <!-- Frontmatter Metadata Section -->
+    {% if title or description or tags or date %}
+    <details class="info-section" open>
+      <summary><strong>Metadata</strong></summary>
+      <div class="info-content">
+        {% if title %}
+        <div class="info-item">
+          <span class="info-label">Title:</span>
+          <span class="info-value">{{ title }}</span>
+        </div>
+        {% endif %}
+        {% if description %}
+        <div class="info-item">
+          <span class="info-label">Description:</span>
+          <span class="info-value">{{ description }}</span>
+        </div>
+        {% endif %}
+        {% if tags %}
+        <div class="info-item">
+          <span class="info-label">Tags:</span>
+          <span class="info-value">{{ tags }}</span>
+        </div>
+        {% endif %}
+        {% if date %}
+        <div class="info-item">
+          <span class="info-label">Date:</span>
+          <span class="info-value">{{ date }}</span>
+        </div>
+        {% endif %}
+      </div>
+    </details>
+    {% endif %}
+
+    <!-- Table of Contents Section -->
+    {% if headings %}
+    <details class="info-section" open>
+      <summary><strong>Table of Contents</strong></summary>
+      <nav class="toc-nav">
+        <ul class="toc-list">
+        {% for heading in headings %}
+          <li class="toc-item toc-level-{{ heading.level }}">
+            <a href="#{{ heading.id }}">{{ heading.text }}</a>
+          </li>
+        {% endfor %}
+        </ul>
+      </nav>
+    </details>
+    {% endif %}
+
+    <!-- Links Out Section (Placeholder) -->
+    <details class="info-section">
+      <summary><strong>Links Out</strong></summary>
+      <div class="info-content">
+        <p><em>Links from this document (coming soon)</em></p>
+      </div>
+    </details>
+
+    <!-- Links In Section (Placeholder) -->
+    <details class="info-section">
+      <summary><strong>Links In</strong></summary>
+      <div class="info-content">
+        <p><em>Links to this document (coming soon)</em></p>
+      </div>
+    </details>
+  </div>
+</aside>
+
+<!-- Backdrop overlay for mobile -->
+<label for="info-panel-toggle" class="info-panel-backdrop" aria-label="Close info panel"></label>
+
+<!-- Floating action button to open panel -->
+<label for="info-panel-toggle" class="info-panel-fab" aria-label="Open info panel">
+  <span class="info-panel-fab-icon">ℹ️</span>
+</label>

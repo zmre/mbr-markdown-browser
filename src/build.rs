@@ -184,7 +184,7 @@ impl Builder {
         };
 
         // Render markdown to HTML
-        let (mut frontmatter, html) = markdown::render(
+        let (mut frontmatter, headings, html) = markdown::render(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
@@ -218,6 +218,7 @@ impl Builder {
         let mut extra_context = std::collections::HashMap::new();
         extra_context.insert("breadcrumbs".to_string(), serde_json::json!(breadcrumbs_json));
         extra_context.insert("current_dir_name".to_string(), serde_json::json!(current_dir_name));
+        extra_context.insert("headings".to_string(), serde_json::json!(headings));
 
         // Render through template
         let html_output = self.templates.render_markdown(&html, frontmatter, extra_context).await?;
