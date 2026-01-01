@@ -725,8 +725,14 @@ impl Server {
 
         // Build extra context for navigation elements
         let mut extra_context = std::collections::HashMap::new();
-        extra_context.insert("breadcrumbs".to_string(), serde_json::json!(breadcrumbs_json));
-        extra_context.insert("current_dir_name".to_string(), serde_json::json!(current_dir_name));
+        extra_context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::json!(breadcrumbs_json),
+        );
+        extra_context.insert(
+            "current_dir_name".to_string(),
+            serde_json::json!(current_dir_name),
+        );
 
         let full_html_output = templates
             .render_markdown(&inner_html_output, frontmatter, extra_context)
@@ -1160,11 +1166,6 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "/components/mbr-components.js",
         include_bytes!("../templates/components-js/mbr-components.js"),
         "application/javascript",
-    ),
-    (
-        "/components/mbr-components.css",
-        include_bytes!("../templates/components-js/mbr-components.css"),
-        "text/css",
     ),
     (
         "/hljs.dark.css",

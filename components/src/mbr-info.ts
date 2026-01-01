@@ -1,5 +1,5 @@
 import { LitElement, html, css, type CSSResultGroup } from 'lit';
-import { customElement, property, query } from 'lit/decorators.js';
+import { customElement, property } from 'lit/decorators.js';
 
 /**
  * An example element.
@@ -41,9 +41,6 @@ export class MbrInfoElement extends LitElement {
     return html`
       <slot></slot>
     `;
-  }
-
-  private _onClick() {
   }
 
   /**
