@@ -267,43 +267,55 @@ export class MbrSearchElement extends LitElement {
   }
 
   private _handleKeydown(e: KeyboardEvent) {
-    // Handle Ctrl key combinations for scrolling
+    // Handle Ctrl key combinations for scrolling and navigation
     if (e.ctrlKey) {
       const resultsContainer = this.shadowRoot?.querySelector('.results-container');
-      if (!resultsContainer) return;
-
-      const halfPage = resultsContainer.clientHeight / 2;
-      const fullPage = resultsContainer.clientHeight - 50;
 
       switch (e.key.toLowerCase()) {
-        case 'd': // Ctrl+d - half page down
+        case 'n': // Ctrl+n - next result (readline-style)
           e.preventDefault();
-          resultsContainer.scrollBy({ top: halfPage, behavior: 'smooth' });
+          this._selectedIndex = Math.min(this._selectedIndex + 1, this._results.length - 1);
+          this._scrollSelectedIntoView();
+          return;
+        case 'p': // Ctrl+p - previous result (readline-style)
+          e.preventDefault();
+          this._selectedIndex = Math.max(this._selectedIndex - 1, -1);
+          this._scrollSelectedIntoView();
+          return;
+        case 'd': // Ctrl+d - half page down
+          if (resultsContainer) {
+            e.preventDefault();
+            resultsContainer.scrollBy({ top: resultsContainer.clientHeight / 2, behavior: 'smooth' });
+          }
           return;
         case 'u': // Ctrl+u - half page up
-          e.preventDefault();
-          resultsContainer.scrollBy({ top: -halfPage, behavior: 'smooth' });
+          if (resultsContainer) {
+            e.preventDefault();
+            resultsContainer.scrollBy({ top: -resultsContainer.clientHeight / 2, behavior: 'smooth' });
+          }
           return;
         case 'f': // Ctrl+f - full page down
-          e.preventDefault();
-          resultsContainer.scrollBy({ top: fullPage, behavior: 'smooth' });
+          if (resultsContainer) {
+            e.preventDefault();
+            resultsContainer.scrollBy({ top: resultsContainer.clientHeight - 50, behavior: 'smooth' });
+          }
           return;
         case 'b': // Ctrl+b - full page up
-          e.preventDefault();
-          resultsContainer.scrollBy({ top: -fullPage, behavior: 'smooth' });
+          if (resultsContainer) {
+            e.preventDefault();
+            resultsContainer.scrollBy({ top: -(resultsContainer.clientHeight - 50), behavior: 'smooth' });
+          }
           return;
       }
     }
 
     switch (e.key) {
       case 'ArrowDown':
-      case 'j': // vim-style down
         e.preventDefault();
         this._selectedIndex = Math.min(this._selectedIndex + 1, this._results.length - 1);
         this._scrollSelectedIntoView();
         break;
       case 'ArrowUp':
-      case 'k': // vim-style up
         e.preventDefault();
         this._selectedIndex = Math.max(this._selectedIndex - 1, -1);
         this._scrollSelectedIntoView();
@@ -617,7 +629,7 @@ export class MbrSearchElement extends LitElement {
 
           <div class="search-footer">
             <span class="footer-hint">
-              <kbd>j</kbd><kbd>k</kbd> navigate
+              <kbd>^n</kbd><kbd>^p</kbd> navigate
               <kbd>↵</kbd> select
               <kbd>esc</kbd> close
               <kbd>^d</kbd><kbd>^u</kbd> scroll

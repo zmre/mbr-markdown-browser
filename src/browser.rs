@@ -5,8 +5,9 @@ use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
 use tao::{
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
+    keyboard::{KeyCode, ModifiersState},
     window::{Icon, WindowBuilder},
 };
 use wry::WebViewBuilder;
@@ -32,10 +33,16 @@ fn about_metadata() -> AboutMetadata {
     }
 }
 
+/// Menu items for history navigation
+struct HistoryMenuItems {
+    back: MenuItem,
+    forward: MenuItem,
+}
+
 /// Build the application menu bar with standard menus
 /// On macOS, creates proper app menu with About, Services, Hide, Quit
 /// On Windows/Linux, puts About in Help menu and Quit in File menu
-fn build_menu_bar() -> (Menu, MenuItem, Submenu) {
+fn build_menu_bar() -> (Menu, MenuItem, HistoryMenuItems, Submenu) {
     let menu_bar = Menu::new();
 
     // macOS: First menu is the app menu (named after the app)
@@ -121,6 +128,29 @@ fn build_menu_bar() -> (Menu, MenuItem, Submenu) {
         ])
         .expect("Failed to append view menu items");
 
+    // History menu with Back/Forward navigation
+    let history_menu = Submenu::new("&History", true);
+    let back_item = MenuItem::with_id(
+        "back",
+        "&Back",
+        true,
+        Some(Accelerator::new(Some(Modifiers::SUPER), Code::BracketLeft)),
+    );
+    let forward_item = MenuItem::with_id(
+        "forward",
+        "&Forward",
+        true,
+        Some(Accelerator::new(Some(Modifiers::SUPER), Code::BracketRight)),
+    );
+    history_menu
+        .append_items(&[&back_item, &forward_item])
+        .expect("Failed to append history menu items");
+
+    let history_items = HistoryMenuItems {
+        back: back_item,
+        forward: forward_item,
+    };
+
     // Window menu
     let window_menu = Submenu::new("&Window", true);
     window_menu
@@ -145,7 +175,14 @@ fn build_menu_bar() -> (Menu, MenuItem, Submenu) {
     // Build menu bar - order matters, especially on macOS
     #[cfg(target_os = "macos")]
     menu_bar
-        .append_items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
+        .append_items(&[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &history_menu,
+            &window_menu,
+        ])
         .expect("Failed to append menus to menu bar");
 
     #[cfg(not(target_os = "macos"))]
@@ -154,6 +191,7 @@ fn build_menu_bar() -> (Menu, MenuItem, Submenu) {
             &file_menu,
             &edit_menu,
             &view_menu,
+            &history_menu,
             &window_menu,
             &help_menu,
         ])
@@ -163,7 +201,7 @@ fn build_menu_bar() -> (Menu, MenuItem, Submenu) {
     #[cfg(target_os = "macos")]
     window_menu.set_as_windows_menu_for_nsapp();
 
-    (menu_bar, reload_item, window_menu)
+    (menu_bar, reload_item, history_items, window_menu)
 }
 
 pub fn launch_url(url: &str) -> Result<(), BrowserError> {
@@ -177,7 +215,7 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     }));
 
     // Build the menu bar
-    let (menu_bar, reload_item, _window_menu) = build_menu_bar();
+    let (menu_bar, reload_item, history_items, _window_menu) = build_menu_bar();
 
     // Initialize menu for macOS (global app menu)
     #[cfg(target_os = "macos")]
@@ -219,8 +257,13 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
             .map_err(BrowserError::WebViewCreationFailed)?
     };
 
-    // Store reload item ID for event matching
+    // Store menu item IDs for event matching
     let reload_id = reload_item.id().clone();
+    let back_id = history_items.back.id().clone();
+    let forward_id = history_items.forward.id().clone();
+
+    // Track modifier state for Alt+arrow handling
+    let mut modifiers = ModifiersState::empty();
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -231,6 +274,12 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                 if menu_event.id == reload_id {
                     tracing::debug!("Reload requested via menu");
                     let _ = webview.load_url(&url_owned);
+                } else if menu_event.id == back_id {
+                    tracing::debug!("History back via menu");
+                    let _ = webview.evaluate_script("history.back()");
+                } else if menu_event.id == forward_id {
+                    tracing::debug!("History forward via menu");
+                    let _ = webview.evaluate_script("history.forward()");
                 }
                 // Note: PredefinedMenuItem events (quit, close, etc.) are handled automatically
             }
@@ -242,16 +291,32 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                 *control_flow = ControlFlow::Exit
             }
             Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(new_modifiers),
+                ..
+            } => {
+                modifiers = new_modifiers;
+            }
+            Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
-                        device_id: _,
-                        event,
-                        is_synthetic: _,
-                        ..
+                        event: key_event, ..
                     },
                 ..
             } => {
-                tracing::trace!("Window keyboard input: {:?}", &event);
+                // Handle Alt+Left/Right for history navigation
+                if key_event.state == ElementState::Pressed && modifiers.alt_key() {
+                    match key_event.physical_key {
+                        KeyCode::ArrowLeft => {
+                            tracing::debug!("History back via Alt+Left");
+                            let _ = webview.evaluate_script("history.back()");
+                        }
+                        KeyCode::ArrowRight => {
+                            tracing::debug!("History forward via Alt+Right");
+                            let _ = webview.evaluate_script("history.forward()");
+                        }
+                        _ => {}
+                    }
+                }
             }
             _ => (),
         }

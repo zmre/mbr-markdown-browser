@@ -33,28 +33,6 @@ function isModalOpen(): boolean {
 }
 
 /**
- * Get the scrollable element - either a modal/panel content or the document.
- */
-function getScrollTarget(): Element | Window {
-  // If search modal is open, scroll its results container
-  const search = document.querySelector('mbr-search');
-  if (search && (search as any)._isOpen) {
-    const resultsContainer = search.shadowRoot?.querySelector('.results-container');
-    if (resultsContainer) return resultsContainer;
-  }
-
-  // If browse panel is open, scroll its panel content
-  const browse = document.querySelector('mbr-browse');
-  if (browse && (browse as any)._isOpen) {
-    const panelContent = browse.shadowRoot?.querySelector('.panel-content');
-    if (panelContent) return panelContent;
-  }
-
-  // Default to window/document scrolling
-  return window;
-}
-
-/**
  * Scroll a target element or window by a given amount.
  */
 function scrollBy(target: Element | Window, amount: number) {
@@ -93,7 +71,8 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'Ctrl+f / Ctrl+b', description: 'Full page down / up' },
       { keys: 'g g', description: 'Go to top' },
       { keys: 'G', description: 'Go to bottom' },
-      { keys: 'H / L', description: 'Previous / next page' },
+      { keys: 'H / L', description: 'Previous / next sibling' },
+      { keys: 'Ctrl+o / Ctrl+i', description: 'History back / forward' },
     ],
   },
   {
@@ -107,7 +86,8 @@ const SHORTCUTS: ShortcutCategory[] = [
   {
     title: 'Search (when open)',
     shortcuts: [
-      { keys: 'j / k', description: 'Navigate results' },
+      { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate results' },
+      { keys: '↑ / ↓', description: 'Navigate results' },
       { keys: 'Enter', description: 'Open selected result' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll results' },
     ],
@@ -115,7 +95,8 @@ const SHORTCUTS: ShortcutCategory[] = [
   {
     title: 'File Browser (when open)',
     shortcuts: [
-      { keys: 'j / k', description: 'Navigate tree' },
+      { keys: 'j / k / ↑ / ↓', description: 'Navigate tree' },
+      { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate tree' },
       { keys: 'h', description: 'Collapse / go to parent' },
       { keys: 'l or Enter', description: 'Expand / open' },
       { keys: 'o', description: 'Open in new tab' },
@@ -190,32 +171,50 @@ export class MbrKeysElement extends LitElement {
       return;
     }
 
-    // Handle ctrl/cmd key combinations first
-    if (e.ctrlKey || e.metaKey) {
+    // Handle Ctrl+o/i for history navigation (works regardless of modal state)
+    if (e.ctrlKey && !e.metaKey) {
+      switch (e.key.toLowerCase()) {
+        case 'o': // Ctrl+o - history back (vim jump list style)
+          e.preventDefault();
+          history.back();
+          return;
+
+        case 'i': // Ctrl+i - history forward (vim jump list style)
+          e.preventDefault();
+          history.forward();
+          return;
+      }
+    }
+
+    // Handle ctrl/cmd key combinations for page scrolling (only when no modal is open)
+    // Modals handle their own Ctrl+d/u/f/b scrolling
+    if ((e.ctrlKey || e.metaKey) && !isModalOpen()) {
       switch (e.key.toLowerCase()) {
         case 'd': // Ctrl+d - half page down
           if (!e.metaKey) { // Don't override Cmd+D (bookmark)
             e.preventDefault();
-            scrollBy(getScrollTarget(), SCROLL_HALF_PAGE());
+            scrollBy(window, SCROLL_HALF_PAGE());
           }
           return;
 
         case 'u': // Ctrl+u - half page up
-          e.preventDefault();
-          scrollBy(getScrollTarget(), -SCROLL_HALF_PAGE());
+          if (!e.metaKey) {
+            e.preventDefault();
+            scrollBy(window, -SCROLL_HALF_PAGE());
+          }
           return;
 
         case 'f': // Ctrl+f - full page down (but not Cmd+F which is find)
-          if (!e.metaKey && !isModalOpen()) {
+          if (!e.metaKey) {
             e.preventDefault();
-            scrollBy(getScrollTarget(), SCROLL_FULL_PAGE());
+            scrollBy(window, SCROLL_FULL_PAGE());
           }
           return;
 
         case 'b': // Ctrl+b - full page up
           if (!e.metaKey) {
             e.preventDefault();
-            scrollBy(getScrollTarget(), -SCROLL_FULL_PAGE());
+            scrollBy(window, -SCROLL_FULL_PAGE());
           }
           return;
       }
@@ -227,17 +226,12 @@ export class MbrKeysElement extends LitElement {
       return;
     }
 
-    // Handle gg (go to top) - track double key press
+    // Handle gg (go to top) - track double key press (only when no modal is open)
     const now = Date.now();
-    if (e.key === 'g' && !e.shiftKey) {
+    if (e.key === 'g' && !e.shiftKey && !isModalOpen()) {
       if (this._lastKey === 'g' && now - this._lastKeyTime < 500) {
         e.preventDefault();
-        const target = getScrollTarget();
-        if (target instanceof Window) {
-          target.scrollTo({ top: 0, behavior: 'smooth' });
-        } else {
-          target.scrollTo({ top: 0, behavior: 'smooth' });
-        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
         this._lastKey = '';
         return;
       }
@@ -271,30 +265,24 @@ export class MbrKeysElement extends LitElement {
         }
         break;
 
-      case 'j': // Scroll down / next item
+      case 'j': // Scroll down (main page only, modals handle their own j/k)
         if (!isModalOpen()) {
           e.preventDefault();
-          scrollBy(getScrollTarget(), SCROLL_LINE);
-        }
-        // Modal-specific j/k is handled by the respective components
-        break;
-
-      case 'k': // Scroll up / prev item
-        if (!isModalOpen()) {
-          e.preventDefault();
-          scrollBy(getScrollTarget(), -SCROLL_LINE);
+          scrollBy(window, SCROLL_LINE);
         }
         break;
 
-      case 'G': // Go to bottom (shift+g)
+      case 'k': // Scroll up (main page only)
+        if (!isModalOpen()) {
+          e.preventDefault();
+          scrollBy(window, -SCROLL_LINE);
+        }
+        break;
+
+      case 'G': // Go to bottom (shift+g, main page only)
         if (e.shiftKey && !isModalOpen()) {
           e.preventDefault();
-          const target = getScrollTarget();
-          if (target instanceof Window) {
-            target.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-          } else {
-            target.scrollTo({ top: target.scrollHeight, behavior: 'smooth' });
-          }
+          window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
         }
         break;
 

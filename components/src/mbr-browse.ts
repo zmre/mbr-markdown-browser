@@ -122,15 +122,35 @@ export class MbrBrowseElement extends LitElement {
    * Handle keyboard events when the panel is open.
    */
   private _handlePanelKeydown(e: KeyboardEvent) {
-    // Handle Ctrl key combinations for scrolling
+    // Handle Ctrl key combinations for navigation and scrolling
     if (e.ctrlKey) {
+      const key = e.key.toLowerCase();
+
+      // Ctrl+n/p for navigation (readline-style)
+      if (key === 'n' || key === 'p') {
+        e.preventDefault();
+        const visibleItems = this._getVisibleItems();
+        if (visibleItems.length > 0) {
+          const currentIndex = this._selectedPath
+            ? visibleItems.findIndex(item => item.path === this._selectedPath)
+            : -1;
+          const newIndex = key === 'n'
+            ? Math.min(currentIndex + 1, visibleItems.length - 1)
+            : Math.max(currentIndex - 1, 0);
+          this._selectedPath = visibleItems[newIndex].path;
+          this._scrollSelectedIntoView();
+        }
+        return;
+      }
+
+      // Ctrl+d/u/f/b for scrolling
       const panelContent = this.shadowRoot?.querySelector('.panel-content');
       if (!panelContent) return;
 
       const halfPage = panelContent.clientHeight / 2;
       const fullPage = panelContent.clientHeight - 50;
 
-      switch (e.key.toLowerCase()) {
+      switch (key) {
         case 'd': // Ctrl+d - half page down
           e.preventDefault();
           panelContent.scrollBy({ top: halfPage, behavior: 'smooth' });
