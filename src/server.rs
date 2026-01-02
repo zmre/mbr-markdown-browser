@@ -18,7 +18,7 @@ use crate::search::{search_other_files, SearchEngine, SearchQuery};
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
-use tower_http::{services::ServeFile, trace::TraceLayer};
+use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct Server {
@@ -167,6 +167,7 @@ impl Server {
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
+            .layer(CompressionLayer::new())
             .layer(TraceLayer::new_for_http())
             .with_state(config);
 

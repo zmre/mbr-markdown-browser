@@ -1,10 +1,6 @@
----
-title: README for mbr, the markdown browser
----
+# mbr - markdown browser
 
-# mbr - markdown browser - ALPHA
-
-**THIS IS A WORK IN PROGRESS AND NOT YET STABLE**
+**THIS IS A WORK IN PROGRESS AND NOT YET STABLE** but testers are welcome.
 
 This is inspired by tools like [Marked 2](https://marked2app.com), [Zola](https://www.getzola.org), [mdbook](https://github.com/rust-lang/mdBook), and [Obsidian Publish](https://obsidian.md/publish).
 

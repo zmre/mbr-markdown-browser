@@ -2,6 +2,7 @@
 
 ## What's Next
 
+* [ ] Setup github actions, push to cachix, and release cutting; version in cargo.toml, flake.nix and git tags need to line up. Need to figure out how to build and share, too.  Maybe see about code signing and releases that are signed?
 * [ ] We need to change up the info sidebar in a few ways:
   * Get rid of the big blue blob in the lower right and make an i icon in the header instead
   * Make a shortcut key for launching the info sidebar
@@ -24,10 +25,6 @@
 
 * Videos
 	* [ ] Serve captions, chapters, and posters automatically
-	* [x] Serve ranged requests for videos (info: <https://github.com/tokio-rs/axum/pull/3047> and <https://github.com/tokio-rs/axum/blob/main/examples/static-file-server/src/main.rs>)
-		* [x] Need to figure out if this is already happening -- how to test?
-
-* [ ] Gzip?
 
 * Markdown parsing
   * [ ] Allow unordered bullets under ordered and vice versa

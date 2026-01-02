@@ -23,7 +23,7 @@
       rusttoolchain =
         pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
-      version = "0.1.0";
+      version = "0.3.0";
 
       # Info.plist content for macOS app bundle
       infoPlist = pkgs.writeText "Info.plist" ''
