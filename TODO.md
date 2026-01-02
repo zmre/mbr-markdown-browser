@@ -3,6 +3,8 @@
 ## What's Next
 
 * [ ] Setup github actions, push to cachix, and release cutting; version in cargo.toml, flake.nix and git tags need to line up. Need to figure out how to build and share, too.  Maybe see about code signing and releases that are signed?
+  * Setup action to run all tests including integration tests on every push
+  * Don't allow releases if tests are failing
 * [ ] We need to change up the info sidebar in a few ways:
   * Get rid of the big blue blob in the lower right and make an i icon in the header instead
   * Make a shortcut key for launching the info sidebar

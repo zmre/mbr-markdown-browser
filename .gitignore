@@ -25,3 +25,4 @@ result
 *.njsproj
 *.sln
 *.sw?
+.playwright-mcp
