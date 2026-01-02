@@ -38,4 +38,33 @@ pub struct Args {
     /// Files found in this folder take precedence; missing files fall back to defaults.
     #[arg(long, value_name = "PATH")]
     pub template_folder: Option<PathBuf>,
+
+    /// Increase logging verbosity (-v = info, -vv = debug, -vvv = trace).
+    /// Default is warn level. Can also set RUST_LOG env var.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Suppress all output except errors
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+impl Args {
+    /// Get the log level filter string based on verbosity flags.
+    /// Returns a filter suitable for tracing_subscriber::EnvFilter.
+    pub fn log_level_filter(&self) -> String {
+        let level = if self.quiet {
+            "error"
+        } else {
+            match self.verbose {
+                0 => "warn",
+                1 => "info",
+                2 => "debug",
+                _ => "trace",
+            }
+        };
+
+        // Set level for mbr crate and tower_http (for request logging)
+        format!("{}={},tower_http={}", env!("CARGO_CRATE_NAME"), level, level)
+    }
 }

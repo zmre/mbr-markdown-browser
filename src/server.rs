@@ -56,17 +56,19 @@ impl Server {
         index_file: S,
         oembed_timeout_ms: u64,
         template_folder: Option<std::path::PathBuf>,
+        log_filter: Option<&str>,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
         let index_file = index_file.into();
 
         // Use try_init to allow multiple server instances in tests
+        // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
+        let default_filter = log_filter.unwrap_or("mbr=warn,tower_http=warn");
         let _ = tracing_subscriber::registry()
             .with(
-                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    format!("{}=debug,tower_http=debug", env!("CARGO_CRATE_NAME")).into()
-                }),
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| default_filter.into()),
             )
             .with(tracing_subscriber::fmt::layer())
             .try_init();

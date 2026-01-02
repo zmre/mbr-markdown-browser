@@ -272,6 +272,7 @@ fn reinit_server(
             &config_copy.index_file,
             config_copy.oembed_timeout_ms,
             config_copy.template_folder.clone(),
+            None, // Logging already initialized
         );
         match server {
             Ok(mut s) => {

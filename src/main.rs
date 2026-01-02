@@ -186,6 +186,7 @@ async fn main() -> Result<(), MbrError> {
         println!("{}", &html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
+        let log_filter = args.log_level_filter();
         let server = server::Server::init(
             config.ip.0,
             config.port,
@@ -198,6 +199,7 @@ async fn main() -> Result<(), MbrError> {
             &config.index_file.clone(),
             config.oembed_timeout_ms,
             config.template_folder.clone(),
+            Some(&log_filter),
         )?;
 
         let url_path = build_url_path(
@@ -230,6 +232,7 @@ async fn main() -> Result<(), MbrError> {
                 &config_copy.index_file.clone(),
                 config_copy.oembed_timeout_ms,
                 config_copy.template_folder.clone(),
+                None, // Logging already initialized
             );
             match server {
                 Ok(mut s) => {

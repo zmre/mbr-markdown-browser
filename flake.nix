@@ -275,6 +275,7 @@
         LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
+        RUST_LOG = "mbr=debug,tower_http=debug";
       };
     });
 }
