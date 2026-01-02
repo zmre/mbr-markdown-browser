@@ -22,8 +22,9 @@ pub struct Repo {
     static_folder: String,
     #[serde(skip)]
     markdown_extensions: Vec<String>,
-    #[serde(skip)]
-    index_file: String,
+    /// The configured index file name (e.g., "index.md" or "_index.md").
+    /// Exposed in site.json for frontend use.
+    pub index_file: String,
     #[serde(skip)]
     ignore_dirs: Vec<String>,
     #[serde(skip)]

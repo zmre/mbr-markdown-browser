@@ -70,6 +70,9 @@ export class MbrBrowseElement extends LitElement {
   @state()
   private _loadError: string | null = null;
 
+  /** The configured index file name from site.json (e.g., "index.md" or "_index.md") */
+  private _indexFile: string = 'index.md';
+
   private _keyboardHandler: ((e: KeyboardEvent) => void) | null = null;
   private _unsubscribeSiteNav: (() => void) | null = null;
 
@@ -84,6 +87,11 @@ export class MbrBrowseElement extends LitElement {
       if (state.data?.markdown_files) {
         this._allFiles = state.data.markdown_files;
         this._allTags = this._extractTags(state.data.markdown_files);
+
+        // Get configured index file name from site data
+        if (state.data.index_file) {
+          this._indexFile = state.data.index_file;
+        }
 
         // Auto-expand folders in the current path
         const currentPath = window.location.pathname;
@@ -428,6 +436,31 @@ export class MbrBrowseElement extends LitElement {
         currentNode = currentNode.children.get(part)!;
       }
 
+      // Index files represent folders, not separate file entries.
+      // Detect by checking if raw_path ends with the configured index file name.
+      // The folder link already navigates to the index content.
+      const fileName = file.raw_path.split('/').pop() || '';
+      const isIndexFile = fileName === this._indexFile;
+
+      if (isIndexFile) {
+        // For non-root index files, create the folder if it doesn't exist
+        if (parts.length > 0) {
+          const lastPart = parts[parts.length - 1];
+          const folderPath = '/' + parts.join('/') + '/';
+
+          if (!currentNode.children.has(lastPart)) {
+            currentNode.children.set(lastPart, {
+              name: lastPart,
+              path: folderPath,
+              children: new Map(),
+              files: [],
+            });
+          }
+        }
+        // Skip adding index files as file entries (root or otherwise)
+        continue;
+      }
+
       // Add file to the current folder
       currentNode.files.push(file);
     }
@@ -599,7 +632,8 @@ export class MbrBrowseElement extends LitElement {
    */
   private _renderFolderNode(node: FolderNode, depth: number = 0): TemplateResult {
     const isExpanded = this._expandedFolders.has(node.path);
-    const hasChildren = node.children.size > 0;
+    // A folder has expandable content if it has subfolders OR files
+    const hasContent = node.children.size > 0 || node.files.length > 0;
     const isCurrent = this._isCurrentPath(node.path);
     const isKeyboardSelected = this._selectedPath === node.path;
 
@@ -613,9 +647,9 @@ export class MbrBrowseElement extends LitElement {
           <button
             class="folder-toggle"
             @click=${(e: Event) => { e.stopPropagation(); this._toggleFolder(node.path); }}
-            ?disabled=${!hasChildren}
+            ?disabled=${!hasContent}
           >
-            ${hasChildren ? (isExpanded ? '▼' : '▶') : ''}
+            ${hasContent ? (isExpanded ? '▼' : '▶') : ''}
           </button>
           <a href="${node.path}" class="folder-link">
             📁 ${node.name}
