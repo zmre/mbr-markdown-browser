@@ -19,12 +19,13 @@ bun run watch
 Watches Rust files and restarts the server, while ignoring template/component changes (those are handled by Terminal 1):
 
 ```bash
-cargo watch -i "templates/**" -i "components/**" -q -c -x 'run --release -- -s --template-folder ./templates README.md'
+cargo watch -i "templates/**" -i "components/**" -i "*.md" -q -c -x 'run --release -- -s --template-folder ./templates README.md'
 ```
 
 This command:
 - `-i "templates/**"` - Ignores template file changes (HTML, CSS, JS)
 - `-i "components/**"` - Ignores TypeScript source changes
+- `-i "*.md` - Ignores the markdown files we might be using in this dir for testing
 - `-q` - Quiet mode (less cargo-watch output)
 - `-c` - Clears screen between runs
 - `--template-folder ./templates` - Loads templates from disk instead of compiled defaults

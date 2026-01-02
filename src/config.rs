@@ -36,7 +36,6 @@ pub struct Config {
     /// Files found here take precedence; missing files fall back to compiled defaults.
     #[serde(skip)]
     pub template_folder: Option<PathBuf>,
-    // TODO: need to add some sort order stuff to determine how to arrange files -- by filename, title, last modified or whatever
 }
 
 impl std::fmt::Display for IpArray {
@@ -83,12 +82,21 @@ impl Default for Config {
             theme: "default".to_string(),
             index_file: "index.md".to_string(),
             ignore_dirs: [
-                "target", "result", "build", "node_modules", "ci",
-                "templates", ".git", ".github", "dist", "out", "coverage",
+                "target",
+                "result",
+                "build",
+                "node_modules",
+                "ci",
+                "templates",
+                ".git",
+                ".github",
+                "dist",
+                "out",
+                "coverage",
             ]
-                .into_iter()
-                .map(|x| x.to_string())
-                .collect(),
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect(),
             ignore_globs: [
                 "*.log", "*.bak", "*.lock", "*.sh", "*.css", "*.scss", "*.js", "*.ts",
             ]

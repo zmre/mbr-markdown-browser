@@ -76,6 +76,10 @@ media-provider > video::cue {
   display: none;
 }
 
+ol li {
+  list-style: decimal;
+}
+
 /* ==================== Info Panel Styles ==================== */
 
 /* Hide checkbox (used for state management) */
@@ -99,7 +103,9 @@ media-provider > video::cue {
   cursor: pointer;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   z-index: 1000;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .info-panel-fab:hover {
