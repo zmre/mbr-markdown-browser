@@ -802,6 +802,145 @@ async fn test_site_json_includes_frontmatter() {
 }
 
 // ============================================================================
+// HTTP Range Request Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_range_request_partial_content() {
+    let repo = TestRepo::new();
+    // Create a file with known content for byte-level verification
+    let content = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    repo.create_static_file("video.bin", content);
+
+    let server = TestServer::start(&repo).await;
+
+    // Request bytes 10-19 (inclusive)
+    let response = server
+        .client
+        .get(server.url("/video.bin"))
+        .header("Range", "bytes=10-19")
+        .send()
+        .await
+        .expect("Request failed");
+
+    // Should return 206 Partial Content
+    assert_eq!(
+        response.status(),
+        206,
+        "Expected 206 Partial Content for range request"
+    );
+
+    // Should have Content-Range header
+    let content_range = response
+        .headers()
+        .get("content-range")
+        .expect("Expected Content-Range header");
+    assert!(
+        content_range.to_str().unwrap().contains("bytes 10-19/36"),
+        "Content-Range should indicate bytes 10-19 of 36. Got: {:?}",
+        content_range
+    );
+
+    // Should return exactly the requested bytes
+    let body = response.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), b"ABCDEFGHIJ", "Body should be bytes 10-19");
+}
+
+#[tokio::test]
+async fn test_range_request_suffix() {
+    let repo = TestRepo::new();
+    let content = b"0123456789ABCDEFGHIJ";
+    repo.create_static_file("data.bin", content);
+
+    let server = TestServer::start(&repo).await;
+
+    // Request last 5 bytes
+    let response = server
+        .client
+        .get(server.url("/data.bin"))
+        .header("Range", "bytes=-5")
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(response.status(), 206);
+
+    let body = response.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), b"FGHIJ", "Should return last 5 bytes");
+}
+
+#[tokio::test]
+async fn test_range_request_from_offset() {
+    let repo = TestRepo::new();
+    let content = b"0123456789ABCDEFGHIJ";
+    repo.create_static_file("data.bin", content);
+
+    let server = TestServer::start(&repo).await;
+
+    // Request from byte 15 to end
+    let response = server
+        .client
+        .get(server.url("/data.bin"))
+        .header("Range", "bytes=15-")
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(response.status(), 206);
+
+    let body = response.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), b"FGHIJ", "Should return bytes 15 to end");
+}
+
+#[tokio::test]
+async fn test_range_request_accept_ranges_header() {
+    let repo = TestRepo::new();
+    repo.create_static_file("file.bin", b"content");
+
+    let server = TestServer::start(&repo).await;
+
+    // Regular request (no Range header) should advertise Accept-Ranges
+    let response = server.get("/file.bin").await;
+
+    assert_eq!(response.status(), 200);
+
+    let accept_ranges = response.headers().get("accept-ranges");
+    assert!(
+        accept_ranges.is_some(),
+        "Expected Accept-Ranges header to advertise range support"
+    );
+    assert_eq!(
+        accept_ranges.unwrap().to_str().unwrap(),
+        "bytes",
+        "Accept-Ranges should be 'bytes'"
+    );
+}
+
+#[tokio::test]
+async fn test_range_request_invalid_range() {
+    let repo = TestRepo::new();
+    repo.create_static_file("small.bin", b"tiny");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request beyond file size
+    let response = server
+        .client
+        .get(server.url("/small.bin"))
+        .header("Range", "bytes=100-200")
+        .send()
+        .await
+        .expect("Request failed");
+
+    // Should return 416 Range Not Satisfiable
+    assert_eq!(
+        response.status(),
+        416,
+        "Expected 416 Range Not Satisfiable for invalid range"
+    );
+}
+
+// ============================================================================
 // Cache Headers Tests
 // ============================================================================
 

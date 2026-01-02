@@ -24,8 +24,8 @@
 
 * Videos
 	* [ ] Serve captions, chapters, and posters automatically
-	* [ ] Serve ranged requests for videos (info: <https://github.com/tokio-rs/axum/pull/3047> and <https://github.com/tokio-rs/axum/blob/main/examples/static-file-server/src/main.rs>)
-		* [ ] Need to figure out if this is already happening -- how to test?
+	* [x] Serve ranged requests for videos (info: <https://github.com/tokio-rs/axum/pull/3047> and <https://github.com/tokio-rs/axum/blob/main/examples/static-file-server/src/main.rs>)
+		* [x] Need to figure out if this is already happening -- how to test?
 
 * [ ] Gzip?
 
