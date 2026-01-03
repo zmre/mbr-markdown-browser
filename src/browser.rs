@@ -334,7 +334,7 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     #[cfg(target_os = "linux")]
     {
         use tao::platform::unix::WindowExtUnix;
-        menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
+        let _ = menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
     }
 
     let builder = WebViewBuilder::new().with_devtools(true).with_url(&ctx.url);
@@ -497,7 +497,7 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     #[cfg(target_os = "linux")]
     {
         use tao::platform::unix::WindowExtUnix;
-        menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
+        let _ = menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
     }
 
     let url_owned = url.to_string();
