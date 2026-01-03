@@ -376,16 +376,17 @@ mod tests {
 
     #[test]
     fn test_replace_markdown_extension_with_slash() {
+        let extensions = ["md".to_string()];
         assert_eq!(
-            replace_markdown_extension_with_slash("test.md", &vec!["md".to_string()]),
+            replace_markdown_extension_with_slash("test.md", &extensions),
             "test/"
         );
         assert_eq!(
-            replace_markdown_extension_with_slash("test.txt", &vec!["md".to_string()]),
+            replace_markdown_extension_with_slash("test.txt", &extensions),
             "test.txt"
         );
         assert_eq!(
-            replace_markdown_extension_with_slash("noext", &vec!["md".to_string()]),
+            replace_markdown_extension_with_slash("noext", &extensions),
             "noext"
         );
     }

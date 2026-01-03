@@ -8,8 +8,10 @@ use std::path::Path;
 
 /// Helper to run a build and return the output directory
 async fn build_site(repo: &TestRepo) -> std::path::PathBuf {
-    let mut config = mbr::Config::default();
-    config.root_dir = repo.path().to_path_buf();
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
     let output_dir = repo.path().join("build");
 
     let builder =
@@ -51,18 +53,12 @@ fn get_indexed_urls(pagefind_dir: &Path) -> Vec<String> {
     let mut urls = Vec::new();
     for entry in fs::read_dir(&fragment_dir).unwrap() {
         let entry = entry.unwrap();
-        if entry
-            .path()
-            .extension()
-            .map_or(false, |e| e == "pf_fragment")
-        {
-            if let Some(json) =
+        if entry.path().extension().is_some_and(|e| e == "pf_fragment")
+            && let Some(json) =
                 read_pagefind_fragment(pagefind_dir, entry.file_name().to_str().unwrap())
-            {
-                if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
-                    urls.push(url.to_string());
-                }
-            }
+            && let Some(url) = json.get("url").and_then(|v| v.as_str())
+        {
+            urls.push(url.to_string());
         }
     }
     urls.sort();

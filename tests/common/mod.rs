@@ -63,6 +63,7 @@ impl TestRepo {
     }
 
     /// Creates a static file.
+    #[allow(dead_code)]
     pub fn create_static_file(&self, path: &str, content: &[u8]) -> PathBuf {
         let file_path = self.root.join(path);
         if let Some(parent) = file_path.parent() {

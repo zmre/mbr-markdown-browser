@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-25.11-darwin";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -11,6 +12,7 @@
     self,
     nixpkgs,
     rust-overlay,
+    crane,
     flake-utils,
     ...
   }:
@@ -20,8 +22,12 @@
         inherit system overlays;
         config.allowUnfree = true;
       };
-      rusttoolchain =
-        pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+      # Get rust toolchain from rust-toolchain.toml
+      rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+      # Create crane lib with our toolchain
+      craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
       # Read version from Cargo.toml - single source of truth
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
@@ -33,7 +39,7 @@
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
-          <key>CFBcargo watch -q -c -x 'run --release -- -s README.md'undleDevelopmentRegion</key>
+          <key>CFBundleDevelopmentRegion</key>
           <string>en</string>
           <key>CFBundleDisplayName</key>
           <string>MBR</string>
@@ -116,6 +122,81 @@
         else if system == "x86_64-linux"
         then "linux-x86_64"
         else system;
+
+      # Source filtering - include Rust sources, templates, and embedded assets
+      src = pkgs.lib.cleanSourceWith {
+        src = ./.;
+        filter = path: type:
+          (craneLib.filterCargoSources path type)
+          || (builtins.match ".*templates.*" path != null)
+          || (builtins.match ".*\\.md$" path != null)
+          || (builtins.match ".*\\.png$" path != null)
+          || (builtins.match ".*\\.icns$" path != null);
+      };
+
+      # Shared native build inputs
+      commonNativeBuildInputs = with pkgs;
+        [
+          pkg-config
+          llvmPackages.libclang
+        ]
+        ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          pkgs.apple-sdk
+        ]);
+
+      # Shared build inputs
+      commonBuildInputs = with pkgs;
+        [
+          ffmpeg_7-full.dev
+        ]
+        ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [
+          # Required by wry/tao for Linux webview
+          gtk3
+          glib
+          webkitgtk_4_1
+          libsoup_3
+          cairo
+          pango
+          gdk-pixbuf
+          atk
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXi
+          xorg.libXrandr
+          xdotool # provides libxdo needed by wry/tao
+        ]);
+
+      # Shared environment variables for builds
+      commonEnvVars = {
+        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+        FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
+        # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
+        BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
+          "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
+      };
+
+      # Common arguments shared between builds
+      commonArgs = commonEnvVars // {
+        inherit src;
+        strictDeps = true;
+        pname = "mbr";
+        inherit version;
+        nativeBuildInputs = commonNativeBuildInputs;
+        buildInputs = commonBuildInputs;
+      };
+
+      # Build dependencies only (cached separately from source changes)
+      cargoArtifacts = craneLib.buildDepsOnly (commonArgs
+        // {
+          # Dummy source for dependency-only build
+          src = craneLib.cleanCargoSource ./.;
+          preBuild = ''
+            # Create empty component files for dependency resolution
+            mkdir -p templates/components-js
+            touch templates/components-js/mbr-browse.js
+            touch templates/components-js/mbr-browse.css
+          '';
+        });
     in rec {
       # Build frontend components first
       packages.mbr-components = pkgs.buildNpmPackage {
@@ -133,83 +214,67 @@
       };
 
       # Main package: CLI binary + macOS app bundle (signed on darwin)
-      packages.mbr = pkgs.rustPlatform.buildRustPackage {
-        pname = "mbr";
-        inherit version;
-        cargoLock.lockFile = ./Cargo.lock;
-        src = pkgs.lib.cleanSource ./.;
+      packages.mbr = craneLib.buildPackage (commonArgs
+        // {
+          inherit cargoArtifacts;
+          cargoExtraArgs = "--locked";
 
-        preBuild = ''
-          mkdir -p templates/components-js
-          cp -r ${packages.mbr-components}/* templates/components-js/
-        '';
+          preBuild = ''
+            mkdir -p templates/components-js
+            cp -r ${packages.mbr-components}/* templates/components-js/
+          '';
 
-        nativeBuildInputs = with pkgs;
-          [
-            pkg-config
-            llvmPackages.libclang
-          ]
-          ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            pkgs.apple-sdk
-          ]);
+          # Create CLI binary (all platforms) + .app bundle (macOS only, signed)
+          postInstall = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+            # Create macOS .app bundle structure
+            mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources}
 
-        buildInputs = with pkgs;
-          [
-            ffmpeg_7-full.dev
-          ]
-          ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [
-            # Required by wry/tao for Linux webview
-            gtk3
-            glib
-            webkitgtk_4_1
-            libsoup_3
-            cairo
-            pango
-            gdk-pixbuf
-            atk
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXi
-            xorg.libXrandr
-            xdotool  # provides libxdo needed by wry/tao
-          ]);
+            # Copy binary to app bundle
+            cp $out/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
 
-        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
+            # Install Info.plist
+            cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
 
-        # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
-        BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
-          "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
+            # Copy icon
+            cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-        # Create CLI binary (all platforms) + .app bundle (macOS only, signed)
-        postInstall = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
-          # Create macOS .app bundle structure
-          mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources}
+            # Ad-hoc sign the app bundle for local use
+            /usr/bin/codesign --force --sign - --deep $out/Applications/MBR.app
+          '';
 
-          # Copy binary to app bundle
-          cp $out/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
+          meta = with pkgs.lib; {
+            description = "A markdown viewer, browser, and static site generator";
+            homepage = "https://github.com/zmre/mbr";
+            license = licenses.mit;
+            maintainers = [];
+            mainProgram = "mbr";
+            platforms = platforms.unix;
+          };
+        });
 
-          # Install Info.plist
-          cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
+      # Clippy check - runs lints without full build
+      packages.clippy = craneLib.cargoClippy (commonArgs
+        // {
+          inherit cargoArtifacts;
+          cargoClippyExtraArgs = "--all-targets -- -D warnings";
 
-          # Copy icon
-          cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
+          preBuild = ''
+            mkdir -p templates/components-js
+            cp -r ${packages.mbr-components}/* templates/components-js/
+          '';
+        });
 
-          # Ad-hoc sign the app bundle for local use
-          /usr/bin/codesign --force --sign - --deep $out/Applications/MBR.app
-        '';
-
-        meta = with pkgs.lib; {
-          description = "A markdown viewer, browser, and static site generator";
-          homepage = "https://github.com/zmre/mbr";
-          license = licenses.mit;
-          maintainers = [];
-          mainProgram = "mbr";
-          platforms = platforms.unix;
-        };
+      # Format check
+      packages.fmt = craneLib.cargoFmt {
+        inherit src;
       };
 
       packages.default = packages.mbr;
+
+      # Checks run by `nix flake check`
+      checks = {
+        inherit (packages) mbr clippy fmt;
+      };
 
       # Release package: creates distributable archives from the built package
       packages.release =
@@ -280,55 +345,33 @@
       };
 
       # Development shell
-      devShells.default = pkgs.mkShell {
-        buildInputs =
-          [
-            rusttoolchain
-            pkgs.nodejs_24
-            pkgs.bun
-            pkgs.ffmpeg_7-full.dev
-            pkgs.pkg-config
-            pkgs.cargo-watch
-            pkgs.llvmPackages.libclang
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            pkgs.apple-sdk
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-            pkgs.gtk3
-            pkgs.glib
-            pkgs.webkitgtk_4_1
-            pkgs.libsoup_3
-            pkgs.cairo
-            pkgs.pango
-            pkgs.gdk-pixbuf
-            pkgs.atk
-            pkgs.xorg.libX11
-            pkgs.xorg.libXcursor
-            pkgs.xorg.libXi
-            pkgs.xorg.libXrandr
-            pkgs.xdotool  # provides libxdo needed by wry/tao
+      devShells.default = craneLib.devShell (commonEnvVars
+        // {
+          # Include checks to ensure dev environment matches CI
+          checks = self.checks.${system};
+
+          # Build inputs from common + dev tools
+          inputsFrom = [packages.mbr];
+          packages = with pkgs; [
+            nodejs_24
+            bun
+            cargo-watch
           ];
-        PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
-        LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
-        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
-        RUST_LOG = "mbr=debug,tower_http=debug";
 
-        # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
-        BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
-          "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
+          PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
+          LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
+          RUST_LOG = "mbr=debug,tower_http=debug";
 
-        shellHook = ''
-          # Configure git hooks if in a git repo and not already set
-          if git rev-parse --git-dir > /dev/null 2>&1; then
-            current_hooks_path=$(git config --local core.hooksPath 2>/dev/null || echo "")
-            if [[ "$current_hooks_path" != ".githooks" ]]; then
-              git config --local core.hooksPath .githooks
-              echo "Configured git hooks: core.hooksPath = .githooks"
+          shellHook = ''
+            # Configure git hooks if in a git repo and not already set
+            if git rev-parse --git-dir > /dev/null 2>&1; then
+              current_hooks_path=$(git config --local core.hooksPath 2>/dev/null || echo "")
+              if [[ "$current_hooks_path" != ".githooks" ]]; then
+                git config --local core.hooksPath .githooks
+                echo "Configured git hooks: core.hooksPath = .githooks"
+              fi
             fi
-          fi
-        '';
-      };
+          '';
+        });
     });
 }
