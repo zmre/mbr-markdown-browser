@@ -153,9 +153,25 @@
             pkgs.apple-sdk
           ]);
 
-        buildInputs = with pkgs; [
-          ffmpeg_7-full.dev
-        ];
+        buildInputs = with pkgs;
+          [
+            ffmpeg_7-full.dev
+          ]
+          ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # Required by wry/tao for Linux webview
+            gtk3
+            glib
+            webkitgtk_4_1
+            libsoup_3
+            cairo
+            pango
+            gdk-pixbuf
+            atk
+            xorg.libX11
+            xorg.libXcursor
+            xorg.libXi
+            xorg.libXrandr
+          ]);
 
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
@@ -272,6 +288,20 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.apple-sdk
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.gtk3
+            pkgs.glib
+            pkgs.webkitgtk_4_1
+            pkgs.libsoup_3
+            pkgs.cairo
+            pkgs.pango
+            pkgs.gdk-pixbuf
+            pkgs.atk
+            pkgs.xorg.libX11
+            pkgs.xorg.libXcursor
+            pkgs.xorg.libXi
+            pkgs.xorg.libXrandr
           ];
         PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
         LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";

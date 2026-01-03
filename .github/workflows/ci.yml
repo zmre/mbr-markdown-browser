@@ -56,8 +56,8 @@ jobs:
       - name: Install dependencies
         run: cd components && bun install
 
-      - name: Build components
-        run: cd components && bun run build
+      - name: Run component tests
+        run: cd components && bun run test
 
-      - name: Type check
-        run: cd components && bun run check
+      - name: Build components (includes type check via tsc)
+        run: cd components && bun run build
