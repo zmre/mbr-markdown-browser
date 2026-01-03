@@ -122,7 +122,7 @@
         pname = "mbr-components";
         inherit version;
         src = ./components;
-        npmDepsHash = "sha256-mLUfYTDIYxoBy/tObRelzzJi4fwj6+gV/QzcbaLisUI=";
+        npmDepsHash = "sha256-jsBGQSpIGM7zKyGJm3pulL9CbFC1Hl/Its1ALp6SnaE=";
         buildPhase = ''
           npm run build
         '';
@@ -308,6 +308,17 @@
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
         RUST_LOG = "mbr=debug,tower_http=debug";
+
+        shellHook = ''
+          # Configure git hooks if in a git repo and not already set
+          if git rev-parse --git-dir > /dev/null 2>&1; then
+            current_hooks_path=$(git config --local core.hooksPath 2>/dev/null || echo "")
+            if [[ "$current_hooks_path" != ".githooks" ]]; then
+              git config --local core.hooksPath .githooks
+              echo "Configured git hooks: core.hooksPath = .githooks"
+            fi
+          fi
+        '';
       };
     });
 }

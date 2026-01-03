@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import './mbr-browse.js'
 import type { MbrBrowseElement } from './mbr-browse.js'
 
@@ -149,9 +149,7 @@ describe('MbrBrowseElement', () => {
       element.open()
       await element.updateComplete
 
-      // Component fetches site.json on mount, shows loading state
-      const loading = element.shadowRoot?.querySelector('.loading-container')
-      // May or may not be visible depending on timing, but structure should exist
+      // Component fetches site.json on mount - verify pane content exists
       const paneContent = element.shadowRoot?.querySelector('.pane-content')
       expect(paneContent).not.toBeNull()
     })

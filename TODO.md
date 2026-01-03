@@ -6,7 +6,7 @@
   * Setup action to run all tests including integration tests on every push
   * Don't allow releases if tests are failing
 * [ ] Update cargo dependencies; also switch to using worktrees
-* [ ] Update npm dependencies; also fix the hardcoded npmDepsHash crap in flake.nix
+* [ ] Update npm dependencies
 * [ ] We need to change up the info sidebar in a few ways:
   * Get rid of the big blue blob in the lower right and make an i icon in the header instead
   * Make a shortcut key for launching the info sidebar

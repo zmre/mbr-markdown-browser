@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# pre-commit hook for mbr
+#
+# To install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info() { echo -e "${GREEN}[pre-commit]${NC} $*"; }
+warn() { echo -e "${YELLOW}[pre-commit]${NC} $*"; }
+error() { echo -e "${RED}[pre-commit]${NC} $*" >&2; }
+
+# Check if components/package.json is staged
+package_json_staged() {
+    git diff --cached --name-only | grep -q '^components/package.json$'
+}
+
+# Check if we need to sync npm deps
+check_npm_deps() {
+    if ! package_json_staged; then
+        return 0
+    fi
+
+    info "components/package.json is staged, checking npm deps sync..."
+
+    # Run the sync script
+    if ! "$PROJECT_DIR/scripts/sync-npm-deps.sh" --force; then
+        error "Failed to sync npm dependencies"
+        return 1
+    fi
+
+    # Check if flake.nix or package-lock.json were modified
+    local files_to_add=()
+
+    if ! git diff --quiet "$PROJECT_DIR/flake.nix" 2>/dev/null; then
+        files_to_add+=("flake.nix")
+    fi
+
+    if ! git diff --quiet "$PROJECT_DIR/components/package-lock.json" 2>/dev/null; then
+        files_to_add+=("components/package-lock.json")
+    fi
+
+    if [[ ${#files_to_add[@]} -gt 0 ]]; then
+        info "Auto-staging updated files: ${files_to_add[*]}"
+        git add "${files_to_add[@]}"
+    fi
+}
+
+# Main
+main() {
+    cd "$PROJECT_DIR"
+
+    # Sync npm deps if package.json changed
+    check_npm_deps || exit 1
+
+    info "Pre-commit checks passed"
+}
+
+main "$@"
