@@ -23,6 +23,27 @@ package_json_staged() {
     git diff --cached --name-only | grep -q '^components/package.json$'
 }
 
+# Check if any Rust files are staged
+rust_files_staged() {
+    git diff --cached --name-only | grep -qE '\.(rs|toml)$'
+}
+
+# Run cargo clippy on staged Rust changes
+check_rust_quality() {
+    if ! rust_files_staged; then
+        return 0
+    fi
+
+    info "Rust files staged, running clippy..."
+
+    if ! cargo clippy -- -D warnings 2>&1; then
+        error "Clippy found issues. Please fix them before committing."
+        return 1
+    fi
+
+    info "Clippy passed"
+}
+
 # Check if we need to sync npm deps
 check_npm_deps() {
     if ! package_json_staged; then
@@ -60,6 +81,9 @@ main() {
 
     # Sync npm deps if package.json changed
     check_npm_deps || exit 1
+
+    # Run clippy on Rust changes
+    check_rust_quality || exit 1
 
     info "Pre-commit checks passed"
 }
