@@ -379,10 +379,10 @@ impl SearchEngine {
         }
 
         // Match against filename (high priority - 2x boost)
-        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str()) {
-            if let Some(score) = self.fuzzy_match(pattern, filename, matcher) {
-                best_score = best_score.max(score.saturating_mul(2));
-            }
+        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str())
+            && let Some(score) = self.fuzzy_match(pattern, filename, matcher)
+        {
+            best_score = best_score.max(score.saturating_mul(2));
         }
 
         // Match against all frontmatter fields with dynamic weights
@@ -658,10 +658,10 @@ impl SearchEngine {
         }
 
         // Match against filename
-        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str()) {
-            if let Some(score) = self.fuzzy_match(pattern, filename, matcher) {
-                best_score = best_score.max(score.saturating_mul(2));
-            }
+        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str())
+            && let Some(score) = self.fuzzy_match(pattern, filename, matcher)
+        {
+            best_score = best_score.max(score.saturating_mul(2));
         }
 
         // Match against extracted text (lower weight since it's body content)

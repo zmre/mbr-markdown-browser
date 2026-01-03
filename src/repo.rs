@@ -131,15 +131,15 @@ impl OtherFileInfo {
     /// Respects file size limit for performance.
     fn extract_text(&self) -> Option<String> {
         // Check file size first
-        if let Some(size) = self.metadata.file_size_bytes {
-            if size > MAX_TEXT_EXTRACTION_SIZE {
-                tracing::debug!(
-                    "Skipping text extraction for {:?}: file too large ({} bytes)",
-                    self.raw_path,
-                    size
-                );
-                return None;
-            }
+        if let Some(size) = self.metadata.file_size_bytes
+            && size > MAX_TEXT_EXTRACTION_SIZE
+        {
+            tracing::debug!(
+                "Skipping text extraction for {:?}: file too large ({} bytes)",
+                self.raw_path,
+                size
+            );
+            return None;
         }
 
         match &self.metadata.kind {

@@ -135,31 +135,29 @@ pub async fn render(
             }
             Event::End(TagEnd::Heading(_)) => {
                 // Now we have the full heading text, find the matching Start event and inject ID
-                if let Some(_text) = in_heading_text.take() {
-                    if heading_index < headings.len() {
-                        let heading_info = &headings[heading_index];
-                        // Go back and modify the Start(Heading) event
-                        // Find the last Start(Heading) event
-                        for i in (0..events_with_ids.len()).rev() {
-                            if let Event::Start(Tag::Heading {
-                                level,
-                                id: _,
-                                classes,
-                                attrs,
-                            }) = &events_with_ids[i]
-                            {
-                                // Replace it with one that has the ID
-                                events_with_ids[i] = Event::Start(Tag::Heading {
-                                    level: *level,
-                                    id: Some(CowStr::from(heading_info.id.clone())),
-                                    classes: classes.clone(),
-                                    attrs: attrs.clone(),
-                                });
-                                break;
-                            }
+                if in_heading_text.take().is_some() && heading_index < headings.len() {
+                    let heading_info = &headings[heading_index];
+                    // Go back and modify the Start(Heading) event
+                    // Find the last Start(Heading) event
+                    for i in (0..events_with_ids.len()).rev() {
+                        if let Event::Start(Tag::Heading {
+                            level,
+                            id: _,
+                            classes,
+                            attrs,
+                        }) = &events_with_ids[i]
+                        {
+                            // Replace it with one that has the ID
+                            events_with_ids[i] = Event::Start(Tag::Heading {
+                                level: *level,
+                                id: Some(CowStr::from(heading_info.id.clone())),
+                                classes: classes.clone(),
+                                attrs: attrs.clone(),
+                            });
+                            break;
                         }
-                        heading_index += 1;
                     }
+                    heading_index += 1;
                 }
                 events_with_ids.push(event);
             }

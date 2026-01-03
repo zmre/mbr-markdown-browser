@@ -122,7 +122,7 @@ impl Config {
             .merge(Env::prefixed("MBR_"))
             .merge(Toml::file(root_dir.join(".mbr/config.toml")))
             .extract()
-            .map_err(ConfigError::ParseFailed)?;
+            .map_err(|e| ConfigError::ParseFailed(Box::new(e)))?;
         tracing::debug!("Loaded config: {:?}", &config);
         config.root_dir = root_dir;
         Ok(config)

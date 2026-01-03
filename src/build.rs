@@ -322,14 +322,11 @@ impl Builder {
 
                 // If there's no / in remainder, it's a direct child
                 if !remainder.trim_end_matches('/').contains('/') {
-                    files.push(markdown_file_to_json(&info));
-                } else {
-                    // It's in a subdirectory
-                    if let Some(subdir) = remainder.split('/').next() {
-                        if !subdir.is_empty() {
-                            subdirs.insert(subdir.to_string());
-                        }
-                    }
+                    files.push(markdown_file_to_json(info));
+                } else if let Some(subdir) = remainder.split('/').next()
+                    && !subdir.is_empty()
+                {
+                    subdirs.insert(subdir.to_string());
                 }
             }
         }
@@ -481,7 +478,7 @@ impl Builder {
                 let relative = entry.path().strip_prefix(&static_path)
                     .map_err(|_| BuildError::CreateDirFailed {
                         path: entry.path().to_path_buf(),
-                        source: std::io::Error::new(std::io::ErrorKind::Other, "strip prefix failed"),
+                        source: std::io::Error::other("strip prefix failed"),
                     })?;
 
                 let output_path = self.output_dir.join(relative);
@@ -594,7 +591,7 @@ impl Builder {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "html"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
         {
             let path = entry.path();
 
@@ -660,11 +657,11 @@ impl Builder {
             let file_path = pagefind_dir.join(&file.filename);
 
             // Create parent directories if needed
-            if let Some(parent) = file_path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    tracing::debug!("Failed to create dir {}: {}", parent.display(), e);
-                    continue;
-                }
+            if let Some(parent) = file_path.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                tracing::debug!("Failed to create dir {}: {}", parent.display(), e);
+                continue;
             }
 
             if let Err(e) = fs::write(&file_path, &file.contents) {
@@ -740,13 +737,13 @@ impl Builder {
                     }
 
                     // Resolve the link relative to the current file's directory
-                    if let Some(resolved) = self.resolve_link(path, href) {
-                        if !self.link_target_exists(&resolved) {
-                            broken_links.push(BrokenLink {
-                                source_page: source_page.clone(),
-                                link_url: href.to_string(),
-                            });
-                        }
+                    if let Some(resolved) = self.resolve_link(path, href)
+                        && !self.link_target_exists(&resolved)
+                    {
+                        broken_links.push(BrokenLink {
+                            source_page: source_page.clone(),
+                            link_url: href.to_string(),
+                        });
                     }
                 }
             }
@@ -822,7 +819,7 @@ impl Builder {
                 .map_err(|_| BuildError::CopyFailed {
                     from: entry.path().to_path_buf(),
                     to: to.to_path_buf(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, "strip prefix failed"),
+                    source: std::io::Error::other("strip prefix failed"),
                 })?;
 
             let dest = to.join(relative);

@@ -44,6 +44,7 @@ pub struct ServerState {
 }
 
 impl Server {
+    #[allow(clippy::too_many_arguments)]
     pub fn init<S: Into<String>, P: Into<std::path::PathBuf>>(
         ip: [u8; 4],
         port: u16,

@@ -124,7 +124,7 @@ async fn main() -> Result<(), MbrError> {
                 args.output.clone()
             } else {
                 std::env::current_dir()
-                    .map_err(|e| ConfigError::CurrentDirFailed(e))?
+                    .map_err(ConfigError::CurrentDirFailed)?
                     .join(&args.output)
             };
 
