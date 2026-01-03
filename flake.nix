@@ -171,10 +171,15 @@
             xorg.libXcursor
             xorg.libXi
             xorg.libXrandr
+            xdotool  # provides libxdo needed by wry/tao
           ]);
 
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
+
+        # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
+        BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
+          "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
 
         # Create CLI binary (all platforms) + .app bundle (macOS only, signed)
         postInstall = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
@@ -302,12 +307,17 @@
             pkgs.xorg.libXcursor
             pkgs.xorg.libXi
             pkgs.xorg.libXrandr
+            pkgs.xdotool  # provides libxdo needed by wry/tao
           ];
         PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
         LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
         RUST_LOG = "mbr=debug,tower_http=debug";
+
+        # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
+        BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
+          "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
 
         shellHook = ''
           # Configure git hooks if in a git repo and not already set

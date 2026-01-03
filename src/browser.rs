@@ -15,6 +15,8 @@ use tao::{
 };
 use tokio::task::JoinHandle;
 use wry::WebViewBuilder;
+#[cfg(target_os = "linux")]
+use wry::WebViewBuilderExtUnix;
 
 /// Custom user events for the event loop
 enum UserEvent {
