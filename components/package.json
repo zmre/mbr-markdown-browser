@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@vitest/browser": "^3.0.0",
-    "happy-dom": "^17.4.4",
+    "happy-dom": "^20.0.11",
     "typescript": "~5.9.2",
     "vite": "^7.1.11",
     "vitest": "^3.0.0"
