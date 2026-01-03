@@ -1,10 +1,10 @@
 extern crate image;
+use crate::Config;
 use crate::errors::BrowserError;
 use crate::server::Server;
-use crate::Config;
 use muda::{
-    accelerator::{Accelerator, Code, Modifiers},
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+    accelerator::{Accelerator, Code, Modifiers},
 };
 use std::path::PathBuf;
 use tao::{
@@ -337,9 +337,7 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
         menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
     }
 
-    let builder = WebViewBuilder::new()
-        .with_devtools(true)
-        .with_url(&ctx.url);
+    let builder = WebViewBuilder::new().with_devtools(true).with_url(&ctx.url);
 
     #[cfg(not(target_os = "linux"))]
     let webview = builder

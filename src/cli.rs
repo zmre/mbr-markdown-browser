@@ -65,6 +65,11 @@ impl Args {
         };
 
         // Set level for mbr crate and tower_http (for request logging)
-        format!("{}={},tower_http={}", env!("CARGO_CRATE_NAME"), level, level)
+        format!(
+            "{}={},tower_http={}",
+            env!("CARGO_CRATE_NAME"),
+            level,
+            level
+        )
     }
 }

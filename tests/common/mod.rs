@@ -18,7 +18,8 @@ impl TestRepo {
         let dir = TempDir::new().expect("Failed to create temp directory");
         // Canonicalize the path to resolve symlinks (e.g., /var -> /private/var on macOS)
         // This prevents path diffing issues when computing relative paths
-        let root = dir.path()
+        let root = dir
+            .path()
             .canonicalize()
             .expect("Failed to canonicalize temp directory");
 
@@ -86,7 +87,10 @@ impl Default for TestRepo {
 /// Finds an available port for testing.
 pub fn find_available_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to port");
-    listener.local_addr().expect("Failed to get local address").port()
+    listener
+        .local_addr()
+        .expect("Failed to get local address")
+        .port()
 }
 
 /// Asserts that HTML content contains the expected substring.

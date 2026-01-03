@@ -12,8 +12,8 @@ async fn build_site(repo: &TestRepo) -> std::path::PathBuf {
     config.root_dir = repo.path().to_path_buf();
     let output_dir = repo.path().join("build");
 
-    let builder = mbr::build::Builder::new(config, output_dir.clone())
-        .expect("Failed to create builder");
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
 
     builder.build().await.expect("Build failed");
 
@@ -51,11 +51,14 @@ fn get_indexed_urls(pagefind_dir: &Path) -> Vec<String> {
     let mut urls = Vec::new();
     for entry in fs::read_dir(&fragment_dir).unwrap() {
         let entry = entry.unwrap();
-        if entry.path().extension().map_or(false, |e| e == "pf_fragment") {
-            if let Some(json) = read_pagefind_fragment(
-                pagefind_dir,
-                entry.file_name().to_str().unwrap(),
-            ) {
+        if entry
+            .path()
+            .extension()
+            .map_or(false, |e| e == "pf_fragment")
+        {
+            if let Some(json) =
+                read_pagefind_fragment(pagefind_dir, entry.file_name().to_str().unwrap())
+            {
                 if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
                     urls.push(url.to_string());
                 }
@@ -97,7 +100,11 @@ async fn test_build_creates_section_pages() {
 
     // Should create docs/index.html (section page)
     let section_path = output.join("docs").join("index.html");
-    assert!(section_path.exists(), "Expected section page at {:?}", section_path);
+    assert!(
+        section_path.exists(),
+        "Expected section page at {:?}",
+        section_path
+    );
 
     let html = fs::read_to_string(&section_path).unwrap();
     assert!(html.contains("guide") || html.contains("Guide"));
@@ -115,8 +122,14 @@ async fn test_build_sets_static_mode() {
     let html = fs::read_to_string(&html_path).unwrap();
 
     // Should have serverMode: false
-    assert!(html.contains("serverMode: false"), "Expected serverMode: false in output");
-    assert!(!html.contains("serverMode: true"), "Should not have serverMode: true");
+    assert!(
+        html.contains("serverMode: false"),
+        "Expected serverMode: false in output"
+    );
+    assert!(
+        !html.contains("serverMode: true"),
+        "Should not have serverMode: true"
+    );
 }
 
 // ============================================================================
@@ -132,7 +145,11 @@ async fn test_pagefind_index_created() {
 
     // Should create pagefind directory
     let pagefind_dir = output.join(".mbr").join("pagefind");
-    assert!(pagefind_dir.exists(), "Expected Pagefind directory at {:?}", pagefind_dir);
+    assert!(
+        pagefind_dir.exists(),
+        "Expected Pagefind directory at {:?}",
+        pagefind_dir
+    );
 
     // Should have entry file
     let entry_file = pagefind_dir.join("pagefind-entry.json");
@@ -154,8 +171,16 @@ async fn test_pagefind_indexes_markdown_pages() {
     let pagefind_dir = output.join(".mbr").join("pagefind");
     let urls = get_indexed_urls(&pagefind_dir);
 
-    assert!(urls.iter().any(|u| u.contains("readme")), "Expected readme to be indexed: {:?}", urls);
-    assert!(urls.iter().any(|u| u.contains("guide")), "Expected guide to be indexed: {:?}", urls);
+    assert!(
+        urls.iter().any(|u| u.contains("readme")),
+        "Expected readme to be indexed: {:?}",
+        urls
+    );
+    assert!(
+        urls.iter().any(|u| u.contains("guide")),
+        "Expected guide to be indexed: {:?}",
+        urls
+    );
 }
 
 #[tokio::test]
@@ -171,7 +196,11 @@ async fn test_pagefind_excludes_mbr_directory() {
 
     // No URL should contain .mbr
     for url in &urls {
-        assert!(!url.contains(".mbr"), "Unexpected .mbr URL in index: {}", url);
+        assert!(
+            !url.contains(".mbr"),
+            "Unexpected .mbr URL in index: {}",
+            url
+        );
     }
 }
 
@@ -184,14 +213,20 @@ async fn test_pagefind_page_count_matches() {
 
     let output = build_site(&repo).await;
 
-    let entry_path = output.join(".mbr").join("pagefind").join("pagefind-entry.json");
-    let entry: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&entry_path).unwrap()
-    ).unwrap();
+    let entry_path = output
+        .join(".mbr")
+        .join("pagefind")
+        .join("pagefind-entry.json");
+    let entry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&entry_path).unwrap()).unwrap();
 
     // Should have at least 4 pages (3 markdown + 1 home page)
     let page_count = entry["languages"]["en"]["page_count"].as_i64().unwrap();
-    assert!(page_count >= 4, "Expected at least 4 pages, got {}", page_count);
+    assert!(
+        page_count >= 4,
+        "Expected at least 4 pages, got {}",
+        page_count
+    );
 }
 
 // ============================================================================
@@ -208,7 +243,10 @@ async fn test_build_excludes_node_modules() {
     let output = build_site(&repo).await;
 
     // node_modules should not be in output
-    assert!(!output.join("node_modules").exists(), "node_modules should be excluded");
+    assert!(
+        !output.join("node_modules").exists(),
+        "node_modules should be excluded"
+    );
 
     // But readme should exist
     assert!(output.join("readme").join("index.html").exists());
@@ -228,8 +266,16 @@ async fn test_build_excludes_hidden_directories() {
     let urls = get_indexed_urls(&pagefind_dir);
 
     for url in &urls {
-        assert!(!url.contains("hidden"), "Hidden directories should be excluded: {}", url);
-        assert!(!url.contains("secret"), "Hidden files should be excluded: {}", url);
+        assert!(
+            !url.contains("hidden"),
+            "Hidden directories should be excluded: {}",
+            url
+        );
+        assert!(
+            !url.contains("secret"),
+            "Hidden files should be excluded: {}",
+            url
+        );
     }
 }
 
@@ -248,8 +294,10 @@ async fn test_build_includes_components() {
     let html = fs::read_to_string(&html_path).unwrap();
 
     // Should include the components script
-    assert!(html.contains("mbr-components.js"),
-        "Expected mbr-components.js script reference in HTML");
+    assert!(
+        html.contains("mbr-components.js"),
+        "Expected mbr-components.js script reference in HTML"
+    );
 }
 
 #[tokio::test]
@@ -262,17 +310,26 @@ async fn test_build_creates_site_json() {
 
     // Should create site.json in .mbr directory
     let site_json_path = output.join(".mbr").join("site.json");
-    assert!(site_json_path.exists(), "Expected site.json at {:?}", site_json_path);
+    assert!(
+        site_json_path.exists(),
+        "Expected site.json at {:?}",
+        site_json_path
+    );
 
     let content = fs::read_to_string(&site_json_path).unwrap();
     let body: serde_json::Value = serde_json::from_str(&content).unwrap();
 
     // Should have markdown_files array
-    assert!(body["markdown_files"].is_array(),
-        "Expected markdown_files array in site.json");
+    assert!(
+        body["markdown_files"].is_array(),
+        "Expected markdown_files array in site.json"
+    );
 
     let files = body["markdown_files"].as_array().unwrap();
-    assert!(files.len() >= 2, "Expected at least 2 files in markdown_files");
+    assert!(
+        files.len() >= 2,
+        "Expected at least 2 files in markdown_files"
+    );
 }
 
 #[tokio::test]
@@ -295,12 +352,20 @@ Content here."#;
     let body: serde_json::Value = serde_json::from_str(&content).unwrap();
 
     let files = body["markdown_files"].as_array().unwrap();
-    let tagged_file = files.iter().find(|f| f["url_path"].as_str().unwrap().contains("tagged"));
+    let tagged_file = files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap().contains("tagged"));
 
-    assert!(tagged_file.is_some(), "Expected to find tagged.md in site.json");
+    assert!(
+        tagged_file.is_some(),
+        "Expected to find tagged.md in site.json"
+    );
 
     let tagged = tagged_file.unwrap();
-    assert!(tagged["frontmatter"].is_object(), "Expected frontmatter object");
+    assert!(
+        tagged["frontmatter"].is_object(),
+        "Expected frontmatter object"
+    );
     assert_eq!(tagged["frontmatter"]["title"].as_str(), Some("My Title"));
 }
 
@@ -319,7 +384,10 @@ async fn test_html_contains_pagefind_body_attribute() {
     let html = fs::read_to_string(&html_path).unwrap();
 
     // Main content should have data-pagefind-body
-    assert!(html.contains("data-pagefind-body"), "Expected data-pagefind-body in output");
+    assert!(
+        html.contains("data-pagefind-body"),
+        "Expected data-pagefind-body in output"
+    );
 }
 
 #[tokio::test]
@@ -333,5 +401,8 @@ async fn test_html_contains_pagefind_ignore_on_navigation() {
     let html = fs::read_to_string(&html_path).unwrap();
 
     // Header and footer should be ignored
-    assert!(html.contains("data-pagefind-ignore"), "Expected data-pagefind-ignore in output");
+    assert!(
+        html.contains("data-pagefind-ignore"),
+        "Expected data-pagefind-ignore in output"
+    );
 }

@@ -28,13 +28,45 @@ rust_files_staged() {
     git diff --cached --name-only | grep -qE '\.(rs|toml)$'
 }
 
+# Format Rust files and re-stage them
+format_rust_files() {
+    if ! rust_files_staged; then
+        return 0
+    fi
+
+    info "Formatting Rust files..."
+
+    # Get list of staged .rs files
+    local staged_rs_files
+    staged_rs_files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
+
+    if [[ -z "$staged_rs_files" ]]; then
+        return 0
+    fi
+
+    # Run cargo fmt
+    if ! cargo fmt 2>&1; then
+        error "cargo fmt failed"
+        return 1
+    fi
+
+    # Re-stage the formatted files
+    for file in $staged_rs_files; do
+        if [[ -f "$file" ]]; then
+            git add "$file"
+        fi
+    done
+
+    info "Rust files formatted and re-staged"
+}
+
 # Run cargo clippy on staged Rust changes
 check_rust_quality() {
     if ! rust_files_staged; then
         return 0
     fi
 
-    info "Rust files staged, running clippy..."
+    info "Running clippy..."
 
     if ! cargo clippy -- -D warnings 2>&1; then
         error "Clippy found issues. Please fix them before committing."
@@ -81,6 +113,9 @@ main() {
 
     # Sync npm deps if package.json changed
     check_npm_deps || exit 1
+
+    # Format Rust files first
+    format_rust_files || exit 1
 
     # Run clippy on Rust changes
     check_rust_quality || exit 1

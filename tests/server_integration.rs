@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{assert_html_contains, find_available_port, TestRepo};
+use common::{TestRepo, assert_html_contains, find_available_port};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -27,7 +27,13 @@ impl TestServer {
                 &["md".to_string()],
                 &["target".to_string(), "node_modules".to_string()],
                 &["*.log".to_string()],
-                &[".direnv".to_string(), ".git".to_string(), "result".to_string(), "target".to_string(), "build".to_string()],
+                &[
+                    ".direnv".to_string(),
+                    ".git".to_string(),
+                    "result".to_string(),
+                    "target".to_string(),
+                    "build".to_string(),
+                ],
                 "index.md",
                 100,
                 None, // template_folder
@@ -239,7 +245,9 @@ async fn test_search_finds_by_title() {
     repo.create_markdown_with_frontmatter("findme.md", &frontmatter, "Some content.");
 
     let server = TestServer::start(&repo).await;
-    let response = server.post_json("/.mbr/search", r#"{"q": "Unique Search"}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "Unique Search"}"#)
+        .await;
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
@@ -249,7 +257,9 @@ async fn test_search_finds_by_title() {
     assert!(!results.is_empty());
 
     // Check that our file was found
-    let found = results.iter().any(|r| r["url_path"].as_str().unwrap().contains("findme"));
+    let found = results
+        .iter()
+        .any(|r| r["url_path"].as_str().unwrap().contains("findme"));
     assert!(found, "Expected to find 'findme' in results: {:?}", results);
 }
 
@@ -261,7 +271,12 @@ async fn test_search_with_scope_metadata() {
     repo.create_markdown_with_frontmatter("meta.md", &frontmatter, "Body text without match.");
 
     let server = TestServer::start(&repo).await;
-    let response = server.post_json("/.mbr/search", r#"{"q": "Metadata Only", "scope": "metadata"}"#).await;
+    let response = server
+        .post_json(
+            "/.mbr/search",
+            r#"{"q": "Metadata Only", "scope": "metadata"}"#,
+        )
+        .await;
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
@@ -278,13 +293,19 @@ async fn test_search_with_limit() {
     }
 
     let server = TestServer::start(&repo).await;
-    let response = server.post_json("/.mbr/search", r#"{"q": "file", "limit": 2}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "file", "limit": 2}"#)
+        .await;
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
 
     let results = body["results"].as_array().unwrap();
-    assert!(results.len() <= 2, "Expected at most 2 results, got {}", results.len());
+    assert!(
+        results.len() <= 2,
+        "Expected at most 2 results, got {}",
+        results.len()
+    );
 }
 
 #[tokio::test]
@@ -298,8 +319,14 @@ async fn test_search_includes_duration() {
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
 
-    assert!(body["duration_ms"].is_number(), "Expected duration_ms in response");
-    assert!(body["query"].as_str().unwrap() == "test", "Expected query echo in response");
+    assert!(
+        body["duration_ms"].is_number(),
+        "Expected duration_ms in response"
+    );
+    assert!(
+        body["query"].as_str().unwrap() == "test",
+        "Expected query echo in response"
+    );
 }
 
 // ==================== Link Transformation Tests ====================
@@ -363,7 +390,10 @@ async fn test_link_transform_root_index() {
 async fn test_link_transform_preserves_anchors() {
     let repo = TestRepo::new();
     repo.create_dir("docs");
-    repo.create_markdown("docs/page.md", "# Page\n\n[Other Section](other.md#section)");
+    repo.create_markdown(
+        "docs/page.md",
+        "# Page\n\n[Other Section](other.md#section)",
+    );
 
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/docs/page/").await;
@@ -450,17 +480,29 @@ async fn test_search_with_facet() {
     let server = TestServer::start(&repo).await;
 
     // Search with facet should only find matching file
-    let response = server.post_json("/.mbr/search", r#"{"q": "category:programming"}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "category:programming"}"#)
+        .await;
     assert_eq!(response.status(), 200);
 
     let body: serde_json::Value = response.json().await.unwrap();
     let results = body["results"].as_array().unwrap();
 
     // Should find rust.md but not recipe.md
-    assert!(results.iter().any(|r| r["url_path"].as_str().unwrap().contains("rust")),
-        "Expected to find 'rust' in results: {:?}", results);
-    assert!(!results.iter().any(|r| r["url_path"].as_str().unwrap().contains("recipe")),
-        "Should not find 'recipe' in results: {:?}", results);
+    assert!(
+        results
+            .iter()
+            .any(|r| r["url_path"].as_str().unwrap().contains("rust")),
+        "Expected to find 'rust' in results: {:?}",
+        results
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|r| r["url_path"].as_str().unwrap().contains("recipe")),
+        "Should not find 'recipe' in results: {:?}",
+        results
+    );
 }
 
 #[tokio::test]
@@ -473,13 +515,18 @@ async fn test_search_facet_contains_match() {
     let server = TestServer::start(&repo).await;
 
     // Facet should use contains match
-    let response = server.post_json("/.mbr/search", r#"{"q": "category:programming"}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "category:programming"}"#)
+        .await;
     assert_eq!(response.status(), 200);
 
     let body: serde_json::Value = response.json().await.unwrap();
     let results = body["results"].as_array().unwrap();
 
-    assert!(!results.is_empty(), "Should find file with 'systems programming' category");
+    assert!(
+        !results.is_empty(),
+        "Should find file with 'systems programming' category"
+    );
 }
 
 #[tokio::test]
@@ -492,12 +539,16 @@ async fn test_search_facet_case_insensitive() {
     let server = TestServer::start(&repo).await;
 
     // Facet should be case-insensitive
-    let response = server.post_json("/.mbr/search", r#"{"q": "language:rust"}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "language:rust"}"#)
+        .await;
     assert_eq!(response.status(), 200);
 
     let body: serde_json::Value = response.json().await.unwrap();
-    assert!(body["total_matches"].as_i64().unwrap() >= 1,
-        "Should find file with case-insensitive facet match");
+    assert!(
+        body["total_matches"].as_i64().unwrap() >= 1,
+        "Should find file with case-insensitive facet match"
+    );
 }
 
 #[tokio::test]
@@ -511,23 +562,38 @@ async fn test_search_with_folder_scope() {
     let server = TestServer::start(&repo).await;
 
     // Search everywhere
-    let response = server.post_json("/.mbr/search", r#"{"q": "guide", "folder_scope": "everywhere"}"#).await;
+    let response = server
+        .post_json(
+            "/.mbr/search",
+            r#"{"q": "guide", "folder_scope": "everywhere"}"#,
+        )
+        .await;
     let body: serde_json::Value = response.json().await.unwrap();
     let all_results = body["results"].as_array().unwrap().len();
 
     // Search in docs folder only
-    let response = server.post_json("/.mbr/search", r#"{"q": "guide", "folder": "/docs/", "folder_scope": "current"}"#).await;
+    let response = server
+        .post_json(
+            "/.mbr/search",
+            r#"{"q": "guide", "folder": "/docs/", "folder_scope": "current"}"#,
+        )
+        .await;
     let body: serde_json::Value = response.json().await.unwrap();
     let docs_results = body["results"].as_array().unwrap();
 
     // Docs-only search should return fewer results
-    assert!(docs_results.len() < all_results || all_results == 1,
-        "Folder-scoped search should be more specific");
+    assert!(
+        docs_results.len() < all_results || all_results == 1,
+        "Folder-scoped search should be more specific"
+    );
 
     // Docs-only search should only contain /docs/ paths
     for r in docs_results {
-        assert!(r["url_path"].as_str().unwrap().starts_with("/docs/"),
-            "Result should be in /docs/: {}", r["url_path"]);
+        assert!(
+            r["url_path"].as_str().unwrap().starts_with("/docs/"),
+            "Result should be in /docs/: {}",
+            r["url_path"]
+        );
     }
 }
 
@@ -542,12 +608,16 @@ async fn test_search_arbitrary_frontmatter_field() {
     let server = TestServer::start(&repo).await;
 
     // Should be able to search custom frontmatter fields
-    let response = server.post_json("/.mbr/search", r#"{"q": "author:alice"}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "author:alice"}"#)
+        .await;
     assert_eq!(response.status(), 200);
 
     let body: serde_json::Value = response.json().await.unwrap();
-    assert!(body["total_matches"].as_i64().unwrap() >= 1,
-        "Should find file by custom frontmatter field 'author'");
+    assert!(
+        body["total_matches"].as_i64().unwrap() >= 1,
+        "Should find file by custom frontmatter field 'author'"
+    );
 }
 
 #[tokio::test]
@@ -566,13 +636,20 @@ async fn test_search_mixed_terms_and_facets() {
     let server = TestServer::start(&repo).await;
 
     // Search with both term and facet
-    let response = server.post_json("/.mbr/search", r#"{"q": "rust category:tutorial"}"#).await;
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "rust category:tutorial"}"#)
+        .await;
     let body: serde_json::Value = response.json().await.unwrap();
     let results = body["results"].as_array().unwrap();
 
     // Should find rust tutorial but not python tutorial
-    assert!(results.iter().any(|r| r["url_path"].as_str().unwrap().contains("async")),
-        "Expected to find Rust tutorial: {:?}", results);
+    assert!(
+        results
+            .iter()
+            .any(|r| r["url_path"].as_str().unwrap().contains("async")),
+        "Expected to find Rust tutorial: {:?}",
+        results
+    );
 }
 
 // ============================================================================
@@ -600,7 +677,13 @@ impl TestServerWithTemplates {
                 &["md".to_string()],
                 &["target".to_string(), "node_modules".to_string()],
                 &["*.log".to_string()],
-                &[".direnv".to_string(), ".git".to_string(), "result".to_string(), "target".to_string(), "build".to_string()],
+                &[
+                    ".direnv".to_string(),
+                    ".git".to_string(),
+                    "result".to_string(),
+                    "target".to_string(),
+                    "build".to_string(),
+                ],
                 "index.md",
                 100,
                 template_folder,
@@ -635,7 +718,11 @@ impl TestServerWithTemplates {
     }
 
     async fn get_text(&self, path: &str) -> String {
-        self.get(path).await.text().await.expect("Failed to get text")
+        self.get(path)
+            .await
+            .text()
+            .await
+            .expect("Failed to get text")
     }
 }
 
@@ -646,14 +733,21 @@ async fn test_template_folder_serves_css() {
     // Create a custom template folder with a custom CSS file
     let template_dir = repo.path().join("custom-templates");
     std::fs::create_dir_all(&template_dir).unwrap();
-    std::fs::write(template_dir.join("theme.css"), "/* Custom theme CSS */\nbody { color: red; }").unwrap();
+    std::fs::write(
+        template_dir.join("theme.css"),
+        "/* Custom theme CSS */\nbody { color: red; }",
+    )
+    .unwrap();
 
     let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
     let response = server.get("/.mbr/theme.css").await;
 
     assert_eq!(response.status(), 200);
     let body = response.text().await.unwrap();
-    assert!(body.contains("Custom theme CSS"), "Should serve custom theme.css from template folder");
+    assert!(
+        body.contains("Custom theme CSS"),
+        "Should serve custom theme.css from template folder"
+    );
 }
 
 #[tokio::test]
@@ -663,14 +757,21 @@ async fn test_template_folder_serves_js_from_js_subdir() {
     // Create a custom template folder with components-js/ subdirectory for components
     let template_dir = repo.path().join("custom-templates");
     std::fs::create_dir_all(template_dir.join("components-js")).unwrap();
-    std::fs::write(template_dir.join("components-js/mbr-components.js"), "// Custom components JS").unwrap();
+    std::fs::write(
+        template_dir.join("components-js/mbr-components.js"),
+        "// Custom components JS",
+    )
+    .unwrap();
 
     let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
     let response = server.get("/.mbr/components/mbr-components.js").await;
 
     assert_eq!(response.status(), 200);
     let body = response.text().await.unwrap();
-    assert!(body.contains("Custom components JS"), "Should serve components from template_folder/components-js/");
+    assert!(
+        body.contains("Custom components JS"),
+        "Should serve components from template_folder/components-js/"
+    );
 }
 
 #[tokio::test]
@@ -689,7 +790,10 @@ async fn test_template_folder_falls_back_to_defaults() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.unwrap();
     // pico.min.css is a compiled-in default, should be served
-    assert!(!body.is_empty(), "Should fall back to compiled default for missing files");
+    assert!(
+        !body.is_empty(),
+        "Should fall back to compiled default for missing files"
+    );
 }
 
 #[tokio::test]
@@ -708,15 +812,25 @@ async fn test_template_folder_overrides_html_templates() {
 <body>
 <div class="custom-wrapper">{{ markdown | safe }}</div>
 </body>
-</html>"#
-    ).unwrap();
+</html>"#,
+    )
+    .unwrap();
 
     let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
     let html = server.get_text("/test/").await;
 
-    assert!(html.contains("Custom Template"), "Should use custom HTML template");
-    assert!(html.contains("custom-wrapper"), "Should render with custom wrapper");
-    assert!(html.contains("<h1 id=\"test-page\">Test Page</h1>"), "Should still render markdown content");
+    assert!(
+        html.contains("Custom Template"),
+        "Should use custom HTML template"
+    );
+    assert!(
+        html.contains("custom-wrapper"),
+        "Should render with custom wrapper"
+    );
+    assert!(
+        html.contains("<h1 id=\"test-page\">Test Page</h1>"),
+        "Should still render markdown content"
+    );
 }
 
 // ============================================================================
@@ -732,10 +846,15 @@ async fn test_server_mode_sets_server_mode_true() {
     let html = server.get_text("/test/").await;
 
     // Server mode should have serverMode: true
-    assert!(html.contains("serverMode: true"),
-        "Expected serverMode: true in server mode. Got: {}", &html[..std::cmp::min(2000, html.len())]);
-    assert!(!html.contains("serverMode: false"),
-        "Should not have serverMode: false in server mode");
+    assert!(
+        html.contains("serverMode: true"),
+        "Expected serverMode: true in server mode. Got: {}",
+        &html[..std::cmp::min(2000, html.len())]
+    );
+    assert!(
+        !html.contains("serverMode: false"),
+        "Should not have serverMode: false in server mode"
+    );
 }
 
 #[tokio::test]
@@ -747,8 +866,10 @@ async fn test_server_mode_includes_components() {
     let html = server.get_text("/test/").await;
 
     // Should include the components script
-    assert!(html.contains("mbr-components.js"),
-        "Expected mbr-components.js script reference in HTML");
+    assert!(
+        html.contains("mbr-components.js"),
+        "Expected mbr-components.js script reference in HTML"
+    );
 }
 
 #[tokio::test]
@@ -765,18 +886,29 @@ async fn test_site_json_returns_valid_structure() {
     let body: serde_json::Value = response.json().await.unwrap();
 
     // Should have markdown_files array
-    assert!(body["markdown_files"].is_array(),
-        "Expected markdown_files array in site.json");
+    assert!(
+        body["markdown_files"].is_array(),
+        "Expected markdown_files array in site.json"
+    );
 
     let files = body["markdown_files"].as_array().unwrap();
-    assert!(files.len() >= 2, "Expected at least 2 files in markdown_files");
+    assert!(
+        files.len() >= 2,
+        "Expected at least 2 files in markdown_files"
+    );
 
     // Each file should have required fields
     for file in files {
         assert!(file["url_path"].is_string(), "Expected url_path in file");
         assert!(file["raw_path"].is_string(), "Expected raw_path in file");
-        assert!(file["created"].is_number(), "Expected created timestamp in file");
-        assert!(file["modified"].is_number(), "Expected modified timestamp in file");
+        assert!(
+            file["created"].is_number(),
+            "Expected created timestamp in file"
+        );
+        assert!(
+            file["modified"].is_number(),
+            "Expected modified timestamp in file"
+        );
     }
 }
 
@@ -792,12 +924,20 @@ async fn test_site_json_includes_frontmatter() {
     let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
 
     let files = body["markdown_files"].as_array().unwrap();
-    let tagged_file = files.iter().find(|f| f["url_path"].as_str().unwrap().contains("tagged"));
+    let tagged_file = files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap().contains("tagged"));
 
-    assert!(tagged_file.is_some(), "Expected to find tagged.md in site.json");
+    assert!(
+        tagged_file.is_some(),
+        "Expected to find tagged.md in site.json"
+    );
 
     let tagged = tagged_file.unwrap();
-    assert!(tagged["frontmatter"].is_object(), "Expected frontmatter object");
+    assert!(
+        tagged["frontmatter"].is_object(),
+        "Expected frontmatter object"
+    );
     assert_eq!(tagged["frontmatter"]["title"].as_str(), Some("My Title"));
 }
 
@@ -956,18 +1096,27 @@ async fn test_cache_headers_on_markdown() {
 
     // Check Cache-Control header
     let cache_control = response.headers().get("cache-control");
-    assert!(cache_control.is_some(), "Markdown pages should have Cache-Control header");
+    assert!(
+        cache_control.is_some(),
+        "Markdown pages should have Cache-Control header"
+    );
     assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-cache");
 
     // Check ETag header
     let etag = response.headers().get("etag");
     assert!(etag.is_some(), "Markdown pages should have ETag header");
     let etag_value = etag.unwrap().to_str().unwrap();
-    assert!(etag_value.starts_with("W/\""), "ETag should be weak (W/\"...\")");
+    assert!(
+        etag_value.starts_with("W/\""),
+        "ETag should be weak (W/\"...\")"
+    );
 
     // Check Last-Modified header
     let last_modified = response.headers().get("last-modified");
-    assert!(last_modified.is_some(), "Markdown pages should have Last-Modified header");
+    assert!(
+        last_modified.is_some(),
+        "Markdown pages should have Last-Modified header"
+    );
 }
 
 #[tokio::test]
@@ -981,7 +1130,10 @@ async fn test_cache_headers_on_default_assets() {
 
     // Check Cache-Control header
     let cache_control = response.headers().get("cache-control");
-    assert!(cache_control.is_some(), "Default assets should have Cache-Control header");
+    assert!(
+        cache_control.is_some(),
+        "Default assets should have Cache-Control header"
+    );
     assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-cache");
 
     // Check ETag header
@@ -1001,7 +1153,10 @@ async fn test_cache_headers_on_static_files() {
 
     // Check Cache-Control header
     let cache_control = response.headers().get("cache-control");
-    assert!(cache_control.is_some(), "Static files should have Cache-Control header");
+    assert!(
+        cache_control.is_some(),
+        "Static files should have Cache-Control header"
+    );
     assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-cache");
 }
 
@@ -1019,7 +1174,10 @@ async fn test_cache_headers_on_directory_listing() {
 
     // Directory listings should use no-store since they're truly dynamic
     let cache_control = response.headers().get("cache-control");
-    assert!(cache_control.is_some(), "Directory listings should have Cache-Control header");
+    assert!(
+        cache_control.is_some(),
+        "Directory listings should have Cache-Control header"
+    );
     assert_eq!(cache_control.unwrap().to_str().unwrap(), "no-store");
 
     // Should still have ETag
@@ -1036,7 +1194,13 @@ async fn test_etag_changes_with_content() {
 
     // Get first ETag
     let response1 = server.get("/mutable/").await;
-    let etag1 = response1.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let etag1 = response1
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
 
     // Modify the file
     std::fs::write(repo.path().join("mutable.md"), "# Modified Content").unwrap();
@@ -1046,7 +1210,13 @@ async fn test_etag_changes_with_content() {
 
     // Get second ETag - should be different
     let response2 = server.get("/mutable/").await;
-    let etag2 = response2.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let etag2 = response2
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
 
     assert_ne!(etag1, etag2, "ETag should change when content changes");
 }

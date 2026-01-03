@@ -1,4 +1,4 @@
-use crate::link_transform::{transform_link, LinkTransformConfig};
+use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::vid::Vid;
@@ -631,7 +631,10 @@ mod tests {
         let html = render_markdown(md).await;
         println!("Output HTML: {}", &html);
         assert!(html.contains("<video"), "Should contain video element");
-        assert!(html.contains("/videos/test/video.mp4"), "Should contain video path");
+        assert!(
+            html.contains("/videos/test/video.mp4"),
+            "Should contain video path"
+        );
     }
 
     #[tokio::test]
@@ -640,7 +643,10 @@ mod tests {
         let html = render_markdown(md).await;
         println!("Output HTML: {}", &html);
         assert!(html.contains("<video"), "Should contain video element");
-        assert!(html.contains("/videos/Eric%20Jones"), "Should contain URL-encoded path");
+        assert!(
+            html.contains("/videos/Eric%20Jones"),
+            "Should contain URL-encoded path"
+        );
     }
 
     // Link transformation tests

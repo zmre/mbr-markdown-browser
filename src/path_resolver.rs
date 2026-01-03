@@ -118,7 +118,11 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 
 /// Finds a file in the static folder.
 fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Option<PathBuf> {
-    let static_dir = config.base_dir.join(config.static_folder).canonicalize().ok()?;
+    let static_dir = config
+        .base_dir
+        .join(config.static_folder)
+        .canonicalize()
+        .ok()?;
     let candidate = static_dir.join(request_path);
     if candidate.is_file() {
         Some(candidate)
@@ -204,10 +208,7 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "docs");
 
-        assert_eq!(
-            result,
-            ResolvedPath::MarkdownFile(subdir.join("index.md"))
-        );
+        assert_eq!(result, ResolvedPath::MarkdownFile(subdir.join("index.md")));
     }
 
     #[test]
@@ -269,10 +270,7 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "blog/2024");
 
-        assert_eq!(
-            result,
-            ResolvedPath::MarkdownFile(nested.join("index.md"))
-        );
+        assert_eq!(result, ResolvedPath::MarkdownFile(nested.join("index.md")));
     }
 
     #[test]

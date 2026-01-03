@@ -59,7 +59,10 @@ impl PageInfo {
         })
     }
 
-    pub async fn new_from_url(url: &str, timeout_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new_from_url(
+        url: &str,
+        timeout_ms: u64,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Check for YouTube first - no need to fetch the page
         if let Some(embed_html) = Self::youtube_embed(url) {
             return Ok(PageInfo {
@@ -87,7 +90,10 @@ impl PageInfo {
         }
     }
 
-    async fn fetch_page_info(client: &Client, url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn fetch_page_info(
+        client: &Client,
+        url: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let response = client.get(url).send().await?;
         let body = response.text().await?;
         let document = Html::parse_document(&body);

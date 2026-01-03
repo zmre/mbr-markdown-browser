@@ -62,11 +62,7 @@ impl Audio {
             self.url,
             self.to_mime_type(),
             self.caption.as_deref().unwrap_or(""),
-            if open_only {
-                ""
-            } else {
-                Self::html_close()
-            }
+            if open_only { "" } else { Self::html_close() }
         )
     }
 
