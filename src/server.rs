@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Body,
-    extract::{self, ws::WebSocketUpgrade, State},
-    http::{header, HeaderValue, StatusCode},
+    extract::{self, State, ws::WebSocketUpgrade},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
-    Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, path::Path, sync::Arc};
@@ -12,9 +12,9 @@ use tokio::sync::broadcast;
 
 use crate::errors::ServerError;
 use crate::link_transform::LinkTransformConfig;
-use crate::path_resolver::{resolve_request_path, PathResolverConfig, ResolvedPath};
+use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use crate::repo::MarkdownInfo;
-use crate::search::{search_other_files, SearchEngine, SearchQuery};
+use crate::search::{SearchEngine, SearchQuery, search_other_files};
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
@@ -44,6 +44,7 @@ pub struct ServerState {
 }
 
 impl Server {
+    #[allow(clippy::too_many_arguments)]
     pub fn init<S: Into<String>, P: Into<std::path::PathBuf>>(
         ip: [u8; 4],
         port: u16,

@@ -44,6 +44,65 @@ When you edit:
 - **HTML/CSS files in templates/** → Browser auto-reloads via WebSocket
 - **TypeScript in components/src/** → Vite rebuilds to `templates/components-js/`, then browser auto-reloads
 
+## Code Quality Requirements
+
+All Rust code must pass formatting and linting checks before commit. CI enforces these as blocking checks.
+
+### Formatting (cargo fmt)
+
+All Rust code must be formatted with `rustfmt`:
+
+```bash
+# Check formatting (CI runs this)
+cargo fmt -- --check
+
+# Auto-format all files
+cargo fmt
+```
+
+### Linting (cargo clippy)
+
+All clippy warnings are treated as errors:
+
+```bash
+# Check for lint issues (CI runs this)
+cargo clippy -- -D warnings
+
+# See warnings without failing
+cargo clippy
+```
+
+### Pre-commit Hook
+
+The project includes a pre-commit hook that automatically:
+1. Runs `cargo fmt` and re-stages formatted files
+2. Runs `cargo clippy -- -D warnings` and blocks commit on failure
+3. Syncs npm dependencies if `components/package.json` changed
+
+**Setup (automatic in nix shell):**
+```bash
+git config core.hooksPath .githooks
+```
+
+The nix dev shell automatically configures this when you run `nix develop`.
+
+**Manual setup:**
+```bash
+# If not using nix, manually configure the hooks
+git config --local core.hooksPath .githooks
+```
+
+### CI Checks
+
+GitHub Actions runs on every push to main and all PRs:
+- `cargo test --all-features`
+- `cargo clippy -- -D warnings`
+- `cargo fmt -- --check`
+- `bun run test` (components)
+- `bun run build` (components)
+
+All checks must pass before merge.
+
 ## Build Commands
 
 ```bash
@@ -56,8 +115,8 @@ cargo test
 # Build components only
 cd components && bun run build
 
-# Check for issues
-cargo clippy
+# Format and lint
+cargo fmt && cargo clippy -- -D warnings
 ```
 
 ## Architecture Notes

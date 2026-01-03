@@ -1,4 +1,4 @@
-use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -10,14 +10,17 @@ static TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
 static KV_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Match key="value" pairs, supporting both straight quotes (") and
     // curly/smart quotes (" " U+201C/U+201D) from pulldown-cmark's smart punctuation
-    Regex::new(r#"\b(?P<key>\w+)\s*=\s*["'""\u{201C}\u{201D}](?P<val>[^'""]*?)["'""\u{201C}\u{201D}]"#)
-        .expect("Invalid KV_RE regex pattern")
+    Regex::new(
+        r#"\b(?P<key>\w+)\s*=\s*["'""\u{201C}\u{201D}](?P<val>[^'""]*?)["'""\u{201C}\u{201D}]"#,
+    )
+    .expect("Invalid KV_RE regex pattern")
 });
 static EXTENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\.([0-9a-zA-Z]+)([?#].*)?$").expect("Invalid EXTENSION_RE regex pattern")
 });
 static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"#t=([0-9]+(:[0-9]+)*)(,([0-9]+(:[0-9]+)*))?$").expect("Invalid TIME_RE regex pattern")
+    Regex::new(r"#t=([0-9]+(:[0-9]+)*)(,([0-9]+(:[0-9]+)*))?$")
+        .expect("Invalid TIME_RE regex pattern")
 });
 
 #[derive(Debug, PartialEq, Default)]
@@ -292,13 +295,13 @@ mod tests {
 #[cfg(test)]
 mod markdown_integration_tests {
     use super::*;
-    
+
     #[test]
     fn test_from_vid_with_spaces_in_path() {
         let input = r#"{{ vid(path="Eric Jones/Eric Jones - Metal 3.mp4")}}"#;
         let vid = Vid::from_vid(input).unwrap();
         println!("URL: {}", &vid.url);
         assert!(vid.url.contains("/videos/"));
-        assert!(vid.url.contains("Eric%20Jones"));  // spaces should be URL-encoded
+        assert!(vid.url.contains("Eric%20Jones")); // spaces should be URL-encoded
     }
 }

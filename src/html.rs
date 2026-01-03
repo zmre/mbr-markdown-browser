@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use pulldown_cmark_escape::IoWriter;
-use pulldown_cmark_escape::{escape_href, escape_html, escape_html_body_text, FmtWriter, StrWrite};
+use pulldown_cmark_escape::{FmtWriter, StrWrite, escape_href, escape_html, escape_html_body_text};
 
 use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, CowStr,

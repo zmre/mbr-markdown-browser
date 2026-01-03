@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# pre-commit hook for mbr
+#
+# To install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info() { echo -e "${GREEN}[pre-commit]${NC} $*"; }
+warn() { echo -e "${YELLOW}[pre-commit]${NC} $*"; }
+error() { echo -e "${RED}[pre-commit]${NC} $*" >&2; }
+
+# Check if components/package.json is staged
+package_json_staged() {
+    git diff --cached --name-only | grep -q '^components/package.json$'
+}
+
+# Check if any Rust files are staged
+rust_files_staged() {
+    git diff --cached --name-only | grep -qE '\.(rs|toml)$'
+}
+
+# Format Rust files and re-stage them
+format_rust_files() {
+    if ! rust_files_staged; then
+        return 0
+    fi
+
+    info "Formatting Rust files..."
+
+    # Get list of staged .rs files
+    local staged_rs_files
+    staged_rs_files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
+
+    if [[ -z "$staged_rs_files" ]]; then
+        return 0
+    fi
+
+    # Run cargo fmt
+    if ! cargo fmt 2>&1; then
+        error "cargo fmt failed"
+        return 1
+    fi
+
+    # Re-stage the formatted files
+    for file in $staged_rs_files; do
+        if [[ -f "$file" ]]; then
+            git add "$file"
+        fi
+    done
+
+    info "Rust files formatted and re-staged"
+}
+
+# Run cargo clippy on staged Rust changes
+check_rust_quality() {
+    if ! rust_files_staged; then
+        return 0
+    fi
+
+    info "Running clippy..."
+
+    if ! cargo clippy -- -D warnings 2>&1; then
+        error "Clippy found issues. Please fix them before committing."
+        return 1
+    fi
+
+    info "Clippy passed"
+}
+
+# Check if we need to sync npm deps
+check_npm_deps() {
+    if ! package_json_staged; then
+        return 0
+    fi
+
+    info "components/package.json is staged, checking npm deps sync..."
+
+    # Run the sync script
+    if ! "$PROJECT_DIR/scripts/sync-npm-deps.sh" --force; then
+        error "Failed to sync npm dependencies"
+        return 1
+    fi
+
+    # Check if flake.nix or package-lock.json were modified
+    local files_to_add=()
+
+    if ! git diff --quiet "$PROJECT_DIR/flake.nix" 2>/dev/null; then
+        files_to_add+=("flake.nix")
+    fi
+
+    if ! git diff --quiet "$PROJECT_DIR/components/package-lock.json" 2>/dev/null; then
+        files_to_add+=("components/package-lock.json")
+    fi
+
+    if [[ ${#files_to_add[@]} -gt 0 ]]; then
+        info "Auto-staging updated files: ${files_to_add[*]}"
+        git add "${files_to_add[@]}"
+    fi
+}
+
+# Main
+main() {
+    cd "$PROJECT_DIR"
+
+    # Sync npm deps if package.json changed
+    check_npm_deps || exit 1
+
+    # Format Rust files first
+    format_rust_files || exit 1
+
+    # Run clippy on Rust changes
+    check_rust_quality || exit 1
+
+    info "Pre-commit checks passed"
+}
+
+main "$@"

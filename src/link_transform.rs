@@ -291,10 +291,7 @@ mod tests {
 
     #[test]
     fn test_nested_index_collapse() {
-        assert_eq!(
-            transform_link("a/b/index.md", &regular_config()),
-            "../a/b/"
-        );
+        assert_eq!(transform_link("a/b/index.md", &regular_config()), "../a/b/");
     }
 
     #[test]
@@ -345,10 +342,7 @@ mod tests {
 
     #[test]
     fn test_explicit_current_dir() {
-        assert_eq!(
-            transform_link("./other.md", &regular_config()),
-            "../other/"
-        );
+        assert_eq!(transform_link("./other.md", &regular_config()), "../other/");
     }
 
     #[test]
@@ -383,10 +377,7 @@ mod tests {
 
     #[test]
     fn test_index_parent_traversal() {
-        assert_eq!(
-            transform_link("../other.md", &index_config()),
-            "../other/"
-        );
+        assert_eq!(transform_link("../other.md", &index_config()), "../other/");
     }
 
     #[test]

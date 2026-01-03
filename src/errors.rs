@@ -16,7 +16,7 @@ pub enum MbrError {
     Config(#[from] ConfigError),
 
     #[error("Configuration parsing error: {0}")]
-    ConfigParse(#[from] figment::Error),
+    ConfigParse(Box<figment::Error>),
 
     #[error("Markdown error: {0}")]
     Markdown(#[from] MarkdownError),
@@ -34,7 +34,7 @@ pub enum MbrError {
     Watcher(#[from] WatcherError),
 
     #[error("Build error: {0}")]
-    Build(#[from] BuildError),
+    Build(Box<BuildError>),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -79,7 +79,7 @@ pub enum ConfigError {
     NoParentDir { path: PathBuf },
 
     #[error("Configuration parsing failed")]
-    ParseFailed(#[from] figment::Error),
+    ParseFailed(Box<figment::Error>),
 
     #[error("Failed to canonicalize path: {path}")]
     CanonicalizeFailed {
@@ -279,7 +279,7 @@ pub enum BuildError {
     Markdown(#[from] MarkdownError),
 
     #[error("Configuration error")]
-    Config(#[from] ConfigError),
+    Config(Box<ConfigError>),
 }
 
 // Convenience type alias for Results using MbrError
@@ -297,5 +297,33 @@ impl From<Box<dyn std::error::Error>> for MbrError {
 impl From<Box<dyn std::error::Error + Send + Sync>> for MbrError {
     fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
         MbrError::Io(std::io::Error::other(err.to_string()))
+    }
+}
+
+// Auto-box BuildError when converting to MbrError
+impl From<BuildError> for MbrError {
+    fn from(err: BuildError) -> Self {
+        MbrError::Build(Box::new(err))
+    }
+}
+
+// Auto-box ConfigError when converting to BuildError
+impl From<ConfigError> for BuildError {
+    fn from(err: ConfigError) -> Self {
+        BuildError::Config(Box::new(err))
+    }
+}
+
+// Auto-box figment::Error when converting to MbrError
+impl From<figment::Error> for MbrError {
+    fn from(err: figment::Error) -> Self {
+        MbrError::ConfigParse(Box::new(err))
+    }
+}
+
+// Auto-box figment::Error when converting to ConfigError
+impl From<figment::Error> for ConfigError {
+    fn from(err: figment::Error) -> Self {
+        ConfigError::ParseFailed(Box::new(err))
     }
 }

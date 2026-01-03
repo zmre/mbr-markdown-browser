@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches: [main]  # Only run on direct pushes to main
+    tags-ignore: ['v*']  # Don't run CI on release tags (release workflow handles that)
+  pull_request:
+    branches: [main]  # Run on all PRs targeting main
+
+# Cancel in-progress runs when a new run starts for the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast check - runs first, fails fast on formatting issues
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check formatting
+        run: nix develop --command cargo fmt -- --check
+
+  # Build frontend components - needed by lint and test jobs
+  build-components:
+    name: Build Components
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Build components
+        run: |
+          nix build .#mbr-components
+          mkdir -p templates/components-js
+          cp -r result/* templates/components-js/
+
+      - name: Upload components
+        uses: actions/upload-artifact@v4
+        with:
+          name: components
+          path: templates/components-js/
+          retention-days: 1
+
+  # Clippy lint - runs after components are built
+  lint:
+    name: Clippy Lint (${{ matrix.os }})
+    needs: [format-check, build-components]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download components
+        uses: actions/download-artifact@v4
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Clippy lint
+        run: nix build .#clippy
+
+  # Tests - runs after components are built
+  test:
+    name: Test (${{ matrix.os }})
+    needs: [format-check, build-components]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download components
+        uses: actions/download-artifact@v4
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Run tests
+        run: nix develop --command cargo test --all-features
+
+  # Full build - runs in parallel with lint/test
+  build:
+    name: Build (${{ matrix.os }})
+    needs: [format-check, build-components]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download components
+        uses: actions/download-artifact@v4
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Build
+        run: nix build .#mbr
+
+  # Frontend component tests (TypeScript)
+  test-components:
+    name: Test Frontend Components
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: cd components && bun install
+
+      - name: Run component tests
+        run: cd components && bun run test
+
+      - name: Build components (includes type check via tsc)
+        run: cd components && bun run build

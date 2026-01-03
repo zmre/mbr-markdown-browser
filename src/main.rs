@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use mbr::{
+    Config, ConfigError, MbrError,
     browser::{self, BrowserContext},
     build::Builder,
     cli,
     link_transform::LinkTransformConfig,
-    markdown, server, templates, Config, ConfigError, MbrError,
+    markdown, server, templates,
 };
 
 /// Check if the given path requires a folder picker dialog.
@@ -64,12 +65,13 @@ async fn main() -> Result<(), MbrError> {
     };
 
     let input_path_ref = Path::new(&input_path);
-    let absolute_path = input_path_ref.canonicalize().map_err(|e| {
-        ConfigError::CanonicalizeFailed {
-            path: input_path_ref.to_path_buf(),
-            source: e,
-        }
-    })?;
+    let absolute_path =
+        input_path_ref
+            .canonicalize()
+            .map_err(|e| ConfigError::CanonicalizeFailed {
+                path: input_path_ref.to_path_buf(),
+                source: e,
+            })?;
 
     let is_directory = absolute_path.is_dir();
 
@@ -81,12 +83,13 @@ async fn main() -> Result<(), MbrError> {
     }
     if let Some(ref template_folder) = args.template_folder {
         // Canonicalize and validate the template folder path
-        let template_path = template_folder.canonicalize().map_err(|e| {
-            ConfigError::CanonicalizeFailed {
-                path: template_folder.clone(),
-                source: e,
-            }
-        })?;
+        let template_path =
+            template_folder
+                .canonicalize()
+                .map_err(|e| ConfigError::CanonicalizeFailed {
+                    path: template_folder.clone(),
+                    source: e,
+                })?;
         if !template_path.is_dir() {
             return Err(ConfigError::TemplateFolderNotDirectory {
                 path: template_path,
@@ -124,7 +127,7 @@ async fn main() -> Result<(), MbrError> {
                 args.output.clone()
             } else {
                 std::env::current_dir()
-                    .map_err(|e| ConfigError::CurrentDirFailed(e))?
+                    .map_err(ConfigError::CurrentDirFailed)?
                     .join(&args.output)
             };
 
@@ -136,7 +139,11 @@ async fn main() -> Result<(), MbrError> {
             if stats.broken_links > 0 {
                 println!(
                     "Build complete: {} markdown pages, {} section pages, {} assets linked, {} broken links in {:?}",
-                    stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.broken_links, stats.duration
+                    stats.markdown_pages,
+                    stats.section_pages,
+                    stats.assets_linked,
+                    stats.broken_links,
+                    stats.duration
                 );
             } else {
                 println!(
@@ -242,7 +249,9 @@ async fn main() -> Result<(), MbrError> {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Couldn't initialize the server: {e}. Try with -s for more info");
+                    tracing::error!(
+                        "Couldn't initialize the server: {e}. Try with -s for more info"
+                    );
                     // Drop the sender to signal failure
                     drop(ready_tx);
                 }
@@ -367,16 +376,17 @@ mod tests {
 
     #[test]
     fn test_replace_markdown_extension_with_slash() {
+        let extensions = ["md".to_string()];
         assert_eq!(
-            replace_markdown_extension_with_slash("test.md", &vec!["md".to_string()]),
+            replace_markdown_extension_with_slash("test.md", &extensions),
             "test/"
         );
         assert_eq!(
-            replace_markdown_extension_with_slash("test.txt", &vec!["md".to_string()]),
+            replace_markdown_extension_with_slash("test.txt", &extensions),
             "test.txt"
         );
         assert_eq!(
-            replace_markdown_extension_with_slash("noext", &vec!["md".to_string()]),
+            replace_markdown_extension_with_slash("noext", &extensions),
             "noext"
         );
     }

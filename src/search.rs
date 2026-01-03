@@ -107,7 +107,11 @@ pub fn parse_query(q: &str) -> ParsedQuery {
 }
 
 /// Check if a frontmatter field value contains the facet value (case-insensitive).
-fn facet_matches(frontmatter: Option<&std::collections::HashMap<String, String>>, field: &str, value: &str) -> bool {
+fn facet_matches(
+    frontmatter: Option<&std::collections::HashMap<String, String>>,
+    field: &str,
+    value: &str,
+) -> bool {
     frontmatter
         .and_then(|fm| fm.get(field))
         .map(|field_value| field_value.to_lowercase().contains(&value.to_lowercase()))
@@ -299,7 +303,11 @@ impl SearchEngine {
     }
 
     /// Search metadata (titles, paths, tags, frontmatter) using nucleo-matcher.
-    fn search_metadata(&self, query: &SearchQuery, parsed: &ParsedQuery) -> Result<Vec<SearchResult>, SearchError> {
+    fn search_metadata(
+        &self,
+        query: &SearchQuery,
+        parsed: &ParsedQuery,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         // Build pattern from terms only (facets are handled separately)
         let pattern = if parsed.terms.is_empty() {
             None
@@ -312,21 +320,23 @@ impl SearchEngine {
         };
 
         // Collect files to search, applying folder filter and facet pre-filtering
-        let files: Vec<_> = self
-            .repo
-            .markdown_files
-            .pin()
-            .iter()
-            .filter(|(_, info)| self.matches_folder_filter(info, &query.folder, &query.folder_scope))
-            .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
-            // Apply facet filters - all facets must match
-            .filter(|(_, info)| {
-                parsed.facets.iter().all(|(field, value)| {
-                    facet_matches(info.frontmatter.as_ref(), field, value)
+        let files: Vec<_> =
+            self.repo
+                .markdown_files
+                .pin()
+                .iter()
+                .filter(|(_, info)| {
+                    self.matches_folder_filter(info, &query.folder, &query.folder_scope)
                 })
-            })
-            .map(|(_, info)| info.clone())
-            .collect();
+                .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
+                // Apply facet filters - all facets must match
+                .filter(|(_, info)| {
+                    parsed.facets.iter().all(|(field, value)| {
+                        facet_matches(info.frontmatter.as_ref(), field, value)
+                    })
+                })
+                .map(|(_, info)| info.clone())
+                .collect();
 
         // Parallel fuzzy matching with nucleo-matcher
         let results: Vec<SearchResult> = files
@@ -361,9 +371,18 @@ impl SearchEngine {
         let Some(pattern) = pattern else {
             return Some(SearchResult {
                 url_path: info.url_path.clone(),
-                title: info.frontmatter.as_ref().and_then(|fm| fm.get("title").cloned()),
-                description: info.frontmatter.as_ref().and_then(|fm| fm.get("description").cloned()),
-                tags: info.frontmatter.as_ref().and_then(|fm| fm.get("tags").cloned()),
+                title: info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("title").cloned()),
+                description: info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("description").cloned()),
+                tags: info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("tags").cloned()),
                 score: 100, // Base score for facet matches
                 snippet: None,
                 is_content_match: false,
@@ -379,10 +398,10 @@ impl SearchEngine {
         }
 
         // Match against filename (high priority - 2x boost)
-        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str()) {
-            if let Some(score) = self.fuzzy_match(pattern, filename, matcher) {
-                best_score = best_score.max(score.saturating_mul(2));
-            }
+        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str())
+            && let Some(score) = self.fuzzy_match(pattern, filename, matcher)
+        {
+            best_score = best_score.max(score.saturating_mul(2));
         }
 
         // Match against all frontmatter fields with dynamic weights
@@ -398,9 +417,18 @@ impl SearchEngine {
         if best_score > 0 {
             Some(SearchResult {
                 url_path: info.url_path.clone(),
-                title: info.frontmatter.as_ref().and_then(|fm| fm.get("title").cloned()),
-                description: info.frontmatter.as_ref().and_then(|fm| fm.get("description").cloned()),
-                tags: info.frontmatter.as_ref().and_then(|fm| fm.get("tags").cloned()),
+                title: info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("title").cloned()),
+                description: info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("description").cloned()),
+                tags: info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("tags").cloned()),
                 score: best_score,
                 snippet: None,
                 is_content_match: false,
@@ -419,7 +447,11 @@ impl SearchEngine {
     }
 
     /// Search file contents using grep-searcher.
-    fn search_content(&self, query: &SearchQuery, parsed: &ParsedQuery) -> Result<Vec<SearchResult>, SearchError> {
+    fn search_content(
+        &self,
+        query: &SearchQuery,
+        parsed: &ParsedQuery,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         // Build regex pattern from terms (escape special characters for literal search)
         let search_terms = parsed.terms.join(" ");
         let regex_pattern = regex::escape(&search_terms);
@@ -432,28 +464,28 @@ impl SearchEngine {
             })?;
 
         // Collect files to search, applying facet filters
-        let files: Vec<_> = self
-            .repo
-            .markdown_files
-            .pin()
-            .iter()
-            .filter(|(_, info)| self.matches_folder_filter(info, &query.folder, &query.folder_scope))
-            .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
-            // Apply facet filters - all facets must match
-            .filter(|(_, info)| {
-                parsed.facets.iter().all(|(field, value)| {
-                    facet_matches(info.frontmatter.as_ref(), field, value)
+        let files: Vec<_> =
+            self.repo
+                .markdown_files
+                .pin()
+                .iter()
+                .filter(|(_, info)| {
+                    self.matches_folder_filter(info, &query.folder, &query.folder_scope)
                 })
-            })
-            .map(|(_, info)| info.clone())
-            .collect();
+                .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
+                // Apply facet filters - all facets must match
+                .filter(|(_, info)| {
+                    parsed.facets.iter().all(|(field, value)| {
+                        facet_matches(info.frontmatter.as_ref(), field, value)
+                    })
+                })
+                .map(|(_, info)| info.clone())
+                .collect();
 
         // Parallel content search
         let results: Vec<SearchResult> = files
             .into_par_iter()
-            .filter_map(|info| {
-                self.search_file_content(&matcher, &info).ok().flatten()
-            })
+            .filter_map(|info| self.search_file_content(&matcher, &info).ok().flatten())
             .collect();
 
         Ok(results)
@@ -503,20 +535,18 @@ impl SearchEngine {
 
         if match_count > 0 {
             // Build snippet from first match
-            let snippet = matches
-                .first()
-                .map(|(line_num, line)| {
-                    let mut s = format!("Line {}: ", line_num);
-                    if line.len() > MAX_SNIPPET_LENGTH {
-                        // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
-                        let end = line.floor_char_boundary(MAX_SNIPPET_LENGTH);
-                        s.push_str(&line[..end]);
-                        s.push_str("...");
-                    } else {
-                        s.push_str(line);
-                    }
-                    s
-                });
+            let snippet = matches.first().map(|(line_num, line)| {
+                let mut s = format!("Line {}: ", line_num);
+                if line.len() > MAX_SNIPPET_LENGTH {
+                    // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
+                    let end = line.floor_char_boundary(MAX_SNIPPET_LENGTH);
+                    s.push_str(&line[..end]);
+                    s.push_str("...");
+                } else {
+                    s.push_str(line);
+                }
+                s
+            });
 
             // Score based on match count (more matches = higher score)
             // Content matches are weighted lower than metadata matches
@@ -547,7 +577,12 @@ impl SearchEngine {
     }
 
     /// Check if a file matches the folder filter based on folder scope.
-    fn matches_folder_filter(&self, info: &MarkdownInfo, folder: &Option<String>, folder_scope: &FolderScope) -> bool {
+    fn matches_folder_filter(
+        &self,
+        info: &MarkdownInfo,
+        folder: &Option<String>,
+        folder_scope: &FolderScope,
+    ) -> bool {
         // If scope is Everywhere, always match
         if *folder_scope == FolderScope::Everywhere {
             return true;
@@ -620,7 +655,9 @@ impl SearchEngine {
             .pin()
             .iter()
             .filter(|(_, info)| info.is_searchable())
-            .filter(|(_, info)| self.matches_other_file_folder_filter(info, &query.folder, &query.folder_scope))
+            .filter(|(_, info)| {
+                self.matches_other_file_folder_filter(info, &query.folder, &query.folder_scope)
+            })
             .map(|(_, info)| info.clone())
             .collect();
 
@@ -658,10 +695,10 @@ impl SearchEngine {
         }
 
         // Match against filename
-        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str()) {
-            if let Some(score) = self.fuzzy_match(pattern, filename, matcher) {
-                best_score = best_score.max(score.saturating_mul(2));
-            }
+        if let Some(filename) = info.raw_path.file_stem().and_then(|s| s.to_str())
+            && let Some(score) = self.fuzzy_match(pattern, filename, matcher)
+        {
+            best_score = best_score.max(score.saturating_mul(2));
         }
 
         // Match against extracted text (lower weight since it's body content)
@@ -692,7 +729,9 @@ impl SearchEngine {
 
             Some(SearchResult {
                 url_path: info.url_path.clone(),
-                title: info.raw_path.file_name()
+                title: info
+                    .raw_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_string()),
                 description: None,
@@ -802,7 +841,10 @@ pub fn search_other_files(
                         .to_lowercase();
                     let matches = match ft_lower.as_str() {
                         "pdf" => ext == "pdf",
-                        "image" => matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg"),
+                        "image" => matches!(
+                            ext.as_str(),
+                            "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg"
+                        ),
                         "video" => matches!(ext.as_str(), "mp4" | "webm" | "mov" | "avi"),
                         "audio" => matches!(ext.as_str(), "mp3" | "wav" | "ogg" | "m4a" | "flac"),
                         _ => true,
@@ -959,17 +1001,23 @@ mod tests {
     fn test_parse_query_single_facet() {
         let parsed = parse_query("category:rust");
         assert!(parsed.terms.is_empty());
-        assert_eq!(parsed.facets, vec![("category".to_string(), "rust".to_string())]);
+        assert_eq!(
+            parsed.facets,
+            vec![("category".to_string(), "rust".to_string())]
+        );
     }
 
     #[test]
     fn test_parse_query_mixed_terms_and_facets() {
         let parsed = parse_query("guide category:programming author:alice");
         assert_eq!(parsed.terms, vec!["guide"]);
-        assert_eq!(parsed.facets, vec![
-            ("category".to_string(), "programming".to_string()),
-            ("author".to_string(), "alice".to_string()),
-        ]);
+        assert_eq!(
+            parsed.facets,
+            vec![
+                ("category".to_string(), "programming".to_string()),
+                ("author".to_string(), "alice".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1014,9 +1062,27 @@ mod tests {
 
     #[test]
     fn test_parsed_query_is_empty() {
-        assert!(ParsedQuery { terms: vec![], facets: vec![] }.is_empty());
-        assert!(!ParsedQuery { terms: vec!["test".to_string()], facets: vec![] }.is_empty());
-        assert!(!ParsedQuery { terms: vec![], facets: vec![("k".to_string(), "v".to_string())] }.is_empty());
+        assert!(
+            ParsedQuery {
+                terms: vec![],
+                facets: vec![]
+            }
+            .is_empty()
+        );
+        assert!(
+            !ParsedQuery {
+                terms: vec!["test".to_string()],
+                facets: vec![]
+            }
+            .is_empty()
+        );
+        assert!(
+            !ParsedQuery {
+                terms: vec![],
+                facets: vec![("k".to_string(), "v".to_string())]
+            }
+            .is_empty()
+        );
     }
 
     // ==================== Facet Matching Tests ====================

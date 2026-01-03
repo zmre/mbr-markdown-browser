@@ -213,10 +213,8 @@ mod tests {
 
     #[test]
     fn test_youtube_with_extra_params() {
-        let embed = MediaEmbed::from_url_and_title(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s",
-            "",
-        );
+        let embed =
+            MediaEmbed::from_url_and_title("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s", "");
         assert!(matches!(
             embed,
             Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"

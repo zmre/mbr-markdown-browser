@@ -19,7 +19,10 @@ use crate::{
     link_transform::LinkTransformConfig,
     markdown,
     repo::{MarkdownInfo, Repo},
-    server::{generate_breadcrumbs, get_current_dir_name, get_parent_path, markdown_file_to_json, DEFAULT_FILES},
+    server::{
+        DEFAULT_FILES, generate_breadcrumbs, get_current_dir_name, get_parent_path,
+        markdown_file_to_json,
+    },
     templates::Templates,
 };
 
@@ -95,12 +98,12 @@ impl Builder {
         let mut stats = BuildStats::default();
 
         // Scan repository for all files
-        self.repo.scan_all().map_err(|e| {
-            crate::errors::RepoError::ScanFailed {
+        self.repo
+            .scan_all()
+            .map_err(|e| crate::errors::RepoError::ScanFailed {
                 path: self.config.root_dir.clone(),
                 source: std::io::Error::other(e.to_string()),
-            }
-        })?;
+            })?;
 
         // Prepare output directory
         self.prepare_output_dir()?;
@@ -125,7 +128,10 @@ impl Builder {
         stats.broken_links = broken_links.len();
 
         if !broken_links.is_empty() {
-            eprintln!("\n⚠️  Broken links detected ({} total):", broken_links.len());
+            eprintln!(
+                "\n⚠️  Broken links detected ({} total):",
+                broken_links.len()
+            );
             for link in &broken_links {
                 eprintln!("   {} → {}", link.source_page, link.link_url);
             }
@@ -156,7 +162,11 @@ impl Builder {
 
     /// Renders all markdown files to HTML.
     async fn render_markdown_files(&self) -> Result<usize, BuildError> {
-        let markdown_files: Vec<_> = self.repo.markdown_files.pin().iter()
+        let markdown_files: Vec<_> = self
+            .repo
+            .markdown_files
+            .pin()
+            .iter()
             .map(|(path, info)| (path.clone(), info.clone()))
             .collect();
 
@@ -170,7 +180,11 @@ impl Builder {
     }
 
     /// Renders a single markdown file.
-    async fn render_single_markdown(&self, path: &Path, info: &MarkdownInfo) -> Result<(), BuildError> {
+    async fn render_single_markdown(
+        &self,
+        path: &Path,
+        info: &MarkdownInfo,
+    ) -> Result<(), BuildError> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = path
             .file_name()
@@ -197,10 +211,7 @@ impl Builder {
         })?;
 
         // Add markdown_source to frontmatter
-        frontmatter.insert(
-            "markdown_source".to_string(),
-            info.url_path.clone(),
-        );
+        frontmatter.insert("markdown_source".to_string(), info.url_path.clone());
 
         // Indicate static mode (no dynamic search endpoint)
         // Empty string is falsy in Tera templates
@@ -216,12 +227,21 @@ impl Builder {
         let current_dir_name = crate::server::get_current_dir_name(url_path_for_breadcrumbs);
 
         let mut extra_context = std::collections::HashMap::new();
-        extra_context.insert("breadcrumbs".to_string(), serde_json::json!(breadcrumbs_json));
-        extra_context.insert("current_dir_name".to_string(), serde_json::json!(current_dir_name));
+        extra_context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::json!(breadcrumbs_json),
+        );
+        extra_context.insert(
+            "current_dir_name".to_string(),
+            serde_json::json!(current_dir_name),
+        );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
 
         // Render through template
-        let html_output = self.templates.render_markdown(&html, frontmatter, extra_context).await?;
+        let html_output = self
+            .templates
+            .render_markdown(&html, frontmatter, extra_context)
+            .await?;
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');
@@ -261,7 +281,11 @@ impl Builder {
             let url_path = info.url_path.trim_start_matches('/').trim_end_matches('/');
             if !url_path.is_empty() {
                 let mut current = PathBuf::new();
-                for component in Path::new(url_path).parent().into_iter().flat_map(|p| p.components()) {
+                for component in Path::new(url_path)
+                    .parent()
+                    .into_iter()
+                    .flat_map(|p| p.components())
+                {
                     if let std::path::Component::Normal(s) = component {
                         current.push(s);
                         directories.insert(current.clone());
@@ -288,7 +312,10 @@ impl Builder {
 
         // Breadcrumbs
         let breadcrumbs = generate_breadcrumbs(relative_dir);
-        context.insert("breadcrumbs".to_string(), serde_json::to_value(&breadcrumbs).unwrap_or_default());
+        context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::to_value(&breadcrumbs).unwrap_or_default(),
+        );
 
         // Current directory name
         let current_dir_name = if is_root {
@@ -296,7 +323,10 @@ impl Builder {
         } else {
             get_current_dir_name(relative_dir)
         };
-        context.insert("current_dir_name".to_string(), serde_json::Value::String(current_dir_name));
+        context.insert(
+            "current_dir_name".to_string(),
+            serde_json::Value::String(current_dir_name),
+        );
 
         // Parent path
         if let Some(parent) = get_parent_path(relative_dir) {
@@ -322,14 +352,11 @@ impl Builder {
 
                 // If there's no / in remainder, it's a direct child
                 if !remainder.trim_end_matches('/').contains('/') {
-                    files.push(markdown_file_to_json(&info));
-                } else {
-                    // It's in a subdirectory
-                    if let Some(subdir) = remainder.split('/').next() {
-                        if !subdir.is_empty() {
-                            subdirs.insert(subdir.to_string());
-                        }
-                    }
+                    files.push(markdown_file_to_json(info));
+                } else if let Some(subdir) = remainder.split('/').next()
+                    && !subdir.is_empty()
+                {
+                    subdirs.insert(subdir.to_string());
                 }
             }
         }
@@ -358,7 +385,10 @@ impl Builder {
                 })
             })
             .collect();
-        context.insert("subdirs".to_string(), serde_json::Value::Array(subdirs_json));
+        context.insert(
+            "subdirs".to_string(),
+            serde_json::Value::Array(subdirs_json),
+        );
 
         // Indicate static mode (no dynamic search endpoint)
         context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
@@ -397,7 +427,11 @@ impl Builder {
 
     /// Creates symlinks for static assets.
     fn symlink_assets(&self) -> Result<usize, BuildError> {
-        let other_files: Vec<_> = self.repo.other_files.pin().iter()
+        let other_files: Vec<_> = self
+            .repo
+            .other_files
+            .pin()
+            .iter()
             .map(|(_, info)| info.clone())
             .collect();
 
@@ -421,10 +455,12 @@ impl Builder {
             // Create symlink (skip if already exists)
             if !output_path.exists() {
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| BuildError::SymlinkFailed {
-                    target: target.clone(),
-                    link: output_path.clone(),
-                    source: e,
+                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| {
+                    BuildError::SymlinkFailed {
+                        target: target.clone(),
+                        link: output_path.clone(),
+                        source: e,
+                    }
                 })?;
             }
         }
@@ -442,7 +478,8 @@ impl Builder {
         let to_components: Vec<_> = to.components().collect();
 
         // Find common prefix length
-        let common_len = from_components.iter()
+        let common_len = from_components
+            .iter()
             .zip(to_components.iter())
             .take_while(|(a, b)| a == b)
             .count();
@@ -478,11 +515,12 @@ impl Builder {
             .filter_map(|e| e.ok())
         {
             if entry.file_type().is_file() {
-                let relative = entry.path().strip_prefix(&static_path)
-                    .map_err(|_| BuildError::CreateDirFailed {
+                let relative = entry.path().strip_prefix(&static_path).map_err(|_| {
+                    BuildError::CreateDirFailed {
                         path: entry.path().to_path_buf(),
-                        source: std::io::Error::new(std::io::ErrorKind::Other, "strip prefix failed"),
-                    })?;
+                        source: std::io::Error::other("strip prefix failed"),
+                    }
+                })?;
 
                 let output_path = self.output_dir.join(relative);
 
@@ -498,10 +536,12 @@ impl Builder {
                     let target = self.calculate_relative_symlink(&output_path, entry.path())?;
 
                     #[cfg(unix)]
-                    std::os::unix::fs::symlink(&target, &output_path).map_err(|e| BuildError::SymlinkFailed {
-                        target,
-                        link: output_path,
-                        source: e,
+                    std::os::unix::fs::symlink(&target, &output_path).map_err(|e| {
+                        BuildError::SymlinkFailed {
+                            target,
+                            link: output_path,
+                            source: e,
+                        }
                     })?;
                 }
             }
@@ -555,9 +595,10 @@ impl Builder {
         }
 
         // Step 4: Generate site.json
-        let site_json = self.repo.to_json().map_err(|e| BuildError::RepoScan(
-            crate::errors::RepoError::JsonSerializeFailed(e)
-        ))?;
+        let site_json = self
+            .repo
+            .to_json()
+            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
         let site_json_path = mbr_output.join("site.json");
         fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
             path: site_json_path,
@@ -594,7 +635,7 @@ impl Builder {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "html"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
         {
             let path = entry.path();
 
@@ -620,11 +661,10 @@ impl Builder {
 
             // Add to index - parameters are: source_path, url, content
             // We use url (2nd param) since we have the explicit URL path
-            match index.add_html_file(
-                None,
-                Some(url_path.clone()),
-                html_content,
-            ).await {
+            match index
+                .add_html_file(None, Some(url_path.clone()), html_content)
+                .await
+            {
                 Ok(_) => {
                     files_indexed += 1;
                     tracing::debug!("Indexed: {}", url_path);
@@ -660,11 +700,11 @@ impl Builder {
             let file_path = pagefind_dir.join(&file.filename);
 
             // Create parent directories if needed
-            if let Some(parent) = file_path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    tracing::debug!("Failed to create dir {}: {}", parent.display(), e);
-                    continue;
-                }
+            if let Some(parent) = file_path.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                tracing::debug!("Failed to create dir {}: {}", parent.display(), e);
+                continue;
             }
 
             if let Err(e) = fs::write(&file_path, &file.contents) {
@@ -673,7 +713,10 @@ impl Builder {
             }
         }
 
-        tracing::info!("Pagefind search index generated: {} pages indexed", files_indexed);
+        tracing::info!(
+            "Pagefind search index generated: {} pages indexed",
+            files_indexed
+        );
         true
     }
 
@@ -740,13 +783,13 @@ impl Builder {
                     }
 
                     // Resolve the link relative to the current file's directory
-                    if let Some(resolved) = self.resolve_link(path, href) {
-                        if !self.link_target_exists(&resolved) {
-                            broken_links.push(BrokenLink {
-                                source_page: source_page.clone(),
-                                link_url: href.to_string(),
-                            });
-                        }
+                    if let Some(resolved) = self.resolve_link(path, href)
+                        && !self.link_target_exists(&resolved)
+                    {
+                        broken_links.push(BrokenLink {
+                            source_page: source_page.clone(),
+                            link_url: href.to_string(),
+                        });
                     }
                 }
             }
@@ -818,11 +861,13 @@ impl Builder {
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            let relative = entry.path().strip_prefix(from)
+            let relative = entry
+                .path()
+                .strip_prefix(from)
                 .map_err(|_| BuildError::CopyFailed {
                     from: entry.path().to_path_buf(),
                     to: to.to_path_buf(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, "strip prefix failed"),
+                    source: std::io::Error::other("strip prefix failed"),
                 })?;
 
             let dest = to.join(relative);

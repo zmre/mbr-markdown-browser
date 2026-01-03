@@ -6,10 +6,7 @@ use std::{
 
 use papaya::{HashMap, HashSet};
 use rayon::prelude::*;
-use serde::{
-    ser::SerializeSeq,
-    Serialize, Serializer,
-};
+use serde::{Serialize, Serializer, ser::SerializeSeq};
 use walkdir::WalkDir;
 
 use crate::Config;
@@ -131,15 +128,15 @@ impl OtherFileInfo {
     /// Respects file size limit for performance.
     fn extract_text(&self) -> Option<String> {
         // Check file size first
-        if let Some(size) = self.metadata.file_size_bytes {
-            if size > MAX_TEXT_EXTRACTION_SIZE {
-                tracing::debug!(
-                    "Skipping text extraction for {:?}: file too large ({} bytes)",
-                    self.raw_path,
-                    size
-                );
-                return None;
-            }
+        if let Some(size) = self.metadata.file_size_bytes
+            && size > MAX_TEXT_EXTRACTION_SIZE
+        {
+            tracing::debug!(
+                "Skipping text extraction for {:?}: file too large ({} bytes)",
+                self.raw_path,
+                size
+            );
+            return None;
         }
 
         match &self.metadata.kind {
@@ -158,11 +155,7 @@ impl OtherFileInfo {
         match result {
             Ok(Ok(text)) => {
                 let text = text.trim().to_string();
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
+                if text.is_empty() { None } else { Some(text) }
             }
             Ok(Err(e)) => {
                 tracing::debug!("Failed to extract PDF text from {:?}: {}", self.raw_path, e);
@@ -183,18 +176,10 @@ impl OtherFileInfo {
         match std::fs::read_to_string(&self.raw_path) {
             Ok(text) => {
                 let text = text.trim().to_string();
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
+                if text.is_empty() { None } else { Some(text) }
             }
             Err(e) => {
-                tracing::debug!(
-                    "Failed to read text file {:?}: {}",
-                    self.raw_path,
-                    e
-                );
+                tracing::debug!("Failed to read text file {:?}: {}", self.raw_path, e);
                 None
             }
         }
@@ -592,10 +577,7 @@ pub fn file_details_from_path<P: AsRef<Path>>(
 /// - It's a directory matching one of the ignore_dirs
 /// - It matches one of the ignore_globs patterns
 pub fn should_ignore(path: &Path, ignore_dirs: &[String], ignore_globs: &[String]) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|x| x.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
 
     // Hidden files/dirs (starting with .)
     if file_name.starts_with('.') {
@@ -622,10 +604,7 @@ fn should_ignore_compiled(
     ignore_dirs: &[String],
     compiled_patterns: &[glob::Pattern],
 ) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|x| x.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
 
     // Hidden files/dirs (starting with .)
     if file_name.starts_with('.') {
@@ -647,11 +626,7 @@ fn should_ignore_compiled(
 /// - Ensures leading slash
 /// - Removes index file from path (e.g., /docs/index.md → /docs/)
 /// - Replaces file extension with trailing slash
-pub fn build_markdown_url_path(
-    path: &Path,
-    root_dir: &Path,
-    index_file: &str,
-) -> String {
+pub fn build_markdown_url_path(path: &Path, root_dir: &Path, index_file: &str) -> String {
     let mut url = pathdiff::diff_paths(path, root_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -681,11 +656,7 @@ pub fn build_markdown_url_path(
 /// Converts a filesystem path relative to root into a URL path:
 /// - Removes static folder prefix
 /// - Ensures leading slash
-pub fn build_static_url_path(
-    path: &Path,
-    root_dir: &Path,
-    static_folder: &str,
-) -> String {
+pub fn build_static_url_path(path: &Path, root_dir: &Path, static_folder: &str) -> String {
     let mut url = pathdiff::diff_paths(path, root_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default()
@@ -751,7 +722,10 @@ mod tests {
     fn test_build_markdown_url_path_nested() {
         let root = Path::new("/root");
         let path = Path::new("/root/docs/guide.md");
-        assert_eq!(build_markdown_url_path(path, root, "index.md"), "/docs/guide/");
+        assert_eq!(
+            build_markdown_url_path(path, root, "index.md"),
+            "/docs/guide/"
+        );
     }
 
     #[test]
@@ -779,7 +753,10 @@ mod tests {
     fn test_build_static_url_path_not_in_static() {
         let root = Path::new("/root");
         let path = Path::new("/root/assets/image.png");
-        assert_eq!(build_static_url_path(path, root, "static"), "/assets/image.png");
+        assert_eq!(
+            build_static_url_path(path, root, "static"),
+            "/assets/image.png"
+        );
     }
 
     #[test]

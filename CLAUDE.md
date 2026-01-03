@@ -10,6 +10,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a rust project and a serious engineering work.  ALWAYS USE the engineer subagent unless expressly told otherwise.  Always read the rust language skill.
 
+## Code Quality (MANDATORY)
+
+Before completing ANY Rust code changes, you MUST run these checks:
+
+```bash
+# Format all Rust code
+cargo fmt
+
+# Check for lint issues (warnings are errors)
+cargo clippy -- -D warnings
+
+# Run tests
+cargo test
+```
+
+**These are blocking requirements.** Do not consider Rust work complete until:
+1. `cargo fmt` has been run (code is formatted)
+2. `cargo clippy -- -D warnings` passes with no errors
+3. `cargo test` passes
+
+CI will reject any PR that fails these checks. The pre-commit hook enforces this locally, but you should run these explicitly to catch issues early.
+
 ## Goals
 
 In this tool, **performance is extremely important** -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.  Everything should be near instantaneous and we should be constantly looking for safe ways to make things fast, but without using local cache files.  This tool may be used on repositories with tens of thousands of markdown files and as many assets (images, pdfs, etc.) as well and it MUST perform well even on big repositories. Anything slow must be async and background and out of the critical path. It should also be made as fast as possible.
