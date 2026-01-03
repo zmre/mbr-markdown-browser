@@ -1,0 +1,224 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.4.0) - must match Cargo.toml'
+        required: true
+        type: string
+
+# Ensure only one release workflow runs at a time
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Run tests first - must pass before building release artifacts
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Run tests
+        run: nix develop --command cargo test --all-features
+
+  # Validate version consistency between tag and Cargo.toml
+  validate-version:
+    name: Validate Version
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract and validate version
+        id: version
+        run: |
+          # Determine version from tag or input
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+          # Get version from Cargo.toml
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          # Validate match
+          if [[ "$CARGO_VERSION" != "$VERSION" ]]; then
+            echo "::error::Version mismatch! Tag/input: $VERSION, Cargo.toml: $CARGO_VERSION"
+            echo "Run: ./scripts/bump-version.sh $VERSION"
+            exit 1
+          fi
+
+          echo "Version validated: $VERSION"
+
+  # Build release artifacts for all platforms
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: validate-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: macos-arm64
+          - os: macos-13
+            arch: macos-x86_64
+          - os: ubuntu-latest
+            arch: linux-x86_64
+          # Note: ARM64 Linux requires self-hosted runner or QEMU emulation
+          # Uncomment when ubuntu-24.04-arm is available
+          # - os: ubuntu-24.04-arm
+          #   arch: linux-arm64
+
+    env:
+      VERSION: ${{ needs.validate-version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build release artifacts
+        run: |
+          nix build .#release
+          mkdir -p staging
+          cp -r result/* staging/
+
+      - name: List artifacts
+        run: ls -la staging/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: staging/*
+          if-no-files-found: error
+
+  # Create GitHub Release with all artifacts
+  release:
+    name: Create Release
+    needs: [validate-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+
+          # Copy all artifacts
+          find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+
+          # Generate combined checksums
+          cd release
+          sha256sum *.tar.gz > SHA256SUMS
+
+          echo "Release files:"
+          ls -la
+
+      - name: Generate release notes
+        run: |
+          cat << 'EOF' > release_notes.md
+          ## mbr v${{ needs.validate-version.outputs.version }}
+
+          ### Downloads
+
+          | Platform | Architecture | Download |
+          |----------|--------------|----------|
+          | macOS | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
+          | macOS | x86_64 (Intel) | `mbr-macos-x86_64.tar.gz` |
+          | Linux | x86_64 | `mbr-linux-x86_64.tar.gz` |
+
+          ### Installation
+
+          **macOS (Apple Silicon):**
+          ```bash
+          tar xzf mbr-macos-arm64.tar.gz
+          cp -r MBR.app /Applications/
+          ```
+
+          **macOS (Intel):**
+          ```bash
+          tar xzf mbr-macos-x86_64.tar.gz
+          cp -r MBR.app /Applications/
+          ```
+
+          **Linux:**
+          ```bash
+          tar xzf mbr-linux-x86_64.tar.gz
+          sudo mv mbr /usr/local/bin/
+          ```
+
+          ### Verification
+
+          Verify downloads using the SHA256SUMS file:
+          ```bash
+          sha256sum -c SHA256SUMS
+          ```
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ needs.validate-version.outputs.version }}
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', needs.validate-version.outputs.version) }}
+          body_path: release_notes.md
+          files: release/*
+          draft: false
+          prerelease: ${{ contains(needs.validate-version.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -23,7 +23,9 @@
       rusttoolchain =
         pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
-      version = "0.3.0";
+      # Read version from Cargo.toml - single source of truth
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      version = cargoToml.package.version;
 
       # Info.plist content for macOS app bundle
       infoPlist = pkgs.writeText "Info.plist" ''
@@ -118,9 +120,9 @@
       # Build frontend components first
       packages.mbr-components = pkgs.buildNpmPackage {
         pname = "mbr-components";
-        version = "0.1";
+        inherit version;
         src = ./components;
-        npmDepsHash = "sha256-kf1UObyt2f9WJLVHWFcEC8NMM4Mg7cW46Dqcv1EQns8=";
+        npmDepsHash = "sha256-mLUfYTDIYxoBy/tObRelzzJi4fwj6+gV/QzcbaLisUI=";
         buildPhase = ''
           npm run build
         '';
@@ -172,7 +174,7 @@
           # Copy icon
           cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-          # Ad-hoc sign the entire bundle (signs binary and seals resources)
+          # Ad-hoc sign the app bundle for local use
           /usr/bin/codesign --force --sign - --deep $out/Applications/MBR.app
         '';
 

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*']  # Don't run CI on release tags (release workflow handles that)
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build
+        run: nix build .#mbr
+
+      - name: Run tests
+        run: nix develop --command cargo test --all-features
+
+      - name: Clippy lint
+        run: nix develop --command cargo clippy -- -D warnings
+
+      - name: Check formatting
+        run: nix develop --command cargo fmt -- --check
+
+  build-components:
+    name: Build Frontend Components
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: cd components && bun install
+
+      - name: Build components
+        run: cd components && bun run build
+
+      - name: Type check
+        run: cd components && bun run check
