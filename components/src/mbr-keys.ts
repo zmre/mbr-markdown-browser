@@ -29,7 +29,21 @@ function isModalOpen(): boolean {
   const browse = document.querySelector('mbr-browse');
   if (browse && (browse as any)._isOpen) return true;
 
+  // Check for info panel
+  const infoPanel = document.getElementById('info-panel-toggle') as HTMLInputElement | null;
+  if (infoPanel?.checked) return true;
+
   return false;
+}
+
+/**
+ * Toggle the info panel open/closed.
+ */
+function toggleInfoPanel(): void {
+  const checkbox = document.getElementById('info-panel-toggle') as HTMLInputElement | null;
+  if (checkbox) {
+    checkbox.checked = !checkbox.checked;
+  }
 }
 
 /**
@@ -80,6 +94,7 @@ const SHORTCUTS: ShortcutCategory[] = [
     shortcuts: [
       { keys: '/', description: 'Open search' },
       { keys: '- or F2', description: 'Open file browser' },
+      { keys: 'Ctrl+g', description: 'Toggle info panel' },
       { keys: 'Esc', description: 'Close panel' },
     ],
   },
@@ -161,6 +176,16 @@ export class MbrKeysElement extends LitElement {
       return;
     }
 
+    // Close info panel with Escape
+    if (e.key === 'Escape') {
+      const infoPanel = document.getElementById('info-panel-toggle') as HTMLInputElement | null;
+      if (infoPanel?.checked) {
+        e.preventDefault();
+        infoPanel.checked = false;
+        return;
+      }
+    }
+
     // Don't process other keys when help is open
     if (this._helpOpen) {
       return;
@@ -172,6 +197,7 @@ export class MbrKeysElement extends LitElement {
     }
 
     // Handle Ctrl+o/i for history navigation (works regardless of modal state)
+    // Handle Ctrl+g for info panel toggle
     if (e.ctrlKey && !e.metaKey) {
       switch (e.key.toLowerCase()) {
         case 'o': // Ctrl+o - history back (vim jump list style)
@@ -182,6 +208,11 @@ export class MbrKeysElement extends LitElement {
         case 'i': // Ctrl+i - history forward (vim jump list style)
           e.preventDefault();
           history.forward();
+          return;
+
+        case 'g': // Ctrl+g - toggle info panel (vim file info style)
+          e.preventDefault();
+          toggleInfoPanel();
           return;
       }
     }

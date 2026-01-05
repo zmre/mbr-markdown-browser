@@ -9,38 +9,62 @@
 
     <h2>Info</h2>
 
-    <!-- Frontmatter Metadata Section -->
-    {% if title or description or tags or date %}
-    <details class="info-section" open>
+    <!-- Frontmatter Metadata Section (populated by JavaScript from window.frontmatter) -->
+    <details class="info-section" id="info-metadata-section" open>
       <summary><strong>Metadata</strong></summary>
-      <div class="info-content">
-        {% if title %}
-        <div class="info-item">
-          <span class="info-label">Title:</span>
-          <span class="info-value">{{ title }}</span>
-        </div>
-        {% endif %}
-        {% if description %}
-        <div class="info-item">
-          <span class="info-label">Description:</span>
-          <span class="info-value">{{ description }}</span>
-        </div>
-        {% endif %}
-        {% if tags %}
-        <div class="info-item">
-          <span class="info-label">Tags:</span>
-          <span class="info-value">{{ tags }}</span>
-        </div>
-        {% endif %}
-        {% if date %}
-        <div class="info-item">
-          <span class="info-label">Date:</span>
-          <span class="info-value">{{ date }}</span>
-        </div>
-        {% endif %}
+      <div class="info-content" id="info-metadata-content">
+        <!-- Populated dynamically from window.frontmatter -->
       </div>
     </details>
-    {% endif %}
+    <script>
+      (function() {
+        const container = document.getElementById('info-metadata-content');
+        const section = document.getElementById('info-metadata-section');
+        const fm = window.frontmatter || {};
+
+        // Keys to skip (internal/technical fields)
+        const skipKeys = new Set(['markdown_source', 'server_mode']);
+
+        // Preferred display order for common keys
+        const preferredOrder = ['title', 'description', 'tags', 'keywords', 'date', 'author', 'category', 'categories', 'draft', 'slug'];
+
+        // Get all keys and sort them
+        const allKeys = Object.keys(fm).filter(k => !skipKeys.has(k));
+        const orderedKeys = [...preferredOrder.filter(k => allKeys.includes(k)), ...allKeys.filter(k => !preferredOrder.includes(k))];
+
+        if (orderedKeys.length === 0) {
+          section.style.display = 'none';
+        } else {
+          orderedKeys.forEach(key => {
+            const value = fm[key];
+            if (value === null || value === undefined || value === '') return;
+
+            const item = document.createElement('div');
+            item.className = 'info-item';
+
+            const label = document.createElement('span');
+            label.className = 'info-label';
+            label.textContent = key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ') + ':';
+
+            const val = document.createElement('span');
+            val.className = 'info-value';
+
+            // Format arrays and objects nicely
+            if (Array.isArray(value)) {
+              val.textContent = value.join(', ');
+            } else if (typeof value === 'object') {
+              val.textContent = JSON.stringify(value);
+            } else {
+              val.textContent = String(value);
+            }
+
+            item.appendChild(label);
+            item.appendChild(val);
+            container.appendChild(item);
+          });
+        }
+      })();
+    </script>
 
     <!-- Table of Contents Section -->
     {% if headings %}
@@ -78,8 +102,3 @@
 
 <!-- Backdrop overlay for mobile -->
 <label for="info-panel-toggle" class="info-panel-backdrop" aria-label="Close info panel"></label>
-
-<!-- Floating action button to open panel -->
-<label for="info-panel-toggle" class="info-panel-fab" aria-label="Open info panel">
-  <span class="info-panel-fab-icon">ℹ️</span>
-</label>
