@@ -2,12 +2,7 @@
 
 ## What's Next
 
-* [x] Setup github actions, push to cachix, and release cutting; version in cargo.toml, flake.nix and git tags need to line up. Need to figure out how to build and share, too.  Maybe see about code signing and releases that are signed?
-  * Setup action to run all tests including integration tests on every push
-  * Don't allow releases if tests are failing
-* [ ] Update cargo dependencies; also switch to using worktrees
-* [ ] Update npm dependencies
-* [ ] We need to change up the info sidebar in a few ways:
+* [x] We need to change up the info sidebar in a few ways:
   * Get rid of the big blue blob in the lower right and make an i icon in the header instead
   * Make a shortcut key for launching the info sidebar
   * It doesn't seem to show all the frontmatter for a given file now -- it seems like it did, but isn't anymore or perhaps sometimes it doesn't show?
@@ -30,7 +25,7 @@
 ## Full List
 
 * Videos
-	* [ ] Serve captions, chapters, and posters automatically
+	* [ ] Serve captions, chapters, and posters automatically when in server/gui mode and when the relevant files don't exist already; use ffmpeg to dynamically extract and serve
 
 * Markdown parsing
   * [ ] Allow unordered bullets under ordered and vice versa

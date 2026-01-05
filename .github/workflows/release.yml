@@ -1,12 +1,14 @@
 name: Release
+permissions:
+  contents: read
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., 0.4.0) - must match Cargo.toml'
+        description: "Version to release (e.g., 0.4.0) - must match Cargo.toml"
         required: true
         type: string
 
@@ -34,8 +36,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v15
@@ -112,8 +112,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v15
