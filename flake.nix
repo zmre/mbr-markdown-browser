@@ -171,19 +171,22 @@
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
         # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
-        BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
+        BINDGEN_EXTRA_CLANG_ARGS =
+          pkgs.lib.optionalString pkgs.stdenv.isLinux
           "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
       };
 
       # Common arguments shared between builds
-      commonArgs = commonEnvVars // {
-        inherit src;
-        strictDeps = true;
-        pname = "mbr";
-        inherit version;
-        nativeBuildInputs = commonNativeBuildInputs;
-        buildInputs = commonBuildInputs;
-      };
+      commonArgs =
+        commonEnvVars
+        // {
+          inherit src;
+          strictDeps = true;
+          pname = "mbr";
+          inherit version;
+          nativeBuildInputs = commonNativeBuildInputs;
+          buildInputs = commonBuildInputs;
+        };
 
       # Build dependencies only (cached separately from source changes)
       cargoArtifacts = craneLib.buildDepsOnly (commonArgs
@@ -203,7 +206,8 @@
         pname = "mbr-components";
         inherit version;
         src = ./components;
-        npmDepsHash = "sha256-jsBGQSpIGM7zKyGJm3pulL9CbFC1Hl/Its1ALp6SnaE=";
+        # npmDepsHash = pkgs.lib.fakeHash;
+        npmDepsHash = "sha256-qWsHQidGobEZmqTlYd+wHyEQnshV6fF3z/Sr5fTaNS0=";
         buildPhase = ''
           npm run build
         '';
