@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]  # Only run on direct pushes to main
-    tags-ignore: ['v*']  # Don't run CI on release tags (release workflow handles that)
+    branches: [main] # Only run on direct pushes to main
+    tags-ignore: ["v*"] # Don't run CI on release tags (release workflow handles that)
   pull_request:
-    branches: [main]  # Run on all PRs targeting main
+    branches: [main] # Run on all PRs targeting main
 
 # Cancel in-progress runs when a new run starts for the same PR/branch
 concurrency:
@@ -23,8 +23,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check formatting
         run: nix develop --command cargo fmt -- --check
@@ -39,8 +37,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v15
@@ -86,8 +82,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v15
@@ -123,8 +117,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v15
@@ -160,8 +152,6 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v15
