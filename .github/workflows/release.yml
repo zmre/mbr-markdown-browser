@@ -129,16 +129,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             arch: macos-arm64
-          - os: macos-13
-            arch: macos-x86_64
           - os: ubuntu-latest
             arch: linux-x86_64
-          # Note: ARM64 Linux requires self-hosted runner or QEMU emulation
-          # Uncomment when ubuntu-24.04-arm is available
-          # - os: ubuntu-24.04-arm
-          #   arch: linux-arm64
 
     env:
       VERSION: ${{ needs.validate-version.outputs.version }}
@@ -214,7 +208,6 @@ jobs:
           | Platform | Architecture | Download |
           |----------|--------------|----------|
           | macOS | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
-          | macOS | x86_64 (Intel) | `mbr-macos-x86_64.tar.gz` |
           | Linux | x86_64 | `mbr-linux-x86_64.tar.gz` |
 
           ### Installation
@@ -222,12 +215,6 @@ jobs:
           **macOS (Apple Silicon):**
           ```bash
           tar xzf mbr-macos-arm64.tar.gz
-          cp -r MBR.app /Applications/
-          ```
-
-          **macOS (Intel):**
-          ```bash
-          tar xzf mbr-macos-x86_64.tar.gz
           cp -r MBR.app /Applications/
           ```
 
