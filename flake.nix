@@ -139,6 +139,9 @@
         [
           pkg-config
           llvmPackages.libclang
+          typescript
+          nodejs_24
+          bun
         ]
         ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
           pkgs.apple-sdk
@@ -357,8 +360,6 @@
           # Build inputs from common + dev tools
           inputsFrom = [packages.mbr];
           packages = with pkgs; [
-            nodejs_24
-            bun
             cargo-watch
           ];
 
