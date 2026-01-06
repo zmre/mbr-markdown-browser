@@ -146,26 +146,28 @@ impl OtherFileInfo {
         }
     }
 
-    /// Extract text from a PDF file.
-    /// Uses catch_unwind to handle panics from pdf-extract on malformed PDFs.
+    /// Extract text from a PDF file using lopdf.
     fn extract_pdf_text(&self) -> Option<String> {
-        let path = self.raw_path.clone();
-        let result = std::panic::catch_unwind(|| pdf_extract::extract_text(&path));
+        let doc = match lopdf::Document::load(&self.raw_path) {
+            Ok(doc) => doc,
+            Err(e) => {
+                tracing::debug!("Failed to load PDF {:?}: {}", self.raw_path, e);
+                return None;
+            }
+        };
 
-        match result {
-            Ok(Ok(text)) => {
+        let page_numbers: Vec<u32> = doc.get_pages().keys().copied().collect();
+        if page_numbers.is_empty() {
+            return None;
+        }
+
+        match doc.extract_text(&page_numbers) {
+            Ok(text) => {
                 let text = text.trim().to_string();
                 if text.is_empty() { None } else { Some(text) }
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 tracing::debug!("Failed to extract PDF text from {:?}: {}", self.raw_path, e);
-                None
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "PDF extraction panicked for {:?}, skipping text extraction",
-                    self.raw_path
-                );
                 None
             }
         }

@@ -2,19 +2,13 @@
 
 ## What's Next
 
-* [x] We need to change up the info sidebar in a few ways:
-  * Get rid of the big blue blob in the lower right and make an i icon in the header instead
-  * Make a shortcut key for launching the info sidebar
-  * It doesn't seem to show all the frontmatter for a given file now -- it seems like it did, but isn't anymore or perhaps sometimes it doesn't show?
-  * On a wider screen, the sidebar should be made wider
 * Browser widget updates
-  * [ ] Fix that damn ugly hamburger icon
   * [ ] Enhance the browser widget to allow more keyboard shortcuts
   * [ ] Enhance the browser widget to have a broader idea of tags and other frontmatter
   * [ ] Bug in browser widget not showing all tags or full counts
   * [ ] Bug in browser widget where when all markdown in the root, the Notes section shows nothing under it
   * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
-* [ ] Try to find another way to read text from PDF files since current library is constantly panicking and I'd like to get rid of the panic handling code and all the warnings
+* [x] Try to find another way to read text from PDF files since current library is constantly panicking and I'd like to get rid of the panic handling code and all the warnings
 * [ ] Add a command palette, which can be brought up with either `:` or `cmd-shift-k`.  Everything that has a shortcut key including next/previous file, search, browse, etc., should pop up. Use fuzzy search completion to select the desired item. This will also serve as a sort of shortcut help as the title of the action will be on the left and the shortcut key or keys for the action will be shown right aligned in gray. 
 * [ ] Editing of metadata (tags and other yaml frontmatter) maybe including description recommendations using in-browser local AI for a given note.
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
