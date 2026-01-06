@@ -210,9 +210,9 @@
           src = craneLib.cleanCargoSource ./.;
           preBuild = ''
             # Create empty component files for dependency resolution
+            # Must match the actual file names produced by vite build (see vite.config.ts)
             mkdir -p templates/components-js
-            touch templates/components-js/mbr-browse.js
-            touch templates/components-js/mbr-browse.css
+            touch templates/components-js/mbr-components.js
           '';
         });
     in rec {

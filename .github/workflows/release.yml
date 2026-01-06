@@ -21,9 +21,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Build frontend components - needed by test job
+  build-components:
+    name: Build Components
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Build components
+        run: |
+          set -euo pipefail
+          nix build .#mbr-components
+          echo "=== Nix build output ==="
+          ls -la result/
+          mkdir -p templates/components-js
+          cp -v result/* templates/components-js/
+          echo "=== Copied components ==="
+          ls -la templates/components-js/
+          # Fail fast if the required file doesn't exist
+          test -f templates/components-js/mbr-components.js || { echo "FATAL: mbr-components.js not created!"; exit 1; }
+
+      - name: Upload components
+        uses: actions/upload-artifact@v4
+        with:
+          name: components
+          path: templates/components-js/
+          retention-days: 1
+          if-no-files-found: error
+
   # Run tests first - must pass before building release artifacts
   test:
     name: Test (${{ matrix.os }})
+    needs: build-components
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -34,14 +76,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Download components
+        uses: actions/download-artifact@v4
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Verify components downloaded
+        run: |
+          echo "Downloaded components:"
+          ls -la templates/components-js/
+          if [ ! -f templates/components-js/mbr-components.js ]; then
+            echo "ERROR: mbr-components.js not found!"
+            exit 1
+          fi
+
       - name: Install Nix
         uses: cachix/install-nix-action@v31
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
 
       - name: Run tests
         run: nix develop --command cargo test --all-features
@@ -92,16 +152,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             arch: macos-arm64
-          - os: macos-13
-            arch: macos-x86_64
           - os: ubuntu-latest
             arch: linux-x86_64
-          # Note: ARM64 Linux requires self-hosted runner or QEMU emulation
-          # Uncomment when ubuntu-24.04-arm is available
-          # - os: ubuntu-24.04-arm
-          #   arch: linux-arm64
 
     env:
       VERSION: ${{ needs.validate-version.outputs.version }}
@@ -114,7 +168,7 @@ jobs:
         uses: cachix/install-nix-action@v31
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -177,7 +231,6 @@ jobs:
           | Platform | Architecture | Download |
           |----------|--------------|----------|
           | macOS | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
-          | macOS | x86_64 (Intel) | `mbr-macos-x86_64.tar.gz` |
           | Linux | x86_64 | `mbr-linux-x86_64.tar.gz` |
 
           ### Installation
@@ -185,12 +238,6 @@ jobs:
           **macOS (Apple Silicon):**
           ```bash
           tar xzf mbr-macos-arm64.tar.gz
-          cp -r MBR.app /Applications/
-          ```
-
-          **macOS (Intel):**
-          ```bash
-          tar xzf mbr-macos-x86_64.tar.gz
           cp -r MBR.app /Applications/
           ```
 

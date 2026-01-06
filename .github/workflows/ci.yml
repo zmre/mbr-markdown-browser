@@ -41,19 +41,25 @@ jobs:
         uses: cachix/install-nix-action@v31
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: DeterminateSystems/magic-nix-cache-action@v13
 
       - name: Build components
         run: |
+          set -euo pipefail
           nix build .#mbr-components
+          echo "=== Nix build output ==="
+          ls -la result/
           mkdir -p templates/components-js
-          cp -r result/* templates/components-js/
+          cp -v result/* templates/components-js/
+          echo "=== Copied components ==="
+          ls -la templates/components-js/
+          test -f templates/components-js/mbr-components.js || { echo "FATAL: mbr-components.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v4
@@ -61,6 +67,7 @@ jobs:
           name: components
           path: templates/components-js/
           retention-days: 1
+          if-no-files-found: error
 
   # Clippy lint - runs after components are built
   lint:
@@ -86,13 +93,13 @@ jobs:
         uses: cachix/install-nix-action@v31
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: DeterminateSystems/magic-nix-cache-action@v13
 
       - name: Clippy lint
         run: nix build .#clippy
@@ -121,13 +128,13 @@ jobs:
         uses: cachix/install-nix-action@v31
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: DeterminateSystems/magic-nix-cache-action@v13
 
       - name: Run tests
         run: nix develop --command cargo test --all-features
@@ -156,13 +163,13 @@ jobs:
         uses: cachix/install-nix-action@v31
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: DeterminateSystems/magic-nix-cache-action@v13
 
       - name: Build
         run: nix build .#mbr

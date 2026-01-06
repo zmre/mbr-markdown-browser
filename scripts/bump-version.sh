@@ -40,9 +40,15 @@ echo "Updating Cargo.toml..."
 sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$PROJECT_DIR/Cargo.toml"
 rm -f "$PROJECT_DIR/Cargo.toml.bak"
 
+# Build and place components (required for cargo check)
+echo "Building frontend components..."
+cd "$PROJECT_DIR"
+nix build .#mbr-components
+mkdir -p templates/components-js
+cp -r result/* templates/components-js/
+
 # Update Cargo.lock by running cargo check
 echo "Updating Cargo.lock..."
-cd "$PROJECT_DIR"
 cargo check --quiet 2>/dev/null || cargo check
 
 echo ""
