@@ -28,7 +28,7 @@ metadata = "0.1.10" # Requires ffmpeg for video/audio metadata extraction
 ffmpeg-next = "7.1"  # Direct dep to control log level (suppress warnings from metadata crate)
 papaya = "0.2.3"
 pathdiff = "0.2.3"
-pdf-extract = "0.10"
+lopdf = { version = "0.38", default-features = false, features = ["rayon"] }
 percent-encoding = "2.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
@@ -77,6 +77,5 @@ tempfile = "3.14"
 opt-level = 3
 lto = true
 codegen-units = 16
-# Use 'unwind' to allow catch_unwind for handling panics from dependencies (e.g., pdf-extract)
-panic = 'unwind'
+panic = 'abort'
 strip = 'debuginfo'
