@@ -38,11 +38,21 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
       - name: Build components
         run: |
+          set -euo pipefail
           nix build .#mbr-components
+          echo "=== Nix build output ==="
+          ls -la result/
           mkdir -p templates/components-js
-          cp -r result/* templates/components-js/
+          cp -v result/* templates/components-js/
+          echo "=== Copied components ==="
+          ls -la templates/components-js/
+          # Fail fast if the required file doesn't exist
+          test -f templates/components-js/mbr-components.js || { echo "FATAL: mbr-components.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v4
@@ -50,6 +60,7 @@ jobs:
           name: components
           path: templates/components-js/
           retention-days: 1
+          if-no-files-found: error
 
   # Run tests first - must pass before building release artifacts
   test:
@@ -71,6 +82,15 @@ jobs:
           name: components
           path: templates/components-js/
 
+      - name: Verify components downloaded
+        run: |
+          echo "Downloaded components:"
+          ls -la templates/components-js/
+          if [ ! -f templates/components-js/mbr-components.js ]; then
+            echo "ERROR: mbr-components.js not found!"
+            exit 1
+          fi
+
       - name: Install Nix
         uses: cachix/install-nix-action@v31
 
@@ -79,6 +99,9 @@ jobs:
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
 
       - name: Run tests
         run: nix develop --command cargo test --all-features
