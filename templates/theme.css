@@ -2,6 +2,49 @@
   --mbr-icon-search: url("data:image/svg+xml,%20%20%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221.2em%22%20height%3D%221.2em%22%20viewBox%3D%220%200%20512%20512%22%3E%3Cpath%20fill%3D%22currentColor%22%20d%3D%22M416%20208c0%2045.9-14.9%2088.3-40%20122.7l126.6%20126.7c12.5%2012.5%2012.5%2032.8%200%2045.3s-32.8%2012.5-45.3%200L330.7%20376c-34.4%2025.2-76.8%2040-122.7%2040C93.1%20416%200%20322.9%200%20208S93.1%200%20208%200s208%2093.1%20208%20208M208%20352a144%20144%200%201%200%200-288a144%20144%200%201%200%200%20288%22%2F%3E%3C%2Fsvg%3E");
 
   --mbr-icon-hamburger: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221.05em%22%20height%3D%221.2em%22%20viewBox%3D%220%200%20448%20512%22%3E%3Cpath%20fill%3D%22currentColor%22%20d%3D%22M0%2096c0-17.7%2014.3-32%2032-32h384c17.7%200%2032%2014.3%2032%2032s-14.3%2032-32%2032H32c-17.7%200-32-14.3-32-32m0%20160c0-17.7%2014.3-32%2032-32h384c17.7%200%2032%2014.3%2032%2032s-14.3%2032-32%2032H32c-17.7%200-32-14.3-32-32m448%20160c0%2017.7-14.3%2032-32%2032H32c-17.7%200-32-14.3-32-32s14.3-32%2032-32h384c17.7%200%2032%2014.3%2032%2032%22%2F%3E%3C%2Fsvg%3E");
+
+  /* Pull Quote Styling Variables */
+  --mbr-pullquote-bg: var(--pico-muted-border-color);
+  --mbr-pullquote-border: var(--pico-primary);
+  --mbr-pullquote-color: var(--pico-color);
+
+  /* Marginalia Styling Variables */
+  --mbr-marginalia-bg: var(--pico-secondary-background);
+  /* --mbr-marginalia-border: var(--pico-muted-border-color); */
+  --mbr-marginalia-border: var(--pico-secondary-hover-background);
+  --mbr-marginalia-color: var(--pico-muted-color);
+
+  /* GitHub Alert: Note (Blue) */
+  --mbr-alert-note-bg: rgba(227, 242, 253, 0.4);
+  --mbr-alert-note-border: #1976d2;
+  --mbr-alert-note-icon-color: #1976d2;
+
+  /* GitHub Alert: Tip (Green) */
+  --mbr-alert-tip-bg: rgba(232, 245, 233, 0.4);
+  --mbr-alert-tip-border: #388e3c;
+  --mbr-alert-tip-icon-color: #388e3c;
+
+  /* GitHub Alert: Important (Purple) */
+  --mbr-alert-important-bg: rgba(243, 229, 245, 0.4);
+  --mbr-alert-important-border: #7b1fa2;
+  --mbr-alert-important-icon-color: #7b1fa2;
+
+  /* GitHub Alert: Warning (Orange) */
+  --mbr-alert-warning-bg: rgba(255, 243, 224, 0.4);
+  --mbr-alert-warning-border: #f57c00;
+  --mbr-alert-warning-icon-color: #f57c00;
+
+  /* GitHub Alert: Caution (Red) */
+  --mbr-alert-caution-bg: rgba(255, 235, 238, 0.4);
+  --mbr-alert-caution-border: #c62828;
+  --mbr-alert-caution-icon-color: #c62828;
+
+  /* Alert Icons (SVG Data URIs) */
+  --mbr-icon-note: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cline x1='12' y1='16' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'%3E%3C/line%3E%3C/svg%3E");
+  --mbr-icon-tip: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z'%3E%3C/path%3E%3Cpath d='M9 21h6'%3E%3C/path%3E%3C/svg%3E");
+  --mbr-icon-important: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'%3E%3C/path%3E%3Cline x1='12' y1='8' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'%3E%3C/line%3E%3C/svg%3E");
+  --mbr-icon-warning: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'%3E%3C/path%3E%3Cline x1='12' y1='9' x2='12' y2='13'%3E%3C/line%3E%3Cline x1='12' y1='17' x2='12.01' y2='17'%3E%3C/line%3E%3C/svg%3E");
+  --mbr-icon-caution: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2'%3E%3C/polygon%3E%3Cline x1='12' y1='8' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'%3E%3C/line%3E%3C/svg%3E");
 }
 
 .mbr-hamburger-button {
@@ -21,7 +64,9 @@
   padding: 0.25rem 0.5rem;
   cursor: pointer;
   border-radius: 4px;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
   text-decoration: none;
   border-bottom: none;
 }
@@ -120,7 +165,9 @@ ol li {
   justify-content: center;
   border-radius: 4px;
   border: 1px solid transparent;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
 }
 
 .info-trigger:hover {
@@ -173,7 +220,6 @@ ol li {
   opacity: 1;
   pointer-events: auto;
 }
-
 
 /* Panel content container */
 .info-panel-content {
@@ -336,5 +382,386 @@ ol li {
 
   .info-panel-content {
     padding: 1.5rem 1rem;
+  }
+}
+
+/* ==================== Dark Mode Overrides ==================== */
+
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    /* Marginalia - Dark Mode */
+    --mbr-marginalia-bg: rgba(32, 38, 50, 0.6);
+
+    /* GitHub Alerts - Dark Mode */
+    --mbr-alert-note-bg: rgba(13, 71, 161, 0.2);
+    --mbr-alert-note-border: #42a5f5;
+    --mbr-alert-note-icon-color: #42a5f5;
+
+    --mbr-alert-tip-bg: rgba(27, 94, 32, 0.2);
+    --mbr-alert-tip-border: #66bb6a;
+    --mbr-alert-tip-icon-color: #66bb6a;
+
+    --mbr-alert-important-bg: rgba(74, 20, 140, 0.2);
+    --mbr-alert-important-border: #ab47bc;
+    --mbr-alert-important-icon-color: #ab47bc;
+
+    --mbr-alert-warning-bg: rgba(230, 81, 0, 0.2);
+    --mbr-alert-warning-border: #ffa726;
+    --mbr-alert-warning-icon-color: #ffa726;
+
+    --mbr-alert-caution-bg: rgba(183, 28, 28, 0.2);
+    --mbr-alert-caution-border: #ef5350;
+    --mbr-alert-caution-icon-color: #ef5350;
+  }
+}
+
+[data-theme="dark"] {
+  /* Pull Quote - Dark Mode */
+  --mbr-pullquote-bg: rgba(42, 49, 64, 0.4);
+  --mbr-pullquote-border: var(--pico-primary-hover);
+
+  /* Marginalia - Dark Mode */
+  --mbr-marginalia-bg: rgba(32, 38, 50, 0.6);
+
+  /* GitHub Alerts - Dark Mode */
+  --mbr-alert-note-bg: rgba(13, 71, 161, 0.2);
+  --mbr-alert-note-border: #42a5f5;
+  --mbr-alert-note-icon-color: #42a5f5;
+
+  --mbr-alert-tip-bg: rgba(27, 94, 32, 0.2);
+  --mbr-alert-tip-border: #66bb6a;
+  --mbr-alert-tip-icon-color: #66bb6a;
+
+  --mbr-alert-important-bg: rgba(74, 20, 140, 0.2);
+  --mbr-alert-important-border: #ab47bc;
+  --mbr-alert-important-icon-color: #ab47bc;
+
+  --mbr-alert-warning-bg: rgba(230, 81, 0, 0.2);
+  --mbr-alert-warning-border: #ffa726;
+  --mbr-alert-warning-icon-color: #ffa726;
+
+  --mbr-alert-caution-bg: rgba(183, 28, 28, 0.2);
+  --mbr-alert-caution-border: #ef5350;
+  --mbr-alert-caution-icon-color: #ef5350;
+}
+
+/* ==================== Standard Block Quotes (> - Level 1 Nesting) ==================== */
+blockquote {
+  /* avoid awkward indents when we nest blockquotes by clearing some defaults */
+  padding: 0;
+  border: none;
+}
+blockquote > p:last-child {
+  /* this will remove the double padding from the blockquote element and the p  for all of these */
+  margin-bottom: 0;
+}
+:not(blockquote) > blockquote:not(:has(> blockquote)) {
+  padding: var(--pico-spacing);
+  border-left: 0.25rem solid var(--pico-blockquote-border-color);
+}
+blockquote:not(:has(blockquote)) p {
+  font-style: italic;
+}
+blockquote > p {
+  font-size: var(--pico-font-size);
+}
+
+/* ==================== Pull Quotes (>> - Level 2 Nesting) ==================== */
+
+/*
+ * Pull quotes are created with double blockquote nesting (>>).
+ * Styled like magazine pull quotes: larger text, bold border, italic styling.
+ *
+ * Example markdown:
+ * >> This is a pull quote with larger, emphasized text
+ */
+
+:not(blockquote) > blockquote > blockquote:not(:has(> blockquote)) {
+  --pico-font-size: 1.5rem;
+  --pico-font-weight: 500;
+  font-style: italic;
+  background-color: var(--mbr-pullquote-bg);
+  border-left: 0.5rem solid var(--mbr-pullquote-border);
+  color: var(--mbr-pullquote-color);
+  padding: calc(var(--pico-spacing) * 2);
+}
+
+/* ==================== GitHub-Style Alerts ==================== */
+
+/*
+ * GitHub-style alert blockquotes with semantic colors and icons.
+ * Classes are automatically added by pulldown-cmark for markdown like:
+ *
+ * > [!NOTE]
+ * > This is a note alert
+ */
+
+/* Base alert styling */
+blockquote.markdown-alert-note,
+blockquote.markdown-alert-tip,
+blockquote.markdown-alert-important,
+blockquote.markdown-alert-warning,
+blockquote.markdown-alert-caution {
+  position: relative;
+  padding: var(--pico-spacing);
+  padding-left: calc(var(--pico-spacing) * 2.5);
+  margin: var(--pico-typography-spacing-vertical) 0;
+  border-left: 0.5rem solid;
+  border-radius: var(--pico-border-radius);
+}
+
+/* Icon positioning */
+blockquote.markdown-alert-note::before,
+blockquote.markdown-alert-tip::before,
+blockquote.markdown-alert-important::before,
+blockquote.markdown-alert-warning::before,
+blockquote.markdown-alert-caution::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--pico-spacing) * 0.75);
+  top: calc(var(--pico-spacing) * 1.5);
+  width: 22px;
+  height: 22px;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+}
+
+/* Alert title styling */
+blockquote.markdown-alert-note > p:first-of-type::before,
+blockquote.markdown-alert-tip > p:first-of-type::before,
+blockquote.markdown-alert-important > p:first-of-type::before,
+blockquote.markdown-alert-warning > p:first-of-type::before,
+blockquote.markdown-alert-caution > p:first-of-type::before {
+  --pico-font-weight: 700;
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+/* Note Alert (Blue) */
+blockquote.markdown-alert-note {
+  background-color: var(--mbr-alert-note-bg);
+  border-color: var(--mbr-alert-note-border);
+}
+
+blockquote.markdown-alert-note::before {
+  mask-image: var(--mbr-icon-note);
+  background-color: var(--mbr-alert-note-icon-color);
+}
+
+blockquote.markdown-alert-note > p:first-of-type::before {
+  content: "Note";
+  color: var(--mbr-alert-note-icon-color);
+}
+
+/* Tip Alert (Green) */
+blockquote.markdown-alert-tip {
+  background-color: var(--mbr-alert-tip-bg);
+  border-color: var(--mbr-alert-tip-border);
+}
+
+blockquote.markdown-alert-tip::before {
+  background-color: var(--mbr-alert-tip-icon-color);
+  mask-image: var(--mbr-icon-tip);
+}
+
+blockquote.markdown-alert-tip > p:first-of-type::before {
+  content: "Tip";
+  color: var(--mbr-alert-tip-icon-color);
+}
+
+/* Important Alert (Purple) */
+blockquote.markdown-alert-important {
+  background-color: var(--mbr-alert-important-bg);
+  border-color: var(--mbr-alert-important-border);
+}
+
+blockquote.markdown-alert-important::before {
+  mask: var(--mbr-icon-important);
+  background-color: var(--mbr-alert-important-icon-color);
+}
+
+blockquote.markdown-alert-important > p:first-of-type::before {
+  content: "Important";
+  color: var(--mbr-alert-important-icon-color);
+}
+
+/* Warning Alert (Orange) */
+blockquote.markdown-alert-warning {
+  background-color: var(--mbr-alert-warning-bg);
+  border-color: var(--mbr-alert-warning-border);
+}
+
+blockquote.markdown-alert-warning::before {
+  background-color: var(--mbr-alert-warning-icon-color);
+  mask-image: var(--mbr-icon-warning);
+}
+
+blockquote.markdown-alert-warning > p:first-of-type::before {
+  content: "Warning";
+  color: var(--mbr-alert-warning-icon-color);
+}
+
+/* Caution Alert (Red) */
+blockquote.markdown-alert-caution {
+  background-color: var(--mbr-alert-caution-bg);
+  border-color: var(--mbr-alert-caution-border);
+}
+
+blockquote.markdown-alert-caution::before {
+  mask-image: var(--mbr-icon-caution);
+  background-color: var(--mbr-alert-caution-icon-color);
+}
+
+blockquote.markdown-alert-caution > p:first-of-type::before {
+  content: "Caution";
+  color: var(--mbr-alert-caution-icon-color);
+}
+
+/* ==================== Marginalia (>>> - Level 3+ Nesting) ==================== */
+
+/*
+ * Marginalia are created with triple blockquote nesting (>>>).
+ * Uses a hover/click indicator to reveal sidenote content when there aren't margins.
+ *
+ * Example markdown:
+ * >>> This is a margin note shown in gutter or via indicator
+ */
+
+/* Marginalia container - inline indicator approach */
+blockquote blockquote:has(blockquote) {
+  position: relative;
+}
+
+blockquote blockquote blockquote {
+  display: block;
+  position: absolute;
+  left: 100%;
+  top: -3rem;
+  font-size: 0.75em;
+}
+
+/* Indicator marker */
+blockquote blockquote blockquote::before {
+  content: "†";
+  display: inline-block;
+  color: var(--pico-primary);
+  font-weight: 700;
+  font-size: 1.5em;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: var(--pico-border-radius);
+}
+
+blockquote blockquote blockquote:hover::before,
+blockquote blockquote blockquote:focus-within::before {
+  background-color: var(--mbr-marginalia-bg);
+}
+
+/* Hide marginalia content by default if screen is less than x pixels; media queries below override */
+blockquote blockquote blockquote p {
+  position: absolute;
+  display: none;
+  z-index: 1000;
+
+  /* Popover styling */
+  background-color: var(--pico-background-color);
+  border: 1px solid var(--mbr-marginalia-border);
+  border-left: 3px solid var(--pico-primary);
+  border-radius: var(--pico-border-radius);
+  box-shadow: var(--pico-box-shadow);
+  padding: calc(var(--pico-spacing) * 0.75);
+  margin: 0;
+
+  /* Sizing and positioning */
+  min-width: 280px;
+  max-width: 90vw;
+  transform: translateX(-100%) translateY(-50%);
+
+  /* Text styling */
+  --pico-font-size: 0.875em;
+  --pico-line-height: 1.15;
+}
+
+/* Show marginalia on hover */
+blockquote blockquote blockquote:hover p,
+blockquote blockquote blockquote:focus-within p {
+  display: block;
+}
+
+/* Popover arrow - points right toward the † indicator */
+blockquote blockquote blockquote p::before {
+  content: "";
+  position: absolute;
+  left: 100%;
+  top: 12px;
+  border: 8px solid transparent;
+  border-left-color: var(--mbr-marginalia-border);
+}
+
+blockquote blockquote blockquote p::after {
+  content: "";
+  position: absolute;
+  left: 100%;
+  top: 13px;
+  border: 7px solid transparent;
+  border-left-color: var(--pico-background-color);
+  margin-left: -1px;
+}
+
+/* Show marginalia fixed in margin when screen is wide enough */
+@media (min-width: 2000px) {
+  blockquote blockquote blockquote::before {
+    content: "";
+  }
+
+  blockquote blockquote blockquote p {
+    left: calc(100% + 5px);
+    width: calc(100vw - 40px);
+    transform: translateY(-50%);
+    max-width: 250px;
+    display: block;
+    border: none;
+    box-shadow: none;
+    background: none;
+    border-radius: 0;
+  }
+
+  blockquote blockquote blockquote p::before,
+  blockquote blockquote blockquote p::after {
+    left: auto;
+    right: 20px;
+    border: none;
+    transform: none;
+  }
+}
+
+/* Multiple paragraphs in marginalia */
+blockquote blockquote blockquote p + p {
+  position: static;
+  visibility: visible;
+  opacity: 1;
+  display: none;
+  margin-top: calc(var(--pico-typography-spacing-vertical) * 0.5);
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background: none;
+  width: auto;
+  max-width: none;
+}
+
+blockquote blockquote blockquote:hover p + p,
+blockquote blockquote blockquote:focus-within p + p {
+  display: block;
+}
+
+/* Touch device support - keep visible longer after tap */
+@media (hover: none) {
+  blockquote blockquote blockquote:focus p,
+  blockquote blockquote blockquote:active p {
+    visibility: visible;
+    display: block;
+    opacity: 1;
   }
 }
