@@ -1,6 +1,4 @@
-// import "https://cdn.vidstack.io/player@1.12.13";
 import { PlyrLayout, VidstackPlayer, VidstackPlayerLayout } from "/.mbr/vidstack.player.js";
-// import { PlyrLayout, VidstackPlayer, VidstackPlayerLayout } from "vidstack";
 
 // let layout = new VidstackPlayerLayout({});
 let layout2 = new PlyrLayout({});
@@ -40,9 +38,18 @@ document.querySelectorAll("video").forEach(async (videoEl) => {
     load: "visible",
     // posterLoad: "eager",
     crossorigin: true,
+    playsInline: true,
+    // title: TODO - extract from nearby figcaption
     storage: src_no_timecode,
     clipStartTime: clipStart,
     clipEndTime: clipEnd
   });
+  // TODO: add tracks if they exist; equivalent of:
+  // {% set vtt = get_url(path="videos/" ~ path ~ ".captions.en.vtt", cachebust=false) %}
+  // {% set chapters = get_url(path="videos/" ~ path ~ ".chapters.en.vtt", cachebust=false) %}
+  // <track kind="captions" label="English captions" src="{{ vtt | urlencode | safe }}" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
+  // <track kind="chapters" language="en-US" label="Chapters" src="{{ chapters | urlencode | safe }}" srclang="en" default type="vtt" data-type="vtt" />
+  // see https://vidstack.io/docs/player/api/text-tracks/?styling=default-theme
+
 });
 

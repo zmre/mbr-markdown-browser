@@ -74,6 +74,154 @@ mbr -b --output ./public /path/to/notes
 
 See [DEVELOP](DEVELOP.md)
 
+## Markdown Extensions
+
+mbr extends standard markdown with several features for richer content.
+
+### Github Extensions
+
+mbr uses [pulldown-cmark](https://github.com/raphlinus/pulldown-cmark) with all extensions enabled:
+
+| Extension | Syntax | Example |
+|-----------|--------|---------|
+| Tables | GFM tables | `| Col1 | Col2 |` |
+| Footnotes | `[^1]` references | `Text[^1]` with `[^1]: footnote` |
+| Strikethrough | `~~text~~` | ~~deleted~~ |
+| Task lists | `- [ ]` / `- [x]` | Checkboxes in lists |
+| Smart punctuation | `"quotes"`, `--` | Curly quotes, em-dashes |
+| Heading attributes | `# Title {#id}` | Custom anchor IDs |
+| YAML frontmatter | `---` blocks | Metadata at file start |
+| Autolinks | `<https://...>` | Auto-linked URLs |
+
+### YAML Frontmatter
+
+Add metadata at the start of any markdown file and it becomes searchable and navigable:
+
+```yaml
+---
+title: My Document
+tags: documentation, guide
+author: Your Name
+---
+```
+
+### Task Lists with addition of Canceled Items
+
+In addition to standard `[ ]` and `[x]` checkboxes, mbr supports canceled items:
+
+```markdown
+- [ ] Unchecked task
+- [x] Completed task
+- [-] Canceled task (renders with strikethrough)
+```
+
+### Mermaid Diagrams
+
+Code blocks with the `mermaid` language are rendered as diagrams:
+
+````markdown
+```mermaid
+graph LR
+    A[Start] --> B{Decision}
+    B -->|Yes| C[Result 1]
+    B -->|No| D[Result 2]
+```
+````
+
+### Media Embedding via Image Syntax
+
+Use standard image syntax `![caption](url)` to embed various media types:
+
+**Video files** (mp4, mpg, avi, ogv, ogg, m4v), optionally with start and end timestamps:
+
+```markdown
+![My Video](video.mp4)
+![Clip with timestamp](video.mp4#t=10,30)
+```
+
+**Audio files** (mp3, wav, ogg, flac, aac, m4a, webm):
+```markdown
+![Episode 1](podcast.mp3)
+```
+
+**YouTube videos** (various URL formats supported):
+```markdown
+![Watch this](https://www.youtube.com/watch?v=dQw4w9WgXcQ)
+![](https://youtu.be/dQw4w9WgXcQ)
+```
+
+**PDF documents**:
+```markdown
+![Important Report](document.pdf)
+```
+
+Regular images (jpg, png, gif, etc.) render normally as images.
+
+### Enriched Bare URLs
+
+Bare URLs on their own line are enriched with OpenGraph metadata when available:
+
+```markdown
+Some text here.
+
+https://example.com/article
+
+More text here.
+```
+
+This fetches the page's title, description, and image to create a rich preview card. YouTube URLs get full video embeds.
+
+### GitHub-style Alerts
+
+Use GitHub's alert syntax for callout boxes:
+
+```markdown
+> [!NOTE]
+> Helpful information that users should know.
+
+> [!TIP]
+> Optional advice to help users succeed.
+
+> [!IMPORTANT]
+> Key information users need to know.
+
+> [!WARNING]
+> Urgent info that needs immediate attention.
+
+> [!CAUTION]
+> Advises about risks or negative outcomes.
+```
+
+Each alert type has distinct colors and icons.
+
+### Pull Quotes
+
+Use double `>>` for magazine-style pull quotes with emphasized styling:
+
+```markdown
+Regular paragraph text here.
+
+>> This important quote stands out from the surrounding text with larger, italic styling and a prominent border.
+
+More regular text continues here.
+```
+
+Pull quotes by default render with larger font size, italic text, and a distinctive left border.
+
+### Marginalia (Sidenotes)
+
+Use triple `>>>` for margin notes that appear in margins on wide screens or as hover/click popovers on narrower screens:
+
+```markdown
+Main paragraph text that readers focus on.
+
+>>> This aside provides supplementary context without interrupting the main flow.
+
+Continuation of the main content.
+```
+
+Marginalia appear as a dagger symbol (†) to the right. Hover or tap reveals the note content in a popover. The `>>>` syntax must be on its own line with blank lines before and after.
+
 ## TODO
 
 See [TODO](TODO.md)
