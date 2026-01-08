@@ -47,9 +47,11 @@ struct ContentView: View {
 
             Spacer()
 
-            Link("Learn more at github.com/zmre/mbr",
-                 destination: URL(string: "https://github.com/zmre/mbr")!)
-                .font(.caption)
+            Link(
+                "Learn more at github.com/zmre/mbr",
+                destination: URL(string: "https://github.com/zmre/mbr")!
+            )
+            .font(.caption)
         }
         .padding(40)
         .frame(width: 400, height: 350)

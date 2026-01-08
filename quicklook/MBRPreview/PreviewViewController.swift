@@ -4,9 +4,9 @@
 // Renders markdown files using MBR's rendering engine via UniFFI bindings.
 
 import Cocoa
+import os.log
 import Quartz
 import WebKit
-import os.log
 
 private let logger = OSLog(subsystem: "com.zmre.mbr.MBRPreview", category: "Preview")
 
@@ -21,7 +21,6 @@ private let logger = OSLog(subsystem: "com.zmre.mbr.MBRPreview", category: "Prev
 /// - `WKNavigationDelegate` for handling WebView load completion
 @objc(PreviewViewController)
 class PreviewViewController: NSViewController, QLPreviewingController, WKNavigationDelegate {
-
     private var webView: WKWebView!
     private var completionHandler: ((Error?) -> Void)?
 
@@ -36,35 +35,35 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
         // Create WebView - QuickLook will resize it
-        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
-        webView.autoresizingMask = [.width, .height]
-        webView.navigationDelegate = self
+        self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
+        self.webView.autoresizingMask = [.width, .height]
+        self.webView.navigationDelegate = self
 
         // Set the webview directly as the view
-        self.view = webView
+        self.view = self.webView
 
         os_log(.error, log: logger, "loadView complete, webView is the view")
     }
 
     // MARK: - WKNavigationDelegate
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    func webView(_ webView: WKWebView, didFinish _: WKNavigation!) {
         os_log(.info, log: logger, "webView didFinish navigation")
         webView.needsDisplay = true
-        completionHandler?(nil)
-        completionHandler = nil
+        self.completionHandler?(nil)
+        self.completionHandler = nil
     }
 
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    func webView(_: WKWebView, didFail _: WKNavigation!, withError error: Error) {
         os_log(.error, log: logger, "webView didFail navigation: %{public}@", error.localizedDescription)
-        completionHandler?(error)
-        completionHandler = nil
+        self.completionHandler?(error)
+        self.completionHandler = nil
     }
 
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+    func webView(_: WKWebView, didFailProvisionalNavigation _: WKNavigation!, withError error: Error) {
         os_log(.error, log: logger, "webView didFailProvisionalNavigation: %{public}@", error.localizedDescription)
-        completionHandler?(error)
-        completionHandler = nil
+        self.completionHandler?(error)
+        self.completionHandler = nil
     }
 
     // MARK: - QLPreviewingController
@@ -79,7 +78,7 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         let filePath = url.path
 
         // Find config root by looking for .mbr/ directory
-        let configRoot = findConfigRoot(for: url)
+        let configRoot = self.findConfigRoot(for: url)
         os_log(.info, log: logger, "configRoot = %{public}@", configRoot ?? "nil")
 
         do {
@@ -93,7 +92,7 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
             os_log(.info, log: logger, "loading HTML with baseURL = %{public}@", baseURL.absoluteString)
 
             // Load the rendered HTML - completion handler will be called in didFinish delegate
-            webView.loadHTMLString(html, baseURL: baseURL)
+            self.webView.loadHTMLString(html, baseURL: baseURL)
 
         } catch let error as QuickLookError {
             // Handle specific QuickLook errors
@@ -103,7 +102,7 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         } catch {
             // Handle unexpected errors
             os_log(.error, log: logger, "Unexpected error: %{public}@", error.localizedDescription)
-            loadErrorHTML(message: error.localizedDescription)
+            self.loadErrorHTML(message: error.localizedDescription)
             // For errors, we still load error HTML, so the handler will be called in didFinish
         }
     }
@@ -118,12 +117,12 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
     ///
     /// - Parameter fileURL: The URL of the markdown file being previewed.
     /// - Returns: The path to the directory containing `.mbr/`, or `nil` if not found.
-    internal func findConfigRoot(for fileURL: URL) -> String? {
+    func findConfigRoot(for fileURL: URL) -> String? {
         var currentDir = fileURL.deletingLastPathComponent()
         let fileManager = FileManager.default
 
         // Search up to 10 levels deep
-        for _ in 0..<10 {
+        for _ in 0 ..< 10 {
             let mbrDir = currentDir.appendingPathComponent(".mbr")
             var isDirectory: ObjCBool = false
 
@@ -150,7 +149,7 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
     /// with macOS system appearance.
     ///
     /// - Parameter message: The error message to display to the user.
-    internal func loadErrorHTML(message: String) {
+    func loadErrorHTML(message: String) {
         let escapedMessage = message
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -195,6 +194,6 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         </html>
         """
 
-        webView.loadHTMLString(errorHTML, baseURL: nil)
+        self.webView.loadHTMLString(errorHTML, baseURL: nil)
     }
 }

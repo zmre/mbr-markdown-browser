@@ -7,20 +7,19 @@
 // WKWebView's WebContent process cannot run in the sandboxed test environment.
 // The core rendering logic is tested via Rust unit tests in src/quicklook.rs.
 
-import XCTest
 import WebKit
+import XCTest
 
 class PreviewViewControllerTests: XCTestCase {
-
     var viewController: PreviewViewController!
 
     override func setUp() {
         super.setUp()
-        viewController = PreviewViewController()
+        self.viewController = PreviewViewController()
     }
 
     override func tearDown() {
-        viewController = nil
+        self.viewController = nil
         super.tearDown()
     }
 
@@ -28,13 +27,16 @@ class PreviewViewControllerTests: XCTestCase {
 
     func testLoadView_createsWebView() {
         // When
-        viewController.loadView()
+        self.viewController.loadView()
 
         // Then
-        XCTAssertNotNil(viewController.view, "View should be created")
-        XCTAssertTrue(viewController.view is WKWebView, "View should be a WKWebView")
+        XCTAssertNotNil(self.viewController.view, "View should be created")
+        XCTAssertTrue(self.viewController.view is WKWebView, "View should be a WKWebView")
 
-        let webView = viewController.view as! WKWebView
+        guard let webView = self.viewController.view as? WKWebView else {
+            XCTFail("View should be a WKWebView")
+            return
+        }
         XCTAssertTrue(webView.autoresizingMask.contains(.width), "WebView should autoresize width")
         XCTAssertTrue(webView.autoresizingMask.contains(.height), "WebView should autoresize height")
         XCTAssertNotNil(webView.navigationDelegate, "Navigation delegate should be set")
@@ -60,7 +62,7 @@ class PreviewViewControllerTests: XCTestCase {
         try "# Test".write(to: testFile, atomically: true, encoding: .utf8)
 
         // When
-        let result = viewController.findConfigRoot(for: testFile)
+        let result = self.viewController.findConfigRoot(for: testFile)
 
         // Then
         XCTAssertNotNil(result, "Should find config root")
@@ -78,7 +80,7 @@ class PreviewViewControllerTests: XCTestCase {
         try "# Test".write(to: testFile, atomically: true, encoding: .utf8)
 
         // When
-        let result = viewController.findConfigRoot(for: testFile)
+        let result = self.viewController.findConfigRoot(for: testFile)
 
         // Then
         XCTAssertNil(result, "Should return nil when no .mbr directory found")
@@ -105,7 +107,7 @@ class PreviewViewControllerTests: XCTestCase {
         try "# Deep test".write(to: testFile, atomically: true, encoding: .utf8)
 
         // When
-        let result = viewController.findConfigRoot(for: testFile)
+        let result = self.viewController.findConfigRoot(for: testFile)
 
         // Then
         XCTAssertNotNil(result, "Should find config root in parent directories")
@@ -113,6 +115,7 @@ class PreviewViewControllerTests: XCTestCase {
     }
 
     // MARK: - Preview Rendering Tests
+
     // These tests verify that rendering completes without error.
     // Content verification is done via Rust unit tests in src/quicklook.rs.
 
@@ -132,10 +135,10 @@ class PreviewViewControllerTests: XCTestCase {
         try markdownContent.write(to: testFile, atomically: true, encoding: .utf8)
 
         // When
-        viewController.loadView()
+        self.viewController.loadView()
         let expectation = self.expectation(description: "Preview should render")
 
-        viewController.preparePreviewOfFile(at: testFile) { error in
+        self.viewController.preparePreviewOfFile(at: testFile) { error in
             // Then
             XCTAssertNil(error, "Should render without error")
             expectation.fulfill()
@@ -169,10 +172,10 @@ class PreviewViewControllerTests: XCTestCase {
         try "# Custom Theme Test".write(to: testFile, atomically: true, encoding: .utf8)
 
         // When
-        viewController.loadView()
+        self.viewController.loadView()
         let expectation = self.expectation(description: "Preview with custom CSS should render")
 
-        viewController.preparePreviewOfFile(at: testFile) { error in
+        self.viewController.preparePreviewOfFile(at: testFile) { error in
             // Then
             XCTAssertNil(error, "Should render without error")
             expectation.fulfill()
@@ -203,10 +206,10 @@ class PreviewViewControllerTests: XCTestCase {
         try markdownContent.write(to: testFile, atomically: true, encoding: .utf8)
 
         // When
-        viewController.loadView()
+        self.viewController.loadView()
         let expectation = self.expectation(description: "Frontmatter should be parsed")
 
-        viewController.preparePreviewOfFile(at: testFile) { error in
+        self.viewController.preparePreviewOfFile(at: testFile) { error in
             // Then
             XCTAssertNil(error, "Should render without error")
             expectation.fulfill()
@@ -219,26 +222,26 @@ class PreviewViewControllerTests: XCTestCase {
 
     func testLoadErrorHTML_doesNotCrash() {
         // Given
-        viewController.loadView()
+        self.viewController.loadView()
         let dangerousMessage = "<script>alert('XSS')</script> & \"quotes\" > < test"
 
         // When/Then - should not crash
-        viewController.loadErrorHTML(message: dangerousMessage)
+        self.viewController.loadErrorHTML(message: dangerousMessage)
 
         // Verify WebView received the HTML (doesn't crash)
-        XCTAssertNotNil(viewController.view, "View should still exist after loading error HTML")
+        XCTAssertNotNil(self.viewController.view, "View should still exist after loading error HTML")
     }
 
     func testLoadErrorHTML_withSimpleMessage_doesNotCrash() {
         // Given
-        viewController.loadView()
+        self.viewController.loadView()
         let errorMessage = "Test error message"
 
         // When/Then - should not crash
-        viewController.loadErrorHTML(message: errorMessage)
+        self.viewController.loadErrorHTML(message: errorMessage)
 
         // Verify WebView received the HTML (doesn't crash)
-        XCTAssertNotNil(viewController.view, "View should still exist after loading error HTML")
+        XCTAssertNotNil(self.viewController.view, "View should still exist after loading error HTML")
     }
 
     func testRenderPreview_withNonexistentFile_completesWithoutCrashing() {
@@ -246,10 +249,10 @@ class PreviewViewControllerTests: XCTestCase {
         let nonexistentFile = URL(fileURLWithPath: "/nonexistent/path/to/file.md")
 
         // When
-        viewController.loadView()
+        self.viewController.loadView()
         let expectation = self.expectation(description: "Should handle nonexistent file")
 
-        viewController.preparePreviewOfFile(at: nonexistentFile) { error in
+        self.viewController.preparePreviewOfFile(at: nonexistentFile) { _ in
             // Then - completion handler should still be called
             expectation.fulfill()
         }
@@ -257,6 +260,6 @@ class PreviewViewControllerTests: XCTestCase {
         waitForExpectations(timeout: 5.0)
 
         // Verify view controller didn't crash
-        XCTAssertNotNil(viewController.view, "View should still exist after handling error")
+        XCTAssertNotNil(self.viewController.view, "View should still exist after handling error")
     }
 }

@@ -1,3 +1,4 @@
+# flake.nix
 {
   nixConfig = {
     extra-substituters = [
@@ -152,7 +153,10 @@
           || (builtins.match ".*\\.modulemap$" path != null)
           || (builtins.match ".*\\.h$" path != null) # C headers for FFI
           || (builtins.match ".*/quicklook/project\\.yml$" path != null)
-          || (builtins.match ".*/quicklook/build\\.sh$" path != null);
+          || (builtins.match ".*/quicklook/build\\.sh$" path != null)
+          # Swift tooling config
+          || (builtins.match ".*/quicklook/\\.swiftformat$" path != null)
+          || (builtins.match ".*/quicklook/\\.swiftlint\\.yml$" path != null);
       };
 
       # Shared native build inputs
@@ -384,12 +388,50 @@
         inherit src;
       };
 
+      # Swift format check (Darwin only)
+      # Excludes Generated/ directory (UniFFI auto-generated code)
+      packages.swiftfmt = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
+        pkgs.runCommand "mbr-swiftfmt-check" {
+          nativeBuildInputs = [pkgs.swiftformat];
+        } ''
+          cd ${src}/quicklook
+          # Use explicit exclusion since config file may not be accessible in sandbox
+          swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed" && exit 1)
+          touch $out
+        ''
+      );
+
+      # Swift lint check (Darwin only)
+      # Excludes Generated/ directory (UniFFI auto-generated code)
+      packages.swiftlint-check = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
+        pkgs.runCommand "mbr-swiftlint-check" {
+          nativeBuildInputs = [pkgs.swiftlint];
+          # SwiftLint needs HOME for cache directory
+          HOME = "/tmp";
+        } ''
+          cd ${src}/quicklook
+          # Check for violations (swiftlint may error about cache but still report correctly)
+          output=$(swiftlint lint --config .swiftlint.yml . 2>&1 || true)
+          echo "$output"
+          # Fail if violations found
+          if echo "$output" | grep -q "Found [1-9][0-9]* violation"; then
+            echo "SwiftLint check failed - violations found"
+            exit 1
+          fi
+          touch $out
+        ''
+      );
+
       packages.default = packages.mbr;
 
       # Checks run by `nix flake check`
-      checks = {
-        inherit (packages) mbr clippy fmt;
-      };
+      checks =
+        {
+          inherit (packages) mbr clippy fmt;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          inherit (packages) swiftfmt swiftlint-check;
+        };
 
       # Release package: creates distributable archives from the built package
       packages.release =
@@ -471,7 +513,9 @@
             cargo-watch
           ]
           ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            xcodegen  # For generating Xcode project from project.yml
+            xcodegen     # For generating Xcode project from project.yml
+            swiftformat  # Swift code formatter (like cargo fmt)
+            swiftlint    # Swift linter (like cargo clippy)
           ]);
 
           PKG_CONFIG_PATH = "${pkgs.ffmpeg_7-full.dev}/lib/pkgconfig";
