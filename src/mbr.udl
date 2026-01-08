@@ -1,0 +1,32 @@
+// UniFFI interface definition for MBR QuickLook plugin
+// This defines the FFI boundary between Rust and Swift
+
+namespace mbr {
+    // Render a markdown file to self-contained HTML for QuickLook preview
+    // Returns complete HTML string suitable for display in WKWebView
+    [Throws=QuickLookError]
+    string render_preview(string file_path, string? config_root);
+
+    // Render with custom configuration options
+    [Throws=QuickLookError]
+    string render_preview_with_config(string file_path, string? config_root, QuickLookConfig config);
+};
+
+// Error types that can be returned from the API
+// Using interface-style errors to include descriptive messages
+[Error]
+interface QuickLookError {
+    FileReadError(string message);
+    MarkdownRenderError(string message);
+    TemplateRenderError(string message);
+    ConfigError(string message);
+    InvalidPathEncoding();
+};
+
+// Configuration options for QuickLook rendering
+dictionary QuickLookConfig {
+    boolean include_syntax_highlighting;
+    boolean include_mermaid;
+    boolean include_vidstack;
+    string? base_url;
+};

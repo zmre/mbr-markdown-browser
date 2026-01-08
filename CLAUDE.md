@@ -119,7 +119,8 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `markdown.rs` | pulldown-cmark markdown parsing with YAML frontmatter extraction |
 | `templates.rs` | Tera template engine - renders markdown into HTML wrapper |
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
-| `browser.rs` | Native GUI window using wry/tao with devtools |
+| `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
+| `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
 | `vid.rs` | Video embed handling with VidStack player and shortcodes |
 | `oembed.rs` | Auto-embed for bare URLs in markdown |
 | `html.rs` | Custom HTML output for pulldown-cmark |
@@ -272,8 +273,9 @@ build/
 - **pulldown-cmark** - Markdown parsing (with SIMD)
 - **tera** - Template engine
 - **figment** - Configuration management
-- **wry/tao** - Native webview GUI
-- **muda** - Native menu bar (macOS)
+- **wry/tao** - Native webview GUI (optional, `gui` feature)
+- **muda** - Native menu bar (macOS, optional, `gui` feature)
+- **uniffi** - FFI bindings generator for Swift/Kotlin
 - **papaya** - Concurrent hash maps
 - **rayon** - Parallel iteration for repo scanning
 - **proptest** - Property-based testing (dev)

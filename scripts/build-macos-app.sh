@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_DIR="$PROJECT_DIR/macos/MBR.app"
+APP_DIR="$PROJECT_DIR/macos/MBR.app-template"
 
 echo "Building mbr release binary..."
 cd "$PROJECT_DIR"

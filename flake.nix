@@ -143,7 +143,16 @@
           || (builtins.match ".*templates.*" path != null)
           || (builtins.match ".*\\.md$" path != null)
           || (builtins.match ".*\\.png$" path != null)
-          || (builtins.match ".*\\.icns$" path != null);
+          || (builtins.match ".*\\.icns$" path != null)
+          || (builtins.match ".*\\.udl$" path != null) # UniFFI interface definitions
+          # QuickLook extension sources
+          || (builtins.match ".*\\.swift$" path != null)
+          || (builtins.match ".*\\.plist$" path != null)
+          || (builtins.match ".*\\.entitlements$" path != null)
+          || (builtins.match ".*\\.modulemap$" path != null)
+          || (builtins.match ".*\\.h$" path != null) # C headers for FFI
+          || (builtins.match ".*/quicklook/project\\.yml$" path != null)
+          || (builtins.match ".*/quicklook/build\\.sh$" path != null);
       };
 
       # Shared native build inputs
@@ -232,6 +241,86 @@
         '';
       };
 
+      # QuickLook staticlib: builds libmbr.a without GUI/ffmpeg for sandbox compatibility
+      packages.mbr-quicklook-staticlib = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
+        craneLib.buildPackage (commonArgs
+          // {
+            inherit cargoArtifacts;
+            pname = "mbr-quicklook-staticlib";
+            # Build only the staticlib without GUI or media-metadata features
+            # These would pull in SDL/ffmpeg which crash in QuickLook sandbox
+            # Enable ffi feature for UniFFI bindings (required for Swift interop)
+            cargoExtraArgs = "--locked --no-default-features --features ffi --lib";
+
+            preBuild = ''
+              mkdir -p templates/components-js
+              cp -r ${packages.mbr-components}/* templates/components-js/
+            '';
+
+            # Only install the static library
+            installPhaseCommand = ''
+              mkdir -p $out/lib
+              cp target/release/libmbr.a $out/lib/
+            '';
+          })
+      );
+
+      # QuickLook extension: builds the .appex using swiftc directly
+      packages.mbr-quicklook = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
+        pkgs.stdenv.mkDerivation {
+          pname = "mbr-quicklook";
+          inherit version;
+          inherit src;
+
+          nativeBuildInputs = [
+            pkgs.swift
+            pkgs.apple-sdk
+          ];
+
+          buildPhase = ''
+            mkdir -p build/MBRPreview.appex/Contents/MacOS
+
+            # Compile the QuickLook extension using swiftc from nixpkgs
+            # App extensions should be MH_EXECUTE (executables), not MH_BUNDLE
+            # -parse-as-library: Don't look for main() function
+            # -application-extension: Mark as app extension (required for sandboxing)
+            # -e _NSExtensionMain: Use extension entry point instead of _main
+            swiftc \
+              -O \
+              -parse-as-library \
+              -application-extension \
+              -target arm64-apple-macos14.0 \
+              -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
+              -L ${packages.mbr-quicklook-staticlib}/lib \
+              -lmbr \
+              -framework Foundation \
+              -framework CoreFoundation \
+              -framework Security \
+              -framework SystemConfiguration \
+              -framework Cocoa \
+              -framework QuickLookUI \
+              -framework Quartz \
+              -framework WebKit \
+              -framework ExtensionKit \
+              -module-name MBRPreview \
+              -Xlinker -e -Xlinker _NSExtensionMain \
+              -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
+              -I quicklook/Generated \
+              -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
+              quicklook/Generated/mbr.swift \
+              quicklook/MBRPreview/PreviewViewController.swift
+
+            # Copy Info.plist to complete the .appex bundle structure
+            cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
+          '';
+
+          installPhase = ''
+            mkdir -p $out
+            cp -R build/MBRPreview.appex $out/
+          '';
+        }
+      );
+
       # Main package: CLI binary + macOS app bundle (signed on darwin)
       packages.mbr = craneLib.buildPackage (commonArgs
         // {
@@ -246,7 +335,7 @@
           # Create CLI binary (all platforms) + .app bundle (macOS only, signed)
           postInstall = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
             # Create macOS .app bundle structure
-            mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources}
+            mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources,PlugIns}
 
             # Copy binary to app bundle
             cp $out/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
@@ -257,8 +346,15 @@
             # Copy icon
             cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-            # Ad-hoc sign the app bundle for local use
-            /usr/bin/codesign --force --sign - --deep $out/Applications/MBR.app
+            # Copy QuickLook extension (make writable for codesigning)
+            cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
+            chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+
+            # Sign the extension first with its entitlements, then sign the app bundle
+            /usr/bin/codesign --force --sign - \
+              --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+              $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+            /usr/bin/codesign --force --sign - $out/Applications/MBR.app
           '';
 
           meta = with pkgs.lib; {
@@ -373,9 +469,12 @@
           inputsFrom = [packages.mbr];
           packages = with pkgs; [
             cargo-watch
-          ];
+          ]
+          ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            xcodegen  # For generating Xcode project from project.yml
+          ]);
 
-          PKG_CONFIG_PATH = "${pkgs.ffmpeg-headless.dev}/lib/pkgconfig";
+          PKG_CONFIG_PATH = "${pkgs.ffmpeg_7-full.dev}/lib/pkgconfig";
           LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
           RUST_LOG = "mbr=debug,tower_http=debug";
 

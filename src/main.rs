@@ -1,17 +1,16 @@
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+#[cfg(feature = "gui")]
+use mbr::browser::{self, BrowserContext};
 use mbr::{
-    Config, ConfigError, MbrError,
-    browser::{self, BrowserContext},
-    build::Builder,
-    cli,
-    link_transform::LinkTransformConfig,
+    Config, ConfigError, MbrError, build::Builder, cli, link_transform::LinkTransformConfig,
     markdown, server, templates,
 };
 
 /// Check if the given path requires a folder picker dialog.
 /// This is true when launched as an app without a valid working directory.
+#[cfg(feature = "gui")]
 fn needs_folder_picker(path: &Path) -> bool {
     // Try to canonicalize, fall back to the path as-is
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -34,6 +33,7 @@ fn needs_folder_picker(path: &Path) -> bool {
 
 /// Show a folder picker dialog and return the selected path.
 /// Returns None if the user cancels.
+#[cfg(feature = "gui")]
 fn show_folder_picker() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Select Markdown Folder")
@@ -44,14 +44,19 @@ fn show_folder_picker() -> Option<PathBuf> {
 async fn main() -> Result<(), MbrError> {
     // Suppress ffmpeg warnings/info messages from the metadata crate
     // These would otherwise clutter stdout/stderr when processing video files
+    #[cfg(feature = "media-metadata")]
     ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Error);
 
     let args = cli::Args::parse();
 
     // Determine if we're in GUI mode (no --server, --stdout, --build flags)
+    #[cfg(feature = "gui")]
     let is_gui_mode = !args.server && !args.stdout && !args.build;
+    #[cfg(not(feature = "gui"))]
+    let is_gui_mode = false;
 
     // Check if we need to show a folder picker (only in GUI mode when path is root/system dir)
+    #[cfg(feature = "gui")]
     let input_path = if is_gui_mode && needs_folder_picker(&args.path) {
         match show_folder_picker() {
             Some(path) => path,
@@ -63,6 +68,8 @@ async fn main() -> Result<(), MbrError> {
     } else {
         args.path.clone()
     };
+    #[cfg(not(feature = "gui"))]
+    let input_path = args.path.clone();
 
     let input_path_ref = Path::new(&input_path);
     let absolute_path =
@@ -224,68 +231,80 @@ async fn main() -> Result<(), MbrError> {
         server.start().await?;
     } else {
         // GUI mode - default when no flags specified (or explicit -g)
-        let config_copy = config.clone();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
-        let handle = tokio::spawn(async move {
-            let server = server::Server::init(
-                config_copy.ip.0,
-                config_copy.port,
-                config_copy.root_dir.clone(),
-                &config_copy.static_folder,
-                &config_copy.markdown_extensions.clone(),
-                &config_copy.ignore_dirs.clone(),
-                &config_copy.ignore_globs.clone(),
-                &config_copy.watcher_ignore_dirs.clone(),
-                &config_copy.index_file.clone(),
-                config_copy.oembed_timeout_ms,
-                config_copy.template_folder.clone(),
-                None, // Logging already initialized
-            );
-            match server {
-                Ok(mut s) => {
-                    // Try up to 10 port increments if address is in use
-                    if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
-                        tracing::error!("Server error: {e}");
+        #[cfg(feature = "gui")]
+        {
+            let config_copy = config.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
+            let handle = tokio::spawn(async move {
+                let server = server::Server::init(
+                    config_copy.ip.0,
+                    config_copy.port,
+                    config_copy.root_dir.clone(),
+                    &config_copy.static_folder,
+                    &config_copy.markdown_extensions.clone(),
+                    &config_copy.ignore_dirs.clone(),
+                    &config_copy.ignore_globs.clone(),
+                    &config_copy.watcher_ignore_dirs.clone(),
+                    &config_copy.index_file.clone(),
+                    config_copy.oembed_timeout_ms,
+                    config_copy.template_folder.clone(),
+                    None, // Logging already initialized
+                );
+                match server {
+                    Ok(mut s) => {
+                        // Try up to 10 port increments if address is in use
+                        if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
+                            tracing::error!("Server error: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Couldn't initialize the server: {e}. Try with -s for more info"
+                        );
+                        // Drop the sender to signal failure
+                        drop(ready_tx);
                     }
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "Couldn't initialize the server: {e}. Try with -s for more info"
-                    );
-                    // Drop the sender to signal failure
-                    drop(ready_tx);
+            });
+
+            // Wait for server to be ready before opening browser
+            let actual_port = match ready_rx.await {
+                Ok(port) => port,
+                Err(_) => {
+                    tracing::error!("Server failed to start");
+                    return Ok(());
                 }
-            }
-        });
+            };
 
-        // Wait for server to be ready before opening browser
-        let actual_port = match ready_rx.await {
-            Ok(port) => port,
-            Err(_) => {
-                tracing::error!("Server failed to start");
-                return Ok(());
-            }
-        };
+            let url = url::Url::parse(format!("http://{}:{}/", config.ip, actual_port).as_str())?;
+            let url_path = build_url_path(
+                &path_relative_to_root,
+                is_directory,
+                &config.markdown_extensions,
+            );
+            let url = url.join(&url_path)?;
 
-        let url = url::Url::parse(format!("http://{}:{}/", config.ip, actual_port).as_str())?;
-        let url_path = build_url_path(
-            &path_relative_to_root,
-            is_directory,
-            &config.markdown_extensions,
-        );
-        let url = url.join(&url_path)?;
+            // Launch browser with full context for server management
+            let ctx = BrowserContext {
+                url: url.to_string(),
+                server_handle: handle,
+                config,
+                tokio_runtime: tokio::runtime::Handle::current(),
+            };
 
-        // Launch browser with full context for server management
-        let ctx = BrowserContext {
-            url: url.to_string(),
-            server_handle: handle,
-            config,
-            tokio_runtime: tokio::runtime::Handle::current(),
-        };
-
-        browser::launch_browser(ctx)?;
-        // Note: server handle is now managed by the browser context
-        // It will be aborted when the browser window closes or when switching folders
+            browser::launch_browser(ctx)?;
+            // Note: server handle is now managed by the browser context
+            // It will be aborted when the browser window closes or when switching folders
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            // GUI mode not available - this shouldn't happen since is_gui_mode is always false
+            // when the gui feature is disabled, but provide a clear error just in case
+            tracing::error!(
+                "GUI mode is not available in this build. Use -s for server mode or --stdout for stdout mode."
+            );
+            std::process::exit(1);
+        }
     }
     Ok(())
 }
@@ -392,17 +411,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gui")]
     fn test_needs_folder_picker_root() {
         assert!(needs_folder_picker(Path::new("/")));
     }
 
     #[test]
+    #[cfg(feature = "gui")]
     fn test_needs_folder_picker_normal_path() {
         // A normal path like /Users/foo should not need folder picker
         assert!(!needs_folder_picker(Path::new("/Users/foo")));
     }
 
     #[test]
+    #[cfg(feature = "gui")]
     fn test_needs_folder_picker_current_dir() {
         // Current directory "." should not need folder picker when it resolves to a real path
         // This test depends on where it's run from
