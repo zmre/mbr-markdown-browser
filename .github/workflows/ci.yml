@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
       - name: Check formatting
         run: nix develop --command cargo fmt -- --check
@@ -35,24 +35,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+          extraPullNames: nix-community
 
       - name: Build components
         run: |
           set -euo pipefail
-          nix build .#mbr-components
+          nix build -L .#mbr-components
           echo "=== Nix build output ==="
           ls -la result/
           mkdir -p templates/components-js
@@ -62,7 +60,7 @@ jobs:
           test -f templates/components-js/mbr-components.js || { echo "FATAL: mbr-components.js not created!"; exit 1; }
 
       - name: Upload components
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: components
           path: templates/components-js/
@@ -81,28 +79,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download components
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: components
           path: templates/components-js/
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+          extraPullNames: nix-community
 
       - name: Clippy lint
-        run: nix build .#clippy
+        run: nix build -L .#clippy
 
   # Tests - runs after components are built
   test:
@@ -116,28 +112,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download components
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: components
           path: templates/components-js/
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+          extraPullNames: nix-community
 
       - name: Run tests
-        run: nix develop --command cargo test --all-features
+        run: nix build -L .#tests
 
   # Full build - runs in parallel with lint/test
   build:
@@ -151,28 +145,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download components
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: components
           path: templates/components-js/
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+          extraPullNames: nix-community
 
       - name: Build
-        run: nix build .#mbr
+        run: nix build -L .#mbr
 
   # Swift checks - only run on macOS
   swift-check:
@@ -180,25 +172,23 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
       - name: Setup Cachix
         uses: cachix/cachix-action@v16
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+          extraPullNames: nix-community
 
       - name: Swift format check
-        run: nix build .#swiftfmt
+        run: nix build -L .#swiftfmt
 
       - name: SwiftLint check
-        run: nix build .#swiftlint-check
+        run: nix build -L .#swiftlint-check
 
   # Frontend component tests (TypeScript)
   test-components:
@@ -206,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

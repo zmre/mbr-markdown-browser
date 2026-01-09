@@ -1,4 +1,4 @@
-# mbr - markdown browser
+# mbr - the fast, complete markdown browser
 
 **THIS IS A WORK IN PROGRESS AND NOT YET STABLE** but testers are welcome.
 
@@ -14,12 +14,12 @@ I've added quite a few minor markdown extensions. For example, if an image link 
 
 While I want to use this first and foremost as a markdown previewer with live updating, and second as a markdown browser, the whole thing is HTML-centric. This means that it is a short extra distance to be able to generate a static website and because there are no other static site generators that meet my various criteria (ability to blend assets with markdown in the same folders, no required directory structures, enriched markdown, fast, handling of videos, and more).
 
-## Technical approach
+## Approach
 
 1. Markdown will convert to HTML on the fly
 2. HTML will be served up from a local private web server
 3. The UI is HTML+JavaScript+CSS with Lit web components
-4. Everything (style, behavior) is highly configurable and selectively overrideable
+4. Everything (style, behavior, html, components) is highly configurable and selectively overrideable
 5. Performance is extremely important -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.
 6. Leaves nothing behind (no caches, temp files, etc.), unless there's a static build and even then, only in the build directory.
 
