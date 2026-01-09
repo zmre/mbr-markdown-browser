@@ -97,6 +97,7 @@ impl Vid {
         }
     }
 
+    // open_only is used so the markdown parser can automatically fill in the caption and then cause the html to close after
     pub fn to_html(&self, open_only: bool) -> String {
         let mut time = "".to_string();
         if let Some(start) = self.start.as_ref() {
