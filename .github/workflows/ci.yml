@@ -50,7 +50,7 @@ jobs:
       - name: Build components
         run: |
           set -euo pipefail
-          nix build .#mbr-components
+          nix build -L .#mbr-components
           echo "=== Nix build output ==="
           ls -la result/
           mkdir -p templates/components-js
@@ -98,7 +98,7 @@ jobs:
           extraPullNames: nix-community
 
       - name: Clippy lint
-        run: nix build .#clippy
+        run: nix build -L .#clippy
 
   # Tests - runs after components are built
   test:
@@ -131,7 +131,7 @@ jobs:
           extraPullNames: nix-community
 
       - name: Run tests
-        run: nix build .#tests
+        run: nix build -L .#tests
 
   # Full build - runs in parallel with lint/test
   build:
@@ -164,7 +164,7 @@ jobs:
           extraPullNames: nix-community
 
       - name: Build
-        run: nix build .#mbr
+        run: nix build -L .#mbr
 
   # Swift checks - only run on macOS
   swift-check:
@@ -185,10 +185,10 @@ jobs:
           extraPullNames: nix-community
 
       - name: Swift format check
-        run: nix build .#swiftfmt
+        run: nix build -L .#swiftfmt
 
       - name: SwiftLint check
-        run: nix build .#swiftlint-check
+        run: nix build -L .#swiftlint-check
 
   # Frontend component tests (TypeScript)
   test-components:
