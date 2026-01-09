@@ -1,4 +1,4 @@
-# mbr - markdown browser
+# mbr - the fast, complete markdown browser
 
 **THIS IS A WORK IN PROGRESS AND NOT YET STABLE** but testers are welcome.
 
