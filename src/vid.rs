@@ -122,7 +122,7 @@ impl Vid {
         format!(
             r#"
             <figure>
-                <video controls preload="metadata" poster="{}.cover.png">
+                <video controls preload="none" playsinline muted="false" loop="false" poster="{}.cover.png">
                     <source src='{}{}' type="{}">
                     <track kind="captions" label="English captions" src="{}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
                     <track kind="chapters" language="en-US" label="Chapters" src="{}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />

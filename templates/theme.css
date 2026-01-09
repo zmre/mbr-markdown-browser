@@ -132,18 +132,20 @@ body > footer {
 figure > video {
   width: 100%;
   height: auto;
+  max-height: calc(100vh - 50px);
+  max-width: 100%;
   align-items: center;
   /* display: inline-flex; */
   user-select: none;
 }
-figure > video::cue {
-  font-size: 0.875em;
-  margin: 1em;
-  padding: 0.5em;
-}
-media-provider > video::cue {
-  display: none;
-}
+/* figure > video::cue { */
+/*   font-size: 0.875em; */
+/*   margin: 1em; */
+/*   padding: 0.5em; */
+/* } */
+/* media-provider > video::cue { */
+/*   display: none; */
+/* } */
 
 ol li {
   list-style: decimal;

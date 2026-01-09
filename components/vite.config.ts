@@ -55,10 +55,17 @@ export default {
       entry: resolve(__dirname, 'src/main.js'),
       fileName: 'mbr-components',
       name: 'MBR',
+      // Use 'es' format without code splitting for simpler embedding
+      formats: ['es'],
     },
     rollupOptions: {
       // Pagefind is loaded at runtime from static sites, not bundled
       external: ['/.mbr/pagefind/pagefind.js'],
+      output: {
+        // Disable code splitting - bundle everything into one file
+        // This is essential since we serve the bundle as a single embedded file
+        inlineDynamicImports: true,
+      },
     }
   }
 } satisfies UserConfig

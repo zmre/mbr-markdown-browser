@@ -1220,3 +1220,74 @@ async fn test_etag_changes_with_content() {
 
     assert_ne!(etag1, etag2, "ETag should change when content changes");
 }
+
+// ==================== Video Enhancement Tests ====================
+
+#[tokio::test]
+async fn test_components_js_bundle_served() {
+    let repo = TestRepo::new();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/.mbr/components/mbr-components.js").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Components JS bundle should be served at /.mbr/components/mbr-components.js"
+    );
+
+    let content_type = response.headers().get("content-type").unwrap();
+    assert!(
+        content_type.to_str().unwrap().contains("javascript"),
+        "Should have javascript content type"
+    );
+}
+
+#[tokio::test]
+async fn test_components_js_bundle_no_missing_imports() {
+    // This test verifies that the JS bundle doesn't try to dynamically import
+    // files that aren't served, which would cause 404 errors in the browser
+    let repo = TestRepo::new();
+
+    let server = TestServer::start(&repo).await;
+    let js_content = server.get_text("/.mbr/components/mbr-components.js").await;
+
+    // Check that there are no dynamic imports to external chunk files
+    // These would look like: import("./main-xxx.js") or import("/.mbr/components/main-xxx.js")
+    let has_dynamic_import_to_chunk =
+        js_content.contains(r#"import("./"#) || js_content.contains(r#"import("/.mbr/components/"#);
+
+    // If there are dynamic imports, they should either:
+    // 1. Not exist (everything bundled inline)
+    // 2. Or be to files that are served
+    if has_dynamic_import_to_chunk {
+        // Extract the imported paths and verify they're served
+        // For now, just fail with a helpful message
+        assert!(
+            !has_dynamic_import_to_chunk,
+            "Components bundle contains dynamic imports to external chunks. \
+             These chunks must either be bundled inline or explicitly served. \
+             Check vite.config.ts to disable code splitting."
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_video_in_markdown_gets_video_tag() {
+    let repo = TestRepo::new();
+    // Use image syntax to embed a video (which gets converted to <video> tag)
+    repo.create_markdown(
+        "video-page.md",
+        "# Video Page\n\n![My Video](test.mp4)\n\nSome text after.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/video-page/").await;
+
+    // The markdown should render a <video> element
+    assert!(
+        html.contains("<video"),
+        "Page with video should have <video> element. Got: {}",
+        html
+    );
+}
