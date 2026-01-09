@@ -631,19 +631,12 @@ impl Server {
             }
             ResolvedPath::MarkdownFile(md_path) => {
                 tracing::debug!("rendering markdown: {:?}", &md_path);
-                Self::markdown_to_html(
-                    &md_path,
-                    &config.templates,
-                    config.base_dir.as_path(),
-                    config.oembed_timeout_ms,
-                    &config.markdown_extensions,
-                    &config.index_file,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Error rendering markdown: {e}");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })
+                Self::markdown_to_html(&md_path, &config)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Error rendering markdown: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("generating directory listing: {:?}", &dir_path);
@@ -693,28 +686,26 @@ impl Server {
 
     async fn markdown_to_html(
         md_path: &Path,
-        templates: &crate::templates::Templates,
-        root_path: &Path,
-        oembed_timeout_ms: u64,
-        markdown_extensions: &[String],
-        index_file: &str,
+        config: &ServerState,
     ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+        let root_path = config.base_dir.as_path();
+
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = md_path
             .file_name()
             .and_then(|f| f.to_str())
-            .is_some_and(|f| f == index_file);
+            .is_some_and(|f| f == config.index_file);
 
         let link_transform_config = LinkTransformConfig {
-            markdown_extensions: markdown_extensions.to_vec(),
-            index_file: index_file.to_string(),
+            markdown_extensions: config.markdown_extensions.clone(),
+            index_file: config.index_file.clone(),
             is_index_file,
         };
 
         let (mut frontmatter, headings, inner_html_output) = markdown::render(
             md_path.to_path_buf(),
             root_path,
-            oembed_timeout_ms,
+            config.oembed_timeout_ms,
             link_transform_config,
         )
         .await
@@ -755,7 +746,7 @@ impl Server {
             .collect();
         let current_dir_name = get_current_dir_name(&url_path_buf);
 
-        // Build extra context for navigation elements and heading TOC
+        // Build extra context for navigation elements, heading TOC, and config
         let mut extra_context = std::collections::HashMap::new();
         extra_context.insert(
             "breadcrumbs".to_string(),
@@ -767,7 +758,8 @@ impl Server {
         );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
 
-        let full_html_output = templates
+        let full_html_output = config
+            .templates
             .render_markdown(&inner_html_output, frontmatter, extra_context)
             .await
             .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?;
@@ -894,6 +886,17 @@ impl Server {
         // Indicate server mode for frontend search functionality
         context.insert("server_mode".to_string(), json!(true));
 
+        // Add full config to template context
+        context.insert(
+            "config".to_string(),
+            json!({
+                "static_folder": config.static_folder,
+                "markdown_extensions": config.markdown_extensions,
+                "index_file": config.index_file,
+                "oembed_timeout_ms": config.oembed_timeout_ms,
+            }),
+        );
+
         // Detect if we're at the root directory
         let is_root =
             relative_path.as_os_str().is_empty() || relative_path == std::path::Path::new(".");
@@ -944,19 +947,12 @@ impl Server {
         match resolve_request_path(&resolver_config, "") {
             ResolvedPath::MarkdownFile(md_path) => {
                 tracing::debug!("home: rendering index markdown: {:?}", &md_path);
-                Self::markdown_to_html(
-                    &md_path,
-                    &config.templates,
-                    config.base_dir.as_path(),
-                    config.oembed_timeout_ms,
-                    &config.markdown_extensions,
-                    &config.index_file,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Error rendering home markdown: {e}");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })
+                Self::markdown_to_html(&md_path, &config)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Error rendering home markdown: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("home: generating directory listing: {:?}", &dir_path);
@@ -1174,26 +1170,6 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "/pico.min.css",
         include_bytes!("../templates/pico.min.css"),
         "text/css",
-    ),
-    (
-        "/vid.js",
-        include_bytes!("../templates/vid.js"),
-        "application/javascript",
-    ),
-    (
-        "/vidstack.player.css",
-        include_bytes!("../templates/vidstack.player.1.11.21.css"),
-        "text/css",
-    ),
-    (
-        "/vidstack.plyr.css",
-        include_bytes!("../templates/vidstack.plyr.1.11.21.css"),
-        "text/css",
-    ),
-    (
-        "/vidstack.player.js",
-        include_bytes!("../templates/vidstack.player.1.12.13.js"),
-        "application/javascript",
     ),
     (
         "/components/mbr-components.js",

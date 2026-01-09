@@ -355,6 +355,13 @@ async fn process_event(
                 (new_event, state)
             }
         },
+        Event::End(TagEnd::Image) => {
+            if let Some(media) = state.current_media.take() {
+                (Event::Html(media.html_close().into()), state)
+            } else {
+                (event, state)
+            }
+        }
         Event::Start(Tag::MetadataBlock(v)) => {
             state.metadata_source = Some(*v);
             state.in_metadata = true;
@@ -363,13 +370,6 @@ async fn process_event(
         Event::End(TagEnd::MetadataBlock(_)) => {
             state.in_metadata = false;
             (event.clone(), state)
-        }
-        Event::End(TagEnd::Image) => {
-            if let Some(media) = state.current_media.take() {
-                (Event::Html(media.html_close().into()), state)
-            } else {
-                (event, state)
-            }
         }
         // Track when we're inside a link (including autolinks like <http://...>)
         // and transform the link URL for trailing-slash URL convention
