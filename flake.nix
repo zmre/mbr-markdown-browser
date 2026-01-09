@@ -383,6 +383,18 @@
           '';
         });
 
+      # Test - runs all tests with all features enabled
+      packages.tests = craneLib.cargoTest (commonArgs
+        // {
+          inherit cargoArtifacts;
+          cargoTestExtraArgs = "--all-features";
+
+          preBuild = ''
+            mkdir -p templates/components-js
+            cp -r ${packages.mbr-components}/* templates/components-js/
+          '';
+        });
+
       # Format check
       packages.fmt = craneLib.cargoFmt {
         inherit src;
@@ -427,7 +439,7 @@
       # Checks run by `nix flake check`
       checks =
         {
-          inherit (packages) mbr clippy fmt;
+          inherit (packages) mbr clippy fmt tests;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           inherit (packages) swiftfmt swiftlint-check;

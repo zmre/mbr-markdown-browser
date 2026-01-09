@@ -146,7 +146,7 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Run tests
-        run: nix develop --command cargo test --all-features
+        run: nix build .#tests
 
   # Full build - runs in parallel with lint/test
   build:
