@@ -127,7 +127,9 @@ impl Vid {
                     <track kind="captions" label="English captions" src="{}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
                     <track kind="chapters" language="en-US" label="Chapters" src="{}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />
                 </video>
-                <figcaption>{}{}
+                <figcaption>{}
+                <mbr-video-extras src='{}' start='{}' end='{}'></mbr-video-extras>
+                {}
             "#,
             self.url,
             self.url,
@@ -136,6 +138,9 @@ impl Vid {
             self.url,
             self.url,
             self.caption.as_deref().unwrap_or(""),
+            self.url,
+            self.start.as_ref().unwrap_or(&"".to_string()),
+            self.end.as_ref().unwrap_or(&"".to_string()),
             {
                 if open_only {
                     "".to_string()
@@ -240,7 +245,11 @@ mod tests {
         let html = vid.to_html(false);
         assert!(html.contains("<video"));
         assert!(html.contains("src='/videos/foo.mp4#t=10,20'"));
-        assert!(html.contains("<figcaption>Caption</figcaption>"));
+        assert!(html.contains("<figcaption>Caption"));
+        assert!(html.contains(
+            "<mbr-video-extras src='/videos/foo.mp4' start='10' end='20'></mbr-video-extras>"
+        ));
+        assert!(html.contains("</figcaption></figure>"));
     }
 
     #[test]
