@@ -1,0 +1,120 @@
+name: MBRQuickLook
+options:
+  bundleIdPrefix: com.zmre.mbr
+  deploymentTarget:
+    macOS: "12.0"
+  xcodeVersion: "16.0"
+
+settings:
+  base:
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Build only for arm64 (matching Rust library)
+    ARCHS: arm64
+    VALID_ARCHS: arm64
+
+configs:
+  Debug:
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+  Release:
+    SWIFT_OPTIMIZATION_LEVEL: -O
+
+targets:
+  # Minimal host app (required for embedding QuickLook extension)
+  MBRQuickLookHost:
+    type: application
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: Host
+        createIntermediateGroups: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.quicklook-host
+        INFOPLIST_FILE: Host/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        # Use clang as the linker driver (fixes Xcode 16 linker issues)
+        LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
+    dependencies:
+      - target: MBRPreview
+        embed: true
+        codeSign: true
+
+  # QuickLook Preview Extension
+  MBRPreview:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: MBRPreview
+        createIntermediateGroups: true
+      - path: Generated/mbr.swift
+        createIntermediateGroups: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.quicklook-host.MBRPreview
+        INFOPLIST_FILE: MBRPreview/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_ENTITLEMENTS: MBRPreview/MBRPreview.entitlements
+        SKIP_INSTALL: YES
+        # Use clang as the linker driver (fixes Xcode 16 linker issues)
+        LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
+        # Library search paths for Rust static library
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../target/release
+        # Link to Rust static library and required macOS frameworks
+        # Note: GUI deps (wry/tao) and ffmpeg excluded via --no-default-features to avoid SDL dependency
+        OTHER_LDFLAGS: $(inherited) -lmbr -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
+        # Header search path for FFI
+        HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
+        SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated
+        # Import the FFI module
+        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/mbrFFI.modulemap
+    dependencies: []
+
+  # Test target for MBRPreview extension
+  # Note: We include MBRPreview sources directly since app extensions don't export symbols
+  MBRPreviewTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: MBRPreviewTests
+        createIntermediateGroups: true
+      - path: MBRPreview
+        createIntermediateGroups: true
+      - path: Generated/mbr.swift
+        createIntermediateGroups: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.quicklook-host.MBRPreviewTests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        # Use clang as the linker driver (fixes Xcode 16 linker issues)
+        LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
+        # Inherit search paths from MBRPreview target
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../target/release
+        OTHER_LDFLAGS: $(inherited) -lmbr -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
+        HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
+        SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated
+        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/mbrFFI.modulemap
+    dependencies: []
+
+schemes:
+  MBRQuickLook:
+    build:
+      targets:
+        MBRQuickLookHost: all
+        MBRPreview: all
+        MBRPreviewTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MBRPreviewTests

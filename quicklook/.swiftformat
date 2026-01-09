@@ -1,0 +1,27 @@
+# SwiftFormat configuration for MBR QuickLook Extension
+# Run: swiftformat .
+
+# Swift version (required for some formatting rules)
+--swiftversion 5.9
+
+# Exclude auto-generated UniFFI bindings
+--exclude Generated
+
+# Use 4-space indentation (matches Xcode default)
+--indent 4
+
+# Allow explicit self for clarity
+--self insert
+
+# Trailing commas in arrays/dictionaries
+--commas inline
+
+# Wrap arguments that exceed line length
+--wraparguments before-first
+--wrapcollections before-first
+
+# Maximum line length (matches Xcode default)
+--maxwidth 120
+
+# Disable brace wrapping that conflicts with SwiftLint
+--disable wrapMultilineStatementBraces

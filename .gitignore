@@ -26,3 +26,8 @@ result
 *.sln
 *.sw?
 .playwright-mcp
+
+# macOS app template build artifacts (keep Info.plist and Resources/)
+macos/MBR.app-template/Contents/MacOS/
+macos/MBR.app-template/Contents/PlugIns/
+macos/MBR.app-template/Contents/_CodeSignature/

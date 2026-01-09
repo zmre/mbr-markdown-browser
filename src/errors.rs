@@ -27,6 +27,7 @@ pub enum MbrError {
     #[error("Repository error: {0}")]
     Repo(#[from] RepoError),
 
+    #[cfg(feature = "gui")]
     #[error("Browser error: {0}")]
     Browser(#[from] BrowserError),
 
@@ -174,6 +175,7 @@ pub enum RepoError {
 }
 
 /// Errors related to the browser/GUI window.
+#[cfg(feature = "gui")]
 #[derive(Debug, Error)]
 pub enum BrowserError {
     #[error("Failed to create window")]

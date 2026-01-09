@@ -324,41 +324,45 @@ impl StaticFileMetadata {
         me.file_size_bytes = filesize;
         me.created = created;
         me.modified = modified;
-        me.kind = match me.kind {
-            /* StaticFileKind::Pdf {
-                            ..me
-                        }, // TODO: get PDF metadata using https://docs.rs/pdf-extract/latest/pdf_extract/ -- but see if there's a way to just process some of the file
-            // */
-            StaticFileKind::Image { .. } => {
-                let metadata =
-                    metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
+        // Extract media metadata when available (requires ffmpeg)
+        #[cfg(feature = "media-metadata")]
+        {
+            me.kind = match me.kind {
+                /* StaticFileKind::Pdf {
+                                ..me
+                            }, // TODO: get PDF metadata using https://docs.rs/pdf-extract/latest/pdf_extract/ -- but see if there's a way to just process some of the file
+                // */
+                StaticFileKind::Image { .. } => {
+                    let metadata =
+                        metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
 
-                StaticFileKind::Image {
-                    width: metadata.as_ref().and_then(|m| m.width),
-                    height: metadata.as_ref().and_then(|m| m.height),
+                    StaticFileKind::Image {
+                        width: metadata.as_ref().and_then(|m| m.width),
+                        height: metadata.as_ref().and_then(|m| m.height),
+                    }
                 }
-            }
-            StaticFileKind::Audio { .. } => {
-                let metadata =
-                    metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
-                StaticFileKind::Audio {
-                    duration: metadata.as_ref().and_then(|m| m.duration.clone()),
-                    title: metadata.as_ref().and_then(|m| m.title.clone()),
+                StaticFileKind::Audio { .. } => {
+                    let metadata =
+                        metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
+                    StaticFileKind::Audio {
+                        duration: metadata.as_ref().and_then(|m| m.duration.clone()),
+                        title: metadata.as_ref().and_then(|m| m.title.clone()),
+                    }
                 }
-            }
-            StaticFileKind::Video { .. } => {
-                let metadata =
-                    metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
+                StaticFileKind::Video { .. } => {
+                    let metadata =
+                        metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
 
-                StaticFileKind::Video {
-                    width: metadata.as_ref().and_then(|m| m.width),
-                    height: metadata.as_ref().and_then(|m| m.height),
-                    duration: metadata.as_ref().and_then(|m| m.duration.clone()),
-                    title: metadata.as_ref().and_then(|m| m.title.clone()),
+                    StaticFileKind::Video {
+                        width: metadata.as_ref().and_then(|m| m.width),
+                        height: metadata.as_ref().and_then(|m| m.height),
+                        duration: metadata.as_ref().and_then(|m| m.duration.clone()),
+                        title: metadata.as_ref().and_then(|m| m.title.clone()),
+                    }
                 }
-            }
-            _ => me.kind,
-        };
+                _ => me.kind,
+            };
+        }
         me
     }
 

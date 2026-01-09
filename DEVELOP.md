@@ -139,3 +139,89 @@ Asset resolution follows this priority:
 3. Compiled-in defaults
 
 This means you can partially override - missing files fall back to defaults.
+
+## QuickLook Extension
+
+MBR includes a macOS QuickLook preview extension that renders markdown files using MBR's rendering engine. The extension is bundled with MBR.app and auto-registers when the app is run.
+
+### Building the QuickLook Extension
+
+The extension uses UniFFI to call Rust code from Swift. Build with:
+
+```bash
+# From nix development shell
+nix develop -c bash -c './quicklook/build.sh'
+
+# Build and install into local MBR.app
+nix develop -c bash -c './quicklook/build.sh install'
+```
+
+**Requirements:**
+- Nix development shell (provides xcodegen, ffmpeg, pkg-config)
+- Xcode command line tools
+
+### Extension Architecture
+
+```
+quicklook/
+├── build.sh                          # Build script
+├── project.yml                       # xcodegen project definition
+├── Host/                             # Minimal host app (required for embedding)
+│   ├── AppDelegate.swift
+│   └── Info.plist
+├── MBRPreview/                       # QuickLook extension target
+│   ├── PreviewViewController.swift   # Main extension controller
+│   ├── Info.plist                    # Supported UTIs, extension config
+│   └── MBRPreview.entitlements       # Sandbox entitlements
+└── Generated/                        # UniFFI-generated Swift bindings
+    ├── mbr.swift
+    └── mbrFFI.modulemap
+```
+
+### How It Works
+
+1. **UniFFI Bindings**: The Rust `render_preview()` function (in `src/quicklook.rs`) is exposed to Swift via UniFFI
+2. **Static Library**: Rust code is compiled as `libmbr.a` without GUI dependencies (`--no-default-features`)
+3. **Swift Extension**: `PreviewViewController.swift` calls the Rust function and displays HTML in a WebView
+
+### Feature Flags
+
+The `gui` feature controls whether wry/tao/muda/rfd dependencies are included:
+
+```bash
+# Build with GUI (default) - for main MBR binary
+cargo build --release
+
+# Build without GUI - for QuickLook extension
+cargo build --release --no-default-features
+```
+
+The QuickLook extension **must** be built without the `gui` feature because:
+- QuickLook extensions run in a sandboxed environment without GUI access
+- wry/tao require SDL3 which isn't available in the sandbox
+
+### Testing the Extension
+
+```bash
+# After running build.sh install and launching MBR.app once:
+qlmanage -p /path/to/file.md
+
+# Check if extension is registered
+pluginkit -m -i com.zmre.mbr.MBRPreview
+```
+
+### Troubleshooting
+
+**Extension not appearing:**
+1. Run MBR.app once to register the extension
+2. Check `pluginkit -m` output for registration
+
+**Extension crashes:**
+1. Check crash logs in `~/Library/Logs/DiagnosticReports/`
+2. Ensure extension was built with `--no-default-features`
+
+**Conflicting extensions:**
+```bash
+# List all markdown QuickLook extensions
+pluginkit -m | grep -i markdown
+```

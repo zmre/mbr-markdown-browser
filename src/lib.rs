@@ -2,7 +2,13 @@
 //!
 //! A markdown previewer, browser, and static site generator.
 
+// Include the UniFFI scaffolding generated from mbr.udl (only when ffi feature is enabled)
+// This must be in the crate root (lib.rs) for UniFFI to work properly
+#[cfg(feature = "ffi")]
+uniffi::include_scaffolding!("mbr");
+
 pub mod audio;
+#[cfg(feature = "gui")]
 pub mod browser;
 pub mod build;
 pub mod cli;
@@ -14,6 +20,8 @@ pub mod markdown;
 pub mod media;
 pub mod oembed;
 pub mod path_resolver;
+#[cfg(feature = "ffi")]
+pub mod quicklook;
 pub mod repo;
 pub mod search;
 pub mod server;
@@ -24,4 +32,6 @@ pub mod watcher;
 pub use build::{BuildStats, Builder};
 pub use config::Config;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
+#[cfg(feature = "ffi")]
+pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
