@@ -33,9 +33,6 @@ jobs:
   build-components:
     name: Build Components
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -48,9 +45,7 @@ jobs:
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          extraPullNames: nix-community
 
       - name: Build components
         run: |
@@ -76,9 +71,6 @@ jobs:
   lint:
     name: Clippy Lint (${{ matrix.os }})
     needs: [format-check, build-components]
-    permissions:
-      contents: read
-      id-token: write
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -103,9 +95,7 @@ jobs:
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          extraPullNames: nix-community
 
       - name: Clippy lint
         run: nix build .#clippy
@@ -115,9 +105,6 @@ jobs:
     name: Test (${{ matrix.os }})
     needs: [format-check, build-components]
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -141,9 +128,7 @@ jobs:
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          extraPullNames: nix-community
 
       - name: Run tests
         run: nix build .#tests
@@ -152,9 +137,6 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: [format-check, build-components]
-    permissions:
-      contents: read
-      id-token: write
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -179,9 +161,7 @@ jobs:
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          extraPullNames: nix-community
 
       - name: Build
         run: nix build .#mbr
@@ -190,9 +170,6 @@ jobs:
   swift-check:
     name: Swift Checks
     runs-on: macos-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -205,9 +182,7 @@ jobs:
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          extraPullNames: nix-community
 
       - name: Swift format check
         run: nix build .#swiftfmt
