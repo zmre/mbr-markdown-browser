@@ -105,6 +105,22 @@ async fn main() -> Result<(), MbrError> {
         }
         config.template_folder = Some(template_path);
     }
+    if let Some(port) = args.port {
+        config.port = port;
+    }
+    if let Some(ref host) = args.host {
+        let ip: std::net::IpAddr = host
+            .parse()
+            .map_err(|_| ConfigError::InvalidHost { host: host.clone() })?;
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                config.ip = mbr::config::IpArray(v4.octets());
+            }
+            std::net::IpAddr::V6(_) => {
+                return Err(ConfigError::InvalidHost { host: host.clone() }.into());
+            }
+        }
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
