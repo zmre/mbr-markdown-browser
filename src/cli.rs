@@ -47,6 +47,17 @@ pub struct Args {
     /// Suppress all output except errors
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Port to listen on when running in server mode (-s).
+    /// Overrides the default port from config (default: 5200).
+    #[arg(short = 'p', long, value_name = "PORT")]
+    pub port: Option<u16>,
+
+    /// Host/IP address to bind to when running in server mode (-s).
+    /// Overrides the default from config (default: 127.0.0.1).
+    /// Use 0.0.0.0 to listen on all interfaces.
+    #[arg(long, value_name = "HOST")]
+    pub host: Option<String>,
 }
 
 impl Args {
