@@ -330,6 +330,7 @@
         // {
           inherit cargoArtifacts;
           cargoExtraArgs = "--locked";
+          doCheck = false; # Tests run separately via packages.tests
 
           preBuild = ''
             mkdir -p templates/components-js
