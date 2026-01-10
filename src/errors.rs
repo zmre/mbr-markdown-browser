@@ -94,6 +94,11 @@ pub enum ConfigError {
 
     #[error("Template folder is not a directory: {}", path.display())]
     TemplateFolderNotDirectory { path: PathBuf },
+
+    #[error(
+        "Invalid host address: {host}. Must be a valid IPv4 address (e.g., 127.0.0.1 or 0.0.0.0)"
+    )]
+    InvalidHost { host: String },
 }
 
 /// Errors related to markdown parsing and rendering.

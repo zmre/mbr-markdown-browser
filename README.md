@@ -59,6 +59,15 @@ mbr README.md
 # Start web server at http://127.0.0.1:5200/
 mbr -s /path/to/notes
 
+# Start web server on custom port
+mbr -s -p 8080 /path/to/notes
+
+# Bind to all interfaces (accessible from network)
+mbr -s --host 0.0.0.0 /path/to/notes
+
+# Both custom host and port
+mbr -s --host 0.0.0.0 -p 3000 /path/to/notes
+
 # Launch native GUI window with web server
 mbr -g /path/to/notes
 
