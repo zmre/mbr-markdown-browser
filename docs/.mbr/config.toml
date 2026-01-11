@@ -1,0 +1,4 @@
+# mbr documentation site configuration
+port = 5201
+index_file = "index.md"
+ignore_dirs = ["node_modules", ".git", "target", "build"]

@@ -767,3 +767,7 @@ blockquote blockquote blockquote:focus-within p + p {
     opacity: 1;
   }
 }
+
+pre.mermaid {
+  padding: var(--pico-typography-spacing-vertical);
+}

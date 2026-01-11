@@ -60,7 +60,7 @@ cargo watch -q -c -x 'run --release -- -s README.md'
 
 ## Testing
 
-The project has comprehensive test coverage with ~150 tests:
+The project has comprehensive test coverage with ~290 tests:
 
 ```bash
 # Run all tests
@@ -78,11 +78,11 @@ cargo test -- --nocapture
 
 | Location | Description | Count |
 |----------|-------------|-------|
-| `src/*/tests` | Unit tests for each module | ~80 |
-| `src/*/proptests` | Property-based tests (proptest) | ~25 |
-| `src/main.rs` | URL path builder tests | 7 |
-| `tests/server_integration.rs` | HTTP integration tests | 18 |
-| Doc tests | Code examples in documentation | 3 |
+| `src/lib.rs` (unit tests) | Unit tests for each module | ~210 |
+| `src/main.rs` | URL path builder tests | 10 |
+| `tests/build_integration.rs` | Build/static site tests | ~22 |
+| `tests/server_integration.rs` | HTTP integration tests | ~57 |
+| Doc tests | Code examples in documentation | 5 |
 
 Property tests use `proptest` to verify invariants like:
 - Path resolution determinism and safety
@@ -162,7 +162,11 @@ These functions have been extracted for testability:
 2. Environment variables (`MBR_*` prefix)
 3. `.mbr/config.toml` in the markdown root
 
-The root directory is found by searching upward for a `.mbr/` folder.
+The root directory is found by searching upward for common repository markers:
+- **Directories** (in order): `.mbr/`, `.git/`, `.zk/`, `.obsidian/`
+- **Files** (if no dirs found): `book.toml`, `mkdocs.yml`, `docusaurus.config.js`
+
+The `static_folder` config option (default: `"static"`) creates a URL overlay - files in `static/images/` become available at `/images/`.
 
 ### Key Endpoints
 
@@ -206,6 +210,7 @@ The project uses Tera templates with a partial-based architecture. Templates are
   ```
 - Use `{% if varname %}` to check variable existence before using
 - `{{ frontmatter_json | safe }}` outputs frontmatter as JSON (excludes rendered markdown for efficiency)
+- `server_mode` is a boolean template variable: `true` in server/GUI mode, `false` in static builds. Use it to conditionally include live-only features (e.g., `{% if server_mode %}<mbr-live-reload>{% endif %}`)
 
 ### Customization Points
 

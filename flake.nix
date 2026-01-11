@@ -522,14 +522,16 @@
 
           # Build inputs from common + dev tools
           inputsFrom = [packages.mbr];
-          packages = with pkgs; [
-            cargo-watch
-          ]
-          ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            xcodegen     # For generating Xcode project from project.yml
-            swiftformat  # Swift code formatter (like cargo fmt)
-            swiftlint    # Swift linter (like cargo clippy)
-          ]);
+          packages = with pkgs;
+            [
+              cargo-watch
+              imagemagick
+            ]
+            ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              xcodegen # For generating Xcode project from project.yml
+              swiftformat # Swift code formatter (like cargo fmt)
+              swiftlint # Swift linter (like cargo clippy)
+            ]);
 
           PKG_CONFIG_PATH = "${pkgs.ffmpeg_7-full.dev}/lib/pkgconfig";
           LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";

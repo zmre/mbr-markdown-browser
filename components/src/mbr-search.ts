@@ -64,7 +64,7 @@ interface PagefindSearchResponse {
 
 interface Pagefind {
   init: () => Promise<void>;
-  options: (opts: { baseUrl?: string; [key: string]: any }) => Promise<void>;
+  options: (opts: { baseUrl?: string;[key: string]: any }) => Promise<void>;
   search: (query: string) => Promise<PagefindSearchResponse>;
   debouncedSearch: (query: string, options?: { debounceTimeoutMs?: number }) => Promise<PagefindSearchResponse | null>;
 }
@@ -568,7 +568,7 @@ export class MbrSearchElement extends LitElement {
               </svg>
               <input
                 id="search-input"
-                type="text"
+                type="search"
                 placeholder="Search files..."
                 .value=${this._query}
                 @input=${this._handleInput}

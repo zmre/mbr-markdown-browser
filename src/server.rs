@@ -1157,6 +1157,11 @@ const CACHE_CONTROL_NO_STORE: &str = "no-store";
 
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
+        "/favicon.png",
+        include_bytes!("../templates/favicon.png"),
+        "image/png",
+    ),
+    (
         "/theme.css",
         include_bytes!("../templates/theme.css"),
         "text/css",
@@ -1234,6 +1239,11 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/hljs.lang.ruby.js",
         include_bytes!("../templates/hljs.lang.ruby.11.11.1.js"),
+        "application/javascript",
+    ),
+    (
+        "/hljs.lang.nix.js",
+        include_bytes!("../templates/hljs.lang.nix.11.11.1.js"),
         "application/javascript",
     ),
     (
