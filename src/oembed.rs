@@ -7,6 +7,13 @@ use std::time::Duration;
 static META_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("meta").expect("Invalid meta selector"));
 
+// Giphy regex patterns - compiled once for efficiency
+static GIPHY_MEDIA_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"https?://(?:media\d*|i)\.giphy\.com/").unwrap());
+static GIPHY_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"https?://(?:www\.)?giphy\.com/gifs/(?:[^/]+-)?([a-zA-Z0-9]+)(?:\?.*)?$").unwrap()
+});
+
 #[derive(Default)]
 pub struct PageInfo {
     pub url: String,
@@ -59,12 +66,56 @@ impl PageInfo {
         })
     }
 
+    /// Check if URL is a Giphy URL and create embed HTML
+    /// Matches patterns like:
+    /// - https://media.giphy.com/media/ID/giphy.gif
+    /// - https://media1.giphy.com/media/.../giphy.gif (or .webp)
+    /// - https://giphy.com/gifs/name-ID
+    /// - https://i.giphy.com/ID.gif
+    fn giphy_embed(url: &str) -> Option<String> {
+        // Pattern for direct media URLs (media.giphy.com, media1.giphy.com, i.giphy.com)
+        // These are direct image files - embed as img tags
+        if GIPHY_MEDIA_RE.is_match(url) {
+            return Some(format!(
+                r#"<figure class="giphy-embed">
+                    <img src="{}" alt="Giphy animation" loading="lazy" />
+                </figure>"#,
+                url
+            ));
+        }
+
+        // Pattern for giphy.com/gifs/... URLs - extract the ID and convert to media URL
+        // Format: https://giphy.com/gifs/description-ID or https://giphy.com/gifs/ID
+        if let Some(caps) = GIPHY_PAGE_RE.captures(url)
+            && let Some(id) = caps.get(1)
+        {
+            let gif_url = format!("https://media.giphy.com/media/{}/giphy.gif", id.as_str());
+            return Some(format!(
+                r#"<figure class="giphy-embed">
+                    <img src="{}" alt="Giphy animation" loading="lazy" />
+                </figure>"#,
+                gif_url
+            ));
+        }
+
+        None
+    }
+
     pub async fn new_from_url(
         url: &str,
         timeout_ms: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Check for YouTube first - no need to fetch the page
         if let Some(embed_html) = Self::youtube_embed(url) {
+            return Ok(PageInfo {
+                url: url.to_string(),
+                embed_html: Some(embed_html),
+                ..Default::default()
+            });
+        }
+
+        // Check for Giphy - embed directly without fetching
+        if let Some(embed_html) = Self::giphy_embed(url) {
             return Ok(PageInfo {
                 url: url.to_string(),
                 embed_html: Some(embed_html),
@@ -151,5 +202,92 @@ impl PageInfo {
             &self.url,
             self.title.clone().unwrap_or(self.url.clone())
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_giphy_media_url() {
+        let url = "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExaThmbzNhb3duNGM5NGVxemo4aHlnYTM1YXA4cGxmc2l2ejdjc2s4ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/CAxbo8KC2A0y4/giphy.gif";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("giphy-embed"));
+        assert!(html.contains(url));
+    }
+
+    #[test]
+    fn test_giphy_media_url_without_version() {
+        let url = "https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("giphy-embed"));
+        assert!(html.contains(url));
+    }
+
+    #[test]
+    fn test_giphy_i_url() {
+        let url = "https://i.giphy.com/CAxbo8KC2A0y4.gif";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("giphy-embed"));
+        assert!(html.contains(url));
+    }
+
+    #[test]
+    fn test_giphy_page_url() {
+        let url = "https://giphy.com/gifs/cat-funny-CAxbo8KC2A0y4";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("giphy-embed"));
+        assert!(html.contains("https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif"));
+    }
+
+    #[test]
+    fn test_giphy_page_url_simple() {
+        let url = "https://giphy.com/gifs/CAxbo8KC2A0y4";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif"));
+    }
+
+    #[test]
+    fn test_non_giphy_url() {
+        let url = "https://example.com/image.gif";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_none());
+    }
+
+    #[test]
+    fn test_youtube_not_giphy() {
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_none());
+    }
+
+    #[test]
+    fn test_youtube_embed() {
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let embed = PageInfo::youtube_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("youtube-embed"));
+        assert!(html.contains("dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn test_youtube_short_url() {
+        let url = "https://youtu.be/dQw4w9WgXcQ";
+        let embed = PageInfo::youtube_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("dQw4w9WgXcQ"));
     }
 }

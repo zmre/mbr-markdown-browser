@@ -49,4 +49,6 @@
 
 * [ ] Components are currently bundled as mbr-components.js and loaded as a single file, which is great, but we want to allow for more fine-grained overrides.  The better behavior here is for us to assemble a mbr-components.js file from a set of individual files allowing for user overrides to those files.  A static build will have a single mbr-comonents.js file and a dynamic one will concatenate each component file in a particular dir together first checking for per-repo or templates dir overrides.
 
-* [ ] Add express support for giphy links becoming animated gif embeds
+* [x] Add express support for giphy links becoming animated gif embeds
+
+* [ ] Strange issue where image logo doesn't show up in gui mode, but does in server mode. shouldn't these show the same thing?

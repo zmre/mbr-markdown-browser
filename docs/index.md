@@ -34,8 +34,10 @@ mbr is three tools in one:
 
 ### Key Principles
 
+https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbG5udXhqcWpseDgyaGJ2bDd0MXRqYWVqYnY0b2MyMjRsbzU5cng5OSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/izspP6uMbMeti/giphy.gif
+
+- **Speed** - Sub-second rendering, instant navigation, fast site builds
 - **No lock-in** - Works with any markdown repository without modifications
-- **Speed** - Sub-second rendering, instant navigation, fast builds
 - **Customizable** - Override styles, templates, and components per-repository
 - **Rich content** - Embed videos, audio, PDFs, diagrams, and more
 

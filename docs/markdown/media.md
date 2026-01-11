@@ -119,6 +119,31 @@ All render as responsive embedded iframe players.
 
 YouTube embeds use `youtube-nocookie.com` by default for better privacy.
 
+## Giphy Embedding
+
+Giphy URLs on their own line are automatically embedded as animated GIFs.
+
+### Supported URL Formats
+
+Both the Giphy page URL and direct media URLs work:
+
+```markdown
+https://giphy.com/gifs/season-17-the-simpsons-17x6-xT5LMB2WiOdjpB7K4o
+
+https://media.giphy.com/media/xT5LMB2WiOdjpB7K4o/giphy.gif
+```
+
+Both render the same animated GIF:
+
+https://giphy.com/gifs/season-17-the-simpsons-17x6-xT5LMB2WiOdjpB7K4o
+
+### How It Works
+
+- **Page URLs** (`giphy.com/gifs/...`) - mbr extracts the ID and converts to a media URL
+- **Media URLs** (`media.giphy.com/...`, `i.giphy.com/...`) - embedded directly
+
+No network fetch is required - Giphy URLs are detected and rendered instantly.
+
 ## PDF Embedding
 
 ```markdown
