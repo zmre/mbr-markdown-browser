@@ -10,7 +10,7 @@ description: The fast, complete markdown browser and static site generator
 **mbr** is a fast tool for browsing, previewing, and publishing markdown. Point it at any collection of markdown files - no custom syntax or directory structures required.
 
 > [!NOTE]
-> This documentation site is built with mbr. It serves as a live example of mbr's features including navigation like browsing and searching, and extended syntax like mermaid diagrams and embedded media. Browse around to see mbr in action.
+> This documentation site is built with mbr. It serves as a live example of mbr's features including navigation like browsing and searching, and extended syntax like mermaid diagrams and embedded media. Browse around to see mbr in action. Hit minus (`-`) or click the hamburger icon in the top left to browse or hit slash (`/`) to search.
 
 ## Quick Links
 

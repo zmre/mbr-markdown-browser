@@ -18,6 +18,7 @@ interface MarkdownFile {
  */
 interface FolderNode {
   name: string;
+  title?: string;  // From index file frontmatter, fallback to name
   path: string;
   children: Map<string, FolderNode>;
   files: MarkdownFile[];
@@ -344,6 +345,9 @@ export class MbrBrowseElement extends LitElement {
       const isIndexFile = fileName === this._indexFile;
 
       if (isIndexFile) {
+        // Index files define folder metadata (title)
+        let targetNode = currentNode;
+
         if (parts.length > 0) {
           const lastPart = parts[parts.length - 1];
           const folderPath = '/' + parts.join('/') + '/';
@@ -357,7 +361,15 @@ export class MbrBrowseElement extends LitElement {
               fileCount: 0,
             });
           }
+          targetNode = currentNode.children.get(lastPart)!;
         }
+
+        // Capture title from index file frontmatter
+        if (file.frontmatter?.title) {
+          targetNode.title = file.frontmatter.title;
+        }
+        // Include index file in the folder's file count
+        targetNode.files.push(file);
         continue;
       }
 
@@ -524,7 +536,29 @@ export class MbrBrowseElement extends LitElement {
 
       case 'folder': {
         const folderPath = this._currentSelection.value;
-        files = this._allFiles.filter(f => f.url_path.startsWith(folderPath));
+        // Filter to only direct children of this folder (not descendants)
+        files = this._allFiles.filter(f => {
+          if (!f.url_path.startsWith(folderPath)) return false;
+          // Get the path relative to the folder
+          const relativePath = f.url_path.slice(folderPath.length);
+          const parts = relativePath.split('/').filter(p => p.length > 0);
+
+          // parts.length === 0: This folder's own index file (show it)
+          // parts.length === 1: Direct child file or subfolder's index
+          if (parts.length > 1) return false;  // Too deep, not direct child
+
+          if (parts.length === 1) {
+            // Direct child - but check if it's a subfolder's index file
+            const fileName = f.raw_path.split('/').pop() || '';
+            if (fileName === this._indexFile) {
+              // This is a subfolder's index file - don't show as file
+              // (it's represented by the folder in the tree)
+              return false;
+            }
+          }
+
+          return true;
+        });
         break;
       }
 
@@ -612,6 +646,7 @@ export class MbrBrowseElement extends LitElement {
     const parts = path.split('/').filter(p => p.length > 0);
     let accumulated = '';
 
+    // Expand all parent folders
     for (const part of parts) {
       accumulated += '/' + part;
       this._expandedFolders.add(accumulated);
@@ -619,6 +654,39 @@ export class MbrBrowseElement extends LitElement {
 
     this._expandedFolders.add('/');
     this._expandedFolders = new Set(this._expandedFolders);
+
+    // Auto-select the current folder (path already ends with / for folders)
+    const folderPath = path.endsWith('/') ? path : path + '/';
+
+    // Find the folder node to get its title
+    let folderTitle = 'Home';
+    if (this._folderTree) {
+      if (folderPath === '/') {
+        folderTitle = this._folderTree.title || 'Home';
+      } else {
+        const node = this._findFolderNode(this._folderTree, folderPath);
+        if (node) {
+          folderTitle = node.title || node.name;
+        }
+      }
+    }
+
+    this._currentSelection = {
+      type: 'folder',
+      value: folderPath,
+      label: folderTitle,
+    };
+  }
+
+  private _findFolderNode(node: FolderNode, path: string): FolderNode | null {
+    if (node.path === path) {
+      return node;
+    }
+    for (const child of node.children.values()) {
+      const found = this._findFolderNode(child, path);
+      if (found) return found;
+    }
+    return null;
   }
 
   private _toggleSection(section: string) {
@@ -806,7 +874,12 @@ export class MbrBrowseElement extends LitElement {
     `;
   }
 
-  private _renderTagsSection(): TemplateResult {
+  private _renderTagsSection(): TemplateResult | typeof nothing {
+    // Hide section if no tags exist
+    if (this._tagHierarchy.size === 0) {
+      return nothing;
+    }
+
     const isExpanded = this._expandedSections.has('tags');
 
     return html`
@@ -901,12 +974,14 @@ export class MbrBrowseElement extends LitElement {
                        this._currentSelection?.value === node.path;
     const isCurrent = this._isCurrentPath(node.path);
 
-    return html`
-      ${!isRoot ? html`
+    // For root, render "Home" entry with children indented under it
+    if (isRoot) {
+      const homeLabel = node.title || 'Home';
+      return html`
         <div class="tree-item folder-item">
           <div
             class="tree-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''}"
-            style="padding-left: ${depth * 0.75 + 0.25}rem"
+            style="padding-left: 0.25rem"
           >
             ${hasChildren ? html`
               <button
@@ -918,19 +993,51 @@ export class MbrBrowseElement extends LitElement {
             ` : html`<span class="tree-spacer"></span>`}
             <button
               class="tree-label"
-              @click=${() => this._selectFolder(node.path, node.name)}
+              @click=${() => this._selectFolder(node.path, homeLabel)}
             >
               <span class="folder-icon">📁</span>
-              <span class="label-text">${node.name}</span>
+              <span class="label-text">${homeLabel}</span>
               <span class="label-count">${node.fileCount}</span>
             </button>
           </div>
         </div>
-      ` : nothing}
+        ${isExpanded ? html`
+          ${[...node.children.values()]
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map(child => this._renderFolderTree(child, 1))}
+        ` : nothing}
+      `;
+    }
+
+    // Non-root folder rendering
+    return html`
+      <div class="tree-item folder-item">
+        <div
+          class="tree-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''}"
+          style="padding-left: ${depth * 0.75 + 0.25}rem"
+        >
+          ${hasChildren ? html`
+            <button
+              class="tree-toggle"
+              @click=${(e: Event) => { e.stopPropagation(); this._toggleFolder(node.path); }}
+            >
+              ${isExpanded ? '▼' : '▶'}
+            </button>
+          ` : html`<span class="tree-spacer"></span>`}
+          <button
+            class="tree-label"
+            @click=${() => this._selectFolder(node.path, node.title || node.name)}
+          >
+            <span class="folder-icon">📁</span>
+            <span class="label-text">${node.title || node.name}</span>
+            <span class="label-count">${node.fileCount}</span>
+          </button>
+        </div>
+      </div>
       ${isExpanded ? html`
         ${[...node.children.values()]
           .sort((a, b) => a.name.localeCompare(b.name))
-          .map(child => this._renderFolderTree(child, isRoot ? 0 : depth + 1))}
+          .map(child => this._renderFolderTree(child, depth + 1))}
       ` : nothing}
     `;
   }
@@ -1019,9 +1126,10 @@ export class MbrBrowseElement extends LitElement {
     const tags = this._extractFileTags(file);
     const modifiedDate = this._formatDate(file.modified);
     const parentFolder = this._getParentFolder(file.url_path);
+    const isCurrent = this._isCurrentPath(file.url_path);
 
     return html`
-      <a href="${file.url_path}" class="file-card">
+      <a href="${file.url_path}" class="file-card ${isCurrent ? 'current' : ''}">
         <div class="file-filename">${filename}</div>
         <div class="file-title">${title}</div>
         ${description ? html`
@@ -1144,6 +1252,10 @@ export class MbrBrowseElement extends LitElement {
       font-size: 1rem;
       font-weight: 600;
       color: var(--pico-color, #333);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .close-button {
@@ -1202,6 +1314,9 @@ export class MbrBrowseElement extends LitElement {
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--pico-muted-color, #666);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .section-count {
@@ -1232,6 +1347,7 @@ export class MbrBrowseElement extends LitElement {
       padding: 0.35rem 0.5rem;
       border-radius: 4px;
       transition: background 0.15s ease;
+      min-width: 0;  /* Allow flex children to shrink for ellipsis */
     }
 
     .tree-row:hover {
@@ -1277,6 +1393,8 @@ export class MbrBrowseElement extends LitElement {
       padding: 0;
       color: var(--pico-color, #333);
       font-size: 0.875rem;
+      min-width: 0;  /* Allow text truncation */
+      overflow: hidden;
     }
 
     .tree-label:hover .label-text {
@@ -1386,10 +1504,18 @@ export class MbrBrowseElement extends LitElement {
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
     }
 
+    .file-card.current {
+      border-left: 3px solid var(--pico-primary, #0d6efd);
+      background: var(--pico-primary-background, #e3f2fd);
+    }
+
     .file-filename {
       font-size: 0.7rem;
       color: var(--pico-muted-color, #999);
       margin-bottom: 0.25rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .file-title {
@@ -1397,6 +1523,9 @@ export class MbrBrowseElement extends LitElement {
       font-weight: 600;
       margin-bottom: 0.35rem;
       line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .file-description {
@@ -1467,7 +1596,7 @@ export class MbrBrowseElement extends LitElement {
       color: var(--pico-muted-color, #666);
     }
 
-    /* Responsive */
+    /* Responsive - Mobile */
     @media (max-width: 768px) {
       .left-pane {
         width: 100%;
@@ -1481,6 +1610,39 @@ export class MbrBrowseElement extends LitElement {
         width: 100%;
         max-width: 100vw;
         z-index: 1001;
+      }
+    }
+
+    /* Responsive - Large screens */
+    @media (min-width: 1200px) {
+      .left-pane {
+        width: 320px;
+      }
+
+      .middle-pane {
+        width: 380px;
+      }
+    }
+
+    /* Responsive - Extra large screens */
+    @media (min-width: 1400px) {
+      .left-pane {
+        width: 360px;
+      }
+
+      .middle-pane {
+        width: 440px;
+      }
+    }
+
+    /* Responsive - Ultra wide screens */
+    @media (min-width: 1800px) {
+      .left-pane {
+        width: 400px;
+      }
+
+      .middle-pane {
+        width: 500px;
       }
     }
   `;
