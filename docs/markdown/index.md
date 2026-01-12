@@ -21,6 +21,7 @@ These are pulldown-cmark's built-in extensions:
 | Smart punctuation | `"quotes"`, `--` | Curly quotes, em-dashes |
 | Heading attributes | `# Title {#id}` | Custom anchor IDs |
 | Autolinks | `<https://...>` | Clickable URLs |
+| Math | `$...$` / `$$...$$` | LaTeX via KaTeX |
 
 ## YAML Frontmatter
 
@@ -171,6 +172,64 @@ graph LR
 - And more...
 
 See [Mermaid documentation](https://mermaid.js.org/) for full syntax.
+
+## Math with KaTeX
+
+mbr supports mathematical notation using [KaTeX](https://katex.org/), rendered from LaTeX syntax.
+
+### Inline Math
+
+Wrap expressions in single dollar signs for inline math:
+
+```markdown
+The quadratic formula is $x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$ which solves $ax^2 + bx + c = 0$.
+```
+
+Renders as: The quadratic formula is $x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$ which solves $ax^2 + bx + c = 0$.
+
+### Display Math
+
+Use double dollar signs for block-level equations:
+
+```markdown
+$$
+\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+$$
+```
+
+Renders as:
+
+$$
+\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+$$
+
+### More Examples
+
+**Matrices:**
+
+$$
+\begin{pmatrix}
+a & b \\
+c & d
+\end{pmatrix}
+\begin{pmatrix}
+x \\
+y
+\end{pmatrix}
+=
+\begin{pmatrix}
+ax + by \\
+cx + dy
+\end{pmatrix}
+$$
+
+**Summations and products:**
+
+$$
+\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
+$$
+
+See the [KaTeX documentation](https://katex.org/docs/supported.html) for the full list of supported LaTeX commands.
 
 ## Syntax Highlighting
 
