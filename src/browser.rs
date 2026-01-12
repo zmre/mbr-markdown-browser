@@ -275,6 +275,7 @@ fn reinit_server(
             config_copy.oembed_timeout_ms,
             config_copy.template_folder.clone(),
             config_copy.sort.clone(),
+            true, // gui_mode: native window mode
             None, // Logging already initialized
         );
         match server {

@@ -1,0 +1,43 @@
+{% set asset_base = relative_base | default(value="/.mbr/") %}
+<!doctype html>
+<html lang="en">
+  <head>
+{% include "_head.html" %}
+    <title>{{ error_code }} - {{ error_title | default(value="Error") }}</title>
+  </head>
+  <body>
+{% include "_nav.html" %}
+    <main id="wrapper" class="container">
+      <article class="error-page">
+        <header>
+          <h1>{{ error_code }}</h1>
+          <p class="error-title">{{ error_title | default(value="Error") }}</p>
+        </header>
+
+        {% if error_message %}
+        <p>{{ error_message }}</p>
+        {% endif %}
+
+        {% if requested_url %}
+        <p class="error-url"><code>{{ requested_url }}</code></p>
+        {% endif %}
+
+        <footer>
+          <nav>
+            <ul>
+              <li>
+                <button onclick="history.back()" class="outline secondary">&larr; Go Back</button>
+              </li>
+              <li>
+                {% if relative_root %}<a href="{{ relative_root }}" role="button" class="outline">Home</a>{% else %}<a href="./" role="button" class="outline">Home</a>{% endif %}
+              </li>
+            </ul>
+          </nav>
+          <p><small>Tip: Press <kbd>/</kbd> to search for what you're looking for.</small></p>
+        </footer>
+      </article>
+    </main>
+{% include "_footer.html" %}
+  </body>
+{% include "_scripts.html" %}
+</html>

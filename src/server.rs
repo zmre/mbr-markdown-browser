@@ -45,6 +45,8 @@ pub struct ServerState {
     pub template_folder: Option<std::path::PathBuf>,
     /// Sort configuration for file listings
     pub sort: Vec<SortField>,
+    /// Whether the server is running in GUI mode (native window) vs browser mode
+    pub gui_mode: bool,
 }
 
 impl Server {
@@ -62,6 +64,7 @@ impl Server {
         oembed_timeout_ms: u64,
         template_folder: Option<std::path::PathBuf>,
         sort: Vec<SortField>,
+        gui_mode: bool,
         log_filter: Option<&str>,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
@@ -165,6 +168,7 @@ impl Server {
             file_change_tx: Some(file_change_tx),
             template_folder,
             sort,
+            gui_mode,
         };
 
         let router = Router::new()
@@ -602,6 +606,67 @@ impl Server {
         }
     }
 
+    /// Render an error page using the error.html template.
+    /// Falls back to a plain text response if template rendering fails.
+    fn render_error_page(
+        templates: &templates::Templates,
+        status_code: StatusCode,
+        error_title: &str,
+        error_message: Option<&str>,
+        requested_url: &str,
+        gui_mode: bool,
+    ) -> Response<Body> {
+        use std::collections::HashMap;
+
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+        context.insert(
+            "error_code".to_string(),
+            serde_json::Value::Number(status_code.as_u16().into()),
+        );
+        context.insert(
+            "error_title".to_string(),
+            serde_json::Value::String(error_title.to_string()),
+        );
+        if let Some(msg) = error_message {
+            context.insert(
+                "error_message".to_string(),
+                serde_json::Value::String(msg.to_string()),
+            );
+        }
+        context.insert(
+            "requested_url".to_string(),
+            serde_json::Value::String(requested_url.to_string()),
+        );
+        // Server mode uses absolute paths
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(true));
+        context.insert("gui_mode".to_string(), serde_json::Value::Bool(gui_mode));
+
+        match templates.render_error(context) {
+            Ok(html) => Response::builder()
+                .status(status_code)
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(Body::from(html))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(status_code)
+                        .body(Body::from(error_title.to_string()))
+                        .unwrap()
+                }),
+            Err(e) => {
+                tracing::error!("Failed to render error page: {}", e);
+                Response::builder()
+                    .status(status_code)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(Body::from(format!(
+                        "{} {}",
+                        status_code.as_u16(),
+                        error_title
+                    )))
+                    .unwrap()
+            }
+        }
+    }
+
     /// Serve from compiled-in DEFAULT_FILES with cache headers.
     fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
         if let Some((_name, bytes, mime)) = DEFAULT_FILES.iter().find(|(name, _, _)| {
@@ -671,7 +736,15 @@ impl Server {
             }
             ResolvedPath::NotFound => {
                 tracing::debug!("resource not found: {}", &path);
-                Err(StatusCode::NOT_FOUND)
+                let requested_url = format!("/{}", path);
+                Ok(Self::render_error_page(
+                    &config.templates,
+                    StatusCode::NOT_FOUND,
+                    "Not Found",
+                    Some("The requested page could not be found."),
+                    &requested_url,
+                    config.gui_mode,
+                ))
             }
         }
     }
@@ -736,6 +809,11 @@ impl Server {
         );
         // Indicate server mode for frontend search functionality
         frontmatter.insert("server_mode".into(), "true".into());
+        // Indicate GUI mode for native window detection
+        frontmatter.insert(
+            "gui_mode".into(),
+            if config.gui_mode { "true" } else { "" }.into(),
+        );
 
         // Compute breadcrumbs based on the URL path, not the file path
         // For a file like docs/guide.md, the URL is /docs/guide/ so breadcrumbs should include docs
@@ -898,6 +976,8 @@ impl Server {
         }
         // Indicate server mode for frontend search functionality
         context.insert("server_mode".to_string(), json!(true));
+        // Indicate GUI mode for native window detection
+        context.insert("gui_mode".to_string(), json!(config.gui_mode));
 
         // Add full config to template context
         context.insert(

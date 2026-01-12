@@ -14,6 +14,7 @@ mbr uses [Tera](https://tera.netlify.app/) for templating. Customize any templat
 | `index.html` | Markdown page layout | Rendering `.md` files |
 | `section.html` | Directory listing | Subdirectory pages |
 | `home.html` | Home page | Root directory |
+| `error.html` | Error pages | 404 Not Found, server errors |
 
 ### Partial Templates
 
@@ -30,6 +31,25 @@ Partials are prefixed with underscore and included by other templates:
 | `_scripts_markdown.html` | Markdown-specific scripts |
 
 ## Template Variables
+
+### Global Variables (All Templates)
+
+These variables are available in all templates:
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `server_mode` | bool | `true` when running with live server (`-s` or `-g`), `false` for static builds |
+| `gui_mode` | bool | `true` when running in native window (`-g`), `false` for browser or static |
+| `relative_base` | string | Path prefix to `.mbr/` assets (e.g., `../../.mbr/` for static builds) |
+| `relative_root` | string | Path prefix to site root (e.g., `../../` for static builds) |
+
+**Mode combinations:**
+
+| Mode | `server_mode` | `gui_mode` |
+|------|---------------|------------|
+| GUI (`-g`) | `true` | `true` |
+| Server (`-s`) | `true` | `false` |
+| Static build (`-b`) | `false` | `false` |
 
 ### Markdown Pages (`index.html`)
 
@@ -57,6 +77,16 @@ Partials are prefixed with underscore and included by other templates:
 | `subdirs` | string | Subdirectory list (JSON) |
 | `files` | string | File list (JSON) |
 | `is_home` | bool | True if root directory |
+
+### Error Pages (`error.html`)
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `error_code` | number | HTTP status code (e.g., 404) |
+| `error_title` | string | Short error title (e.g., "Not Found") |
+| `error_message` | string | Detailed error message |
+| `requested_url` | string | The URL that was requested |
+| `breadcrumbs` | array | Navigation breadcrumbs |
 
 ### File/Directory Data Structure
 
@@ -148,6 +178,34 @@ The `subdirs` JSON array contains:
   const frontmatter = {{ frontmatter_json | safe }};
   const headings = {{ headings | safe }};
 </script>
+```
+
+### JavaScript Configuration Object
+
+The `_head.html` partial exposes a global `window.__MBR_CONFIG__` object for use by JavaScript:
+
+```javascript
+window.__MBR_CONFIG__ = {
+  serverMode: true,     // false for static builds
+  guiMode: true,        // true only in native window (-g)
+  searchEndpoint: "/.mbr/search",
+  basePath: ""          // relative path prefix for static builds
+};
+```
+
+Use this in custom scripts to adapt behavior:
+
+```javascript
+// Only show certain features in GUI mode
+if (window.__MBR_CONFIG__?.guiMode) {
+  // Native window - no browser URL bar visible
+  document.querySelector('.url-display')?.classList.remove('hidden');
+}
+
+// Conditionally enable features requiring server
+if (window.__MBR_CONFIG__?.serverMode) {
+  initLiveSearch();
+}
 ```
 
 ## Example: Custom Page Template
@@ -267,6 +325,65 @@ Create `.mbr/section.html`:
 </body>
 </html>
 ```
+
+## Example: Custom Error Page
+
+Create `.mbr/error.html` to customize the 404 and error page experience:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {% include "_head.html" %}
+  <title>{{ error_code }} - {{ error_title }}</title>
+</head>
+<body>
+  {% include "_nav.html" %}
+
+  <main class="container">
+    <div class="error-page">
+      <h1>{{ error_code }}</h1>
+      <h2>{{ error_title }}</h2>
+
+      {% if error_message %}
+        <p>{{ error_message }}</p>
+      {% endif %}
+
+      {% if requested_url %}
+        <p>Looking for: <code>{{ requested_url }}</code></p>
+      {% endif %}
+
+      <nav>
+        <button onclick="history.back()">Go Back</button>
+        {% if relative_root %}
+          <a href="{{ relative_root }}">Home</a>
+        {% else %}
+          <a href="./">Home</a>
+        {% endif %}
+      </nav>
+
+      <p>Try searching for what you need:</p>
+      <mbr-search></mbr-search>
+    </div>
+  </main>
+
+  {% include "_footer.html" %}
+  {% include "_scripts.html" %}
+</body>
+</html>
+```
+
+### Error Pages and Static Builds
+
+When you build a static site with `mbr -b`, a `404.html` file is automatically generated at the root of your output directory. This file is used by:
+
+- **GitHub Pages** - Automatically serves `404.html` for missing pages
+- **Netlify** - Recognizes `404.html` as the custom error page
+- **Most static hosts** - Follow the same convention
+
+The generated `404.html` uses relative paths so it works correctly regardless of where your site is deployed (root domain or subdirectory).
+
+**Important:** In static mode, the `requested_url` variable is not available since the 404 page is pre-generated. The error page shows a generic message instead.
 
 ## Development Workflow
 

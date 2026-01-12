@@ -38,6 +38,7 @@ impl TestServer {
                 100,
                 None,                               // template_folder
                 mbr::config::default_sort_config(), // sort
+                false,                              // gui_mode
                 None,                               // log_filter
             )
             .expect("Failed to initialize server");
@@ -689,6 +690,7 @@ impl TestServerWithTemplates {
                 100,
                 template_folder,
                 mbr::config::default_sort_config(), // sort
+                false,                              // gui_mode
                 None,                               // log_filter
             )
             .expect("Failed to initialize server");
@@ -1291,5 +1293,98 @@ async fn test_video_in_markdown_gets_video_tag() {
         html.contains("<video"),
         "Page with video should have <video> element. Got: {}",
         html
+    );
+}
+
+// ============================================================================
+// Error page tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_404_returns_error_page_html() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/non-existent-page/").await;
+
+    // Should return 404 status
+    assert_eq!(response.status(), 404);
+
+    let html = response.text().await.expect("Failed to get response text");
+
+    // Should contain error page structure
+    assert!(
+        html.contains("<h1>404</h1>"),
+        "Error page should display 404 code"
+    );
+    assert!(
+        html.contains("Not Found"),
+        "Error page should display 'Not Found' title"
+    );
+}
+
+#[tokio::test]
+async fn test_404_error_page_shows_requested_url() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let server = TestServer::start(&repo).await;
+    let html = server
+        .get_text("/some/deep/path/that/does/not/exist/")
+        .await;
+
+    // Error page should show the requested URL (slashes may be HTML-encoded as &#x2F;)
+    // Check for unique path segments that will be present regardless of encoding
+    assert!(
+        html.contains("some")
+            && html.contains("deep")
+            && html.contains("path")
+            && html.contains("exist"),
+        "Error page should show the requested URL. Got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn test_404_error_page_includes_navigation() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/missing-page/").await;
+
+    // Error page should have navigation elements
+    assert!(
+        html.contains("Go Back") || html.contains("history.back"),
+        "Error page should have a back button"
+    );
+    assert!(
+        html.contains("Home") || html.contains("href=\"/\""),
+        "Error page should have a home link"
+    );
+    assert!(
+        html.contains("mbr-search") || html.contains("search"),
+        "Error page should suggest using search"
+    );
+}
+
+#[tokio::test]
+async fn test_404_error_page_has_proper_content_type() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/non-existent/").await;
+
+    // Should return HTML content type
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap_or(""));
+    assert!(
+        content_type.is_some_and(|ct| ct.contains("text/html")),
+        "Error page should have text/html content type. Got: {:?}",
+        content_type
     );
 }

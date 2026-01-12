@@ -402,3 +402,85 @@ async fn test_html_contains_pagefind_ignore_on_navigation() {
         "Expected data-pagefind-ignore in output"
     );
 }
+
+// ============================================================================
+// Error page tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_build_generates_404_html() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+
+    // Should create 404.html at root
+    let error_page_path = output.join("404.html");
+    assert!(
+        error_page_path.exists(),
+        "Expected 404.html to be generated at {:?}",
+        error_page_path
+    );
+}
+
+#[tokio::test]
+async fn test_build_404_html_contains_error_structure() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("404.html")).unwrap();
+
+    // Should contain error page structure
+    assert!(
+        html.contains("404"),
+        "404.html should contain error code. Got: {}",
+        &html[..500.min(html.len())]
+    );
+    assert!(
+        html.contains("Not Found"),
+        "404.html should contain 'Not Found' text"
+    );
+}
+
+#[tokio::test]
+async fn test_build_404_html_uses_relative_paths() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("404.html")).unwrap();
+
+    // Should use relative paths to .mbr/ assets (not absolute /.mbr/)
+    assert!(
+        html.contains(".mbr/") && !html.contains("\"/.mbr/"),
+        "404.html should use relative paths to .mbr/ folder"
+    );
+
+    // Should have serverMode: false for static build
+    assert!(
+        html.contains("serverMode: false") || html.contains("serverMode:false"),
+        "404.html should have serverMode: false for static builds"
+    );
+}
+
+#[tokio::test]
+async fn test_build_404_html_includes_navigation() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("404.html")).unwrap();
+
+    // Should have navigation elements
+    assert!(
+        html.contains("Go Back") || html.contains("history.back"),
+        "404.html should have a back button"
+    );
+    assert!(html.contains("Home"), "404.html should have a home link");
+    // Should include search component or search tip
+    assert!(
+        html.contains("mbr-search") || html.contains("search"),
+        "404.html should include search functionality"
+    );
+}

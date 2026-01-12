@@ -408,8 +408,9 @@ async fn process_event(
         Event::Text(text) => {
             // println!("Text: {}", &text);
             if state.in_metadata {
-                state.metadata_parsed =
-                    YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
+                state.metadata_parsed = YamlLoader::load_from_str(text)
+                    .ok()
+                    .and_then(|ys| ys.into_iter().next());
                 (event, state)
             } else if let Some(remaining_text) = text.strip_prefix("[-] ") {
                 // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`

@@ -771,3 +771,16 @@ blockquote blockquote blockquote:focus-within p + p {
 pre.mermaid {
   padding: var(--pico-typography-spacing-vertical);
 }
+
+/* ==================== Link Enhancement Tooltips (GUI Mode) ==================== */
+
+/*
+ * Subtle tooltip styling for links enhanced by mbr-link-enhancement component.
+ * Only active in GUI mode where browser URL and status bar is not visible.
+ * Users can override these styles in their own theme.css. And can disable by removing
+ * the component that adds them or by using display: none; on this selector.
+ */
+a.mbr-link-enhanced[data-tooltip]::before {
+  font-size: 0.65em;
+  background-color: rgb(from var(--pico-tooltip-background-color) r g b / 0.6);
+}
