@@ -1,14 +1,19 @@
+    {% set asset_base = relative_base | default(value="/.mbr/") %}
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" type="image/png" href="/.mbr/favicon.png" />
-    <link rel="stylesheet" href="/.mbr/pico.min.css" />
-    <link href="/.mbr/theme.css" rel="stylesheet" />
-    <link href="/.mbr/user.css" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="{{ asset_base }}favicon.png" />
+    <link rel="stylesheet" href="{{ asset_base }}pico.min.css" />
+    <link href="{{ asset_base }}theme.css" rel="stylesheet" />
+    <link href="{{ asset_base }}user.css" rel="stylesheet" />
     <script>
-      // MBR configuration - serverMode indicates if dynamic search endpoint is available
+      // MBR configuration
+      // - serverMode is set when live server available (server or GUI mode)
+      // - guiMode is set when running in native window (no browser URL bar)
       window.__MBR_CONFIG__ = {
         serverMode: {% if server_mode %}true{% else %}false{% endif %},
-        searchEndpoint: "/.mbr/search"
+        guiMode: {% if gui_mode %}true{% else %}false{% endif %},
+        searchEndpoint: "{{ asset_base | safe }}search",
+        basePath: "{{ relative_root | default(value='') | safe }}"
       };
     </script>

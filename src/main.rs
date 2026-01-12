@@ -230,6 +230,7 @@ async fn main() -> Result<(), MbrError> {
             config.oembed_timeout_ms,
             config.template_folder.clone(),
             config.sort.clone(),
+            false, // gui_mode: browser access, not native window
             Some(&log_filter),
         )?;
 
@@ -266,6 +267,7 @@ async fn main() -> Result<(), MbrError> {
                     config_copy.oembed_timeout_ms,
                     config_copy.template_folder.clone(),
                     config_copy.sort.clone(),
+                    true, // gui_mode: native window mode
                     None, // Logging already initialized
                 );
                 match server {

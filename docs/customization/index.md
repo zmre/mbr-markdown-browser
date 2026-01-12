@@ -57,6 +57,7 @@ flowchart TD
 | `index.html` | Main page template | [Templates](templates/) |
 | `section.html` | Directory listing template | [Templates](templates/) |
 | `home.html` | Home page template | [Templates](templates/) |
+| `error.html` | Error/404 page template | [Templates](templates/) |
 | `_*.html` | Partial templates | [Templates](templates/) |
 | `components/*.js` | Custom web components | [Components](components/) |
 

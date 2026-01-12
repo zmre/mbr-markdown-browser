@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { subscribeSiteNav } from './shared.js'
+import { subscribeSiteNav, resolveUrl } from './shared.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -996,7 +996,7 @@ export class MbrBrowseElement extends LitElement {
       file.url_path.split('/').filter(p => p).pop() || 'Untitled';
 
     return html`
-      <a href="${file.url_path}" class="compact-file">
+      <a href="${resolveUrl(file.url_path)}" class="compact-file">
         <span class="compact-title">${title}</span>
       </a>
     `;
@@ -1033,7 +1033,7 @@ export class MbrBrowseElement extends LitElement {
     const isCurrent = this._isCurrentPath(file.url_path);
 
     return html`
-      <a href="${file.url_path}" class="file-card ${isCurrent ? 'current' : ''}">
+      <a href="${resolveUrl(file.url_path)}" class="file-card ${isCurrent ? 'current' : ''}">
         <div class="file-filename">${filename}</div>
         <div class="file-title">${title}</div>
         ${description ? html`

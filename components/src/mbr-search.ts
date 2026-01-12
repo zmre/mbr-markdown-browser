@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state, query } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
+import { getBasePath, resolveUrl } from './shared.js'
 
 /**
  * MBR configuration injected by the server/build.
@@ -208,7 +209,10 @@ export class MbrSearchElement extends LitElement {
     this._pagefindLoadPromise = (async () => {
       try {
         // Load Pagefind from the .mbr assets location
-        const pagefind = await import('/.mbr/pagefind/pagefind.js' as any) as Pagefind;
+        // Use URL() to resolve relative to page, not the component module
+        const basePath = getBasePath();
+        const pagefindUrl = new URL(basePath + '.mbr/pagefind/pagefind.js', window.location.href).href;
+        const pagefind = await import(/* @vite-ignore */ pagefindUrl) as Pagefind;
         // Configure baseUrl to "/" so result URLs are not prefixed with the module path
         await pagefind.options({ baseUrl: "/" });
         await pagefind.init();
@@ -500,7 +504,8 @@ export class MbrSearchElement extends LitElement {
   }
 
   private _navigateToResult(result: SearchResult) {
-    window.location.href = result.url_path;
+    // Use resolveUrl to handle relative paths in static mode
+    window.location.href = resolveUrl(result.url_path);
   }
 
   private _renderResult(result: SearchResult, index: number) {

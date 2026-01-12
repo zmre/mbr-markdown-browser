@@ -149,6 +149,35 @@ impl Templates {
             })?;
         Ok(html_output)
     }
+
+    /// Renders an error page using error.html template.
+    ///
+    /// Context variables:
+    /// - `error_code`: HTTP status code (e.g., 404, 500)
+    /// - `error_title`: Short error title (e.g., "Not Found")
+    /// - `error_message`: Optional detailed message
+    /// - `requested_url`: The URL that was requested (useful in GUI mode without URL bar)
+    /// - `server_mode`: Boolean indicating server vs static mode
+    /// - `relative_base`: Path prefix to .mbr assets (e.g., ".mbr/", "../.mbr/")
+    /// - `relative_root`: Path prefix to root (e.g., "", "../")
+    pub fn render_error(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let mut context = Context::new();
+        context_data.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        let html_output = self
+            .tera
+            .read()
+            .render("error.html", &context)
+            .map_err(|e| TemplateError::RenderFailed {
+                template_name: "error.html".to_string(),
+                source: e,
+            })?;
+        Ok(html_output)
+    }
 }
 
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
@@ -173,4 +202,5 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     ("index.html", include_str!("../templates/index.html")),
     ("section.html", include_str!("../templates/section.html")),
     ("home.html", include_str!("../templates/home.html")),
+    ("error.html", include_str!("../templates/error.html")),
 ];

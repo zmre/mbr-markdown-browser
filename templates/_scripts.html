@@ -1,1 +1,2 @@
-  <script defer type="module" src="/.mbr/components/mbr-components.js"></script>
+{% if not asset_base %}{% set asset_base = relative_base | default(value="/.mbr/") %}{% endif %}
+  <script defer type="module" src="{{ asset_base }}components/mbr-components.js"></script>

@@ -2,6 +2,10 @@
 
 ## What's Next
 
+* Static build
+  * [ ] Fix / understand slow performance on big repos: slow and worse, there's zero info on what it's doing while waiting for it even with -vvv
+  * [ ] Fix search relevance/ranking: the static site search is treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
+
 * Theming
   * [ ] Figure out a way to choose a pico theme with config
   * [ ] Delete all the pico crap that isn't in use
@@ -9,12 +13,12 @@
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in
 * Browser widget updates
-  * [ ] Lots of bugs :-( files in the root dir aren't shown at all, for example
-  * [ ] Enhance the browser widget to allow more keyboard shortcuts
+  * [x] Lots of bugs :-( files in the root dir aren't shown at all, for example
+  * [ ] Enhance the browser widget to allow more keyboard shortcuts (hjkl for starters)
   * [ ] Enhance the browser widget to have a broader idea of tags and other frontmatter
   * [ ] Bug in browser widget not showing all tags or full counts
   * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
-  * [ ] Add index pages for frontmatter taxonomy (maybe explicitly defined and requested) like performer, tag, etc. and maybe optionally specify content partials in the .mbr dir?
+* [ ] Add index pages for frontmatter taxonomy (maybe explicitly defined and requested) like performer, tag, etc. and maybe optionally specify content partials in the .mbr dir?
   * [ ] Add ability to specify code blocks of type mbr-search which will client-side produce search results that are displayed (for static sites, may need to build it out ahead of time, but this would slow things down)
   * [ ] I want to make docs for this using this, but docs typically have full-time sidebars on wide screens.  Should I make an option that pins this on?  Or is there a way to do that with just CSS?
 * [ ] Add tooltips to all hrefs that show the URL they go to.  Alternately setup some js that makes a sort of status at the bottom of the screen showing where a link goes to when hovering.  What about for touch screens?  Is there a click and hold action of some kind or something we can do so a person can know a URL?  And finally, while we're at it, do we want a different styling (prefix icon?) for external links versus internal links?  I think so. I think maybe a subtle globe icon for links that start with http.  And I think that can be done entirely in css.
@@ -30,7 +34,8 @@
   * [ ] in the video js component, when the transcript is being shown, make it so clicking on a line of text takes you to the relevant point in the video.  The cursor can change, but I don't want there to be any visual clues (underlines or dotted underlines or blue colors) that the text is clickable. Make sure to update the docs to explain the function.
 	* [ ] Serve captions, chapters, and posters automatically when in server/gui mode and when the relevant files don't exist already; based on config, use ffmpeg to dynamically extract and serve chapters and captions if they're available inside a video
   * [ ] dynamically scale down videos streaming to mobile without pre transcoding them? i'm using rust and axum to serve the videos
-* [ ] Make all links relative so for example from `/xyz` to `../../xyz` as needed which will handle static generation hosted mode and prefixes and more
+  * [ ] Intermingle chapter headings into the transcript with some extra styling (when available)
+* [x] Make all links relative so for example from `/xyz` to `../../xyz` as needed which will handle static generation hosted mode and prefixes and more
   * All links that are relative will need to be converted 
   * in arbitrary subfolders
   * Also, don't allow `..` paths that go outside of the root
@@ -47,7 +52,7 @@
 
 * [ ] Support for wikilinks?  If we don't have to search for titles, maybe we assume that what's in `[[title]]` is a filename like. There are also links to headings (see https://help.obsidian.md/links) but they allow spaces and stuff so would need to convert to ids.
 
-* [ ] Need a 404 page (and other error page) and need it to be customizable. server mode should serve it up as needed and build mode should make root level files like 404.html and 4xx.html and 5xx.html.
+* [x] Need a 404 page (and other error page) and need it to be customizable. server mode should serve it up as needed and build mode should make root level files like 404.html and 4xx.html and 5xx.html.
 * [ ] Need to produce robots.txt and sitemap.xml files (robots pulled from .mbr so user can override). we need some custom frontmatter to cause something to be left out or even ignored. we also need to use last update or date field to push into sitemap too.
 
 * [ ] Components are currently bundled as mbr-components.js and loaded as a single file, which is great, but we want to allow for more fine-grained overrides.  The better behavior here is for us to assemble a mbr-components.js file from a set of individual files allowing for user overrides to those files.  A static build will have a single mbr-comonents.js file and a dynamic one will concatenate each component file in a particular dir together first checking for per-repo or templates dir overrides.

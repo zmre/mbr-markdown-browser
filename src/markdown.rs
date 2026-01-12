@@ -348,25 +348,29 @@ async fn process_event(
             dest_url,
             title,
             id,
-        }) => match MediaEmbed::from_url_and_title(dest_url, title) {
-            Some(media) => {
-                // the link title is actually the next Text event so need to split this to only produce the open tags
-                let html = media.to_html(true);
-                state.current_media = Some(media);
-                (Event::Html(html.into()), state)
+        }) => {
+            // Transform the URL first for trailing-slash URL convention
+            // This applies to all images/media, not just regular images
+            let transformed_url = transform_link(dest_url, &state.link_transform_config);
+
+            match MediaEmbed::from_url_and_title(&transformed_url, title) {
+                Some(media) => {
+                    // the link title is actually the next Text event so need to split this to only produce the open tags
+                    let html = media.to_html(true);
+                    state.current_media = Some(media);
+                    (Event::Html(html.into()), state)
+                }
+                _ => {
+                    let new_event = Event::Start(Tag::Image {
+                        link_type: *link_type,
+                        dest_url: CowStr::from(transformed_url),
+                        title: title.clone(),
+                        id: id.clone(),
+                    });
+                    (new_event, state)
+                }
             }
-            _ => {
-                // Transform the image URL for trailing-slash URL convention
-                let transformed_url = transform_link(dest_url, &state.link_transform_config);
-                let new_event = Event::Start(Tag::Image {
-                    link_type: *link_type,
-                    dest_url: CowStr::from(transformed_url),
-                    title: title.clone(),
-                    id: id.clone(),
-                });
-                (new_event, state)
-            }
-        },
+        }
         Event::End(TagEnd::Image) => {
             if let Some(media) = state.current_media.take() {
                 (Event::Html(media.html_close().into()), state)
@@ -408,8 +412,9 @@ async fn process_event(
         Event::Text(text) => {
             // println!("Text: {}", &text);
             if state.in_metadata {
-                state.metadata_parsed =
-                    YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
+                state.metadata_parsed = YamlLoader::load_from_str(text)
+                    .ok()
+                    .and_then(|ys| ys.into_iter().next());
                 (event, state)
             } else if let Some(remaining_text) = text.strip_prefix("[-] ") {
                 // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`
@@ -590,7 +595,12 @@ mod tests {
         let md = "![Important Document](report.pdf)";
         let html = render_markdown(md).await;
         assert!(html.contains("pdf-embed"));
-        assert!(html.contains(r#"data="report.pdf""#));
+        // URL is transformed for trailing-slash convention (../report.pdf for non-index files)
+        assert!(
+            html.contains(r#"data="../report.pdf""#),
+            "PDF URL should be transformed. Got: {}",
+            html
+        );
         assert!(html.contains(r#"type="application/pdf""#));
         assert!(html.contains("data-pdf-fallback"));
         assert!(html.contains("<figcaption>"));
@@ -603,7 +613,12 @@ mod tests {
         let md = "![](docs/manual.pdf)";
         let html = render_markdown(md).await;
         assert!(html.contains("pdf-embed"));
-        assert!(html.contains(r#"data="docs/manual.pdf""#));
+        // URL is transformed for trailing-slash convention (../docs/manual.pdf for non-index files)
+        assert!(
+            html.contains(r#"data="../docs/manual.pdf""#),
+            "PDF URL should be transformed. Got: {}",
+            html
+        );
     }
 
     #[tokio::test]
@@ -726,6 +741,103 @@ mod tests {
         assert!(
             html.contains(r#"src="images/photo.jpg""#),
             "Index file image URLs shouldn't get ../. Got: {}",
+            html
+        );
+    }
+
+    // Media embed URL transformation tests
+    #[tokio::test]
+    async fn test_video_embed_url_transformation() {
+        // Video embeds in regular markdown files should get ../ prefix
+        let md = "![My Video](video.mp4)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains("../video.mp4"),
+            "Video URLs should be transformed with ../. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_video_embed_url_transformation_index_file() {
+        // Video embeds in index files should NOT get ../ prefix
+        let md = "![My Video](video.mp4)";
+        let html = render_markdown_with_config(md, true).await;
+        assert!(
+            !html.contains("../video.mp4"),
+            "Index file video URLs shouldn't get ../. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("video.mp4"),
+            "Video URL should be present. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audio_embed_url_transformation() {
+        // Audio embeds in regular markdown files should get ../ prefix
+        let md = "![Podcast](episode.mp3)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains("../episode.mp3"),
+            "Audio URLs should be transformed with ../. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pdf_embed_url_transformation() {
+        // PDF embeds in regular markdown files should get ../ prefix
+        let md = "![Document](report.pdf)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains("../report.pdf"),
+            "PDF URLs should be transformed with ../. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pdf_embed_url_transformation_index_file() {
+        // PDF embeds in index files should NOT get ../ prefix
+        let md = "![Document](report.pdf)";
+        let html = render_markdown_with_config(md, true).await;
+        assert!(
+            !html.contains("../report.pdf"),
+            "Index file PDF URLs shouldn't get ../. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("report.pdf"),
+            "PDF URL should be present. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_media_embed_peer_file_transformation() {
+        // Test the specific bug case: peer file in same folder as markdown
+        // Markdown: docs/guide.md references peer-video.mp4 (docs/peer-video.mp4)
+        // When served at /docs/guide/, browser sees ../peer-video.mp4 → /docs/peer-video.mp4 (correct!)
+        let md = "![](peer-video.mp4)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains("../peer-video.mp4"),
+            "Peer file video should get ../ prefix. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_media_embed_explicit_relative_path() {
+        // Test ./file.mp4 syntax also gets transformed correctly
+        let md = "![](./peer-video.mp4)";
+        let html = render_markdown_with_config(md, false).await;
+        assert!(
+            html.contains("../peer-video.mp4"),
+            "./peer-video.mp4 should transform to ../peer-video.mp4. Got: {}",
             html
         );
     }

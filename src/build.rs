@@ -27,6 +27,73 @@ use crate::{
     templates::Templates,
 };
 
+/// Calculate the directory depth from a URL path.
+///
+/// Examples:
+/// - "/" or "" → 0
+/// - "/docs/" → 1
+/// - "/docs/guide/" → 2
+fn url_depth(url_path: &str) -> usize {
+    url_path
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .count()
+}
+
+/// Build the relative path prefix for .mbr assets based on page depth.
+///
+/// Examples:
+/// - depth 0 → ".mbr/"
+/// - depth 1 → "../.mbr/"
+/// - depth 2 → "../../.mbr/"
+fn relative_base(depth: usize) -> String {
+    if depth == 0 {
+        ".mbr/".to_string()
+    } else {
+        format!("{}.mbr/", "../".repeat(depth))
+    }
+}
+
+/// Build the relative path prefix to root based on page depth.
+///
+/// Examples:
+/// - depth 0 → "" (empty string, already at root)
+/// - depth 1 → "../"
+/// - depth 2 → "../../"
+fn relative_root(depth: usize) -> String {
+    if depth == 0 {
+        String::new()
+    } else {
+        "../".repeat(depth)
+    }
+}
+
+/// Convert an absolute URL path to a relative URL from the given depth.
+///
+/// Examples (from depth 2):
+/// - "/" → "../../"
+/// - "/docs/" → "../../docs/"
+/// - "/docs/guide/" → "../../docs/guide/"
+fn make_relative_url(absolute_url: &str, depth: usize) -> String {
+    let target = absolute_url.trim_start_matches('/');
+    if target.is_empty() {
+        // Link to root
+        if depth == 0 {
+            "./".to_string()
+        } else {
+            "../".repeat(depth)
+        }
+    } else {
+        // Go up to root, then down to target
+        if depth == 0 {
+            target.to_string()
+        } else {
+            format!("{}{}", "../".repeat(depth), target)
+        }
+    }
+}
+
 /// Normalize a path by resolving `.` and `..` components without requiring the path to exist.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
@@ -124,6 +191,9 @@ impl Builder {
         // Handle .mbr folder (copy, write defaults, generate site.json)
         self.handle_mbr_folder()?;
 
+        // Generate 404.html for GitHub Pages compatibility
+        self.generate_404_page()?;
+
         // Validate internal links and report broken ones
         let broken_links = self.validate_links();
         stats.broken_links = broken_links.len();
@@ -218,12 +288,20 @@ impl Builder {
         // Empty string is falsy in Tera templates
         frontmatter.insert("server_mode".to_string(), String::new());
 
-        // Compute breadcrumbs for the markdown file
+        // Calculate page depth for relative path generation
+        let depth = url_depth(&info.url_path);
+
+        // Compute breadcrumbs for the markdown file with relative URLs
         let url_path_for_breadcrumbs = std::path::Path::new(&info.url_path);
         let breadcrumbs = crate::server::generate_breadcrumbs(url_path_for_breadcrumbs);
         let breadcrumbs_json: Vec<_> = breadcrumbs
             .iter()
-            .map(|b| serde_json::json!({"name": b.name, "url": b.url}))
+            .map(|b| {
+                serde_json::json!({
+                    "name": b.name,
+                    "url": make_relative_url(&b.url, depth)
+                })
+            })
             .collect();
         let current_dir_name = crate::server::get_current_dir_name(url_path_for_breadcrumbs);
 
@@ -237,6 +315,16 @@ impl Builder {
             serde_json::json!(current_dir_name),
         );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
+
+        // Add relative path variables for static builds
+        extra_context.insert(
+            "relative_base".to_string(),
+            serde_json::json!(relative_base(depth)),
+        );
+        extra_context.insert(
+            "relative_root".to_string(),
+            serde_json::json!(relative_root(depth)),
+        );
 
         // Render through template
         let html_output = self
@@ -308,14 +396,30 @@ impl Builder {
     async fn render_directory_page(&self, relative_dir: &Path) -> Result<(), BuildError> {
         let is_root = relative_dir.as_os_str().is_empty();
 
+        // Calculate page depth for relative path generation
+        let depth = if is_root {
+            0
+        } else {
+            relative_dir.components().count()
+        };
+
         // Build context for template
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
 
-        // Breadcrumbs
+        // Breadcrumbs with relative URLs
         let breadcrumbs = generate_breadcrumbs(relative_dir);
+        let breadcrumbs_json: Vec<serde_json::Value> = breadcrumbs
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "name": b.name,
+                    "url": make_relative_url(&b.url, depth)
+                })
+            })
+            .collect();
         context.insert(
             "breadcrumbs".to_string(),
-            serde_json::to_value(&breadcrumbs).unwrap_or_default(),
+            serde_json::Value::Array(breadcrumbs_json),
         );
 
         // Current directory name
@@ -329,10 +433,24 @@ impl Builder {
             serde_json::Value::String(current_dir_name),
         );
 
-        // Parent path
+        // Parent path (relative)
         if let Some(parent) = get_parent_path(relative_dir) {
-            context.insert("parent_path".to_string(), serde_json::Value::String(parent));
+            let relative_parent = make_relative_url(&parent, depth);
+            context.insert(
+                "parent_path".to_string(),
+                serde_json::Value::String(relative_parent),
+            );
         }
+
+        // Add relative path variables for static builds
+        context.insert(
+            "relative_base".to_string(),
+            serde_json::Value::String(relative_base(depth)),
+        );
+        context.insert(
+            "relative_root".to_string(),
+            serde_json::Value::String(relative_root(depth)),
+        );
 
         // Collect files in this directory
         let dir_prefix = if is_root {
@@ -353,7 +471,17 @@ impl Builder {
 
                 // If there's no / in remainder, it's a direct child
                 if !remainder.trim_end_matches('/').contains('/') {
-                    files.push(markdown_file_to_json(info));
+                    // Convert file JSON to use relative url_path
+                    let mut file_json = markdown_file_to_json(info);
+                    if let Some(obj) = file_json.as_object_mut()
+                        && let Some(abs_url) = obj.get("url_path").and_then(|v| v.as_str())
+                    {
+                        obj.insert(
+                            "url_path".to_string(),
+                            serde_json::Value::String(make_relative_url(abs_url, depth)),
+                        );
+                    }
+                    files.push(file_json);
                 } else if let Some(subdir) = remainder.split('/').next()
                     && !subdir.is_empty()
                 {
@@ -367,18 +495,18 @@ impl Builder {
 
         context.insert("files".to_string(), serde_json::Value::Array(files));
 
-        // Convert subdirs to JSON array with name and url_path
+        // Convert subdirs to JSON array with name and relative url_path
         let subdirs_json: Vec<serde_json::Value> = subdirs
             .into_iter()
             .map(|name| {
-                let url_path = if is_root {
+                let abs_url_path = if is_root {
                     format!("/{}/", name)
                 } else {
                     format!("{}{}/", dir_prefix, name)
                 };
                 serde_json::json!({
                     "name": name,
-                    "url_path": url_path
+                    "url_path": make_relative_url(&abs_url_path, depth)
                 })
             })
             .collect();
@@ -608,6 +736,58 @@ impl Builder {
         let site_json_path = mbr_output.join("site.json");
         fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
             path: site_json_path,
+            source: e,
+        })?;
+
+        Ok(())
+    }
+
+    /// Generates a 404.html error page at the root of the output directory.
+    /// This is used by GitHub Pages and other hosts for custom 404 pages.
+    fn generate_404_page(&self) -> Result<(), BuildError> {
+        use std::collections::HashMap;
+
+        let output_path = self.output_dir.join("404.html");
+
+        // Build context for error template
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+        context.insert(
+            "error_code".to_string(),
+            serde_json::Value::Number(404.into()),
+        );
+        context.insert(
+            "error_title".to_string(),
+            serde_json::Value::String("Not Found".to_string()),
+        );
+        context.insert(
+            "error_message".to_string(),
+            serde_json::Value::String("The requested page could not be found.".to_string()),
+        );
+
+        // Static mode settings - 404.html is at root level (depth 0)
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
+        context.insert(
+            "relative_base".to_string(),
+            serde_json::Value::String(relative_base(0)),
+        );
+        context.insert(
+            "relative_root".to_string(),
+            serde_json::Value::String(relative_root(0)),
+        );
+
+        // Empty breadcrumbs for error page
+        context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::Value::Array(vec![serde_json::json!({
+                "name": "Home",
+                "url": "./"
+            })]),
+        );
+
+        let html = self.templates.render_error(context)?;
+
+        fs::write(&output_path, html).map_err(|e| BuildError::WriteFailed {
+            path: output_path,
             source: e,
         })?;
 
@@ -954,5 +1134,82 @@ mod tests {
     fn test_normalize_path_mixed() {
         let path = PathBuf::from("/foo/./bar/../baz/./qux");
         assert_eq!(normalize_path(&path), PathBuf::from("/foo/baz/qux"));
+    }
+
+    #[test]
+    fn test_url_depth_root() {
+        assert_eq!(url_depth("/"), 0);
+        assert_eq!(url_depth(""), 0);
+    }
+
+    #[test]
+    fn test_url_depth_one_level() {
+        assert_eq!(url_depth("/docs/"), 1);
+        assert_eq!(url_depth("docs/"), 1);
+        assert_eq!(url_depth("/docs"), 1);
+    }
+
+    #[test]
+    fn test_url_depth_multiple_levels() {
+        assert_eq!(url_depth("/docs/guide/"), 2);
+        assert_eq!(url_depth("/a/b/c/"), 3);
+        assert_eq!(url_depth("/a/b/c/d/e/"), 5);
+    }
+
+    #[test]
+    fn test_relative_base_at_root() {
+        assert_eq!(relative_base(0), ".mbr/");
+    }
+
+    #[test]
+    fn test_relative_base_one_level() {
+        assert_eq!(relative_base(1), "../.mbr/");
+    }
+
+    #[test]
+    fn test_relative_base_multiple_levels() {
+        assert_eq!(relative_base(2), "../../.mbr/");
+        assert_eq!(relative_base(3), "../../../.mbr/");
+    }
+
+    #[test]
+    fn test_relative_root_at_root() {
+        assert_eq!(relative_root(0), "");
+    }
+
+    #[test]
+    fn test_relative_root_one_level() {
+        assert_eq!(relative_root(1), "../");
+    }
+
+    #[test]
+    fn test_relative_root_multiple_levels() {
+        assert_eq!(relative_root(2), "../../");
+        assert_eq!(relative_root(3), "../../../");
+    }
+
+    #[test]
+    fn test_make_relative_url_to_root() {
+        // From depth 0
+        assert_eq!(make_relative_url("/", 0), "./");
+        // From depth 1
+        assert_eq!(make_relative_url("/", 1), "../");
+        // From depth 2
+        assert_eq!(make_relative_url("/", 2), "../../");
+    }
+
+    #[test]
+    fn test_make_relative_url_to_path() {
+        // From root
+        assert_eq!(make_relative_url("/docs/", 0), "docs/");
+        assert_eq!(make_relative_url("/docs/guide/", 0), "docs/guide/");
+
+        // From depth 1
+        assert_eq!(make_relative_url("/docs/", 1), "../docs/");
+        assert_eq!(make_relative_url("/other/", 1), "../other/");
+
+        // From depth 2
+        assert_eq!(make_relative_url("/docs/", 2), "../../docs/");
+        assert_eq!(make_relative_url("/docs/guide/", 2), "../../docs/guide/");
     }
 }

@@ -1,5 +1,6 @@
+{% set asset_base = relative_base | default(value="/.mbr/") %}
 {% include "_head.html" %}
-    <link rel="stylesheet" href="/.mbr/hljs.dark.css" />
+    <link rel="stylesheet" href="{{ asset_base }}hljs.dark.css" />
     {% if tags %}
     <meta name="keywords" content="{{tags | safe}}" data-pagefind-filter="tag[content]" />
     {% elif keywords %}
