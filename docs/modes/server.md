@@ -1,6 +1,7 @@
 ---
 title: Server Mode
 description: Local web server with mbr -s
+order: 2
 ---
 
 # Server Mode

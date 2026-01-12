@@ -1,6 +1,7 @@
 ---
 title: Customization
 description: Customize mbr for your needs
+order: 4
 ---
 
 # Customization
@@ -50,7 +51,7 @@ flowchart TD
 
 | File | Purpose | Guide |
 |------|---------|-------|
-| `config.toml` | Settings and behavior | [CLI Reference](../reference/cli/) |
+| `config.toml` | Settings and behavior | [CLI Reference](../reference/cli/), [Sorting](sorting/) |
 | `theme.css` | Color theme override | [Themes](themes/) |
 | `user.css` | Additional styles | [Themes](themes/) |
 | `index.html` | Main page template | [Templates](templates/) |
@@ -108,3 +109,4 @@ This lets you share templates or work on ones in their own repository for sharin
 - [CSS Theming](themes/) - Colors, fonts, and styles
 - [HTML Templates](templates/) - Page structure and layout
 - [Web Components](components/) - Interactive elements
+- [File Sorting](sorting/) - Configure file listing order

@@ -24,8 +24,14 @@
     if (typeof hljs !== "undefined") {
       hljs.highlightAll();
     }
+
     if (typeof mermaid !== "undefined") {
-      mermaid.initialize({ startOnLoad: true, theme: "dark" });
+      const prefersDarkScheme = window.matchMedia(
+        "(prefers-color-scheme: dark)",
+      );
+
+      const theme = prefersDarkScheme.matches ? "dark" : "default";
+      mermaid.initialize({ startOnLoad: true, theme: theme });
     }
   });
 </script>

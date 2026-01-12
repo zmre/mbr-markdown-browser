@@ -1,29 +1,15 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav } from './shared.js'
-
-/**
- * Markdown file metadata from site.json.
- */
-interface MarkdownFile {
-  url_path: string;
-  raw_path: string;
-  created: number;
-  modified: number;
-  frontmatter: Record<string, any> | null;
-}
-
-/**
- * Folder node with file count for descendant tracking.
- */
-interface FolderNode {
-  name: string;
-  title?: string;  // From index file frontmatter, fallback to name
-  path: string;
-  children: Map<string, FolderNode>;
-  files: MarkdownFile[];
-  fileCount: number;  // Total files in this folder and all descendants
-}
+import {
+  type MarkdownFile,
+  type SortField,
+  type FolderNode,
+  DEFAULT_SORT_CONFIG,
+  sortFiles,
+  sortFolders,
+  buildFolderTree,
+} from './sorting.js'
 
 /**
  * Hierarchical tag node for nested tag support (e.g., tech/rust/async).
@@ -116,6 +102,9 @@ export class MbrBrowseElement extends LitElement {
   /** The configured index file name from site.json */
   private _indexFile: string = 'index.md';
 
+  /** Sort configuration from site.json */
+  private _sortConfig: SortField[] = DEFAULT_SORT_CONFIG;
+
   private _keyboardHandler: ((e: KeyboardEvent) => void) | null = null;
   private _unsubscribeSiteNav: (() => void) | null = null;
 
@@ -144,9 +133,14 @@ export class MbrBrowseElement extends LitElement {
           this._indexFile = state.data.index_file;
         }
 
+        // Load sort configuration if available
+        if (state.data.sort && Array.isArray(state.data.sort) && state.data.sort.length > 0) {
+          this._sortConfig = state.data.sort;
+        }
+
         // Build derived data structures
         this._tagHierarchy = this._buildTagHierarchy(this._allFiles);
-        this._folderTree = this._buildFolderTreeWithCounts(this._allFiles);
+        this._folderTree = buildFolderTree(this._allFiles, this._indexFile);
         this._dynamicFields = this._detectDynamicFields(this._allFiles);
 
         // Auto-expand current path in folder tree
@@ -304,94 +298,6 @@ export class MbrBrowseElement extends LitElement {
     }
 
     return root;
-  }
-
-  /**
-   * Build folder tree with descendant file counts.
-   */
-  private _buildFolderTreeWithCounts(files: MarkdownFile[]): FolderNode {
-    const root: FolderNode = {
-      name: '',
-      path: '/',
-      children: new Map(),
-      files: [],
-      fileCount: 0,
-    };
-
-    for (const file of files) {
-      const parts = file.url_path.split('/').filter(p => p.length > 0);
-      let currentNode = root;
-
-      // Navigate/create folder structure (all parts except last are folders)
-      for (let i = 0; i < parts.length - 1; i++) {
-        const part = parts[i];
-        const folderPath = '/' + parts.slice(0, i + 1).join('/') + '/';
-
-        if (!currentNode.children.has(part)) {
-          currentNode.children.set(part, {
-            name: part,
-            path: folderPath,
-            children: new Map(),
-            files: [],
-            fileCount: 0,
-          });
-        }
-
-        currentNode = currentNode.children.get(part)!;
-      }
-
-      // Handle index files
-      const fileName = file.raw_path.split('/').pop() || '';
-      const isIndexFile = fileName === this._indexFile;
-
-      if (isIndexFile) {
-        // Index files define folder metadata (title)
-        let targetNode = currentNode;
-
-        if (parts.length > 0) {
-          const lastPart = parts[parts.length - 1];
-          const folderPath = '/' + parts.join('/') + '/';
-
-          if (!currentNode.children.has(lastPart)) {
-            currentNode.children.set(lastPart, {
-              name: lastPart,
-              path: folderPath,
-              children: new Map(),
-              files: [],
-              fileCount: 0,
-            });
-          }
-          targetNode = currentNode.children.get(lastPart)!;
-        }
-
-        // Capture title from index file frontmatter
-        if (file.frontmatter?.title) {
-          targetNode.title = file.frontmatter.title;
-        }
-        // Include index file in the folder's file count
-        targetNode.files.push(file);
-        continue;
-      }
-
-      currentNode.files.push(file);
-    }
-
-    // Calculate descendant counts
-    this._calculateFolderCounts(root);
-
-    return root;
-  }
-
-  /**
-   * Recursively calculate file counts for folders.
-   */
-  private _calculateFolderCounts(node: FolderNode): number {
-    let count = node.files.length;
-    for (const child of node.children.values()) {
-      count += this._calculateFolderCounts(child);
-    }
-    node.fileCount = count;
-    return count;
   }
 
   /**
@@ -584,9 +490,9 @@ export class MbrBrowseElement extends LitElement {
       }
     }
 
-    // Sort by modified date, newest first (except recent which is already sorted)
+    // Sort files using configurable sort order (except recent which is already sorted)
     if (this._currentSelection.type !== 'recent') {
-      files.sort((a, b) => b.modified - a.modified);
+      files = sortFiles(files, this._sortConfig);
     }
 
     this._selectedFiles = files;
@@ -1002,8 +908,7 @@ export class MbrBrowseElement extends LitElement {
           </div>
         </div>
         ${isExpanded ? html`
-          ${[...node.children.values()]
-            .sort((a, b) => a.name.localeCompare(b.name))
+          ${sortFolders([...node.children.values()], this._sortConfig)
             .map(child => this._renderFolderTree(child, 1))}
         ` : nothing}
       `;
@@ -1035,8 +940,7 @@ export class MbrBrowseElement extends LitElement {
         </div>
       </div>
       ${isExpanded ? html`
-        ${[...node.children.values()]
-          .sort((a, b) => a.name.localeCompare(b.name))
+        ${sortFolders([...node.children.values()], this._sortConfig)
           .map(child => this._renderFolderTree(child, depth + 1))}
       ` : nothing}
     `;

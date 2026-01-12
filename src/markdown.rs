@@ -228,6 +228,18 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
                             hm.insert(key.to_string() + "." + k.as_str(), v);
                         }
                     }
+                    (Yaml::String(key), Yaml::Integer(val)) => {
+                        tracing::trace!("Frontmatter: {key} = {val}");
+                        hm.insert(key.to_string(), val.to_string());
+                    }
+                    (Yaml::String(key), Yaml::Real(val)) => {
+                        tracing::trace!("Frontmatter: {key} = {val}");
+                        hm.insert(key.to_string(), val.to_string());
+                    }
+                    (Yaml::String(key), Yaml::Boolean(val)) => {
+                        tracing::trace!("Frontmatter: {key} = {val}");
+                        hm.insert(key.to_string(), val.to_string());
+                    }
                     (Yaml::String(key), other_val) => {
                         tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
                         if let Some(str_val) = other_val.clone().into_string() {

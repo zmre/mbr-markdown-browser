@@ -1,6 +1,7 @@
 ---
 title: QuickLook Preview
 description: Preview markdown in macOS Finder
+order: 4
 ---
 
 # QuickLook Preview (macOS)

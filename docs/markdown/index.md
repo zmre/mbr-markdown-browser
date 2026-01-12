@@ -1,6 +1,7 @@
 ---
 title: Markdown Extensions
 description: Extended markdown features in mbr
+order: 3
 ---
 
 # Markdown Extensions

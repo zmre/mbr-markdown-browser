@@ -1,6 +1,7 @@
 ---
 title: Static Site Generation
 description: Build static sites with mbr -b
+order: 3
 ---
 
 # Static Site Generation

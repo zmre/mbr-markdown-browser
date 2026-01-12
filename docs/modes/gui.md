@@ -1,6 +1,7 @@
 ---
 title: GUI Mode
 description: Native browser window with mbr -g
+order: 1
 ---
 
 # GUI Mode

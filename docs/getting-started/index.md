@@ -1,6 +1,7 @@
 ---
-title: Installation
+title: Getting Started - Installation
 description: Install mbr on your system
+order: 1
 ---
 
 # Installation

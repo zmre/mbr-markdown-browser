@@ -1,6 +1,7 @@
 ---
 title: Modes of Operation
 description: Different ways to use mbr
+order: 2
 ---
 
 # Modes of Operation
