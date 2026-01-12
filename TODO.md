@@ -9,12 +9,13 @@
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in
 * Browser widget updates
+  * [ ] Lots of bugs :-( files in the root dir aren't shown at all, for example
   * [ ] Enhance the browser widget to allow more keyboard shortcuts
   * [ ] Enhance the browser widget to have a broader idea of tags and other frontmatter
   * [ ] Bug in browser widget not showing all tags or full counts
   * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
   * [ ] Add index pages for frontmatter taxonomy (maybe explicitly defined and requested) like performer, tag, etc. and maybe optionally specify content partials in the .mbr dir?
-    * [ ] Add ability to specify code blocks of type mbr-search which will client-side produce search results that are displayed (for static sites, may need to build it out ahead of time, but this would slow things down, so maybe not)
+  * [ ] Add ability to specify code blocks of type mbr-search which will client-side produce search results that are displayed (for static sites, may need to build it out ahead of time, but this would slow things down)
   * [ ] I want to make docs for this using this, but docs typically have full-time sidebars on wide screens.  Should I make an option that pins this on?  Or is there a way to do that with just CSS?
 * [ ] Add tooltips to all hrefs that show the URL they go to.  Alternately setup some js that makes a sort of status at the bottom of the screen showing where a link goes to when hovering.  What about for touch screens?  Is there a click and hold action of some kind or something we can do so a person can know a URL?  And finally, while we're at it, do we want a different styling (prefix icon?) for external links versus internal links?  I think so. I think maybe a subtle globe icon for links that start with http.  And I think that can be done entirely in css.
 * [ ] Add a command palette, which can be brought up with either `:` or `cmd-shift-k`.  Everything that has a shortcut key including next/previous file, search, browse, etc., should pop up. Use fuzzy search completion to select the desired item. This will also serve as a sort of shortcut help as the title of the action will be on the left and the shortcut key or keys for the action will be shown right aligned in gray. 
@@ -40,6 +41,10 @@
 * [ ] Do we want a tui, too? maybe too much bloat?  or maybe awesomesauce?  if we did a tui for showing markdown then it would need to browse and jump around it, too, and have a key for launching an editor.  maybe re-use colors from pico variables in css?  my use case here is for the two linux machines i ssh into. locally i think i'd always just use the gui.  but it may be an awful lot to have gui and tui in one binary so the other option is to make different binaries?  or just feature flags?  thinking needed. (ratatui)
 
 
+* [ ] Publish to crates.io?
+* [ ] Publish to a homebrew cask?
+* [ ] Publish to determinate's flake hub?
+
 * [ ] Support for wikilinks?  If we don't have to search for titles, maybe we assume that what's in `[[title]]` is a filename like. There are also links to headings (see https://help.obsidian.md/links) but they allow spaces and stuff so would need to convert to ids.
 
 * [ ] Need a 404 page (and other error page) and need it to be customizable. server mode should serve it up as needed and build mode should make root level files like 404.html and 4xx.html and 5xx.html.
@@ -47,6 +52,3 @@
 
 * [ ] Components are currently bundled as mbr-components.js and loaded as a single file, which is great, but we want to allow for more fine-grained overrides.  The better behavior here is for us to assemble a mbr-components.js file from a set of individual files allowing for user overrides to those files.  A static build will have a single mbr-comonents.js file and a dynamic one will concatenate each component file in a particular dir together first checking for per-repo or templates dir overrides.
 
-* [ ] Publish to crates.io?
-* [ ] Publish to a homebrew cask?
-* [ ] Publish to determinate's flake hub?
