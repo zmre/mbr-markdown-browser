@@ -24,6 +24,7 @@ HLJS_LANGUAGES=(
     scala
     go
     ruby
+    nix
     css
     json
     yaml

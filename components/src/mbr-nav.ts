@@ -1,17 +1,14 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { siteNav } from './shared.js'
-
-/**
- * Markdown file metadata from site.json.
- */
-interface MarkdownFile {
-  url_path: string;
-  raw_path: string;
-  created: number;
-  modified: number;
-  frontmatter: Record<string, any> | null;
-}
+import {
+  type MarkdownFile,
+  type SortField,
+  DEFAULT_SORT_CONFIG,
+  getFileName,
+  buildFolderTree,
+  flattenToLinearSequence,
+} from './sorting.js'
 
 /**
  * Site navigation data structure.
@@ -19,15 +16,17 @@ interface MarkdownFile {
 interface SiteNav {
   markdown_files: MarkdownFile[];
   other_files?: any[];
+  sort?: SortField[];
 }
 
 /**
  * Previous/Next navigation component.
  *
- * Displays prev/next buttons that navigate to adjacent files in the same folder,
- * sorted alphabetically by URL path.
+ * Displays prev/next buttons for linear navigation through the entire site.
+ * Navigation follows a depth-first traversal: folder files first (sorted),
+ * then child folders (sorted). This creates a "book-like" reading order.
  *
- * Buttons start disabled and enable once site.json is loaded and siblings are found.
+ * Buttons start disabled and enable once site.json is loaded.
  */
 @customElement('mbr-nav')
 export class MbrNavElement extends LitElement {
@@ -37,13 +36,20 @@ export class MbrNavElement extends LitElement {
   @state()
   private _nextFile: MarkdownFile | null = null;
 
+  /** Sort configuration from site.json */
+  private _sortConfig: SortField[] = DEFAULT_SORT_CONFIG;
+
   override connectedCallback() {
     super.connectedCallback();
 
     // Load site navigation data and compute prev/next
     siteNav.then((nav: SiteNav) => {
       if (nav?.markdown_files) {
-        this._computeSiblings(nav.markdown_files);
+        // Load sort config if available
+        if (nav.sort && Array.isArray(nav.sort) && nav.sort.length > 0) {
+          this._sortConfig = nav.sort;
+        }
+        this._computeNavigation(nav.markdown_files);
       }
     }).catch(() => {
       // Failed to load site.json - buttons remain disabled
@@ -51,55 +57,19 @@ export class MbrNavElement extends LitElement {
   }
 
   /**
-   * Get the parent folder path from a URL path.
-   * e.g., "/docs/guide/intro/" -> "/docs/guide/"
-   *       "/README/" -> "/"
+   * Compute prev/next navigation for the current page using global linear order.
+   * This creates a "book-like" navigation through the entire site.
    */
-  private _getParentPath(urlPath: string): string {
-    // Remove trailing slash for processing
-    const normalized = urlPath.endsWith('/') ? urlPath.slice(0, -1) : urlPath;
-    const lastSlash = normalized.lastIndexOf('/');
-
-    if (lastSlash <= 0) {
-      return '/';
-    }
-
-    return normalized.slice(0, lastSlash + 1);
-  }
-
-  /**
-   * Get the filename part of a URL path for sorting.
-   * e.g., "/docs/guide/intro/" -> "intro"
-   */
-  private _getFileName(urlPath: string): string {
-    const normalized = urlPath.endsWith('/') ? urlPath.slice(0, -1) : urlPath;
-    const lastSlash = normalized.lastIndexOf('/');
-    return normalized.slice(lastSlash + 1);
-  }
-
-  /**
-   * Compute prev/next siblings for the current page.
-   */
-  private _computeSiblings(allFiles: MarkdownFile[]) {
+  private _computeNavigation(allFiles: MarkdownFile[]) {
     const currentPath = window.location.pathname;
     const normalizedCurrent = currentPath.endsWith('/') ? currentPath : currentPath + '/';
-    const parentPath = this._getParentPath(normalizedCurrent);
 
-    // Find all files in the same parent folder
-    const siblings = allFiles.filter(file => {
-      const fileParent = this._getParentPath(file.url_path);
-      return fileParent === parentPath;
-    });
+    // Build folder tree and flatten to linear sequence
+    const tree = buildFolderTree(allFiles);
+    const orderedFiles = flattenToLinearSequence(tree, this._sortConfig);
 
-    // Sort alphabetically by filename (case-insensitive)
-    siblings.sort((a, b) => {
-      const nameA = this._getFileName(a.url_path).toLowerCase();
-      const nameB = this._getFileName(b.url_path).toLowerCase();
-      return nameA.localeCompare(nameB);
-    });
-
-    // Find current file index
-    const currentIndex = siblings.findIndex(file => {
+    // Find current file in global sequence
+    const currentIndex = orderedFiles.findIndex(file => {
       const filePath = file.url_path.endsWith('/') ? file.url_path : file.url_path + '/';
       return filePath === normalizedCurrent;
     });
@@ -108,13 +78,13 @@ export class MbrNavElement extends LitElement {
       return;
     }
 
-    // Set prev/next
+    // Set prev/next from global sequence
     if (currentIndex > 0) {
-      this._prevFile = siblings[currentIndex - 1];
+      this._prevFile = orderedFiles[currentIndex - 1];
     }
 
-    if (currentIndex < siblings.length - 1) {
-      this._nextFile = siblings[currentIndex + 1];
+    if (currentIndex < orderedFiles.length - 1) {
+      this._nextFile = orderedFiles[currentIndex + 1];
     }
   }
 
@@ -125,7 +95,7 @@ export class MbrNavElement extends LitElement {
     if (file.frontmatter?.title) {
       return file.frontmatter.title;
     }
-    return this._getFileName(file.url_path);
+    return getFileName(file.url_path);
   }
 
   override render() {

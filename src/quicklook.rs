@@ -347,6 +347,7 @@ const HLJS_LANGUAGES: &[&str] = &[
     "scala",
     "go",
     "ruby",
+    "nix",
     "json",
     "yaml",
     "xml",

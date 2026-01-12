@@ -36,8 +36,9 @@ impl TestServer {
                 ],
                 "index.md",
                 100,
-                None, // template_folder
-                None, // log_filter
+                None,                               // template_folder
+                mbr::config::default_sort_config(), // sort
+                None,                               // log_filter
             )
             .expect("Failed to initialize server");
 
@@ -687,7 +688,8 @@ impl TestServerWithTemplates {
                 "index.md",
                 100,
                 template_folder,
-                None, // log_filter
+                mbr::config::default_sort_config(), // sort
+                None,                               // log_filter
             )
             .expect("Failed to initialize server");
 

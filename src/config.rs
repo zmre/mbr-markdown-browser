@@ -11,6 +11,42 @@ use figment::{
 
 use crate::errors::ConfigError;
 
+/// Configuration for a single sort field in multi-level sorting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SortField {
+    /// Field to sort by: "title", "filename", "created", "modified", or any frontmatter field
+    pub field: String,
+    /// Sort order: "asc" or "desc"
+    #[serde(default = "default_sort_order")]
+    pub order: String,
+    /// Comparison type: "string" or "numeric"
+    #[serde(default = "default_sort_compare")]
+    pub compare: String,
+}
+
+fn default_sort_order() -> String {
+    "asc".to_string()
+}
+
+fn default_sort_compare() -> String {
+    "string".to_string()
+}
+
+impl Default for SortField {
+    fn default() -> Self {
+        Self {
+            field: "title".to_string(),
+            order: default_sort_order(),
+            compare: default_sort_compare(),
+        }
+    }
+}
+
+/// Returns the default sort configuration: title ascending, string comparison.
+pub fn default_sort_config() -> Vec<SortField> {
+    vec![SortField::default()]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IpArray(pub [u8; 4]);
 
@@ -36,6 +72,10 @@ pub struct Config {
     /// Files found here take precedence; missing files fall back to compiled defaults.
     #[serde(skip)]
     pub template_folder: Option<PathBuf>,
+    /// Sort configuration for file listings. Supports multi-level sorting by any field.
+    /// Default: sort by title (falling back to filename), ascending, string comparison.
+    #[serde(default = "default_sort_config")]
+    pub sort: Vec<SortField>,
 }
 
 impl std::fmt::Display for IpArray {
@@ -109,6 +149,7 @@ impl Default for Config {
                 .collect(),
             oembed_timeout_ms: 300,
             template_folder: None,
+            sort: default_sort_config(),
         }
     }
 }
@@ -129,9 +170,25 @@ impl Config {
     }
 
     fn find_root_dir(start_dir: &PathBuf) -> PathBuf {
-        Self::search_folder_in_ancestors(start_dir, ".mbr")
-            .or_else(|| Self::cwd_if_ancestor(start_dir))
-            .unwrap_or_else(|| start_dir.clone())
+        // Search for common repository markers in priority order
+        // Directories
+        const DIR_MARKERS: &[&str] = &[".mbr", ".git", ".zk", ".obsidian"];
+        // Config files for documentation tools
+        const FILE_MARKERS: &[&str] = &["book.toml", "mkdocs.yml", "docusaurus.config.js"];
+
+        for marker in DIR_MARKERS {
+            if let Some(root) = Self::search_folder_in_ancestors(start_dir, marker) {
+                return root;
+            }
+        }
+
+        for marker in FILE_MARKERS {
+            if let Some(root) = Self::search_file_in_ancestors(start_dir, marker) {
+                return root;
+            }
+        }
+
+        Self::cwd_if_ancestor(start_dir).unwrap_or_else(|| start_dir.clone())
     }
 
     fn cwd_if_ancestor(start_path: &PathBuf) -> Option<PathBuf> {
@@ -161,5 +218,22 @@ impl Config {
             .map(|ancestor| ancestor.join(search_folder))
             .find(|candidate| candidate.as_path().is_dir())
             .and_then(|mbr_dir| mbr_dir.parent().map(|p| p.to_path_buf()))
+    }
+
+    fn search_file_in_ancestors<P: AsRef<Path>>(
+        start_path: &PathBuf,
+        search_file: P, // the file I'm looking for (e.g., book.toml)
+    ) -> Option<PathBuf> {
+        let search_file = search_file.as_ref();
+        let dir = if start_path.is_dir() {
+            start_path
+        } else {
+            start_path.parent()?
+        };
+        // ancestors() yields `dir`, then its parent, then its parent, … until root.
+        dir.ancestors()
+            .map(|ancestor| ancestor.join(search_file))
+            .find(|candidate| candidate.as_path().is_file())
+            .and_then(|file_path| file_path.parent().map(|p| p.to_path_buf()))
     }
 }

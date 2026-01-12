@@ -1,0 +1,15 @@
+# mbr documentation site configuration
+port = 5201
+index_file = "index.md"
+ignore_dirs = ["node_modules", ".git", "target", "build"]
+
+# Sort documentation sections by order field first, then by title
+[[sort]]
+field = "order"
+order = "asc"
+compare = "numeric"
+
+[[sort]]
+field = "title"
+order = "asc"
+compare = "string"

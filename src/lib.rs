@@ -25,13 +25,15 @@ pub mod quicklook;
 pub mod repo;
 pub mod search;
 pub mod server;
+pub mod sorting;
 pub mod templates;
 pub mod vid;
 pub mod watcher;
 
 pub use build::{BuildStats, Builder};
-pub use config::Config;
+pub use config::{Config, SortField};
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
 #[cfg(feature = "ffi")]
 pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
+pub use sorting::sort_files;

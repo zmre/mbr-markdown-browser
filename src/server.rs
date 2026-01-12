@@ -10,11 +10,13 @@ use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 
+use crate::config::SortField;
 use crate::errors::ServerError;
 use crate::link_transform::LinkTransformConfig;
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
+use crate::sorting::sort_files;
 use crate::templates;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
@@ -41,6 +43,8 @@ pub struct ServerState {
     pub file_change_tx: Option<broadcast::Sender<crate::watcher::FileChangeEvent>>,
     /// Optional template folder that overrides default .mbr/ and compiled defaults
     pub template_folder: Option<std::path::PathBuf>,
+    /// Sort configuration for file listings
+    pub sort: Vec<SortField>,
 }
 
 impl Server {
@@ -57,6 +61,7 @@ impl Server {
         index_file: S,
         oembed_timeout_ms: u64,
         template_folder: Option<std::path::PathBuf>,
+        sort: Vec<SortField>,
         log_filter: Option<&str>,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
@@ -159,6 +164,7 @@ impl Server {
             oembed_timeout_ms,
             file_change_tx: Some(file_change_tx),
             template_folder,
+            sort,
         };
 
         let router = Router::new()
@@ -368,14 +374,25 @@ impl Server {
             .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        // Build combined response with repo data and config
+        let mut response = serde_json::to_value(&*config.repo)
+            .inspect_err(|e| tracing::error!("Error creating json: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Add sort config to the response
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "sort".to_string(),
+                serde_json::to_value(&config.sort).unwrap_or(serde_json::Value::Array(vec![])),
+            );
+        }
+
         let resp = Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(
-                config
-                    .repo
-                    .to_json()
-                    .inspect_err(|e| tracing::error!("Error creating json: {e}"))
+                serde_json::to_string(&response)
+                    .inspect_err(|e| tracing::error!("Error serializing json: {e}"))
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             )
             .inspect_err(|e| tracing::error!("Error rendering site file: {e}"))
@@ -826,12 +843,8 @@ impl Server {
             .map(|(_, file_info)| markdown_file_to_json(file_info))
             .collect();
 
-        // Sort by modified timestamp, newest first
-        files.sort_by(|a, b| {
-            let a_modified = a["modified"].as_u64().unwrap_or(0);
-            let b_modified = b["modified"].as_u64().unwrap_or(0);
-            b_modified.cmp(&a_modified)
-        });
+        // Sort files using configurable sort order
+        sort_files(&mut files, &config.sort);
 
         // Extract subdirectories
         let subdirs: Vec<_> = temp_repo
@@ -1157,6 +1170,11 @@ const CACHE_CONTROL_NO_STORE: &str = "no-store";
 
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
+        "/favicon.png",
+        include_bytes!("../templates/favicon.png"),
+        "image/png",
+    ),
+    (
         "/theme.css",
         include_bytes!("../templates/theme.css"),
         "text/css",
@@ -1234,6 +1252,11 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/hljs.lang.ruby.js",
         include_bytes!("../templates/hljs.lang.ruby.11.11.1.js"),
+        "application/javascript",
+    ),
+    (
+        "/hljs.lang.nix.js",
+        include_bytes!("../templates/hljs.lang.nix.11.11.1.js"),
         "application/javascript",
     ),
     (

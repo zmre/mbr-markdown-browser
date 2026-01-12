@@ -1,30 +1,37 @@
 {% include "_scripts.html" %}
-  <script defer src="/.mbr/hljs.js"></script>
-  <script defer src="/.mbr/hljs.lang.javascript.js"></script>
-  <script defer src="/.mbr/hljs.lang.typescript.js"></script>
-  <script defer src="/.mbr/hljs.lang.rust.js"></script>
-  <script defer src="/.mbr/hljs.lang.python.js"></script>
-  <script defer src="/.mbr/hljs.lang.bash.js"></script>
-  <script defer src="/.mbr/hljs.lang.java.js"></script>
-  <script defer src="/.mbr/hljs.lang.scala.js"></script>
-  <script defer src="/.mbr/hljs.lang.go.js"></script>
-  <script defer src="/.mbr/hljs.lang.ruby.js"></script>
-  <script defer src="/.mbr/hljs.lang.css.js"></script>
-  <script defer src="/.mbr/hljs.lang.json.js"></script>
-  <script defer src="/.mbr/hljs.lang.yaml.js"></script>
-  <script defer src="/.mbr/hljs.lang.xml.js"></script>
-  <script defer src="/.mbr/hljs.lang.sql.js"></script>
-  <script defer src="/.mbr/hljs.lang.dockerfile.js"></script>
-  <script defer src="/.mbr/hljs.lang.markdown.js"></script>
-  <script defer src="/.mbr/mermaid.min.js"></script>
-  <script>
-    // Wait for all deferred scripts to load before initializing
-    document.addEventListener('DOMContentLoaded', function() {
-      if (typeof hljs !== 'undefined') {
-        hljs.highlightAll();
-      }
-      if (typeof mermaid !== 'undefined') {
-        mermaid.initialize({ startOnLoad: true });
-      }
-    });
-  </script>
+<script defer src="/.mbr/hljs.js"></script>
+<script defer src="/.mbr/hljs.lang.javascript.js"></script>
+<script defer src="/.mbr/hljs.lang.typescript.js"></script>
+<script defer src="/.mbr/hljs.lang.rust.js"></script>
+<script defer src="/.mbr/hljs.lang.python.js"></script>
+<script defer src="/.mbr/hljs.lang.bash.js"></script>
+<script defer src="/.mbr/hljs.lang.java.js"></script>
+<script defer src="/.mbr/hljs.lang.scala.js"></script>
+<script defer src="/.mbr/hljs.lang.go.js"></script>
+<script defer src="/.mbr/hljs.lang.ruby.js"></script>
+<script defer src="/.mbr/hljs.lang.nix.js"></script>
+<script defer src="/.mbr/hljs.lang.css.js"></script>
+<script defer src="/.mbr/hljs.lang.json.js"></script>
+<script defer src="/.mbr/hljs.lang.yaml.js"></script>
+<script defer src="/.mbr/hljs.lang.xml.js"></script>
+<script defer src="/.mbr/hljs.lang.sql.js"></script>
+<script defer src="/.mbr/hljs.lang.dockerfile.js"></script>
+<script defer src="/.mbr/hljs.lang.markdown.js"></script>
+<script defer src="/.mbr/mermaid.min.js"></script>
+<script>
+  // Wait for all deferred scripts to load before initializing
+  document.addEventListener("DOMContentLoaded", function () {
+    if (typeof hljs !== "undefined") {
+      hljs.highlightAll();
+    }
+
+    if (typeof mermaid !== "undefined") {
+      const prefersDarkScheme = window.matchMedia(
+        "(prefers-color-scheme: dark)",
+      );
+
+      const theme = prefersDarkScheme.matches ? "dark" : "default";
+      mermaid.initialize({ startOnLoad: true, theme: theme });
+    }
+  });
+</script>

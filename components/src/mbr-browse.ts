@@ -1,28 +1,15 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav } from './shared.js'
-
-/**
- * Markdown file metadata from site.json.
- */
-interface MarkdownFile {
-  url_path: string;
-  raw_path: string;
-  created: number;
-  modified: number;
-  frontmatter: Record<string, any> | null;
-}
-
-/**
- * Folder node with file count for descendant tracking.
- */
-interface FolderNode {
-  name: string;
-  path: string;
-  children: Map<string, FolderNode>;
-  files: MarkdownFile[];
-  fileCount: number;  // Total files in this folder and all descendants
-}
+import {
+  type MarkdownFile,
+  type SortField,
+  type FolderNode,
+  DEFAULT_SORT_CONFIG,
+  sortFiles,
+  sortFolders,
+  buildFolderTree,
+} from './sorting.js'
 
 /**
  * Hierarchical tag node for nested tag support (e.g., tech/rust/async).
@@ -115,6 +102,9 @@ export class MbrBrowseElement extends LitElement {
   /** The configured index file name from site.json */
   private _indexFile: string = 'index.md';
 
+  /** Sort configuration from site.json */
+  private _sortConfig: SortField[] = DEFAULT_SORT_CONFIG;
+
   private _keyboardHandler: ((e: KeyboardEvent) => void) | null = null;
   private _unsubscribeSiteNav: (() => void) | null = null;
 
@@ -143,9 +133,14 @@ export class MbrBrowseElement extends LitElement {
           this._indexFile = state.data.index_file;
         }
 
+        // Load sort configuration if available
+        if (state.data.sort && Array.isArray(state.data.sort) && state.data.sort.length > 0) {
+          this._sortConfig = state.data.sort;
+        }
+
         // Build derived data structures
         this._tagHierarchy = this._buildTagHierarchy(this._allFiles);
-        this._folderTree = this._buildFolderTreeWithCounts(this._allFiles);
+        this._folderTree = buildFolderTree(this._allFiles, this._indexFile);
         this._dynamicFields = this._detectDynamicFields(this._allFiles);
 
         // Auto-expand current path in folder tree
@@ -306,83 +301,6 @@ export class MbrBrowseElement extends LitElement {
   }
 
   /**
-   * Build folder tree with descendant file counts.
-   */
-  private _buildFolderTreeWithCounts(files: MarkdownFile[]): FolderNode {
-    const root: FolderNode = {
-      name: '',
-      path: '/',
-      children: new Map(),
-      files: [],
-      fileCount: 0,
-    };
-
-    for (const file of files) {
-      const parts = file.url_path.split('/').filter(p => p.length > 0);
-      let currentNode = root;
-
-      // Navigate/create folder structure (all parts except last are folders)
-      for (let i = 0; i < parts.length - 1; i++) {
-        const part = parts[i];
-        const folderPath = '/' + parts.slice(0, i + 1).join('/') + '/';
-
-        if (!currentNode.children.has(part)) {
-          currentNode.children.set(part, {
-            name: part,
-            path: folderPath,
-            children: new Map(),
-            files: [],
-            fileCount: 0,
-          });
-        }
-
-        currentNode = currentNode.children.get(part)!;
-      }
-
-      // Handle index files
-      const fileName = file.raw_path.split('/').pop() || '';
-      const isIndexFile = fileName === this._indexFile;
-
-      if (isIndexFile) {
-        if (parts.length > 0) {
-          const lastPart = parts[parts.length - 1];
-          const folderPath = '/' + parts.join('/') + '/';
-
-          if (!currentNode.children.has(lastPart)) {
-            currentNode.children.set(lastPart, {
-              name: lastPart,
-              path: folderPath,
-              children: new Map(),
-              files: [],
-              fileCount: 0,
-            });
-          }
-        }
-        continue;
-      }
-
-      currentNode.files.push(file);
-    }
-
-    // Calculate descendant counts
-    this._calculateFolderCounts(root);
-
-    return root;
-  }
-
-  /**
-   * Recursively calculate file counts for folders.
-   */
-  private _calculateFolderCounts(node: FolderNode): number {
-    let count = node.files.length;
-    for (const child of node.children.values()) {
-      count += this._calculateFolderCounts(child);
-    }
-    node.fileCount = count;
-    return count;
-  }
-
-  /**
    * Detect frontmatter fields that appear commonly with enumerable values.
    */
   private _detectDynamicFields(files: MarkdownFile[]): Map<string, Set<string>> {
@@ -524,7 +442,29 @@ export class MbrBrowseElement extends LitElement {
 
       case 'folder': {
         const folderPath = this._currentSelection.value;
-        files = this._allFiles.filter(f => f.url_path.startsWith(folderPath));
+        // Filter to only direct children of this folder (not descendants)
+        files = this._allFiles.filter(f => {
+          if (!f.url_path.startsWith(folderPath)) return false;
+          // Get the path relative to the folder
+          const relativePath = f.url_path.slice(folderPath.length);
+          const parts = relativePath.split('/').filter(p => p.length > 0);
+
+          // parts.length === 0: This folder's own index file (show it)
+          // parts.length === 1: Direct child file or subfolder's index
+          if (parts.length > 1) return false;  // Too deep, not direct child
+
+          if (parts.length === 1) {
+            // Direct child - but check if it's a subfolder's index file
+            const fileName = f.raw_path.split('/').pop() || '';
+            if (fileName === this._indexFile) {
+              // This is a subfolder's index file - don't show as file
+              // (it's represented by the folder in the tree)
+              return false;
+            }
+          }
+
+          return true;
+        });
         break;
       }
 
@@ -550,9 +490,9 @@ export class MbrBrowseElement extends LitElement {
       }
     }
 
-    // Sort by modified date, newest first (except recent which is already sorted)
+    // Sort files using configurable sort order (except recent which is already sorted)
     if (this._currentSelection.type !== 'recent') {
-      files.sort((a, b) => b.modified - a.modified);
+      files = sortFiles(files, this._sortConfig);
     }
 
     this._selectedFiles = files;
@@ -612,6 +552,7 @@ export class MbrBrowseElement extends LitElement {
     const parts = path.split('/').filter(p => p.length > 0);
     let accumulated = '';
 
+    // Expand all parent folders
     for (const part of parts) {
       accumulated += '/' + part;
       this._expandedFolders.add(accumulated);
@@ -619,6 +560,39 @@ export class MbrBrowseElement extends LitElement {
 
     this._expandedFolders.add('/');
     this._expandedFolders = new Set(this._expandedFolders);
+
+    // Auto-select the current folder (path already ends with / for folders)
+    const folderPath = path.endsWith('/') ? path : path + '/';
+
+    // Find the folder node to get its title
+    let folderTitle = 'Home';
+    if (this._folderTree) {
+      if (folderPath === '/') {
+        folderTitle = this._folderTree.title || 'Home';
+      } else {
+        const node = this._findFolderNode(this._folderTree, folderPath);
+        if (node) {
+          folderTitle = node.title || node.name;
+        }
+      }
+    }
+
+    this._currentSelection = {
+      type: 'folder',
+      value: folderPath,
+      label: folderTitle,
+    };
+  }
+
+  private _findFolderNode(node: FolderNode, path: string): FolderNode | null {
+    if (node.path === path) {
+      return node;
+    }
+    for (const child of node.children.values()) {
+      const found = this._findFolderNode(child, path);
+      if (found) return found;
+    }
+    return null;
   }
 
   private _toggleSection(section: string) {
@@ -806,7 +780,12 @@ export class MbrBrowseElement extends LitElement {
     `;
   }
 
-  private _renderTagsSection(): TemplateResult {
+  private _renderTagsSection(): TemplateResult | typeof nothing {
+    // Hide section if no tags exist
+    if (this._tagHierarchy.size === 0) {
+      return nothing;
+    }
+
     const isExpanded = this._expandedSections.has('tags');
 
     return html`
@@ -901,12 +880,14 @@ export class MbrBrowseElement extends LitElement {
                        this._currentSelection?.value === node.path;
     const isCurrent = this._isCurrentPath(node.path);
 
-    return html`
-      ${!isRoot ? html`
+    // For root, render "Home" entry with children indented under it
+    if (isRoot) {
+      const homeLabel = node.title || 'Home';
+      return html`
         <div class="tree-item folder-item">
           <div
             class="tree-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''}"
-            style="padding-left: ${depth * 0.75 + 0.25}rem"
+            style="padding-left: 0.25rem"
           >
             ${hasChildren ? html`
               <button
@@ -918,19 +899,49 @@ export class MbrBrowseElement extends LitElement {
             ` : html`<span class="tree-spacer"></span>`}
             <button
               class="tree-label"
-              @click=${() => this._selectFolder(node.path, node.name)}
+              @click=${() => this._selectFolder(node.path, homeLabel)}
             >
               <span class="folder-icon">📁</span>
-              <span class="label-text">${node.name}</span>
+              <span class="label-text">${homeLabel}</span>
               <span class="label-count">${node.fileCount}</span>
             </button>
           </div>
         </div>
-      ` : nothing}
+        ${isExpanded ? html`
+          ${sortFolders([...node.children.values()], this._sortConfig)
+            .map(child => this._renderFolderTree(child, 1))}
+        ` : nothing}
+      `;
+    }
+
+    // Non-root folder rendering
+    return html`
+      <div class="tree-item folder-item">
+        <div
+          class="tree-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''}"
+          style="padding-left: ${depth * 0.75 + 0.25}rem"
+        >
+          ${hasChildren ? html`
+            <button
+              class="tree-toggle"
+              @click=${(e: Event) => { e.stopPropagation(); this._toggleFolder(node.path); }}
+            >
+              ${isExpanded ? '▼' : '▶'}
+            </button>
+          ` : html`<span class="tree-spacer"></span>`}
+          <button
+            class="tree-label"
+            @click=${() => this._selectFolder(node.path, node.title || node.name)}
+          >
+            <span class="folder-icon">📁</span>
+            <span class="label-text">${node.title || node.name}</span>
+            <span class="label-count">${node.fileCount}</span>
+          </button>
+        </div>
+      </div>
       ${isExpanded ? html`
-        ${[...node.children.values()]
-          .sort((a, b) => a.name.localeCompare(b.name))
-          .map(child => this._renderFolderTree(child, isRoot ? 0 : depth + 1))}
+        ${sortFolders([...node.children.values()], this._sortConfig)
+          .map(child => this._renderFolderTree(child, depth + 1))}
       ` : nothing}
     `;
   }
@@ -1019,9 +1030,10 @@ export class MbrBrowseElement extends LitElement {
     const tags = this._extractFileTags(file);
     const modifiedDate = this._formatDate(file.modified);
     const parentFolder = this._getParentFolder(file.url_path);
+    const isCurrent = this._isCurrentPath(file.url_path);
 
     return html`
-      <a href="${file.url_path}" class="file-card">
+      <a href="${file.url_path}" class="file-card ${isCurrent ? 'current' : ''}">
         <div class="file-filename">${filename}</div>
         <div class="file-title">${title}</div>
         ${description ? html`
@@ -1144,6 +1156,10 @@ export class MbrBrowseElement extends LitElement {
       font-size: 1rem;
       font-weight: 600;
       color: var(--pico-color, #333);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .close-button {
@@ -1202,6 +1218,9 @@ export class MbrBrowseElement extends LitElement {
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--pico-muted-color, #666);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .section-count {
@@ -1232,6 +1251,7 @@ export class MbrBrowseElement extends LitElement {
       padding: 0.35rem 0.5rem;
       border-radius: 4px;
       transition: background 0.15s ease;
+      min-width: 0;  /* Allow flex children to shrink for ellipsis */
     }
 
     .tree-row:hover {
@@ -1277,6 +1297,8 @@ export class MbrBrowseElement extends LitElement {
       padding: 0;
       color: var(--pico-color, #333);
       font-size: 0.875rem;
+      min-width: 0;  /* Allow text truncation */
+      overflow: hidden;
     }
 
     .tree-label:hover .label-text {
@@ -1386,10 +1408,18 @@ export class MbrBrowseElement extends LitElement {
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
     }
 
+    .file-card.current {
+      border-left: 3px solid var(--pico-primary, #0d6efd);
+      background: var(--pico-primary-background, #e3f2fd);
+    }
+
     .file-filename {
       font-size: 0.7rem;
       color: var(--pico-muted-color, #999);
       margin-bottom: 0.25rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .file-title {
@@ -1397,6 +1427,9 @@ export class MbrBrowseElement extends LitElement {
       font-weight: 600;
       margin-bottom: 0.35rem;
       line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .file-description {
@@ -1467,7 +1500,7 @@ export class MbrBrowseElement extends LitElement {
       color: var(--pico-muted-color, #666);
     }
 
-    /* Responsive */
+    /* Responsive - Mobile */
     @media (max-width: 768px) {
       .left-pane {
         width: 100%;
@@ -1481,6 +1514,39 @@ export class MbrBrowseElement extends LitElement {
         width: 100%;
         max-width: 100vw;
         z-index: 1001;
+      }
+    }
+
+    /* Responsive - Large screens */
+    @media (min-width: 1200px) {
+      .left-pane {
+        width: 320px;
+      }
+
+      .middle-pane {
+        width: 380px;
+      }
+    }
+
+    /* Responsive - Extra large screens */
+    @media (min-width: 1400px) {
+      .left-pane {
+        width: 360px;
+      }
+
+      .middle-pane {
+        width: 440px;
+      }
+    }
+
+    /* Responsive - Ultra wide screens */
+    @media (min-width: 1800px) {
+      .left-pane {
+        width: 400px;
+      }
+
+      .middle-pane {
+        width: 500px;
       }
     }
   `;

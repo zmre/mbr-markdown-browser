@@ -229,6 +229,7 @@ async fn main() -> Result<(), MbrError> {
             &config.index_file.clone(),
             config.oembed_timeout_ms,
             config.template_folder.clone(),
+            config.sort.clone(),
             Some(&log_filter),
         )?;
 
@@ -264,6 +265,7 @@ async fn main() -> Result<(), MbrError> {
                     &config_copy.index_file.clone(),
                     config_copy.oembed_timeout_ms,
                     config_copy.template_folder.clone(),
+                    config_copy.sort.clone(),
                     None, // Logging already initialized
                 );
                 match server {

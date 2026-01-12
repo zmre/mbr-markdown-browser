@@ -64,7 +64,7 @@ interface PagefindSearchResponse {
 
 interface Pagefind {
   init: () => Promise<void>;
-  options: (opts: { baseUrl?: string; [key: string]: any }) => Promise<void>;
+  options: (opts: { baseUrl?: string;[key: string]: any }) => Promise<void>;
   search: (query: string) => Promise<PagefindSearchResponse>;
   debouncedSearch: (query: string, options?: { debounceTimeoutMs?: number }) => Promise<PagefindSearchResponse | null>;
 }
@@ -568,7 +568,7 @@ export class MbrSearchElement extends LitElement {
               </svg>
               <input
                 id="search-input"
-                type="text"
+                type="search"
                 placeholder="Search files..."
                 .value=${this._query}
                 @input=${this._handleInput}
@@ -699,6 +699,7 @@ export class MbrSearchElement extends LitElement {
       border: 1px solid var(--pico-muted-border-color, #ccc);
       border-radius: 4px;
       background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #eee);
       font-size: 0.75rem;
       font-family: inherit;
     }
@@ -977,6 +978,7 @@ export class MbrSearchElement extends LitElement {
       border: 1px solid var(--pico-muted-border-color, #ccc);
       border-radius: 3px;
       background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #eee);
       font-family: inherit;
       font-size: 0.7rem;
     }

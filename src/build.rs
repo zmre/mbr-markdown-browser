@@ -23,6 +23,7 @@ use crate::{
         DEFAULT_FILES, generate_breadcrumbs, get_current_dir_name, get_parent_path,
         markdown_file_to_json,
     },
+    sorting::sort_files,
     templates::Templates,
 };
 
@@ -361,12 +362,8 @@ impl Builder {
             }
         }
 
-        // Sort files by title
-        files.sort_by(|a, b| {
-            let title_a = a.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let title_b = b.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            title_a.cmp(title_b)
-        });
+        // Sort files using configurable sort order
+        sort_files(&mut files, &self.config.sort);
 
         context.insert("files".to_string(), serde_json::Value::Array(files));
 
@@ -594,10 +591,19 @@ impl Builder {
             }
         }
 
-        // Step 4: Generate site.json
-        let site_json = self
-            .repo
-            .to_json()
+        // Step 4: Generate site.json with sort config
+        let mut response = serde_json::to_value(&self.repo)
+            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
+
+        // Add sort config to the response
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "sort".to_string(),
+                serde_json::to_value(&self.config.sort).unwrap_or(serde_json::Value::Array(vec![])),
+            );
+        }
+
+        let site_json = serde_json::to_string(&response)
             .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
         let site_json_path = mbr_output.join("site.json");
         fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
