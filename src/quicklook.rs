@@ -141,9 +141,10 @@ pub fn render_preview_with_config(
         })?;
 
     // Calculate base URL for relative asset resolution
+    // Use root_path (markdown repo root) to properly resolve root-relative paths like /videos/
     let base_url = ql_config.base_url.clone().unwrap_or_else(|| {
-        path.parent()
-            .and_then(|p| p.to_str())
+        root_path
+            .to_str()
             .map(|s| format!("file://{}/", s))
             .unwrap_or_default()
     });
@@ -176,6 +177,40 @@ fn find_config_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Convert root-relative URLs (starting with /) to mbrfile:// URLs.
+/// This is necessary because WKWebView's loadHTMLString() cannot access file:// URLs.
+/// The Swift side registers a WKURLSchemeHandler for the mbrfile:// scheme that
+/// serves local files from disk.
+fn convert_root_relative_urls(html: &str, root_path: &Path) -> String {
+    let root_str = root_path.to_str().unwrap_or("");
+
+    // Replace src="/... with src="mbrfile://{root}/...
+    // Replace src='/... with src='mbrfile://{root}/...
+    // Same for href and poster attributes
+    //
+    // Note: The patterns match the start of root-relative paths (e.g., src="/)
+    // and replace with the mbrfile scheme plus the root path, preserving the rest.
+    let mut result = html.to_string();
+
+    // Handle double-quoted attributes
+    result = result.replace(r#"src="/"#, &format!(r#"src="mbrfile://{}/"#, root_str));
+    result = result.replace(r#"href="/"#, &format!(r#"href="mbrfile://{}/"#, root_str));
+    result = result.replace(
+        r#"poster="/"#,
+        &format!(r#"poster="mbrfile://{}/"#, root_str),
+    );
+
+    // Handle single-quoted attributes
+    result = result.replace(r#"src='/"#, &format!(r#"src='mbrfile://{}/"#, root_str));
+    result = result.replace(r#"href='/"#, &format!(r#"href='mbrfile://{}/"#, root_str));
+    result = result.replace(
+        r#"poster='/"#,
+        &format!(r#"poster='mbrfile://{}/"#, root_str),
+    );
+
+    result
+}
+
 /// Render the QuickLook HTML template with inlined assets.
 fn render_quicklook_template(
     markdown_html: &str,
@@ -185,6 +220,9 @@ fn render_quicklook_template(
     base_url: &str,
     config: &QuickLookConfig,
 ) -> Result<String, QuickLookError> {
+    // Convert root-relative URLs to absolute file:// URLs for QuickLook
+    let markdown_html = convert_root_relative_urls(markdown_html, root_path);
+
     // Load custom theme CSS if available
     let custom_theme = load_custom_theme(root_path);
     let custom_user_css = load_custom_user_css(root_path);
@@ -218,10 +256,10 @@ fn render_quicklook_template(
     context.insert("headings", &headings);
 
     // Add main content
-    context.insert("markdown", markdown_html);
+    context.insert("markdown", &markdown_html);
     context.insert("inline_css", &inline_css);
     context.insert("inline_js", &inline_js);
-    context.insert("base_url", base_url);
+    context.insert("base_url", &base_url);
 
     // Render template
     tera.render("quicklook.html", &context)
@@ -603,5 +641,117 @@ mod tests {
         // Should NOT contain the actual hljs library code (pattern from hljs.js)
         // The init code that references hljs is guarded and always present
         assert!(!html.contains("registerLanguage"));
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_double_quotes() {
+        let html = r#"<img src="/images/test.png" alt="test">"#;
+        let root = Path::new("/Users/test/notes");
+        let result = convert_root_relative_urls(html, root);
+        assert_eq!(
+            result,
+            r#"<img src="mbrfile:///Users/test/notes/images/test.png" alt="test">"#
+        );
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_single_quotes() {
+        let html = r#"<source src='/videos/test.mp4' type="video/mp4">"#;
+        let root = Path::new("/Users/test/notes");
+        let result = convert_root_relative_urls(html, root);
+        assert_eq!(
+            result,
+            r#"<source src='mbrfile:///Users/test/notes/videos/test.mp4' type="video/mp4">"#
+        );
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_href() {
+        let html = r#"<a href="/docs/readme.md">Link</a>"#;
+        let root = Path::new("/Users/test/notes");
+        let result = convert_root_relative_urls(html, root);
+        assert_eq!(
+            result,
+            r#"<a href="mbrfile:///Users/test/notes/docs/readme.md">Link</a>"#
+        );
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_poster() {
+        let html = r#"<video poster="/images/thumb.jpg"></video>"#;
+        let root = Path::new("/Users/test/notes");
+        let result = convert_root_relative_urls(html, root);
+        assert_eq!(
+            result,
+            r#"<video poster="mbrfile:///Users/test/notes/images/thumb.jpg"></video>"#
+        );
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_preserves_relative() {
+        // Relative paths (not starting with /) should NOT be converted
+        let html = r#"<img src="./images/test.png" alt="test">"#;
+        let root = Path::new("/Users/test/notes");
+        let result = convert_root_relative_urls(html, root);
+        // Should remain unchanged
+        assert_eq!(result, r#"<img src="./images/test.png" alt="test">"#);
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_preserves_http() {
+        // HTTP URLs should NOT be converted
+        let html = r#"<img src="https://example.com/image.png">"#;
+        let root = Path::new("/Users/test/notes");
+        let result = convert_root_relative_urls(html, root);
+        assert_eq!(result, r#"<img src="https://example.com/image.png">"#);
+    }
+
+    #[test]
+    fn test_render_with_vid_shortcode() {
+        // Create temp dir with .mbr folder and videos folder
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mbr_dir = temp_dir.path().join(".mbr");
+        std::fs::create_dir(&mbr_dir).unwrap();
+
+        let videos_dir = temp_dir.path().join("videos");
+        std::fs::create_dir(&videos_dir).unwrap();
+
+        // Create a dummy video file
+        std::fs::write(videos_dir.join("test.mp4"), b"dummy video").unwrap();
+
+        // Create markdown with vid shortcode
+        let file_path = temp_dir.path().join("test.md");
+        std::fs::write(
+            &file_path,
+            r#"# Video Test
+
+{{ vid(path="test.mp4", caption="Test") }}
+"#,
+        )
+        .unwrap();
+
+        let path = file_path.to_str().unwrap().to_string();
+        let html = render_preview(path, None).unwrap();
+
+        // The vid shortcode should generate /videos/test.mp4 which should be converted
+        // to mbrfile:// URLs
+        eprintln!("\n=== Generated HTML for video sections ===");
+        for line in html.lines() {
+            if line.contains("video")
+                || line.contains("source")
+                || line.contains("/videos")
+                || line.contains("mbrfile")
+                || line.contains("poster")
+            {
+                eprintln!("{}", line);
+            }
+        }
+        eprintln!("=== End HTML ===\n");
+
+        // Verify mbrfile:// URLs are present
+        assert!(
+            html.contains("mbrfile://"),
+            "HTML should contain mbrfile:// URLs for video sources"
+        );
     }
 }

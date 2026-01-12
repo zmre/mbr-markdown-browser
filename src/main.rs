@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "gui")]
+use std::path::PathBuf;
 
 use clap::Parser;
 #[cfg(feature = "gui")]
@@ -53,7 +55,7 @@ async fn main() -> Result<(), MbrError> {
     #[cfg(feature = "gui")]
     let is_gui_mode = !args.server && !args.stdout && !args.build;
     #[cfg(not(feature = "gui"))]
-    let is_gui_mode = false;
+    let _is_gui_mode = false;
 
     // Check if we need to show a folder picker (only in GUI mode when path is root/system dir)
     #[cfg(feature = "gui")]
