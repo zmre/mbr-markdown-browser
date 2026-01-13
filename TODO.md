@@ -3,13 +3,16 @@
 ## What's Next
 
 * Static build
-  * [ ] Fix / understand slow performance on big repos: slow and worse, there's zero info on what it's doing while waiting for it even with -vvv
-  * [ ] Fix search relevance/ranking: the static site search is treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
+  * [ ] Fix / understand slow performance on static builds in big repos; worse, there's zero info on what it's doing while waiting for it even with -vvv
+  * [ ] Fix / understand slow initial rendering in some markdown files in dynamic mode
+  * [ ] Setup some benchmarking and profiling
+  * [ ] Fix search relevance/ranking for static build site search; it's treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
 
 * Theming
   * [ ] Figure out a way to choose a pico theme with config
   * [ ] Delete all the pico crap that isn't in use
   * [ ] Test html template overrides including partials and includes using the template to see if I can override just a footer and if so, make sure it's documented right
+  * [ ] Add empty partials in a few places so people can extend without overwriting
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in
 * Browser widget updates
@@ -51,6 +54,7 @@
 * [ ] Publish to determinate's flake hub?
 
 * [ ] Support for wikilinks?  If we don't have to search for titles, maybe we assume that what's in `[[title]]` is a filename like. There are also links to headings (see https://help.obsidian.md/links) but they allow spaces and stuff so would need to convert to ids.
+  * UPDATE: looks like we maybe already support this?  Need to test, verify, and if so, document
 
 * [x] Need a 404 page (and other error page) and need it to be customizable. server mode should serve it up as needed and build mode should make root level files like 404.html and 4xx.html and 5xx.html.
 * [ ] Need to produce robots.txt and sitemap.xml files (robots pulled from .mbr so user can override). we need some custom frontmatter to cause something to be left out or even ignored. we also need to use last update or date field to push into sitemap too.
