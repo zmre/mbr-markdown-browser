@@ -1263,6 +1263,12 @@ export class MbrBrowseElement extends LitElement {
 
     .section-header:hover {
       background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .section-header:hover .section-title,
+    .section-header:hover .toggle-icon {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .toggle-icon {
@@ -1285,8 +1291,8 @@ export class MbrBrowseElement extends LitElement {
 
     .section-count {
       font-size: 0.75rem;
-      color: var(--pico-secondary-inverse);
-      background: var(--pico-secondary-background);
+      color: var(--pico-muted-color, #666);
+      background: var(--pico-muted-border-color, #e0e0e0);
       padding: 0.1rem 0.4rem;
       border-radius: 10px;
     }
@@ -1314,16 +1320,30 @@ export class MbrBrowseElement extends LitElement {
       min-width: 0;  /* Allow flex children to shrink for ellipsis */
     }
 
-    .tree-row:hover {
-      background: var(--pico-secondary-background, #f5f5f5);
-    }
-
     .tree-row.selected {
       background: var(--pico-primary-background, #e3f2fd);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .tree-row.selected .tree-label,
+    .tree-row.selected .label-count,
+    .tree-row.selected .tree-toggle {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .tree-row.current {
       border-left: 3px solid var(--pico-primary, #0d6efd);
+    }
+
+    .tree-row:hover {
+      background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .tree-row:hover .tree-label,
+    .tree-row:hover .label-count,
+    .tree-row:hover .tree-toggle {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .tree-toggle {
@@ -1427,10 +1447,20 @@ export class MbrBrowseElement extends LitElement {
 
     .frontmatter-value:hover {
       background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .frontmatter-value:hover .value-count {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .frontmatter-value.selected {
       background: var(--pico-primary-background, #e3f2fd);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .frontmatter-value.selected .value-count {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .value-name {
