@@ -32,6 +32,7 @@ pub struct Args {
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// Falls back to plain link if fetch doesn't complete in time.
     /// Set to 0 to disable oembed fetching entirely (uses plain links).
+    /// Default: 500ms for server/GUI mode, 0 (disabled) for build mode.
     #[arg(long)]
     pub oembed_timeout_ms: Option<u64>,
 

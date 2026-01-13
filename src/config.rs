@@ -153,7 +153,7 @@ impl Default for Config {
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
-            oembed_timeout_ms: 300,
+            oembed_timeout_ms: 500,
             oembed_cache_size: 2 * 1024 * 1024, // 2MB default
             template_folder: None,
             sort: default_sort_config(),

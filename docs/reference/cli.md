@@ -32,7 +32,7 @@ These flags are mutually exclusive:
 |--------|-------------|---------|
 | `--output <PATH>` | Output directory for static build | `build` |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
-| `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `300` |
+| `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
@@ -146,8 +146,9 @@ watcher_ignore_dirs = [
     "target"
 ]
 
-# oEmbed/OpenGraph fetch timeout in milliseconds
-oembed_timeout_ms = 300
+# oEmbed/OpenGraph fetch timeout in milliseconds (server/GUI default: 500)
+# Note: Build mode defaults to 0 (disabled) for performance. Override with CLI if needed.
+oembed_timeout_ms = 500
 
 # Enable write operations (future feature)
 enable_writes = false
@@ -192,13 +193,30 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `oembed_timeout_ms` | number | `300` | URL metadata fetch timeout (0 to disable) |
+| `oembed_timeout_ms` | number | `500` (server/GUI), `0` (build) | URL metadata fetch timeout (0 to disable) |
 | `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `enable_writes` | bool | `false` | Allow write operations |
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
 > **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.
+
+### Build Mode Performance
+
+By default, static builds (`-b`) disable oembed fetching (`oembed_timeout_ms=0`) for maximum performance. This is because oembed fetching can dramatically slow down builds:
+
+| Oembed Setting | Build Time (3,000 notes) |
+|----------------|--------------------------|
+| `--oembed-timeout-ms 0` (default) | ~12 seconds |
+| `--oembed-timeout-ms 1000` | ~10 minutes |
+
+If you want rich link previews in your static site, you can opt-in by specifying a timeout:
+
+```bash
+mbr -b --oembed-timeout-ms 500 ~/notes
+```
+
+> **Future improvement:** We plan to optimize oembed fetching for static builds by batching and caching more aggressively. For now, we recommend keeping oembed disabled for large repositories and enabling it only for smaller sites where the build time is acceptable.
 
 ## Environment Variables
 

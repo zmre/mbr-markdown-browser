@@ -39,7 +39,7 @@ jobs:
 
       - name: Build documentation site
         run: |
-          ./result/bin/mbr -b --output ./docs-build ./docs
+          ./result/bin/mbr -b --oembed-timeout-ms 1000 --output ./docs-build ./docs
           echo "Documentation built successfully"
           ls -la ./docs-build
 

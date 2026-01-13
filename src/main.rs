@@ -158,6 +158,12 @@ async fn main() -> Result<(), MbrError> {
 
     if args.build {
         // Build mode - generate static site
+        // Default oembed timeout to 0 (disabled) for fastest builds unless explicitly set via CLI.
+        // In tests on a 3,000 note repo, oembed=1000ms took 10 minutes vs 12 seconds with oembed=0.
+        if args.oembed_timeout_ms.is_none() {
+            config.oembed_timeout_ms = 0;
+        }
+
         #[cfg(target_os = "windows")]
         {
             eprintln!("Error: Static site generation is not supported on Windows");
