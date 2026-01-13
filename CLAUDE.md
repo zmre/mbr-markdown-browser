@@ -292,7 +292,7 @@ The oembed system auto-embeds bare URLs in markdown with rich previews:
 | Mode | oembed_timeout_ms | Reason |
 |------|-------------------|--------|
 | Server/GUI | 500 | Good UX with reasonable timeout |
-| Build | 0 (disabled) | Speed - oembed can slow builds dramatically |
+| Build | 0 (disabled) | Default off, but overhead is minimal when enabled |
 
 ### Theming
 
@@ -342,7 +342,7 @@ mbr -b --build-concurrency 8 /path/to/repo  # Explicit concurrency limit
 
 **Performance optimizations:**
 - **Parallel rendering**: Default concurrency is 2x CPU cores (max 32). Control with `--build-concurrency`.
-- **Oembed disabled by default**: Build mode sets `oembed_timeout_ms=0` for speed. On a 3,000-note repo, oembed=1000ms takes ~10 minutes vs ~12 seconds with oembed disabled.
+- **Oembed disabled by default**: Build mode sets `oembed_timeout_ms=0`. Oembed fetching is parallelized and cached, so overhead is minimal when enabled.
 - To enable oembed in builds: `mbr -b --oembed-timeout-ms 500 /path/to/repo`
 
 **Output structure:**

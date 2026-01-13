@@ -204,20 +204,13 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 
 ### Build Mode Performance
 
-By default, static builds (`-b`) disable oembed fetching (`oembed_timeout_ms=0`) for maximum performance. This is because oembed fetching can dramatically slow down builds:
-
-| Oembed Setting | Build Time (3,000 notes) |
-|----------------|--------------------------|
-| `--oembed-timeout-ms 0` (default) | ~12 seconds |
-| `--oembed-timeout-ms 1000` | ~10 minutes |
-
-If you want rich link previews in your static site, you can opt-in by specifying a timeout:
+By default, static builds (`-b`) disable oembed fetching (`oembed_timeout_ms=0`). If you want rich link previews in your static site, you can enable it by specifying a timeout:
 
 ```bash
 mbr -b --oembed-timeout-ms 500 ~/notes
 ```
 
-> **Future improvement:** We plan to optimize oembed fetching for static builds by batching and caching more aggressively. For now, we recommend keeping oembed disabled for large repositories and enabling it only for smaller sites where the build time is acceptable.
+Oembed fetching is parallelized and cached, so the overhead is minimal even for large repositories.
 
 ### Parallel Building
 
