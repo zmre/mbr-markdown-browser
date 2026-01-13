@@ -18,6 +18,15 @@
 <script defer src="{{ asset_base }}hljs.lang.dockerfile.js"></script>
 <script defer src="{{ asset_base }}hljs.lang.markdown.js"></script>
 <script defer src="{{ asset_base }}mermaid.min.js"></script>
+
+<!-- The loading of KaTeX is deferred to speed up page rendering -->
+<script
+  defer
+  src="https://cdn.jsdelivr.net/npm/katex@0.16.27/dist/katex.min.js"
+  integrity="sha384-2B8pfmZZ6JlVoScJm/5hQfNS2TI/6hPqDZInzzPc8oHpN5SgeNOf4LzREO6p5YtZ"
+  crossorigin="anonymous"
+></script>
+
 <script>
   // Wait for all deferred scripts to load before initializing
   document.addEventListener("DOMContentLoaded", function () {
@@ -32,6 +41,30 @@
 
       const theme = prefersDarkScheme.matches ? "dark" : "default";
       mermaid.initialize({ startOnLoad: true, theme: theme });
+    }
+
+    if (typeof katex !== "undefined" && typeof katex.render !== "undefined") {
+      const inlineMathNodes = document.querySelectorAll(".math-inline");
+      const blockMathNodes = document.querySelectorAll(".math-display");
+
+      inlineMathNodes.forEach((el) => {
+        const tex = (el.textContent || "").trim();
+        if (!tex) return;
+
+        window.katex.render(tex, el, {
+          throwOnError: false,
+          displayMode: false,
+        });
+      });
+      blockMathNodes.forEach((el) => {
+        const tex = (el.textContent || "").trim();
+        if (!tex) return;
+
+        window.katex.render(tex, el, {
+          throwOnError: false,
+          displayMode: true,
+        });
+      });
     }
   });
 </script>

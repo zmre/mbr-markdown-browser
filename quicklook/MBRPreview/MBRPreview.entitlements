@@ -8,5 +8,10 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Allow QuickLook extension to read files for video/image assets -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/</string>
+    </array>
 </dict>
 </plist>

@@ -227,11 +227,25 @@ jobs:
 
 ### Vim/Neovim
 
-Auto-preview on save:
+Auto-preview on open and updates on save:
 
 ```vim
-" Start mbr server for markdown directories
-autocmd BufEnter *.md silent! !pgrep -x mbr || mbr -s %:p:h &
+" Start mbr gui for current file and current repo
+" switch "-g" for "-s" to start a server and use your browser instead
+autocmd BufEnter *.md silent! !pgrep -x mbr || mbr -g %:p:h &
+```
+
+Or in neovim only, using lua config, start a background job on a shortcut key:
+
+```lua
+vim.keymap.set(
+  "n", -- normal mode
+  "<leader>m", -- leader key (like space or comma) followed by m
+  function()
+     vim.fn.jobstart({'mbr', vim.fn.expand('%:p')}, {detach = true}) -- background the previewer
+  end,
+  { silent = true, noremap = true }
+)
 ```
 
 ### Emacs

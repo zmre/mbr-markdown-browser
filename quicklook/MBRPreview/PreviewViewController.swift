@@ -10,6 +10,114 @@ import WebKit
 
 private let logger = OSLog(subsystem: "com.zmre.mbr.MBRPreview", category: "Preview")
 
+// MARK: - MBRFileSchemeHandler
+
+/// Handles mbrfile:// URLs by reading local files from disk.
+///
+/// This scheme handler allows the WebView to access local files without needing
+/// to use `loadFileURL()` (which requires a temp file). The Rust side converts
+/// root-relative URLs like `/videos/test.mp4` to `mbrfile:///path/to/root/videos/test.mp4`,
+/// and this handler intercepts those requests and serves the file data.
+class MBRFileSchemeHandler: NSObject, WKURLSchemeHandler {
+    func webView(_: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        NSLog("[MBRFileSchemeHandler] received request: %@", urlSchemeTask.request.url?.absoluteString ?? "nil")
+        os_log(
+            .info,
+            log: logger,
+            "MBRFileSchemeHandler received request: %{public}@",
+            urlSchemeTask.request.url?.absoluteString ?? "nil"
+        )
+
+        guard let url = urlSchemeTask.request.url,
+              url.scheme == "mbrfile"
+        else {
+            os_log(.error, log: logger, "MBRFileSchemeHandler: invalid scheme in request")
+            urlSchemeTask.didFailWithError(NSError(domain: "MBRPreview", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid URL scheme"
+            ]))
+            return
+        }
+
+        // The path portion of mbrfile:///path/to/file is the actual file path
+        let filePath = url.path
+        let fileURL = URL(fileURLWithPath: filePath)
+
+        os_log(.info, log: logger, "MBRFileSchemeHandler loading file: %{public}@", filePath)
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let mimeType = self.mimeType(for: filePath)
+
+            let response = URLResponse(
+                url: url,
+                mimeType: mimeType,
+                expectedContentLength: data.count,
+                textEncodingName: nil
+            )
+
+            urlSchemeTask.didReceive(response)
+            urlSchemeTask.didReceive(data)
+            urlSchemeTask.didFinish()
+        } catch {
+            os_log(
+                .error,
+                log: logger,
+                "MBRFileSchemeHandler failed to read file: %{public}@ - %{public}@",
+                filePath,
+                error.localizedDescription
+            )
+            urlSchemeTask.didFailWithError(error)
+        }
+    }
+
+    func webView(_: WKWebView, stop _: WKURLSchemeTask) {
+        // No cleanup needed for synchronous file reads
+    }
+
+    /// MIME type mapping for common file extensions.
+    private static let mimeTypes: [String: String] = [
+        // Video types
+        "mp4": "video/mp4",
+        "webm": "video/webm",
+        "mov": "video/quicktime",
+        "m4v": "video/x-m4v",
+        "ogv": "video/ogg",
+        // Image types
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "svg": "image/svg+xml",
+        "ico": "image/x-icon",
+        "bmp": "image/bmp",
+        "tiff": "image/tiff",
+        "tif": "image/tiff",
+        "heic": "image/heic",
+        "heif": "image/heic",
+        // Document types
+        "pdf": "application/pdf",
+        // Web types
+        "html": "text/html",
+        "htm": "text/html",
+        "css": "text/css",
+        "js": "application/javascript",
+        "json": "application/json",
+        "xml": "application/xml",
+        // Font types
+        "woff": "font/woff",
+        "woff2": "font/woff2",
+        "ttf": "font/ttf",
+        "otf": "font/otf"
+    ]
+
+    /// Returns the MIME type for a file based on its extension.
+    private func mimeType(for path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        return Self.mimeTypes[ext] ?? "application/octet-stream"
+    }
+}
+
 /// QuickLook preview controller for rendering MBR markdown files.
 ///
 /// This controller uses a WKWebView to display HTML rendered from markdown files
@@ -31,8 +139,10 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
 
-        // Allow file:// URLs for local images and assets
-        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        // Register custom URL scheme handler for local file access
+        // The Rust side converts root-relative URLs (/videos/...) to mbrfile:// URLs
+        // which this handler intercepts and serves from disk
+        config.setURLSchemeHandler(MBRFileSchemeHandler(), forURLScheme: "mbrfile")
 
         // Create WebView - QuickLook will resize it
         self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
@@ -41,6 +151,9 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
 
         // Set the webview directly as the view
         self.view = self.webView
+
+        // Request larger preview size (QuickLook may constrain based on available space)
+        self.preferredContentSize = NSSize(width: 1000, height: 800)
 
         os_log(.error, log: logger, "loadView complete, webView is the view")
     }
@@ -87,12 +200,44 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
             let html = try renderPreview(filePath: filePath, configRoot: configRoot)
             os_log(.info, log: logger, "renderPreview succeeded, HTML length = %d", html.count)
 
-            // Load HTML in WebView with base URL for relative resources
-            let baseURL = url.deletingLastPathComponent()
-            os_log(.info, log: logger, "loading HTML with baseURL = %{public}@", baseURL.absoluteString)
+            // Write HTML to debug file for inspection
+            let debugPath = "/tmp/mbr-quicklook-debug.html"
+            try? html.write(toFile: debugPath, atomically: true, encoding: .utf8)
 
-            // Load the rendered HTML - completion handler will be called in didFinish delegate
-            self.webView.loadHTMLString(html, baseURL: baseURL)
+            // Check if mbrfile:// URLs are present (for debugging)
+            if html.contains("mbrfile://") {
+                try? "HTML CONTAINS mbrfile:// URLs\n".write(
+                    toFile: "/tmp/mbr-quicklook-status.txt",
+                    atomically: true,
+                    encoding: .utf8
+                )
+                NSLog("[MBRPreview] HTML contains mbrfile:// URLs - scheme handler should intercept")
+                os_log(.info, log: logger, "HTML contains mbrfile:// URLs - scheme handler should intercept")
+                // Find a sample mbrfile URL for logging
+                if let range = html.range(of: "mbrfile://[^'\"\\s]+", options: .regularExpression) {
+                    let sample = String(html[range])
+                    try? "Sample URL: \(sample)\n".write(
+                        toFile: "/tmp/mbr-quicklook-sample-url.txt",
+                        atomically: true,
+                        encoding: .utf8
+                    )
+                    NSLog("[MBRPreview] Sample mbrfile URL: %@", sample)
+                    os_log(.info, log: logger, "Sample mbrfile URL: %{public}@", sample)
+                }
+            } else {
+                try? "HTML does NOT contain mbrfile:// URLs\n".write(
+                    toFile: "/tmp/mbr-quicklook-status.txt",
+                    atomically: true,
+                    encoding: .utf8
+                )
+                NSLog("[MBRPreview] HTML does NOT contain mbrfile:// URLs")
+                os_log(.error, log: logger, "HTML does NOT contain mbrfile:// URLs - check Rust conversion")
+            }
+
+            // Load HTML in WebView
+            // Note: The Rust code converts root-relative URLs (/path) to mbrfile:// URLs
+            // which are handled by MBRFileSchemeHandler registered in loadView()
+            self.webView.loadHTMLString(html, baseURL: nil)
 
         } catch let error as QuickLookError {
             // Handle specific QuickLook errors

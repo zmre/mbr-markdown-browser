@@ -37,15 +37,14 @@ impl Vid {
         let (start, end, url) = Self::start_stop_from_url(url);
         let ext = Self::extension_from_url(url);
         match ext.as_deref() {
-            Some("mp4") | Some("mpg") | Some("avi") | Some("ogv") | Some("ogg") | Some("m4v") => {
-                Some(Self {
-                    url: url.to_string(),
-                    ext,
-                    start,
-                    end,
-                    caption: Some(title.to_string()),
-                })
-            }
+            Some("mp4") | Some("mpg") | Some("avi") | Some("ogv") | Some("ogg") | Some("m4v")
+            | Some("mkv") => Some(Self {
+                url: url.to_string(),
+                ext,
+                start,
+                end,
+                caption: Some(title.to_string()),
+            }),
             _ => None,
         }
     }

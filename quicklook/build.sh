@@ -13,8 +13,9 @@ cd "$SCRIPT_DIR"
 
 # Ensure Rust library is built WITHOUT GUI or media-metadata features
 # QuickLook extensions run in a sandboxed environment without GUI access or ffmpeg
+# The 'ffi' feature enables UniFFI exports needed for Swift bindings
 echo "Building Rust library (minimal features for QuickLook)..."
-cargo build --release --no-default-features --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release --no-default-features --features ffi --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
 # Regenerate Xcode project
 echo "Generating Xcode project..."

@@ -1,6 +1,12 @@
 {% set asset_base = relative_base | default(value="/.mbr/") %}
 {% include "_head.html" %}
     <link rel="stylesheet" href="{{ asset_base }}hljs.dark.css" />
+    <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/katex@0.16.27/dist/katex.min.css"
+    integrity="sha384-Pu5+C18nP5dwykLJOhd2U4Xen7rjScHN/qusop27hdd2drI+lL5KvX7YntvT8yew"
+    crossorigin="anonymous"
+    />
     {% if tags %}
     <meta name="keywords" content="{{tags | safe}}" data-pagefind-filter="tag[content]" />
     {% elif keywords %}
