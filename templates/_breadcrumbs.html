@@ -1,0 +1,15 @@
+<nav class="container breadcrumbs" aria-label="breadcrumb" role="navigation">
+  <ul>
+    {% if breadcrumbs %} {% for crumb in breadcrumbs %}
+    <li>
+      <small><a href="{{ crumb.url }}">{{ crumb.name }}</a></small>
+    </li>
+    {% endfor %} {% endif %}
+    <li>
+      <small
+        >{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name
+        }}{% endif %}</small
+      >
+    </li>
+  </ul>
+</nav>

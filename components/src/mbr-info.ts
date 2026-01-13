@@ -239,7 +239,9 @@ export class MbrInfoElement extends LitElement {
     /* Trigger button */
     .info-trigger {
       cursor: pointer;
-      padding: 0.5rem;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
       display: flex;
       align-items: center;
       justify-content: center;
