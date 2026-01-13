@@ -12,6 +12,16 @@
     * [x] Can we disable oembed?  Maybe with a value of zero?
   * [ ] Setup some benchmarking and profiling
   * [x] Fix search relevance/ranking for static build site search; it's treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
+  * [ ] I want some non-logging output when building a site that lets the user know what step they're on in the static build process just left aligned maye with an emoji icon
+
+* UX
+  * [ ] Track links out and links in between files
+  * [ ] In the UI, in addition to adding the link lists to the info bar, I want to be able to press the "F" key and then filter over the links out using fuzzy search on link titles (highlight link selected if hovering or using ctrl-n/p to navigate results list) and I want to be able to hit a toggle key (tab?) to switch to links in and has the same UI.  When the selection window initially pops up, it should show just what links are currently on the screen from top to bottom (or put those ones at the top in the sort order anyway).  And as long as we're doing that, let's add a shortcut to jump to the pages that link inbound (capital `F`) and lets add a third tab that is the table of contents. We can press tab/shift-tab to switch between the tabs or we can go straight to one. Capital "T" should trigger the table of contents one and that should have the same fuzzy search interface.
+    * We can actually make this UI widget minus the inbound links right away
+
+* Big repo (goodwiki) issues
+  * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
+  * [ ] I'm getting 40k broken links which is like half of all links. Need to investigate if it is an issue with the files or with how mbr works with wikilinks (it probably doesn't normalize them)
 
 * Theming
   * [ ] Test html template overrides including partials and includes using the template to see if I can override just a footer and if so, make sure it's documented right
@@ -30,7 +40,6 @@
   * [ ] Bug in browser widget not showing all tags or full counts; also not hiding tags section if there aren't any
   * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
 
-* [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
 * [ ] Add index pages for frontmatter taxonomy (maybe explicitly defined and requested) like performer, tag, etc. and maybe optionally specify content partials in the .mbr dir?
   * [ ] Add ability to specify code blocks of type mbr-search which will client-side produce search results that are displayed (for static sites, may need to build it out ahead of time, but this would slow things down)
 
@@ -43,7 +52,6 @@
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
 
 * **Navigation**
-  * [ ] Track links out and links in between files
 
 * **Videos**
   * [x] Enhance the UI to allow caption and chapter expansion outside of the video window and to jump to the appropriate place in the video on click inside them, plus tracking for where we are so the appropriate caption or title is shown when those bits are expanded.

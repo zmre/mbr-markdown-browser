@@ -862,7 +862,7 @@ export class MbrSearchElement extends LitElement {
 
     .result:hover,
     .result.selected {
-      background: var(--pico-card-sectionning-background-color, rgba(0, 0, 0, 0.05));
+      background: var(--pico-primary-focus, rgba(99, 102, 241, 0.15));
     }
 
     .result-header {
@@ -928,8 +928,8 @@ export class MbrSearchElement extends LitElement {
     .tag {
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
-      background: var(--pico-secondary-background, #f0f0f0);
-      color: var(--pico-muted-color, #666);
+      background: var(--pico-muted-border-color, #d1d5db);
+      color: var(--pico-color, #333);
       font-size: 0.7rem;
     }
 
