@@ -862,7 +862,7 @@ export class MbrSearchElement extends LitElement {
 
     .result:hover,
     .result.selected {
-      background: var(--pico-secondary-background, #f5f5f5);
+      background: var(--pico-card-sectionning-background-color, rgba(0, 0, 0, 0.05));
     }
 
     .result-header {
@@ -884,8 +884,8 @@ export class MbrSearchElement extends LitElement {
       flex-shrink: 0;
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
-      background: var(--pico-primary-background, #e3f2fd);
-      color: var(--pico-primary, #0d6efd);
+      background: var(--pico-primary, #0d6efd);
+      color: var(--pico-primary-inverse, #fff);
       font-size: 0.7rem;
       text-transform: uppercase;
     }
@@ -963,7 +963,8 @@ export class MbrSearchElement extends LitElement {
     .hint-facets code {
       padding: 0.1rem 0.3rem;
       border-radius: 3px;
-      background: var(--pico-secondary-background, #f5f5f5);
+      background: var(--pico-code-background-color, #f5f5f5);
+      color: var(--pico-code-color, #333);
       font-size: 0.75rem;
     }
 

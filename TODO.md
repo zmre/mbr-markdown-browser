@@ -19,7 +19,7 @@
   * [x] Light mode issues with color on background stuff (hamburger icon, tag counts, etc.)
   * [x] I messed up. I want regular and regular fluid versions of pico, not the classless stuff.  Regular has classless and classes.
   * [ ] Make the oembed stuff even better with images -- medium style so make a card with header, description, and image if available, which should look nice when oembed enrichment is available
-  * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
+  * [ ] Do I need a different mode that always shows nav and page info when on a wide screen? Maybe a configuration?  And if we have an autoexpanding browser, should we ditch the two column thing and do something more like normal doc sites?  Better: if we could auto-pin those items as a CSS option (like by looking at a CSS var?) that would be awesome.
 
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in
@@ -30,9 +30,9 @@
   * [ ] Bug in browser widget not showing all tags or full counts; also not hiding tags section if there aren't any
   * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
 
+* [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
 * [ ] Add index pages for frontmatter taxonomy (maybe explicitly defined and requested) like performer, tag, etc. and maybe optionally specify content partials in the .mbr dir?
   * [ ] Add ability to specify code blocks of type mbr-search which will client-side produce search results that are displayed (for static sites, may need to build it out ahead of time, but this would slow things down)
-  * [ ] I want to make docs for this using this, but docs typically have full-time sidebars on wide screens.  Should I make an option that pins this on?  Or is there a way to do that with just CSS?
 
 * [ ] Add tooltips to all hrefs that show the URL they go to.  Alternately setup some js that makes a sort of status at the bottom of the screen showing where a link goes to when hovering.  What about for touch screens?  Is there a click and hold action of some kind or something we can do so a person can know a URL?  And finally, while we're at it, do we want a different styling (prefix icon?) for external links versus internal links?  I think so. I think maybe a subtle globe icon for links that start with http.  And I think that can be done entirely in css.
 
