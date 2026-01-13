@@ -606,8 +606,8 @@ impl Server {
     /// Serve themed Pico CSS based on the configured theme.
     ///
     /// Returns the appropriate Pico CSS variant based on theme config:
-    /// - "" or "default" -> pico.classless.min.css
-    /// - "{color}" (e.g., "amber") -> pico.classless.{color}.min.css
+    /// - "" or "default" -> pico.min.css
+    /// - "{color}" (e.g., "amber") -> pico.{color}.min.css
     /// - "fluid" -> pico.fluid.classless.min.css
     /// - "fluid.{color}" (e.g., "fluid.amber") -> pico.fluid.classless.{color}.min.css
     fn serve_themed_pico(theme: &str) -> Result<Response<Body>, StatusCode> {
@@ -1314,7 +1314,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/pico.min.css",
-        include_bytes!("../templates/pico-main/pico.classless.min.css"),
+        include_bytes!("../templates/pico-main/pico.min.css"),
         "text/css",
     ),
     (

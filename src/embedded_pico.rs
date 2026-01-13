@@ -4,37 +4,37 @@
 //! look up the correct CSS bytes based on a theme configuration string.
 //!
 //! Theme mapping:
-//! - "" or "default" -> pico.classless.min.css
-//! - "{color}" (e.g., "amber") -> pico.classless.{color}.min.css
+//! - "" or "default" -> pico.min.css
+//! - "{color}" (e.g., "amber") -> pico.{color}.min.css
 //! - "fluid" -> pico.fluid.classless.min.css
 //! - "fluid.{color}" (e.g., "fluid.amber") -> pico.fluid.classless.{color}.min.css
 //! - Invalid value -> None (caller should show 404 + warning)
 
 // Default (no color)
-const PICO_DEFAULT: &[u8] = include_bytes!("../templates/pico-main/pico.classless.min.css");
+const PICO_DEFAULT: &[u8] = include_bytes!("../templates/pico-main/pico.min.css");
 const PICO_FLUID_DEFAULT: &[u8] =
     include_bytes!("../templates/pico-main/pico.fluid.classless.min.css");
 
 // Color variants - standard (20 colors)
-const PICO_AMBER: &[u8] = include_bytes!("../templates/pico-main/pico.classless.amber.min.css");
-const PICO_BLUE: &[u8] = include_bytes!("../templates/pico-main/pico.classless.blue.min.css");
-const PICO_CYAN: &[u8] = include_bytes!("../templates/pico-main/pico.classless.cyan.min.css");
-const PICO_FUCHSIA: &[u8] = include_bytes!("../templates/pico-main/pico.classless.fuchsia.min.css");
-const PICO_GREEN: &[u8] = include_bytes!("../templates/pico-main/pico.classless.green.min.css");
-const PICO_GREY: &[u8] = include_bytes!("../templates/pico-main/pico.classless.grey.min.css");
-const PICO_INDIGO: &[u8] = include_bytes!("../templates/pico-main/pico.classless.indigo.min.css");
-const PICO_JADE: &[u8] = include_bytes!("../templates/pico-main/pico.classless.jade.min.css");
-const PICO_LIME: &[u8] = include_bytes!("../templates/pico-main/pico.classless.lime.min.css");
-const PICO_ORANGE: &[u8] = include_bytes!("../templates/pico-main/pico.classless.orange.min.css");
-const PICO_PINK: &[u8] = include_bytes!("../templates/pico-main/pico.classless.pink.min.css");
-const PICO_PUMPKIN: &[u8] = include_bytes!("../templates/pico-main/pico.classless.pumpkin.min.css");
-const PICO_PURPLE: &[u8] = include_bytes!("../templates/pico-main/pico.classless.purple.min.css");
-const PICO_RED: &[u8] = include_bytes!("../templates/pico-main/pico.classless.red.min.css");
-const PICO_SAND: &[u8] = include_bytes!("../templates/pico-main/pico.classless.sand.min.css");
-const PICO_SLATE: &[u8] = include_bytes!("../templates/pico-main/pico.classless.slate.min.css");
-const PICO_VIOLET: &[u8] = include_bytes!("../templates/pico-main/pico.classless.violet.min.css");
-const PICO_YELLOW: &[u8] = include_bytes!("../templates/pico-main/pico.classless.yellow.min.css");
-const PICO_ZINC: &[u8] = include_bytes!("../templates/pico-main/pico.classless.zinc.min.css");
+const PICO_AMBER: &[u8] = include_bytes!("../templates/pico-main/pico.amber.min.css");
+const PICO_BLUE: &[u8] = include_bytes!("../templates/pico-main/pico.blue.min.css");
+const PICO_CYAN: &[u8] = include_bytes!("../templates/pico-main/pico.cyan.min.css");
+const PICO_FUCHSIA: &[u8] = include_bytes!("../templates/pico-main/pico.fuchsia.min.css");
+const PICO_GREEN: &[u8] = include_bytes!("../templates/pico-main/pico.green.min.css");
+const PICO_GREY: &[u8] = include_bytes!("../templates/pico-main/pico.grey.min.css");
+const PICO_INDIGO: &[u8] = include_bytes!("../templates/pico-main/pico.indigo.min.css");
+const PICO_JADE: &[u8] = include_bytes!("../templates/pico-main/pico.jade.min.css");
+const PICO_LIME: &[u8] = include_bytes!("../templates/pico-main/pico.lime.min.css");
+const PICO_ORANGE: &[u8] = include_bytes!("../templates/pico-main/pico.orange.min.css");
+const PICO_PINK: &[u8] = include_bytes!("../templates/pico-main/pico.pink.min.css");
+const PICO_PUMPKIN: &[u8] = include_bytes!("../templates/pico-main/pico.pumpkin.min.css");
+const PICO_PURPLE: &[u8] = include_bytes!("../templates/pico-main/pico.purple.min.css");
+const PICO_RED: &[u8] = include_bytes!("../templates/pico-main/pico.red.min.css");
+const PICO_SAND: &[u8] = include_bytes!("../templates/pico-main/pico.sand.min.css");
+const PICO_SLATE: &[u8] = include_bytes!("../templates/pico-main/pico.slate.min.css");
+const PICO_VIOLET: &[u8] = include_bytes!("../templates/pico-main/pico.violet.min.css");
+const PICO_YELLOW: &[u8] = include_bytes!("../templates/pico-main/pico.yellow.min.css");
+const PICO_ZINC: &[u8] = include_bytes!("../templates/pico-main/pico.zinc.min.css");
 
 // Color variants - fluid (20 colors)
 const PICO_FLUID_AMBER: &[u8] =
