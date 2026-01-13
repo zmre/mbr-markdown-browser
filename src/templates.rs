@@ -184,11 +184,19 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     // Partials (underscore prefix indicates internal-only templates)
     ("_head.html", include_str!("../templates/_head.html")),
     (
+        "_head_custom.html",
+        include_str!("../templates/_head_custom.html"),
+    ),
+    (
         "_head_markdown.html",
         include_str!("../templates/_head_markdown.html"),
     ),
     ("_nav.html", include_str!("../templates/_nav.html")),
     ("_footer.html", include_str!("../templates/_footer.html")),
+    (
+        "_footer_custom.html",
+        include_str!("../templates/_footer_custom.html"),
+    ),
     (
         "_info_panel.html",
         include_str!("../templates/_info_panel.html"),
