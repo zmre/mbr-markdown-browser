@@ -4,15 +4,21 @@
 
 * Static build
   * [ ] Fix / understand slow performance on static builds in big repos; worse, there's zero info on what it's doing while waiting for it even with -vvv
-  * [ ] Fix / understand slow initial rendering in some markdown files in dynamic mode
+  * [ ] Fix / understand slow initial rendering in some markdown files in dynamic mode (I think this is the oembed stuff)
+    * [ ] Are we parallelizing the oembed stuff?  Can we?
+    * [ ] Do we have an oembed cache like for when we are doing a static build? Should we?
+    * [ ] Is there a way to display and then enrich in the case of dynamic viewing? Or to stream?
+    * [ ] Do we need/want a loading indicator if the above don't work?
+    * [ ] Can we disable oembed?  Maybe with a value of zero?
   * [ ] Setup some benchmarking and profiling
-  * [ ] Fix search relevance/ranking for static build site search; it's treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
+  * [x] Fix search relevance/ranking for static build site search; it's treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
 
 * Theming
-  * [ ] Figure out a way to choose a pico theme with config
-  * [ ] Delete all the pico crap that isn't in use
   * [ ] Test html template overrides including partials and includes using the template to see if I can override just a footer and if so, make sure it's documented right
   * [ ] Add empty partials in a few places so people can extend without overwriting
+  * [ ] Light mode issues with color on background stuff (hamburger icon, tag counts, etc.)
+  * [ ] I messed up. I want regular and regular fluid versions of pico, not the classless stuff.  Regular has classless and classes.
+  * [ ] Make the oembed stuff even better with images -- medium style so make a card with header, description, and image if available, which should look nice when oembed enrichment is available
 
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in

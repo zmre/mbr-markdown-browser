@@ -213,8 +213,15 @@ export class MbrSearchElement extends LitElement {
         const basePath = getBasePath();
         const pagefindUrl = new URL(basePath + '.mbr/pagefind/pagefind.js', window.location.href).href;
         const pagefind = await import(/* @vite-ignore */ pagefindUrl) as Pagefind;
-        // Configure baseUrl to "/" so result URLs are not prefixed with the module path
-        await pagefind.options({ baseUrl: "/" });
+        // Configure baseUrl and ranking to prioritize title/filename matches
+        await pagefind.options({
+          baseUrl: "/",
+          ranking: {
+            termFrequency: 0.5,    // Short docs (title matches) less penalized
+            pageLength: 0.0,       // Neutralize page length effect
+            termSaturation: 2.0    // High density helps (titles repeat term)
+          }
+        });
         await pagefind.init();
         this._pagefind = pagefind;
         return pagefind;

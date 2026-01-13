@@ -8,6 +8,7 @@
   <body>
 {% include "_nav.html" %}
     <main id="wrapper" class="container" data-pagefind-body>
+      <span class="sr-only" data-pagefind-weight="10">{{ current_dir_name | default(value="") }}</span>
       <h1 data-pagefind-meta="title">{{ current_dir_name | default(value="Home") }}</h1>
 
       {% if subdirs %}
