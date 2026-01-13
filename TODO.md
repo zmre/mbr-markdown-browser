@@ -16,7 +16,7 @@
 * Theming
   * [ ] Test html template overrides including partials and includes using the template to see if I can override just a footer and if so, make sure it's documented right
   * [x] Add empty partials in a few places so people can extend without overwriting
-  * [ ] Light mode issues with color on background stuff (hamburger icon, tag counts, etc.)
+  * [x] Light mode issues with color on background stuff (hamburger icon, tag counts, etc.)
   * [x] I messed up. I want regular and regular fluid versions of pico, not the classless stuff.  Regular has classless and classes.
   * [ ] Make the oembed stuff even better with images -- medium style so make a card with header, description, and image if available, which should look nice when oembed enrichment is available
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)

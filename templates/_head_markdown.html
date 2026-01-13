@@ -21,4 +21,10 @@
     <script>
       // Frontmatter available to page scripts (excludes rendered markdown for efficiency)
       window.frontmatter = {{ frontmatter_json | safe }};
+      // Headings for table of contents
+      window.headings = [
+        {% for heading in headings %}
+        { level: {{ heading.level }}, id: "{{ heading.id }}", text: "{{ heading.text | escape }}" }{% if not loop.last %},{% endif %}
+        {% endfor %}
+      ];
     </script>
