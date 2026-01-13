@@ -58,6 +58,13 @@ pub struct Args {
     /// Use 0.0.0.0 to listen on all interfaces.
     #[arg(long, value_name = "HOST")]
     pub host: Option<String>,
+
+    /// Pico CSS theme to use. Overrides config file setting.
+    /// Options: default, fluid, or a color name (amber, blue, cyan, fuchsia, green,
+    /// grey, indigo, jade, lime, orange, pink, pumpkin, purple, red, sand, slate,
+    /// violet, yellow, zinc). Prefix with "fluid." for fluid typography (e.g., fluid.amber).
+    #[arg(long, value_name = "THEME")]
+    pub theme: Option<String>,
 }
 
 impl Args {

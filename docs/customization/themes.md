@@ -7,6 +7,75 @@ description: Customize colors and styles
 
 mbr uses [Pico CSS](https://picocss.com/) as its base framework, making customization straightforward through CSS variables.
 
+## Theme Selection
+
+The `theme` configuration option lets you select a pre-built Pico CSS color variant without writing any CSS:
+
+```toml
+# .mbr/config.toml
+theme = "jade"
+```
+
+### Theme Options
+
+| Value | Description |
+|-------|-------------|
+| `default` or empty | Default Pico classless theme (blue accent) |
+| `{color}` | Color variant (e.g., `amber`, `jade`, `violet`) |
+| `fluid` | Fluid typography that scales with viewport width |
+| `fluid.{color}` | Fluid typography with color variant (e.g., `fluid.purple`) |
+
+### Available Colors
+
+19 color variants are available:
+
+- **Warm**: amber, orange, pumpkin, red, pink, fuchsia
+- **Cool**: blue, cyan, indigo, violet, purple
+- **Natural**: green, jade, lime, yellow
+- **Neutral**: grey, slate, sand, zinc
+
+### Examples
+
+```toml
+# Amber accent color
+theme = "amber"
+
+# Purple with fluid typography
+theme = "fluid.purple"
+
+# Minimal grey theme
+theme = "grey"
+```
+
+### Fluid Typography
+
+Fluid themes use responsive typography that scales smoothly with viewport width, providing optimal reading experience across devices without hard breakpoints:
+
+```toml
+theme = "fluid.jade"
+```
+
+> **Note:** Theme selection only changes the base Pico CSS. You can further customize using `user.css` (see below).
+
+### Command Line Override
+
+You can override the theme at runtime using the `--theme` flag:
+
+```bash
+# Server mode with amber theme
+mbr -s --theme amber .
+
+# Static build with fluid purple theme
+mbr -b --theme fluid.purple .
+
+# GUI mode with jade theme
+mbr -g --theme jade .
+```
+
+Valid `--theme` values: `default`, `fluid`, or any color name: `amber`, `blue`, `cyan`, `fuchsia`, `green`, `grey`, `indigo`, `jade`, `lime`, `orange`, `pink`, `pumpkin`, `purple`, `red`, `sand`, `slate`, `violet`, `yellow`, `zinc`. Prefix with `fluid.` for fluid typography (e.g., `--theme fluid.amber`).
+
+This is useful for testing themes or building a site with a different theme than the config file specifies.
+
 ## Quick Customization
 
 For simple style additions, create `.mbr/user.css`:

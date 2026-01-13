@@ -276,6 +276,7 @@ fn reinit_server(
             config_copy.template_folder.clone(),
             config_copy.sort.clone(),
             true, // gui_mode: native window mode
+            &config_copy.theme,
             None, // Logging already initialized
         );
         match server {

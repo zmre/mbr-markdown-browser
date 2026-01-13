@@ -7,6 +7,8 @@
 //! This module is exposed via UniFFI for Swift interop in macOS QuickLook extensions.
 
 use crate::config::Config;
+use crate::embedded_hljs;
+use crate::embedded_pico;
 use crate::link_transform::LinkTransformConfig;
 use crate::markdown;
 use crate::server::DEFAULT_FILES;
@@ -288,9 +290,13 @@ fn build_inline_css(
 ) -> String {
     let mut css = String::with_capacity(64 * 1024); // Pre-allocate for performance
 
-    // Base CSS (pico.min.css)
-    css.push_str(get_embedded_file("/pico.min.css"));
-    css.push('\n');
+    // Base CSS (pico.min.css) - use default theme for QuickLook
+    if let Some(pico_css) = embedded_pico::get_pico_css("default") {
+        if let Ok(pico_str) = std::str::from_utf8(pico_css) {
+            css.push_str(pico_str);
+            css.push('\n');
+        }
+    }
 
     // Theme CSS (custom or default)
     if let Some(custom) = custom_theme {
@@ -306,10 +312,12 @@ fn build_inline_css(
         css.push('\n');
     }
 
-    // Syntax highlighting CSS
+    // Syntax highlighting CSS - use embedded_hljs module
     if config.include_syntax_highlighting {
-        css.push_str(get_embedded_file("/hljs.dark.css"));
-        css.push('\n');
+        if let Ok(hljs_css) = std::str::from_utf8(embedded_hljs::HLJS_DARK_CSS) {
+            css.push_str(hljs_css);
+            css.push('\n');
+        }
     }
 
     // VidStack CSS for video playback
@@ -330,16 +338,38 @@ fn build_inline_css(
 fn build_inline_js(config: &QuickLookConfig) -> String {
     let mut js = String::with_capacity(512 * 1024); // Pre-allocate for large JS files
 
-    // Syntax highlighting
+    // Syntax highlighting - use embedded_hljs module
     if config.include_syntax_highlighting {
-        js.push_str(get_embedded_file("/hljs.js"));
-        js.push('\n');
-
-        // Language packs
-        for lang in HLJS_LANGUAGES {
-            let path = format!("/hljs.lang.{}.js", lang);
-            js.push_str(get_embedded_file(&path));
+        if let Ok(hljs_js) = std::str::from_utf8(embedded_hljs::HLJS_JS) {
+            js.push_str(hljs_js);
             js.push('\n');
+        }
+
+        // Language packs from embedded_hljs
+        let lang_modules: &[&[u8]] = &[
+            embedded_hljs::HLJS_LANG_BASH,
+            embedded_hljs::HLJS_LANG_CSS,
+            embedded_hljs::HLJS_LANG_DOCKERFILE,
+            embedded_hljs::HLJS_LANG_GO,
+            embedded_hljs::HLJS_LANG_JAVA,
+            embedded_hljs::HLJS_LANG_JAVASCRIPT,
+            embedded_hljs::HLJS_LANG_JSON,
+            embedded_hljs::HLJS_LANG_MARKDOWN,
+            embedded_hljs::HLJS_LANG_NIX,
+            embedded_hljs::HLJS_LANG_PYTHON,
+            embedded_hljs::HLJS_LANG_RUBY,
+            embedded_hljs::HLJS_LANG_RUST,
+            embedded_hljs::HLJS_LANG_SCALA,
+            embedded_hljs::HLJS_LANG_SQL,
+            embedded_hljs::HLJS_LANG_TYPESCRIPT,
+            embedded_hljs::HLJS_LANG_XML,
+            embedded_hljs::HLJS_LANG_YAML,
+        ];
+        for lang_bytes in lang_modules {
+            if let Ok(lang_js) = std::str::from_utf8(lang_bytes) {
+                js.push_str(lang_js);
+                js.push('\n');
+            }
         }
     }
 
@@ -372,27 +402,6 @@ fn get_embedded_file(path: &str) -> &'static str {
     }
     ""
 }
-
-/// List of highlight.js language packs to include.
-const HLJS_LANGUAGES: &[&str] = &[
-    "css",
-    "javascript",
-    "typescript",
-    "rust",
-    "python",
-    "bash",
-    "java",
-    "scala",
-    "go",
-    "ruby",
-    "nix",
-    "json",
-    "yaml",
-    "xml",
-    "sql",
-    "dockerfile",
-    "markdown",
-];
 
 /// QuickLook-specific CSS overrides.
 const QUICKLOOK_CSS: &str = r##"

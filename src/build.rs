@@ -15,6 +15,7 @@ use scraper::{Html, Selector};
 
 use crate::{
     config::Config,
+    embedded_pico,
     errors::BuildError,
     link_transform::LinkTransformConfig,
     markdown,
@@ -698,6 +699,11 @@ impl Builder {
                 continue;
             }
 
+            // Skip pico.min.css - we'll write the themed version separately
+            if *route == "/pico.min.css" {
+                continue;
+            }
+
             // Strip leading / from route to get filename
             let filename = route.trim_start_matches('/');
             let output_path = mbr_output.join(filename);
@@ -717,6 +723,24 @@ impl Builder {
                     source: e,
                 })?;
             }
+        }
+
+        // Step 3b: Write themed pico.min.css (only if not already present from repo's .mbr/)
+        let pico_output_path = mbr_output.join("pico.min.css");
+        if !pico_output_path.exists() {
+            let pico_content =
+                embedded_pico::get_pico_css(&self.config.theme).unwrap_or_else(|| {
+                    eprintln!(
+                        "Warning: Invalid theme '{}'. Using default. Valid themes: {}",
+                        self.config.theme,
+                        embedded_pico::valid_themes_display()
+                    );
+                    embedded_pico::get_pico_css("default").expect("default theme must exist")
+                });
+            fs::write(&pico_output_path, pico_content).map_err(|e| BuildError::WriteFailed {
+                path: pico_output_path,
+                source: e,
+            })?;
         }
 
         // Step 4: Generate site.json with sort config

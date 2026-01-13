@@ -123,6 +123,9 @@ async fn main() -> Result<(), MbrError> {
             }
         }
     }
+    if let Some(ref theme) = args.theme {
+        config.theme = theme.clone();
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -233,6 +236,7 @@ async fn main() -> Result<(), MbrError> {
             config.template_folder.clone(),
             config.sort.clone(),
             false, // gui_mode: browser access, not native window
+            &config.theme,
             Some(&log_filter),
         )?;
 
@@ -270,6 +274,7 @@ async fn main() -> Result<(), MbrError> {
                     config_copy.template_folder.clone(),
                     config_copy.sort.clone(),
                     true, // gui_mode: native window mode
+                    &config_copy.theme,
                     None, // Logging already initialized
                 );
                 match server {

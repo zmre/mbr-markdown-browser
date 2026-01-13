@@ -11,6 +11,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::config::SortField;
+use crate::embedded_pico;
 use crate::errors::ServerError;
 use crate::link_transform::LinkTransformConfig;
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
@@ -47,6 +48,8 @@ pub struct ServerState {
     pub sort: Vec<SortField>,
     /// Whether the server is running in GUI mode (native window) vs browser mode
     pub gui_mode: bool,
+    /// Theme for Pico CSS selection (e.g., "default", "amber", "fluid", "fluid.jade")
+    pub theme: String,
 }
 
 impl Server {
@@ -65,11 +68,13 @@ impl Server {
         template_folder: Option<std::path::PathBuf>,
         sort: Vec<SortField>,
         gui_mode: bool,
+        theme: S,
         log_filter: Option<&str>,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
         let index_file = index_file.into();
+        let theme = theme.into();
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -169,6 +174,7 @@ impl Server {
             template_folder,
             sort,
             gui_mode,
+            theme,
         };
 
         let router = Router::new()
@@ -548,6 +554,11 @@ impl Server {
             return Self::serve_file_from_path(&file_path).await;
         }
 
+        // Handle /pico.min.css dynamically based on theme config
+        if asset_path == "/pico.min.css" {
+            return Self::serve_themed_pico(&config.theme);
+        }
+
         // Fall back to compiled-in defaults
         Self::serve_default_file(&asset_path)
     }
@@ -584,6 +595,36 @@ impl Server {
         builder
             .body(axum::body::Body::from(bytes))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    /// Serve themed Pico CSS based on the configured theme.
+    ///
+    /// Returns the appropriate Pico CSS variant based on theme config:
+    /// - "" or "default" -> pico.classless.min.css
+    /// - "{color}" (e.g., "amber") -> pico.classless.{color}.min.css
+    /// - "fluid" -> pico.fluid.classless.min.css
+    /// - "fluid.{color}" (e.g., "fluid.amber") -> pico.fluid.classless.{color}.min.css
+    fn serve_themed_pico(theme: &str) -> Result<Response<Body>, StatusCode> {
+        match embedded_pico::get_pico_css(theme) {
+            Some(bytes) => {
+                let etag = generate_etag(bytes);
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/css")
+                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                    .header(header::ETAG, etag)
+                    .body(Body::from(bytes.to_vec()))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            None => {
+                eprintln!(
+                    "Warning: Invalid theme '{}'. Valid themes: {}",
+                    theme,
+                    embedded_pico::valid_themes_display()
+                );
+                Err(StatusCode::NOT_FOUND)
+            }
+        }
     }
 
     /// Guess MIME type from file extension
@@ -1266,7 +1307,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/pico.min.css",
-        include_bytes!("../templates/pico.min.css"),
+        include_bytes!("../templates/pico-main/pico.classless.min.css"),
         "text/css",
     ),
     (

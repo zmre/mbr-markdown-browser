@@ -484,3 +484,95 @@ async fn test_build_404_html_includes_navigation() {
         "404.html should include search functionality"
     );
 }
+
+// ============================================================================
+// Theme tests
+// ============================================================================
+
+/// Helper to run a build with a specific theme
+async fn build_site_with_theme(repo: &TestRepo, theme: &str) -> std::path::PathBuf {
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        theme: theme.to_string(),
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+
+    builder.build().await.expect("Build failed");
+
+    output_dir
+}
+
+#[tokio::test]
+async fn test_build_uses_default_theme() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+
+    // Check that pico.min.css exists
+    let pico_path = output.join(".mbr").join("pico.min.css");
+    assert!(pico_path.exists(), "pico.min.css should be created");
+
+    // Should have substantial content
+    let pico_css = fs::read_to_string(&pico_path).unwrap();
+    assert!(
+        pico_css.len() > 1000,
+        "pico.min.css should have substantial content"
+    );
+}
+
+#[tokio::test]
+async fn test_build_uses_color_theme() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site_with_theme(&repo, "amber").await;
+
+    let pico_path = output.join(".mbr").join("pico.min.css");
+    assert!(pico_path.exists(), "pico.min.css should be created");
+
+    let pico_css = fs::read_to_string(&pico_path).unwrap();
+    assert!(pico_css.len() > 1000, "amber theme should have content");
+}
+
+#[tokio::test]
+async fn test_build_uses_fluid_theme() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site_with_theme(&repo, "fluid.jade").await;
+
+    let pico_path = output.join(".mbr").join("pico.min.css");
+    assert!(pico_path.exists(), "pico.min.css should be created");
+
+    let pico_css = fs::read_to_string(&pico_path).unwrap();
+    assert!(
+        pico_css.len() > 1000,
+        "fluid.jade theme should have content"
+    );
+}
+
+#[tokio::test]
+async fn test_build_invalid_theme_falls_back_to_default() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    // Invalid theme should fall back to default (with warning)
+    let output = build_site_with_theme(&repo, "invalid-theme").await;
+
+    let pico_path = output.join(".mbr").join("pico.min.css");
+    assert!(
+        pico_path.exists(),
+        "pico.min.css should be created even with invalid theme"
+    );
+
+    let pico_css = fs::read_to_string(&pico_path).unwrap();
+    assert!(
+        pico_css.len() > 1000,
+        "fallback theme should have valid content"
+    );
+}

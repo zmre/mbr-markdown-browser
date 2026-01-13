@@ -39,6 +39,7 @@ impl TestServer {
                 None,                               // template_folder
                 mbr::config::default_sort_config(), // sort
                 false,                              // gui_mode
+                "default",                          // theme
                 None,                               // log_filter
             )
             .expect("Failed to initialize server");
@@ -691,6 +692,7 @@ impl TestServerWithTemplates {
                 template_folder,
                 mbr::config::default_sort_config(), // sort
                 false,                              // gui_mode
+                "default",                          // theme
                 None,                               // log_filter
             )
             .expect("Failed to initialize server");
@@ -1386,5 +1388,192 @@ async fn test_404_error_page_has_proper_content_type() {
         content_type.is_some_and(|ct| ct.contains("text/html")),
         "Error page should have text/html content type. Got: {:?}",
         content_type
+    );
+}
+
+// ============================================================================
+// Theme Configuration Tests
+// ============================================================================
+
+/// Helper to start a server with a specific theme
+struct TestServerWithTheme {
+    port: u16,
+    client: reqwest::Client,
+    _handle: tokio::task::JoinHandle<()>,
+}
+
+impl TestServerWithTheme {
+    async fn start(repo: &TestRepo, theme: &str) -> Self {
+        let port = find_available_port();
+        let root_dir = repo.path().to_path_buf();
+        let theme = theme.to_string();
+
+        let handle = tokio::spawn(async move {
+            let server = mbr::server::Server::init(
+                [127, 0, 0, 1],
+                port,
+                root_dir,
+                "static",
+                &["md".to_string()],
+                &["target".to_string(), "node_modules".to_string()],
+                &["*.log".to_string()],
+                &[
+                    ".direnv".to_string(),
+                    ".git".to_string(),
+                    "result".to_string(),
+                    "target".to_string(),
+                    "build".to_string(),
+                ],
+                "index.md",
+                100,
+                None,                               // template_folder
+                mbr::config::default_sort_config(), // sort
+                false,                              // gui_mode
+                &theme,                             // theme
+                None,                               // log_filter
+            )
+            .expect("Failed to initialize server");
+
+            let _ = server.start().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+
+        Self {
+            port,
+            client,
+            _handle: handle,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{}", self.port, path)
+    }
+
+    async fn get(&self, path: &str) -> reqwest::Response {
+        self.client
+            .get(self.url(path))
+            .send()
+            .await
+            .expect("Request failed")
+    }
+
+    #[allow(dead_code)]
+    async fn get_text(&self, path: &str) -> String {
+        self.get(path)
+            .await
+            .text()
+            .await
+            .expect("Failed to get response text")
+    }
+}
+
+#[tokio::test]
+async fn test_pico_css_default_theme() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "default").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Default theme should return the classless variant
+    let css = response.text().await.unwrap();
+    assert!(
+        css.contains("Pico CSS") || css.len() > 1000,
+        "Should return valid Pico CSS"
+    );
+}
+
+#[tokio::test]
+async fn test_pico_css_color_theme() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "amber").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Color theme should return CSS with different content than default
+    let css = response.text().await.unwrap();
+    assert!(
+        css.len() > 1000,
+        "Amber theme should return valid CSS content"
+    );
+}
+
+#[tokio::test]
+async fn test_pico_css_fluid_theme() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "fluid").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    let css = response.text().await.unwrap();
+    assert!(css.len() > 1000, "Fluid theme should return valid CSS");
+}
+
+#[tokio::test]
+async fn test_pico_css_fluid_color_theme() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "fluid.jade").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    let css = response.text().await.unwrap();
+    assert!(css.len() > 1000, "Fluid jade theme should return valid CSS");
+}
+
+#[tokio::test]
+async fn test_pico_css_invalid_theme_returns_404() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "invalid-theme-name").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    // Invalid theme should return 404
+    assert_eq!(
+        response.status(),
+        404,
+        "Invalid theme should return 404 status"
+    );
+}
+
+#[tokio::test]
+async fn test_pico_css_empty_theme_uses_default() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    let css = response.text().await.unwrap();
+    assert!(css.len() > 1000, "Empty theme should use default CSS");
+}
+
+#[tokio::test]
+async fn test_pico_css_has_cache_headers() {
+    let repo = TestRepo::new();
+
+    let server = TestServerWithTheme::start(&repo, "default").await;
+    let response = server.get("/.mbr/pico.min.css").await;
+
+    assert_eq!(response.status(), 200);
+
+    // Check cache headers
+    let etag = response.headers().get("etag");
+    assert!(etag.is_some(), "Pico CSS response should have ETag header");
+
+    let cache_control = response.headers().get("cache-control");
+    assert!(
+        cache_control.is_some(),
+        "Pico CSS response should have Cache-Control header"
     );
 }
