@@ -39,7 +39,7 @@ https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbG5udXhqcWpseDgyaGJ2bDd0MXRqYW
 - **Speed** - Sub-second rendering, instant navigation, fast site builds
 - **No lock-in** - Works with any markdown repository without modifications
 - **Customizable** - Override styles, templates, and components per-repository
-- **Rich content** - Embed videos, audio, PDFs, diagrams, and more
+- **Rich content** - Embed videos, audio, PDFs, diagrams, and more with native markdown image syntax that works magically with other media types
 
 ### Navigation Features
 

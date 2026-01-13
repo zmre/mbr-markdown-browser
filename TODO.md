@@ -19,15 +19,15 @@
   * [ ] Light mode issues with color on background stuff (hamburger icon, tag counts, etc.)
   * [x] I messed up. I want regular and regular fluid versions of pico, not the classless stuff.  Regular has classless and classes.
   * [ ] Make the oembed stuff even better with images -- medium style so make a card with header, description, and image if available, which should look nice when oembed enrichment is available
+  * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
 
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in
 
 * Browser widget updates
-  * [x] Lots of bugs :-( files in the root dir aren't shown at all, for example
   * [ ] Enhance the browser widget to allow more keyboard shortcuts (hjkl for starters)
   * [ ] Enhance the browser widget to have a broader idea of tags and other frontmatter
-  * [ ] Bug in browser widget not showing all tags or full counts
+  * [ ] Bug in browser widget not showing all tags or full counts; also not hiding tags section if there aren't any
   * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
 
 * [ ] Add index pages for frontmatter taxonomy (maybe explicitly defined and requested) like performer, tag, etc. and maybe optionally specify content partials in the .mbr dir?
@@ -64,8 +64,7 @@
 * [ ] Support for wikilinks?  If we don't have to search for titles, maybe we assume that what's in `[[title]]` is a filename like. There are also links to headings (see https://help.obsidian.md/links) but they allow spaces and stuff so would need to convert to ids.
   * UPDATE: looks like we maybe already support this?  Need to test, verify, and if so, document
 
-* [ ] Need to produce robots.txt and sitemap.xml files (robots pulled from .mbr so user can override). we need some custom frontmatter to cause something to be left out or even ignored. we also need to use last update or date field to push into sitemap too.
-* [ ] favicon.ico
+* [ ] Need to produce robots.txt and sitemap.xml files (robots pulled from .mbr so user can override)? We would need some custom frontmatter to cause something to be left out or even ignored. We also need to use last update or date field to push into sitemap too.  But our "everything is relative" idea falls apart since the sitemap needs to know the full URL of the content (hostname, prefix path, etc.) so maybe we'd only build it if that's specified.
 
 * [ ] Components are currently bundled as mbr-components.js and loaded as a single file, which is great, but we want to allow for more fine-grained overrides.  The better behavior here is for us to assemble a mbr-components.js file from a set of individual files allowing for user overrides to those files.  A static build will have a single mbr-comonents.js file and a dynamic one will concatenate each component file in a particular dir together first checking for per-repo or templates dir overrides.
 

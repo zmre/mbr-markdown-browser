@@ -32,6 +32,37 @@ cargo test
 
 CI will reject any PR that fails these checks. The pre-commit hook enforces this locally, but you should run these explicitly to catch issues early.
 
+## When to Update Documentation and Tests (MANDATORY)
+
+When making code changes, you MUST also update:
+
+### Documentation Updates
+
+Update `docs/reference/cli.md` when:
+- Adding or removing CLI flags/options
+- Changing default values for any configuration
+- Adding new configuration options to `config.rs`
+- Changing behavior of existing options
+
+Update other docs in `docs/` when:
+- Adding new features that users need to know about
+- Changing how existing features work
+- Adding new markdown extensions or shortcodes
+
+### Test Updates
+
+Add or update tests when:
+- Adding new functions (add unit tests in the same file)
+- Adding new CLI options (add integration tests)
+- Fixing bugs (add regression tests to prevent recurrence)
+- Changing behavior of existing functions (update existing tests)
+
+**Test locations:**
+- Unit tests: In the same `.rs` file under `#[cfg(test)] mod tests`
+- Integration tests: `tests/server_integration.rs` for HTTP/server behavior
+- Build tests: `tests/build_integration.rs` for static site generation
+- Property tests: Use `proptest` for invariant verification
+
 ## Goals
 
 In this tool, **performance is extremely important** -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.  Everything should be near instantaneous and we should be constantly looking for safe ways to make things fast, but without using local cache files.  This tool may be used on repositories with tens of thousands of markdown files and as many assets (images, pdfs, etc.) as well and it MUST perform well even on big repositories. Anything slow must be async and background and out of the critical path. It should also be made as fast as possible.
@@ -58,17 +89,36 @@ cargo run -- -b --output ./public /path/to/markdown/repo
 cargo watch -q -c -x 'run --release -- -s README.md'
 ```
 
+### Key CLI Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-s, --server` | Start web server | (none) |
+| `-g, --gui` | Launch native GUI window | (none) |
+| `-b, --build` | Generate static site | (none) |
+| `--output <PATH>` | Output directory for static build | `build` |
+| `--port <PORT>` | Server port | `5200` |
+| `--host <HOST>` | Server IP address | `127.0.0.1` |
+| `--theme <THEME>` | Pico CSS theme (amber, blue, cyan, etc.) | `default` |
+| `--oembed-timeout-ms <MS>` | URL metadata fetch timeout (0 to disable) | `500` (server), `0` (build) |
+| `--oembed-cache-size <BYTES>` | Max oembed cache size | `2097152` (2MB) |
+| `--build-concurrency <N>` | Parallel file processing limit | auto (2x cores, max 32) |
+| `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
+| `-v, --verbose` | Increase log verbosity | warn level |
+
+See `docs/reference/cli.md` for complete documentation.
+
 ## Testing
 
-The project has comprehensive test coverage with ~290 tests:
+The project has comprehensive test coverage with ~387 tests:
 
 ```bash
 # Run all tests
 cargo test
 
 # Run specific test modules
-cargo test --lib                    # Unit tests (~120 tests)
-cargo test --test server_integration # Integration tests (18 tests)
+cargo test --lib                    # Unit tests (~274 tests)
+cargo test --test server_integration # Integration tests (~68 tests)
 
 # Run with output
 cargo test -- --nocapture
@@ -78,10 +128,10 @@ cargo test -- --nocapture
 
 | Location | Description | Count |
 |----------|-------------|-------|
-| `src/lib.rs` (unit tests) | Unit tests for each module | ~210 |
+| `src/*.rs` (unit tests) | Unit tests for each module | ~274 |
 | `src/main.rs` | URL path builder tests | 10 |
-| `tests/build_integration.rs` | Build/static site tests | ~22 |
-| `tests/server_integration.rs` | HTTP integration tests | ~57 |
+| `tests/build_integration.rs` | Build/static site tests | ~30 |
+| `tests/server_integration.rs` | HTTP integration tests | ~68 |
 | Doc tests | Code examples in documentation | 5 |
 
 Property tests use `proptest` to verify invariants like:
@@ -122,7 +172,8 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
 | `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
 | `vid.rs` | Video embed handling with VidStack player and shortcodes |
-| `oembed.rs` | Auto-embed for bare URLs in markdown |
+| `oembed.rs` | Auto-embed for bare URLs in markdown (YouTube, Giphy, OpenGraph) |
+| `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
 | `html.rs` | Custom HTML output for pulldown-cmark |
 
 ### Key Pure Functions (Testable)
@@ -222,6 +273,40 @@ Users override defaults by creating files in their markdown repo's `.mbr/` folde
 - `.mbr/user.css` - Additional user styles
 - `.mbr/components/*.js` - Component overrides
 
+### Oembed System
+
+The oembed system auto-embeds bare URLs in markdown with rich previews:
+
+**Supported URL types:**
+- **YouTube** - Embedded player (no network call needed)
+- **Giphy** - GIF embeds (no network call needed)
+- **OpenGraph** - Fetches page metadata (title, description, image) for rich link previews
+
+**Architecture:**
+- `oembed.rs` - URL detection and embed generation
+- `oembed_cache.rs` - LRU cache using papaya concurrent hashmap
+- URLs are fetched in parallel during markdown rendering
+- Cache is shared across requests (server mode) or files (build mode)
+
+**Mode-specific defaults:**
+| Mode | oembed_timeout_ms | Reason |
+|------|-------------------|--------|
+| Server/GUI | 500 | Good UX with reasonable timeout |
+| Build | 0 (disabled) | Speed - oembed can slow builds dramatically |
+
+### Theming
+
+The project uses Pico CSS with color theme variants:
+
+```bash
+mbr -s --theme amber ~/notes     # Use amber color theme
+mbr -s --theme fluid.blue ~/notes # Fluid typography with blue
+```
+
+**Available themes:** default, fluid, amber, blue, cyan, fuchsia, green, grey, indigo, jade, lime, orange, pink, pumpkin, purple, red, sand, slate, violet, yellow, zinc
+
+Theme files are in `templates/pico-main/` and loaded dynamically by `embedded_pico.rs`.
+
 ### Markdown Extensions
 
 **Vid Shortcode:**
@@ -245,14 +330,20 @@ The `-b/--build` flag generates a complete static site:
 ```bash
 mbr -b /path/to/markdown/repo              # Output to ./build
 mbr -b --output ./public /path/to/repo      # Custom output directory
+mbr -b --build-concurrency 8 /path/to/repo  # Explicit concurrency limit
 ```
 
 **Build process:**
-1. Renders all markdown files to HTML
-2. Generates section pages for directories
+1. Renders all markdown files to HTML **in parallel** (uses `futures::stream::buffer_unordered`)
+2. Generates section pages for directories **in parallel**
 3. Symlinks assets (images, PDFs, videos) - macOS/Linux only
 4. Copies `.mbr/` folder with default files
 5. Creates `.mbr/site.json` with full site metadata
+
+**Performance optimizations:**
+- **Parallel rendering**: Default concurrency is 2x CPU cores (max 32). Control with `--build-concurrency`.
+- **Oembed disabled by default**: Build mode sets `oembed_timeout_ms=0` for speed. On a 3,000-note repo, oembed=1000ms takes ~10 minutes vs ~12 seconds with oembed disabled.
+- To enable oembed in builds: `mbr -b --oembed-timeout-ms 500 /path/to/repo`
 
 **Output structure:**
 ```
@@ -281,8 +372,10 @@ build/
 - **wry/tao** - Native webview GUI (optional, `gui` feature)
 - **muda** - Native menu bar (macOS, optional, `gui` feature)
 - **uniffi** - FFI bindings generator for Swift/Kotlin
-- **papaya** - Concurrent hash maps
+- **papaya** - Concurrent hash maps (used for oembed cache, repo metadata)
 - **rayon** - Parallel iteration for repo scanning
+- **futures** - Async streams with `buffer_unordered` for parallel builds
+- **reqwest** - HTTP client for oembed fetching (with rustls-tls)
 - **proptest** - Property-based testing (dev)
 - **tempfile** - Temporary directories for tests (dev)
 

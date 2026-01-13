@@ -1,15 +1,7 @@
     <header class="container" data-pagefind-ignore>
       <nav role="navigation" aria-label="Main menu">
         <ul>
-          <li>
-            <button class="browse-trigger"
-                    onclick="document.querySelector('mbr-browse')?.open()"
-                    aria-label="Browse files"
-                    data-tooltip="Browse (-)"
-                    data-placement="bottom">
-                        <div class="mbr-hamburger-button"></div>
-            </button>
-          </li>
+          <li><mbr-browse></mbr-browse></li>
         </ul>
         <ul>
           <li><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>
