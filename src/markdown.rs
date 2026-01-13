@@ -1,16 +1,18 @@
 use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
+use crate::oembed_cache::OembedCache;
 use crate::vid::Vid;
 use pulldown_cmark::{
     CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd,
     TextMergeStream,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -31,9 +33,10 @@ struct EventState {
     in_link: bool, // Track when inside a link (including autolinks like <http://...>)
     metadata_source: Option<MetadataBlockKind>,
     metadata_parsed: Option<Yaml>,
-    oembed_timeout_ms: u64,
     /// Configuration for transforming relative links
     link_transform_config: LinkTransformConfig,
+    /// Pre-fetched oembed results for bare URLs (populated during parallel fetch phase)
+    prefetched_oembed: HashMap<String, PageInfo>,
 }
 
 pub type SimpleMetadata = HashMap<String, String>;
@@ -101,8 +104,30 @@ pub async fn render(
     oembed_timeout_ms: u64,
     link_transform_config: LinkTransformConfig,
 ) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
+    render_with_cache(
+        file,
+        root_path,
+        oembed_timeout_ms,
+        link_transform_config,
+        None,
+    )
+    .await
+}
+
+/// Renders markdown to HTML with optional OEmbed caching support.
+///
+/// When `oembed_cache` is provided, cached results are used when available and
+/// new results are cached for future use. URLs are fetched in parallel for improved
+/// performance when multiple bare URLs are present in the document.
+pub async fn render_with_cache(
+    file: PathBuf,
+    root_path: &Path,
+    oembed_timeout_ms: u64,
+    link_transform_config: LinkTransformConfig,
+    oembed_cache: Option<Arc<OembedCache>>,
+) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
     // Read markdown input
-    let markdown_input = fs::read_to_string(file)?;
+    let markdown_input = fs::read_to_string(&file)?;
 
     // First pass: extract headings and generate IDs
     let (headings, _heading_id_map) = extract_headings(&markdown_input);
@@ -167,6 +192,10 @@ pub async fn render(
         }
     }
 
+    // Collect bare URLs that need oembed fetching and fetch them in parallel
+    let prefetched_oembed =
+        prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await;
+
     // Third pass: process events through our custom logic
     let mut state = EventState {
         root_path: root_path.to_path_buf(),
@@ -175,13 +204,13 @@ pub async fn render(
         in_link: false,
         metadata_source: None,
         metadata_parsed: None,
-        oembed_timeout_ms,
         link_transform_config,
+        prefetched_oembed,
     };
     let mut processed_events = Vec::new();
 
     for event in events_with_ids {
-        let (processed, new_state) = process_event(event, state).await;
+        let (processed, new_state) = process_event(event, state);
         state = new_state;
         processed_events.push(processed);
     }
@@ -194,6 +223,109 @@ pub async fn render(
         headings,
         html_output,
     ))
+}
+
+/// Pre-pass to collect all bare URLs that need oembed fetching.
+///
+/// This identifies text events that look like bare URLs (start with "http", no spaces,
+/// and not inside a link element). These URLs are then fetched in parallel for better
+/// performance.
+fn collect_bare_urls(events: &[Event<'_>]) -> HashSet<String> {
+    let mut urls = HashSet::new();
+    let mut in_link = false;
+    let mut in_metadata = false;
+
+    for event in events {
+        match event {
+            Event::Start(Tag::Link { .. }) => in_link = true,
+            Event::End(TagEnd::Link) => in_link = false,
+            Event::Start(Tag::MetadataBlock(_)) => in_metadata = true,
+            Event::End(TagEnd::MetadataBlock(_)) => in_metadata = false,
+            Event::Text(text) => {
+                if !in_link
+                    && !in_metadata
+                    && text.starts_with("http")
+                    && !text.contains(' ')
+                    && !text.trim_start().starts_with("{{")
+                {
+                    urls.insert(text.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    urls
+}
+
+/// Fetches oembed data for a collection of URLs in parallel.
+///
+/// Uses the cache when available to avoid redundant network requests.
+/// New results are stored in the cache for future use.
+async fn prefetch_oembed_urls(
+    events: &[Event<'_>],
+    oembed_timeout_ms: u64,
+    oembed_cache: &Option<Arc<OembedCache>>,
+) -> HashMap<String, PageInfo> {
+    let urls = collect_bare_urls(events);
+
+    if urls.is_empty() {
+        return HashMap::new();
+    }
+
+    tracing::debug!("oembed prefetch: found {} bare URLs to fetch", urls.len());
+
+    // Partition URLs into cached and uncached
+    let (cached, uncached): (Vec<_>, Vec<_>) = urls
+        .into_iter()
+        .partition(|url| oembed_cache.as_ref().and_then(|c| c.get(url)).is_some());
+
+    let mut results = HashMap::new();
+
+    // Add cached results
+    if let Some(cache) = oembed_cache {
+        for url in cached {
+            if let Some(info) = cache.get(&url) {
+                results.insert(url, info);
+            }
+        }
+    }
+
+    // Fetch uncached URLs in parallel
+    if !uncached.is_empty() {
+        tracing::debug!(
+            "oembed prefetch: {} cached, {} to fetch",
+            results.len(),
+            uncached.len()
+        );
+
+        let fetch_futures: Vec<_> = uncached
+            .into_iter()
+            .map(|url| async move {
+                tracing::debug!("oembed fetch start: {}", url);
+                let result = PageInfo::new_from_url(&url, oembed_timeout_ms)
+                    .await
+                    .unwrap_or_else(|_| PageInfo {
+                        url: url.clone(),
+                        ..Default::default()
+                    });
+                tracing::debug!("oembed fetch complete: {}", url);
+                (url, result)
+            })
+            .collect();
+
+        let fetched: Vec<_> = futures::future::join_all(fetch_futures).await;
+
+        // Store results and cache them
+        for (url, info) in fetched {
+            if let Some(cache) = oembed_cache {
+                cache.insert(url.clone(), info.clone());
+            }
+            results.insert(url, info);
+        }
+    }
+
+    results
 }
 
 fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
@@ -338,7 +470,12 @@ fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> St
     }
 }
 
-async fn process_event(
+/// Processes a single markdown event, transforming it as needed.
+///
+/// This function is now synchronous because all async work (oembed fetching)
+/// is done in the prefetch phase. Bare URLs are looked up in the prefetched
+/// results instead of being fetched inline.
+fn process_event(
     event: pulldown_cmark::Event<'_>,
     mut state: EventState,
 ) -> (pulldown_cmark::Event<'_>, EventState) {
@@ -410,7 +547,6 @@ async fn process_event(
             (event, state)
         }
         Event::Text(text) => {
-            // println!("Text: {}", &text);
             if state.in_metadata {
                 state.metadata_parsed = YamlLoader::load_from_str(text)
                     .ok()
@@ -423,14 +559,19 @@ async fn process_event(
                     html_escape::encode_text(remaining_text)
                 );
                 (Event::Html(html.into()), state)
-            } else if !state.in_link && text.starts_with("http") && !text.contains(" ") {
+            } else if !state.in_link && text.starts_with("http") && !text.contains(' ') {
                 // Only process bare URLs that are NOT inside a link element.
                 // URLs in <http://...> autolinks or [text](url) links are already
                 // handled by markdown and shouldn't trigger oembed fetching.
-                let info = PageInfo::new_from_url(text, state.oembed_timeout_ms)
-                    .await
-                    .unwrap_or(PageInfo {
-                        url: text.clone().to_string(),
+                //
+                // Look up the prefetched result instead of fetching inline.
+                let url_str = text.to_string();
+                let info = state
+                    .prefetched_oembed
+                    .get(&url_str)
+                    .cloned()
+                    .unwrap_or_else(|| PageInfo {
+                        url: url_str,
                         ..Default::default()
                     });
                 (Event::Html(info.html().into()), state)
@@ -444,15 +585,7 @@ async fn process_event(
                 (event, state)
             }
         }
-        // Event::Code(code) => {
-        //     // TODO: detect mermaid
-        //     println!("****** code: {}", &code);
-        //     (event, state)
-        // }
-        _ => {
-            // println!("Event: {:?}", &event);
-            (event, state)
-        }
+        _ => (event, state),
     }
 }
 

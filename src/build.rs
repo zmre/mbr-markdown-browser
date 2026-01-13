@@ -11,13 +11,18 @@ use std::{
 
 use walkdir::WalkDir;
 
+use futures::stream::{self, StreamExt, TryStreamExt};
 use scraper::{Html, Selector};
+
+use std::sync::Arc;
 
 use crate::{
     config::Config,
+    embedded_pico,
     errors::BuildError,
     link_transform::LinkTransformConfig,
     markdown,
+    oembed_cache::OembedCache,
     repo::{MarkdownInfo, Repo},
     server::{
         DEFAULT_FILES, generate_breadcrumbs, get_current_dir_name, get_parent_path,
@@ -144,6 +149,8 @@ pub struct Builder {
     templates: Templates,
     output_dir: PathBuf,
     repo: Repo,
+    /// Cache for OEmbed page metadata shared across all file renders
+    oembed_cache: Arc<OembedCache>,
 }
 
 impl Builder {
@@ -151,12 +158,19 @@ impl Builder {
     pub fn new(config: Config, output_dir: PathBuf) -> Result<Self, BuildError> {
         let templates = Templates::new(&config.root_dir, config.template_folder.as_deref())?;
         let repo = Repo::init_from_config(&config);
+        let oembed_cache = Arc::new(OembedCache::new(config.oembed_cache_size));
+
+        tracing::debug!(
+            "build: initialized oembed cache with {} bytes max",
+            config.oembed_cache_size
+        );
 
         Ok(Builder {
             config,
             templates,
             output_dir,
             repo,
+            oembed_cache,
         })
     }
 
@@ -231,7 +245,16 @@ impl Builder {
         Ok(())
     }
 
-    /// Renders all markdown files to HTML.
+    /// Returns the effective build concurrency based on config or auto-detection.
+    fn get_concurrency(&self) -> usize {
+        self.config.build_concurrency.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| std::cmp::min(n.get() * 2, 32))
+                .unwrap_or(4)
+        })
+    }
+
+    /// Renders all markdown files to HTML in parallel.
     async fn render_markdown_files(&self) -> Result<usize, BuildError> {
         let markdown_files: Vec<_> = self
             .repo
@@ -242,10 +265,19 @@ impl Builder {
             .collect();
 
         let count = markdown_files.len();
+        let concurrency = self.get_concurrency();
 
-        for (path, info) in markdown_files {
-            self.render_single_markdown(&path, &info).await?;
-        }
+        tracing::info!(
+            "Rendering {} markdown files with concurrency {}",
+            count,
+            concurrency
+        );
+
+        stream::iter(markdown_files)
+            .map(|(path, info)| async move { self.render_single_markdown(&path, &info).await })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
 
         Ok(count)
     }
@@ -268,18 +300,23 @@ impl Builder {
             is_index_file,
         };
 
-        // Render markdown to HTML
-        let (mut frontmatter, headings, html) = markdown::render(
+        tracing::debug!("build: rendering {}", path.display());
+
+        // Render markdown to HTML with shared oembed cache
+        let (mut frontmatter, headings, html) = markdown::render_with_cache(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
             link_transform_config,
+            Some(self.oembed_cache.clone()),
         )
         .await
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),
             source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
         })?;
+
+        tracing::debug!("build: rendered {}", path.display());
 
         // Add markdown_source to frontmatter
         frontmatter.insert("markdown_source".to_string(), info.url_path.clone());
@@ -357,7 +394,7 @@ impl Builder {
         Ok(())
     }
 
-    /// Generates directory/section pages.
+    /// Generates directory/section pages in parallel.
     async fn render_directory_pages(&self) -> Result<usize, BuildError> {
         // Collect all directories that need section pages
         let mut directories: HashSet<PathBuf> = HashSet::new();
@@ -384,10 +421,22 @@ impl Builder {
         }
 
         let count = directories.len();
+        let concurrency = self.get_concurrency();
 
-        for dir in directories {
-            self.render_directory_page(&dir).await?;
-        }
+        tracing::info!(
+            "Rendering {} directory pages with concurrency {}",
+            count,
+            concurrency
+        );
+
+        // Convert HashSet to Vec for stream iteration
+        let directories: Vec<_> = directories.into_iter().collect();
+
+        stream::iter(directories)
+            .map(|dir| async move { self.render_directory_page(&dir).await })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
 
         Ok(count)
     }
@@ -698,6 +747,11 @@ impl Builder {
                 continue;
             }
 
+            // Skip pico.min.css - we'll write the themed version separately
+            if *route == "/pico.min.css" {
+                continue;
+            }
+
             // Strip leading / from route to get filename
             let filename = route.trim_start_matches('/');
             let output_path = mbr_output.join(filename);
@@ -717,6 +771,24 @@ impl Builder {
                     source: e,
                 })?;
             }
+        }
+
+        // Step 3b: Write themed pico.min.css (only if not already present from repo's .mbr/)
+        let pico_output_path = mbr_output.join("pico.min.css");
+        if !pico_output_path.exists() {
+            let pico_content =
+                embedded_pico::get_pico_css(&self.config.theme).unwrap_or_else(|| {
+                    eprintln!(
+                        "Warning: Invalid theme '{}'. Using default. Valid themes: {}",
+                        self.config.theme,
+                        embedded_pico::valid_themes_display()
+                    );
+                    embedded_pico::get_pico_css("default").expect("default theme must exist")
+                });
+            fs::write(&pico_output_path, pico_content).map_err(|e| BuildError::WriteFailed {
+                path: pico_output_path,
+                source: e,
+            })?;
         }
 
         // Step 4: Generate site.json with sort config

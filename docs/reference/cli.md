@@ -32,7 +32,9 @@ These flags are mutually exclusive:
 |--------|-------------|---------|
 | `--output <PATH>` | Output directory for static build | `build` |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
-| `--oembed-timeout <MS>` | Timeout for URL metadata fetch | `300` |
+| `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
+| `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
+| `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -74,7 +76,10 @@ mbr -b --output ./public ~/notes
 mbr -s --template-folder ./my-theme ~/notes
 
 # Increase oembed timeout
-mbr -s --oembed-timeout 2000 ~/notes
+mbr -s --oembed-timeout-ms 2000 ~/notes
+
+# Disable oembed fetching (uses plain links)
+mbr -s --oembed-timeout-ms 0 ~/notes
 ```
 
 ---
@@ -142,8 +147,9 @@ watcher_ignore_dirs = [
     "target"
 ]
 
-# oEmbed/OpenGraph fetch timeout in milliseconds
-oembed_timeout_ms = 300
+# oEmbed/OpenGraph fetch timeout in milliseconds (server/GUI default: 500)
+# Note: Build mode defaults to 0 (disabled) for performance. Override with CLI if needed.
+oembed_timeout_ms = 500
 
 # Enable write operations (future feature)
 enable_writes = false
@@ -188,8 +194,35 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `oembed_timeout_ms` | number | `300` | URL metadata fetch timeout |
+| `oembed_timeout_ms` | number | `500` (server/GUI), `0` (build) | URL metadata fetch timeout (0 to disable) |
+| `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `enable_writes` | bool | `false` | Allow write operations |
+
+> **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
+
+> **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.
+
+### Build Mode Performance
+
+By default, static builds (`-b`) disable oembed fetching (`oembed_timeout_ms=0`). If you want rich link previews in your static site, you can enable it by specifying a timeout:
+
+```bash
+mbr -b --oembed-timeout-ms 500 ~/notes
+```
+
+Oembed fetching is parallelized and cached, so the overhead is minimal even for large repositories.
+
+### Parallel Building
+
+Static builds process markdown files in parallel for maximum speed:
+
+| Setting | Effect |
+|---------|--------|
+| Default (auto) | Uses 2x CPU cores, capped at 32 |
+| `--build-concurrency 1` | Sequential processing (useful for debugging) |
+| `--build-concurrency 16` | Explicit concurrency limit |
+
+Memory usage scales with concurrency. Use lower values if running out of memory on very large repositories.
 
 ## Environment Variables
 
@@ -209,6 +242,7 @@ MBR_INDEX_FILE=README.md
 
 # Behavior
 MBR_OEMBED_TIMEOUT_MS=1000
+MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
 ```
 
 Environment variables override config file settings.

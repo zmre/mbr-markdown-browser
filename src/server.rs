@@ -11,8 +11,10 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::config::SortField;
+use crate::embedded_pico;
 use crate::errors::ServerError;
 use crate::link_transform::LinkTransformConfig;
+use crate::oembed_cache::OembedCache;
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
@@ -47,6 +49,10 @@ pub struct ServerState {
     pub sort: Vec<SortField>,
     /// Whether the server is running in GUI mode (native window) vs browser mode
     pub gui_mode: bool,
+    /// Theme for Pico CSS selection (e.g., "default", "amber", "fluid", "fluid.jade")
+    pub theme: String,
+    /// Cache for OEmbed page metadata to avoid redundant network requests
+    pub oembed_cache: Arc<OembedCache>,
 }
 
 impl Server {
@@ -62,14 +68,18 @@ impl Server {
         watcher_ignore_dirs: &[String],
         index_file: S,
         oembed_timeout_ms: u64,
+        oembed_cache_size: usize,
         template_folder: Option<std::path::PathBuf>,
         sort: Vec<SortField>,
         gui_mode: bool,
+        theme: S,
         log_filter: Option<&str>,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
         let index_file = index_file.into();
+        let theme = theme.into();
+        let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -169,6 +179,8 @@ impl Server {
             template_folder,
             sort,
             gui_mode,
+            theme,
+            oembed_cache,
         };
 
         let router = Router::new()
@@ -548,6 +560,11 @@ impl Server {
             return Self::serve_file_from_path(&file_path).await;
         }
 
+        // Handle /pico.min.css dynamically based on theme config
+        if asset_path == "/pico.min.css" {
+            return Self::serve_themed_pico(&config.theme);
+        }
+
         // Fall back to compiled-in defaults
         Self::serve_default_file(&asset_path)
     }
@@ -584,6 +601,36 @@ impl Server {
         builder
             .body(axum::body::Body::from(bytes))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    /// Serve themed Pico CSS based on the configured theme.
+    ///
+    /// Returns the appropriate Pico CSS variant based on theme config:
+    /// - "" or "default" -> pico.min.css
+    /// - "{color}" (e.g., "amber") -> pico.{color}.min.css
+    /// - "fluid" -> pico.fluid.classless.min.css
+    /// - "fluid.{color}" (e.g., "fluid.amber") -> pico.fluid.classless.{color}.min.css
+    fn serve_themed_pico(theme: &str) -> Result<Response<Body>, StatusCode> {
+        match embedded_pico::get_pico_css(theme) {
+            Some(bytes) => {
+                let etag = generate_etag(bytes);
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/css")
+                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                    .header(header::ETAG, etag)
+                    .body(Body::from(bytes.to_vec()))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            None => {
+                eprintln!(
+                    "Warning: Invalid theme '{}'. Valid themes: {}",
+                    theme,
+                    embedded_pico::valid_themes_display()
+                );
+                Err(StatusCode::NOT_FOUND)
+            }
+        }
     }
 
     /// Guess MIME type from file extension
@@ -792,11 +839,12 @@ impl Server {
             is_index_file,
         };
 
-        let (mut frontmatter, headings, inner_html_output) = markdown::render(
+        let (mut frontmatter, headings, inner_html_output) = markdown::render_with_cache(
             md_path.to_path_buf(),
             root_path,
             config.oembed_timeout_ms,
             link_transform_config,
+            Some(config.oembed_cache.clone()),
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
@@ -1266,7 +1314,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/pico.min.css",
-        include_bytes!("../templates/pico.min.css"),
+        include_bytes!("../templates/pico-main/pico.min.css"),
         "text/css",
     ),
     (

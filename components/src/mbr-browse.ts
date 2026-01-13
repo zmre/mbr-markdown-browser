@@ -682,16 +682,34 @@ export class MbrBrowseElement extends LitElement {
   // Render Methods
   // ========================================
 
-  override render() {
-    if (!this._isOpen) return nothing;
-
+  private _renderTrigger(): TemplateResult {
     return html`
-      <div class="navigator-backdrop" @click=${this.close}>
-        <div class="navigator-container" @click=${(e: Event) => e.stopPropagation()}>
-          ${this._renderLeftPane()}
-          ${this._showMiddlePane ? this._renderMiddlePane() : nothing}
+      <button
+        class="browse-trigger"
+        @click=${() => this.open()}
+        aria-label="Browse files"
+        title="Browse (-)"
+      >
+        <div class="hamburger-icon">
+          <span></span>
+          <span></span>
+          <span></span>
         </div>
-      </div>
+      </button>
+    `;
+  }
+
+  override render() {
+    return html`
+      ${this._renderTrigger()}
+      ${this._isOpen ? html`
+        <div class="navigator-backdrop" @click=${this.close}>
+          <div class="navigator-container" @click=${(e: Event) => e.stopPropagation()}>
+            ${this._renderLeftPane()}
+            ${this._showMiddlePane ? this._renderMiddlePane() : nothing}
+          </div>
+        </div>
+      ` : nothing}
     `;
   }
 
@@ -707,7 +725,7 @@ export class MbrBrowseElement extends LitElement {
 
         <div class="pane-content">
           ${this._isLoading ? this._renderLoading() :
-            this._loadError ? this._renderError() : html`
+        this._loadError ? this._renderError() : html`
             ${this._renderRecentSection()}
             ${this._renderShortcutsSection()}
             ${this._renderTagsSection()}
@@ -816,7 +834,7 @@ export class MbrBrowseElement extends LitElement {
       const hasChildren = tag.children.size > 0;
       const isExpanded = this._expandedTags.has(tag.name);
       const isSelected = this._currentSelection?.type === 'tag' &&
-                         this._currentSelection?.value === tag.name;
+        this._currentSelection?.value === tag.name;
 
       return html`
         <div class="tree-item tag-item">
@@ -877,7 +895,7 @@ export class MbrBrowseElement extends LitElement {
     const hasChildren = node.children.size > 0;
     const isExpanded = this._expandedFolders.has(node.path) || isRoot;
     const isSelected = this._currentSelection?.type === 'folder' &&
-                       this._currentSelection?.value === node.path;
+      this._currentSelection?.value === node.path;
     const isCurrent = this._isCurrentPath(node.path);
 
     // For root, render "Home" entry with children indented under it
@@ -951,11 +969,11 @@ export class MbrBrowseElement extends LitElement {
 
     return html`
       ${[...this._dynamicFields.entries()].map(([fieldName, values]) => {
-        const sectionKey = `fm_${fieldName}`;
-        const isExpanded = this._expandedSections.has(sectionKey);
-        const sortedValues = [...values].sort();
+      const sectionKey = `fm_${fieldName}`;
+      const isExpanded = this._expandedSections.has(sectionKey);
+      const sortedValues = [...values].sort();
 
-        return html`
+      return html`
           <div class="nav-section">
             <button
               class="section-header"
@@ -968,12 +986,12 @@ export class MbrBrowseElement extends LitElement {
             ${isExpanded ? html`
               <div class="section-content">
                 ${sortedValues.map(value => {
-                  const count = this._allFiles.filter(f =>
-                    f.frontmatter && String(f.frontmatter[fieldName]) === value
-                  ).length;
-                  const isSelected = this._currentSelection?.type === 'frontmatter' &&
-                                     this._currentSelection?.value === `${fieldName}:${value}`;
-                  return html`
+        const count = this._allFiles.filter(f =>
+          f.frontmatter && String(f.frontmatter[fieldName]) === value
+        ).length;
+        const isSelected = this._currentSelection?.type === 'frontmatter' &&
+          this._currentSelection?.value === `${fieldName}:${value}`;
+        return html`
                     <button
                       class="frontmatter-value ${isSelected ? 'selected' : ''}"
                       @click=${() => this._selectFrontmatter(fieldName, value)}
@@ -982,12 +1000,12 @@ export class MbrBrowseElement extends LitElement {
                       <span class="value-count">${count}</span>
                     </button>
                   `;
-                })}
+      })}
               </div>
             ` : nothing}
           </div>
         `;
-      })}
+    })}
     `;
   }
 
@@ -1081,6 +1099,48 @@ export class MbrBrowseElement extends LitElement {
   static override styles = css`
     :host {
       display: contents;
+    }
+
+    /* Trigger button */
+    .browse-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.5rem;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background 0.15s ease;
+      margin-left: 1px;
+      margin-right: 1px;
+    }
+
+    .browse-trigger:hover {
+      border: 1px solid var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.05));
+      margin-left: 0px;
+      margin-right: 0px;
+    }
+
+    /* Hamburger icon */
+    .hamburger-icon {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      width: 18px;
+      height: 14px;
+    }
+
+    .hamburger-icon span {
+      display: block;
+      height: 2px;
+      background: var(--pico-color, currentColor);
+      border-radius: 1px;
+      transition: all 0.2s ease;
+    }
+
+    .hambruger-icon span:hover {
+      background: #fff;
     }
 
     /* Backdrop */
@@ -1203,6 +1263,12 @@ export class MbrBrowseElement extends LitElement {
 
     .section-header:hover {
       background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .section-header:hover .section-title,
+    .section-header:hover .toggle-icon {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .toggle-icon {
@@ -1225,8 +1291,8 @@ export class MbrBrowseElement extends LitElement {
 
     .section-count {
       font-size: 0.75rem;
-      color: var(--pico-muted-color, #999);
-      background: var(--pico-secondary-background, #f0f0f0);
+      color: var(--pico-muted-color, #666);
+      background: var(--pico-muted-border-color, #e0e0e0);
       padding: 0.1rem 0.4rem;
       border-radius: 10px;
     }
@@ -1254,16 +1320,30 @@ export class MbrBrowseElement extends LitElement {
       min-width: 0;  /* Allow flex children to shrink for ellipsis */
     }
 
-    .tree-row:hover {
-      background: var(--pico-secondary-background, #f5f5f5);
-    }
-
     .tree-row.selected {
       background: var(--pico-primary-background, #e3f2fd);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .tree-row.selected .tree-label,
+    .tree-row.selected .label-count,
+    .tree-row.selected .tree-toggle {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .tree-row.current {
       border-left: 3px solid var(--pico-primary, #0d6efd);
+    }
+
+    .tree-row:hover {
+      background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .tree-row:hover .tree-label,
+    .tree-row:hover .label-count,
+    .tree-row:hover .tree-toggle {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .tree-toggle {
@@ -1299,10 +1379,6 @@ export class MbrBrowseElement extends LitElement {
       font-size: 0.875rem;
       min-width: 0;  /* Allow text truncation */
       overflow: hidden;
-    }
-
-    .tree-label:hover .label-text {
-      color: var(--pico-primary, #0d6efd);
     }
 
     .folder-icon {
@@ -1371,10 +1447,20 @@ export class MbrBrowseElement extends LitElement {
 
     .frontmatter-value:hover {
       background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .frontmatter-value:hover .value-count {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .frontmatter-value.selected {
       background: var(--pico-primary-background, #e3f2fd);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .frontmatter-value.selected .value-count {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .value-name {

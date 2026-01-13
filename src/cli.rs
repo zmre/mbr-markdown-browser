@@ -31,8 +31,16 @@ pub struct Args {
 
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// Falls back to plain link if fetch doesn't complete in time.
+    /// Set to 0 to disable oembed fetching entirely (uses plain links).
+    /// Default: 500ms for server/GUI mode, 0 (disabled) for build mode.
     #[arg(long)]
-    pub oembed_timeout: Option<u64>,
+    pub oembed_timeout_ms: Option<u64>,
+
+    /// Maximum size in bytes for the oembed cache. The cache stores fetched page
+    /// metadata to avoid redundant network requests. Set to 0 to disable caching.
+    /// Default: 2097152 (2MB). Accepts human-readable sizes like "2MB" or "512KB".
+    #[arg(long)]
+    pub oembed_cache_size: Option<usize>,
 
     /// Override template folder (replaces default .mbr/ and compiled defaults).
     /// Files found in this folder take precedence; missing files fall back to defaults.
@@ -58,6 +66,19 @@ pub struct Args {
     /// Use 0.0.0.0 to listen on all interfaces.
     #[arg(long, value_name = "HOST")]
     pub host: Option<String>,
+
+    /// Pico CSS theme to use. Overrides config file setting.
+    /// Options: default, fluid, or a color name (amber, blue, cyan, fuchsia, green,
+    /// grey, indigo, jade, lime, orange, pink, pumpkin, purple, red, sand, slate,
+    /// violet, yellow, zinc). Prefix with "fluid." for fluid typography (e.g., fluid.amber).
+    #[arg(long, value_name = "THEME")]
+    pub theme: Option<String>,
+
+    /// Number of files to process concurrently during static build (-b).
+    /// Higher values use more memory but may be faster on multi-core systems.
+    /// Default: auto (2x CPU cores, max 32).
+    #[arg(long, value_name = "N")]
+    pub build_concurrency: Option<usize>,
 }
 
 impl Args {

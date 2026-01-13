@@ -1,38 +1,14 @@
     <header class="container" data-pagefind-ignore>
       <nav role="navigation" aria-label="Main menu">
         <ul>
-          <li>
-            <button class="browse-trigger"
-                    onclick="document.querySelector('mbr-browse')?.open()"
-                    aria-label="Browse files"
-                    data-tooltip="Browse (-)"
-                    data-placement="bottom">
-                        <div class="mbr-hamburger-button"></div>
-            </button>
-          </li>
+          <li><mbr-browse></mbr-browse></li>
         </ul>
         <ul>
           <li><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>
         </ul>
         <ul>
-          <li>
-            <label for="info-panel-toggle" class="info-trigger" aria-label="Open info panel" data-tooltip="Info (Ctrl+g)" data-placement="bottom">
-              <span class="info-icon">ℹ</span>
-            </label>
-          </li>
+          <li><mbr-info></mbr-info></li>
           <li><mbr-search></mbr-search></li>
         </ul>
       </nav>
     </header>
-    <nav class="container breadcrumbs" aria-label="breadcrumb" role="navigation">
-    <ul>
-        {% if breadcrumbs %}
-        {% for crumb in breadcrumbs %}
-        <li>
-        <small><a href="{{ crumb.url }}">{{ crumb.name }}</a></small>
-        </li>
-        {% endfor %}
-        {% endif %}
-        <li><small>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</small></li>
-    </ul>
-    </nav>

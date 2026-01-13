@@ -213,8 +213,15 @@ export class MbrSearchElement extends LitElement {
         const basePath = getBasePath();
         const pagefindUrl = new URL(basePath + '.mbr/pagefind/pagefind.js', window.location.href).href;
         const pagefind = await import(/* @vite-ignore */ pagefindUrl) as Pagefind;
-        // Configure baseUrl to "/" so result URLs are not prefixed with the module path
-        await pagefind.options({ baseUrl: "/" });
+        // Configure baseUrl and ranking to prioritize title/filename matches
+        await pagefind.options({
+          baseUrl: "/",
+          ranking: {
+            termFrequency: 0.5,    // Short docs (title matches) less penalized
+            pageLength: 0.0,       // Neutralize page length effect
+            termSaturation: 2.0    // High density helps (titles repeat term)
+          }
+        });
         await pagefind.init();
         this._pagefind = pagefind;
         return pagefind;
@@ -855,7 +862,7 @@ export class MbrSearchElement extends LitElement {
 
     .result:hover,
     .result.selected {
-      background: var(--pico-secondary-background, #f5f5f5);
+      background: var(--pico-primary-focus, rgba(99, 102, 241, 0.15));
     }
 
     .result-header {
@@ -877,8 +884,8 @@ export class MbrSearchElement extends LitElement {
       flex-shrink: 0;
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
-      background: var(--pico-primary-background, #e3f2fd);
-      color: var(--pico-primary, #0d6efd);
+      background: var(--pico-primary, #0d6efd);
+      color: var(--pico-primary-inverse, #fff);
       font-size: 0.7rem;
       text-transform: uppercase;
     }
@@ -921,8 +928,8 @@ export class MbrSearchElement extends LitElement {
     .tag {
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
-      background: var(--pico-secondary-background, #f0f0f0);
-      color: var(--pico-muted-color, #666);
+      background: var(--pico-muted-border-color, #d1d5db);
+      color: var(--pico-color, #333);
       font-size: 0.7rem;
     }
 
@@ -956,7 +963,8 @@ export class MbrSearchElement extends LitElement {
     .hint-facets code {
       padding: 0.1rem 0.3rem;
       border-radius: 3px;
-      background: var(--pico-secondary-background, #f5f5f5);
+      background: var(--pico-code-background-color, #f5f5f5);
+      color: var(--pico-code-color, #333);
       font-size: 0.75rem;
     }
 

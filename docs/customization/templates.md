@@ -25,6 +25,7 @@ Partials are prefixed with underscore and included by other templates:
 | `_head.html` | Base `<head>` content |
 | `_head_markdown.html` | Extended head for markdown |
 | `_nav.html` | Navigation bar |
+| `_breadcrumbs.html` | Breadcrumb bar |
 | `_info_panel.html` | Document info sidebar |
 | `_footer.html` | Page footer |
 | `_scripts.html` | Base JavaScript includes |
@@ -221,6 +222,7 @@ Create `.mbr/index.html`:
 </head>
 <body>
   {% include "_nav.html" %}
+  {% include "_breadcrumbs.html" %}
 
   <main class="container">
     <article>
@@ -278,6 +280,10 @@ Create `.mbr/_nav.html`:
   <mbr-search></mbr-search>
 </nav>
 ```
+
+## Example: Remove Breadcrumbs
+
+Add an empty `.mbr/_breadcrumbs.html`.
 
 ## Example: Directory Listing
 

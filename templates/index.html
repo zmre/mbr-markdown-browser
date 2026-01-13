@@ -3,15 +3,17 @@
 <html lang="en">
   <head>
 {% include "_head_markdown.html" %}
+{% include "_head_custom.html" %}
   </head>
   <body>
 {% include "_nav.html" %}
-    <main id="wrapper" class="container" data-pagefind-body>{{ markdown | safe}}</main>
+{% include "_breadcrumbs.html" %}
+    <main id="wrapper" class="container" data-pagefind-body>{% if title %}<span class="sr-only" data-pagefind-weight="10">{{ title }}</span>{% endif %}{{ markdown | safe}}</main>
     <footer class="container" data-pagefind-ignore>
       <mbr-nav></mbr-nav>
     </footer>
-{% include "_info_panel.html" %}
 {% include "_footer.html" %}
+{% include "_footer_custom.html" %}
   </body>
 {% include "_scripts_markdown.html" %}
 </html>

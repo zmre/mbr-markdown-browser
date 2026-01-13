@@ -67,7 +67,13 @@ pub struct Config {
     pub watcher_ignore_dirs: Vec<String>,
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// If the fetch doesn't complete in time, falls back to a plain link.
+    /// Set to 0 to disable oembed fetching entirely (uses plain links for all URLs
+    /// except YouTube and Giphy which are embedded without network calls).
     pub oembed_timeout_ms: u64,
+    /// Maximum size in bytes for the oembed cache. The cache stores fetched page
+    /// metadata to avoid redundant network requests when rendering multiple files.
+    /// Set to 0 to disable caching entirely. Default: 2MB (2097152 bytes).
+    pub oembed_cache_size: usize,
     /// Optional template folder that overrides the default .mbr/ and compiled defaults.
     /// Files found here take precedence; missing files fall back to compiled defaults.
     #[serde(skip)]
@@ -76,6 +82,10 @@ pub struct Config {
     /// Default: sort by title (falling back to filename), ascending, string comparison.
     #[serde(default = "default_sort_config")]
     pub sort: Vec<SortField>,
+    /// Build concurrency: number of files to process in parallel during static builds.
+    /// None = auto-detect based on CPU cores (2x cores, capped at 32).
+    #[serde(default)]
+    pub build_concurrency: Option<usize>,
 }
 
 impl std::fmt::Display for IpArray {
@@ -147,9 +157,11 @@ impl Default for Config {
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
-            oembed_timeout_ms: 300,
+            oembed_timeout_ms: 500,
+            oembed_cache_size: 2 * 1024 * 1024, // 2MB default
             template_folder: None,
             sort: default_sort_config(),
+            build_concurrency: None, // Auto-detect based on CPU cores
         }
     }
 }

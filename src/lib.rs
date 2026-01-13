@@ -13,12 +13,15 @@ pub mod browser;
 pub mod build;
 pub mod cli;
 pub mod config;
+pub mod embedded_hljs;
+pub mod embedded_pico;
 pub mod errors;
 pub mod html;
 pub mod link_transform;
 pub mod markdown;
 pub mod media;
 pub mod oembed;
+pub mod oembed_cache;
 pub mod path_resolver;
 #[cfg(feature = "ffi")]
 pub mod quicklook;
