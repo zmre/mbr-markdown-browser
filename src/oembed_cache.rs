@@ -145,6 +145,12 @@ impl OembedCache {
     pub fn len(&self) -> usize {
         self.cache.pin().len()
     }
+
+    /// Returns true if the cache is empty.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.cache.pin().is_empty()
+    }
 }
 
 #[cfg(test)]

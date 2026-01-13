@@ -19,7 +19,8 @@ Before completing ANY Rust code changes, you MUST run these checks:
 cargo fmt
 
 # Check for lint issues (warnings are errors)
-cargo clippy -- -D warnings
+# IMPORTANT: Use --all-targets to check test code too (matches CI)
+cargo clippy --all-targets -- -D warnings
 
 # Run tests
 cargo test
@@ -27,10 +28,12 @@ cargo test
 
 **These are blocking requirements.** Do not consider Rust work complete until:
 1. `cargo fmt` has been run (code is formatted)
-2. `cargo clippy -- -D warnings` passes with no errors
+2. `cargo clippy --all-targets -- -D warnings` passes with no errors
 3. `cargo test` passes
 
 CI will reject any PR that fails these checks. The pre-commit hook enforces this locally, but you should run these explicitly to catch issues early.
+
+**Why `--all-targets`?** Without this flag, clippy skips `#[cfg(test)]` code. CI runs with `--all-targets`, so you must too to catch all lints locally.
 
 ## When to Update Documentation and Tests (MANDATORY)
 
