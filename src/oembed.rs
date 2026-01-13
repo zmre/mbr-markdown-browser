@@ -14,7 +14,7 @@ static GIPHY_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"https?://(?:www\.)?giphy\.com/gifs/(?:[^/]+-)?([a-zA-Z0-9]+)(?:\?.*)?$").unwrap()
 });
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PageInfo {
     pub url: String,
     pub title: Option<String>,
@@ -24,6 +24,19 @@ pub struct PageInfo {
 }
 
 impl PageInfo {
+    /// Estimates the memory size of this PageInfo in bytes.
+    ///
+    /// Used by OembedCache for size-based eviction. This is an approximation
+    /// that accounts for the struct overhead plus the heap-allocated strings.
+    pub fn estimated_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.url.len()
+            + self.title.as_ref().map_or(0, |s| s.len())
+            + self.description.as_ref().map_or(0, |s| s.len())
+            + self.image.as_ref().map_or(0, |s| s.len())
+            + self.embed_html.as_ref().map_or(0, |s| s.len())
+    }
+
     /// Extract YouTube video ID from various YouTube URL formats
     fn extract_youtube_id(url: &str) -> Option<String> {
         // Matches:
@@ -334,5 +347,46 @@ mod tests {
         let info = result.unwrap();
         assert!(info.embed_html.is_some());
         assert!(info.embed_html.unwrap().contains("giphy-embed"));
+    }
+
+    #[test]
+    fn test_estimated_size_empty() {
+        let info = PageInfo::default();
+        // Should at least include the struct size
+        assert!(info.estimated_size() >= std::mem::size_of::<PageInfo>());
+    }
+
+    #[test]
+    fn test_estimated_size_with_fields() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            title: Some("Test Title".to_string()),
+            description: Some("A longer description text".to_string()),
+            image: Some("https://example.com/image.png".to_string()),
+            embed_html: None,
+        };
+        let size = info.estimated_size();
+        // Size should include all the string lengths
+        let expected_min = std::mem::size_of::<PageInfo>()
+            + info.url.len()
+            + info.title.as_ref().unwrap().len()
+            + info.description.as_ref().unwrap().len()
+            + info.image.as_ref().unwrap().len();
+        assert_eq!(size, expected_min);
+    }
+
+    #[test]
+    fn test_clone() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            title: Some("Test".to_string()),
+            description: None,
+            image: None,
+            embed_html: Some("<div></div>".to_string()),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.url, info.url);
+        assert_eq!(cloned.title, info.title);
+        assert_eq!(cloned.embed_html, info.embed_html);
     }
 }

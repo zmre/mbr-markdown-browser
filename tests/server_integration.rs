@@ -35,7 +35,8 @@ impl TestServer {
                     "build".to_string(),
                 ],
                 "index.md",
-                100,
+                100,                                // oembed_timeout_ms
+                2 * 1024 * 1024,                    // oembed_cache_size (2MB)
                 None,                               // template_folder
                 mbr::config::default_sort_config(), // sort
                 false,                              // gui_mode
@@ -688,7 +689,8 @@ impl TestServerWithTemplates {
                     "build".to_string(),
                 ],
                 "index.md",
-                100,
+                100,             // oembed_timeout_ms
+                2 * 1024 * 1024, // oembed_cache_size (2MB)
                 template_folder,
                 mbr::config::default_sort_config(), // sort
                 false,                              // gui_mode
@@ -1426,6 +1428,7 @@ impl TestServerWithTheme {
                 ],
                 "index.md",
                 100,
+                2 * 1024 * 1024,                    // oembed_cache_size (2MB)
                 None,                               // template_folder
                 mbr::config::default_sort_config(), // sort
                 false,                              // gui_mode

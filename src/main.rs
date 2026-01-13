@@ -9,6 +9,7 @@ use mbr::{
     Config, ConfigError, MbrError, build::Builder, cli, link_transform::LinkTransformConfig,
     markdown, server, templates,
 };
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Check if the given path requires a folder picker dialog.
 /// This is true when launched as an app without a valid working directory.
@@ -51,6 +52,17 @@ async fn main() -> Result<(), MbrError> {
 
     let args = cli::Args::parse();
 
+    // Initialize tracing/logging based on verbosity flags
+    // Use try_init to allow server to re-configure if needed (it uses tower_http logging)
+    let log_filter = args.log_level_filter();
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| log_filter.into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .try_init();
+
     // Determine if we're in GUI mode (no --server, --stdout, --build flags)
     #[cfg(feature = "gui")]
     let is_gui_mode = !args.server && !args.stdout && !args.build;
@@ -89,6 +101,9 @@ async fn main() -> Result<(), MbrError> {
     // Apply CLI overrides
     if let Some(timeout) = args.oembed_timeout_ms {
         config.oembed_timeout_ms = timeout;
+    }
+    if let Some(cache_size) = args.oembed_cache_size {
+        config.oembed_cache_size = cache_size;
     }
     if let Some(ref template_folder) = args.template_folder {
         // Canonicalize and validate the template folder path
@@ -221,7 +236,6 @@ async fn main() -> Result<(), MbrError> {
         println!("{}", &html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
-        let log_filter = args.log_level_filter();
         let server = server::Server::init(
             config.ip.0,
             config.port,
@@ -233,11 +247,12 @@ async fn main() -> Result<(), MbrError> {
             &config.watcher_ignore_dirs,
             &config.index_file.clone(),
             config.oembed_timeout_ms,
+            config.oembed_cache_size,
             config.template_folder.clone(),
             config.sort.clone(),
             false, // gui_mode: browser access, not native window
             &config.theme,
-            Some(&log_filter),
+            None, // Logging already initialized
         )?;
 
         let url_path = build_url_path(
@@ -271,6 +286,7 @@ async fn main() -> Result<(), MbrError> {
                     &config_copy.watcher_ignore_dirs.clone(),
                     &config_copy.index_file.clone(),
                     config_copy.oembed_timeout_ms,
+                    config_copy.oembed_cache_size,
                     config_copy.template_folder.clone(),
                     config_copy.sort.clone(),
                     true, // gui_mode: native window mode

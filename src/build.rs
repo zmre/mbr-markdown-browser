@@ -13,12 +13,15 @@ use walkdir::WalkDir;
 
 use scraper::{Html, Selector};
 
+use std::sync::Arc;
+
 use crate::{
     config::Config,
     embedded_pico,
     errors::BuildError,
     link_transform::LinkTransformConfig,
     markdown,
+    oembed_cache::OembedCache,
     repo::{MarkdownInfo, Repo},
     server::{
         DEFAULT_FILES, generate_breadcrumbs, get_current_dir_name, get_parent_path,
@@ -145,6 +148,8 @@ pub struct Builder {
     templates: Templates,
     output_dir: PathBuf,
     repo: Repo,
+    /// Cache for OEmbed page metadata shared across all file renders
+    oembed_cache: Arc<OembedCache>,
 }
 
 impl Builder {
@@ -152,12 +157,19 @@ impl Builder {
     pub fn new(config: Config, output_dir: PathBuf) -> Result<Self, BuildError> {
         let templates = Templates::new(&config.root_dir, config.template_folder.as_deref())?;
         let repo = Repo::init_from_config(&config);
+        let oembed_cache = Arc::new(OembedCache::new(config.oembed_cache_size));
+
+        tracing::debug!(
+            "build: initialized oembed cache with {} bytes max",
+            config.oembed_cache_size
+        );
 
         Ok(Builder {
             config,
             templates,
             output_dir,
             repo,
+            oembed_cache,
         })
     }
 
@@ -269,18 +281,23 @@ impl Builder {
             is_index_file,
         };
 
-        // Render markdown to HTML
-        let (mut frontmatter, headings, html) = markdown::render(
+        tracing::debug!("build: rendering {}", path.display());
+
+        // Render markdown to HTML with shared oembed cache
+        let (mut frontmatter, headings, html) = markdown::render_with_cache(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
             link_transform_config,
+            Some(self.oembed_cache.clone()),
         )
         .await
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),
             source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
         })?;
+
+        tracing::debug!("build: rendered {}", path.display());
 
         // Add markdown_source to frontmatter
         frontmatter.insert("markdown_source".to_string(), info.url_path.clone());

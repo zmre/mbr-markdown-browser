@@ -21,6 +21,7 @@ pub mod link_transform;
 pub mod markdown;
 pub mod media;
 pub mod oembed;
+pub mod oembed_cache;
 pub mod path_resolver;
 #[cfg(feature = "ffi")]
 pub mod quicklook;

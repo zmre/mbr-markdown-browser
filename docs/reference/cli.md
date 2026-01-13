@@ -33,6 +33,7 @@ These flags are mutually exclusive:
 | `--output <PATH>` | Output directory for static build | `build` |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `300` |
+| `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -192,9 +193,12 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `oembed_timeout_ms` | number | `300` | URL metadata fetch timeout (0 to disable) |
+| `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `enable_writes` | bool | `false` | Allow write operations |
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
+
+> **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.
 
 ## Environment Variables
 
@@ -214,6 +218,7 @@ MBR_INDEX_FILE=README.md
 
 # Behavior
 MBR_OEMBED_TIMEOUT_MS=1000
+MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
 ```
 
 Environment variables override config file settings.

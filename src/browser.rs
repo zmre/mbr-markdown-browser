@@ -273,6 +273,7 @@ fn reinit_server(
             &config_copy.watcher_ignore_dirs,
             &config_copy.index_file,
             config_copy.oembed_timeout_ms,
+            config_copy.oembed_cache_size,
             config_copy.template_folder.clone(),
             config_copy.sort.clone(),
             true, // gui_mode: native window mode

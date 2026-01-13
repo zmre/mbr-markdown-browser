@@ -35,6 +35,12 @@ pub struct Args {
     #[arg(long)]
     pub oembed_timeout_ms: Option<u64>,
 
+    /// Maximum size in bytes for the oembed cache. The cache stores fetched page
+    /// metadata to avoid redundant network requests. Set to 0 to disable caching.
+    /// Default: 2097152 (2MB). Accepts human-readable sizes like "2MB" or "512KB".
+    #[arg(long)]
+    pub oembed_cache_size: Option<usize>,
+
     /// Override template folder (replaces default .mbr/ and compiled defaults).
     /// Files found in this folder take precedence; missing files fall back to defaults.
     #[arg(long, value_name = "PATH")]
