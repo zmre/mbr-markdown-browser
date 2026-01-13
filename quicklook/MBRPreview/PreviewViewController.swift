@@ -21,14 +21,19 @@ private let logger = OSLog(subsystem: "com.zmre.mbr.MBRPreview", category: "Prev
 class MBRFileSchemeHandler: NSObject, WKURLSchemeHandler {
     func webView(_: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         NSLog("[MBRFileSchemeHandler] received request: %@", urlSchemeTask.request.url?.absoluteString ?? "nil")
-        os_log(.info, log: logger, "MBRFileSchemeHandler received request: %{public}@", urlSchemeTask.request.url?.absoluteString ?? "nil")
+        os_log(
+            .info,
+            log: logger,
+            "MBRFileSchemeHandler received request: %{public}@",
+            urlSchemeTask.request.url?.absoluteString ?? "nil"
+        )
 
         guard let url = urlSchemeTask.request.url,
               url.scheme == "mbrfile"
         else {
             os_log(.error, log: logger, "MBRFileSchemeHandler: invalid scheme in request")
             urlSchemeTask.didFailWithError(NSError(domain: "MBRPreview", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Invalid URL scheme",
+                NSLocalizedDescriptionKey: "Invalid URL scheme"
             ]))
             return
         }
@@ -54,7 +59,13 @@ class MBRFileSchemeHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didReceive(data)
             urlSchemeTask.didFinish()
         } catch {
-            os_log(.error, log: logger, "MBRFileSchemeHandler failed to read file: %{public}@ - %{public}@", filePath, error.localizedDescription)
+            os_log(
+                .error,
+                log: logger,
+                "MBRFileSchemeHandler failed to read file: %{public}@ - %{public}@",
+                filePath,
+                error.localizedDescription
+            )
             urlSchemeTask.didFailWithError(error)
         }
     }
@@ -63,46 +74,47 @@ class MBRFileSchemeHandler: NSObject, WKURLSchemeHandler {
         // No cleanup needed for synchronous file reads
     }
 
+    /// MIME type mapping for common file extensions.
+    private static let mimeTypes: [String: String] = [
+        // Video types
+        "mp4": "video/mp4",
+        "webm": "video/webm",
+        "mov": "video/quicktime",
+        "m4v": "video/x-m4v",
+        "ogv": "video/ogg",
+        // Image types
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "svg": "image/svg+xml",
+        "ico": "image/x-icon",
+        "bmp": "image/bmp",
+        "tiff": "image/tiff",
+        "tif": "image/tiff",
+        "heic": "image/heic",
+        "heif": "image/heic",
+        // Document types
+        "pdf": "application/pdf",
+        // Web types
+        "html": "text/html",
+        "htm": "text/html",
+        "css": "text/css",
+        "js": "application/javascript",
+        "json": "application/json",
+        "xml": "application/xml",
+        // Font types
+        "woff": "font/woff",
+        "woff2": "font/woff2",
+        "ttf": "font/ttf",
+        "otf": "font/otf"
+    ]
+
     /// Returns the MIME type for a file based on its extension.
     private func mimeType(for path: String) -> String {
         let ext = (path as NSString).pathExtension.lowercased()
-        switch ext {
-        // Video types
-        case "mp4": return "video/mp4"
-        case "webm": return "video/webm"
-        case "mov": return "video/quicktime"
-        case "m4v": return "video/x-m4v"
-        case "ogv": return "video/ogg"
-
-        // Image types
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "webp": return "image/webp"
-        case "svg": return "image/svg+xml"
-        case "ico": return "image/x-icon"
-        case "bmp": return "image/bmp"
-        case "tiff", "tif": return "image/tiff"
-        case "heic", "heif": return "image/heic"
-
-        // Document types
-        case "pdf": return "application/pdf"
-
-        // Web types
-        case "html", "htm": return "text/html"
-        case "css": return "text/css"
-        case "js": return "application/javascript"
-        case "json": return "application/json"
-        case "xml": return "application/xml"
-
-        // Font types
-        case "woff": return "font/woff"
-        case "woff2": return "font/woff2"
-        case "ttf": return "font/ttf"
-        case "otf": return "font/otf"
-
-        default: return "application/octet-stream"
-        }
+        return Self.mimeTypes[ext] ?? "application/octet-stream"
     }
 }
 
@@ -194,18 +206,30 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
 
             // Check if mbrfile:// URLs are present (for debugging)
             if html.contains("mbrfile://") {
-                try? "HTML CONTAINS mbrfile:// URLs\n".write(toFile: "/tmp/mbr-quicklook-status.txt", atomically: true, encoding: .utf8)
+                try? "HTML CONTAINS mbrfile:// URLs\n".write(
+                    toFile: "/tmp/mbr-quicklook-status.txt",
+                    atomically: true,
+                    encoding: .utf8
+                )
                 NSLog("[MBRPreview] HTML contains mbrfile:// URLs - scheme handler should intercept")
                 os_log(.info, log: logger, "HTML contains mbrfile:// URLs - scheme handler should intercept")
                 // Find a sample mbrfile URL for logging
                 if let range = html.range(of: "mbrfile://[^'\"\\s]+", options: .regularExpression) {
                     let sample = String(html[range])
-                    try? "Sample URL: \(sample)\n".write(toFile: "/tmp/mbr-quicklook-sample-url.txt", atomically: true, encoding: .utf8)
+                    try? "Sample URL: \(sample)\n".write(
+                        toFile: "/tmp/mbr-quicklook-sample-url.txt",
+                        atomically: true,
+                        encoding: .utf8
+                    )
                     NSLog("[MBRPreview] Sample mbrfile URL: %@", sample)
                     os_log(.info, log: logger, "Sample mbrfile URL: %{public}@", sample)
                 }
             } else {
-                try? "HTML does NOT contain mbrfile:// URLs\n".write(toFile: "/tmp/mbr-quicklook-status.txt", atomically: true, encoding: .utf8)
+                try? "HTML does NOT contain mbrfile:// URLs\n".write(
+                    toFile: "/tmp/mbr-quicklook-status.txt",
+                    atomically: true,
+                    encoding: .utf8
+                )
                 NSLog("[MBRPreview] HTML does NOT contain mbrfile:// URLs")
                 os_log(.error, log: logger, "HTML does NOT contain mbrfile:// URLs - check Rust conversion")
             }
