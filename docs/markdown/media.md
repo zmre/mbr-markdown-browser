@@ -191,7 +191,7 @@ And renders a rich preview card.
 ### Timeout Configuration
 
 ```bash
-mbr -s --oembed-timeout 1000 ~/notes  # 1 second timeout
+mbr -s --oembed-timeout-ms 1000 ~/notes  # 1 second timeout
 ```
 
 Or in config:
@@ -200,6 +200,21 @@ Or in config:
 # .mbr/config.toml
 oembed_timeout_ms = 1000
 ```
+
+### Disabling OpenGraph Fetching
+
+Set timeout to 0 to disable OpenGraph fetching entirely:
+
+```bash
+mbr -s --oembed-timeout-ms 0 ~/notes
+```
+
+```toml
+# .mbr/config.toml
+oembed_timeout_ms = 0
+```
+
+With oembed disabled, bare URLs render as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
 ## File Organization
 
@@ -273,5 +288,5 @@ Use leading slash for root-relative paths:
 ### OpenGraph Not Loading
 
 1. Check URL is accessible from your network
-2. Increase timeout: `--oembed-timeout 2000`
+2. Increase timeout: `--oembed-timeout-ms 2000`
 3. Verify the target page has OpenGraph meta tags

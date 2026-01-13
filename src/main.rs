@@ -87,7 +87,7 @@ async fn main() -> Result<(), MbrError> {
     let mut config = Config::read(&absolute_path)?;
 
     // Apply CLI overrides
-    if let Some(timeout) = args.oembed_timeout {
+    if let Some(timeout) = args.oembed_timeout_ms {
         config.oembed_timeout_ms = timeout;
     }
     if let Some(ref template_folder) = args.template_folder {

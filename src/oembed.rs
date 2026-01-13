@@ -123,6 +123,14 @@ impl PageInfo {
             });
         }
 
+        // If timeout is 0, oembed is disabled - return a plain link without network call
+        if timeout_ms == 0 {
+            return Ok(PageInfo {
+                url: url.to_string(),
+                ..Default::default()
+            });
+        }
+
         // Build a client with the configured timeout
         let client = Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
@@ -289,5 +297,42 @@ mod tests {
         assert!(embed.is_some());
         let html = embed.unwrap();
         assert!(html.contains("dQw4w9WgXcQ"));
+    }
+
+    #[tokio::test]
+    async fn test_zero_timeout_returns_plain_link() {
+        // With timeout=0, should return plain link without network call
+        let url = "https://example.com/some-page";
+        let result = PageInfo::new_from_url(url, 0).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.url, url);
+        assert!(info.title.is_none()); // No network call, so no title fetched
+        assert!(info.embed_html.is_none());
+        // html() should return a plain link
+        assert!(info.html().contains("<a href="));
+        assert!(info.html().contains(url));
+    }
+
+    #[tokio::test]
+    async fn test_zero_timeout_still_embeds_youtube() {
+        // YouTube embeds should still work with timeout=0 (no network needed)
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let result = PageInfo::new_from_url(url, 0).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        assert!(info.embed_html.unwrap().contains("youtube-embed"));
+    }
+
+    #[tokio::test]
+    async fn test_zero_timeout_still_embeds_giphy() {
+        // Giphy embeds should still work with timeout=0 (no network needed)
+        let url = "https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif";
+        let result = PageInfo::new_from_url(url, 0).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        assert!(info.embed_html.unwrap().contains("giphy-embed"));
     }
 }

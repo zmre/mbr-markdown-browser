@@ -31,8 +31,9 @@ pub struct Args {
 
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// Falls back to plain link if fetch doesn't complete in time.
+    /// Set to 0 to disable oembed fetching entirely (uses plain links).
     #[arg(long)]
-    pub oembed_timeout: Option<u64>,
+    pub oembed_timeout_ms: Option<u64>,
 
     /// Override template folder (replaces default .mbr/ and compiled defaults).
     /// Files found in this folder take precedence; missing files fall back to defaults.

@@ -32,7 +32,7 @@ These flags are mutually exclusive:
 |--------|-------------|---------|
 | `--output <PATH>` | Output directory for static build | `build` |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
-| `--oembed-timeout <MS>` | Timeout for URL metadata fetch | `300` |
+| `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `300` |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -74,7 +74,10 @@ mbr -b --output ./public ~/notes
 mbr -s --template-folder ./my-theme ~/notes
 
 # Increase oembed timeout
-mbr -s --oembed-timeout 2000 ~/notes
+mbr -s --oembed-timeout-ms 2000 ~/notes
+
+# Disable oembed fetching (uses plain links)
+mbr -s --oembed-timeout-ms 0 ~/notes
 ```
 
 ---
@@ -188,8 +191,10 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `oembed_timeout_ms` | number | `300` | URL metadata fetch timeout |
+| `oembed_timeout_ms` | number | `300` | URL metadata fetch timeout (0 to disable) |
 | `enable_writes` | bool | `false` | Allow write operations |
+
+> **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
 ## Environment Variables
 

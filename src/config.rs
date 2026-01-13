@@ -67,6 +67,8 @@ pub struct Config {
     pub watcher_ignore_dirs: Vec<String>,
     /// Timeout in milliseconds for fetching oembed/OpenGraph metadata from URLs.
     /// If the fetch doesn't complete in time, falls back to a plain link.
+    /// Set to 0 to disable oembed fetching entirely (uses plain links for all URLs
+    /// except YouTube and Giphy which are embedded without network calls).
     pub oembed_timeout_ms: u64,
     /// Optional template folder that overrides the default .mbr/ and compiled defaults.
     /// Files found here take precedence; missing files fall back to compiled defaults.
