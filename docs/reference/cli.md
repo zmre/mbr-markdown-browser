@@ -34,6 +34,7 @@ These flags are mutually exclusive:
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
+| `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -217,6 +218,18 @@ mbr -b --oembed-timeout-ms 500 ~/notes
 ```
 
 > **Future improvement:** We plan to optimize oembed fetching for static builds by batching and caching more aggressively. For now, we recommend keeping oembed disabled for large repositories and enabling it only for smaller sites where the build time is acceptable.
+
+### Parallel Building
+
+Static builds process markdown files in parallel for maximum speed:
+
+| Setting | Effect |
+|---------|--------|
+| Default (auto) | Uses 2x CPU cores, capped at 32 |
+| `--build-concurrency 1` | Sequential processing (useful for debugging) |
+| `--build-concurrency 16` | Explicit concurrency limit |
+
+Memory usage scales with concurrency. Use lower values if running out of memory on very large repositories.
 
 ## Environment Variables
 

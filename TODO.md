@@ -3,13 +3,13 @@
 ## What's Next
 
 * Static build
-  * [ ] Fix / understand slow performance on static builds in big repos; worse, there's zero info on what it's doing while waiting for it even with -vvv
-  * [ ] Fix / understand slow initial rendering in some markdown files in dynamic mode (I think this is the oembed stuff)
-    * [ ] Are we parallelizing the oembed stuff?  Can we?
-    * [ ] Do we have an oembed cache like for when we are doing a static build? Should we?
-    * [ ] Is there a way to display and then enrich in the case of dynamic viewing? Or to stream?
-    * [ ] Do we need/want a loading indicator if the above don't work?
-    * [ ] Can we disable oembed?  Maybe with a value of zero?
+  * [x] Fix / understand slow performance on static builds in big repos; worse, there's zero info on what it's doing while waiting for it even with -vvv
+  * [x] Fix / understand slow initial rendering in some markdown files in dynamic mode (I think this is the oembed stuff)
+    * [x] Are we parallelizing the oembed stuff?  Can we?
+    * [x] Do we have an oembed cache like for when we are doing a static build? Should we?
+    * [-] Is there a way to display and then enrich in the case of dynamic viewing? Or to stream?
+    * [-] Do we need/want a loading indicator if the above don't work?
+    * [x] Can we disable oembed?  Maybe with a value of zero?
   * [ ] Setup some benchmarking and profiling
   * [x] Fix search relevance/ranking for static build site search; it's treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
 

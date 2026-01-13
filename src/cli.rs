@@ -73,6 +73,12 @@ pub struct Args {
     /// violet, yellow, zinc). Prefix with "fluid." for fluid typography (e.g., fluid.amber).
     #[arg(long, value_name = "THEME")]
     pub theme: Option<String>,
+
+    /// Number of files to process concurrently during static build (-b).
+    /// Higher values use more memory but may be faster on multi-core systems.
+    /// Default: auto (2x CPU cores, max 32).
+    #[arg(long, value_name = "N")]
+    pub build_concurrency: Option<usize>,
 }
 
 impl Args {

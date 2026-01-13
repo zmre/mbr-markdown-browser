@@ -141,6 +141,9 @@ async fn main() -> Result<(), MbrError> {
     if let Some(ref theme) = args.theme {
         config.theme = theme.clone();
     }
+    if let Some(concurrency) = args.build_concurrency {
+        config.build_concurrency = Some(concurrency);
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {

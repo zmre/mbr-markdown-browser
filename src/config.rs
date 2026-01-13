@@ -82,6 +82,10 @@ pub struct Config {
     /// Default: sort by title (falling back to filename), ascending, string comparison.
     #[serde(default = "default_sort_config")]
     pub sort: Vec<SortField>,
+    /// Build concurrency: number of files to process in parallel during static builds.
+    /// None = auto-detect based on CPU cores (2x cores, capped at 32).
+    #[serde(default)]
+    pub build_concurrency: Option<usize>,
 }
 
 impl std::fmt::Display for IpArray {
@@ -157,6 +161,7 @@ impl Default for Config {
             oembed_cache_size: 2 * 1024 * 1024, // 2MB default
             template_folder: None,
             sort: default_sort_config(),
+            build_concurrency: None, // Auto-detect based on CPU cores
         }
     }
 }

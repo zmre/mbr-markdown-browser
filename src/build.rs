@@ -11,6 +11,7 @@ use std::{
 
 use walkdir::WalkDir;
 
+use futures::stream::{self, StreamExt, TryStreamExt};
 use scraper::{Html, Selector};
 
 use std::sync::Arc;
@@ -244,7 +245,16 @@ impl Builder {
         Ok(())
     }
 
-    /// Renders all markdown files to HTML.
+    /// Returns the effective build concurrency based on config or auto-detection.
+    fn get_concurrency(&self) -> usize {
+        self.config.build_concurrency.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| std::cmp::min(n.get() * 2, 32))
+                .unwrap_or(4)
+        })
+    }
+
+    /// Renders all markdown files to HTML in parallel.
     async fn render_markdown_files(&self) -> Result<usize, BuildError> {
         let markdown_files: Vec<_> = self
             .repo
@@ -255,10 +265,19 @@ impl Builder {
             .collect();
 
         let count = markdown_files.len();
+        let concurrency = self.get_concurrency();
 
-        for (path, info) in markdown_files {
-            self.render_single_markdown(&path, &info).await?;
-        }
+        tracing::info!(
+            "Rendering {} markdown files with concurrency {}",
+            count,
+            concurrency
+        );
+
+        stream::iter(markdown_files)
+            .map(|(path, info)| async move { self.render_single_markdown(&path, &info).await })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
 
         Ok(count)
     }
@@ -375,7 +394,7 @@ impl Builder {
         Ok(())
     }
 
-    /// Generates directory/section pages.
+    /// Generates directory/section pages in parallel.
     async fn render_directory_pages(&self) -> Result<usize, BuildError> {
         // Collect all directories that need section pages
         let mut directories: HashSet<PathBuf> = HashSet::new();
@@ -402,10 +421,22 @@ impl Builder {
         }
 
         let count = directories.len();
+        let concurrency = self.get_concurrency();
 
-        for dir in directories {
-            self.render_directory_page(&dir).await?;
-        }
+        tracing::info!(
+            "Rendering {} directory pages with concurrency {}",
+            count,
+            concurrency
+        );
+
+        // Convert HashSet to Vec for stream iteration
+        let directories: Vec<_> = directories.into_iter().collect();
+
+        stream::iter(directories)
+            .map(|dir| async move { self.render_directory_page(&dir).await })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
 
         Ok(count)
     }
