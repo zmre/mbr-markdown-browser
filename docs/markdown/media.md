@@ -81,6 +81,8 @@ When captions are available, a "Show transcript" toggle appears below the video.
 
 Clicking any line in the transcript jumps the video to that point and starts playback. The cursor changes to a pointer on hover, but there are no other visual indicators that the text is clickable.
 
+When both chapters and captions exist, chapter titles appear as bold headers within the transcript at their appropriate positions. Clicking a chapter header jumps to that chapter.
+
 ## Audio Embedding
 
 ### Supported Formats
