@@ -20,6 +20,8 @@ use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
 use crate::sorting::sort_files;
 use crate::templates;
+#[cfg(feature = "media-metadata")]
+use crate::video_metadata_cache::VideoMetadataCache;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
@@ -53,6 +55,9 @@ pub struct ServerState {
     pub theme: String,
     /// Cache for OEmbed page metadata to avoid redundant network requests
     pub oembed_cache: Arc<OembedCache>,
+    /// Cache for dynamically generated video metadata (covers, chapters, captions)
+    #[cfg(feature = "media-metadata")]
+    pub video_metadata_cache: Arc<VideoMetadataCache>,
 }
 
 impl Server {
@@ -80,6 +85,10 @@ impl Server {
         let index_file = index_file.into();
         let theme = theme.into();
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
+
+        // Initialize video metadata cache with same size as oembed cache
+        #[cfg(feature = "media-metadata")]
+        let video_metadata_cache = Arc::new(VideoMetadataCache::new(oembed_cache_size));
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -181,6 +190,8 @@ impl Server {
             gui_mode,
             theme,
             oembed_cache,
+            #[cfg(feature = "media-metadata")]
+            video_metadata_cache,
         };
 
         let router = Router::new()
@@ -782,6 +793,12 @@ impl Server {
                 })
             }
             ResolvedPath::NotFound => {
+                // Try to serve dynamically generated video metadata (server mode only)
+                #[cfg(feature = "media-metadata")]
+                if let Some(response) = Self::try_serve_video_metadata(&path, &config).await {
+                    return Ok(response);
+                }
+
                 tracing::debug!("resource not found: {}", &path);
                 let requested_url = format!("/{}", path);
                 Ok(Self::render_error_page(
@@ -819,6 +836,139 @@ impl Server {
         );
 
         Ok(response)
+    }
+
+    /// Try to serve dynamically generated video metadata (cover, chapters, captions).
+    ///
+    /// Returns Some(Response) if the request was for video metadata and we successfully
+    /// generated it, None otherwise (fall through to 404).
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_video_metadata(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::video_metadata::{
+            MetadataType, extract_captions, extract_chapters, extract_cover, parse_metadata_request,
+        };
+        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+
+        // Check if this is a video metadata request
+        let (video_url_path, metadata_type) = parse_metadata_request(path)?;
+
+        let cache_type_str = match metadata_type {
+            MetadataType::Cover => "cover",
+            MetadataType::Chapters => "chapters",
+            MetadataType::Captions => "captions",
+        };
+
+        // Check cache first
+        let key = cache_key(video_url_path, cache_type_str);
+        if let Some(cached) = config.video_metadata_cache.get(&key) {
+            return match cached {
+                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
+                    Some(Self::build_vtt_response(vtt))
+                }
+                CachedMetadata::NotAvailable => None, // Cached negative result
+            };
+        }
+
+        // Try to resolve the video file path
+        // First, try the direct path, then try with static_folder prefix
+        let video_file = {
+            let direct = config.base_dir.join(video_url_path);
+            if direct.is_file() {
+                direct
+            } else {
+                let with_static = config
+                    .base_dir
+                    .join(&config.static_folder)
+                    .join(video_url_path);
+                if with_static.is_file() {
+                    with_static
+                } else {
+                    tracing::debug!(
+                        "Video file not found for metadata generation: {}",
+                        video_url_path
+                    );
+                    return None;
+                }
+            }
+        };
+
+        tracing::debug!(
+            "Generating {} for: {}",
+            cache_type_str,
+            video_file.display()
+        );
+
+        // Generate the metadata
+        match metadata_type {
+            MetadataType::Cover => match extract_cover(&video_file) {
+                Ok(bytes) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Cover(bytes.clone()));
+                    Some(Self::build_png_response(bytes))
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract cover: {}", e);
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::NotAvailable);
+                    None
+                }
+            },
+            MetadataType::Chapters => match extract_chapters(&video_file) {
+                Ok(vtt) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Chapters(vtt.clone()));
+                    Some(Self::build_vtt_response(vtt))
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract chapters: {}", e);
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::NotAvailable);
+                    None
+                }
+            },
+            MetadataType::Captions => match extract_captions(&video_file) {
+                Ok(vtt) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Captions(vtt.clone()));
+                    Some(Self::build_vtt_response(vtt))
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract captions: {}", e);
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::NotAvailable);
+                    None
+                }
+            },
+        }
+    }
+
+    /// Build a PNG image response.
+    #[cfg(feature = "media-metadata")]
+    fn build_png_response(bytes: Vec<u8>) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .body(Body::from(bytes))
+            .unwrap()
+    }
+
+    /// Build a WebVTT response.
+    #[cfg(feature = "media-metadata")]
+    fn build_vtt_response(vtt: String) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .body(Body::from(vtt))
+            .unwrap()
     }
 
     async fn markdown_to_html(

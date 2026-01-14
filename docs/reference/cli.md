@@ -25,6 +25,7 @@ These flags are mutually exclusive:
 | `-s, --server` | Start web server |
 | `-g, --gui` | Launch native GUI window |
 | `-b, --build` | Generate static site |
+| `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
 
 ## Options
 
@@ -223,6 +224,42 @@ Static builds process markdown files in parallel for maximum speed:
 | `--build-concurrency 16` | Explicit concurrency limit |
 
 Memory usage scales with concurrency. Use lower values if running out of memory on very large repositories.
+
+### Video Metadata Extraction
+
+> **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.
+
+mbr can extract video metadata (cover images, chapters, and captions) from video files. This works in two ways:
+
+**Server Mode (Dynamic Generation):**
+When running with `-s` or `-g`, mbr automatically generates metadata files on-the-fly when they don't exist on disk. Request any of these special paths to trigger generation:
+
+| Pattern | Description |
+|---------|-------------|
+| `{video}.cover.png` | Cover image (frame captured at 5 seconds, or earlier for short videos) |
+| `{video}.chapters.en.vtt` | Chapter markers in WebVTT format |
+| `{video}.captions.en.vtt` | Subtitles/captions in WebVTT format |
+
+Example: If you have `videos/demo.mp4`, requesting `/videos/demo.mp4.cover.png` will dynamically extract and return a cover image.
+
+Generated metadata is cached in memory to avoid repeated ffmpeg operations.
+
+**CLI Mode (Pre-generation):**
+Use `--extract-video-metadata` to extract metadata and save as sidecar files:
+
+```bash
+# Extract metadata from a single video
+mbr --extract-video-metadata ~/videos/demo.mp4
+
+# Output:
+# Analyzing video: /Users/you/videos/demo.mp4
+#   Duration: 120.5s, Chapters: yes, Subtitles: no
+# + Created: /Users/you/videos/demo.mp4.cover.png
+# + Created: /Users/you/videos/demo.mp4.chapters.en.vtt
+# - No captions found in video
+```
+
+This is useful for pre-generating metadata for static site builds or when you want the files persisted to disk.
 
 ## Environment Variables
 

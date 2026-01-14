@@ -63,8 +63,10 @@ async fn main() -> Result<(), MbrError> {
         .with(tracing_subscriber::fmt::layer())
         .try_init();
 
-    // Determine if we're in GUI mode (no --server, --stdout, --build flags)
-    #[cfg(feature = "gui")]
+    // Determine if we're in GUI mode (no --server, --stdout, --build, --extract-video-metadata flags)
+    #[cfg(all(feature = "gui", feature = "media-metadata"))]
+    let is_gui_mode = !args.server && !args.stdout && !args.build && !args.extract_video_metadata;
+    #[cfg(all(feature = "gui", not(feature = "media-metadata")))]
     let is_gui_mode = !args.server && !args.stdout && !args.build;
     #[cfg(not(feature = "gui"))]
     let _is_gui_mode = false;
@@ -158,6 +160,19 @@ async fn main() -> Result<(), MbrError> {
         &config.root_dir.display(),
         &path_relative_to_root.display()
     );
+
+    // Extract video metadata mode - extract cover/chapters/captions from video
+    #[cfg(feature = "media-metadata")]
+    if args.extract_video_metadata {
+        if is_directory {
+            eprintln!("Error: --extract-video-metadata requires a video file, not a directory.");
+            eprintln!("Usage: mbr --extract-video-metadata /path/to/video.mp4");
+            std::process::exit(1);
+        }
+
+        mbr::video_metadata::extract_and_save(&absolute_path)?;
+        return Ok(());
+    }
 
     if args.build {
         // Build mode - generate static site

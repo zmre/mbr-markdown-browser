@@ -31,10 +31,16 @@ pub mod server;
 pub mod sorting;
 pub mod templates;
 pub mod vid;
+#[cfg(feature = "media-metadata")]
+pub mod video_metadata;
+#[cfg(feature = "media-metadata")]
+pub mod video_metadata_cache;
 pub mod watcher;
 
 pub use build::{BuildStats, Builder};
 pub use config::{Config, SortField};
+#[cfg(feature = "media-metadata")]
+pub use errors::MetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
 #[cfg(feature = "ffi")]
 pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
