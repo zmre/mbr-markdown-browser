@@ -183,6 +183,7 @@ export class MbrVideoExtrasElement extends LitElement {
       margin: 0.125em 0;
       border-radius: 3px;
       transition: background-color 0.2s ease;
+      cursor: pointer;
     }
 
     .caption.active {
@@ -667,6 +668,16 @@ export class MbrVideoExtrasElement extends LitElement {
     this._closeChaptersModal();
   }
 
+  private _jumpToCaption(caption: VttCue) {
+    if (this._videoElement) {
+      this._videoElement.currentTime = caption.startTime;
+      // Start playing if paused
+      if (this._videoElement.paused) {
+        this._videoElement.play();
+      }
+    }
+  }
+
   private _isCurrentChapter(chapter: VttCue): boolean {
     return chapter.text === this._currentChapter;
   }
@@ -735,6 +746,7 @@ export class MbrVideoExtrasElement extends LitElement {
               ${this._captions.map((caption, index) => html`
                 <div
                   class="caption ${index === this._currentCaptionIndex ? 'active' : ''} ${index < this._currentCaptionIndex ? 'past' : ''}"
+                  @click=${() => this._jumpToCaption(caption)}
                 >
                   ${caption.text}
                 </div>

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use percent_encoding::percent_decode_str;
 use walkdir::WalkDir;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -1070,6 +1071,10 @@ impl Builder {
             return None;
         }
 
+        // URL-decode the href to handle percent-encoded characters (e.g., %20 -> space)
+        // HTML links are percent-encoded by escape_href, but filesystem paths have literal characters
+        let href = percent_decode_str(href).decode_utf8_lossy();
+
         if href.starts_with('/') {
             // Absolute path within site
             let path = href.trim_start_matches('/');
@@ -1077,7 +1082,7 @@ impl Builder {
         } else {
             // Relative path - resolve from source file's parent directory
             let source_dir = source_file.parent()?;
-            let resolved = source_dir.join(href);
+            let resolved = source_dir.join(href.as_ref());
             // Normalize the path manually (handle ../ without requiring existence)
             Some(normalize_path(&resolved))
         }

@@ -71,6 +71,16 @@ videos/
 └── demo.mp4.chapters.en.vtt    # Auto-loaded as chapters
 ```
 
+### Interactive Transcript
+
+When captions are available, a "Show transcript" toggle appears below the video. The transcript displays all caption text with visual indicators:
+
+- **Active line** - Highlighted background showing current playback position
+- **Past lines** - Slightly dimmed for lines already played
+- **Auto-scroll** - Transcript automatically scrolls to keep the active line centered
+
+Clicking any line in the transcript jumps the video to that point and starts playback. The cursor changes to a pointer on hover, but there are no other visual indicators that the text is clickable.
+
 ## Audio Embedding
 
 ### Supported Formats

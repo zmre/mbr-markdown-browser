@@ -1309,7 +1309,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/user.css",
-        &[], // the idea of this is for users to override and for us to leave blank
+        include_bytes!("../templates/user.css"),
         "text/css",
     ),
     (

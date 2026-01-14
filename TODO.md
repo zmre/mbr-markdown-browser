@@ -3,15 +3,7 @@
 ## What's Next
 
 * Static build
-  * [x] Fix / understand slow performance on static builds in big repos; worse, there's zero info on what it's doing while waiting for it even with -vvv
-  * [x] Fix / understand slow initial rendering in some markdown files in dynamic mode (I think this is the oembed stuff)
-    * [x] Are we parallelizing the oembed stuff?  Can we?
-    * [x] Do we have an oembed cache like for when we are doing a static build? Should we?
-    * [-] Is there a way to display and then enrich in the case of dynamic viewing? Or to stream?
-    * [-] Do we need/want a loading indicator if the above don't work?
-    * [x] Can we disable oembed?  Maybe with a value of zero?
   * [ ] Setup some benchmarking and profiling
-  * [x] Fix search relevance/ranking for static build site search; it's treating all fields the same or maybe only searching content. i want to prioritize titles and filenames and other metadata over content so i get more relevant results returned
   * [ ] I want some non-logging output when building a site that lets the user know what step they're on in the static build process just left aligned maye with an emoji icon
 
 * UX
@@ -22,6 +14,7 @@
 * Big repo (goodwiki) issues
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
   * [ ] I'm getting 40k broken links which is like half of all links. Need to investigate if it is an issue with the files or with how mbr works with wikilinks (it probably doesn't normalize them)
+  * [ ] wikilinks and the link checker: underscore-prefixed files (e.g., _...Baby One More Time Tour.md) - files with special chars were renamed with underscores but internal links weren't updated -- none of those work yet. not sure what to do
 
 * Theming
   * [ ] Test html template overrides including partials and includes using the template to see if I can override just a footer and if so, make sure it's documented right
@@ -55,7 +48,7 @@
 
 * **Videos**
   * [x] Enhance the UI to allow caption and chapter expansion outside of the video window and to jump to the appropriate place in the video on click inside them, plus tracking for where we are so the appropriate caption or title is shown when those bits are expanded.
-  * [ ] in the video js component, when the transcript is being shown, make it so clicking on a line of text takes you to the relevant point in the video.  The cursor can change, but I don't want there to be any visual clues (underlines or dotted underlines or blue colors) that the text is clickable. Make sure to update the docs to explain the function.
+  * [x] in the video js component, when the transcript is being shown, make it so clicking on a line of text takes you to the relevant point in the video.  The cursor can change, but I don't want there to be any visual clues (underlines or dotted underlines or blue colors) that the text is clickable. Make sure to update the docs to explain the function.
 	* [ ] Serve captions, chapters, and posters automatically when in server/gui mode and when the relevant files don't exist already; based on config, use ffmpeg to dynamically extract and serve chapters and captions if they're available inside a video
   * [ ] dynamically scale down videos streaming to mobile without pre transcoding them? i'm using rust and axum to serve the videos
   * [ ] Intermingle chapter headings into the transcript with some extra styling (when available)
