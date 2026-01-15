@@ -35,6 +35,10 @@ pub mod vid;
 pub mod video_metadata;
 #[cfg(feature = "media-metadata")]
 pub mod video_metadata_cache;
+#[cfg(feature = "media-metadata")]
+pub mod video_transcode;
+#[cfg(feature = "media-metadata")]
+pub mod video_transcode_cache;
 pub mod watcher;
 
 pub use build::{BuildStats, Builder};
@@ -46,3 +50,5 @@ pub use errors::{BuildError, ConfigError, MbrError, SearchError};
 pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
 pub use sorting::sort_files;
+#[cfg(feature = "media-metadata")]
+pub use video_transcode::TranscodeError;

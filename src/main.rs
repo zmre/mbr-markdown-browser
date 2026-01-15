@@ -146,6 +146,11 @@ async fn main() -> Result<(), MbrError> {
     if let Some(concurrency) = args.build_concurrency {
         config.build_concurrency = Some(concurrency);
     }
+    // Apply transcode options from CLI
+    #[cfg(feature = "media-metadata")]
+    if args.transcode {
+        config.transcode = true;
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -243,11 +248,14 @@ async fn main() -> Result<(), MbrError> {
             is_index_file,
         };
 
+        // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
         let (frontmatter, _headings, html_output) = markdown::render(
             input_path,
             config.root_dir.as_path(),
             config.oembed_timeout_ms,
             link_transform_config,
+            false, // server_mode is false in CLI mode
+            false, // transcode is disabled in CLI mode
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
@@ -277,6 +285,8 @@ async fn main() -> Result<(), MbrError> {
             false, // gui_mode: browser access, not native window
             &config.theme,
             None, // Logging already initialized
+            #[cfg(feature = "media-metadata")]
+            config.transcode,
         )?;
 
         let url_path = build_url_path(
@@ -316,6 +326,8 @@ async fn main() -> Result<(), MbrError> {
                     true, // gui_mode: native window mode
                     &config_copy.theme,
                     None, // Logging already initialized
+                    #[cfg(feature = "media-metadata")]
+                    config_copy.transcode,
                 );
                 match server {
                     Ok(mut s) => {

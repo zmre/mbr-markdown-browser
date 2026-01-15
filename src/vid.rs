@@ -96,8 +96,21 @@ impl Vid {
         }
     }
 
-    // open_only is used so the markdown parser can automatically fill in the caption and then cause the html to close after
-    pub fn to_html(&self, open_only: bool) -> String {
+    /// Generate HTML for video embed.
+    ///
+    /// - `open_only`: When true, leaves figcaption open for markdown parser to fill
+    /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
+    /// - `transcode_enabled`: True when dynamic transcoding is enabled
+    ///
+    /// When both `server_mode` and `transcode_enabled` are true, generates multiple
+    /// `<source>` tags with media queries for responsive video loading using HLS:
+    /// - Original MP4 for wide screens (>= 1280px) - all browsers
+    /// - HLS 720p for medium screens (>= 640px) - Safari only (native HLS)
+    /// - HLS 480p as fallback for small screens - Safari only
+    /// - Original MP4 as final fallback (no media query) - Chrome/Firefox/Edge on mobile
+    ///
+    /// Note: Time fragments (#t=start,end) only apply to MP4 sources, not HLS.
+    pub fn to_html(&self, open_only: bool, server_mode: bool, transcode_enabled: bool) -> String {
         let mut time = "".to_string();
         if let Some(start) = self.start.as_ref() {
             time = format!("#t={start}");
@@ -107,23 +120,43 @@ impl Vid {
             }
         }
 
-        // TODO: look at path and look for expected variants like *.chapters.vtt and *.en.vtt and add tracks below if found
-        // TODO: same with cover art
-        // TODO: consider using my other rust project to extract captions and chapters and cover art if it doesn't exist -- as a config-gated option, but on the fly
-        //      ACTUALLY, maybe automatically specify those files in the HTML, then let the server generate them on-demand if they don't exist
-        //      REALLY need to be able to save these things back into the files better so I can preserve what I have now, too
-        //      MAY consider dynamic transcoding down to 480p or 360 or whatever for mobile with a special filename, too (can i do that streaming for server mode?)
-        //      AND if I'm doing that for videos, do I want to do something similar for images?  I could make all images clickable to zoom in and have mobile-ready versions
-        //      in a produced site or on-demand
+        // Build source tags based on transcode mode
+        let sources = if server_mode && transcode_enabled {
+            // Generate multiple sources with media queries for responsive loading
+            // HLS variants for Safari, MP4 fallback for other browsers
+            let base_url = &self.url;
+            let mime = self.to_mime_type();
 
-        //
-        //
+            // Strip extension for HLS variant URLs
+            let url_base = match base_url.rsplit_once('.') {
+                Some((base, _)) => base.to_string(),
+                None => base_url.clone(),
+            };
+
+            // HLS mime type for playlists
+            let hls_mime = "application/vnd.apple.mpegurl";
+
+            format!(
+                r#"<source src='{base_url}{time}' media="(min-width: 1280px)" type="{mime}">
+                    <source src='{url_base}-720p.m3u8' media="(min-width: 640px)" type="{hls_mime}">
+                    <source src='{url_base}-480p.m3u8' type="{hls_mime}">
+                    <source src='{base_url}{time}' type="{mime}">"#,
+            )
+        } else {
+            // Single source - original behavior
+            format!(
+                "<source src='{}{}' type='{}'>",
+                self.url,
+                time,
+                self.to_mime_type()
+            )
+        };
 
         format!(
             r#"
             <figure>
                 <video controls preload="none" playsinline loop="false" poster="{}.cover.png">
-                    <source src='{}{}' type="{}">
+                    {}
                     <track kind="captions" label="English captions" src="{}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
                     <track kind="chapters" language="en-US" label="Chapters" src="{}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />
                 </video>
@@ -132,9 +165,7 @@ impl Vid {
                 {}
             "#,
             self.url,
-            self.url,
-            time,
-            self.to_mime_type(),
+            sources,
             self.url,
             self.url,
             self.caption.as_deref().unwrap_or(""),
@@ -242,7 +273,7 @@ mod tests {
             end: Some("20".to_string()),
             caption: Some("Caption".to_string()),
         };
-        let html = vid.to_html(false);
+        let html = vid.to_html(false, false, false);
         assert!(html.contains("<video"));
         assert!(html.contains("src='/videos/foo.mp4#t=10,20'"));
         assert!(html.contains("<figcaption>Caption"));
@@ -250,6 +281,52 @@ mod tests {
             "<mbr-video-extras src='/videos/foo.mp4' start='10' end='20'></mbr-video-extras>"
         ));
         assert!(html.contains("</figcaption></figure>"));
+    }
+
+    #[test]
+    fn test_to_html_with_transcode_enabled() {
+        let vid = Vid {
+            url: "/videos/foo.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: Some("10".to_string()),
+            end: Some("20".to_string()),
+            caption: Some("Caption".to_string()),
+        };
+        // With server_mode=true and transcode_enabled=true, should generate HLS sources
+        let html = vid.to_html(false, true, true);
+        assert!(html.contains("<video"));
+        // Original MP4 source with media query for wide screens
+        assert!(html.contains(r#"src='/videos/foo.mp4#t=10,20' media="(min-width: 1280px)""#));
+        // HLS 720p variant (no time fragment - HLS doesn't support it)
+        assert!(html.contains(r#"src='/videos/foo-720p.m3u8' media="(min-width: 640px)""#));
+        assert!(html.contains(r#"type="application/vnd.apple.mpegurl""#));
+        // HLS 480p variant (no media query - smallest HLS)
+        assert!(html.contains("src='/videos/foo-480p.m3u8'"));
+        // MP4 fallback (no media query) for non-Safari browsers
+        // Count the number of times the original MP4 appears (should be twice)
+        assert_eq!(
+            html.matches("/videos/foo.mp4#t=10,20").count(),
+            2,
+            "Original MP4 should appear twice: once for wide screens, once as fallback"
+        );
+        assert!(html.contains("<figcaption>Caption"));
+    }
+
+    #[test]
+    fn test_to_html_transcode_requires_server_mode() {
+        let vid = Vid {
+            url: "/videos/foo.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: None,
+        };
+        // transcode_enabled=true but server_mode=false should NOT generate multiple sources
+        let html = vid.to_html(false, false, true);
+        // Should only have single source (original behavior)
+        assert!(!html.contains("-720p.m3u8"));
+        assert!(!html.contains("-480p.m3u8"));
+        assert!(html.contains("src='/videos/foo.mp4'"));
     }
 
     #[test]

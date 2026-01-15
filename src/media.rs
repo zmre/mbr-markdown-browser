@@ -92,10 +92,13 @@ impl MediaEmbed {
     }
 
     /// Generate opening HTML for the media embed
-    /// When open_only is true, leaves figcaption open for markdown parser to fill
-    pub fn to_html(&self, open_only: bool) -> String {
+    ///
+    /// - `open_only`: When true, leaves figcaption open for markdown parser to fill
+    /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
+    /// - `transcode_enabled`: True when dynamic transcoding is enabled
+    pub fn to_html(&self, open_only: bool, server_mode: bool, transcode_enabled: bool) -> String {
         match self {
-            MediaEmbed::Video(vid) => vid.to_html(open_only),
+            MediaEmbed::Video(vid) => vid.to_html(open_only, server_mode, transcode_enabled),
             MediaEmbed::Audio(audio) => audio.to_html(open_only),
             MediaEmbed::YouTube { video_id, caption } => {
                 Self::youtube_to_html(video_id, caption.as_deref(), open_only)
@@ -299,7 +302,7 @@ mod tests {
             video_id: "abc123xyz".to_string(),
             caption: Some("Test Video".to_string()),
         };
-        let html = embed.to_html(false);
+        let html = embed.to_html(false, false, false);
         assert!(html.contains("youtube-embed"));
         assert!(html.contains("https://www.youtube.com/embed/abc123xyz"));
         assert!(html.contains("<figcaption>Test Video</figcaption>"));
@@ -311,7 +314,7 @@ mod tests {
             url: "/docs/test.pdf".to_string(),
             caption: Some("My PDF".to_string()),
         };
-        let html = embed.to_html(false);
+        let html = embed.to_html(false, false, false);
         assert!(html.contains("pdf-embed"));
         assert!(html.contains(r#"data="/docs/test.pdf""#));
         assert!(html.contains(r#"type="application/pdf""#));
@@ -325,7 +328,7 @@ mod tests {
             url: "doc.pdf".to_string(),
             caption: None,
         };
-        let html = embed.to_html(true);
+        let html = embed.to_html(true, false, false);
         assert!(html.contains("<object"));
         assert!(!html.contains("</figcaption></figure>"));
     }

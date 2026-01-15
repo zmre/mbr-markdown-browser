@@ -68,7 +68,14 @@ Add or update tests when:
 
 ## Goals
 
-In this tool, **performance is extremely important** -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.  Everything should be near instantaneous and we should be constantly looking for safe ways to make things fast, but without using local cache files.  This tool may be used on repositories with tens of thousands of markdown files and as many assets (images, pdfs, etc.) as well and it MUST perform well even on big repositories. Anything slow must be async and background and out of the critical path. It should also be made as fast as possible.
+
+
+- **Speed** - Sub-second rendering, instant navigation, fast site builds.
+  - In this tool, **performance is extremely important** -- for launch of GUI and server, render of a markdown, build of a site, and for built sites, loading and rendering in a browser.  Everything should be near instantaneous and we should be constantly looking for safe ways to make things fast, but without using local cache files.  This tool may be used on repositories with tens of thousands of markdown files and as many assets (images, pdfs, etc.) as well and it MUST perform well even on big repositories. Anything slow must be async and background and out of the critical path. It should also be made as fast as possible.
+- **No lock-in** - Works with any markdown repository without modifications to the markdown files
+- **Customizable** - Override styles, templates, and components per-repository
+- **Rich content** - Embed videos, audio, PDFs, diagrams, and more with native markdown image syntax that works magically with other media types
+- **Zero run-time dependencies** - Everything is self-contained in a single binary; no calls to external tools or special dir structures
 
 ## Build Commands
 
@@ -107,6 +114,7 @@ cargo watch -q -c -x 'run --release -- -s README.md'
 | `--oembed-cache-size <BYTES>` | Max oembed cache size | `2097152` (2MB) |
 | `--build-concurrency <N>` | Parallel file processing limit | auto (2x cores, max 32) |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
+| `--transcode` | Enable HLS video transcoding for 720p/480p variants (server/GUI only) | `false` |
 | `-v, --verbose` | Increase log verbosity | warn level |
 
 See `docs/reference/cli.md` for complete documentation.
@@ -175,6 +183,8 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
 | `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
 | `vid.rs` | Video embed handling with VidStack player and shortcodes |
+| `video_transcode.rs` | HLS-based video transcoding - playlist generation and segment transcoding (requires `media-metadata` feature) |
+| `video_transcode_cache.rs` | LRU cache for HLS playlists and segments using papaya concurrent hashmap |
 | `oembed.rs` | Auto-embed for bare URLs in markdown (YouTube, Giphy, OpenGraph) |
 | `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
 | `html.rs` | Custom HTML output for pulldown-cmark |

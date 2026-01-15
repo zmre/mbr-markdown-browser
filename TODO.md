@@ -2,6 +2,7 @@
 
 ## What's Next
 
++* [ ] Setup a nix mac target that doesn't have the app or quicklook stuff
 * Static build
   * [ ] Setup some benchmarking and profiling
   * [ ] I want some non-logging output when building a site that lets the user know what step they're on in the static build process just left aligned maye with an emoji icon
@@ -23,6 +24,9 @@
   * [x] I messed up. I want regular and regular fluid versions of pico, not the classless stuff.  Regular has classless and classes.
   * [ ] Make the oembed stuff even better with images -- medium style so make a card with header, description, and image if available, which should look nice when oembed enrichment is available
   * [ ] Do I need a different mode that always shows nav and page info when on a wide screen? Maybe a configuration?  And if we have an autoexpanding browser, should we ditch the two column thing and do something more like normal doc sites?  Better: if we could auto-pin those items as a CSS option (like by looking at a CSS var?) that would be awesome.
+  * Style the head and foot to disappear on print (the head being the nav and breadcrumbs, the foot being next/prev buttons). Consider a more natural base font size, and better x-axis margins on main, too.
+    * While we're at it, might as well allow print from inside gui mode if we can do that cross platform.
+  * GFM Footnotes should have nice styling. Right now .footnote-definition and .footnote-definition-label aren't styled so they look ugly.
 
 * hljs
   * [ ] Make the code syntax coloring be a lit component and have it only load the scripts needed for languages on the page. Also support some base set of languages natively, but load from CDN for the ones we don't bake in

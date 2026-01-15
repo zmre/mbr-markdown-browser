@@ -42,6 +42,8 @@ impl TestServer {
                 false,                              // gui_mode
                 "default",                          // theme
                 None,                               // log_filter
+                #[cfg(feature = "media-metadata")]
+                false, // transcode_enabled
             )
             .expect("Failed to initialize server");
 
@@ -696,6 +698,8 @@ impl TestServerWithTemplates {
                 false,                              // gui_mode
                 "default",                          // theme
                 None,                               // log_filter
+                #[cfg(feature = "media-metadata")]
+                false, // transcode_enabled
             )
             .expect("Failed to initialize server");
 
@@ -1434,6 +1438,8 @@ impl TestServerWithTheme {
                 false,                              // gui_mode
                 &theme,                             // theme
                 None,                               // log_filter
+                #[cfg(feature = "media-metadata")]
+                false, // transcode_enabled
             )
             .expect("Failed to initialize server");
 

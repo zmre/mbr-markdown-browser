@@ -86,6 +86,11 @@ pub struct Config {
     /// None = auto-detect based on CPU cores (2x cores, capped at 32).
     #[serde(default)]
     pub build_concurrency: Option<usize>,
+    /// Enable dynamic video transcoding to serve lower-resolution variants (720p, 480p).
+    /// Only active in server/GUI mode. Videos are transcoded on-demand as HLS segments
+    /// and cached in memory. Default: false (disabled).
+    #[serde(default)]
+    pub transcode: bool,
 }
 
 impl std::fmt::Display for IpArray {
@@ -162,6 +167,7 @@ impl Default for Config {
             template_folder: None,
             sort: default_sort_config(),
             build_concurrency: None, // Auto-detect based on CPU cores
+            transcode: false,        // Disabled by default
         }
     }
 }

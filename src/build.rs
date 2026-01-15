@@ -304,12 +304,15 @@ impl Builder {
         tracing::debug!("build: rendering {}", path.display());
 
         // Render markdown to HTML with shared oembed cache
+        // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
         let (mut frontmatter, headings, html) = markdown::render_with_cache(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
             link_transform_config,
             Some(self.oembed_cache.clone()),
+            false, // server_mode is false in build mode
+            false, // transcode is disabled in build mode
         )
         .await
         .map_err(|e| BuildError::RenderFailed {
