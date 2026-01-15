@@ -151,6 +151,10 @@ async fn main() -> Result<(), MbrError> {
     if args.transcode {
         config.transcode = true;
     }
+    // Apply skip_link_checks from CLI
+    if args.skip_link_checks {
+        config.skip_link_checks = true;
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {

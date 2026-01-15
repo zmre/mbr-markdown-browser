@@ -36,6 +36,7 @@ These flags are mutually exclusive:
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
+| `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
 | `--transcode-max-size <MB>` | Skip transcoding for files larger than this | `500` |
 | `-v, --verbose` | Increase log verbosity | warn level |
@@ -199,6 +200,7 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 |--------|------|---------|-------------|
 | `oembed_timeout_ms` | number | `500` (server/GUI), `0` (build) | URL metadata fetch timeout (0 to disable) |
 | `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
+| `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `enable_writes` | bool | `false` | Allow write operations |
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
@@ -226,6 +228,19 @@ Static builds process markdown files in parallel for maximum speed:
 | `--build-concurrency 16` | Explicit concurrency limit |
 
 Memory usage scales with concurrency. Use lower values if running out of memory on very large repositories.
+
+### Link Validation
+
+By default, static builds validate all internal links (links to other pages within the site) and report broken ones. To skip this check for faster builds:
+
+```bash
+mbr -b --skip-link-checks ~/notes
+```
+
+Or in `.mbr/config.toml`:
+```toml
+skip_link_checks = true
+```
 
 ### Video Metadata Extraction
 

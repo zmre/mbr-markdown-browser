@@ -91,6 +91,11 @@ pub struct Config {
     /// and cached in memory. Default: false (disabled).
     #[serde(default)]
     pub transcode: bool,
+    /// Skip internal link validation during static site builds.
+    /// When true, the build will not check if internal links point to valid files.
+    /// Default: false (link checking enabled).
+    #[serde(default)]
+    pub skip_link_checks: bool,
 }
 
 impl std::fmt::Display for IpArray {
@@ -168,6 +173,7 @@ impl Default for Config {
             sort: default_sort_config(),
             build_concurrency: None, // Auto-detect based on CPU cores
             transcode: false,        // Disabled by default
+            skip_link_checks: false, // Link checking enabled by default
         }
     }
 }
