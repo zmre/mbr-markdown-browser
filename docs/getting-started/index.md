@@ -6,7 +6,7 @@ order: 1
 
 # Installation
 
-mbr can be installed via Nix (recommended), Cargo, or from binary releases.
+mbr can be installed via Nix (recommended), Cargo, or from binary releases.  More can be added so file an [issue](https://github.com/zmre/mbr-markdown-browser/issues) if you have a request.
 
 ## Using Nix (Recommended)
 

@@ -25,6 +25,7 @@ These flags are mutually exclusive:
 | `-s, --server` | Start web server |
 | `-g, --gui` | Launch native GUI window |
 | `-b, --build` | Generate static site |
+| `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
 
 ## Options
 
@@ -35,6 +36,8 @@ These flags are mutually exclusive:
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
+| `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
+| `--transcode-max-size <MB>` | Skip transcoding for files larger than this | `500` |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -224,6 +227,106 @@ Static builds process markdown files in parallel for maximum speed:
 
 Memory usage scales with concurrency. Use lower values if running out of memory on very large repositories.
 
+### Video Metadata Extraction
+
+> **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.
+
+mbr can extract video metadata (cover images, chapters, and captions) from video files. This works in two ways:
+
+**Server Mode (Dynamic Generation):**
+When running with `-s` or `-g`, mbr automatically generates metadata files on-the-fly when they don't exist on disk. Request any of these special paths to trigger generation:
+
+| Pattern | Description |
+|---------|-------------|
+| `{video}.cover.png` | Cover image (frame captured at 5 seconds, or earlier for short videos) |
+| `{video}.chapters.en.vtt` | Chapter markers in WebVTT format |
+| `{video}.captions.en.vtt` | Subtitles/captions in WebVTT format |
+
+Example: If you have `videos/demo.mp4`, requesting `/videos/demo.mp4.cover.png` will dynamically extract and return a cover image.
+
+Generated metadata is cached in memory to avoid repeated ffmpeg operations.
+
+**CLI Mode (Pre-generation):**
+Use `--extract-video-metadata` to extract metadata and save as sidecar files:
+
+```bash
+# Extract metadata from a single video
+mbr --extract-video-metadata ~/videos/demo.mp4
+
+# Output:
+# Analyzing video: /Users/you/videos/demo.mp4
+#   Duration: 120.5s, Chapters: yes, Subtitles: no
+# + Created: /Users/you/videos/demo.mp4.cover.png
+# + Created: /Users/you/videos/demo.mp4.chapters.en.vtt
+# - No captions found in video
+```
+
+This is useful for pre-generating metadata for static site builds or when you want the files persisted to disk.
+
+### Video Transcoding (EXPERIMENTAL)
+
+> **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.
+
+> ⚠️ **EXPERIMENTAL** - This feature is new and feedback is welcome! Please report issues or suggestions at the project repository.
+
+mbr can dynamically transcode videos to lower resolutions (720p, 480p) using HLS (HTTP Live Streaming) for bandwidth savings on mobile devices and slow connections. This feature only works in server/GUI mode (`-s` or `-g`).
+
+**Enable transcoding:**
+```bash
+mbr -s --transcode ~/notes
+```
+
+**How it works:**
+1. When transcoding is enabled, video embeds include multiple `<source>` tags with media queries
+2. Desktop browsers (viewport >= 1280px) load the original MP4 directly
+3. Tablets (viewport >= 640px) use HLS 720p playlist (Safari only)
+4. Mobile devices use HLS 480p playlist (Safari only)
+5. Non-Safari browsers fall back to the original MP4 (HLS requires JavaScript in Chrome/Firefox)
+6. HLS segments (~10 seconds each) are transcoded on-demand and cached
+
+**URL patterns:**
+| Type | Example |
+|------|---------|
+| Original video | `/videos/demo.mp4` |
+| 720p HLS playlist | `/videos/demo-720p.m3u8` |
+| 720p HLS segment | `/videos/demo-720p-005.ts` |
+| 480p HLS playlist | `/videos/demo-480p.m3u8` |
+
+**Browser compatibility:**
+| Browser | HLS Support | Behavior |
+|---------|-------------|----------|
+| Safari (macOS/iOS) | Native | Uses HLS variants on mobile/tablet |
+| Chrome/Firefox/Edge | None | Falls back to original MP4 |
+
+**Hardware acceleration:**
+Transcoding automatically uses hardware encoders when available:
+- macOS: VideoToolbox (`h264_videotoolbox`)
+- Linux: NVIDIA (`h264_nvenc`), AMD (`h264_amf`), Intel (`h264_qsv`), VAAPI
+- Fallback: Software encoding (`libx264`)
+
+**Configuration:**
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `transcode` | bool | `false` | Enable dynamic video transcoding via HLS |
+
+**Memory usage:**
+HLS segments and playlists are cached in memory (~200MB max by default). Each segment is approximately:
+- 720p segment (10s @ 2.5 Mbps): ~3 MB
+- 480p segment (10s @ 1.0 Mbps): ~1.25 MB
+- Playlist: ~1-2 KB (negligible)
+
+Cache evicts oldest segments when full, prioritizing keeping playlists cached.
+
+**When to use:**
+- Serving videos to Safari users on mobile devices
+- Reducing bandwidth usage for remote viewers on iOS/macOS
+- Fast video startup (only first segment needs to transcode)
+
+**When NOT to use:**
+- Local browsing on the same machine (default: off)
+- Users primarily on Chrome/Firefox (they get original MP4 anyway)
+- Static site generation (transcoding is server-only)
+
 ## Environment Variables
 
 > [!CAUTION]
@@ -243,6 +346,10 @@ MBR_INDEX_FILE=README.md
 # Behavior
 MBR_OEMBED_TIMEOUT_MS=1000
 MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
+
+# Video transcoding (requires media-metadata feature)
+MBR_TRANSCODE=true
+MBR_TRANSCODE_MAX_SIZE=500  # MB
 ```
 
 Environment variables override config file settings.

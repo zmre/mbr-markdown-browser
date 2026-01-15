@@ -11,6 +11,13 @@ interface VttCue {
 }
 
 /**
+ * Discriminated union for transcript items (chapters appear as headers).
+ */
+type TranscriptItem =
+  | { type: 'chapter'; cue: VttCue }
+  | { type: 'caption'; cue: VttCue; index: number };
+
+/**
  * Parse a VTT timestamp (HH:MM:SS.mmm or MM:SS.mmm) to seconds.
  */
 function parseVttTime(timeStr: string): number {
@@ -183,6 +190,7 @@ export class MbrVideoExtrasElement extends LitElement {
       margin: 0.125em 0;
       border-radius: 3px;
       transition: background-color 0.2s ease;
+      cursor: pointer;
     }
 
     .caption.active {
@@ -192,6 +200,17 @@ export class MbrVideoExtrasElement extends LitElement {
 
     .caption.past {
       opacity: 0.6;
+    }
+
+    .transcript-chapter {
+      font-weight: 600;
+      margin-top: 1em;
+      padding: 0.25em 0.5em;
+      cursor: pointer;
+    }
+
+    .transcript-chapter:first-child {
+      margin-top: 0;
     }
 
     /* Modal styles using Pico CSS patterns */
@@ -667,8 +686,50 @@ export class MbrVideoExtrasElement extends LitElement {
     this._closeChaptersModal();
   }
 
+  private _jumpToCaption(caption: VttCue) {
+    if (this._videoElement) {
+      this._videoElement.currentTime = caption.startTime;
+      // Start playing if paused
+      if (this._videoElement.paused) {
+        this._videoElement.play();
+      }
+    }
+  }
+
+  private _jumpToChapterInTranscript(chapter: VttCue) {
+    if (this._videoElement) {
+      this._videoElement.currentTime = chapter.startTime;
+      this._currentChapter = chapter.text;
+      if (this._videoElement.paused) {
+        this._videoElement.play();
+      }
+    }
+  }
+
   private _isCurrentChapter(chapter: VttCue): boolean {
     return chapter.text === this._currentChapter;
+  }
+
+  /**
+   * Merge chapters and captions into a single sorted list for transcript display.
+   */
+  private get _transcriptItems(): TranscriptItem[] {
+    const items: TranscriptItem[] = [];
+
+    // Add chapters
+    for (const chapter of this._chapters) {
+      items.push({ type: 'chapter', cue: chapter });
+    }
+
+    // Add captions with their original index (for active/past styling)
+    for (let i = 0; i < this._captions.length; i++) {
+      items.push({ type: 'caption', cue: this._captions[i], index: i });
+    }
+
+    // Sort by startTime
+    items.sort((a, b) => a.cue.startTime - b.cue.startTime);
+
+    return items;
   }
 
   override render() {
@@ -732,13 +793,25 @@ export class MbrVideoExtrasElement extends LitElement {
       ${this._showTranscript && hasCaptions
         ? html`
             <div class="transcript-box">
-              ${this._captions.map((caption, index) => html`
-                <div
-                  class="caption ${index === this._currentCaptionIndex ? 'active' : ''} ${index < this._currentCaptionIndex ? 'past' : ''}"
-                >
-                  ${caption.text}
-                </div>
-              `)}
+              ${this._transcriptItems.map(item =>
+                item.type === 'chapter'
+                  ? html`
+                      <div
+                        class="transcript-chapter"
+                        @click=${() => this._jumpToChapterInTranscript(item.cue)}
+                      >
+                        ${item.cue.text}
+                      </div>
+                    `
+                  : html`
+                      <div
+                        class="caption ${item.index === this._currentCaptionIndex ? 'active' : ''} ${item.index < this._currentCaptionIndex ? 'past' : ''}"
+                        @click=${() => this._jumpToCaption(item.cue)}
+                      >
+                        ${item.cue.text}
+                      </div>
+                    `
+              )}
             </div>
           `
         : nothing

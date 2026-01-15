@@ -31,12 +31,24 @@ pub mod server;
 pub mod sorting;
 pub mod templates;
 pub mod vid;
+#[cfg(feature = "media-metadata")]
+pub mod video_metadata;
+#[cfg(feature = "media-metadata")]
+pub mod video_metadata_cache;
+#[cfg(feature = "media-metadata")]
+pub mod video_transcode;
+#[cfg(feature = "media-metadata")]
+pub mod video_transcode_cache;
 pub mod watcher;
 
 pub use build::{BuildStats, Builder};
 pub use config::{Config, SortField};
+#[cfg(feature = "media-metadata")]
+pub use errors::MetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
 #[cfg(feature = "ffi")]
 pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
 pub use sorting::sort_files;
+#[cfg(feature = "media-metadata")]
+pub use video_transcode::TranscodeError;

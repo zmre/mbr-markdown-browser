@@ -20,6 +20,10 @@ use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
 use crate::sorting::sort_files;
 use crate::templates;
+#[cfg(feature = "media-metadata")]
+use crate::video_metadata_cache::VideoMetadataCache;
+#[cfg(feature = "media-metadata")]
+use crate::video_transcode_cache::HlsCache;
 use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
@@ -53,6 +57,15 @@ pub struct ServerState {
     pub theme: String,
     /// Cache for OEmbed page metadata to avoid redundant network requests
     pub oembed_cache: Arc<OembedCache>,
+    /// Cache for dynamically generated video metadata (covers, chapters, captions)
+    #[cfg(feature = "media-metadata")]
+    pub video_metadata_cache: Arc<VideoMetadataCache>,
+    /// Whether video transcoding is enabled
+    #[cfg(feature = "media-metadata")]
+    pub transcode_enabled: bool,
+    /// Cache for HLS playlists and transcoded segments
+    #[cfg(feature = "media-metadata")]
+    pub hls_cache: Arc<HlsCache>,
 }
 
 impl Server {
@@ -74,12 +87,21 @@ impl Server {
         gui_mode: bool,
         theme: S,
         log_filter: Option<&str>,
+        #[cfg(feature = "media-metadata")] transcode_enabled: bool,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
         let index_file = index_file.into();
         let theme = theme.into();
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
+
+        // Initialize video metadata cache with same size as oembed cache
+        #[cfg(feature = "media-metadata")]
+        let video_metadata_cache = Arc::new(VideoMetadataCache::new(oembed_cache_size));
+
+        // Initialize HLS cache (200MB default size for playlists and segments)
+        #[cfg(feature = "media-metadata")]
+        let hls_cache = Arc::new(HlsCache::new(200 * 1024 * 1024));
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -181,6 +203,12 @@ impl Server {
             gui_mode,
             theme,
             oembed_cache,
+            #[cfg(feature = "media-metadata")]
+            video_metadata_cache,
+            #[cfg(feature = "media-metadata")]
+            transcode_enabled,
+            #[cfg(feature = "media-metadata")]
+            hls_cache,
         };
 
         let router = Router::new()
@@ -219,6 +247,7 @@ impl Server {
             .local_addr()
             .map_err(ServerError::LocalAddrFailed)?;
         tracing::debug!("listening on {}", local_addr);
+        println!("Server running at http://{}/", local_addr);
 
         // Signal that server is ready before starting to serve
         if let Some(tx) = ready_tx {
@@ -254,6 +283,7 @@ impl Server {
                         .local_addr()
                         .map_err(ServerError::LocalAddrFailed)?;
                     tracing::debug!("listening on {}", local_addr);
+                    println!("Server running at http://{}/", local_addr);
 
                     // Signal that server is ready with the actual port
                     if let Some(tx) = ready_tx {
@@ -782,6 +812,20 @@ impl Server {
                 })
             }
             ResolvedPath::NotFound => {
+                // Try to serve HLS content (playlist or segment) for transcoded variants
+                #[cfg(feature = "media-metadata")]
+                if config.transcode_enabled
+                    && let Some(response) = Self::try_serve_hls_content(&path, &config).await
+                {
+                    return Ok(response);
+                }
+
+                // Try to serve dynamically generated video metadata (server mode only)
+                #[cfg(feature = "media-metadata")]
+                if let Some(response) = Self::try_serve_video_metadata(&path, &config).await {
+                    return Ok(response);
+                }
+
                 tracing::debug!("resource not found: {}", &path);
                 let requested_url = format!("/{}", path);
                 Ok(Self::render_error_page(
@@ -821,6 +865,479 @@ impl Server {
         Ok(response)
     }
 
+    /// Try to serve dynamically generated video metadata (cover, chapters, captions).
+    ///
+    /// Returns Some(Response) if the request was for video metadata and we successfully
+    /// generated it, None otherwise (fall through to 404).
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_video_metadata(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::video_metadata::{
+            MetadataType, extract_captions, extract_chapters, extract_cover, parse_metadata_request,
+        };
+        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+
+        // Check if this is a video metadata request
+        let (video_url_path, metadata_type) = parse_metadata_request(path)?;
+
+        let cache_type_str = match metadata_type {
+            MetadataType::Cover => "cover",
+            MetadataType::Chapters => "chapters",
+            MetadataType::Captions => "captions",
+        };
+
+        // Check cache first
+        let key = cache_key(video_url_path, cache_type_str);
+        if let Some(cached) = config.video_metadata_cache.get(&key) {
+            return match cached {
+                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
+                    Some(Self::build_vtt_response(vtt))
+                }
+                CachedMetadata::NotAvailable => None, // Cached negative result
+            };
+        }
+
+        // Try to resolve the video file path
+        // First, try the direct path, then try with static_folder prefix
+        let video_file = {
+            let direct = config.base_dir.join(video_url_path);
+            if direct.is_file() {
+                direct
+            } else {
+                let with_static = config
+                    .base_dir
+                    .join(&config.static_folder)
+                    .join(video_url_path);
+                if with_static.is_file() {
+                    with_static
+                } else {
+                    tracing::debug!(
+                        "Video file not found for metadata generation: {}",
+                        video_url_path
+                    );
+                    return None;
+                }
+            }
+        };
+
+        tracing::debug!(
+            "Generating {} for: {}",
+            cache_type_str,
+            video_file.display()
+        );
+
+        // Generate the metadata
+        match metadata_type {
+            MetadataType::Cover => match extract_cover(&video_file) {
+                Ok(bytes) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Cover(bytes.clone()));
+                    Some(Self::build_png_response(bytes))
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract cover: {}", e);
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::NotAvailable);
+                    None
+                }
+            },
+            MetadataType::Chapters => match extract_chapters(&video_file) {
+                Ok(vtt) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Chapters(vtt.clone()));
+                    Some(Self::build_vtt_response(vtt))
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract chapters: {}", e);
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::NotAvailable);
+                    None
+                }
+            },
+            MetadataType::Captions => match extract_captions(&video_file) {
+                Ok(vtt) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Captions(vtt.clone()));
+                    Some(Self::build_vtt_response(vtt))
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract captions: {}", e);
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::NotAvailable);
+                    None
+                }
+            },
+        }
+    }
+
+    /// Build a PNG image response.
+    #[cfg(feature = "media-metadata")]
+    fn build_png_response(bytes: Vec<u8>) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .body(Body::from(bytes))
+            .unwrap()
+    }
+
+    /// Build a WebVTT response.
+    #[cfg(feature = "media-metadata")]
+    fn build_vtt_response(vtt: String) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .body(Body::from(vtt))
+            .unwrap()
+    }
+
+    /// Build an HLS playlist response.
+    #[cfg(feature = "media-metadata")]
+    fn build_hls_playlist_response(playlist: Arc<Vec<u8>>) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+            .header(header::CONTENT_LENGTH, playlist.len())
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .body(Body::from(playlist.as_ref().clone()))
+            .unwrap()
+    }
+
+    /// Build an HLS segment response.
+    #[cfg(feature = "media-metadata")]
+    fn build_hls_segment_response(segment: Arc<Vec<u8>>) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "video/mp2t")
+            .header(header::CONTENT_LENGTH, segment.len())
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+            .body(Body::from(segment.as_ref().clone()))
+            .unwrap()
+    }
+
+    /// Try to serve HLS content (playlist or segment) for transcoded video variants.
+    ///
+    /// Returns Some(Response) if the request was for HLS content and we
+    /// successfully served it, None otherwise (fall through to other handlers).
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_hls_content(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::video_transcode::{
+            HlsRequest, TranscodeError, generate_hls_playlist, parse_hls_request,
+            probe_video_resolution, should_transcode, transcode_segment,
+        };
+        use crate::video_transcode_cache::{HlsCacheKey, HlsCacheStartResult, HlsCacheState};
+
+        // Helper to build error response for transcode errors
+        fn build_transcode_error_response(error: &TranscodeError) -> Option<Response<Body>> {
+            match error {
+                TranscodeError::SourceTooSmall {
+                    source_height,
+                    target_height,
+                } => Some(
+                    Response::builder()
+                        .status(StatusCode::UNPROCESSABLE_ENTITY)
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(Body::from(format!(
+                            "Cannot transcode: source ({}p) not larger than target ({}p)",
+                            source_height, target_height
+                        )))
+                        .unwrap(),
+                ),
+                TranscodeError::SegmentOutOfRange {
+                    segment_index,
+                    video_duration,
+                } => Some(
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(Body::from(format!(
+                            "Segment {} is out of range (video duration: {:.1}s)",
+                            segment_index, video_duration
+                        )))
+                        .unwrap(),
+                ),
+                // For other errors, fall through to 404 (return None)
+                _ => None,
+            }
+        }
+
+        // Check if this is an HLS request
+        let hls_request = parse_hls_request(path)?;
+
+        // Extract the video path and target from the request
+        let (video_path, target) = match &hls_request {
+            HlsRequest::Playlist { video_path, target } => (video_path.clone(), *target),
+            HlsRequest::Segment {
+                video_path, target, ..
+            } => (video_path.clone(), *target),
+        };
+
+        tracing::debug!("HLS request: {:?}", hls_request);
+
+        // Resolve the original video file path
+        let video_file = {
+            let direct = config.base_dir.join(&video_path);
+            if direct.is_file() {
+                direct
+            } else {
+                let with_static = config
+                    .base_dir
+                    .join(&config.static_folder)
+                    .join(&video_path);
+                if with_static.is_file() {
+                    with_static
+                } else {
+                    tracing::debug!("Original video file not found for HLS: {}", video_path);
+                    return None;
+                }
+            }
+        };
+
+        // Check if we should transcode (only downscale, never upscale)
+        let resolution = probe_video_resolution(&video_file).ok()?;
+        if !should_transcode(resolution.height, target) {
+            tracing::debug!(
+                "Video already at or below target resolution: {}x{} <= {}",
+                resolution.width,
+                resolution.height,
+                target.height()
+            );
+            // Return 422 instead of None (404) with helpful message
+            return Some(
+                Response::builder()
+                    .status(StatusCode::UNPROCESSABLE_ENTITY)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from(format!(
+                        "Cannot transcode: source ({}p) not larger than target ({}p)",
+                        resolution.height,
+                        target.height()
+                    )))
+                    .unwrap(),
+            );
+        }
+
+        match hls_request {
+            HlsRequest::Playlist { .. } => {
+                // Generate or serve cached playlist
+                let cache_key = HlsCacheKey::playlist(video_file.clone(), target);
+
+                // Extract base name for playlist URLs
+                let base_name = std::path::Path::new(&video_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("video");
+
+                match config.hls_cache.start_generation(cache_key.clone()) {
+                    HlsCacheStartResult::Started(notify) => {
+                        tracing::debug!("Generating HLS playlist for {:?}", video_file);
+
+                        let video_file_clone = video_file.clone();
+                        let base_name = base_name.to_string();
+                        let result = tokio::task::spawn_blocking(move || {
+                            generate_hls_playlist(&video_file_clone, target, &base_name)
+                        })
+                        .await;
+
+                        match result {
+                            Ok(Ok(playlist)) => {
+                                config
+                                    .hls_cache
+                                    .complete_generation(cache_key.clone(), playlist.into_bytes());
+                                notify.notify_waiters();
+
+                                if let Some(HlsCacheState::Complete(data)) =
+                                    config.hls_cache.get_state(&cache_key)
+                                {
+                                    return Some(Self::build_hls_playlist_response(data));
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Playlist generation failed: {}", e);
+                                config.hls_cache.fail_generation(cache_key, &e);
+                                notify.notify_waiters();
+                                // Return meaningful error response for known error types
+                                if let Some(response) = build_transcode_error_response(&e) {
+                                    return Some(response);
+                                }
+                                return None;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Playlist generation task panicked: {}", e);
+                                return None;
+                            }
+                        }
+                    }
+                    HlsCacheStartResult::AlreadyInProgress(notify) => {
+                        tracing::debug!("Waiting for in-progress playlist generation");
+                        notify.notified().await;
+
+                        match config.hls_cache.get_state(&cache_key) {
+                            Some(HlsCacheState::Complete(data)) => {
+                                return Some(Self::build_hls_playlist_response(data));
+                            }
+                            _ => return None,
+                        }
+                    }
+                    HlsCacheStartResult::AlreadyComplete(data) => {
+                        tracing::debug!("Serving cached playlist");
+                        return Some(Self::build_hls_playlist_response(data));
+                    }
+                    HlsCacheStartResult::PreviouslyFailed(msg) => {
+                        tracing::debug!("Previous playlist generation failed: {}", msg);
+                        // Return 422 with cached error message instead of None (404)
+                        return Some(
+                            Response::builder()
+                                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                                .header(header::CONTENT_TYPE, "text/plain")
+                                .body(Body::from(format!("Transcode failed: {}", msg)))
+                                .unwrap(),
+                        );
+                    }
+                    HlsCacheStartResult::CacheDisabled => {
+                        // Generate without caching
+                        let video_file_clone = video_file.clone();
+                        let base_name = base_name.to_string();
+                        let result = tokio::task::spawn_blocking(move || {
+                            generate_hls_playlist(&video_file_clone, target, &base_name)
+                        })
+                        .await;
+
+                        match result {
+                            Ok(Ok(playlist)) => {
+                                return Some(Self::build_hls_playlist_response(Arc::new(
+                                    playlist.into_bytes(),
+                                )));
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Playlist generation failed: {}", e);
+                                // Return meaningful error response for known error types
+                                if let Some(response) = build_transcode_error_response(&e) {
+                                    return Some(response);
+                                }
+                                return None;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Playlist generation task panicked: {}", e);
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+            HlsRequest::Segment { segment_index, .. } => {
+                // Generate or serve cached segment
+                let cache_key = HlsCacheKey::segment(video_file.clone(), target, segment_index);
+
+                match config.hls_cache.start_generation(cache_key.clone()) {
+                    HlsCacheStartResult::Started(notify) => {
+                        tracing::info!(
+                            "Transcoding segment {} for {:?} @ {:?}",
+                            segment_index,
+                            video_file,
+                            target
+                        );
+
+                        let video_file_clone = video_file.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            transcode_segment(&video_file_clone, target, segment_index)
+                        })
+                        .await;
+
+                        match result {
+                            Ok(Ok(data)) => {
+                                config
+                                    .hls_cache
+                                    .complete_generation(cache_key.clone(), data);
+                                notify.notify_waiters();
+
+                                if let Some(HlsCacheState::Complete(data)) =
+                                    config.hls_cache.get_state(&cache_key)
+                                {
+                                    return Some(Self::build_hls_segment_response(data));
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Segment transcode failed: {}", e);
+                                config.hls_cache.fail_generation(cache_key, &e);
+                                notify.notify_waiters();
+                                // Return meaningful error response for known error types
+                                if let Some(response) = build_transcode_error_response(&e) {
+                                    return Some(response);
+                                }
+                                return None;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Segment transcode task panicked: {}", e);
+                                return None;
+                            }
+                        }
+                    }
+                    HlsCacheStartResult::AlreadyInProgress(notify) => {
+                        tracing::debug!("Waiting for in-progress segment transcode");
+                        notify.notified().await;
+
+                        match config.hls_cache.get_state(&cache_key) {
+                            Some(HlsCacheState::Complete(data)) => {
+                                return Some(Self::build_hls_segment_response(data));
+                            }
+                            _ => return None,
+                        }
+                    }
+                    HlsCacheStartResult::AlreadyComplete(data) => {
+                        tracing::debug!("Serving cached segment");
+                        return Some(Self::build_hls_segment_response(data));
+                    }
+                    HlsCacheStartResult::PreviouslyFailed(msg) => {
+                        tracing::debug!("Previous segment transcode failed: {}", msg);
+                        // Return 422 with cached error message instead of None (404)
+                        return Some(
+                            Response::builder()
+                                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                                .header(header::CONTENT_TYPE, "text/plain")
+                                .body(Body::from(format!("Transcode failed: {}", msg)))
+                                .unwrap(),
+                        );
+                    }
+                    HlsCacheStartResult::CacheDisabled => {
+                        // Transcode without caching (not recommended for segments)
+                        let video_file_clone = video_file.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            transcode_segment(&video_file_clone, target, segment_index)
+                        })
+                        .await;
+
+                        match result {
+                            Ok(Ok(data)) => {
+                                return Some(Self::build_hls_segment_response(Arc::new(data)));
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Segment transcode failed: {}", e);
+                                // Return meaningful error response for known error types
+                                if let Some(response) = build_transcode_error_response(&e) {
+                                    return Some(response);
+                                }
+                                return None;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Segment transcode task panicked: {}", e);
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     async fn markdown_to_html(
         md_path: &Path,
         config: &ServerState,
@@ -839,12 +1356,20 @@ impl Server {
             is_index_file,
         };
 
+        // Transcoding is only available with media-metadata feature
+        #[cfg(feature = "media-metadata")]
+        let transcode_enabled = config.transcode_enabled;
+        #[cfg(not(feature = "media-metadata"))]
+        let transcode_enabled = false;
+
         let (mut frontmatter, headings, inner_html_output) = markdown::render_with_cache(
             md_path.to_path_buf(),
             root_path,
             config.oembed_timeout_ms,
             link_transform_config,
             Some(config.oembed_cache.clone()),
+            true, // server_mode is always true in server
+            transcode_enabled,
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
@@ -1309,7 +1834,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/user.css",
-        &[], // the idea of this is for users to override and for us to leave blank
+        include_bytes!("../templates/user.css"),
         "text/css",
     ),
     (

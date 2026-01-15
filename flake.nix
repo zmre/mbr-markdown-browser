@@ -329,7 +329,7 @@
       packages.mbr = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--locked";
+          cargoExtraArgs = "--locked --all-features";
           doCheck = false; # Tests run separately via packages.tests
 
           preBuild = ''

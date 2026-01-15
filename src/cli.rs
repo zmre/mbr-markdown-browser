@@ -6,20 +6,27 @@ use std::path::PathBuf;
 #[command(version, about, long_about = None)]
 pub struct Args {
     /// Launch GUI window (default if no mode specified)
-    #[arg(short, long, conflicts_with_all = ["server", "stdout", "build"])]
+    #[arg(short, long, conflicts_with_all = ["server", "stdout", "build", "extract_video_metadata"])]
     pub gui: bool,
 
     /// Launch HTTP server only (no GUI)
-    #[arg(short, long, conflicts_with_all = ["gui", "stdout", "build"])]
+    #[arg(short, long, conflicts_with_all = ["gui", "stdout", "build", "extract_video_metadata"])]
     pub server: bool,
 
     /// Render single markdown file to stdout (CLI mode)
-    #[arg(short = 'o', long, conflicts_with_all = ["gui", "server", "build"])]
+    #[arg(short = 'o', long, conflicts_with_all = ["gui", "server", "build", "extract_video_metadata"])]
     pub stdout: bool,
 
     /// Build static site (generate HTML for all markdown files)
-    #[arg(short, long, conflicts_with_all = ["gui", "server", "stdout"])]
+    #[arg(short, long, conflicts_with_all = ["gui", "server", "stdout", "extract_video_metadata"])]
     pub build: bool,
+
+    /// Extract video metadata (cover, chapters, captions) and save as sidecar files.
+    /// Takes a video file path and generates .cover.png, .chapters.en.vtt, and
+    /// .captions.en.vtt files next to it (if the video contains this data).
+    #[cfg(feature = "media-metadata")]
+    #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build"])]
+    pub extract_video_metadata: bool,
 
     /// Output directory for static site build (default: "build")
     #[arg(long, default_value = "build")]
@@ -79,6 +86,14 @@ pub struct Args {
     /// Default: auto (2x CPU cores, max 32).
     #[arg(long, value_name = "N")]
     pub build_concurrency: Option<usize>,
+
+    /// [EXPERIMENTAL] Enable dynamic video transcoding to serve lower-resolution
+    /// HLS variants (720p, 480p) for bandwidth savings. Only active in server/GUI mode.
+    /// Videos are transcoded on-demand as segments and cached in memory.
+    /// Feedback welcome!
+    #[cfg(feature = "media-metadata")]
+    #[arg(long)]
+    pub transcode: bool,
 }
 
 impl Args {

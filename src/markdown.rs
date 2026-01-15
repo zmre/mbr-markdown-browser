@@ -37,6 +37,10 @@ struct EventState {
     link_transform_config: LinkTransformConfig,
     /// Pre-fetched oembed results for bare URLs (populated during parallel fetch phase)
     prefetched_oembed: HashMap<String, PageInfo>,
+    /// True in server/GUI mode, false in build/CLI mode
+    server_mode: bool,
+    /// True when dynamic video transcoding is enabled
+    transcode_enabled: bool,
 }
 
 pub type SimpleMetadata = HashMap<String, String>;
@@ -103,6 +107,8 @@ pub async fn render(
     root_path: &Path,
     oembed_timeout_ms: u64,
     link_transform_config: LinkTransformConfig,
+    server_mode: bool,
+    transcode_enabled: bool,
 ) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
     render_with_cache(
         file,
@@ -110,6 +116,8 @@ pub async fn render(
         oembed_timeout_ms,
         link_transform_config,
         None,
+        server_mode,
+        transcode_enabled,
     )
     .await
 }
@@ -119,12 +127,17 @@ pub async fn render(
 /// When `oembed_cache` is provided, cached results are used when available and
 /// new results are cached for future use. URLs are fetched in parallel for improved
 /// performance when multiple bare URLs are present in the document.
+///
+/// - `server_mode`: True in server/GUI mode, false in build/CLI mode
+/// - `transcode_enabled`: True when dynamic video transcoding is enabled
 pub async fn render_with_cache(
     file: PathBuf,
     root_path: &Path,
     oembed_timeout_ms: u64,
     link_transform_config: LinkTransformConfig,
     oembed_cache: Option<Arc<OembedCache>>,
+    server_mode: bool,
+    transcode_enabled: bool,
 ) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
     // Read markdown input
     let markdown_input = fs::read_to_string(&file)?;
@@ -206,6 +219,8 @@ pub async fn render_with_cache(
         metadata_parsed: None,
         link_transform_config,
         prefetched_oembed,
+        server_mode,
+        transcode_enabled,
     };
     let mut processed_events = Vec::new();
 
@@ -493,7 +508,7 @@ fn process_event(
             match MediaEmbed::from_url_and_title(&transformed_url, title) {
                 Some(media) => {
                     // the link title is actually the next Text event so need to split this to only produce the open tags
-                    let html = media.to_html(true);
+                    let html = media.to_html(true, state.server_mode, state.transcode_enabled);
                     state.current_media = Some(media);
                     (Event::Html(html.into()), state)
                 }
@@ -577,7 +592,13 @@ fn process_event(
                 (Event::Html(info.html().into()), state)
             } else if text.trim_start().starts_with("{{") {
                 if let Some(vid) = Vid::from_vid(text) {
-                    (Event::Html(vid.to_html(false).into()), state)
+                    (
+                        Event::Html(
+                            vid.to_html(false, state.server_mode, state.transcode_enabled)
+                                .into(),
+                        ),
+                        state,
+                    )
                 } else {
                     (event, state)
                 }
@@ -609,7 +630,10 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file,
         };
-        let (_, _, html) = render(path, &root, 100, config).await.unwrap();
+        // Tests run with server_mode=false, transcode_enabled=false
+        let (_, _, html) = render(path, &root, 100, config, false, false)
+            .await
+            .unwrap();
         html
     }
 
@@ -676,7 +700,9 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _) = render(path, &root, 100, config).await.unwrap();
+        let (metadata, _, _) = render(path, &root, 100, config, false, false)
+            .await
+            .unwrap();
         assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
     }
 

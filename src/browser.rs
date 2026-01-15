@@ -279,6 +279,8 @@ fn reinit_server(
             true, // gui_mode: native window mode
             &config_copy.theme,
             None, // Logging already initialized
+            #[cfg(feature = "media-metadata")]
+            config_copy.transcode,
         );
         match server {
             Ok(mut s) => {

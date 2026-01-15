@@ -63,8 +63,10 @@ async fn main() -> Result<(), MbrError> {
         .with(tracing_subscriber::fmt::layer())
         .try_init();
 
-    // Determine if we're in GUI mode (no --server, --stdout, --build flags)
-    #[cfg(feature = "gui")]
+    // Determine if we're in GUI mode (no --server, --stdout, --build, --extract-video-metadata flags)
+    #[cfg(all(feature = "gui", feature = "media-metadata"))]
+    let is_gui_mode = !args.server && !args.stdout && !args.build && !args.extract_video_metadata;
+    #[cfg(all(feature = "gui", not(feature = "media-metadata")))]
     let is_gui_mode = !args.server && !args.stdout && !args.build;
     #[cfg(not(feature = "gui"))]
     let _is_gui_mode = false;
@@ -144,6 +146,11 @@ async fn main() -> Result<(), MbrError> {
     if let Some(concurrency) = args.build_concurrency {
         config.build_concurrency = Some(concurrency);
     }
+    // Apply transcode options from CLI
+    #[cfg(feature = "media-metadata")]
+    if args.transcode {
+        config.transcode = true;
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -158,6 +165,19 @@ async fn main() -> Result<(), MbrError> {
         &config.root_dir.display(),
         &path_relative_to_root.display()
     );
+
+    // Extract video metadata mode - extract cover/chapters/captions from video
+    #[cfg(feature = "media-metadata")]
+    if args.extract_video_metadata {
+        if is_directory {
+            eprintln!("Error: --extract-video-metadata requires a video file, not a directory.");
+            eprintln!("Usage: mbr --extract-video-metadata /path/to/video.mp4");
+            std::process::exit(1);
+        }
+
+        mbr::video_metadata::extract_and_save(&absolute_path)?;
+        return Ok(());
+    }
 
     if args.build {
         // Build mode - generate static site
@@ -228,11 +248,14 @@ async fn main() -> Result<(), MbrError> {
             is_index_file,
         };
 
+        // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
         let (frontmatter, _headings, html_output) = markdown::render(
             input_path,
             config.root_dir.as_path(),
             config.oembed_timeout_ms,
             link_transform_config,
+            false, // server_mode is false in CLI mode
+            false, // transcode is disabled in CLI mode
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
@@ -262,6 +285,8 @@ async fn main() -> Result<(), MbrError> {
             false, // gui_mode: browser access, not native window
             &config.theme,
             None, // Logging already initialized
+            #[cfg(feature = "media-metadata")]
+            config.transcode,
         )?;
 
         let url_path = build_url_path(
@@ -301,6 +326,8 @@ async fn main() -> Result<(), MbrError> {
                     true, // gui_mode: native window mode
                     &config_copy.theme,
                     None, // Logging already initialized
+                    #[cfg(feature = "media-metadata")]
+                    config_copy.transcode,
                 );
                 match server {
                     Ok(mut s) => {

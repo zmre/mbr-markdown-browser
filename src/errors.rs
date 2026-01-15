@@ -37,6 +37,10 @@ pub enum MbrError {
     #[error("Build error: {0}")]
     Build(Box<BuildError>),
 
+    #[cfg(feature = "media-metadata")]
+    #[error("Video metadata error: {0}")]
+    Metadata(#[from] MetadataError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -231,6 +235,42 @@ pub enum SearchError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// Errors related to video metadata extraction.
+#[cfg(feature = "media-metadata")]
+#[derive(Debug, Error)]
+pub enum MetadataError {
+    #[error("FFmpeg initialization failed")]
+    InitFailed,
+
+    #[error("Failed to open video file: {}", path.display())]
+    OpenFailed {
+        path: PathBuf,
+        #[source]
+        source: ffmpeg_next::Error,
+    },
+
+    #[error("No video stream found in file: {}", path.display())]
+    NoVideoStream { path: PathBuf },
+
+    #[error("No subtitle stream found in file: {}", path.display())]
+    NoSubtitleStream { path: PathBuf },
+
+    #[error("No chapters found in file: {}", path.display())]
+    NoChapters { path: PathBuf },
+
+    #[error("Failed to decode video frame: {0}")]
+    DecodeFailed(String),
+
+    #[error("Failed to encode image: {0}")]
+    EncodeFailed(String),
+
+    #[error("Video too short for thumbnail (duration: {duration_secs:.1}s)")]
+    VideoTooShort { duration_secs: f64 },
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Errors related to static site building.

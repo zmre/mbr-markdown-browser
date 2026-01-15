@@ -136,8 +136,19 @@ pub fn render_preview_with_config(
             message: e.to_string(),
         })?;
 
+    // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
     let (frontmatter, headings, html) = rt
-        .block_on(async { markdown::render(path.clone(), &root_path, 0, link_config).await })
+        .block_on(async {
+            markdown::render(
+                path.clone(),
+                &root_path,
+                0,
+                link_config,
+                false, // server_mode is false in QuickLook
+                false, // transcode is disabled in QuickLook
+            )
+            .await
+        })
         .map_err(|e| QuickLookError::MarkdownRenderError {
             message: e.to_string(),
         })?;
