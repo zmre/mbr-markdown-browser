@@ -87,9 +87,10 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     pub build_concurrency: Option<usize>,
 
-    /// Enable dynamic video transcoding to serve lower-resolution HLS variants
-    /// (720p, 480p) for bandwidth savings. Only active in server/GUI mode.
+    /// [EXPERIMENTAL] Enable dynamic video transcoding to serve lower-resolution
+    /// HLS variants (720p, 480p) for bandwidth savings. Only active in server/GUI mode.
     /// Videos are transcoded on-demand as segments and cached in memory.
+    /// Feedback welcome!
     #[cfg(feature = "media-metadata")]
     #[arg(long)]
     pub transcode: bool,

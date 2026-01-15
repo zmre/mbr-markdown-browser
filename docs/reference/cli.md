@@ -36,7 +36,7 @@ These flags are mutually exclusive:
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
-| `--transcode` | Enable dynamic video transcoding (server/GUI mode only) | `false` |
+| `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
 | `--transcode-max-size <MB>` | Skip transcoding for files larger than this | `500` |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
@@ -263,9 +263,11 @@ mbr --extract-video-metadata ~/videos/demo.mp4
 
 This is useful for pre-generating metadata for static site builds or when you want the files persisted to disk.
 
-### Video Transcoding
+### Video Transcoding (EXPERIMENTAL)
 
 > **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.
+
+> ⚠️ **EXPERIMENTAL** - This feature is new and feedback is welcome! Please report issues or suggestions at the project repository.
 
 mbr can dynamically transcode videos to lower resolutions (720p, 480p) using HLS (HTTP Live Streaming) for bandwidth savings on mobile devices and slow connections. This feature only works in server/GUI mode (`-s` or `-g`).
 

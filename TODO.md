@@ -5,7 +5,7 @@
 +* [ ] Setup a nix mac target that doesn't have the app or quicklook stuff
 * Static build
   * [ ] Setup some benchmarking and profiling
-  * [ ] I want some non-logging output when building a site that lets the user know what step they're on in the static build process just left aligned maye with an emoji icon
+  * [ ] I want some non-logging output when building a site that lets the user know what step they're on in the static build process -- progress and stage updates
 
 * UX
   * [ ] Track links out and links in between files
@@ -14,7 +14,7 @@
 
 * Big repo (goodwiki) issues
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.)
-  * [ ] I'm getting 40k broken links which is like half of all links. Need to investigate if it is an issue with the files or with how mbr works with wikilinks (it probably doesn't normalize them)
+  * [x] I'm getting 40k broken links which is like half of all links. Need to investigate if it is an issue with the files or with how mbr works with wikilinks (it probably doesn't normalize them)
   * [ ] wikilinks and the link checker: underscore-prefixed files (e.g., _...Baby One More Time Tour.md) - files with special chars were renamed with underscores but internal links weren't updated -- none of those work yet. not sure what to do
 
 * Theming

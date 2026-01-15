@@ -1356,6 +1356,12 @@ impl Server {
             is_index_file,
         };
 
+        // Transcoding is only available with media-metadata feature
+        #[cfg(feature = "media-metadata")]
+        let transcode_enabled = config.transcode_enabled;
+        #[cfg(not(feature = "media-metadata"))]
+        let transcode_enabled = false;
+
         let (mut frontmatter, headings, inner_html_output) = markdown::render_with_cache(
             md_path.to_path_buf(),
             root_path,
@@ -1363,7 +1369,7 @@ impl Server {
             link_transform_config,
             Some(config.oembed_cache.clone()),
             true, // server_mode is always true in server
-            config.transcode_enabled,
+            transcode_enabled,
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
