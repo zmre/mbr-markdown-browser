@@ -532,3 +532,123 @@ a.mbr-link-enhanced[data-tooltip]::after {
   white-space: nowrap;
   border: 0;
 }
+
+/* ==================== Print Styles ==================== */
+
+@media print {
+  @page {
+    margin: 0.5in 1in; /* top/bottom: 0.5in, left/right: 1in */
+  }
+
+  /* Hide navigation elements */
+  body > header,
+  body > footer,
+  nav.breadcrumbs,
+  mbr-nav {
+    display: none !important;
+  }
+
+  /* Reduce font size (~40% smaller than base) */
+  :root {
+    --pico-font-size: 62.5%;
+  }
+
+  /* Reset main container margins - @page handles paper margins */
+  main.container {
+    margin: 0;
+    padding: 0;
+    max-width: none;
+  }
+
+  /* Prevent awkward page breaks */
+  pre, code, figure, blockquote, table, ul, ol {
+    page-break-inside: avoid;
+  }
+
+  /* Marginalia: display inline for print (not absolute positioned) */
+  blockquote blockquote:has(blockquote) {
+    position: static;
+  }
+
+  blockquote blockquote blockquote {
+    position: static;
+    display: block;
+    font-size: 0.85em;
+    margin: var(--pico-spacing) 0;
+    padding: var(--pico-spacing);
+    background-color: var(--mbr-marginalia-bg);
+    border-left: 3px solid var(--pico-primary);
+  }
+
+  /* Hide the indicator marker in print */
+  blockquote blockquote blockquote::before {
+    content: none;
+  }
+
+  /* Show marginalia content normally in print */
+  blockquote blockquote blockquote p {
+    position: static;
+    display: block;
+    transform: none;
+    min-width: auto;
+    max-width: none;
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  /* Hide popover arrows in print */
+  blockquote blockquote blockquote p::before,
+  blockquote blockquote blockquote p::after {
+    content: none;
+  }
+
+  /* Show additional paragraphs in marginalia */
+  blockquote blockquote blockquote p + p {
+    display: block;
+  }
+
+  /* Video/media elements: use auto height, hide player controls */
+  figure > video,
+  media-player {
+    max-height: none;
+    height: auto;
+  }
+
+  /* Hide video player (videos cannot be printed meaningfully) */
+  media-player,
+  video {
+    display: none;
+  }
+
+  /* Show a placeholder message for videos */
+  figure:has(media-player)::after,
+  figure:has(video)::after {
+    content: "[Video content - see digital version]";
+    display: block;
+    font-style: italic;
+    color: var(--pico-muted-color);
+    padding: var(--pico-spacing);
+    border: 1px dashed var(--pico-muted-border-color);
+    text-align: center;
+  }
+
+  /* Reduce GitHub alert icon size for print */
+  blockquote.markdown-alert-note::before,
+  blockquote.markdown-alert-tip::before,
+  blockquote.markdown-alert-important::before,
+  blockquote.markdown-alert-warning::before,
+  blockquote.markdown-alert-caution::before {
+    width: 14px;
+    height: 14px;
+    top: calc(var(--pico-spacing) * 1.25);
+  }
+}
+
+/*
+ * PRINT TIP: For best results when printing:
+ * 1. Use light mode (not dark mode)
+ * 2. Enable "Print backgrounds" in your browser's print dialog
+ */
