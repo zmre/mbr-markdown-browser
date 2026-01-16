@@ -742,8 +742,8 @@ sup.footnote-reference {
   }
 }
 
-/* ==================== Enhanced Oembed Boxes ==================== */
-.mbr-enhanced-link-box {
+/* ==================== Enhanced Oembed Social Link Boxes ==================== */
+.mbr-social-link-box {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   grid-template-rows: 1fr;
@@ -752,16 +752,16 @@ sup.footnote-reference {
   max-height: 200px;
   overflow: hidden;
 }
-.mbr-enhanced-link {
+.mbr-social-link {
   grid-column: span 2;
   text-decoration: none;
 }
-.mbr-enhanced-link header {
+.mbr-social-link header {
   font-size: 1rem;
   font-weight: bold;
   margin-bottom: var(--pico-typography-spacing-vertical);
 }
-.mbr-enhanced-link p {
+.mbr-social-link p {
   font-size: 0.75rem;
   margin: 0;
   color: var(--pico-secondary);

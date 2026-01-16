@@ -316,9 +316,9 @@ impl PageInfo {
                 .map(|src| format!("<img src='{}'/>", src))
                 .unwrap_or_default();
             format!(
-                "<article class='mbr-enhanced-link-box'>
+                "<article class='mbr-social-link-box'>
                     {}
-                    <a href='{}' class='mbr-enhanced-link'>
+                    <a href='{}' class='mbr-social-link'>
                         <header>{}</header>
                         <p>{}</p>
                     </a>    

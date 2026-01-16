@@ -325,10 +325,11 @@
         }
       );
 
-      # Main package: CLI binary + macOS app bundle (signed on darwin)
-      packages.mbr = craneLib.buildPackage (commonArgs
+      # Core CLI binary (all platforms) - no app bundle, no QuickLook
+      packages.mbr-cli = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          pname = "mbr-cli";
           cargoExtraArgs = "--locked --all-features";
           doCheck = false; # Tests run separately via packages.tests
 
@@ -337,40 +338,58 @@
             cp -r ${packages.mbr-components}/* templates/components-js/
           '';
 
-          # Create CLI binary (all platforms) + .app bundle (macOS only, signed)
-          postInstall = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
-            # Create macOS .app bundle structure
-            mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources,PlugIns}
-
-            # Copy binary to app bundle
-            cp $out/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
-
-            # Install Info.plist
-            cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
-
-            # Copy icon
-            cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
-
-            # Copy QuickLook extension (make writable for codesigning)
-            cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
-            chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
-
-            # Sign the extension first with its entitlements, then sign the app bundle
-            /usr/bin/codesign --force --sign - \
-              --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
-              $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
-            /usr/bin/codesign --force --sign - $out/Applications/MBR.app
-          '';
-
           meta = with pkgs.lib; {
-            description = "A markdown viewer, browser, and static site generator";
+            description = "A markdown viewer, browser, and static site generator (CLI only)";
             homepage = "https://github.com/zmre/mbr";
             license = licenses.mit;
-            maintainers = [];
             mainProgram = "mbr";
             platforms = platforms.unix;
           };
         });
+
+      # Main package: CLI on Linux, CLI + app bundle + QuickLook on macOS
+      packages.mbr =
+        if pkgs.stdenv.isDarwin
+        then
+          pkgs.stdenv.mkDerivation {
+            pname = "mbr";
+            inherit version;
+
+            # No source needed - we're wrapping mbr-cli
+            dontUnpack = true;
+
+            installPhase = ''
+              # CLI binary accessible at $out/bin/mbr
+              mkdir -p $out/bin
+              cp ${packages.mbr-cli}/bin/mbr $out/bin/mbr
+
+              # macOS app bundle
+              mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources,PlugIns}
+              cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
+              cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
+              cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
+
+              # QuickLook extension (make writable for codesigning)
+              cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
+              chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+
+              # Sign the extension first with its entitlements, then sign the app bundle
+              /usr/bin/codesign --force --sign - \
+                --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+              /usr/bin/codesign --force --sign - $out/Applications/MBR.app
+            '';
+
+            meta = with pkgs.lib; {
+              description = "A markdown viewer, browser, and static site generator";
+              homepage = "https://github.com/zmre/mbr";
+              license = licenses.mit;
+              mainProgram = "mbr";
+              platforms = platforms.darwin;
+            };
+          }
+        else
+          packages.mbr-cli; # On Linux, mbr = mbr-cli
 
       # Clippy check - runs lints without full build
       packages.clippy = craneLib.cargoClippy (commonArgs
@@ -440,10 +459,10 @@
       # Checks run by `nix flake check`
       checks =
         {
-          inherit (packages) mbr clippy fmt tests;
+          inherit (packages) mbr-cli clippy fmt tests;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          inherit (packages) swiftfmt swiftlint-check;
+          inherit (packages) swiftfmt swiftlint-check mbr;
         };
 
       # Release package: creates distributable archives from the built package
