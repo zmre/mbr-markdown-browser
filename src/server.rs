@@ -746,10 +746,8 @@ impl Server {
 
     /// Serve from compiled-in DEFAULT_FILES with cache headers.
     fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
-        if let Some((_name, bytes, mime)) = DEFAULT_FILES.iter().find(|(name, _, _)| {
-            tracing::debug!("Comparing path ({}) to name ({})", path, name);
-            path == *name
-        }) {
+        if let Some((_name, bytes, mime)) = DEFAULT_FILES.iter().find(|(name, _, _)| path == *name)
+        {
             tracing::debug!("found default file");
 
             // Generate ETag from content

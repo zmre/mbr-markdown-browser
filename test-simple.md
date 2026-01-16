@@ -14,6 +14,11 @@ date: 2026-01-01
   2. Ordered
 * Unordered
 
+https://ironcorelabs.com/blog/2025/illuminating-dark-corners-ai/
+
+https://github.com/zmre/pwnvim/
+
+https://medium.com/@zmre/quick-tip-fixing-the-sudo-file-on-macos-cf3c2a2584d4
 
 1. Ordered [^bar]
 2. Ordered

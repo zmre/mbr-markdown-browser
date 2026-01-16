@@ -1,11 +1,80 @@
 use regex::Regex;
 use reqwest::Client;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
+use std::error::Error;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-static META_SELECTOR: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("meta").expect("Invalid meta selector"));
+/// Formats an error with its full source chain for detailed logging.
+/// Walks the `source()` chain to reveal nested errors (e.g., reqwest -> hyper -> io).
+fn format_error_chain(err: &dyn Error) -> String {
+    let mut chain = vec![err.to_string()];
+    let mut current = err.source();
+    while let Some(source) = current {
+        chain.push(source.to_string());
+        current = source.source();
+    }
+    chain.join(" -> ")
+}
+
+// Precompiled selectors for efficient HTML parsing
+// All metadata lives in <head>, so we scope our searches there
+static HEAD_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("head").expect("Invalid head selector"));
+static TITLE_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("title").expect("Invalid title selector"));
+
+// OpenGraph meta tags (priority sources)
+static OG_TITLE_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("meta[property='og:title']").expect("Invalid og:title selector")
+});
+static OG_IMAGE_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("meta[property='og:image']").expect("Invalid og:image selector")
+});
+static OG_DESCRIPTION_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("meta[property='og:description']").expect("Invalid og:description selector")
+});
+
+// Fallback selectors
+static META_DESCRIPTION_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("meta[name='description']").expect("Invalid meta description selector")
+});
+static FAVICON_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("link[rel='icon']").expect("Invalid favicon selector"));
+static ALT_FAVICON_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("link[rel='alternate icon']").expect("Invalid alternate favicon selector")
+});
+
+/// Supported image types for favicons
+const SUPPORTED_FAVICON_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/svg+xml",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+];
+
+/// Check if a favicon type is supported (or if no type is specified, assume supported)
+fn is_supported_favicon_type(type_attr: Option<&str>) -> bool {
+    type_attr.is_none_or(|t| SUPPORTED_FAVICON_TYPES.contains(&t))
+}
+
+/// Extract content attribute from first matching element, HTML-escaped
+fn extract_content(head: &ElementRef, selector: &Selector) -> Option<String> {
+    head.select(selector)
+        .next()
+        .and_then(|el| el.value().attr("content"))
+        .map(|s| html_escape::encode_text(s).to_string())
+}
+
+/// Extract favicon href from first matching element with a supported image type
+fn extract_favicon(head: &ElementRef, selector: &Selector) -> Option<String> {
+    head.select(selector)
+        .find(|el| is_supported_favicon_type(el.value().attr("type")))
+        .and_then(|el| el.value().attr("href"))
+        .map(|s| s.to_string())
+}
 
 // Giphy regex patterns - compiled once for efficiency
 static GIPHY_MEDIA_RE: LazyLock<Regex> =
@@ -138,6 +207,7 @@ impl PageInfo {
 
         // If timeout is 0, oembed is disabled - return a plain link without network call
         if timeout_ms == 0 {
+            // tracing::debug!("Oembed disabled, ignoring url {}", &url);
             return Ok(PageInfo {
                 url: url.to_string(),
                 ..Default::default()
@@ -152,8 +222,13 @@ impl PageInfo {
         // For other URLs, fetch and parse OpenGraph metadata
         match Self::fetch_page_info(&client, url).await {
             Ok(info) => Ok(info),
-            Err(_) => {
+            Err(e) => {
                 // Any error (timeout, network, etc.) - return a plain link
+                tracing::warn!(
+                    "Error fetching URL ({}) for enriched display: {}",
+                    &url,
+                    format_error_chain(e.as_ref())
+                );
                 Ok(PageInfo {
                     url: url.to_string(),
                     ..Default::default()
@@ -167,33 +242,49 @@ impl PageInfo {
         url: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let response = client.get(url).send().await?;
+
+        // Check for Cloudflare challenge block
+        if response
+            .headers()
+            .get("cf-mitigated")
+            .is_some_and(|v| v == "challenge")
+        {
+            return Err("Blocked by Cloudflare challenge".into());
+        }
+
         let body = response.text().await?;
         let document = Html::parse_document(&body);
-        let mut title: Option<String> = None;
-        let mut image: Option<String> = None;
-        let mut description: Option<String> = None;
-        for element in document.select(&META_SELECTOR) {
-            if let Some(property) = element.value().attr("property") {
-                match property {
-                    "og:title" => {
-                        if let Some(content) = element.value().attr("content") {
-                            title = Some(html_escape::encode_text(content).to_string());
-                        }
-                    }
-                    "og:image" => {
-                        if let Some(content) = element.value().attr("content") {
-                            image = Some(content.to_string());
-                        }
-                    }
-                    "og:description" => {
-                        if let Some(content) = element.value().attr("content") {
-                            description = Some(content.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+
+        // All metadata lives in <head> - extract with og:* priority, then fallbacks
+        let (title, description, image) = document
+            .select(&HEAD_SELECTOR)
+            .next()
+            .map(|head| {
+                // Priority: og:* tags first
+                let og_title = extract_content(&head, &OG_TITLE_SELECTOR);
+                let og_desc = extract_content(&head, &OG_DESCRIPTION_SELECTOR);
+                let og_image = extract_content(&head, &OG_IMAGE_SELECTOR);
+
+                // Fallbacks only computed if og:* not found
+                let title = og_title.or_else(|| {
+                    head.select(&TITLE_SELECTOR)
+                        .next()
+                        .map(|el| el.text().collect::<String>())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| html_escape::encode_text(&s).to_string())
+                });
+
+                let description =
+                    og_desc.or_else(|| extract_content(&head, &META_DESCRIPTION_SELECTOR));
+
+                let image = og_image
+                    .or_else(|| extract_favicon(&head, &FAVICON_SELECTOR))
+                    .or_else(|| extract_favicon(&head, &ALT_FAVICON_SELECTOR));
+
+                (title, description, image)
+            })
+            .unwrap_or((None, None, None));
+
         Ok(PageInfo {
             url: url.to_string(),
             title,
@@ -218,11 +309,29 @@ impl PageInfo {
         }
 
         // Otherwise, create a link (TODO: make this a rich card with image/description)
-        format!(
-            "<a href='{}'>{}</a>",
-            &self.url,
-            self.title.clone().unwrap_or(self.url.clone())
-        )
+        if let Some(title) = self.title.clone() {
+            let img_tag = self
+                .image
+                .as_ref()
+                .map(|src| format!("<img src='{}'/>", src))
+                .unwrap_or_default();
+            format!(
+                "<article class='mbr-enhanced-link-box'>
+                    {}
+                    <a href='{}' class='mbr-enhanced-link'>
+                        <header>{}</header>
+                        <p>{}</p>
+                    </a>    
+                </article>
+                ",
+                img_tag,
+                &self.url,
+                title,
+                self.description.as_deref().unwrap_or(""),
+            )
+        } else {
+            format!("<a href='{}'>{}</a>", &self.url, &self.url,)
+        }
     }
 }
 

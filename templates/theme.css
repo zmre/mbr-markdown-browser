@@ -546,12 +546,13 @@ a.mbr-link-enhanced[data-tooltip]::after {
  */
 
 /* Footnote reference links (the superscript numbers in the text) */
-.footnote-reference {
+sup.footnote-reference {
   font-size: 0.75em;
   vertical-align: super;
   line-height: 0;
   text-decoration: none;
   font-weight: 600;
+  top: -0.2em;
 }
 
 /* Footnote definitions container - all footnotes at bottom */
@@ -739,6 +740,31 @@ a.mbr-link-enhanced[data-tooltip]::after {
   .footnote-definition:first-of-type {
     break-before: avoid;
   }
+}
+
+/* ==================== Enhanced Oembed Boxes ==================== */
+.mbr-enhanced-link-box {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: 1fr;
+  grid-column-gap: 1em;
+  max-width: 900px;
+  max-height: 200px;
+  overflow: hidden;
+}
+.mbr-enhanced-link {
+  grid-column: span 2;
+  text-decoration: none;
+}
+.mbr-enhanced-link header {
+  font-size: 1rem;
+  font-weight: bold;
+  margin-bottom: var(--pico-typography-spacing-vertical);
+}
+.mbr-enhanced-link p {
+  font-size: 0.75rem;
+  margin: 0;
+  color: var(--pico-secondary);
 }
 
 /*

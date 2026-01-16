@@ -48,7 +48,7 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 pulldown-cmark-escape = { version = "0.11", default-features = false }
 rayon = "1.11"
 regex = "1.11"
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 scraper = "0.25"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -74,6 +74,7 @@ nucleo-matcher = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 pagefind = "1.4"
+#pagefind = { path = "/Users/pwalsh/src/sideprojects/pagefind-zmre-fork/2026-01-15-rayon-parallel-perf/pagefind" }
 
 # Image processing with minimal features (only needed formats)
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

@@ -229,7 +229,7 @@ pub enum MbrError {
 }
 ```
 
-Errors propagate with context using anyhow in appropriate places.
+Errors propagate with context.
 
 ## Testing Strategy
 
