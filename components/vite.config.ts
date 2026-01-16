@@ -49,11 +49,24 @@ export default {
   build: {
     outDir: '../templates/components-js',
     emptyOutDir: true,
-    sourcemap: true,
-    minify: "esbuild",
+    sourcemap: false, // Disable sourcemaps in production for smaller bundle
+    minify: 'terser', // Use terser for more aggressive minification than esbuild
+    terserOptions: {
+      compress: {
+        drop_console: true,  // Remove console.* statements
+        drop_debugger: true, // Remove debugger statements
+        passes: 2,           // Run compression twice for better results
+      },
+      mangle: {
+        properties: false,   // Don't mangle property names (breaks Lit)
+      },
+      format: {
+        comments: false,     // Remove all comments
+      },
+    },
     lib: {
       entry: resolve(__dirname, 'src/main.js'),
-      fileName: 'mbr-components',
+      fileName: 'mbr-components.min',
       name: 'MBR',
       // Use 'es' format without code splitting for simpler embedding
       formats: ['es'],

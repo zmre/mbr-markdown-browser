@@ -225,7 +225,7 @@
             # Create empty component files for dependency resolution
             # Must match the actual file names produced by vite build (see vite.config.ts)
             mkdir -p templates/components-js
-            touch templates/components-js/mbr-components.js
+            touch templates/components-js/mbr-components.min.js
           '';
         });
     in rec {

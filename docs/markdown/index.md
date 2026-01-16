@@ -216,8 +216,7 @@ c & d
 \begin{pmatrix}
 x \\
 y
-\end{pmatrix}
-=
+\end{pmatrix} =
 \begin{pmatrix}
 ax + by \\
 cx + dy
@@ -292,11 +291,7 @@ Here is a statement that needs citation[^1].
 
 mbr uses pulldown-cmark for markdown parsing[^1], which provides excellent CommonMark compliance and performance[^2].
 
-[^1]: pulldown-cmark is a Rust library that parses markdown to events, allowing flexible rendering.
-
-[^2]: The library uses SIMD optimizations for faster text processing.
-
-Footnotes appear at the bottom of the page with back-links.
+Footnotes appear at the bottom of the page.
 
 ## Heading Anchors
 
@@ -324,3 +319,11 @@ URLs in angle brackets become clickable:
 ## See Also
 
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
+
+
+## Footnotes
+
+[^1]: pulldown-cmark is a Rust library that parses markdown to events, allowing flexible rendering.
+
+[^2]: The library uses SIMD optimizations for faster text processing.
+

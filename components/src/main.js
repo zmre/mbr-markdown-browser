@@ -6,3 +6,7 @@ export * from './mbr-keys.ts';
 export * from './mbr-live-reload.ts';
 export * from './mbr-video-extras.ts';
 export * from './mbr-link-enhancement.ts';
+// Dynamic enhancement loaders
+export * from './mbr-hljs.ts';
+export * from './mbr-mermaid.ts';
+export * from './mbr-katex.ts';

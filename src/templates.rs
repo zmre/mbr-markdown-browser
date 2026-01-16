@@ -203,8 +203,8 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     ),
     ("_scripts.html", include_str!("../templates/_scripts.html")),
     (
-        "_scripts_markdown.html",
-        include_str!("../templates/_scripts_markdown.html"),
+        "_display_enhancements.html",
+        include_str!("../templates/_display_enhancements.html"),
     ),
     // Main templates
     ("index.html", include_str!("../templates/index.html")),

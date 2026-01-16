@@ -11,6 +11,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::config::SortField;
+use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::ServerError;
 use crate::link_transform::LinkTransformConfig;
@@ -574,7 +575,7 @@ impl Server {
                 template_folder.join(asset_path.trim_start_matches('/'))
             };
 
-            tracing::debug!("Checking template folder: {}", file_path.display());
+            tracing::trace!("Checking template folder: {}", file_path.display());
 
             if file_path.is_file() {
                 return Self::serve_file_from_path(&file_path).await;
@@ -584,7 +585,7 @@ impl Server {
         // Try .mbr/ directory in base_dir
         let mbr_dir = config.base_dir.join(".mbr");
         let file_path = mbr_dir.join(asset_path.trim_start_matches('/'));
-        tracing::debug!("Checking .mbr dir: {}", file_path.display());
+        tracing::trace!("Checking .mbr dir: {}", file_path.display());
 
         if file_path.is_file() {
             return Self::serve_file_from_path(&file_path).await;
@@ -744,10 +745,20 @@ impl Server {
         }
     }
 
-    /// Serve from compiled-in DEFAULT_FILES with cache headers.
+    /// Serve from compiled-in DEFAULT_FILES or KATEX_FILES with cache headers.
     fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
-        if let Some((_name, bytes, mime)) = DEFAULT_FILES.iter().find(|(name, _, _)| path == *name)
-        {
+        // First check DEFAULT_FILES
+        let file = DEFAULT_FILES
+            .iter()
+            .find(|(name, _, _)| path == *name)
+            // Then check KATEX_FILES (embedded KaTeX CSS, JS, and fonts)
+            .or_else(|| {
+                embedded_katex::KATEX_FILES
+                    .iter()
+                    .find(|(name, _, _)| path == *name)
+            });
+
+        if let Some((_name, bytes, mime)) = file {
             tracing::debug!("found default file");
 
             // Generate ETag from content
@@ -1841,8 +1852,8 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "text/css",
     ),
     (
-        "/components/mbr-components.js",
-        include_bytes!("../templates/components-js/mbr-components.js"),
+        "/components/mbr-components.min.js",
+        include_bytes!("../templates/components-js/mbr-components.min.js"),
         "application/javascript",
     ),
     (

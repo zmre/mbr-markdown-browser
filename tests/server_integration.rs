@@ -770,13 +770,13 @@ async fn test_template_folder_serves_js_from_js_subdir() {
     let template_dir = repo.path().join("custom-templates");
     std::fs::create_dir_all(template_dir.join("components-js")).unwrap();
     std::fs::write(
-        template_dir.join("components-js/mbr-components.js"),
+        template_dir.join("components-js/mbr-components.min.js"),
         "// Custom components JS",
     )
     .unwrap();
 
     let server = TestServerWithTemplates::start(&repo, Some(template_dir)).await;
-    let response = server.get("/.mbr/components/mbr-components.js").await;
+    let response = server.get("/.mbr/components/mbr-components.min.js").await;
 
     assert_eq!(response.status(), 200);
     let body = response.text().await.unwrap();
@@ -879,8 +879,8 @@ async fn test_server_mode_includes_components() {
 
     // Should include the components script
     assert!(
-        html.contains("mbr-components.js"),
-        "Expected mbr-components.js script reference in HTML"
+        html.contains("mbr-components.min.js"),
+        "Expected mbr-components.min.js script reference in HTML"
     );
 }
 
@@ -1240,12 +1240,12 @@ async fn test_components_js_bundle_served() {
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
-    let response = server.get("/.mbr/components/mbr-components.js").await;
+    let response = server.get("/.mbr/components/mbr-components.min.js").await;
 
     assert_eq!(
         response.status(),
         200,
-        "Components JS bundle should be served at /.mbr/components/mbr-components.js"
+        "Components JS bundle should be served at /.mbr/components/mbr-components.min.js"
     );
 
     let content_type = response.headers().get("content-type").unwrap();
@@ -1262,7 +1262,9 @@ async fn test_components_js_bundle_no_missing_imports() {
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
-    let js_content = server.get_text("/.mbr/components/mbr-components.js").await;
+    let js_content = server
+        .get_text("/.mbr/components/mbr-components.min.js")
+        .await;
 
     // Check that there are no dynamic imports to external chunk files
     // These would look like: import("./main-xxx.js") or import("/.mbr/components/main-xxx.js")
