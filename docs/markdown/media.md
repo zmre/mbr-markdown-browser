@@ -140,9 +140,9 @@ Giphy URLs on their own line are automatically embedded as animated GIFs.
 Both the Giphy page URL and direct media URLs work:
 
 ```markdown
-https://giphy.com/gifs/season-17-the-simpsons-17x6-xT5LMB2WiOdjpB7K4o
+ https://giphy.com/gifs/season-17-the-simpsons-17x6-xT5LMB2WiOdjpB7K4o
 
-https://media.giphy.com/media/xT5LMB2WiOdjpB7K4o/giphy.gif
+ https://media.giphy.com/media/xT5LMB2WiOdjpB7K4o/giphy.gif
 ```
 
 Both render the same animated GIF:

@@ -9,15 +9,18 @@ date: 2026-01-01
 # Modified at Thu Dec 18 22:34:51 MST 2025
 # Test modification 32311
 
-* Unordered
+* Unordered [^foo]
   1. Ordered
   2. Ordered
 * Unordered
 
 
-1. Ordered
+1. Ordered [^bar]
 2. Ordered
   * Unordered
     1. Ordered
   * Unordered
 3. Ordered
+
+[^foo]: Reference to <https://example.com>
+[^bar]: Other footnote
