@@ -12,7 +12,6 @@ use std::{
 };
 
 use percent_encoding::percent_decode_str;
-use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -965,56 +964,23 @@ impl Builder {
             }
         };
 
-        // Collect all HTML file paths first
-        let mbr_dir = self.output_dir.join(".mbr");
-        let html_files: Vec<PathBuf> = WalkDir::new(&self.output_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
-            .filter(|e| !e.path().starts_with(&mbr_dir))
-            .map(|e| e.path().to_path_buf())
-            .collect();
+        // Use add_directory for parallel indexing via rayon (in pagefind's fossick_many)
+        // The glob **/*.html naturally excludes .mbr/ since it has no HTML files
+        let path = self.output_dir.to_string_lossy().to_string();
+        let files_indexed = match index
+            .add_directory(path, Some("**/*.html".to_string()))
+            .await
+        {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to index directory: {}", e);
+                return false;
+            }
+        };
 
-        let total_files = html_files.len();
-        if total_files == 0 {
+        if files_indexed == 0 {
             tracing::warn!("No HTML files found to index");
             return false;
-        }
-
-        let mut files_indexed = 0;
-        const BATCH_SIZE: usize = 5000;
-
-        // Process in batches to limit memory usage (44k+ files possible)
-        for batch in html_files.chunks(BATCH_SIZE) {
-            // Read all files in this batch in parallel using rayon
-            let output_dir = &self.output_dir;
-            let file_contents: Vec<(String, String)> = batch
-                .par_iter()
-                .filter_map(|path| {
-                    let content = fs::read_to_string(path).ok()?;
-                    let relative = path.strip_prefix(output_dir).ok()?;
-                    let url = format!("/{}", relative.display())
-                        .replace("/index.html", "/")
-                        .replace("\\", "/");
-                    Some((url, content))
-                })
-                .collect();
-
-            // Feed to Pagefind sequentially (add_html_file requires &mut self)
-            for (url_path, html_content) in file_contents {
-                match index
-                    .add_html_file(None, Some(url_path.clone()), html_content)
-                    .await
-                {
-                    Ok(_) => files_indexed += 1,
-                    Err(e) => tracing::debug!("Failed to index {}: {}", url_path, e),
-                }
-            }
-
-            // Progress output
-            print_progress("Building search index", files_indexed, total_files);
         }
 
         // Get the generated index files
