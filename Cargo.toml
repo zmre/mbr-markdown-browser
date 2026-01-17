@@ -74,7 +74,6 @@ nucleo-matcher = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 pagefind = "1.4"
-#pagefind = { path = "/Users/pwalsh/src/sideprojects/pagefind-zmre-fork/2026-01-15-rayon-parallel-perf/pagefind" }
 
 # Image processing with minimal features (only needed formats)
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
