@@ -87,6 +87,11 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     pub build_concurrency: Option<usize>,
 
+    /// Skip internal link validation during static build (-b).
+    /// Useful for faster builds when you don't need link checking.
+    #[arg(long)]
+    pub skip_link_checks: bool,
+
     /// [EXPERIMENTAL] Enable dynamic video transcoding to serve lower-resolution
     /// HLS variants (720p, 480p) for bandwidth savings. Only active in server/GUI mode.
     /// Videos are transcoded on-demand as segments and cached in memory.

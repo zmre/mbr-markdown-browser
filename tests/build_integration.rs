@@ -291,8 +291,8 @@ async fn test_build_includes_components() {
 
     // Should include the components script
     assert!(
-        html.contains("mbr-components.js"),
-        "Expected mbr-components.js script reference in HTML"
+        html.contains("mbr-components.min.js"),
+        "Expected mbr-components.min.js script reference in HTML"
     );
 }
 

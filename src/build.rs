@@ -5,7 +5,9 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
@@ -73,6 +75,27 @@ fn relative_root(depth: usize) -> String {
     } else {
         "../".repeat(depth)
     }
+}
+
+/// Prints a progress stage message to stdout.
+///
+/// This bypasses the logging system to provide direct user feedback during builds.
+fn print_stage(stage: &str) {
+    print!("\r\x1b[K{}", stage);
+    let _ = io::stdout().flush();
+}
+
+/// Prints a progress update with count/total to stdout.
+///
+/// Uses carriage return to update in place for a cleaner terminal experience.
+fn print_progress(stage: &str, current: usize, total: usize) {
+    print!("\r\x1b[K{} ({}/{})", stage, current, total);
+    let _ = io::stdout().flush();
+}
+
+/// Prints a completed stage message with a newline.
+fn print_stage_done(stage: &str, count: usize) {
+    println!("\r\x1b[K{} ... {} done", stage, count);
 }
 
 /// Convert an absolute URL path to a relative URL from the given depth.
@@ -181,15 +204,20 @@ impl Builder {
         let mut stats = BuildStats::default();
 
         // Scan repository for all files
+        print_stage("Scanning repository...");
         self.repo
             .scan_all()
             .map_err(|e| crate::errors::RepoError::ScanFailed {
                 path: self.config.root_dir.clone(),
                 source: std::io::Error::other(e.to_string()),
             })?;
+        let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
+        print_stage_done("Scanning repository", file_count);
 
         // Prepare output directory
+        print_stage("Cleaning output directory...");
         self.prepare_output_dir()?;
+        println!("\r\x1b[KCleaning output directory ... done");
 
         // Render all markdown files
         stats.markdown_pages = self.render_markdown_files().await?;
@@ -198,34 +226,52 @@ impl Builder {
         stats.section_pages = self.render_directory_pages().await?;
 
         // Symlink assets (images, PDFs, etc.)
+        print_stage("Linking assets...");
         stats.assets_linked = self.symlink_assets()?;
+        print_stage_done("Linking assets", stats.assets_linked);
 
         // Handle static folder overlay
+        print_stage("Processing static folder...");
         self.handle_static_folder()?;
+        println!("\r\x1b[KProcessing static folder ... done");
 
         // Handle .mbr folder (copy, write defaults, generate site.json)
+        print_stage("Copying theme and assets...");
         self.handle_mbr_folder()?;
+        println!("\r\x1b[KCopying theme and assets ... done");
 
         // Generate 404.html for GitHub Pages compatibility
         self.generate_404_page()?;
 
         // Validate internal links and report broken ones
-        let broken_links = self.validate_links();
-        stats.broken_links = broken_links.len();
+        if self.config.skip_link_checks {
+            println!("Validating links ... skipped");
+        } else {
+            print_stage("Validating links...");
+            let broken_links = self.validate_links();
+            stats.broken_links = broken_links.len();
+            println!("\r\x1b[KValidating links ... done");
 
-        if !broken_links.is_empty() {
-            eprintln!(
-                "\n⚠️  Broken links detected ({} total):",
-                broken_links.len()
-            );
-            for link in &broken_links {
-                eprintln!("   {} → {}", link.source_page, link.link_url);
+            if !broken_links.is_empty() {
+                eprintln!(
+                    "\n⚠️  Broken links detected ({} total):",
+                    broken_links.len()
+                );
+                for link in &broken_links {
+                    eprintln!("   {} → {}", link.source_page, link.link_url);
+                }
+                eprintln!();
             }
-            eprintln!();
         }
 
         // Run Pagefind to generate search index
+        print_stage("Building search index...");
         stats.pagefind_indexed = Some(self.run_pagefind().await);
+        if stats.pagefind_indexed == Some(true) {
+            println!("\r\x1b[KBuilding search index ... done");
+        } else {
+            println!("\r\x1b[KBuilding search index ... skipped");
+        }
 
         stats.duration = start.elapsed();
         Ok(stats)
@@ -274,12 +320,26 @@ impl Builder {
             concurrency
         );
 
+        // Progress counter for parallel rendering
+        let completed = Arc::new(AtomicUsize::new(0));
+        print_progress("Rendering markdown", 0, count);
+
+        let completed_clone = completed.clone();
         stream::iter(markdown_files)
-            .map(|(path, info)| async move { self.render_single_markdown(&path, &info).await })
+            .map(|(path, info)| {
+                let completed = completed_clone.clone();
+                async move {
+                    let result = self.render_single_markdown(&path, &info).await;
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    print_progress("Rendering markdown", done, count);
+                    result
+                }
+            })
             .buffer_unordered(concurrency)
             .try_collect::<Vec<_>>()
             .await?;
 
+        print_stage_done("Rendering markdown", count);
         Ok(count)
     }
 
@@ -433,15 +493,29 @@ impl Builder {
             concurrency
         );
 
+        // Progress counter for parallel rendering
+        let completed = Arc::new(AtomicUsize::new(0));
+        print_progress("Generating sections", 0, count);
+
         // Convert HashSet to Vec for stream iteration
         let directories: Vec<_> = directories.into_iter().collect();
 
+        let completed_clone = completed.clone();
         stream::iter(directories)
-            .map(|dir| async move { self.render_directory_page(&dir).await })
+            .map(|dir| {
+                let completed = completed_clone.clone();
+                async move {
+                    let result = self.render_directory_page(&dir).await;
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    print_progress("Generating sections", done, count);
+                    result
+                }
+            })
             .buffer_unordered(concurrency)
             .try_collect::<Vec<_>>()
             .await?;
 
+        print_stage_done("Generating sections", count);
         Ok(count)
     }
 
@@ -890,52 +964,19 @@ impl Builder {
             }
         };
 
-        // Walk through all HTML files in output directory
-        let mut files_indexed = 0;
-        for entry in WalkDir::new(&self.output_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
+        // Use add_directory for parallel indexing via rayon (in pagefind's fossick_many)
+        // The glob **/*.html naturally excludes .mbr/ since it has no HTML files
+        let path = self.output_dir.to_string_lossy().to_string();
+        let files_indexed = match index
+            .add_directory(path, Some("**/*.html".to_string()))
+            .await
         {
-            let path = entry.path();
-
-            // Skip .mbr directory
-            if path.starts_with(self.output_dir.join(".mbr")) {
-                continue;
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to index directory: {}", e);
+                return false;
             }
-
-            // Read HTML content
-            let html_content = match fs::read_to_string(path) {
-                Ok(content) => content,
-                Err(e) => {
-                    tracing::debug!("Failed to read {}: {}", path.display(), e);
-                    continue;
-                }
-            };
-
-            // Calculate URL path from file path
-            let relative_path = path.strip_prefix(&self.output_dir).unwrap_or(path);
-            let url_path = format!("/{}", relative_path.display())
-                .replace("/index.html", "/")
-                .replace("\\", "/");
-
-            // Add to index - parameters are: source_path, url, content
-            // We use url (2nd param) since we have the explicit URL path
-            match index
-                .add_html_file(None, Some(url_path.clone()), html_content)
-                .await
-            {
-                Ok(_) => {
-                    files_indexed += 1;
-                    tracing::debug!("Indexed: {}", url_path);
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to index {}: {}", url_path, e);
-                }
-            }
-        }
+        };
 
         if files_indexed == 0 {
             tracing::warn!("No HTML files found to index");

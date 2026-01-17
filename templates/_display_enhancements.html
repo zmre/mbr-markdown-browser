@@ -1,0 +1,6 @@
+{% if not asset_base %}{% set asset_base = relative_base | default(value="/.mbr/") %}{% endif %}
+<!-- Display enhancement components - dynamically load only what's needed -->
+<mbr-hljs></mbr-hljs>
+<mbr-mermaid></mbr-mermaid>
+<mbr-katex></mbr-katex>
+<mbr-link-enhancement></mbr-link-enhancement>

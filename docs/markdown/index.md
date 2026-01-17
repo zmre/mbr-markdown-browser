@@ -14,14 +14,15 @@ These are pulldown-cmark's built-in extensions:
 
 | Extension | Syntax | Example |
 |-----------|--------|---------|
-| Tables | GFM tables | `\| Col1 \| Col2 \|` |
-| Footnotes | `[^1]` references | `Text[^1]` + `[^1]: Note` |
-| Strikethrough | `~~text~~` | ~~deleted text~~ |
-| Task lists | `- [ ]` / `- [x]` | Checkboxes in lists |
-| Smart punctuation | `"quotes"`, `--` | Curly quotes, em-dashes |
-| Heading attributes | `# Title {#id}` | Custom anchor IDs |
+| [Tables](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_table.html) | GFM tables | `\| Col1 \| Col2 \|` |
+| [Footnotes](https://pulldown-cmark.github.io/pulldown-cmark/specs/footnotes.html) | `[^1]` references | `Text[^1]` + `[^1]: Note` |
+| [Strikethrough](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_strikethrough.html) | `~~text~~` | ~~deleted text~~ |
+| [Task lists](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_tasklist.html) | `- [ ]` / `- [x]` | Checkboxes in lists |
+| [Smart punctuation](https://pulldown-cmark.github.io/pulldown-cmark/third_party/smart_punct.html) | `"quotes"`, `--` | Curly quotes, em-dashes |
+| [Heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html) | `# Title {#id}` or `# Title {.myclass}` | Custom anchor IDs or classes |
 | Autolinks | `<https://...>` | Clickable URLs |
-| Math | `$...$` / `$$...$$` | LaTeX via KaTeX |
+| [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$` | LaTeX via KaTeX |
+| [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" |
 
 ## YAML Frontmatter
 
@@ -215,8 +216,7 @@ c & d
 \begin{pmatrix}
 x \\
 y
-\end{pmatrix}
-=
+\end{pmatrix} =
 \begin{pmatrix}
 ax + by \\
 cx + dy
@@ -291,11 +291,7 @@ Here is a statement that needs citation[^1].
 
 mbr uses pulldown-cmark for markdown parsing[^1], which provides excellent CommonMark compliance and performance[^2].
 
-[^1]: pulldown-cmark is a Rust library that parses markdown to events, allowing flexible rendering.
-
-[^2]: The library uses SIMD optimizations for faster text processing.
-
-Footnotes appear at the bottom of the page with back-links.
+Footnotes appear at the bottom of the page.
 
 ## Heading Anchors
 
@@ -323,3 +319,11 @@ URLs in angle brackets become clickable:
 ## See Also
 
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
+
+
+## Footnotes
+
+[^1]: pulldown-cmark is a Rust library that parses markdown to events, allowing flexible rendering.
+
+[^2]: The library uses SIMD optimizations for faster text processing.
+

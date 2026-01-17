@@ -42,7 +42,7 @@ metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/a
 ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
 papaya = "0.2.3"
 pathdiff = "0.2.3"
-lopdf = { version = "0.38", default-features = false, features = ["rayon"] }
+lopdf = { version = "0.39", default-features = false, features = ["rayon"] }
 percent-encoding = "2.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
@@ -64,10 +64,10 @@ url = "2.5"
 walkdir = "2.5"
 thiserror = "2.0"
 parking_lot = "0.12"
-uniffi = { version = "0.29", features = ["cli", "bindgen"], optional = true }
+uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 yaml-rust2 = "0.11"
 # GUI dependencies (optional, enabled by default "gui" feature)
-wry = { version = "0.53", default-features = true, features = ["devtools", "fullscreen"], optional = true }
+wry = { version = "0.54", default-features = true, features = ["devtools", "fullscreen"], optional = true }
 
 # Search functionality
 nucleo-matcher = "0.3"
@@ -92,7 +92,7 @@ proptest = "1.5"
 tempfile = "3.14"
 
 [build-dependencies]
-uniffi = { version = "0.29", features = ["build"] }
+uniffi = { version = "0.31", features = ["build"] }
 
 [[bin]]
 name = "uniffi-bindgen"
