@@ -234,8 +234,8 @@
         pname = "mbr-components";
         inherit version;
         src = ./components;
-        # npmDepsHash = pkgs.lib.fakeHash;
-        npmDepsHash = "sha256-qWsHQidGobEZmqTlYd+wHyEQnshV6fF3z/Sr5fTaNS0=";
+        #npmDepsHash = pkgs.lib.fakeHash;
+        npmDepsHash = "sha256-KIGfIZwSjtHWs7uvFYvro4FRN1QmZi9JpSL8cyWKGoI=";
         buildPhase = ''
           npm run build
         '';
@@ -388,8 +388,7 @@
               platforms = platforms.darwin;
             };
           }
-        else
-          packages.mbr-cli; # On Linux, mbr = mbr-cli
+        else packages.mbr-cli; # On Linux, mbr = mbr-cli
 
       # Clippy check - runs lints without full build
       packages.clippy = craneLib.cargoClippy (commonArgs
