@@ -230,9 +230,9 @@ pub async fn render_with_cache(
         processed_events.push(processed);
     }
 
-    // Write to a new String buffer.
+    // Write to a new String buffer with MBR extensions (sections, mermaid)
     let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
-    crate::html::push_html(&mut html_output, processed_events.into_iter());
+    crate::html::push_html_mbr(&mut html_output, processed_events.into_iter());
     Ok((
         yaml_frontmatter_simplified(&state.metadata_parsed),
         headings,
