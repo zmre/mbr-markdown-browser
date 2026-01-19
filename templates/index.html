@@ -5,7 +5,7 @@
 {% include "_head_markdown.html" %}
 {% include "_head_custom.html" %}
   </head>
-  <body>
+  <body{% if style %} class="{{ style | replace(from=", ", to=" ") }}"{% endif %}>
 {% include "_nav.html" %}
 {% include "_breadcrumbs.html" %}
     <main id="wrapper" class="container" data-pagefind-body>{% if title %}<span class="sr-only" data-pagefind-weight="10">{{ title }}</span>{% endif %}{{ markdown | safe}}</main>
