@@ -307,6 +307,59 @@ Links to `#my-section`. Override with explicit IDs:
 ## My Section {#custom-id}
 ```
 
+## Section Attributes
+
+When `enable_sections` is active (default for server/GUI mode), horizontal rules (`---`) divide content into `<section>` elements. You can add attributes to the **following** section by placing an attribute block after the rule:
+
+```markdown
+--- {#intro .highlight}
+
+This content is in a section with id="intro" and class="highlight".
+
+--- {.slide data-transition="fade"}
+
+This section has class="slide" and a custom data attribute.
+
+---
+
+Plain section (no attributes).
+```
+
+### Attribute Syntax
+
+The attribute block follows [pulldown-cmark's heading attributes syntax](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html):
+
+| Syntax | Result | Example |
+|--------|--------|---------|
+| `#id` | ID attribute | `{#intro}` → `id="intro"` |
+| `.class` | CSS class | `{.highlight}` → `class="highlight"` |
+| `key=value` | Custom attribute | `{data-x=y}` → `data-x="y"` |
+| `key="value"` | Quoted value | `{title="Hello World"}` |
+
+Multiple attributes can be combined:
+
+```markdown
+--- {#section-1 .slide .center data-transition="slide" data-background="#fff"}
+```
+
+### Use Cases
+
+**Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds.
+
+**Styling:** Target specific sections with CSS using IDs or classes.
+
+**JavaScript hooks:** Add data attributes for interactive behavior.
+
+### Live Example
+
+--- {#demo-section .highlighted-section}
+
+This section has `id="demo-section"` and `class="highlighted-section"`. Inspect the HTML to verify!
+
+---
+
+Back to a plain section.
+
 ## Auto-linking
 
 URLs in angle brackets become clickable:

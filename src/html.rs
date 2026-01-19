@@ -54,6 +54,7 @@
 
 use std::collections::HashMap;
 
+use crate::attrs::ParsedAttrs;
 use pulldown_cmark_escape::IoWriter;
 use pulldown_cmark_escape::{FmtWriter, StrWrite, escape_href, escape_html, escape_html_body_text};
 
@@ -85,14 +86,32 @@ pub struct HtmlConfig {
     /// Render \`\`\`mermaid code blocks as `<pre class="mermaid">` without
     /// the `<code>` wrapper, allowing mermaid.js to render diagrams directly.
     pub enable_mermaid: bool,
+
+    /// Attributes for each section (by 1-based index).
+    ///
+    /// Section 0 is the first section (before any `---`), section 1 is after the
+    /// first `---`, etc. When rendering, attributes are applied to the `<section>` tag.
+    ///
+    /// Use syntax like `--- {#id .class data-attr="value"}` in markdown to set attrs.
+    pub section_attrs: HashMap<usize, ParsedAttrs>,
 }
 
 impl HtmlConfig {
-    /// Standard MBR configuration with all extensions enabled.
+    /// Standard MBR configuration with all extensions enabled and no section attrs.
     pub fn mbr_defaults() -> Self {
         Self {
             enable_sections: true,
             enable_mermaid: true,
+            section_attrs: HashMap::new(),
+        }
+    }
+
+    /// Standard MBR configuration with section attributes.
+    pub fn mbr_with_section_attrs(section_attrs: HashMap<usize, ParsedAttrs>) -> Self {
+        Self {
+            enable_sections: true,
+            enable_mermaid: true,
+            section_attrs,
         }
     }
 }
@@ -132,6 +151,9 @@ struct HtmlWriter<'a, I, W> {
 
     // MBR EXTENSION: Section wrapping - tracks if opening section was emitted
     section_started: bool,
+
+    // MBR EXTENSION: Section attributes - tracks current section index (0-based)
+    current_section: usize,
 }
 
 impl<'a, I, W> HtmlWriter<'a, I, W>
@@ -156,6 +178,7 @@ where
             numbers: HashMap::new(),
             config,
             section_started: false,
+            current_section: 0,
         }
     }
 
@@ -178,9 +201,15 @@ where
     }
 
     fn run(mut self) -> Result<(), W::Error> {
-        // MBR EXTENSION: Emit opening section tag
+        // MBR EXTENSION: Emit opening section tag with optional attrs
         if self.config.enable_sections {
-            self.write("<section>\n")?;
+            let attrs_str = self
+                .config
+                .section_attrs
+                .get(&self.current_section)
+                .map(|a| a.to_html_attr_string())
+                .unwrap_or_default();
+            self.write(&format!("<section{}>\n", attrs_str))?;
             self.section_started = true;
         }
 
@@ -222,10 +251,18 @@ where
                 HardBreak => {
                     self.write("<br />\n")?;
                 }
-                // MBR EXTENSION: Section dividers
+                // MBR EXTENSION: Section dividers with optional attrs
                 Rule => {
                     if self.config.enable_sections {
-                        self.write("</section>\n<hr />\n<section>\n")?;
+                        // Increment section index before opening the next section
+                        self.current_section += 1;
+                        let attrs_str = self
+                            .config
+                            .section_attrs
+                            .get(&self.current_section)
+                            .map(|a| a.to_html_attr_string())
+                            .unwrap_or_default();
+                        self.write(&format!("</section>\n<hr />\n<section{}>\n", attrs_str))?;
                     } else {
                         // Standard pulldown-cmark behavior
                         if self.end_newline {
@@ -780,6 +817,40 @@ where
     I: Iterator<Item = Event<'a>>,
 {
     write_html_fmt_with_config(s, iter, HtmlConfig::mbr_defaults()).unwrap()
+}
+
+/// Push HTML with MBR extensions and section attributes.
+///
+/// Like [`push_html_mbr`] but with pre-parsed section attributes. Attributes
+/// are applied to `<section>` tags based on their index (0-based).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use mbr::html::push_html_mbr_with_attrs;
+/// use mbr::attrs::ParsedAttrs;
+/// use pulldown_cmark::Parser;
+/// use std::collections::HashMap;
+///
+/// let markdown = "First section\n\n---\n\nSecond section";
+/// let parser = Parser::new(markdown);
+///
+/// let mut section_attrs = HashMap::new();
+/// section_attrs.insert(1, ParsedAttrs::parse("{#intro .highlight}").unwrap());
+///
+/// let mut html = String::new();
+/// push_html_mbr_with_attrs(&mut html, parser, section_attrs);
+///
+/// // Output includes: <section id="intro" class="highlight">
+/// ```
+pub fn push_html_mbr_with_attrs<'a, I>(
+    s: &mut String,
+    iter: I,
+    section_attrs: HashMap<usize, ParsedAttrs>,
+) where
+    I: Iterator<Item = Event<'a>>,
+{
+    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_with_section_attrs(section_attrs)).unwrap()
 }
 
 /// Push HTML with explicit configuration.
