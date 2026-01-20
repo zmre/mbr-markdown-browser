@@ -82,8 +82,9 @@ This slide has centered class
 | `->` / `Space` | Next slide |
 | `<-` | Previous slide |
 | `Esc` / `O` | Overview mode |
-| `S` | Speaker notes |
-| `F` | Fullscreen |
+| `s` | Speaker notes |
+| `g` | Speaker notes |
+| `f` | Fullscreen |
 | `?` | Help overlay |
 
 ## Tips
@@ -94,6 +95,8 @@ This slide has centered class
 - **Mermaid**: Diagrams work in presentation mode
 
 ## Example
+
+Use a [live example](/examples/test-slides/).
 
 Create a test presentation:
 

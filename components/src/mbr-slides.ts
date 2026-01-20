@@ -1,21 +1,22 @@
 /**
- * Reveal.js slides dynamic loader component.
+ * Reveal.js slides component with Play button.
  *
- * Transforms markdown pages into Reveal.js presentations when the body has
- * the "slides" class (set by `style: slides` frontmatter).
+ * When a page has the "slides" class (set by `style: slides` frontmatter),
+ * this component displays a "Play Slides" button in the nav bar.
+ * Clicking the button transforms the page into a Reveal.js presentation.
  *
  * Detection: <body class="slides">
  *
- * Transformation:
- * 1. Changes body class from "slides" to "slides-container" (avoids conflict with Reveal.js .slides wrapper)
+ * Transformation (on button click):
+ * 1. Changes body class from "slides" to "slides-container"
  * 2. Loads Reveal.js CSS, JS, and notes plugin
  * 3. Removes <hr> elements (slide separators in markdown become DOM sections)
- * 4. Transforms marginalia (>>>) into speaker notes (<aside class="notes">)
+ * 4. Transforms triple blockquotes (>>>) into speaker notes (<aside class="notes">)
  * 5. Wraps sections in .reveal > .slides structure
  * 6. Initializes Reveal.js with notes plugin
  */
-import { LitElement, nothing } from 'lit'
-import { customElement } from 'lit/decorators.js'
+import { LitElement, html, css, nothing } from 'lit'
+import { customElement, state } from 'lit/decorators.js'
 import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
 
 interface RevealPlugin {
@@ -31,27 +32,134 @@ interface WindowWithReveal extends Window {
 
 @customElement('mbr-slides')
 export class MbrSlidesElement extends LitElement {
-  private _initialized = false
+  @state()
+  private _isSlideDocument = false
+
+  @state()
+  private _isPlaying = false
+
+  @state()
+  private _isLoading = false
+
+  static override styles = css`
+    :host {
+      display: contents;
+    }
+
+    .play-slides-btn {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.7rem;
+      background: var(--pico-primary-background, #1095c1);
+      color: var(--pico-primary-inverse, #fff);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: background 0.15s ease, transform 0.1s ease;
+      white-space: nowrap;
+    }
+
+    .play-slides-btn:hover {
+      background: var(--pico-primary-hover-background, #0d7a9c);
+      transform: translateY(-1px);
+    }
+
+    .play-slides-btn:active {
+      transform: translateY(0);
+    }
+
+    .play-slides-btn:disabled {
+      opacity: 0.7;
+      cursor: wait;
+    }
+
+    .play-icon {
+      width: 0;
+      height: 0;
+      border-left: 8px solid currentColor;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      margin-right: 2px;
+    }
+
+    .loading-spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  `
+
+  private _boundKeyHandler: ((e: KeyboardEvent) => void) | null = null
 
   override connectedCallback() {
     super.connectedCallback()
-    waitForDom().then(() => this._enhance()).catch(err => console.error('[mbr-slides] Error in enhance:', err))
+    waitForDom().then(() => {
+      this._isSlideDocument = document.body.classList.contains('slides')
+
+      // Auto-start presentation for speaker notes windows and multiplex receivers
+      // - data-speaker-layout: Reveal.js speaker notes popup
+      // - ?receiver: Reveal.js multiplex receiver window
+      const isSpeakerLayout = document.body.hasAttribute('data-speaker-layout')
+      const isReceiver = window.location.search.includes('receiver')
+      if (this._isSlideDocument && (isSpeakerLayout || isReceiver)) {
+        this._startPresentation()
+      }
+
+      // Add keyboard shortcut for slides documents
+      if (this._isSlideDocument) {
+        this._boundKeyHandler = this._handleKeyPress.bind(this)
+        document.addEventListener('keydown', this._boundKeyHandler)
+      }
+    }).catch(err => console.error('[mbr-slides] Error:', err))
   }
 
-  private async _enhance() {
-    if (this._initialized) return
-    if (!document.body.classList.contains('slides')) return
+  override disconnectedCallback() {
+    super.disconnectedCallback()
+    if (this._boundKeyHandler) {
+      document.removeEventListener('keydown', this._boundKeyHandler)
+      this._boundKeyHandler = null
+    }
+  }
 
-    this._initialized = true
+  private _handleKeyPress(e: KeyboardEvent) {
+    // Don't trigger if user is typing in an input or textarea
+    const target = e.target as HTMLElement
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+      return
+    }
 
-    // Transform body class to avoid conflict with Reveal.js .slides wrapper
-    document.body.classList.remove('slides')
-    document.body.classList.add('slides-container')
+    // Press 'p' to start presentation
+    if (e.key === 'p' || e.key === 'P') {
+      if (!this._isPlaying && !this._isLoading) {
+        e.preventDefault()
+        this._startPresentation()
+      }
+    }
+  }
 
-    const assetBase = getMbrAssetBase()
+  private async _startPresentation() {
+    if (this._isPlaying || this._isLoading) return
 
-    // Load Reveal.js CSS, JS, and notes plugin
+    this._isLoading = true
+
     try {
+      // Transform body class to avoid conflict with Reveal.js .slides wrapper
+      document.body.classList.remove('slides')
+      document.body.classList.add('slides-container')
+
+      const assetBase = getMbrAssetBase()
+
+      // Load Reveal.js CSS, JS, and notes plugin
       await Promise.all([
         loadCss(`${assetBase}reveal.css`),
         loadCss(`${assetBase}reveal-theme-black.css`),
@@ -59,46 +167,52 @@ export class MbrSlidesElement extends LitElement {
         loadScript(`${assetBase}reveal.js`),
         loadScript(`${assetBase}reveal-notes.js`),
       ])
+
+      const win = window as WindowWithReveal
+
+      // Poll for Reveal.js to be available (script execution may be async)
+      let attempts = 0
+      while (!win.Reveal && attempts < 50) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+        attempts++
+      }
+
+      if (!win.Reveal) {
+        console.error('[mbr-slides] Reveal.js failed to load')
+        this._isLoading = false
+        return
+      }
+
+      this._transformDom()
+      this._isPlaying = true
+
+      // Build plugins array (only include loaded plugins)
+      const plugins: RevealPlugin[] = []
+      if (win.RevealNotes) plugins.push(win.RevealNotes)
+
+      scheduleIdleTask(async () => {
+        try {
+          await win.Reveal!.initialize({
+            hash: true,
+            history: false,
+            controls: true,
+            progress: true,
+            center: true,
+            transition: 'slide',
+            plugins,
+          })
+        } catch (initError) {
+          console.error('[mbr-slides] Reveal.js initialization failed:', initError)
+        }
+      })
     } catch (loadError) {
       console.error('[mbr-slides] Failed to load assets:', loadError)
-      return
+      // Restore original class on error
+      document.body.classList.remove('slides-container')
+      document.body.classList.add('slides')
+    } finally {
+      this._isLoading = false
     }
-
-    const win = window as WindowWithReveal
-
-    // Poll for Reveal.js to be available (script execution may be async)
-    let attempts = 0
-    while (!win.Reveal && attempts < 50) {
-      await new Promise(resolve => setTimeout(resolve, 10))
-      attempts++
-    }
-
-    if (!win.Reveal) {
-      console.error('[mbr-slides] Reveal.js failed to load')
-      return
-    }
-
-    this._transformDom()
-
-    // Build plugins array (only include loaded plugins)
-    const plugins: RevealPlugin[] = []
-    if (win.RevealNotes) plugins.push(win.RevealNotes)
-
-    scheduleIdleTask(async () => {
-      try {
-        await win.Reveal!.initialize({
-          hash: true,
-          history: false,
-          controls: true,
-          progress: true,
-          center: true,
-          transition: 'slide',
-          plugins,
-        })
-      } catch (initError) {
-        console.error('[mbr-slides] Reveal.js initialization failed:', initError)
-      }
-    })
   }
 
   private _transformDom() {
@@ -156,7 +270,25 @@ export class MbrSlidesElement extends LitElement {
   }
 
   override render() {
-    return nothing
+    // Only show button if this is a slides document and not already playing
+    if (!this._isSlideDocument || this._isPlaying) {
+      return nothing
+    }
+
+    return html`
+      <button
+        class="play-slides-btn"
+        @click=${this._startPresentation}
+        ?disabled=${this._isLoading}
+        title="Start presentation mode (P)"
+      >
+        ${this._isLoading
+          ? html`<span class="loading-spinner"></span>`
+          : html`<span class="play-icon"></span>`
+        }
+        <span>${this._isLoading ? 'Loading...' : 'Play Slides (P)'}</span>
+      </button>
+    `
   }
 }
 
