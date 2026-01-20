@@ -83,6 +83,10 @@ static GIPHY_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"https?://(?:www\.)?giphy\.com/gifs/(?:[^/]+-)?([a-zA-Z0-9]+)(?:\?.*)?$").unwrap()
 });
 
+// GIST regex patterns
+static GIST_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"https?://gist\.github\.com/").unwrap());
+
 #[derive(Default, Clone)]
 pub struct PageInfo {
     pub url: String,
@@ -183,10 +187,37 @@ impl PageInfo {
         None
     }
 
+    /// Check if URL is a gist URL and create embed HTML
+    /// Matches patterns like:
+    /// - https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea
+    /// - https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea#file-order-ts
+    fn gist_embed(url: &str) -> Option<String> {
+        if GIST_RE.is_match(url) {
+            // Handle fragment - .js must come before #fragment
+            let script_url = if let Some(hash_pos) = url.find('#') {
+                let (path, fragment) = url.split_at(hash_pos);
+                format!("{}.js{}", path, fragment)
+            } else {
+                format!("{}.js", url)
+            };
+            return Some(format!(r#"<script src="{}"></script>"#, script_url));
+        }
+        None
+    }
+
     pub async fn new_from_url(
         url: &str,
         timeout_ms: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // If timeout is 0, oembed is disabled - return a plain link without network call or substitution
+        if timeout_ms == 0 {
+            // tracing::debug!("Oembed disabled, ignoring url {}", &url);
+            return Ok(PageInfo {
+                url: url.to_string(),
+                ..Default::default()
+            });
+        }
+
         // Check for YouTube first - no need to fetch the page
         if let Some(embed_html) = Self::youtube_embed(url) {
             return Ok(PageInfo {
@@ -205,11 +236,11 @@ impl PageInfo {
             });
         }
 
-        // If timeout is 0, oembed is disabled - return a plain link without network call
-        if timeout_ms == 0 {
-            // tracing::debug!("Oembed disabled, ignoring url {}", &url);
+        // Check for GitHub gist - embed without fetching
+        if let Some(embed_html) = Self::gist_embed(url) {
             return Ok(PageInfo {
                 url: url.to_string(),
+                embed_html: Some(embed_html),
                 ..Default::default()
             });
         }
@@ -437,25 +468,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_zero_timeout_still_embeds_youtube() {
-        // YouTube embeds should still work with timeout=0 (no network needed)
+    async fn test_zero_timeout_disables_youtube_embed() {
+        // With timeout=0, ALL enrichment is disabled - even no-network embeds like YouTube
         let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
         let result = PageInfo::new_from_url(url, 0).await;
         assert!(result.is_ok());
         let info = result.unwrap();
-        assert!(info.embed_html.is_some());
-        assert!(info.embed_html.unwrap().contains("youtube-embed"));
+        assert!(info.embed_html.is_none());
+        // Should return a plain link instead
+        assert!(info.html().contains("<a href="));
     }
 
     #[tokio::test]
-    async fn test_zero_timeout_still_embeds_giphy() {
-        // Giphy embeds should still work with timeout=0 (no network needed)
+    async fn test_zero_timeout_disables_giphy_embed() {
+        // With timeout=0, ALL enrichment is disabled - even no-network embeds like Giphy
         let url = "https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif";
         let result = PageInfo::new_from_url(url, 0).await;
         assert!(result.is_ok());
         let info = result.unwrap();
-        assert!(info.embed_html.is_some());
-        assert!(info.embed_html.unwrap().contains("giphy-embed"));
+        assert!(info.embed_html.is_none());
+        // Should return a plain link instead
+        assert!(info.html().contains("<a href="));
     }
 
     #[test]
@@ -497,5 +530,49 @@ mod tests {
         assert_eq!(cloned.url, info.url);
         assert_eq!(cloned.title, info.title);
         assert_eq!(cloned.embed_html, info.embed_html);
+    }
+
+    #[test]
+    fn test_gist_embed_basic() {
+        let url = "https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea";
+        let embed = PageInfo::gist_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains(
+            r#"<script src="https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea.js"></script>"#
+        ));
+    }
+
+    #[test]
+    fn test_gist_embed_with_fragment() {
+        let url = "https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea#file-order-ts";
+        let embed = PageInfo::gist_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        // .js should come BEFORE the fragment
+        assert!(html.contains(
+            r#"<script src="https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea.js#file-order-ts"></script>"#
+        ));
+    }
+
+    #[test]
+    fn test_gist_embed_http() {
+        let url = "http://gist.github.com/user/abc123";
+        let embed = PageInfo::gist_embed(url);
+        assert!(embed.is_some());
+    }
+
+    #[test]
+    fn test_gist_non_gist_url() {
+        let url = "https://github.com/user/repo";
+        let embed = PageInfo::gist_embed(url);
+        assert!(embed.is_none());
+    }
+
+    #[test]
+    fn test_gist_not_youtube() {
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let embed = PageInfo::gist_embed(url);
+        assert!(embed.is_none());
     }
 }
