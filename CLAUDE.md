@@ -182,7 +182,7 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
 | `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
-| `vid.rs` | Video embed handling with VidStack player and shortcodes |
+| `vid.rs` | Video embed handling and shortcodes |
 | `video_transcode.rs` | HLS-based video transcoding - playlist generation and segment transcoding (requires `media-metadata` feature) |
 | `video_transcode_cache.rs` | LRU cache for HLS playlists and segments using papaya concurrent hashmap |
 | `oembed.rs` | Auto-embed for bare URLs in markdown (YouTube, Giphy, OpenGraph) |
@@ -237,7 +237,7 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 
 - `/{path}` - Markdown files rendered to HTML (trailing slash convention)
 - `/.mbr/site.json` - Full site index with all files and frontmatter
-- `/.mbr/*` - Static assets (theme.css, components, vidstack player)
+- `/.mbr/*` - Static assets (theme.css, components)
 
 ### Lit Web Components
 
@@ -262,7 +262,7 @@ The project uses Tera templates with a partial-based architecture. Templates are
 - `_nav.html` - Navigation header with breadcrumbs and menus
 - `_footer.html` - Page footer with web components
 - `_scripts.html` - Base script includes
-- `_scripts_markdown.html` - Extended scripts for markdown (hljs, mermaid, vidstack)
+- `_scripts_markdown.html` - Extended scripts for markdown (hljs, mermaid)
 
 **Tera Template Gotchas:**
 - Chained `default()` filters don't work as expected for variable fallbacks. Use conditionals instead:

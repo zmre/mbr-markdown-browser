@@ -1,0 +1,24 @@
+/* Hide MBR chrome in slides mode */
+body.slides-container nav,
+body.slides-container .breadcrumbs,
+body.slides-container footer,
+body.slides-container mbr-nav {
+  display: none !important;
+}
+
+/* Full viewport for Reveal.js */
+body.slides-container {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body.slides-container main#wrapper {
+  padding: 0;
+  max-width: none;
+}
+
+body.slides-container .reveal {
+  height: 100vh;
+  width: 100vw;
+}

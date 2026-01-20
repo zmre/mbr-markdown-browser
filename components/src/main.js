@@ -10,3 +10,4 @@ export * from './mbr-link-enhancement.ts';
 export * from './mbr-hljs.ts';
 export * from './mbr-mermaid.ts';
 export * from './mbr-katex.ts';
+export * from './mbr-slides.ts';

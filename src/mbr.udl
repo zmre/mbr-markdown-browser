@@ -27,6 +27,5 @@ interface QuickLookError {
 dictionary QuickLookConfig {
     boolean include_syntax_highlighting;
     boolean include_mermaid;
-    boolean include_vidstack;
     string? base_url;
 };
