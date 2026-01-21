@@ -247,11 +247,21 @@ pub async fn render_with_cache(
     // Write to a new String buffer.
     let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
     crate::html::push_html(&mut html_output, processed_events.into_iter());
+
+    // Deduplicate outbound links by target URL - if a page links to the same
+    // target multiple times, we only keep the first occurrence
+    let mut seen_targets: HashSet<String> = HashSet::new();
+    let deduplicated_links: Vec<OutboundLink> = state
+        .collected_links
+        .into_iter()
+        .filter(|link| seen_targets.insert(link.to.clone()))
+        .collect();
+
     Ok((
         yaml_frontmatter_simplified(&state.metadata_parsed),
         headings,
         html_output,
-        state.collected_links,
+        deduplicated_links,
     ))
 }
 

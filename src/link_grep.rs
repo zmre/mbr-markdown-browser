@@ -5,6 +5,7 @@
 
 use papaya::HashMap as ConcurrentHashMap;
 use regex::Regex;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -361,15 +362,23 @@ pub fn find_inbound_links(
         }
     }
 
+    // Deduplicate inbound links by source file - if a page links to the target
+    // multiple times, we only keep the first occurrence
+    let mut seen_sources: HashSet<String> = HashSet::new();
+    let deduplicated_links: Vec<InboundLink> = inbound_links
+        .into_iter()
+        .filter(|link| seen_sources.insert(link.from.clone()))
+        .collect();
+
     tracing::debug!(
         "Scanned {} files for inbound links to {} in {:?}, found {}",
         files_scanned,
         target_url_path,
         start.elapsed(),
-        inbound_links.len()
+        deduplicated_links.len()
     );
 
-    inbound_links
+    deduplicated_links
 }
 
 /// Computes the URL path for a markdown file.
@@ -570,6 +579,24 @@ mod tests {
         )
         .unwrap();
 
+        // Even though source.md links to target via both markdown and wiki syntax,
+        // we deduplicate by source file - only one inbound link per source page
+        let links = find_inbound_links("/target/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn test_find_inbound_links_multiple_sources() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("target.md"), "# Target").unwrap();
+        fs::write(temp_dir.path().join("source1.md"), "See [link](target/).").unwrap();
+        fs::write(
+            temp_dir.path().join("source2.md"),
+            "Also see [another link](target/).",
+        )
+        .unwrap();
+
+        // Two different source files linking to the same target = two inbound links
         let links = find_inbound_links("/target/", temp_dir.path(), &["md".to_string()], &[], &[]);
         assert_eq!(links.len(), 2);
     }
