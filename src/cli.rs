@@ -92,6 +92,12 @@ pub struct Args {
     #[arg(long)]
     pub skip_link_checks: bool,
 
+    /// Disable bidirectional link tracking (backlinks).
+    /// When disabled, the links.json endpoint returns 404 and no links.json files
+    /// are generated during static builds.
+    #[arg(long)]
+    pub no_link_tracking: bool,
+
     /// [EXPERIMENTAL] Enable dynamic video transcoding to serve lower-resolution
     /// HLS variants (720p, 480p) for bandwidth savings. Only active in server/GUI mode.
     /// Videos are transcoded on-demand as segments and cached in memory.

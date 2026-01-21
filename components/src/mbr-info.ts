@@ -11,6 +11,24 @@ interface Frontmatter {
   [key: string]: unknown;
 }
 
+interface OutboundLink {
+  to: string;
+  text: string;
+  anchor?: string;
+  internal: boolean;
+}
+
+interface InboundLink {
+  from: string;
+  text: string;
+  anchor?: string;
+}
+
+interface PageLinks {
+  inbound: InboundLink[];
+  outbound: OutboundLink[];
+}
+
 declare global {
   interface Window {
     frontmatter?: Frontmatter;
@@ -35,6 +53,15 @@ export class MbrInfoElement extends LitElement {
 
   @state()
   private _headings: Heading[] = [];
+
+  @state()
+  private _links: PageLinks | null = null;
+
+  @state()
+  private _linksLoading = false;
+
+  @state()
+  private _linksError: string | null = null;
 
   // Keys to skip (internal/technical fields)
   private static skipKeys = new Set(['markdown_source', 'server_mode']);
@@ -73,15 +100,55 @@ export class MbrInfoElement extends LitElement {
   };
 
   private _toggle() {
-    this._isOpen = !this._isOpen;
+    if (this._isOpen) {
+      this._close();
+    } else {
+      this._open();
+    }
   }
 
   private _open() {
     this._isOpen = true;
+    // Load links data when panel opens (if not already loaded)
+    if (!this._links && !this._linksLoading) {
+      this._loadLinks();
+    }
   }
 
   private _close() {
     this._isOpen = false;
+  }
+
+  private async _loadLinks() {
+    this._linksLoading = true;
+    this._linksError = null;
+
+    try {
+      // Get current path and construct links.json URL
+      const currentPath = window.location.pathname;
+      // Ensure path ends with / for directory-style URLs
+      const normalizedPath = currentPath.endsWith('/') ? currentPath : currentPath + '/';
+      const linksUrl = normalizedPath + 'links.json';
+
+      const response = await fetch(linksUrl);
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          // Link tracking may be disabled - not an error
+          this._links = { inbound: [], outbound: [] };
+          return;
+        }
+        throw new Error(`Failed to load links: ${response.status}`);
+      }
+
+      this._links = await response.json() as PageLinks;
+    } catch (error) {
+      console.warn('Failed to load links:', error);
+      this._linksError = error instanceof Error ? error.message : 'Unknown error';
+      this._links = { inbound: [], outbound: [] };
+    } finally {
+      this._linksLoading = false;
+    }
   }
 
   private _getOrderedKeys(): string[] {
@@ -178,23 +245,106 @@ export class MbrInfoElement extends LitElement {
     `;
   }
 
-  private _renderLinksOutSection(): TemplateResult {
+  private _renderLinksOutSection(): TemplateResult | typeof nothing {
+    if (this._linksLoading) {
+      return html`
+        <details class="info-section">
+          <summary><strong>Links Out</strong></summary>
+          <div class="info-content">
+            <p class="loading-text">Loading...</p>
+          </div>
+        </details>
+      `;
+    }
+
+    if (this._linksError) {
+      return nothing; // Hide section on error
+    }
+
+    const outbound = this._links?.outbound || [];
+    const internalLinks = outbound.filter(l => l.internal);
+    const externalLinks = outbound.filter(l => !l.internal);
+
+    if (outbound.length === 0) {
+      return nothing;
+    }
+
     return html`
       <details class="info-section">
-        <summary><strong>Links Out</strong></summary>
+        <summary><strong>Links Out</strong> <span class="link-count">(${outbound.length})</span></summary>
         <div class="info-content">
-          <p><em>Links from this document (coming soon)</em></p>
+          ${internalLinks.length > 0 ? html`
+            <div class="link-group">
+              <h4 class="link-group-title">Internal (${internalLinks.length})</h4>
+              <ul class="links-list">
+                ${internalLinks.map(link => html`
+                  <li class="link-item">
+                    <a href="${link.to}${link.anchor || ''}" class="link-url" @click=${() => this._close()}>
+                      ${link.text || link.to}
+                    </a>
+                    ${link.anchor ? html`<span class="link-anchor">${link.anchor}</span>` : nothing}
+                  </li>
+                `)}
+              </ul>
+            </div>
+          ` : nothing}
+          ${externalLinks.length > 0 ? html`
+            <div class="link-group">
+              <h4 class="link-group-title">External (${externalLinks.length})</h4>
+              <ul class="links-list">
+                ${externalLinks.map(link => html`
+                  <li class="link-item">
+                    <a href="${link.to}" class="link-url external" target="_blank" rel="noopener">
+                      ${link.text || link.to}
+                      <span class="external-icon" aria-label="Opens in new tab">↗</span>
+                    </a>
+                  </li>
+                `)}
+              </ul>
+            </div>
+          ` : nothing}
         </div>
       </details>
     `;
   }
 
-  private _renderLinksInSection(): TemplateResult {
+  private _renderLinksInSection(): TemplateResult | typeof nothing {
+    if (this._linksLoading) {
+      return html`
+        <details class="info-section">
+          <summary><strong>Links In</strong></summary>
+          <div class="info-content">
+            <p class="loading-text">Loading...</p>
+          </div>
+        </details>
+      `;
+    }
+
+    if (this._linksError) {
+      return nothing; // Hide section on error
+    }
+
+    const inbound = this._links?.inbound || [];
+
+    if (inbound.length === 0) {
+      return nothing;
+    }
+
     return html`
       <details class="info-section">
-        <summary><strong>Links In</strong></summary>
+        <summary><strong>Links In</strong> <span class="link-count">(${inbound.length})</span></summary>
         <div class="info-content">
-          <p><em>Links to this document (coming soon)</em></p>
+          <ul class="links-list">
+            ${inbound.map(link => html`
+              <li class="link-item">
+                <a href="${link.from}" class="link-url" @click=${() => this._close()}>
+                  <span class="link-source">${link.from}</span>
+                </a>
+                ${link.text ? html`<span class="link-text">"${link.text}"</span>` : nothing}
+                ${link.anchor ? html`<span class="link-anchor">${link.anchor}</span>` : nothing}
+              </li>
+            `)}
+          </ul>
         </div>
       </details>
     `;
@@ -450,6 +600,93 @@ export class MbrInfoElement extends LitElement {
     .toc-level-6 {
       padding-left: 5rem;
       font-size: 0.9em;
+    }
+
+    /* Links section styling */
+    .link-count {
+      font-size: 0.85em;
+      font-weight: normal;
+      color: var(--pico-muted-color, #666);
+    }
+
+    .link-group {
+      margin-bottom: 1rem;
+    }
+
+    .link-group:last-child {
+      margin-bottom: 0;
+    }
+
+    .link-group-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--pico-muted-color, #666);
+      margin: 0 0 0.5rem 0;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .links-list {
+      list-style: none;
+      padding-left: 0;
+      margin: 0;
+    }
+
+    .link-item {
+      margin: 0.25rem 0;
+      padding: 0.25rem 0;
+      border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0);
+    }
+
+    .link-item:last-child {
+      border-bottom: none;
+    }
+
+    .link-url {
+      color: var(--pico-primary, #1095c1);
+      text-decoration: none;
+      display: inline-block;
+      word-break: break-word;
+    }
+
+    .link-url:hover {
+      text-decoration: underline;
+    }
+
+    .link-url.external {
+      color: var(--pico-secondary, #5755d9);
+    }
+
+    .external-icon {
+      font-size: 0.8em;
+      margin-left: 0.25rem;
+      opacity: 0.7;
+    }
+
+    .link-source {
+      font-family: var(--pico-font-family-monospace, monospace);
+      font-size: 0.9em;
+    }
+
+    .link-text {
+      display: block;
+      font-size: 0.85em;
+      color: var(--pico-muted-color, #666);
+      font-style: italic;
+      margin-top: 0.15rem;
+    }
+
+    .link-anchor {
+      display: inline-block;
+      font-size: 0.8em;
+      color: var(--pico-muted-color, #666);
+      margin-left: 0.5rem;
+      font-family: var(--pico-font-family-monospace, monospace);
+    }
+
+    .loading-text {
+      color: var(--pico-muted-color, #666);
+      font-style: italic;
     }
 
     /* Responsive design for tablets */

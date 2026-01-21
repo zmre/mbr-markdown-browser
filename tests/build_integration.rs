@@ -576,3 +576,192 @@ async fn test_build_invalid_theme_falls_back_to_default() {
         "fallback theme should have valid content"
     );
 }
+
+// ============================================================================
+// Link tracking tests (links.json file generation)
+// ============================================================================
+
+#[tokio::test]
+async fn test_build_creates_links_json_files() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page\n\n[Link to Other](other/)");
+    repo.create_markdown("other.md", "# Other Page");
+
+    let output = build_site(&repo).await;
+
+    // Should create links.json for each page
+    let page_links = output.join("page").join("links.json");
+    assert!(
+        page_links.exists(),
+        "Expected links.json at {:?}",
+        page_links
+    );
+
+    let other_links = output.join("other").join("links.json");
+    assert!(
+        other_links.exists(),
+        "Expected links.json at {:?}",
+        other_links
+    );
+}
+
+#[tokio::test]
+async fn test_build_links_json_contains_outbound_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "source.md",
+        "# Source\n\n[Internal](target/)\n\n[External](https://example.com)",
+    );
+    repo.create_markdown("target.md", "# Target");
+
+    let output = build_site(&repo).await;
+
+    let links_path = output.join("source").join("links.json");
+    let content = fs::read_to_string(&links_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let outbound = json["outbound"].as_array().unwrap();
+
+    // Should have internal link
+    let has_internal = outbound
+        .iter()
+        .any(|l| l["to"].as_str().unwrap().contains("target"));
+    assert!(
+        has_internal,
+        "Should have internal link to target: {:?}",
+        outbound
+    );
+
+    // Should have external link
+    let has_external = outbound
+        .iter()
+        .any(|l| l["to"].as_str().unwrap().contains("example.com"));
+    assert!(has_external, "Should have external link: {:?}", outbound);
+}
+
+#[tokio::test]
+async fn test_build_links_json_contains_inbound_links() {
+    let repo = TestRepo::new();
+    // Create source that links to target
+    repo.create_markdown("source.md", "# Source\n\n[Go to Target](target/)");
+    repo.create_markdown("target.md", "# Target Page");
+
+    let output = build_site(&repo).await;
+
+    // Check target's links.json for inbound link from source
+    let links_path = output.join("target").join("links.json");
+    let content = fs::read_to_string(&links_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let inbound = json["inbound"].as_array().unwrap();
+
+    let has_inbound = inbound
+        .iter()
+        .any(|l| l["from"].as_str().unwrap().contains("source"));
+    assert!(
+        has_inbound,
+        "Target should have inbound link from source: {:?}",
+        inbound
+    );
+}
+
+#[tokio::test]
+async fn test_build_links_json_bidirectional() {
+    let repo = TestRepo::new();
+    // Create two pages that link to each other
+    repo.create_markdown("alpha.md", "# Alpha\n\n[Go to Beta](beta/)");
+    repo.create_markdown("beta.md", "# Beta\n\n[Go to Alpha](alpha/)");
+
+    let output = build_site(&repo).await;
+
+    // Check alpha's links
+    let alpha_links_path = output.join("alpha").join("links.json");
+    let alpha_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&alpha_links_path).unwrap()).unwrap();
+
+    // Alpha should have outbound to beta
+    let alpha_outbound = alpha_json["outbound"].as_array().unwrap();
+    assert!(
+        alpha_outbound
+            .iter()
+            .any(|l| l["to"].as_str().unwrap().contains("beta")),
+        "Alpha should have outbound link to beta"
+    );
+
+    // Alpha should have inbound from beta
+    let alpha_inbound = alpha_json["inbound"].as_array().unwrap();
+    assert!(
+        alpha_inbound
+            .iter()
+            .any(|l| l["from"].as_str().unwrap().contains("beta")),
+        "Alpha should have inbound link from beta"
+    );
+}
+
+#[tokio::test]
+async fn test_build_links_json_includes_anchors() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "page.md",
+        "# Page\n\n[Section Link](other/#important-section)",
+    );
+    repo.create_markdown("other.md", "# Other\n\n## Important Section");
+
+    let output = build_site(&repo).await;
+
+    let links_path = output.join("page").join("links.json");
+    let content = fs::read_to_string(&links_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let outbound = json["outbound"].as_array().unwrap();
+    let link = outbound
+        .iter()
+        .find(|l| l["to"].as_str().unwrap().contains("other"));
+    assert!(link.is_some(), "Should have link to other");
+
+    let anchor = link.unwrap()["anchor"].as_str();
+    assert!(
+        anchor.is_some() && anchor.unwrap().contains("important"),
+        "Link should preserve anchor: {:?}",
+        link
+    );
+}
+
+/// Helper to run a build with link tracking disabled
+async fn build_site_no_link_tracking(repo: &TestRepo) -> std::path::PathBuf {
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        link_tracking: false, // Disabled
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+
+    builder.build().await.expect("Build failed");
+
+    output_dir
+}
+
+#[tokio::test]
+async fn test_build_no_links_json_when_disabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page\n\n[Link](other/)");
+    repo.create_markdown("other.md", "# Other");
+
+    let output = build_site_no_link_tracking(&repo).await;
+
+    // Should NOT create links.json files when tracking is disabled
+    let page_links = output.join("page").join("links.json");
+    assert!(
+        !page_links.exists(),
+        "links.json should not exist when link tracking is disabled"
+    );
+
+    let other_links = output.join("other").join("links.json");
+    assert!(
+        !other_links.exists(),
+        "links.json should not exist when link tracking is disabled"
+    );
+}

@@ -29,6 +29,10 @@ function isModalOpen(): boolean {
   const browse = document.querySelector('mbr-browse');
   if (browse && (browse as any)._isOpen) return true;
 
+  // Check for mbr-fuzzy-nav modal
+  const fuzzyNav = document.querySelector('mbr-fuzzy-nav');
+  if (fuzzyNav && (fuzzyNav as any)._isOpen) return true;
+
   // Check for info panel
   const infoPanel = document.getElementById('info-panel-toggle') as HTMLInputElement | null;
   if (infoPanel?.checked) return true;
@@ -96,6 +100,14 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: '- or F2', description: 'Open file browser' },
       { keys: 'Ctrl+g', description: 'Toggle info panel' },
       { keys: 'Esc', description: 'Close panel' },
+    ],
+  },
+  {
+    title: 'Quick Navigation',
+    shortcuts: [
+      { keys: 'f', description: 'Open links out' },
+      { keys: 'F', description: 'Open links in (backlinks)' },
+      { keys: 'T', description: 'Open table of contents' },
     ],
   },
   {
@@ -339,6 +351,36 @@ export class MbrKeysElement extends LitElement {
             if (nextLink) {
               nextLink.click();
             }
+          }
+        }
+        break;
+
+      case 'f': // Open fuzzy nav - links out (lowercase f)
+        if (!e.shiftKey && !isModalOpen()) {
+          e.preventDefault();
+          const fuzzyNavOut = document.querySelector('mbr-fuzzy-nav');
+          if (fuzzyNavOut && typeof (fuzzyNavOut as any).open === 'function') {
+            (fuzzyNavOut as any).open('links-out');
+          }
+        }
+        break;
+
+      case 'F': // Open fuzzy nav - links in (Shift+f)
+        if (e.shiftKey && !isModalOpen()) {
+          e.preventDefault();
+          const fuzzyNavIn = document.querySelector('mbr-fuzzy-nav');
+          if (fuzzyNavIn && typeof (fuzzyNavIn as any).open === 'function') {
+            (fuzzyNavIn as any).open('links-in');
+          }
+        }
+        break;
+
+      case 'T': // Open fuzzy nav - table of contents (Shift+t)
+        if (e.shiftKey && !isModalOpen()) {
+          e.preventDefault();
+          const fuzzyNavToc = document.querySelector('mbr-fuzzy-nav');
+          if (fuzzyNavToc && typeof (fuzzyNavToc as any).open === 'function') {
+            (fuzzyNavToc as any).open('toc');
           }
         }
         break;

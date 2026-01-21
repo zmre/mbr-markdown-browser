@@ -37,6 +37,7 @@ These flags are mutually exclusive:
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
+| `--no-link-tracking` | Disable bidirectional link tracking | `false` |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
 | `--transcode-max-size <MB>` | Skip transcoding for files larger than this | `500` |
 | `-v, --verbose` | Increase log verbosity | warn level |
@@ -201,6 +202,7 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `oembed_timeout_ms` | number | `500` (server/GUI), `0` (build) | URL metadata fetch timeout (0 to disable) |
 | `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
+| `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `enable_writes` | bool | `false` | Allow write operations |
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
@@ -241,6 +243,54 @@ Or in `.mbr/config.toml`:
 ```toml
 skip_link_checks = true
 ```
+
+### Link Tracking (Backlinks)
+
+mbr automatically tracks bidirectional links between pages. The info panel (Ctrl+g) shows both:
+- **Links Out**: Pages this document links to
+- **Links In**: Pages that link to this document (backlinks)
+
+This feature enables wiki-style backlink navigation without requiring any special syntax.
+
+**How it works:**
+
+| Mode | Method | Performance |
+|------|--------|-------------|
+| Server/GUI | On-demand grep search (cached) | First request: ~1-3s, subsequent: instant |
+| Build | Eager index during render | Computed in parallel, no runtime cost |
+
+**API:** Each page has a `links.json` endpoint:
+```bash
+# Server mode
+curl http://localhost:5200/docs/guide/links.json
+
+# Static build
+cat build/docs/guide/links.json
+```
+
+Response format:
+```json
+{
+  "inbound": [
+    {"from": "/other/page/", "text": "link text", "anchor": "#section"}
+  ],
+  "outbound": [
+    {"to": "/another/page/", "text": "link text", "anchor": "#section", "internal": true}
+  ]
+}
+```
+
+**Disable link tracking:**
+```bash
+mbr -s --no-link-tracking ~/notes
+```
+
+Or in `.mbr/config.toml`:
+```toml
+link_tracking = false
+```
+
+When disabled, the `links.json` endpoint returns 404 and no link files are generated during builds.
 
 ### Video Metadata Extraction
 

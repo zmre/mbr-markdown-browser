@@ -155,6 +155,10 @@ async fn main() -> Result<(), MbrError> {
     if args.skip_link_checks {
         config.skip_link_checks = true;
     }
+    // Apply no_link_tracking from CLI
+    if args.no_link_tracking {
+        config.link_tracking = false;
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -253,7 +257,7 @@ async fn main() -> Result<(), MbrError> {
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
-        let (frontmatter, _headings, html_output) = markdown::render(
+        let (frontmatter, _headings, html_output, _outbound_links) = markdown::render(
             input_path,
             config.root_dir.as_path(),
             config.oembed_timeout_ms,
@@ -289,6 +293,7 @@ async fn main() -> Result<(), MbrError> {
             false, // gui_mode: browser access, not native window
             &config.theme,
             None, // Logging already initialized
+            config.link_tracking,
             #[cfg(feature = "media-metadata")]
             config.transcode,
         )?;
@@ -330,6 +335,7 @@ async fn main() -> Result<(), MbrError> {
                     true, // gui_mode: native window mode
                     &config_copy.theme,
                     None, // Logging already initialized
+                    config_copy.link_tracking,
                     #[cfg(feature = "media-metadata")]
                     config_copy.transcode,
                 );

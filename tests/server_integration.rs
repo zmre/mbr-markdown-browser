@@ -42,6 +42,7 @@ impl TestServer {
                 false,                              // gui_mode
                 "default",                          // theme
                 None,                               // log_filter
+                true,                               // link_tracking
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -698,6 +699,7 @@ impl TestServerWithTemplates {
                 false,                              // gui_mode
                 "default",                          // theme
                 None,                               // log_filter
+                true,                               // link_tracking
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -1440,6 +1442,7 @@ impl TestServerWithTheme {
                 false,                              // gui_mode
                 &theme,                             // theme
                 None,                               // log_filter
+                true,                               // link_tracking
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -1586,5 +1589,259 @@ async fn test_pico_css_has_cache_headers() {
     assert!(
         cache_control.is_some(),
         "Pico CSS response should have Cache-Control header"
+    );
+}
+
+// ============================================================================
+// Link Tracking Tests (links.json endpoint)
+// ============================================================================
+
+#[tokio::test]
+async fn test_links_json_returns_valid_structure() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Test Page\n\n[Other](other/)");
+    repo.create_markdown("other.md", "# Other Page");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/page/links.json").await;
+
+    assert_eq!(response.status(), 200);
+
+    let content_type = response.headers().get("content-type").unwrap();
+    assert!(
+        content_type.to_str().unwrap().contains("application/json"),
+        "links.json should return JSON content type"
+    );
+
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    // Should have inbound and outbound arrays
+    assert!(
+        body["inbound"].is_array(),
+        "Expected 'inbound' array in links.json"
+    );
+    assert!(
+        body["outbound"].is_array(),
+        "Expected 'outbound' array in links.json"
+    );
+}
+
+#[tokio::test]
+async fn test_links_json_contains_outbound_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "source.md",
+        "# Source\n\n[Link to Target](target/)\n\n[External](https://example.com)",
+    );
+    repo.create_markdown("target.md", "# Target Page");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/source/links.json").await.json().await.unwrap();
+
+    let outbound = body["outbound"].as_array().unwrap();
+
+    // Should have at least one internal link
+    let has_internal = outbound.iter().any(|l| {
+        l["to"].as_str().unwrap().contains("target") && l["internal"].as_bool() == Some(true)
+    });
+    assert!(
+        has_internal,
+        "Should have internal link to target: {:?}",
+        outbound
+    );
+
+    // Should have external link
+    let has_external = outbound.iter().any(|l| {
+        l["to"].as_str().unwrap().contains("example.com") && l["internal"].as_bool() == Some(false)
+    });
+    assert!(
+        has_external,
+        "Should have external link to example.com: {:?}",
+        outbound
+    );
+}
+
+#[tokio::test]
+async fn test_links_json_contains_inbound_links() {
+    let repo = TestRepo::new();
+    // Create source page that links to target
+    repo.create_markdown("source.md", "# Source\n\n[See the Target](target/)");
+    // Create target page
+    repo.create_markdown("target.md", "# Target Page");
+
+    let server = TestServer::start(&repo).await;
+
+    // First, load the source page to populate the link cache
+    let _ = server.get("/source/").await;
+
+    // Now get links for the target page - should show inbound link from source
+    let body: serde_json::Value = server.get("/target/links.json").await.json().await.unwrap();
+
+    let inbound = body["inbound"].as_array().unwrap();
+
+    let has_inbound_from_source = inbound
+        .iter()
+        .any(|l| l["from"].as_str().unwrap().contains("source"));
+    assert!(
+        has_inbound_from_source,
+        "Target should have inbound link from source: {:?}",
+        inbound
+    );
+}
+
+#[tokio::test]
+async fn test_links_json_outbound_includes_anchor() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "page.md",
+        "# Page\n\n[Section Link](other/#section-heading)",
+    );
+    repo.create_markdown("other.md", "# Other\n\n## Section Heading");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/page/links.json").await.json().await.unwrap();
+
+    let outbound = body["outbound"].as_array().unwrap();
+
+    let link_with_anchor = outbound
+        .iter()
+        .find(|l| l["to"].as_str().unwrap().contains("other"));
+    assert!(
+        link_with_anchor.is_some(),
+        "Should have link to other page: {:?}",
+        outbound
+    );
+
+    let anchor = link_with_anchor.unwrap()["anchor"].as_str();
+    assert!(
+        anchor.is_some() && anchor.unwrap().contains("section"),
+        "Link should have anchor: {:?}",
+        link_with_anchor
+    );
+}
+
+#[tokio::test]
+async fn test_links_json_404_for_nonexistent_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown("exists.md", "# Exists");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/nonexistent/links.json").await;
+
+    assert_eq!(
+        response.status(),
+        404,
+        "links.json for nonexistent page should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_links_json_empty_for_page_with_no_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown("isolated.md", "# Isolated Page\n\nNo links here.");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server
+        .get("/isolated/links.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+
+    let outbound = body["outbound"].as_array().unwrap();
+    let inbound = body["inbound"].as_array().unwrap();
+
+    assert!(
+        outbound.is_empty(),
+        "Isolated page should have no outbound links"
+    );
+    assert!(
+        inbound.is_empty(),
+        "Isolated page should have no inbound links"
+    );
+}
+
+/// Helper to start a server with link tracking disabled
+struct TestServerNoLinkTracking {
+    port: u16,
+    client: reqwest::Client,
+    _handle: tokio::task::JoinHandle<()>,
+}
+
+impl TestServerNoLinkTracking {
+    async fn start(repo: &TestRepo) -> Self {
+        let port = find_available_port();
+        let root_dir = repo.path().to_path_buf();
+
+        let handle = tokio::spawn(async move {
+            let server = mbr::server::Server::init(
+                [127, 0, 0, 1],
+                port,
+                root_dir,
+                "static",
+                &["md".to_string()],
+                &["target".to_string(), "node_modules".to_string()],
+                &["*.log".to_string()],
+                &[
+                    ".direnv".to_string(),
+                    ".git".to_string(),
+                    "result".to_string(),
+                    "target".to_string(),
+                    "build".to_string(),
+                ],
+                "index.md",
+                100,                                // oembed_timeout_ms
+                2 * 1024 * 1024,                    // oembed_cache_size (2MB)
+                None,                               // template_folder
+                mbr::config::default_sort_config(), // sort
+                false,                              // gui_mode
+                "default",                          // theme
+                None,                               // log_filter
+                false,                              // link_tracking DISABLED
+                #[cfg(feature = "media-metadata")]
+                false, // transcode_enabled
+            )
+            .expect("Failed to initialize server");
+
+            let _ = server.start().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+
+        Self {
+            port,
+            client,
+            _handle: handle,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{}", self.port, path)
+    }
+
+    async fn get(&self, path: &str) -> reqwest::Response {
+        self.client
+            .get(self.url(path))
+            .send()
+            .await
+            .expect("Request failed")
+    }
+}
+
+#[tokio::test]
+async fn test_links_json_404_when_link_tracking_disabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page\n\n[Link](other/)");
+    repo.create_markdown("other.md", "# Other");
+
+    let server = TestServerNoLinkTracking::start(&repo).await;
+    let response = server.get("/page/links.json").await;
+
+    assert_eq!(
+        response.status(),
+        404,
+        "links.json should return 404 when link tracking is disabled"
     );
 }
