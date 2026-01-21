@@ -1,3 +1,4 @@
+use crate::attrs::ParsedAttrs;
 use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
@@ -100,6 +101,61 @@ fn extract_headings(markdown_input: &str) -> (Vec<HeadingInfo>, HashMap<String, 
     }
 
     (headings, heading_id_map)
+}
+
+/// Em dash character (U+2014) - what `---` becomes with smart punctuation
+const EM_DASH: &str = "\u{2014}";
+
+/// Transform events: detect `--- {attrs}` pattern and convert to Rule + attrs.
+///
+/// When pulldown-cmark (with TextMergeStream) sees `--- {#id .class}` on a single line,
+/// it produces:
+/// - Start(Paragraph)
+/// - Text("— {#id .class}") (em dash + space + attrs, merged into one Text)
+/// - End(Paragraph)
+///
+/// This function detects that pattern and transforms it into a single Rule event,
+/// extracting the attributes for section rendering.
+///
+/// Returns (transformed_events, section_attrs) where section_attrs maps section
+/// index to parsed attributes.
+fn transform_rule_attrs(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, HashMap<usize, ParsedAttrs>) {
+    let mut result = Vec::with_capacity(events.len());
+    let mut section_attrs = HashMap::new();
+    let mut section_index = 0;
+    let mut i = 0;
+
+    while i < events.len() {
+        // Detect pattern: Start(Paragraph), Text("— {attrs}"), End(Paragraph)
+        // TextMergeStream merges adjacent Text events, so we see a single Text event
+        if i + 2 < events.len()
+            && let (Event::Start(Tag::Paragraph), Event::Text(text), Event::End(TagEnd::Paragraph)) =
+                (&events[i], &events[i + 1], &events[i + 2])
+            // Check: text starts with em dash + space + "{" and ends with "}"
+            && text.starts_with(EM_DASH)
+            && let Some(attrs_str) = text.strip_prefix(EM_DASH)
+            && attrs_str.starts_with(" {")
+            && attrs_str.ends_with('}')
+            && let Some(attrs) = ParsedAttrs::parse(attrs_str.trim())
+        {
+            // Transform: emit Rule instead of paragraph
+            result.push(Event::Rule);
+            section_index += 1;
+            section_attrs.insert(section_index, attrs);
+            i += 3; // Skip all 3 events
+            continue;
+        }
+
+        // Track real Rule events for section counting
+        if matches!(&events[i], Event::Rule) {
+            section_index += 1;
+        }
+
+        result.push(events[i].clone());
+        i += 1;
+    }
+
+    (result, section_attrs)
 }
 
 pub async fn render(
@@ -205,6 +261,9 @@ pub async fn render_with_cache(
         }
     }
 
+    // Transform rule attrs: detect `--- {attrs}` pattern and convert to Rule + attrs
+    let (events_with_ids, section_attrs) = transform_rule_attrs(events_with_ids);
+
     // Collect bare URLs that need oembed fetching and fetch them in parallel
     let prefetched_oembed =
         prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await;
@@ -230,9 +289,13 @@ pub async fn render_with_cache(
         processed_events.push(processed);
     }
 
-    // Write to a new String buffer.
+    // Write to a new String buffer with MBR extensions (sections, mermaid)
     let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
-    crate::html::push_html(&mut html_output, processed_events.into_iter());
+    crate::html::push_html_mbr_with_attrs(
+        &mut html_output,
+        processed_events.into_iter(),
+        section_attrs,
+    );
     Ok((
         yaml_frontmatter_simplified(&state.metadata_parsed),
         headings,
@@ -997,6 +1060,128 @@ mod tests {
         assert!(
             html.contains("../peer-video.mp4"),
             "./peer-video.mp4 should transform to ../peer-video.mp4. Got: {}",
+            html
+        );
+    }
+
+    // Section attributes tests
+    #[tokio::test]
+    async fn test_section_attrs_with_id() {
+        // Test that --- {#id} applies ID to the next section
+        let md = "First section\n\n--- {#intro}\n\nSecond section";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section id="intro">"#),
+            "Section should have id='intro'. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_with_class() {
+        // Test that --- {.highlight} applies class to the next section
+        let md = "First section\n\n--- {.highlight}\n\nSecond section";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section class="highlight">"#),
+            "Section should have class='highlight'. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_with_multiple_classes() {
+        // Test multiple classes
+        let md = "First section\n\n--- {.slide .center}\n\nSecond section";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section class="slide center">"#),
+            "Section should have class='slide center'. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_with_data_attributes() {
+        // Test data attributes
+        let md = "First section\n\n--- {data-transition=\"slide\"}\n\nSecond section";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"data-transition="slide""#),
+            "Section should have data-transition='slide'. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_mixed() {
+        // Test ID, class, and data attribute together
+        let md = "First section\n\n--- {#main .highlight data-bg=\"blue\"}\n\nSecond section";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"id="main""#),
+            "Section should have id='main'. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"class="highlight""#),
+            "Section should have class='highlight'. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"data-bg="blue""#),
+            "Section should have data-bg='blue'. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_multiple_rules() {
+        // Test multiple rules with attrs
+        let md = "Section 0\n\n--- {#one}\n\nSection 1\n\n--- {#two}\n\nSection 2";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section id="one">"#),
+            "First rule section should have id='one'. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"<section id="two">"#),
+            "Second rule section should have id='two'. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plain_rule_still_works() {
+        // Test that plain --- without attrs still creates a section
+        let md = "First section\n\n---\n\nSecond section";
+        let html = render_markdown(md).await;
+        // Should have at least 2 sections (one before and one after the rule)
+        let section_count = html.matches("<section>").count();
+        assert!(
+            section_count >= 1,
+            "Plain rule should create sections. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("<hr />"),
+            "Should contain <hr /> divider. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_em_dash_with_non_attrs_text() {
+        // Test that --- followed by text that isn't attrs is rendered normally
+        // This becomes paragraph with em dash + text (not transformed to Rule)
+        let md = "Some text\n\n--- not attrs\n\nMore text";
+        let html = render_markdown(md).await;
+        // Should NOT have a <hr /> since it's not a valid rule pattern
+        // The em dash paragraph should be preserved as text
+        assert!(
+            html.contains("—"),
+            "Em dash should be preserved. Got: {}",
             html
         );
     }

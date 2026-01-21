@@ -1,0 +1,7 @@
+name: "CodeQL Config"
+paths:
+  - src
+  - components
+  - templates/*.html
+paths-ignore:
+  - templates/*.js

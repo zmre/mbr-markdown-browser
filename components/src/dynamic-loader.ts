@@ -47,7 +47,7 @@ export function loadScript(src: string, integrity?: string): Promise<void> {
 
     const script = document.createElement('script')
     script.src = src
-    script.defer = true
+    // Don't use defer - it causes onload to fire before execution for dynamically inserted scripts
     if (integrity) {
       script.integrity = integrity
       script.crossOrigin = 'anonymous'
@@ -68,10 +68,15 @@ export function loadScript(src: string, integrity?: string): Promise<void> {
  */
 export function loadCss(href: string, integrity?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    // Check if already loaded
-    if (document.querySelector(`link[href="${href}"]`)) {
-      resolve()
-      return
+    // Check if already loaded - browsers normalize href to absolute URL
+    // so check both the original and any existing link with matching end
+    const existingLinks = document.querySelectorAll('link[rel="stylesheet"]')
+    for (const existing of existingLinks) {
+      const existingHref = existing.getAttribute('href') || ''
+      if (existingHref === href || existingHref.endsWith(href)) {
+        resolve()
+        return
+      }
     }
 
     const link = document.createElement('link')
@@ -82,7 +87,10 @@ export function loadCss(href: string, integrity?: string): Promise<void> {
       link.crossOrigin = 'anonymous'
     }
     link.onload = () => resolve()
-    link.onerror = () => reject(new Error(`Failed to load CSS: ${href}`))
+    link.onerror = (e) => {
+      console.error('[loadCss] Failed to load:', href, e)
+      reject(new Error(`Failed to load CSS: ${href}`))
+    }
     document.head.appendChild(link)
   })
 }
