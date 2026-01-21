@@ -2129,6 +2129,37 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         include_bytes!("../templates/mermaid.11.12.2.min.js"),
         "application/javascript",
     ),
+    // Reveal.js presentation framework
+    (
+        "/reveal.js",
+        include_bytes!("../templates/reveal.5.2.1.js"),
+        "application/javascript",
+    ),
+    (
+        "/reveal.css",
+        include_bytes!("../templates/reveal.5.2.1.css"),
+        "text/css",
+    ),
+    (
+        "/reveal-theme-black.css",
+        include_bytes!("../templates/reveal.theme.black.5.2.1.css"),
+        "text/css",
+    ),
+    (
+        "/reveal-theme-white.css",
+        include_bytes!("../templates/reveal.theme.white.5.2.1.css"),
+        "text/css",
+    ),
+    (
+        "/reveal-slides.css",
+        include_bytes!("../templates/reveal-slides.css"),
+        "text/css",
+    ),
+    (
+        "/reveal-notes.js",
+        include_bytes!("../templates/reveal.notes.5.2.1.js"),
+        "application/javascript",
+    ),
 ];
 
 #[cfg(test)]

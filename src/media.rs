@@ -22,7 +22,7 @@ static YOUTUBE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Represents different types of media that can be embedded via image syntax
 #[derive(Debug, PartialEq)]
 pub enum MediaEmbed {
-    /// Video files (mp4, webm, etc.) - uses HTML5 video with VidStack enhancement
+    /// Video files (mp4, webm, etc.) - uses HTML5 video
     Video(Vid),
     /// Audio files (mp3, wav, etc.) - uses HTML5 audio
     Audio(Audio),

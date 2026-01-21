@@ -121,7 +121,7 @@ See `docs/reference/cli.md` for complete documentation.
 
 ## Testing
 
-The project has comprehensive test coverage with ~387 tests:
+The project has comprehensive test coverage with ~462 tests:
 
 ```bash
 # Run all tests
@@ -139,11 +139,11 @@ cargo test -- --nocapture
 
 | Location | Description | Count |
 |----------|-------------|-------|
-| `src/*.rs` (unit tests) | Unit tests for each module | ~274 |
+| `src/*.rs` (unit tests) | Unit tests for each module | ~354 |
 | `src/main.rs` | URL path builder tests | 10 |
 | `tests/build_integration.rs` | Build/static site tests | ~30 |
 | `tests/server_integration.rs` | HTTP integration tests | ~68 |
-| Doc tests | Code examples in documentation | 5 |
+| Doc tests | Code examples in documentation | 7 |
 
 Property tests use `proptest` to verify invariants like:
 - Path resolution determinism and safety
@@ -182,12 +182,13 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
 | `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
-| `vid.rs` | Video embed handling with VidStack player and shortcodes |
+| `vid.rs` | Video embed handling and shortcodes |
 | `video_transcode.rs` | HLS-based video transcoding - playlist generation and segment transcoding (requires `media-metadata` feature) |
 | `video_transcode_cache.rs` | LRU cache for HLS playlists and segments using papaya concurrent hashmap |
 | `oembed.rs` | Auto-embed for bare URLs in markdown (YouTube, Giphy, OpenGraph) |
 | `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
-| `html.rs` | Custom HTML output for pulldown-cmark |
+| `html.rs` | Custom HTML output for pulldown-cmark with section support |
+| `attrs.rs` | Reusable attribute parser for `{#id .class key=value}` syntax |
 
 ### Key Pure Functions (Testable)
 
@@ -236,7 +237,7 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 
 - `/{path}` - Markdown files rendered to HTML (trailing slash convention)
 - `/.mbr/site.json` - Full site index with all files and frontmatter
-- `/.mbr/*` - Static assets (theme.css, components, vidstack player)
+- `/.mbr/*` - Static assets (theme.css, components)
 
 ### Lit Web Components
 
@@ -261,7 +262,7 @@ The project uses Tera templates with a partial-based architecture. Templates are
 - `_nav.html` - Navigation header with breadcrumbs and menus
 - `_footer.html` - Page footer with web components
 - `_scripts.html` - Base script includes
-- `_scripts_markdown.html` - Extended scripts for markdown (hljs, mermaid, vidstack)
+- `_scripts_markdown.html` - Extended scripts for markdown (hljs, mermaid)
 
 **Tera Template Gotchas:**
 - Chained `default()` filters don't work as expected for variable fallbacks. Use conditionals instead:
@@ -321,6 +322,21 @@ mbr -s --theme fluid.blue ~/notes # Fluid typography with blue
 Theme files are in `templates/pico-main/` and loaded dynamically by `embedded_pico.rs`.
 
 ### Markdown Extensions
+
+**Section Attributes:**
+When `enable_sections` is active, horizontal rules create `<section>` elements. Add attributes to the following section:
+```markdown
+--- {#intro .highlight data-transition="slide"}
+
+Content in section with id="intro" class="highlight" data-transition="slide"
+```
+
+Attribute syntax follows pulldown-cmark heading attrs spec:
+- `#id` - ID attribute (last one wins if multiple)
+- `.class` - CSS class (multiple allowed)
+- `key=value` or `key="quoted value"` - Custom attributes
+
+**Implementation:** `attrs.rs` parses the attribute block. `markdown.rs` transforms the event stream (pulldown-cmark converts `--- {attrs}` to em-dash + text paragraph). `html.rs` applies attrs when opening sections.
 
 **Vid Shortcode:**
 Embed videos with the `{{ vid(...) }}` shortcode:

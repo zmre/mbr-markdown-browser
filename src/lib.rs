@@ -7,6 +7,7 @@
 #[cfg(feature = "ffi")]
 uniffi::include_scaffolding!("mbr");
 
+pub mod attrs;
 pub mod audio;
 #[cfg(feature = "gui")]
 pub mod browser;

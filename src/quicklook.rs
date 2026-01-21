@@ -44,8 +44,6 @@ pub struct QuickLookConfig {
     pub include_syntax_highlighting: bool,
     /// Whether to include mermaid diagram support
     pub include_mermaid: bool,
-    /// Whether to include vidstack for video playback
-    pub include_vidstack: bool,
     /// Base URL for converting relative paths (typically file:// URL of containing directory)
     pub base_url: Option<String>,
 }
@@ -55,7 +53,6 @@ impl Default for QuickLookConfig {
         Self {
             include_syntax_highlighting: true,
             include_mermaid: true,
-            include_vidstack: true,
             base_url: None,
         }
     }
@@ -331,14 +328,6 @@ fn build_inline_css(
         }
     }
 
-    // VidStack CSS for video playback
-    if config.include_vidstack {
-        css.push_str(get_embedded_file("/vidstack.player.css"));
-        css.push('\n');
-        css.push_str(get_embedded_file("/vidstack.plyr.css"));
-        css.push('\n');
-    }
-
     // QuickLook-specific overrides
     css.push_str(QUICKLOOK_CSS);
 
@@ -387,14 +376,6 @@ fn build_inline_js(config: &QuickLookConfig) -> String {
     // Mermaid diagrams
     if config.include_mermaid {
         js.push_str(get_embedded_file("/mermaid.min.js"));
-        js.push('\n');
-    }
-
-    // VidStack video player
-    if config.include_vidstack {
-        js.push_str(get_embedded_file("/vidstack.player.js"));
-        js.push('\n');
-        js.push_str(get_embedded_file("/vid.js"));
         js.push('\n');
     }
 
@@ -650,7 +631,6 @@ mod tests {
         let config = QuickLookConfig {
             include_syntax_highlighting: false,
             include_mermaid: false,
-            include_vidstack: false,
             base_url: None,
         };
 

@@ -18,15 +18,43 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-//! HTML renderer that takes an iterator of events as input.
+//! # MBR HTML Renderer
+//!
+//! Modified from pulldown-cmark's html.rs to support MBR-specific features.
+//!
+//! ## MBR Extensions
+//!
+//! All extensions are controlled via [`HtmlConfig`] and can be enabled/disabled:
+//!
+//! | Extension | Config Flag | Description |
+//! |-----------|-------------|-------------|
+//! | **Section wrapping** | `enable_sections` | Wraps content in `<section>` tags with `<hr>` as dividers |
+//! | **Mermaid diagrams** | `enable_mermaid` | Renders \`\`\`mermaid blocks as `<pre class="mermaid">` |
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! // Use MBR defaults (all extensions enabled)
+//! html::push_html_mbr(&mut output, events);
+//!
+//! // Or configure explicitly
+//! let config = HtmlConfig { enable_sections: true, enable_mermaid: false };
+//! html::push_html_with_config(&mut output, events, config);
+//! ```
+//!
+//! ## Upstream Tracking
+//!
+//! Based on: <https://github.com/pulldown-cmark/pulldown-cmark/blob/master/pulldown-cmark/src/html.rs>
+//!
+//! Key differences from upstream:
+//! - Added [`HtmlConfig`] for extension configuration
+//! - Added `section_started` field for section tracking
+//! - Added `codeblock_state` field for mermaid closing tag handling
+//! - Removed `ContainerBlock` handling (not used in MBR)
 
-// This file is modified starting with
-// https://github.com/pulldown-cmark/pulldown-cmark/blob/master/pulldown-cmark/src/html.rs
-// and enhanced to allow fancier setups
-
-// use alloc::{string::String, vec::Vec};
 use std::collections::HashMap;
 
+use crate::attrs::ParsedAttrs;
 use pulldown_cmark_escape::IoWriter;
 use pulldown_cmark_escape::{FmtWriter, StrWrite, escape_href, escape_html, escape_html_body_text};
 
@@ -35,6 +63,62 @@ use pulldown_cmark::{
     Event::{self, *},
     LinkType, Tag, TagEnd,
 };
+
+// ============================================================================
+// MBR EXTENSION: Configuration
+// ============================================================================
+
+/// Configuration for MBR-specific HTML extensions.
+///
+/// This struct controls all custom behavior beyond pulldown-cmark's standard
+/// HTML output. Use [`HtmlConfig::mbr_defaults()`] for standard MBR behavior,
+/// or construct manually for fine-grained control.
+#[derive(Debug, Default, Clone)]
+pub struct HtmlConfig {
+    /// Wrap content in `<section>` tags, using `<hr>` as dividers.
+    ///
+    /// When enabled:
+    /// - Output starts with `<section>\n`
+    /// - Each `---` (Rule) becomes `</section>\n<hr />\n<section>\n`
+    /// - Output ends with `</section>\n`
+    pub enable_sections: bool,
+
+    /// Render \`\`\`mermaid code blocks as `<pre class="mermaid">` without
+    /// the `<code>` wrapper, allowing mermaid.js to render diagrams directly.
+    pub enable_mermaid: bool,
+
+    /// Attributes for each section (by 1-based index).
+    ///
+    /// Section 0 is the first section (before any `---`), section 1 is after the
+    /// first `---`, etc. When rendering, attributes are applied to the `<section>` tag.
+    ///
+    /// Use syntax like `--- {#id .class data-attr="value"}` in markdown to set attrs.
+    pub section_attrs: HashMap<usize, ParsedAttrs>,
+}
+
+impl HtmlConfig {
+    /// Standard MBR configuration with all extensions enabled and no section attrs.
+    pub fn mbr_defaults() -> Self {
+        Self {
+            enable_sections: true,
+            enable_mermaid: true,
+            section_attrs: HashMap::new(),
+        }
+    }
+
+    /// Standard MBR configuration with section attributes.
+    pub fn mbr_with_section_attrs(section_attrs: HashMap<usize, ParsedAttrs>) -> Self {
+        Self {
+            enable_sections: true,
+            enable_mermaid: true,
+            section_attrs,
+        }
+    }
+}
+
+// ============================================================================
+// Internal Types
+// ============================================================================
 
 enum TableState {
     Head,
@@ -54,11 +138,22 @@ struct HtmlWriter<'a, I, W> {
     /// Whether if inside a metadata block (text should not be written)
     in_non_writing_block: bool,
 
+    // MBR EXTENSION: Mermaid support - tracks the closing tag for code blocks
     codeblock_state: Option<CowStr<'a>>,
+
     table_state: TableState,
     table_alignments: Vec<Alignment>,
     table_cell_index: usize,
     numbers: HashMap<CowStr<'a>, usize>,
+
+    // MBR EXTENSION: Configuration for extensions
+    config: HtmlConfig,
+
+    // MBR EXTENSION: Section wrapping - tracks if opening section was emitted
+    section_started: bool,
+
+    // MBR EXTENSION: Section attributes - tracks current section index (0-based)
+    current_section: usize,
 }
 
 impl<'a, I, W> HtmlWriter<'a, I, W>
@@ -67,6 +162,10 @@ where
     W: StrWrite,
 {
     fn new(iter: I, writer: W) -> Self {
+        Self::new_with_config(iter, writer, HtmlConfig::default())
+    }
+
+    fn new_with_config(iter: I, writer: W, config: HtmlConfig) -> Self {
         Self {
             iter,
             writer,
@@ -77,6 +176,9 @@ where
             table_alignments: vec![],
             table_cell_index: 0,
             numbers: HashMap::new(),
+            config,
+            section_started: false,
+            current_section: 0,
         }
     }
 
@@ -99,6 +201,18 @@ where
     }
 
     fn run(mut self) -> Result<(), W::Error> {
+        // MBR EXTENSION: Emit opening section tag with optional attrs
+        if self.config.enable_sections {
+            let attrs_str = self
+                .config
+                .section_attrs
+                .get(&self.current_section)
+                .map(|a| a.to_html_attr_string())
+                .unwrap_or_default();
+            self.write(&format!("<section{}>\n", attrs_str))?;
+            self.section_started = true;
+        }
+
         while let Some(event) = self.iter.next() {
             match event {
                 Start(tag) => {
@@ -137,11 +251,25 @@ where
                 HardBreak => {
                     self.write("<br />\n")?;
                 }
+                // MBR EXTENSION: Section dividers with optional attrs
                 Rule => {
-                    if self.end_newline {
-                        self.write("<hr />\n")?;
+                    if self.config.enable_sections {
+                        // Increment section index before opening the next section
+                        self.current_section += 1;
+                        let attrs_str = self
+                            .config
+                            .section_attrs
+                            .get(&self.current_section)
+                            .map(|a| a.to_html_attr_string())
+                            .unwrap_or_default();
+                        self.write(&format!("</section>\n<hr />\n<section{}>\n", attrs_str))?;
                     } else {
-                        self.write("\n<hr />\n")?;
+                        // Standard pulldown-cmark behavior
+                        if self.end_newline {
+                            self.write("<hr />\n")?;
+                        } else {
+                            self.write("\n<hr />\n")?;
+                        }
                     }
                 }
                 FootnoteReference(name) => {
@@ -161,6 +289,12 @@ where
                 }
             }
         }
+
+        // MBR EXTENSION: Emit closing section tag
+        if self.config.enable_sections && self.section_started {
+            self.write("</section>\n")?;
+        }
+
         Ok(())
     }
 
@@ -271,7 +405,8 @@ where
                         let lang = info.split(' ').next().unwrap_or_default();
                         if lang.is_empty() {
                             self.write("<pre><code>")
-                        } else if lang == "mermaid" {
+                        // MBR EXTENSION: Mermaid diagram support
+                        } else if self.config.enable_mermaid && lang == "mermaid" {
                             self.codeblock_state = Some("</pre>".into());
                             self.write("<pre class=\"mermaid\">")
                         } else {
@@ -645,4 +780,111 @@ where
     W: core::fmt::Write,
 {
     HtmlWriter::new(iter, FmtWriter(writer)).run()
+}
+
+// ============================================================================
+// MBR EXTENSION: Public API
+// ============================================================================
+
+/// Push HTML with MBR extensions enabled (sections and mermaid support).
+///
+/// This is the primary function for MBR's markdown rendering. It wraps content
+/// in `<section>` tags with `<hr>` as dividers, and renders mermaid code blocks
+/// as `<pre class="mermaid">`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use mbr::html::push_html_mbr;
+/// use pulldown_cmark::Parser;
+///
+/// let markdown = "First section\n\n---\n\nSecond section";
+/// let parser = Parser::new(markdown);
+/// let mut html = String::new();
+/// push_html_mbr(&mut html, parser);
+///
+/// // Output:
+/// // <section>
+/// // <p>First section</p>
+/// // </section>
+/// // <hr />
+/// // <section>
+/// // <p>Second section</p>
+/// // </section>
+/// ```
+pub fn push_html_mbr<'a, I>(s: &mut String, iter: I)
+where
+    I: Iterator<Item = Event<'a>>,
+{
+    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_defaults()).unwrap()
+}
+
+/// Push HTML with MBR extensions and section attributes.
+///
+/// Like [`push_html_mbr`] but with pre-parsed section attributes. Attributes
+/// are applied to `<section>` tags based on their index (0-based).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use mbr::html::push_html_mbr_with_attrs;
+/// use mbr::attrs::ParsedAttrs;
+/// use pulldown_cmark::Parser;
+/// use std::collections::HashMap;
+///
+/// let markdown = "First section\n\n---\n\nSecond section";
+/// let parser = Parser::new(markdown);
+///
+/// let mut section_attrs = HashMap::new();
+/// section_attrs.insert(1, ParsedAttrs::parse("{#intro .highlight}").unwrap());
+///
+/// let mut html = String::new();
+/// push_html_mbr_with_attrs(&mut html, parser, section_attrs);
+///
+/// // Output includes: <section id="intro" class="highlight">
+/// ```
+pub fn push_html_mbr_with_attrs<'a, I>(
+    s: &mut String,
+    iter: I,
+    section_attrs: HashMap<usize, ParsedAttrs>,
+) where
+    I: Iterator<Item = Event<'a>>,
+{
+    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_with_section_attrs(section_attrs)).unwrap()
+}
+
+/// Push HTML with explicit configuration.
+///
+/// Allows fine-grained control over which MBR extensions are enabled.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use mbr::html::{push_html_with_config, HtmlConfig};
+/// use pulldown_cmark::Parser;
+///
+/// let config = HtmlConfig {
+///     enable_sections: true,
+///     enable_mermaid: false,
+/// };
+///
+/// let markdown = "Hello world";
+/// let parser = Parser::new(markdown);
+/// let mut html = String::new();
+/// push_html_with_config(&mut html, parser, config);
+/// ```
+pub fn push_html_with_config<'a, I>(s: &mut String, iter: I, config: HtmlConfig)
+where
+    I: Iterator<Item = Event<'a>>,
+{
+    write_html_fmt_with_config(s, iter, config).unwrap()
+}
+
+/// Internal: write HTML with explicit configuration.
+fn write_html_fmt_with_config<'a, I, W>(writer: W, iter: I, config: HtmlConfig) -> core::fmt::Result
+where
+    I: Iterator<Item = Event<'a>>,
+    W: core::fmt::Write,
+{
+    HtmlWriter::new_with_config(iter, FmtWriter(writer), config).run()
 }
