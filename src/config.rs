@@ -32,6 +32,10 @@ fn default_sort_compare() -> String {
     "string".to_string()
 }
 
+fn default_link_tracking() -> bool {
+    true
+}
+
 impl Default for SortField {
     fn default() -> Self {
         Self {
@@ -96,6 +100,13 @@ pub struct Config {
     /// Default: false (link checking enabled).
     #[serde(default)]
     pub skip_link_checks: bool,
+    /// Enable bidirectional link tracking (backlinks).
+    /// When enabled, generates links.json endpoints/files for each page with inbound/outbound links.
+    /// Server mode: lazy grep-based discovery on-demand with caching.
+    /// Build mode: eager collection during render, inverted for inbound links.
+    /// Default: true (enabled).
+    #[serde(default = "default_link_tracking")]
+    pub link_tracking: bool,
 }
 
 impl std::fmt::Display for IpArray {
@@ -174,6 +185,7 @@ impl Default for Config {
             build_concurrency: None, // Auto-detect based on CPU cores
             transcode: false,        // Disabled by default
             skip_link_checks: false, // Link checking enabled by default
+            link_tracking: true,     // Bidirectional link tracking enabled by default
         }
     }
 }

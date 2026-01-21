@@ -1,3 +1,4 @@
+use crate::link_index::{OutboundLink, is_internal_link, split_url_anchor};
 use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
@@ -41,6 +42,12 @@ struct EventState {
     server_mode: bool,
     /// True when dynamic video transcoding is enabled
     transcode_enabled: bool,
+    /// Collected outbound links from the document
+    collected_links: Vec<OutboundLink>,
+    /// Current link destination URL being processed (set on Start(Link))
+    current_link_dest: Option<String>,
+    /// Current link text being accumulated
+    current_link_text: String,
 }
 
 pub type SimpleMetadata = HashMap<String, String>;
@@ -109,7 +116,8 @@ pub async fn render(
     link_transform_config: LinkTransformConfig,
     server_mode: bool,
     transcode_enabled: bool,
-) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
+) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String, Vec<OutboundLink>), Box<dyn std::error::Error>>
+{
     render_with_cache(
         file,
         root_path,
@@ -128,6 +136,8 @@ pub async fn render(
 /// new results are cached for future use. URLs are fetched in parallel for improved
 /// performance when multiple bare URLs are present in the document.
 ///
+/// Returns: (frontmatter, headings, html, outbound_links)
+///
 /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
 /// - `transcode_enabled`: True when dynamic video transcoding is enabled
 pub async fn render_with_cache(
@@ -138,7 +148,8 @@ pub async fn render_with_cache(
     oembed_cache: Option<Arc<OembedCache>>,
     server_mode: bool,
     transcode_enabled: bool,
-) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String), Box<dyn std::error::Error>> {
+) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String, Vec<OutboundLink>), Box<dyn std::error::Error>>
+{
     // Read markdown input
     let markdown_input = fs::read_to_string(&file)?;
 
@@ -221,6 +232,9 @@ pub async fn render_with_cache(
         prefetched_oembed,
         server_mode,
         transcode_enabled,
+        collected_links: Vec::new(),
+        current_link_dest: None,
+        current_link_text: String::new(),
     };
     let mut processed_events = Vec::new();
 
@@ -237,6 +251,7 @@ pub async fn render_with_cache(
         yaml_frontmatter_simplified(&state.metadata_parsed),
         headings,
         html_output,
+        state.collected_links,
     ))
 }
 
@@ -548,6 +563,9 @@ fn process_event(
             id,
         }) => {
             state.in_link = true;
+            // Store the original destination URL for link tracking
+            state.current_link_dest = Some(dest_url.to_string());
+            state.current_link_text.clear();
             let transformed_url = transform_link(dest_url, &state.link_transform_config);
             let new_event = Event::Start(Tag::Link {
                 link_type: *link_type,
@@ -559,9 +577,25 @@ fn process_event(
         }
         Event::End(TagEnd::Link) => {
             state.in_link = false;
+            // Collect the outbound link
+            if let Some(dest_url) = state.current_link_dest.take() {
+                let (path, anchor) = split_url_anchor(&dest_url);
+                let internal = is_internal_link(&dest_url);
+                let link = OutboundLink {
+                    to: path,
+                    text: std::mem::take(&mut state.current_link_text),
+                    anchor,
+                    internal,
+                };
+                state.collected_links.push(link);
+            }
             (event, state)
         }
         Event::Text(text) => {
+            // Accumulate link text when inside a link
+            if state.in_link {
+                state.current_link_text.push_str(text);
+            }
             if state.in_metadata {
                 state.metadata_parsed = YamlLoader::load_from_str(text)
                     .ok()
@@ -631,7 +665,7 @@ mod tests {
             is_index_file,
         };
         // Tests run with server_mode=false, transcode_enabled=false
-        let (_, _, html) = render(path, &root, 100, config, false, false)
+        let (_, _, html, _) = render(path, &root, 100, config, false, false)
             .await
             .unwrap();
         html
@@ -700,7 +734,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _) = render(path, &root, 100, config, false, false)
+        let (metadata, _, _, _) = render(path, &root, 100, config, false, false)
             .await
             .unwrap();
         assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));

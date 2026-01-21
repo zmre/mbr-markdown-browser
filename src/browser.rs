@@ -279,6 +279,7 @@ fn reinit_server(
             true, // gui_mode: native window mode
             &config_copy.theme,
             None, // Logging already initialized
+            config_copy.link_tracking,
             #[cfg(feature = "media-metadata")]
             config_copy.transcode,
         );

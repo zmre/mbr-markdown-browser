@@ -137,7 +137,7 @@ pub fn render_preview_with_config(
         })?;
 
     // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
-    let (frontmatter, headings, html) = rt
+    let (frontmatter, headings, html, _outbound_links) = rt
         .block_on(async {
             markdown::render(
                 path.clone(),

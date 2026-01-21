@@ -19,10 +19,13 @@ use scraper::{Html, Selector};
 
 use std::sync::Arc;
 
+use papaya::HashMap as ConcurrentHashMap;
+
 use crate::{
     config::Config,
     embedded_pico,
     errors::BuildError,
+    link_index::{InboundLink, OutboundLink, PageLinks},
     link_transform::LinkTransformConfig,
     markdown,
     oembed_cache::OembedCache,
@@ -74,6 +77,66 @@ fn relative_root(depth: usize) -> String {
         String::new()
     } else {
         "../".repeat(depth)
+    }
+}
+
+/// Resolves a relative URL against a base URL path.
+///
+/// Given a source page URL (e.g., "/docs/page/") and a relative link (e.g., "../other/"),
+/// returns the absolute target URL (e.g., "/other/").
+///
+/// In mbr, URLs like "/docs/page/" correspond to files like "docs/page.md".
+/// Relative links are resolved against the file's parent directory (e.g., "docs/").
+///
+/// Examples:
+/// - resolve_relative_url("/source/", "target/") → "/target/" (sibling in root)
+/// - resolve_relative_url("/docs/guide/", "intro/") → "/docs/intro/" (sibling in docs/)
+/// - resolve_relative_url("/docs/guide/", "../other/") → "/other/" (up from docs/ to root)
+fn resolve_relative_url(base_url: &str, relative_url: &str) -> String {
+    // If the relative URL is already absolute, just normalize it
+    if relative_url.starts_with('/') {
+        let trimmed = relative_url.trim_end_matches('/');
+        return if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{}/", trimmed)
+        };
+    }
+
+    // Split base URL into path segments
+    // The base URL like "/docs/guide/" represents a FILE in directory "/docs/"
+    // So we treat the last segment as the filename and start from its parent directory
+    let base_segments: Vec<&str> = base_url
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Remove the last segment (the "filename" part) to get the parent directory
+    let mut segments: Vec<&str> = if !base_segments.is_empty() {
+        base_segments[..base_segments.len() - 1].to_vec()
+    } else {
+        vec![]
+    };
+
+    // Process each segment of the relative URL
+    for part in relative_url.split('/') {
+        match part {
+            "" | "." => {} // Skip empty or current directory
+            ".." => {
+                segments.pop(); // Go up one directory
+            }
+            segment => {
+                segments.push(segment); // Add the segment
+            }
+        }
+    }
+
+    // Reconstruct the absolute URL
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}/", segments.join("/"))
     }
 }
 
@@ -156,6 +219,8 @@ pub struct BuildStats {
     pub pagefind_indexed: Option<bool>,
     /// Number of broken links detected
     pub broken_links: usize,
+    /// Number of links.json files written (for link tracking)
+    pub link_files: usize,
 }
 
 /// A broken link detected during build.
@@ -175,6 +240,9 @@ pub struct Builder {
     repo: Repo,
     /// Cache for OEmbed page metadata shared across all file renders
     oembed_cache: Arc<OembedCache>,
+    /// Index of outbound links per page (url_path -> links)
+    /// Used for building bidirectional link tracking during static builds
+    build_link_index: Arc<ConcurrentHashMap<String, Vec<OutboundLink>>>,
 }
 
 impl Builder {
@@ -183,6 +251,7 @@ impl Builder {
         let templates = Templates::new(&config.root_dir, config.template_folder.as_deref())?;
         let repo = Repo::init_from_config(&config);
         let oembed_cache = Arc::new(OembedCache::new(config.oembed_cache_size));
+        let build_link_index = Arc::new(ConcurrentHashMap::new());
 
         tracing::debug!(
             "build: initialized oembed cache with {} bytes max",
@@ -195,6 +264,7 @@ impl Builder {
             output_dir,
             repo,
             oembed_cache,
+            build_link_index,
         })
     }
 
@@ -221,6 +291,11 @@ impl Builder {
 
         // Render all markdown files
         stats.markdown_pages = self.render_markdown_files().await?;
+
+        // Write links.json files (if link tracking is enabled)
+        if self.config.link_tracking {
+            stats.link_files = self.write_link_files().await?;
+        }
 
         // Generate directory/section pages
         stats.section_pages = self.render_directory_pages().await?;
@@ -343,6 +418,134 @@ impl Builder {
         Ok(count)
     }
 
+    /// Writes links.json files for all pages with bidirectional link information.
+    ///
+    /// This method:
+    /// 1. Builds an inbound link index by inverting the outbound links
+    /// 2. Writes links.json files in parallel for each page
+    async fn write_link_files(&self) -> Result<usize, BuildError> {
+        print_stage("Building link index...");
+
+        // Step 1: Build the inbound index by inverting outbound links
+        // For each outbound link from page A to page B, create an inbound link on page B from A
+        // Also collect the outbound index into a regular HashMap for thread-safe parallel access
+        let outbound_guard = self.build_link_index.pin();
+        let mut inbound_index: HashMap<String, Vec<InboundLink>> = HashMap::new();
+        let mut outbound_index: HashMap<String, Vec<OutboundLink>> = HashMap::new();
+
+        for (source_url, outbound_links) in outbound_guard.iter() {
+            // Copy outbound links to our local HashMap
+            outbound_index.insert(source_url.clone(), outbound_links.clone());
+
+            for link in outbound_links {
+                // Only track internal links for inbound
+                if !link.internal {
+                    continue;
+                }
+
+                // Resolve the relative URL to an absolute URL based on the source page
+                let target_url = resolve_relative_url(source_url, &link.to);
+
+                let inbound_link = InboundLink {
+                    from: source_url.clone(),
+                    text: link.text.clone(),
+                    anchor: link.anchor.clone(),
+                };
+
+                inbound_index
+                    .entry(target_url)
+                    .or_default()
+                    .push(inbound_link);
+            }
+        }
+
+        // Step 2: Collect all page URLs (both those with outbound links and those with inbound)
+        let all_page_urls: HashSet<String> = {
+            let mut urls: HashSet<String> = outbound_index.keys().cloned().collect();
+            urls.extend(inbound_index.keys().cloned());
+
+            // Also include pages that might not have any links
+            for (_, info) in self.repo.markdown_files.pin().iter() {
+                urls.insert(info.url_path.clone());
+            }
+            urls
+        };
+
+        let count = all_page_urls.len();
+        let concurrency = self.get_concurrency();
+
+        // Progress counter for parallel writing
+        let completed = Arc::new(AtomicUsize::new(0));
+        print_progress("Writing link files", 0, count);
+
+        let page_urls: Vec<String> = all_page_urls.into_iter().collect();
+        let inbound_index = Arc::new(inbound_index);
+        let outbound_index = Arc::new(outbound_index);
+        let completed_clone = completed.clone();
+
+        stream::iter(page_urls)
+            .map(|url_path| {
+                let inbound_index = inbound_index.clone();
+                let outbound_index = outbound_index.clone();
+                let completed = completed_clone.clone();
+                async move {
+                    let result =
+                        self.write_single_link_file(&url_path, &outbound_index, &inbound_index);
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    print_progress("Writing link files", done, count);
+                    result
+                }
+            })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        print_stage_done("Writing link files", count);
+        Ok(count)
+    }
+
+    /// Writes a single links.json file for a page.
+    fn write_single_link_file(
+        &self,
+        url_path: &str,
+        outbound_index: &HashMap<String, Vec<OutboundLink>>,
+        inbound_index: &HashMap<String, Vec<InboundLink>>,
+    ) -> Result<(), BuildError> {
+        let outbound = outbound_index.get(url_path).cloned().unwrap_or_default();
+        let inbound = inbound_index.get(url_path).cloned().unwrap_or_default();
+
+        let page_links = PageLinks { inbound, outbound };
+
+        // Determine output path: url_path → build/{url_path}/links.json
+        let url_path_stripped = url_path.trim_start_matches('/');
+        let output_path = if url_path_stripped.is_empty() || url_path == "/" {
+            self.output_dir.join("links.json")
+        } else {
+            self.output_dir.join(url_path_stripped).join("links.json")
+        };
+
+        // Create parent directories
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+
+        // Write JSON file
+        let json = serde_json::to_string(&page_links).map_err(|e| BuildError::WriteFailed {
+            path: output_path.clone(),
+            source: std::io::Error::other(format!("JSON serialization failed: {}", e)),
+        })?;
+
+        fs::write(&output_path, json).map_err(|e| BuildError::WriteFailed {
+            path: output_path,
+            source: e,
+        })?;
+
+        Ok(())
+    }
+
     /// Renders a single markdown file.
     async fn render_single_markdown(
         &self,
@@ -365,7 +568,7 @@ impl Builder {
 
         // Render markdown to HTML with shared oembed cache
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
-        let (mut frontmatter, headings, html) = markdown::render_with_cache(
+        let (mut frontmatter, headings, html, outbound_links) = markdown::render_with_cache(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
@@ -379,6 +582,13 @@ impl Builder {
             path: path.to_path_buf(),
             source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
         })?;
+
+        // Store outbound links in the build link index for generating links.json files
+        if self.config.link_tracking && !outbound_links.is_empty() {
+            self.build_link_index
+                .pin()
+                .insert(info.url_path.clone(), outbound_links);
+        }
 
         tracing::debug!("build: rendered {}", path.display());
 
@@ -1332,5 +1542,47 @@ mod tests {
         // From depth 2
         assert_eq!(make_relative_url("/docs/", 2), "../../docs/");
         assert_eq!(make_relative_url("/docs/guide/", 2), "../../docs/guide/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_parent() {
+        // Non-index pages use ../ prefix, so /source/ linking to target/ becomes ../target/
+        assert_eq!(resolve_relative_url("/source/", "../target/"), "/target/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_nested() {
+        // From /docs/guide/ (file docs/guide.md), ../reference/ goes up from docs/ to root
+        assert_eq!(
+            resolve_relative_url("/docs/guide/", "../reference/"),
+            "/reference/"
+        );
+        assert_eq!(
+            resolve_relative_url("/docs/guide/", "../../other/"),
+            "/other/"
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_url_sibling() {
+        // From /docs/guide/ (file docs/guide.md), a sibling link reference/ goes to docs/reference/
+        assert_eq!(
+            resolve_relative_url("/docs/guide/", "reference/"),
+            "/docs/reference/"
+        );
+        // From /source/, sibling link target/ goes to /target/
+        assert_eq!(resolve_relative_url("/source/", "target/"), "/target/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_absolute() {
+        assert_eq!(resolve_relative_url("/source/", "/target/"), "/target/");
+        assert_eq!(resolve_relative_url("/source/", "/"), "/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_to_root() {
+        assert_eq!(resolve_relative_url("/source/", "../"), "/");
+        assert_eq!(resolve_relative_url("/docs/guide/", "../../"), "/");
     }
 }

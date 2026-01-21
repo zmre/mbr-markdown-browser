@@ -14,6 +14,8 @@ use crate::config::SortField;
 use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::ServerError;
+use crate::link_grep::InboundLinkCache;
+use crate::link_index::{LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
 use crate::oembed_cache::OembedCache;
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
@@ -67,6 +69,12 @@ pub struct ServerState {
     /// Cache for HLS playlists and transcoded segments
     #[cfg(feature = "media-metadata")]
     pub hls_cache: Arc<HlsCache>,
+    /// Whether bidirectional link tracking is enabled
+    pub link_tracking: bool,
+    /// Cache for outbound links extracted during page renders
+    pub link_cache: Arc<LinkCache>,
+    /// Cache for inbound links discovered via grep
+    pub inbound_link_cache: Arc<InboundLinkCache>,
 }
 
 impl Server {
@@ -88,6 +96,7 @@ impl Server {
         gui_mode: bool,
         theme: S,
         log_filter: Option<&str>,
+        link_tracking: bool,
         #[cfg(feature = "media-metadata")] transcode_enabled: bool,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
@@ -188,6 +197,11 @@ impl Server {
             }
         });
 
+        // Initialize link caches (use same size strategy as oembed cache)
+        // 2MB for outbound links, 1MB for inbound with 60 second TTL
+        let link_cache = Arc::new(LinkCache::new(2 * 1024 * 1024));
+        let inbound_link_cache = Arc::new(InboundLinkCache::new(1024 * 1024, 60));
+
         let config = ServerState {
             base_dir,
             static_folder,
@@ -210,6 +224,9 @@ impl Server {
             transcode_enabled,
             #[cfg(feature = "media-metadata")]
             hls_cache,
+            link_tracking,
+            link_cache,
+            inbound_link_cache,
         };
 
         let router = Router::new()
@@ -835,6 +852,11 @@ impl Server {
                     return Ok(response);
                 }
 
+                // Try to serve links.json for bidirectional link tracking
+                if let Some(response) = Self::try_serve_links_json(&path, &config).await {
+                    return Ok(response);
+                }
+
                 tracing::debug!("resource not found: {}", &path);
                 let requested_url = format!("/{}", path);
                 Ok(Self::render_error_page(
@@ -983,6 +1005,147 @@ impl Server {
                 }
             },
         }
+    }
+
+    /// Try to serve links.json for bidirectional link tracking.
+    ///
+    /// Returns Some(Response) if the request was for links.json and we successfully
+    /// generated it, None otherwise (fall through to 404).
+    async fn try_serve_links_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::link_grep::find_inbound_links;
+        use crate::link_index::PageLinks;
+
+        // Check if this is a links.json request
+        if !path.ends_with("links.json") {
+            return None;
+        }
+
+        // If link tracking is disabled, return None (404)
+        if !config.link_tracking {
+            tracing::debug!("links.json requested but link tracking is disabled");
+            return None;
+        }
+
+        // Extract the page URL path from the request
+        // e.g., "docs/guide/links.json" -> "/docs/guide/"
+        let page_path = path.strip_suffix("links.json")?;
+        let page_url_path = if page_path.is_empty() || page_path == "/" {
+            "/".to_string()
+        } else {
+            let normalized = page_path.trim_end_matches('/');
+            format!("{}/", normalized)
+        };
+
+        tracing::debug!("links.json request for page: {}", page_url_path);
+
+        // Check if the page exists and get outbound links
+        // If not cached, we need to verify the page exists and render it to extract links
+        let outbound = if let Some(cached) = config.link_cache.get(&page_url_path) {
+            cached
+        } else {
+            // Resolve the path to find the markdown file
+            let resolver_config = PathResolverConfig {
+                base_dir: &config.base_dir,
+                static_folder: &config.static_folder,
+                markdown_extensions: &config.markdown_extensions,
+                index_file: &config.index_file,
+            };
+
+            // Convert page_url_path to a request path for the resolver
+            // "/docs/guide/" -> "docs/guide"
+            let request_path = page_url_path.trim_matches('/');
+
+            match resolve_request_path(&resolver_config, request_path) {
+                ResolvedPath::MarkdownFile(md_path) => {
+                    tracing::debug!(
+                        "links.json: rendering page to extract links: {:?}",
+                        &md_path
+                    );
+
+                    // Render the page to extract outbound links
+                    let is_index_file = md_path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .is_some_and(|f| f == config.index_file);
+
+                    let link_transform_config = LinkTransformConfig {
+                        markdown_extensions: config.markdown_extensions.clone(),
+                        index_file: config.index_file.clone(),
+                        is_index_file,
+                    };
+
+                    match markdown::render_with_cache(
+                        md_path,
+                        &config.base_dir,
+                        config.oembed_timeout_ms,
+                        link_transform_config,
+                        Some(config.oembed_cache.clone()),
+                        true,  // server_mode
+                        false, // transcode_enabled (not needed for link extraction)
+                    )
+                    .await
+                    {
+                        Ok((_frontmatter, _headings, _html, outbound_links)) => {
+                            // Resolve relative URLs to absolute before caching
+                            let resolved_links =
+                                resolve_outbound_links(&page_url_path, outbound_links);
+                            // Cache the outbound links
+                            config
+                                .link_cache
+                                .insert(page_url_path.clone(), resolved_links.clone());
+                            resolved_links
+                        }
+                        Err(e) => {
+                            tracing::error!("links.json: failed to render page: {}", e);
+                            return None;
+                        }
+                    }
+                }
+                _ => {
+                    // Page doesn't exist
+                    tracing::debug!("links.json: page not found: {}", page_url_path);
+                    return None;
+                }
+            }
+        };
+
+        // Get inbound links from cache or grep
+        let inbound = if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
+            cached
+        } else {
+            // Grep for inbound links
+            let links = find_inbound_links(
+                &page_url_path,
+                &config.base_dir,
+                &config.markdown_extensions,
+                &config.ignore_dirs,
+                &config.ignore_globs,
+            );
+            // Cache the result
+            config
+                .inbound_link_cache
+                .insert(page_url_path.clone(), links.clone());
+            links
+        };
+
+        let page_links = PageLinks { inbound, outbound };
+
+        let json = match serde_json::to_string(&page_links) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("Failed to serialize links.json: {}", e);
+                return None;
+            }
+        };
+
+        Some(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(json))
+                .unwrap(),
+        )
     }
 
     /// Build a PNG image response.
@@ -1371,17 +1534,18 @@ impl Server {
         #[cfg(not(feature = "media-metadata"))]
         let transcode_enabled = false;
 
-        let (mut frontmatter, headings, inner_html_output) = markdown::render_with_cache(
-            md_path.to_path_buf(),
-            root_path,
-            config.oembed_timeout_ms,
-            link_transform_config,
-            Some(config.oembed_cache.clone()),
-            true, // server_mode is always true in server
-            transcode_enabled,
-        )
-        .await
-        .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
+        let (mut frontmatter, headings, inner_html_output, outbound_links) =
+            markdown::render_with_cache(
+                md_path.to_path_buf(),
+                root_path,
+                config.oembed_timeout_ms,
+                link_transform_config,
+                Some(config.oembed_cache.clone()),
+                true, // server_mode is always true in server
+                transcode_enabled,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
         // Use relative path for markdown_source so live reload can match it
         let relative_md_path =
             pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
@@ -1416,6 +1580,15 @@ impl Server {
                 .unwrap_or("");
             parent.join(stem)
         };
+
+        // Cache outbound links for links.json endpoint if link tracking is enabled
+        if config.link_tracking && !outbound_links.is_empty() {
+            let url_path_str = format!("/{}/", url_path_buf.display()).replace("//", "/");
+            // Resolve relative URLs to absolute before caching
+            let resolved_links = resolve_outbound_links(&url_path_str, outbound_links);
+            config.link_cache.insert(url_path_str, resolved_links);
+        }
+
         let breadcrumbs = generate_breadcrumbs(&url_path_buf);
         let breadcrumbs_json: Vec<_> = breadcrumbs
             .iter()
