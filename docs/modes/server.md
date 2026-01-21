@@ -187,6 +187,72 @@ Press **`/`** (forward slash) to open the search dialog.
 | `↑` / `↓` | Navigate results |
 | `Enter` | Open selected result |
 
+## Link Explorer
+
+Press **`f`**, **`F`**, or **`T`** to open the Link Explorer - a quick navigation modal for jumping between pages and headings.
+
+### Tabs
+
+| Key | Tab | Description |
+|-----|-----|-------------|
+| `f` | **Links Out** | All links from the current page to other pages |
+| `F` | **Links In** | Backlinks - pages that link to the current page |
+| `T` | **ToC** | Table of contents - all headings in the current document |
+
+### Features
+
+- **Fuzzy search** - Type to filter items with intelligent matching
+- **Visibility awareness** - In ToC mode, currently visible headings are prioritized and marked
+- **Internal vs External** - External links open in new tabs, internal links navigate in place
+- **Tab cycling** - Press `Tab` to cycle between the three views
+
+### Layout
+
+```
+┌──────────────────────────────────────────┐
+│  [Links Out]  [Links In]  [ToC]          │
+├──────────────────────────────────────────┤
+│  🔍 Filter...                            │
+├──────────────────────────────────────────┤
+│  → Getting Started                       │
+│  → Installation Guide                    │
+│  → API Reference               ↗ (ext)   │
+│  ← docs/intro (backlink)                 │
+├──────────────────────────────────────────┤
+│  ^n ^p navigate  Tab switch  Enter open  │
+└──────────────────────────────────────────┘
+```
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `f` | Open Links Out tab |
+| `F` (Shift+f) | Open Links In (backlinks) tab |
+| `T` (Shift+t) | Open Table of Contents tab |
+| `Tab` | Cycle to next tab |
+| `Shift+Tab` | Cycle to previous tab |
+| `↑` / `↓` | Navigate items |
+| `Ctrl+n` / `Ctrl+p` | Navigate items (vim-style) |
+| `Ctrl+d` / `Ctrl+u` | Scroll the list |
+| `Enter` | Navigate to selected item |
+| `Escape` | Close the explorer |
+
+### Link Tracking
+
+The Links Out and Links In tabs require link tracking to be enabled (default). This is controlled by the `link_tracking` config option:
+
+```toml
+# .mbr/config.toml
+link_tracking = true  # default
+```
+
+When enabled, mbr automatically tracks:
+- **Outbound links** - All markdown links `[text](url)` in the current page
+- **Inbound links** - All pages that link to the current page (backlinks)
+
+This enables wiki-style bidirectional link navigation without requiring any special syntax.
+
 ## Server Endpoints
 
 | Endpoint | Method | Description |

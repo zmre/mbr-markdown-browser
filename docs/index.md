@@ -46,6 +46,7 @@ https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbG5udXhqcWpseDgyaGJ2bDd0MXRqYW
 
 - **File Browser** - Press `-` to open a sidebar with shortcuts, recent files, tag tree, and folder navigation
 - **Full-Text Search** - Press `/` to search across all files instantly
+- **Link Explorer** - Press `f` for outgoing links, `F` for backlinks, or `T` for table of contents
 - **Tag Hierarchy** - Nested tags like `project/frontend` create browsable trees
 - **Breadcrumbs** - Navigate up through the directory structure
 - **Next/Prev** - Press `L` to go to the next file and `H` to go to the previous one
