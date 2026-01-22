@@ -15,6 +15,18 @@ pub enum ResolvedPath {
     MarkdownFile(PathBuf),
     /// Generate a directory listing
     DirectoryListing(PathBuf),
+    /// Render a tag page listing all pages with this tag
+    TagPage {
+        /// The tag source (e.g., "tags", "performers", "taxonomy.tags")
+        source: String,
+        /// The normalized tag value (e.g., "rust", "joshua_jay")
+        value: String,
+    },
+    /// Render a tag source index listing all tags from this source
+    TagSourceIndex {
+        /// The tag source (e.g., "tags", "performers")
+        source: String,
+    },
     /// Resource not found
     NotFound,
 }
@@ -26,6 +38,9 @@ pub struct PathResolverConfig<'a> {
     pub static_folder: &'a str,
     pub markdown_extensions: &'a [String],
     pub index_file: &'a str,
+    /// Valid tag source URL identifiers (e.g., ["tags", "performers", "taxonomy.tags"])
+    /// Used to detect tag page URLs like /tags/rust/
+    pub tag_sources: &'a [String],
 }
 
 /// Resolves a URL path to determine what resource should be served.
@@ -41,7 +56,12 @@ pub struct PathResolverConfig<'a> {
 /// 4. File in static folder → StaticFile
 /// 5. Directory with index.{markdown_ext} → MarkdownFile
 /// 6. Directory without index → DirectoryListing
-/// 7. Nothing matches → NotFound
+/// 7. Tag source index (e.g., /tags/) → TagSourceIndex (if source matches config)
+/// 8. Tag page (e.g., /tags/rust/) → TagPage (if source matches config)
+/// 9. Nothing matches → NotFound
+///
+/// Note: Filesystem paths (steps 1-6) always take precedence over tag URLs (steps 7-8).
+/// If a file or directory named "tags" exists, it will be served instead of the tag index.
 pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> ResolvedPath {
     let candidate_path = config.base_dir.join(request_path);
 
@@ -85,7 +105,12 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
         return ResolvedPath::DirectoryListing(candidate_base);
     }
 
-    // 7. Nothing found
+    // 7-8. Check for tag URLs (only if nothing matched in filesystem)
+    if let Some(tag_result) = try_resolve_tag_url(request_path, config.tag_sources) {
+        return tag_result;
+    }
+
+    // 9. Nothing found
     ResolvedPath::NotFound
 }
 
@@ -131,16 +156,73 @@ fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Opt
     }
 }
 
+/// Attempts to resolve a URL path as a tag URL.
+///
+/// Matches patterns like:
+/// - `{source}/` → TagSourceIndex (e.g., "tags/" → list all tags)
+/// - `{source}/{value}/` → TagPage (e.g., "tags/rust/" → pages tagged "rust")
+///
+/// The source must match one of the configured tag sources (case-insensitive).
+/// Returns `None` if the path doesn't match a tag URL pattern.
+fn try_resolve_tag_url(request_path: &str, tag_sources: &[String]) -> Option<ResolvedPath> {
+    // Skip if no tag sources configured
+    if tag_sources.is_empty() {
+        return None;
+    }
+
+    // Normalize path: strip leading and trailing slashes
+    let path = request_path.trim_matches('/');
+
+    // Empty path is not a tag URL
+    if path.is_empty() {
+        return None;
+    }
+
+    // Split path into segments
+    let segments: Vec<&str> = path.split('/').collect();
+
+    match segments.len() {
+        // Single segment: might be a tag source index (e.g., "tags")
+        1 => {
+            let source = segments[0].to_lowercase();
+            if tag_sources.iter().any(|s| s.to_lowercase() == source) {
+                Some(ResolvedPath::TagSourceIndex { source })
+            } else {
+                None
+            }
+        }
+        // Two segments: might be a tag page (e.g., "tags/rust")
+        2 => {
+            let source = segments[0].to_lowercase();
+            let value = segments[1].to_lowercase();
+
+            // Don't match empty values
+            if value.is_empty() {
+                return None;
+            }
+
+            if tag_sources.iter().any(|s| s.to_lowercase() == source) {
+                Some(ResolvedPath::TagPage { source, value })
+            } else {
+                None
+            }
+        }
+        // More than 2 segments: not a tag URL
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
 
-    /// Test fixture that owns the extensions vector
+    /// Test fixture that owns the extensions and tag_sources vectors
     struct TestFixture {
         dir: TempDir,
         extensions: Vec<String>,
+        tag_sources: Vec<String>,
     }
 
     impl TestFixture {
@@ -150,13 +232,28 @@ mod tests {
             Self {
                 dir,
                 extensions: vec![String::from("md")],
+                tag_sources: vec![],
             }
         }
 
         fn with_extensions(extensions: Vec<String>) -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
-            Self { dir, extensions }
+            Self {
+                dir,
+                extensions,
+                tag_sources: vec![],
+            }
+        }
+
+        fn with_tag_sources(tag_sources: Vec<String>) -> Self {
+            let dir = TempDir::new().unwrap();
+            fs::create_dir(dir.path().join("static")).unwrap();
+            Self {
+                dir,
+                extensions: vec![String::from("md")],
+                tag_sources,
+            }
         }
 
         fn config(&self) -> PathResolverConfig<'_> {
@@ -165,6 +262,7 @@ mod tests {
                 static_folder: "static",
                 markdown_extensions: &self.extensions,
                 index_file: "index.md",
+                tag_sources: &self.tag_sources,
             }
         }
 
@@ -343,6 +441,198 @@ mod tests {
             PathBuf::from("relative")
         );
     }
+
+    // ==================== Tag URL Resolution Tests ====================
+
+    #[test]
+    fn test_tag_source_index() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+        let result = resolve_request_path(&fixture.config(), "tags/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::TagSourceIndex {
+                source: "tags".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_source_index_without_trailing_slash() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+        let result = resolve_request_path(&fixture.config(), "tags");
+
+        assert_eq!(
+            result,
+            ResolvedPath::TagSourceIndex {
+                source: "tags".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_page() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+        let result = resolve_request_path(&fixture.config(), "tags/rust/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::TagPage {
+                source: "tags".to_string(),
+                value: "rust".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_page_without_trailing_slash() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+        let result = resolve_request_path(&fixture.config(), "tags/rust");
+
+        assert_eq!(
+            result,
+            ResolvedPath::TagPage {
+                source: "tags".to_string(),
+                value: "rust".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_url_case_insensitive_source() {
+        let fixture = TestFixture::with_tag_sources(vec!["Tags".to_string()]);
+
+        // Uppercase in URL should match lowercase config
+        let result = resolve_request_path(&fixture.config(), "TAGS/rust/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::TagPage {
+                source: "tags".to_string(),
+                value: "rust".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_url_unknown_source_not_matched() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+
+        // "categories" is not a configured tag source
+        let result = resolve_request_path(&fixture.config(), "categories/rust/");
+
+        assert_eq!(result, ResolvedPath::NotFound);
+    }
+
+    #[test]
+    fn test_tag_url_no_sources_configured() {
+        let fixture = TestFixture::new(); // Empty tag_sources
+        let result = resolve_request_path(&fixture.config(), "tags/rust/");
+
+        assert_eq!(result, ResolvedPath::NotFound);
+    }
+
+    #[test]
+    fn test_tag_url_multiple_sources() {
+        let fixture = TestFixture::with_tag_sources(vec![
+            "tags".to_string(),
+            "performers".to_string(),
+            "taxonomy.categories".to_string(),
+        ]);
+
+        // All sources should be recognized
+        assert_eq!(
+            resolve_request_path(&fixture.config(), "tags/rust/"),
+            ResolvedPath::TagPage {
+                source: "tags".to_string(),
+                value: "rust".to_string()
+            }
+        );
+        assert_eq!(
+            resolve_request_path(&fixture.config(), "performers/joshua_jay/"),
+            ResolvedPath::TagPage {
+                source: "performers".to_string(),
+                value: "joshua_jay".to_string()
+            }
+        );
+        assert_eq!(
+            resolve_request_path(&fixture.config(), "taxonomy.categories/"),
+            ResolvedPath::TagSourceIndex {
+                source: "taxonomy.categories".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_file_takes_precedence_over_tag_url() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+        // Create a real markdown file at "tags.md"
+        fs::write(fixture.path().join("tags.md"), "# Real Tags Page").unwrap();
+
+        // File should take precedence over tag source index
+        let result = resolve_request_path(&fixture.config(), "tags/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::MarkdownFile(fixture.path().join("tags.md"))
+        );
+    }
+
+    #[test]
+    fn test_directory_takes_precedence_over_tag_url() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+        // Create a real directory "tags/"
+        fs::create_dir(fixture.path().join("tags")).unwrap();
+
+        // Directory listing should take precedence
+        let result = resolve_request_path(&fixture.config(), "tags/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::DirectoryListing(fixture.path().join("tags"))
+        );
+    }
+
+    #[test]
+    fn test_nested_tag_value_not_matched() {
+        let fixture = TestFixture::with_tag_sources(vec!["tags".to_string()]);
+
+        // More than 2 segments is not a valid tag URL
+        let result = resolve_request_path(&fixture.config(), "tags/rust/advanced/");
+
+        assert_eq!(result, ResolvedPath::NotFound);
+    }
+
+    #[test]
+    fn test_try_resolve_tag_url_directly() {
+        let sources = vec!["tags".to_string(), "performers".to_string()];
+
+        // Tag source index
+        assert_eq!(
+            try_resolve_tag_url("tags/", &sources),
+            Some(ResolvedPath::TagSourceIndex {
+                source: "tags".to_string()
+            })
+        );
+
+        // Tag page
+        assert_eq!(
+            try_resolve_tag_url("tags/rust", &sources),
+            Some(ResolvedPath::TagPage {
+                source: "tags".to_string(),
+                value: "rust".to_string()
+            })
+        );
+
+        // Unknown source
+        assert_eq!(try_resolve_tag_url("unknown/value", &sources), None);
+
+        // Empty path
+        assert_eq!(try_resolve_tag_url("", &sources), None);
+
+        // Empty sources
+        assert_eq!(try_resolve_tag_url("tags/rust", &[]), None);
+    }
 }
 
 #[cfg(test)]
@@ -432,11 +722,13 @@ mod proptests {
             fs::write(dir.path().join("test.md"), "# Test").unwrap();
 
             let extensions = vec![String::from("md")];
+            let tag_sources: Vec<String> = vec![];
             let config = PathResolverConfig {
                 base_dir: dir.path(),
                 static_folder: "static",
                 markdown_extensions: &extensions,
                 index_file: "index.md",
+                tag_sources: &tag_sources,
             };
 
             let path_str = request_path.join("/");
@@ -459,11 +751,13 @@ mod proptests {
             fs::create_dir(base_dir.join("static")).unwrap();
 
             let extensions = vec![String::from("md")];
+            let tag_sources: Vec<String> = vec![];
             let config = PathResolverConfig {
                 base_dir,
                 static_folder: "static",
                 markdown_extensions: &extensions,
                 index_file: "index.md",
+                tag_sources: &tag_sources,
             };
 
             // Try various path traversal patterns

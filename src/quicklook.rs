@@ -134,6 +134,7 @@ pub fn render_preview_with_config(
         })?;
 
     // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
+    // Use empty tag sources for QuickLook (no wikilink transformation)
     let (frontmatter, headings, html, _outbound_links) = rt
         .block_on(async {
             markdown::render(
@@ -141,8 +142,9 @@ pub fn render_preview_with_config(
                 &root_path,
                 0,
                 link_config,
-                false, // server_mode is false in QuickLook
-                false, // transcode is disabled in QuickLook
+                false,                            // server_mode is false in QuickLook
+                false,                            // transcode is disabled in QuickLook
+                std::collections::HashSet::new(), // No tag sources in QuickLook
             )
             .await
         })

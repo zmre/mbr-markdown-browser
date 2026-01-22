@@ -1,6 +1,7 @@
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
@@ -10,6 +11,8 @@ use serde::{Serialize, Serializer, ser::SerializeSeq};
 use walkdir::WalkDir;
 
 use crate::Config;
+use crate::config::TagSource;
+use crate::tag_index::{TagIndex, TaggedPage};
 
 #[derive(Clone, Serialize)]
 pub struct Repo {
@@ -35,6 +38,12 @@ pub struct Repo {
     pub queued_folders: HashMap<PathBuf, PathBuf>,
     pub markdown_files: MarkdownFiles,
     pub other_files: OtherFiles,
+    /// Thread-safe index of tagged pages.
+    #[serde(skip)]
+    pub tag_index: Arc<TagIndex>,
+    /// Configured tag sources for frontmatter extraction.
+    #[serde(skip)]
+    tag_sources: Vec<TagSource>,
 }
 
 #[derive(Clone)]
@@ -381,6 +390,7 @@ impl Repo {
             &c.ignore_dirs[..],
             &c.ignore_globs[..],
             c.index_file.clone(),
+            &c.tag_sources[..],
         )
     }
 
@@ -391,6 +401,7 @@ impl Repo {
         ignore_dirs: &[String],
         ignore_globs: &[String],
         index_file: S,
+        tag_sources: &[TagSource],
     ) -> Self {
         // Pre-compile glob patterns for efficient matching during scans
         let compiled_ignore_globs: Vec<glob::Pattern> = ignore_globs
@@ -414,6 +425,8 @@ impl Repo {
             queued_folders: HashMap::new(),
             markdown_files: MarkdownFiles(HashMap::new()),
             other_files: OtherFiles(HashMap::new()),
+            tag_index: Arc::new(TagIndex::new()),
+            tag_sources: tag_sources.to_vec(),
         }
     }
 
@@ -486,12 +499,36 @@ impl Repo {
             }
         }
 
-        // Parallel processing: extract frontmatter from markdown files
+        // Parallel processing: extract frontmatter from markdown files and build tag index
         markdown
             .into_par_iter()
             .for_each(|(mdfile, mddetails): (PathBuf, MarkdownInfo)| {
                 let metadata = crate::markdown::extract_metadata_from_file(&mdfile).ok();
-                let details = if metadata.is_some() {
+                let details = if let Some(ref frontmatter) = metadata {
+                    // Extract tags from frontmatter for each configured tag source
+                    let title = get_page_title(frontmatter, &mddetails.raw_path);
+                    let description = frontmatter.get("description").cloned();
+
+                    for tag_source in &self.tag_sources {
+                        // Look up the field (supports dot notation like "taxonomy.tags")
+                        if let Some(tag_values_str) = frontmatter.get(&tag_source.field) {
+                            // Parse comma-separated values
+                            for tag_value in parse_tag_values(tag_values_str) {
+                                let page = if let Some(ref desc) = description {
+                                    TaggedPage::with_description(
+                                        &mddetails.url_path,
+                                        &title,
+                                        desc,
+                                        &tag_value,
+                                    )
+                                } else {
+                                    TaggedPage::new(&mddetails.url_path, &title, &tag_value)
+                                };
+                                self.tag_index.add_page(&tag_source.field, &tag_value, page);
+                            }
+                        }
+                    }
+
                     MarkdownInfo {
                         frontmatter: metadata,
                         ..mddetails
@@ -681,6 +718,39 @@ pub fn is_markdown_extension(extension: &str, markdown_extensions: &[String]) ->
     markdown_extensions.iter().any(|x| x.as_str() == extension)
 }
 
+/// Parses a comma-separated string of tag values into individual tags.
+///
+/// Handles whitespace around commas and filters empty values.
+///
+/// # Examples
+///
+/// ```
+/// use mbr::repo::parse_tag_values;
+///
+/// let tags: Vec<String> = parse_tag_values("rust, programming, web dev").collect();
+/// assert_eq!(tags, vec!["rust", "programming", "web dev"]);
+/// ```
+pub fn parse_tag_values(values: &str) -> impl Iterator<Item = String> + '_ {
+    values
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Gets the page title from frontmatter or falls back to filename.
+///
+/// Priority:
+/// 1. `title` field in frontmatter
+/// 2. Filename stem (without extension)
+fn get_page_title(frontmatter: &crate::markdown::SimpleMetadata, path: &Path) -> String {
+    frontmatter.get("title").cloned().unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled")
+            .to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +847,58 @@ mod tests {
         let extensions = vec!["md".to_string()];
         assert!(!is_markdown_extension("txt", &extensions));
         assert!(!is_markdown_extension("html", &extensions));
+    }
+
+    #[test]
+    fn test_parse_tag_values_basic() {
+        let tags: Vec<String> = parse_tag_values("rust, programming, web dev").collect();
+        assert_eq!(tags, vec!["rust", "programming", "web dev"]);
+    }
+
+    #[test]
+    fn test_parse_tag_values_single() {
+        let tags: Vec<String> = parse_tag_values("rust").collect();
+        assert_eq!(tags, vec!["rust"]);
+    }
+
+    #[test]
+    fn test_parse_tag_values_whitespace() {
+        let tags: Vec<String> = parse_tag_values("  rust  ,  python  ").collect();
+        assert_eq!(tags, vec!["rust", "python"]);
+    }
+
+    #[test]
+    fn test_parse_tag_values_empty() {
+        let tags: Vec<String> = parse_tag_values("").collect();
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_parse_tag_values_empty_between() {
+        let tags: Vec<String> = parse_tag_values("rust,,python").collect();
+        assert_eq!(tags, vec!["rust", "python"]);
+    }
+
+    #[test]
+    fn test_get_page_title_from_frontmatter() {
+        let mut frontmatter = std::collections::HashMap::new();
+        frontmatter.insert("title".to_string(), "My Page Title".to_string());
+        let path = Path::new("/docs/readme.md");
+        assert_eq!(get_page_title(&frontmatter, path), "My Page Title");
+    }
+
+    #[test]
+    fn test_get_page_title_from_filename() {
+        let frontmatter = std::collections::HashMap::new();
+        let path = Path::new("/docs/rust-guide.md");
+        assert_eq!(get_page_title(&frontmatter, path), "rust-guide");
+    }
+
+    #[test]
+    fn test_get_page_title_fallback() {
+        let frontmatter = std::collections::HashMap::new();
+        let path = Path::new("/");
+        assert_eq!(get_page_title(&frontmatter, path), "Untitled");
     }
 }
 

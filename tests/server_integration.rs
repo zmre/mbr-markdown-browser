@@ -35,14 +35,15 @@ impl TestServer {
                     "build".to_string(),
                 ],
                 "index.md",
-                100,                                // oembed_timeout_ms
-                2 * 1024 * 1024,                    // oembed_cache_size (2MB)
-                None,                               // template_folder
-                mbr::config::default_sort_config(), // sort
-                false,                              // gui_mode
-                "default",                          // theme
-                None,                               // log_filter
-                true,                               // link_tracking
+                100,                                 // oembed_timeout_ms
+                2 * 1024 * 1024,                     // oembed_cache_size (2MB)
+                None,                                // template_folder
+                mbr::config::default_sort_config(),  // sort
+                false,                               // gui_mode
+                "default",                           // theme
+                None,                                // log_filter
+                true,                                // link_tracking
+                &mbr::config::default_tag_sources(), // tag_sources
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -695,11 +696,12 @@ impl TestServerWithTemplates {
                 100,             // oembed_timeout_ms
                 2 * 1024 * 1024, // oembed_cache_size (2MB)
                 template_folder,
-                mbr::config::default_sort_config(), // sort
-                false,                              // gui_mode
-                "default",                          // theme
-                None,                               // log_filter
-                true,                               // link_tracking
+                mbr::config::default_sort_config(),  // sort
+                false,                               // gui_mode
+                "default",                           // theme
+                None,                                // log_filter
+                true,                                // link_tracking
+                &mbr::config::default_tag_sources(), // tag_sources
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -1436,13 +1438,14 @@ impl TestServerWithTheme {
                 ],
                 "index.md",
                 100,
-                2 * 1024 * 1024,                    // oembed_cache_size (2MB)
-                None,                               // template_folder
-                mbr::config::default_sort_config(), // sort
-                false,                              // gui_mode
-                &theme,                             // theme
-                None,                               // log_filter
-                true,                               // link_tracking
+                2 * 1024 * 1024,                     // oembed_cache_size (2MB)
+                None,                                // template_folder
+                mbr::config::default_sort_config(),  // sort
+                false,                               // gui_mode
+                &theme,                              // theme
+                None,                                // log_filter
+                true,                                // link_tracking
+                &mbr::config::default_tag_sources(), // tag_sources
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -1790,14 +1793,15 @@ impl TestServerNoLinkTracking {
                     "build".to_string(),
                 ],
                 "index.md",
-                100,                                // oembed_timeout_ms
-                2 * 1024 * 1024,                    // oembed_cache_size (2MB)
-                None,                               // template_folder
-                mbr::config::default_sort_config(), // sort
-                false,                              // gui_mode
-                "default",                          // theme
-                None,                               // log_filter
-                false,                              // link_tracking DISABLED
+                100,                                 // oembed_timeout_ms
+                2 * 1024 * 1024,                     // oembed_cache_size (2MB)
+                None,                                // template_folder
+                mbr::config::default_sort_config(),  // sort
+                false,                               // gui_mode
+                "default",                           // theme
+                None,                                // log_filter
+                false,                               // link_tracking DISABLED
+                &mbr::config::default_tag_sources(), // tag_sources
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )

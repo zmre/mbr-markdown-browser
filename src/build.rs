@@ -213,6 +213,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 pub struct BuildStats {
     pub markdown_pages: usize,
     pub section_pages: usize,
+    pub tag_pages: usize,
     pub assets_linked: usize,
     pub duration: Duration,
     /// Whether Pagefind search indexing succeeded (None = not attempted)
@@ -299,6 +300,13 @@ impl Builder {
 
         // Generate directory/section pages
         stats.section_pages = self.render_directory_pages().await?;
+
+        // Generate tag pages (if enabled)
+        if self.config.build_tag_pages {
+            stats.tag_pages = self.render_tag_pages().await?;
+        } else {
+            println!("Generating tag pages ... skipped");
+        }
 
         // Symlink assets (images, PDFs, etc.)
         print_stage("Linking assets...");
@@ -568,6 +576,7 @@ impl Builder {
 
         // Render markdown to HTML with shared oembed cache
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
+        let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
         let (mut frontmatter, headings, html, outbound_links) = markdown::render_with_cache(
             path.to_path_buf(),
             &self.config.root_dir,
@@ -576,6 +585,7 @@ impl Builder {
             Some(self.oembed_cache.clone()),
             false, // server_mode is false in build mode
             false, // transcode is disabled in build mode
+            valid_tag_sources,
         )
         .await
         .map_err(|e| BuildError::RenderFailed {
@@ -887,6 +897,298 @@ impl Builder {
         Ok(())
     }
 
+    /// Generates tag pages in parallel.
+    ///
+    /// For each configured tag source, generates:
+    /// - A tag source index page at `/{source}/`
+    /// - Individual tag pages at `/{source}/{value}/`
+    async fn render_tag_pages(&self) -> Result<usize, BuildError> {
+        // Collect all tag pages to render (source index + individual tags)
+        let mut tasks: Vec<(String, Option<String>)> = Vec::new(); // (source, Some(value)) or (source, None for index)
+
+        for tag_source in &self.config.tag_sources {
+            let source = tag_source.url_source();
+
+            // Check if this source has any tags
+            if !self.repo.tag_index.has_source(&source) {
+                continue;
+            }
+
+            // Add source index page
+            tasks.push((source.clone(), None));
+
+            // Add individual tag pages
+            for tag_info in self.repo.tag_index.get_all_tags(&source) {
+                tasks.push((source.clone(), Some(tag_info.normalized)));
+            }
+        }
+
+        if tasks.is_empty() {
+            println!("Generating tag pages ... skipped (no tags)");
+            return Ok(0);
+        }
+
+        let count = tasks.len();
+        let concurrency = self.get_concurrency();
+
+        tracing::info!(
+            "Rendering {} tag pages with concurrency {}",
+            count,
+            concurrency
+        );
+
+        // Progress counter for parallel rendering
+        let completed = Arc::new(AtomicUsize::new(0));
+        print_progress("Generating tag pages", 0, count);
+
+        let completed_clone = completed.clone();
+        stream::iter(tasks)
+            .map(|(source, value)| {
+                let completed = completed_clone.clone();
+                async move {
+                    let result = if let Some(ref tag_value) = value {
+                        self.render_single_tag_page(&source, tag_value).await
+                    } else {
+                        self.render_tag_source_index(&source).await
+                    };
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    print_progress("Generating tag pages", done, count);
+                    result
+                }
+            })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        print_stage_done("Generating tag pages", count);
+        Ok(count)
+    }
+
+    /// Renders a single tag page showing all pages with that tag.
+    async fn render_single_tag_page(&self, source: &str, value: &str) -> Result<(), BuildError> {
+        // Find the TagSource config for labels
+        let tag_source = self
+            .config
+            .tag_sources
+            .iter()
+            .find(|ts| ts.url_source() == source);
+
+        let (singular_label, plural_label) = match tag_source {
+            Some(ts) => (ts.singular_label(), ts.plural_label()),
+            None => (source.to_string(), format!("{}s", source)),
+        };
+
+        // Get display value for the tag
+        let display_value = self
+            .repo
+            .tag_index
+            .get_tag_display(source, value)
+            .unwrap_or_else(|| value.to_string());
+
+        // Get pages with this tag
+        let pages = self.repo.tag_index.get_pages(source, value);
+
+        // Calculate URL path and depth
+        let url_path = format!("/{}/{}/", source, value);
+        let depth = url_depth(&url_path);
+
+        // Build context
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Tag information
+        context.insert(
+            "tag_source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        context.insert(
+            "tag_display_value".to_string(),
+            serde_json::Value::String(display_value.clone()),
+        );
+        context.insert(
+            "tag_label".to_string(),
+            serde_json::Value::String(singular_label),
+        );
+        context.insert(
+            "tag_label_plural".to_string(),
+            serde_json::Value::String(plural_label),
+        );
+        context.insert(
+            "page_count".to_string(),
+            serde_json::Value::Number(pages.len().into()),
+        );
+
+        // Pages array with relative URLs
+        let pages_json: Vec<serde_json::Value> = pages
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "url_path": make_relative_url(&p.url_path, depth),
+                    "title": p.title,
+                    "description": p.description
+                })
+            })
+            .collect();
+        context.insert("pages".to_string(), serde_json::Value::Array(pages_json));
+
+        // Static build settings
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
+        context.insert(
+            "relative_base".to_string(),
+            serde_json::Value::String(relative_base(depth)),
+        );
+        context.insert(
+            "relative_root".to_string(),
+            serde_json::Value::String(relative_root(depth)),
+        );
+
+        // Breadcrumbs with relative URLs
+        let breadcrumbs_json = vec![
+            serde_json::json!({
+                "name": "Home",
+                "url": make_relative_url("/", depth)
+            }),
+            serde_json::json!({
+                "name": context.get("tag_label_plural").and_then(|v| v.as_str()).unwrap_or(source),
+                "url": make_relative_url(&format!("/{}/", source), depth)
+            }),
+        ];
+        context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::Value::Array(breadcrumbs_json),
+        );
+        context.insert(
+            "current_dir_name".to_string(),
+            serde_json::Value::String(display_value),
+        );
+
+        // Render template
+        let html_output = self.templates.render_tag(context)?;
+
+        // Determine output path
+        let output_path = self.output_dir.join(source).join(value).join("index.html");
+
+        // Create parent directories and write file (only if not exists - files take precedence)
+        if !output_path.exists() {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Renders a tag source index page showing all tags from that source.
+    async fn render_tag_source_index(&self, source: &str) -> Result<(), BuildError> {
+        // Find the TagSource config for labels
+        let tag_source = self
+            .config
+            .tag_sources
+            .iter()
+            .find(|ts| ts.url_source() == source);
+
+        let (singular_label, plural_label) = match tag_source {
+            Some(ts) => (ts.singular_label(), ts.plural_label()),
+            None => (source.to_string(), format!("{}s", source)),
+        };
+
+        // Get all tags for this source
+        let tags = self.repo.tag_index.get_all_tags(source);
+
+        // Calculate URL path and depth
+        let url_path = format!("/{}/", source);
+        let depth = url_depth(&url_path);
+
+        // Build context
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Tag source information
+        context.insert(
+            "tag_source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        context.insert(
+            "tag_label".to_string(),
+            serde_json::Value::String(singular_label),
+        );
+        context.insert(
+            "tag_label_plural".to_string(),
+            serde_json::Value::String(plural_label.clone()),
+        );
+        context.insert(
+            "tag_count".to_string(),
+            serde_json::Value::Number(tags.len().into()),
+        );
+
+        // Tags array with relative URLs
+        let tags_json: Vec<serde_json::Value> = tags
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "url_value": t.normalized.clone(),
+                    "display_value": t.display.clone(),
+                    "page_count": t.count
+                })
+            })
+            .collect();
+        context.insert("tags".to_string(), serde_json::Value::Array(tags_json));
+
+        // Static build settings
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
+        context.insert(
+            "relative_base".to_string(),
+            serde_json::Value::String(relative_base(depth)),
+        );
+        context.insert(
+            "relative_root".to_string(),
+            serde_json::Value::String(relative_root(depth)),
+        );
+
+        // Breadcrumbs with relative URLs
+        let breadcrumbs_json = vec![serde_json::json!({
+            "name": "Home",
+            "url": make_relative_url("/", depth)
+        })];
+        context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::Value::Array(breadcrumbs_json),
+        );
+        context.insert(
+            "current_dir_name".to_string(),
+            serde_json::Value::String(plural_label),
+        );
+
+        // Render template
+        let html_output = self.templates.render_tag_index(context)?;
+
+        // Determine output path
+        let output_path = self.output_dir.join(source).join("index.html");
+
+        // Create parent directories and write file (only if not exists - files take precedence)
+        if !output_path.exists() {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Creates symlinks for static assets.
     fn symlink_assets(&self) -> Result<usize, BuildError> {
         let other_files: Vec<_> = self
@@ -1079,16 +1381,51 @@ impl Builder {
             })?;
         }
 
-        // Step 4: Generate site.json with sort config
+        // Step 4: Generate site.json with sort config and tags
         let mut response = serde_json::to_value(&self.repo)
             .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
 
-        // Add sort config to the response
+        // Add sort config and tags to the response
         if let Some(obj) = response.as_object_mut() {
             obj.insert(
                 "sort".to_string(),
                 serde_json::to_value(&self.config.sort).unwrap_or(serde_json::Value::Array(vec![])),
             );
+
+            // Add tag sources with their tags
+            let mut tags_data: HashMap<String, serde_json::Value> = HashMap::new();
+            for tag_source in &self.config.tag_sources {
+                let source = tag_source.url_source();
+                if self.repo.tag_index.has_source(&source) {
+                    let tags = self.repo.tag_index.get_all_tags(&source);
+                    let tags_json: Vec<serde_json::Value> = tags
+                        .iter()
+                        .map(|t| {
+                            serde_json::json!({
+                                "normalized": t.normalized,
+                                "display": t.display,
+                                "count": t.count,
+                                "url": format!("/{}/{}/", source, t.normalized)
+                            })
+                        })
+                        .collect();
+                    tags_data.insert(
+                        source,
+                        serde_json::json!({
+                            "label": tag_source.singular_label(),
+                            "label_plural": tag_source.plural_label(),
+                            "tags": tags_json
+                        }),
+                    );
+                }
+            }
+            if !tags_data.is_empty() {
+                obj.insert(
+                    "tag_sources".to_string(),
+                    serde_json::to_value(tags_data)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                );
+            }
         }
 
         let site_json = serde_json::to_string(&response)
@@ -1422,6 +1759,7 @@ mod tests {
         let stats = BuildStats::default();
         assert_eq!(stats.markdown_pages, 0);
         assert_eq!(stats.section_pages, 0);
+        assert_eq!(stats.tag_pages, 0);
         assert_eq!(stats.assets_linked, 0);
         assert_eq!(stats.pagefind_indexed, None);
         assert_eq!(stats.broken_links, 0);

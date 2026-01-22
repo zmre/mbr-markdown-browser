@@ -257,6 +257,7 @@ async fn main() -> Result<(), MbrError> {
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
+        let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
         let (frontmatter, _headings, html_output, _outbound_links) = markdown::render(
             input_path,
             config.root_dir.as_path(),
@@ -264,6 +265,7 @@ async fn main() -> Result<(), MbrError> {
             link_transform_config,
             false, // server_mode is false in CLI mode
             false, // transcode is disabled in CLI mode
+            valid_tag_sources,
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
@@ -294,6 +296,7 @@ async fn main() -> Result<(), MbrError> {
             &config.theme,
             None, // Logging already initialized
             config.link_tracking,
+            &config.tag_sources,
             #[cfg(feature = "media-metadata")]
             config.transcode,
         )?;
@@ -336,6 +339,7 @@ async fn main() -> Result<(), MbrError> {
                     &config_copy.theme,
                     None, // Logging already initialized
                     config_copy.link_tracking,
+                    &config_copy.tag_sources,
                     #[cfg(feature = "media-metadata")]
                     config_copy.transcode,
                 );

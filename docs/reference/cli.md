@@ -205,6 +205,32 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `enable_writes` | bool | `false` | Allow write operations |
 
+### Tag Settings
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `tag_sources` | array | `[{ field = "tags" }]` | Frontmatter fields to extract tags from |
+| `build_tag_pages` | bool | `true` | Generate tag pages in static builds |
+
+**Tag source configuration:**
+
+Each tag source can specify:
+- `field` (required): Frontmatter field name (supports dot-notation for nested fields like `taxonomy.tags`)
+- `label`: Singular label for display (e.g., "Tag", "Performer")
+- `label_plural`: Plural label for display (e.g., "Tags", "Performers")
+
+Example configuration:
+```toml
+# .mbr/config.toml
+tag_sources = [
+    { field = "tags" },
+    { field = "taxonomy.performers", label = "Performer", label_plural = "Performers" }
+]
+build_tag_pages = true
+```
+
+See the [Tags feature documentation](/features/tags/) for complete details.
+
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
 > **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.

@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 
-use crate::config::SortField;
+use crate::config::{SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::ServerError;
@@ -75,6 +75,8 @@ pub struct ServerState {
     pub link_cache: Arc<LinkCache>,
     /// Cache for inbound links discovered via grep
     pub inbound_link_cache: Arc<InboundLinkCache>,
+    /// Tag sources for frontmatter extraction
+    pub tag_sources: Vec<TagSource>,
 }
 
 impl Server {
@@ -97,6 +99,7 @@ impl Server {
         theme: S,
         log_filter: Option<&str>,
         link_tracking: bool,
+        tag_sources: &[TagSource],
         #[cfg(feature = "media-metadata")] transcode_enabled: bool,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
@@ -134,6 +137,7 @@ impl Server {
             ignore_dirs,
             ignore_globs,
             &index_file,
+            tag_sources,
         ));
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
@@ -227,6 +231,7 @@ impl Server {
             link_tracking,
             link_cache,
             inbound_link_cache,
+            tag_sources: tag_sources.to_vec(),
         };
 
         let router = Router::new()
@@ -802,11 +807,13 @@ impl Server {
     ) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("handle: {}", &path);
 
+        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
             static_folder: &config.static_folder,
             markdown_extensions: &config.markdown_extensions,
             index_file: &config.index_file,
+            tag_sources: &tag_url_sources,
         };
 
         match resolve_request_path(&resolver_config, &path) {
@@ -836,6 +843,24 @@ impl Server {
                     tracing::error!("Error generating directory listing: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })
+            }
+            ResolvedPath::TagPage { source, value } => {
+                tracing::debug!("generating tag page: source={}, value={}", source, value);
+                Self::tag_page_to_html(&source, &value, &config)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Error generating tag page: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
+            }
+            ResolvedPath::TagSourceIndex { source } => {
+                tracing::debug!("generating tag source index: source={}", source);
+                Self::tag_source_index_to_html(&source, &config)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Error generating tag source index: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
             }
             ResolvedPath::NotFound => {
                 // Try to serve HLS content (playlist or segment) for transcoded variants
@@ -1044,11 +1069,13 @@ impl Server {
             cached
         } else {
             // Resolve the path to find the markdown file
+            let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
             let resolver_config = PathResolverConfig {
                 base_dir: &config.base_dir,
                 static_folder: &config.static_folder,
                 markdown_extensions: &config.markdown_extensions,
                 index_file: &config.index_file,
+                tag_sources: &tag_url_sources,
             };
 
             // Convert page_url_path to a request path for the resolver
@@ -1074,6 +1101,7 @@ impl Server {
                         is_index_file,
                     };
 
+                    let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
                     match markdown::render_with_cache(
                         md_path,
                         &config.base_dir,
@@ -1082,6 +1110,7 @@ impl Server {
                         Some(config.oembed_cache.clone()),
                         true,  // server_mode
                         false, // transcode_enabled (not needed for link extraction)
+                        valid_tag_sources,
                     )
                     .await
                     {
@@ -1534,6 +1563,7 @@ impl Server {
         #[cfg(not(feature = "media-metadata"))]
         let transcode_enabled = false;
 
+        let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
         let (mut frontmatter, headings, inner_html_output, outbound_links) =
             markdown::render_with_cache(
                 md_path.to_path_buf(),
@@ -1543,6 +1573,7 @@ impl Server {
                 Some(config.oembed_cache.clone()),
                 true, // server_mode is always true in server
                 transcode_enabled,
+                valid_tag_sources,
             )
             .await
             .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
@@ -1657,6 +1688,7 @@ impl Server {
             &config.ignore_dirs,
             &config.ignore_globs,
             &config.index_file,
+            &config.tag_sources,
         );
 
         // Calculate relative path from root
@@ -1779,16 +1811,149 @@ impl Server {
             .map_err(|e| e.into())
     }
 
+    /// Renders a tag page showing all pages with a specific tag value.
+    async fn tag_page_to_html(
+        source: &str,
+        value: &str,
+        config: &ServerState,
+    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        // Find the TagSource config to get labels
+        let tag_source = config.tag_sources.iter().find(|s| s.url_source() == source);
+
+        let (label, label_plural) = if let Some(ts) = tag_source {
+            (ts.singular_label(), ts.plural_label())
+        } else {
+            // Fallback to capitalized source name
+            let capitalized = source
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default()
+                + &source[1..];
+            (capitalized.clone(), format!("{}s", capitalized))
+        };
+
+        // Get pages with this tag from the index
+        let pages = config.repo.tag_index.get_pages(source, value);
+
+        // Get display value for the tag
+        let display_value = config
+            .repo
+            .tag_index
+            .get_tag_display(source, value)
+            .unwrap_or_else(|| value.to_string());
+
+        // Convert pages to JSON objects
+        let pages_json: Vec<serde_json::Value> = pages
+            .iter()
+            .map(|page| {
+                json!({
+                    "url_path": page.url_path,
+                    "title": page.title,
+                    "description": page.description,
+                })
+            })
+            .collect();
+
+        // Build template context
+        let mut context = std::collections::HashMap::new();
+        context.insert("tag_source".to_string(), json!(source));
+        context.insert("tag_display_value".to_string(), json!(display_value));
+        context.insert("tag_label".to_string(), json!(label));
+        context.insert("tag_label_plural".to_string(), json!(label_plural));
+        context.insert("pages".to_string(), json!(pages_json));
+        context.insert("page_count".to_string(), json!(pages.len()));
+        context.insert("server_mode".to_string(), json!(true));
+        context.insert("relative_base".to_string(), json!("/.mbr/"));
+
+        let html_output = config.templates.render_tag(context)?;
+
+        let etag = generate_etag(html_output.as_bytes());
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+            .header(header::ETAG, etag)
+            .body(Body::from(html_output))
+            .map_err(|e| e.into())
+    }
+
+    /// Renders a tag source index showing all tags from a source.
+    async fn tag_source_index_to_html(
+        source: &str,
+        config: &ServerState,
+    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        // Find the TagSource config to get labels
+        let tag_source = config.tag_sources.iter().find(|s| s.url_source() == source);
+
+        let (label, label_plural) = if let Some(ts) = tag_source {
+            (ts.singular_label(), ts.plural_label())
+        } else {
+            // Fallback to capitalized source name
+            let capitalized = source
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default()
+                + &source[1..];
+            (capitalized.clone(), format!("{}s", capitalized))
+        };
+
+        // Get all tags for this source
+        let tags = config.repo.tag_index.get_all_tags(source);
+
+        // Convert tags to JSON objects
+        let tags_json: Vec<serde_json::Value> = tags
+            .iter()
+            .map(|tag| {
+                json!({
+                    "url_value": tag.normalized,
+                    "display_value": tag.display,
+                    "page_count": tag.count,
+                })
+            })
+            .collect();
+
+        // Build template context
+        let mut context = std::collections::HashMap::new();
+        context.insert("tag_source".to_string(), json!(source));
+        context.insert("tag_label".to_string(), json!(label));
+        context.insert("tag_label_plural".to_string(), json!(label_plural));
+        context.insert("tags".to_string(), json!(tags_json));
+        context.insert("tag_count".to_string(), json!(tags.len()));
+        context.insert("server_mode".to_string(), json!(true));
+        context.insert("relative_base".to_string(), json!("/.mbr/"));
+
+        let html_output = config.templates.render_tag_index(context)?;
+
+        let etag = generate_etag(html_output.as_bytes());
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+            .header(header::ETAG, etag)
+            .body(Body::from(html_output))
+            .map_err(|e| e.into())
+    }
+
     /// Handler for the root path "/" - renders the home page using the same
     /// logic as other directories but with the home.html template.
     async fn home_page(State(config): State<ServerState>) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("home_page handler");
 
+        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
             static_folder: &config.static_folder,
             markdown_extensions: &config.markdown_extensions,
             index_file: &config.index_file,
+            tag_sources: &tag_url_sources,
         };
 
         // Resolve empty path (root)
