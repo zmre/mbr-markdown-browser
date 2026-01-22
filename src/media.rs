@@ -39,6 +39,14 @@ pub enum MediaEmbed {
 }
 
 impl MediaEmbed {
+    /// Create a MediaEmbed for bare URLs (no caption)
+    ///
+    /// This is used by the oembed system to detect media files from bare URLs
+    /// in markdown text before attempting OpenGraph fetching.
+    pub fn from_bare_url(url: &str) -> Option<Self> {
+        Self::from_url_and_title(url, "")
+    }
+
     /// Try to detect media type from URL and create appropriate embed
     ///
     /// Priority order:

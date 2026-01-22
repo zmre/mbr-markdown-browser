@@ -38,7 +38,7 @@ impl Vid {
         let ext = Self::extension_from_url(url);
         match ext.as_deref() {
             Some("mp4") | Some("mpg") | Some("avi") | Some("ogv") | Some("ogg") | Some("m4v")
-            | Some("mkv") => Some(Self {
+            | Some("mkv") | Some("mov") => Some(Self {
                 url: url.to_string(),
                 ext,
                 start,
@@ -229,6 +229,17 @@ mod tests {
         let url = "image.png";
         let title = "Not a video";
         assert!(Vid::from_url_and_title(url, title).is_none());
+    }
+
+    #[test]
+    fn test_from_url_and_title_mov() {
+        let url = "video.mov";
+        let title = "QuickTime video";
+        let vid = Vid::from_url_and_title(url, title).unwrap();
+        assert_eq!(vid.url, url);
+        assert_eq!(vid.ext.as_deref(), Some("mov"));
+        assert_eq!(vid.caption.as_deref(), Some(title));
+        assert_eq!(vid.to_mime_type(), "video/quicktime");
     }
 
     #[test]
