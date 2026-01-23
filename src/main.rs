@@ -48,7 +48,7 @@ async fn main() -> Result<(), MbrError> {
     // Suppress ffmpeg warnings/info messages from the metadata crate
     // These would otherwise clutter stdout/stderr when processing video files
     #[cfg(feature = "media-metadata")]
-    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Error);
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Fatal);
 
     let args = cli::Args::parse();
 
