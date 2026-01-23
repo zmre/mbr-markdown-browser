@@ -21,13 +21,19 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 /// Markdown parser options.
 ///
-/// We use most features from pulldown-cmark EXCEPT:
-/// - ENABLE_WIKILINKS: We handle `[[Source:value]]` wikilinks ourselves via transform_wikilinks
+/// Uses `Options::all()` to enable all pulldown-cmark features including wikilinks.
 ///
-/// This allows us to control wikilink parsing and only transform recognized tag sources,
-/// leaving unknown `[[...]]` patterns as literal text.
+/// Wikilink processing flow:
+/// 1. `transform_wikilinks` runs FIRST on raw markdown, converting tag-style wikilinks
+///    like `[[Tags:rust]]` to standard markdown links `[rust](/tags/rust/)`
+/// 2. pulldown-cmark then parses the result, handling plain wikilinks like `[[Whatever]]`
+///    natively with its ENABLE_WIKILINKS support
+///
+/// This hybrid approach allows us to:
+/// - Support custom tag-source links (`[[Source:value]]`)
+/// - Preserve standard wikilink behavior for plain `[[page]]` links
 fn markdown_options() -> Options {
-    Options::all() - Options::ENABLE_WIKILINKS
+    Options::all()
 }
 
 /// Represents a heading in the document for table of contents generation.
@@ -1536,15 +1542,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wikilink_unknown_source_unchanged() {
-        // [[category:books]] should remain unchanged if category is not a valid source
+    async fn test_wikilink_unknown_source_becomes_native_wikilink() {
+        // [[category:books]] - category is not a valid tag source, so transform_wikilinks
+        // leaves it alone. But pulldown-cmark's native wikilink support picks it up
+        // and renders it as a link to "category:books".
         let sources = make_sources(&["tags"]);
         let md = "See [[category:books]] for more.";
         let html = render_markdown_with_tags(md, sources).await;
-        // The wikilink should NOT be transformed
+        // With native wikilink support, this becomes a link (not literal text)
         assert!(
-            html.contains("[[category:books]]"),
-            "Unknown source should remain as literal text. Got: {}",
+            html.contains("<a"),
+            "Wikilink should become a link via pulldown-cmark. Got: {}",
+            html
+        );
+        // The link destination should be the wikilink content
+        assert!(
+            html.contains("category:books"),
+            "Link should reference the wikilink content. Got: {}",
             html
         );
     }
@@ -1628,14 +1642,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_no_tag_sources_no_transformation() {
-        // When no tag sources configured, wikilinks remain unchanged
+    async fn test_no_tag_sources_uses_native_wikilinks() {
+        // When no tag sources configured, transform_wikilinks is skipped entirely.
+        // pulldown-cmark's native wikilink support still applies, rendering
+        // [[Tags:rust]] as a link to "Tags:rust".
         let sources = HashSet::new();
         let md = "See [[Tags:rust]] for more.";
         let html = render_markdown_with_tags(md, sources).await;
+        // With native wikilink support, this becomes a link (not literal text)
         assert!(
-            html.contains("[[Tags:rust]]"),
-            "Without sources, wikilinks should remain literal. Got: {}",
+            html.contains("<a"),
+            "Wikilink should become a link via pulldown-cmark. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("Tags:rust"),
+            "Link should reference the wikilink content. Got: {}",
+            html
+        );
+    }
+
+    // Regression tests for plain wikilinks (no colon/source prefix)
+    // These verify that pulldown-cmark's native wikilink support works correctly
+
+    #[tokio::test]
+    async fn test_plain_wikilink_works() {
+        // Plain [[MyPage]] should become a link to MyPage
+        let html = render_markdown("Check out [[MyPage]] for more.").await;
+        assert!(
+            html.contains("<a"),
+            "Plain wikilink should become a link. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("MyPage"),
+            "Link should reference MyPage. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plain_wikilink_with_spaces() {
+        // [[My Page]] should work with spaces
+        let html = render_markdown("See [[My Page]] here.").await;
+        assert!(
+            html.contains("<a"),
+            "Wikilink with spaces should become a link. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("My Page"),
+            "Link should preserve the page name. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tag_and_plain_wikilinks_together() {
+        // Both tag-style and plain wikilinks should work in the same document
+        let sources = make_sources(&["tags"]);
+        let md = "See [[Tags:rust]] and also [[MyPage]] for info.";
+        let html = render_markdown_with_tags(md, sources).await;
+        // Tag wikilink should go to /tags/rust/
+        assert!(
+            html.contains(r#"href="/tags/rust/""#),
+            "Tag wikilink should transform to /tags/rust/. Got: {}",
+            html
+        );
+        // Plain wikilink should become a link to MyPage
+        assert!(
+            html.contains("MyPage"),
+            "Plain wikilink should reference MyPage. Got: {}",
+            html
+        );
+        // Should have two links
+        let link_count = html.matches("<a").count();
+        assert!(
+            link_count >= 2,
+            "Should have at least 2 links. Got {} in: {}",
+            link_count,
             html
         );
     }

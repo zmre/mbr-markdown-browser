@@ -508,10 +508,10 @@ pre.mermaid {
  */
 a.mbr-link-enhanced[data-tooltip]::before {
   font-size: 0.65em;
-  background-color: rgb(from var(--pico-tooltip-background-color) r g b / 0.6);
+  background-color: rgb(from var(--pico-tooltip-background-color) r g b / 0.75);
 }
 a.mbr-link-enhanced[data-tooltip]::after {
-  color: rgb(from var(--pico-tooltip-background-color) r g b / 0.6);
+  color: rgb(from var(--pico-tooltip-background-color) r g b / 0.75);
 }
 
 /* ==================== Screen Reader Only (Accessibility) ==================== */

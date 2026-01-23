@@ -25,7 +25,7 @@ tags: [rust, programming, tutorial]
 
 ### Tag Extraction
 
-mbr extracts tags from configurable frontmatter fields during repository scanning. By default, it looks for a `tags` field, but you can configure additional sources.
+mbr extracts tags from configurable frontmatter fields during repository scanning. By default, it looks for a `tags` field, but you can configure your own source or sources.
 
 **Supported formats:**
 
@@ -51,8 +51,8 @@ Tag pages follow the pattern `/{source}/{value}/`:
 |-----|-------------|
 | `/tags/` | List of all tags |
 | `/tags/rust/` | Pages tagged with "rust" |
-| `/performers/` | List of all performers (custom source) |
-| `/performers/joshua_jay/` | Pages with performer "Joshua Jay" |
+| `/authors/` | List of all authors (custom source) |
+| `/authors/patrick_walsh/` | Pages with author "Patrick Walsh" |
 
 ### Normalization
 
@@ -190,12 +190,6 @@ To skip tag page generation in static builds:
 
 ```toml
 build_tag_pages = false
-```
-
-Or via CLI:
-
-```bash
-# No direct CLI flag - use config.toml
 ```
 
 ### Tag Data in site.json
