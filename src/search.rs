@@ -107,15 +107,21 @@ pub fn parse_query(q: &str) -> ParsedQuery {
 }
 
 /// Check if a frontmatter field value contains the facet value (case-insensitive).
+/// Handles both string values and array values (for array tags).
 fn facet_matches(
-    frontmatter: Option<&std::collections::HashMap<String, String>>,
+    frontmatter: Option<&std::collections::HashMap<String, serde_json::Value>>,
     field: &str,
     value: &str,
 ) -> bool {
-    frontmatter
-        .and_then(|fm| fm.get(field))
-        .map(|field_value| field_value.to_lowercase().contains(&value.to_lowercase()))
-        .unwrap_or(false)
+    match frontmatter.and_then(|fm| fm.get(field)) {
+        Some(serde_json::Value::String(s)) => s.to_lowercase().contains(&value.to_lowercase()),
+        Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| {
+            v.as_str()
+                .map(|s| s.to_lowercase().contains(&value.to_lowercase()))
+                .unwrap_or(false)
+        }),
+        _ => false,
+    }
 }
 
 /// Get the scoring weight for a frontmatter field.
@@ -367,6 +373,24 @@ impl SearchEngine {
         info: &MarkdownInfo,
         matcher: &mut Matcher,
     ) -> Option<SearchResult> {
+        // Helper to extract string from frontmatter value
+        let extract_string = |fm: &std::collections::HashMap<String, serde_json::Value>,
+                              key: &str|
+         -> Option<String> {
+            fm.get(key).and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Array(arr) => {
+                    let strings: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                    if strings.is_empty() {
+                        None
+                    } else {
+                        Some(strings.join(", "))
+                    }
+                }
+                _ => None,
+            })
+        };
+
         // If no pattern (facet-only query), return base score for files that passed facet filter
         let Some(pattern) = pattern else {
             return Some(SearchResult {
@@ -374,15 +398,15 @@ impl SearchEngine {
                 title: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("title").cloned()),
+                    .and_then(|fm| extract_string(fm, "title")),
                 description: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("description").cloned()),
+                    .and_then(|fm| extract_string(fm, "description")),
                 tags: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("tags").cloned()),
+                    .and_then(|fm| extract_string(fm, "tags")),
                 score: 100, // Base score for facet matches
                 snippet: None,
                 is_content_match: false,
@@ -407,9 +431,25 @@ impl SearchEngine {
         // Match against all frontmatter fields with dynamic weights
         if let Some(ref fm) = info.frontmatter {
             for (key, value) in fm.iter() {
-                if let Some(score) = self.fuzzy_match(pattern, value, matcher) {
-                    let weight = field_weight(key);
-                    best_score = best_score.max(score.saturating_mul(weight));
+                // Match against string values or each element of arrays
+                match value {
+                    serde_json::Value::String(s) => {
+                        if let Some(score) = self.fuzzy_match(pattern, s, matcher) {
+                            let weight = field_weight(key);
+                            best_score = best_score.max(score.saturating_mul(weight));
+                        }
+                    }
+                    serde_json::Value::Array(arr) => {
+                        for item in arr {
+                            if let Some(s) = item.as_str()
+                                && let Some(score) = self.fuzzy_match(pattern, s, matcher)
+                            {
+                                let weight = field_weight(key);
+                                best_score = best_score.max(score.saturating_mul(weight));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -420,15 +460,15 @@ impl SearchEngine {
                 title: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("title").cloned()),
+                    .and_then(|fm| extract_string(fm, "title")),
                 description: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("description").cloned()),
+                    .and_then(|fm| extract_string(fm, "description")),
                 tags: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("tags").cloned()),
+                    .and_then(|fm| extract_string(fm, "tags")),
                 score: best_score,
                 snippet: None,
                 is_content_match: false,
@@ -552,20 +592,38 @@ impl SearchEngine {
             // Content matches are weighted lower than metadata matches
             let score = match_count.min(100);
 
+            // Helper to extract string from frontmatter value
+            let extract_string = |fm: &std::collections::HashMap<String, serde_json::Value>,
+                                  key: &str|
+             -> Option<String> {
+                fm.get(key).and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Array(arr) => {
+                        let strings: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                        if strings.is_empty() {
+                            None
+                        } else {
+                            Some(strings.join(", "))
+                        }
+                    }
+                    _ => None,
+                })
+            };
+
             Ok(Some(SearchResult {
                 url_path: info.url_path.clone(),
                 title: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("title").cloned()),
+                    .and_then(|fm| extract_string(fm, "title")),
                 description: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("description").cloned()),
+                    .and_then(|fm| extract_string(fm, "description")),
                 tags: info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("tags").cloned()),
+                    .and_then(|fm| extract_string(fm, "tags")),
                 score,
                 snippet,
                 is_content_match: true,
@@ -1090,7 +1148,10 @@ mod tests {
     #[test]
     fn test_facet_matches_exact() {
         let mut fm = std::collections::HashMap::new();
-        fm.insert("category".to_string(), "programming".to_string());
+        fm.insert(
+            "category".to_string(),
+            serde_json::Value::String("programming".to_string()),
+        );
 
         assert!(facet_matches(Some(&fm), "category", "programming"));
     }
@@ -1098,7 +1159,10 @@ mod tests {
     #[test]
     fn test_facet_matches_contains() {
         let mut fm = std::collections::HashMap::new();
-        fm.insert("category".to_string(), "systems programming".to_string());
+        fm.insert(
+            "category".to_string(),
+            serde_json::Value::String("systems programming".to_string()),
+        );
 
         assert!(facet_matches(Some(&fm), "category", "programming"));
         assert!(facet_matches(Some(&fm), "category", "systems"));
@@ -1107,7 +1171,10 @@ mod tests {
     #[test]
     fn test_facet_matches_case_insensitive() {
         let mut fm = std::collections::HashMap::new();
-        fm.insert("category".to_string(), "Systems Programming".to_string());
+        fm.insert(
+            "category".to_string(),
+            serde_json::Value::String("Systems Programming".to_string()),
+        );
 
         assert!(facet_matches(Some(&fm), "category", "PROGRAMMING"));
         assert!(facet_matches(Some(&fm), "category", "systems"));
@@ -1116,7 +1183,10 @@ mod tests {
     #[test]
     fn test_facet_matches_missing_field() {
         let mut fm = std::collections::HashMap::new();
-        fm.insert("title".to_string(), "test".to_string());
+        fm.insert(
+            "title".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
 
         assert!(!facet_matches(Some(&fm), "category", "anything"));
     }
@@ -1129,9 +1199,22 @@ mod tests {
     #[test]
     fn test_facet_matches_no_match() {
         let mut fm = std::collections::HashMap::new();
-        fm.insert("category".to_string(), "web development".to_string());
+        fm.insert(
+            "category".to_string(),
+            serde_json::Value::String("web development".to_string()),
+        );
 
         assert!(!facet_matches(Some(&fm), "category", "systems"));
+    }
+
+    #[test]
+    fn test_facet_matches_array_value() {
+        let mut fm = std::collections::HashMap::new();
+        fm.insert("tags".to_string(), serde_json::json!(["rust", "python"]));
+
+        assert!(facet_matches(Some(&fm), "tags", "rust"));
+        assert!(facet_matches(Some(&fm), "tags", "python"));
+        assert!(!facet_matches(Some(&fm), "tags", "go"));
     }
 
     // ==================== Field Weight Tests ====================

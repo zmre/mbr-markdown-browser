@@ -1114,7 +1114,14 @@ impl Server {
                     )
                     .await
                     {
-                        Ok((_frontmatter, _headings, _html, outbound_links, _has_h1)) => {
+                        Ok((
+                            _frontmatter,
+                            _headings,
+                            _html,
+                            outbound_links,
+                            _has_h1,
+                            _word_count,
+                        )) => {
                             // Resolve relative URLs to absolute before caching
                             let resolved_links =
                                 resolve_outbound_links(&page_url_path, outbound_links);
@@ -1129,6 +1136,23 @@ impl Server {
                             return None;
                         }
                     }
+                }
+                ResolvedPath::TagPage { source, value } => {
+                    tracing::debug!(
+                        "links.json: building tag page links for {}/{}",
+                        source,
+                        value
+                    );
+                    build_tag_page_outbound_links(
+                        &source,
+                        &value,
+                        &config.repo.tag_index,
+                        &config.tag_sources,
+                    )
+                }
+                ResolvedPath::TagSourceIndex { source } => {
+                    tracing::debug!("links.json: building tag index links for {}", source);
+                    build_tag_index_outbound_links(&source, &config.repo.tag_index)
                 }
                 _ => {
                     // Page doesn't exist
@@ -1564,7 +1588,7 @@ impl Server {
         let transcode_enabled = false;
 
         let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
-        let (mut frontmatter, headings, inner_html_output, outbound_links, has_h1) =
+        let (mut frontmatter, headings, inner_html_output, outbound_links, has_h1, word_count) =
             markdown::render_with_cache(
                 md_path.to_path_buf(),
                 root_path,
@@ -1639,6 +1663,106 @@ impl Server {
         );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
         extra_context.insert("has_h1".to_string(), serde_json::json!(has_h1));
+
+        // Pass tag sources configuration for frontend tag linking
+        // Pre-serialize as JSON string for safe template rendering in JavaScript context
+        let tag_sources_json = serde_json::to_string(
+            &config
+                .tag_sources
+                .iter()
+                .map(|ts| {
+                    serde_json::json!({
+                        "field": ts.field,
+                        "urlSource": ts.url_source(),
+                        "label": ts.singular_label(),
+                        "labelPlural": ts.plural_label()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".to_string());
+        extra_context.insert(
+            "tag_sources".to_string(),
+            serde_json::json!(tag_sources_json),
+        );
+
+        // Pass word count and reading time (200 words per minute)
+        let reading_time_minutes = word_count.div_ceil(200);
+        extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
+        extra_context.insert(
+            "reading_time_minutes".to_string(),
+            serde_json::json!(reading_time_minutes),
+        );
+
+        // Pass file path (relative to root) for reference
+        extra_context.insert(
+            "file_path".to_string(),
+            serde_json::json!(relative_md_path.to_string_lossy()),
+        );
+
+        // Pass modified date from file metadata
+        let modified_info = tokio::fs::metadata(md_path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        if let Some(duration) = modified_info {
+            extra_context.insert(
+                "modified_timestamp".to_string(),
+                serde_json::json!(duration.as_secs()),
+            );
+        }
+
+        // Compute prev/next sibling pages for navigation
+        let current_url = format!("/{}/", url_path_buf.display()).replace("//", "/");
+        let parent_dir = relative_md_path.parent().unwrap_or(Path::new(""));
+
+        // Get sibling markdown files in the same directory
+        let mut siblings: Vec<_> = config
+            .repo
+            .markdown_files
+            .pin()
+            .iter()
+            .filter_map(|(_, info)| {
+                let file_parent = info.raw_path.parent()?;
+                if file_parent == parent_dir {
+                    Some(markdown_file_to_json(info))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort siblings using configured sort order
+        sort_files(&mut siblings, &config.sort);
+
+        // Find current position and get prev/next
+        if let Some(current_idx) = siblings.iter().position(|f| {
+            f.get("url_path")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p == current_url)
+        }) {
+            if current_idx > 0
+                && let Some(prev) = siblings.get(current_idx - 1)
+            {
+                extra_context.insert(
+                    "prev_page".to_string(),
+                    serde_json::json!({
+                        "url": prev.get("url_path"),
+                        "title": prev.get("title").and_then(|v| v.as_str()).unwrap_or("Previous")
+                    }),
+                );
+            }
+            if let Some(next) = siblings.get(current_idx + 1) {
+                extra_context.insert(
+                    "next_page".to_string(),
+                    serde_json::json!({
+                        "url": next.get("url_path"),
+                        "title": next.get("title").and_then(|v| v.as_str()).unwrap_or("Next")
+                    }),
+                );
+            }
+        }
 
         let full_html_output = config
             .templates
@@ -1777,6 +1901,25 @@ impl Server {
                 "oembed_timeout_ms": config.oembed_timeout_ms,
             }),
         );
+
+        // Pass tag_sources configuration for frontend (consistent with markdown pages)
+        // Pre-serialize as JSON string for safe template rendering in JavaScript context
+        let tag_sources_json = serde_json::to_string(
+            &config
+                .tag_sources
+                .iter()
+                .map(|ts| {
+                    json!({
+                        "field": ts.field,
+                        "urlSource": ts.url_source(),
+                        "label": ts.singular_label(),
+                        "labelPlural": ts.plural_label()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".to_string());
+        context.insert("tag_sources".to_string(), json!(tag_sources_json));
 
         // Detect if we're at the root directory
         let is_root =
@@ -2105,12 +2248,14 @@ pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
         .and_then(|fm| fm.get("title"))
         .cloned()
         .unwrap_or_else(|| {
-            file_info
-                .raw_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Untitled")
-                .to_string()
+            serde_json::Value::String(
+                file_info
+                    .raw_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string(),
+            )
         });
 
     let description = file_info
@@ -2328,6 +2473,71 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
 ];
 
+// ============================================================================
+// Tag page link helpers
+// ============================================================================
+
+/// Builds outbound links for a tag page (e.g., /tags/rust/).
+///
+/// Returns links to all pages tagged with this tag, plus a link back to the tag source index.
+fn build_tag_page_outbound_links(
+    source: &str,
+    value: &str,
+    tag_index: &crate::tag_index::TagIndex,
+    tag_sources: &[TagSource],
+) -> Vec<crate::link_index::OutboundLink> {
+    use crate::link_index::OutboundLink;
+
+    let mut outbound = Vec::new();
+
+    // Add links to all tagged pages
+    for page in tag_index.get_pages(source, value) {
+        outbound.push(OutboundLink {
+            to: page.url_path,
+            text: page.title,
+            anchor: None,
+            internal: true,
+        });
+    }
+
+    // Add link back to tag source index
+    let label = tag_sources
+        .iter()
+        .find(|ts| ts.url_source() == source)
+        .map(|ts| ts.plural_label())
+        .unwrap_or_else(|| source.to_string());
+
+    outbound.push(OutboundLink {
+        to: format!("/{}/", source),
+        text: label,
+        anchor: None,
+        internal: true,
+    });
+
+    outbound
+}
+
+/// Builds outbound links for a tag source index page (e.g., /tags/).
+///
+/// Returns links to all individual tag pages under this source.
+fn build_tag_index_outbound_links(
+    source: &str,
+    tag_index: &crate::tag_index::TagIndex,
+) -> Vec<crate::link_index::OutboundLink> {
+    use crate::link_index::OutboundLink;
+
+    tag_index
+        .get_all_tags(source)
+        .into_iter()
+        .map(|tag| OutboundLink {
+            to: format!("/{}/{}/", source, tag.normalized),
+            text: tag.display,
+            anchor: None,
+            internal: true,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2421,9 +2631,15 @@ mod tests {
     #[test]
     fn test_markdown_file_to_json_with_frontmatter() {
         let mut frontmatter = HashMap::new();
-        frontmatter.insert("title".to_string(), "My Title".to_string());
-        frontmatter.insert("description".to_string(), "My description".to_string());
-        frontmatter.insert("tags".to_string(), "rust, testing".to_string());
+        frontmatter.insert(
+            "title".to_string(),
+            serde_json::Value::String("My Title".to_string()),
+        );
+        frontmatter.insert(
+            "description".to_string(),
+            serde_json::Value::String("My description".to_string()),
+        );
+        frontmatter.insert("tags".to_string(), serde_json::json!(["rust", "testing"]));
 
         let file_info = MarkdownInfo {
             raw_path: PathBuf::from("/root/test.md"),
@@ -2438,7 +2654,7 @@ mod tests {
         assert_eq!(json["title"], "My Title");
         assert_eq!(json["url_path"], "/test/");
         assert_eq!(json["description"], "My description");
-        assert_eq!(json["tags"], "rust, testing");
+        assert_eq!(json["tags"], serde_json::json!(["rust", "testing"]));
         assert_eq!(json["modified"], 1700000000);
         assert_eq!(json["name"], "test.md");
     }
@@ -2465,7 +2681,10 @@ mod tests {
     #[test]
     fn test_markdown_file_to_json_partial_frontmatter() {
         let mut frontmatter = HashMap::new();
-        frontmatter.insert("title".to_string(), "Only Title".to_string());
+        frontmatter.insert(
+            "title".to_string(),
+            serde_json::Value::String("Only Title".to_string()),
+        );
         // No description or tags
 
         let file_info = MarkdownInfo {

@@ -78,7 +78,7 @@ impl Templates {
     pub async fn render_markdown(
         &self,
         html: &str,
-        frontmatter: HashMap<String, String>,
+        frontmatter: HashMap<String, serde_json::Value>,
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         tracing::debug!("frontmatter: {:?}", &frontmatter);

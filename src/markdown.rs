@@ -69,9 +69,13 @@ struct EventState {
     current_link_text: String,
     /// Valid tag sources for detecting tag links (e.g., "tags", "performers")
     valid_tag_sources: HashSet<String>,
+    /// Word count accumulator for text content
+    word_count: usize,
+    /// Track if we're inside a code block (to exclude from word count)
+    in_code_block: bool,
 }
 
-pub type SimpleMetadata = HashMap<String, String>;
+pub type SimpleMetadata = HashMap<String, serde_json::Value>;
 
 /// Extracts the first H1 heading text from markdown content.
 ///
@@ -234,6 +238,7 @@ pub async fn render(
         String,
         Vec<OutboundLink>,
         bool,
+        usize,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -279,6 +284,7 @@ pub async fn render_with_cache(
         String,
         Vec<OutboundLink>,
         bool,
+        usize, // word_count
     ),
     Box<dyn std::error::Error>,
 > {
@@ -381,6 +387,8 @@ pub async fn render_with_cache(
         current_link_dest: None,
         current_link_text: String::new(),
         valid_tag_sources,
+        word_count: 0,
+        in_code_block: false,
     };
     let mut processed_events = Vec::new();
 
@@ -416,7 +424,7 @@ pub async fn render_with_cache(
             .filter(|h| h.level == 1)
             .map(|h| h.text.clone())
     {
-        frontmatter.insert("title".to_string(), h1_text);
+        frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
     Ok((
@@ -425,6 +433,7 @@ pub async fn render_with_cache(
         html_output,
         deduplicated_links,
         has_h1,
+        state.word_count,
     ))
 }
 
@@ -541,44 +550,45 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
                 match (k, v) {
                     (Yaml::String(key), Yaml::String(value)) => {
                         tracing::trace!("Frontmatter: {key} = {value}");
-                        hm.insert(key.to_string(), value.to_string());
+                        hm.insert(
+                            key.to_string(),
+                            serde_json::Value::String(value.to_string()),
+                        );
                     }
                     (Yaml::String(key), Yaml::Array(vals)) => {
-                        let vals = vals
+                        // Preserve arrays as JSON arrays instead of joining them
+                        let arr: Vec<serde_json::Value> = vals
                             .iter()
                             .filter_map(|val| val.clone().into_string())
-                            .fold(String::new(), |accum, i| {
-                                let join = if !accum.is_empty() { ", " } else { "" };
-                                accum + join + i.as_str()
-                            });
-                        tracing::trace!("Frontmatter: {key} = [{vals}]");
-                        hm.insert(key.to_string(), vals);
+                            .map(serde_json::Value::String)
+                            .collect();
+                        tracing::trace!("Frontmatter: {key} = {:?}", &arr);
+                        hm.insert(key.to_string(), serde_json::Value::Array(arr));
                     }
                     (Yaml::String(key), Yaml::Hash(hash)) => {
                         tracing::trace!("Frontmatter: {key} = (nested hash)");
-                        // TODO: recursively parse this, then modify all keys
-                        // to have a leading `key.` before inserting
-                        let hash = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
-                        for (k, v) in hash {
+                        // Recursively parse nested hashes and flatten with dot notation
+                        let nested = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
+                        for (k, v) in nested {
                             hm.insert(key.to_string() + "." + k.as_str(), v);
                         }
                     }
                     (Yaml::String(key), Yaml::Integer(val)) => {
                         tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), val.to_string());
+                        hm.insert(key.to_string(), serde_json::json!(val));
                     }
                     (Yaml::String(key), Yaml::Real(val)) => {
                         tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), val.to_string());
+                        hm.insert(key.to_string(), serde_json::Value::String(val.to_string()));
                     }
                     (Yaml::String(key), Yaml::Boolean(val)) => {
                         tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), val.to_string());
+                        hm.insert(key.to_string(), serde_json::json!(val));
                     }
                     (Yaml::String(key), other_val) => {
                         tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
                         if let Some(str_val) = other_val.clone().into_string() {
-                            hm.insert(key.to_string(), str_val);
+                            hm.insert(key.to_string(), serde_json::Value::String(str_val));
                         }
                     }
                     (k, v) => {
@@ -636,7 +646,7 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
     if !hm.contains_key("title")
         && let Some(h1_text) = extract_first_h1(&markdown_input)
     {
-        hm.insert("title".to_string(), h1_text);
+        hm.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
     Ok(hm)
@@ -784,10 +794,23 @@ fn process_event(
             }
             (event, state)
         }
+        // Track code blocks to exclude from word count
+        Event::Start(Tag::CodeBlock(_)) => {
+            state.in_code_block = true;
+            (event, state)
+        }
+        Event::End(TagEnd::CodeBlock) => {
+            state.in_code_block = false;
+            (event, state)
+        }
         Event::Text(text) => {
             // Accumulate link text when inside a link
             if state.in_link {
                 state.current_link_text.push_str(text);
+            }
+            // Count words in text content (excluding metadata and code blocks)
+            if !state.in_metadata && !state.in_code_block {
+                state.word_count += text.split_whitespace().count();
             }
             if state.in_metadata {
                 state.metadata_parsed = YamlLoader::load_from_str(text)
@@ -866,7 +889,7 @@ mod tests {
             is_index_file,
         };
         // Tests run with server_mode=false, transcode_enabled=false
-        let (_, _, html, _, _) = render(path, &root, 100, config, false, false, tag_sources)
+        let (_, _, html, _, _, _) = render(path, &root, 100, config, false, false, tag_sources)
             .await
             .unwrap();
         html
@@ -935,10 +958,14 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, _) = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
-        assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
+        let (metadata, _, _, _, _, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert_eq!(
+            metadata.get("title"),
+            Some(&serde_json::Value::String("Test Title".to_string()))
+        );
     }
 
     // H1 extraction tests
@@ -989,9 +1016,10 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (_, _, _, _, has_h1) = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let (_, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
         assert!(has_h1);
     }
 
@@ -1007,9 +1035,10 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (_, _, _, _, has_h1) = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let (_, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
         assert!(!has_h1);
     }
 
@@ -1026,14 +1055,14 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, has_h1) =
+        let (metadata, _, _, _, has_h1, _) =
             render(path, &root, 100, config, false, false, HashSet::new())
                 .await
                 .unwrap();
         assert!(has_h1);
         assert_eq!(
             metadata.get("title"),
-            Some(&"My Document Title".to_string())
+            Some(&serde_json::Value::String("My Document Title".to_string()))
         );
     }
 
@@ -1050,14 +1079,14 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, has_h1) =
+        let (metadata, _, _, _, has_h1, _) =
             render(path, &root, 100, config, false, false, HashSet::new())
                 .await
                 .unwrap();
         assert!(has_h1);
         assert_eq!(
             metadata.get("title"),
-            Some(&"Frontmatter Title".to_string())
+            Some(&serde_json::Value::String("Frontmatter Title".to_string()))
         );
     }
 
@@ -1074,7 +1103,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, has_h1) =
+        let (metadata, _, _, _, has_h1, _) =
             render(path, &root, 100, config, false, false, HashSet::new())
                 .await
                 .unwrap();

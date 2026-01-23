@@ -507,13 +507,16 @@ impl Repo {
                 let details = if let Some(ref frontmatter) = metadata {
                     // Extract tags from frontmatter for each configured tag source
                     let title = get_page_title(frontmatter, &mddetails.raw_path);
-                    let description = frontmatter.get("description").cloned();
+                    let description = frontmatter
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
 
                     for tag_source in &self.tag_sources {
                         // Look up the field (supports dot notation like "taxonomy.tags")
-                        if let Some(tag_values_str) = frontmatter.get(&tag_source.field) {
-                            // Parse comma-separated values
-                            for tag_value in parse_tag_values(tag_values_str) {
+                        if let Some(tag_value_json) = frontmatter.get(&tag_source.field) {
+                            // Extract tag values (handles both arrays and comma-separated strings)
+                            for tag_value in extract_tag_values(tag_value_json) {
                                 let page = if let Some(ref desc) = description {
                                     TaggedPage::with_description(
                                         &mddetails.url_path,
@@ -737,18 +740,49 @@ pub fn parse_tag_values(values: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|s| !s.is_empty())
 }
 
+/// Extract tag values from a serde_json::Value (supports both arrays and comma-separated strings).
+///
+/// # Examples
+///
+/// ```
+/// use mbr::repo::extract_tag_values;
+///
+/// // From array
+/// let val = serde_json::json!(["rust", "python"]);
+/// assert_eq!(extract_tag_values(&val), vec!["rust", "python"]);
+///
+/// // From comma-separated string
+/// let val = serde_json::json!("rust, python");
+/// assert_eq!(extract_tag_values(&val), vec!["rust", "python"]);
+/// ```
+pub fn extract_tag_values(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(s) => parse_tag_values(s).collect(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// Gets the page title from frontmatter or falls back to filename.
 ///
 /// Priority:
 /// 1. `title` field in frontmatter
 /// 2. Filename stem (without extension)
 fn get_page_title(frontmatter: &crate::markdown::SimpleMetadata, path: &Path) -> String {
-    frontmatter.get("title").cloned().unwrap_or_else(|| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Untitled")
-            .to_string()
-    })
+    frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled")
+                .to_string()
+        })
 }
 
 #[cfg(test)]
@@ -882,7 +916,10 @@ mod tests {
     #[test]
     fn test_get_page_title_from_frontmatter() {
         let mut frontmatter = std::collections::HashMap::new();
-        frontmatter.insert("title".to_string(), "My Page Title".to_string());
+        frontmatter.insert(
+            "title".to_string(),
+            serde_json::Value::String("My Page Title".to_string()),
+        );
         let path = Path::new("/docs/readme.md");
         assert_eq!(get_page_title(&frontmatter, path), "My Page Title");
     }
@@ -899,6 +936,34 @@ mod tests {
         let frontmatter = std::collections::HashMap::new();
         let path = Path::new("/");
         assert_eq!(get_page_title(&frontmatter, path), "Untitled");
+    }
+
+    #[test]
+    fn test_extract_tag_values_from_array() {
+        let val = serde_json::json!(["rust", "python"]);
+        let tags = extract_tag_values(&val);
+        assert_eq!(tags, vec!["rust", "python"]);
+    }
+
+    #[test]
+    fn test_extract_tag_values_from_comma_string() {
+        let val = serde_json::json!("rust, python");
+        let tags = extract_tag_values(&val);
+        assert_eq!(tags, vec!["rust", "python"]);
+    }
+
+    #[test]
+    fn test_extract_tag_values_from_single_string() {
+        let val = serde_json::json!("rust");
+        let tags = extract_tag_values(&val);
+        assert_eq!(tags, vec!["rust"]);
+    }
+
+    #[test]
+    fn test_extract_tag_values_from_number() {
+        let val = serde_json::json!(42);
+        let tags = extract_tag_values(&val);
+        assert!(tags.is_empty());
     }
 }
 

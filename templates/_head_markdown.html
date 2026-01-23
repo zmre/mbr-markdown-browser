@@ -2,11 +2,23 @@
 {% include "_head.html" %}
     {# HLJS and KaTeX CSS are now loaded dynamically by mbr-hljs and mbr-katex components #}
     {% if tags %}
-    <meta name="keywords" content="{{tags | safe}}" data-pagefind-filter="tag[content]" />
+        {% if tags is string %}
+    <meta name="keywords" content="{{tags}}" data-pagefind-filter="tag[content]" />
+        {% else %}
+    <meta name="keywords" content="{{tags | join(sep=', ')}}" data-pagefind-filter="tag[content]" />
+        {% endif %}
     {% elif keywords %}
-    <meta name="keywords" content="{{keywords | safe}}" data-pagefind-filter="tag[content]" />
+        {% if keywords is string %}
+    <meta name="keywords" content="{{keywords}}" data-pagefind-filter="tag[content]" />
+        {% else %}
+    <meta name="keywords" content="{{keywords | join(sep=', ')}}" data-pagefind-filter="tag[content]" />
+        {% endif %}
     {% elif taxonomy.tags %}
-    <meta name="keywords" content="{{taxonomy.tags | safe}}" data-pagefind-filter="tag[content]" />
+        {% if taxonomy.tags is string %}
+    <meta name="keywords" content="{{taxonomy.tags}}" data-pagefind-filter="tag[content]" />
+        {% else %}
+    <meta name="keywords" content="{{taxonomy.tags | join(sep=', ')}}" data-pagefind-filter="tag[content]" />
+        {% endif %}
     {% endif %}
     <title>{{title | default(value="") | safe}}</title>
     <meta name="title" content="{{title | default(value="") | safe}}" data-pagefind-meta="title[content]" />
@@ -21,4 +33,13 @@
         { level: {{ heading.level }}, id: "{{ heading.id }}", text: "{{ heading.text | escape }}" }{% if not loop.last %},{% endif %}
         {% endfor %}
       ];
+      // Extended metadata
+      window.extendedMeta = {
+        wordCount: {{ word_count | default(value=0) }},
+        readingTimeMinutes: {{ reading_time_minutes | default(value=0) }},
+        filePath: "{{ file_path | default(value='') | safe }}",
+        modifiedTimestamp: {{ modified_timestamp | default(value=0) }},
+        {% if prev_page %}prevPage: { url: "{{ prev_page.url | safe }}", title: "{{ prev_page.title | escape }}" },{% endif %}
+        {% if next_page %}nextPage: { url: "{{ next_page.url | safe }}", title: "{{ next_page.title | escape }}" }{% endif %}
+      };
     </script>

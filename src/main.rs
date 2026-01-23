@@ -258,17 +258,18 @@ async fn main() -> Result<(), MbrError> {
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
         let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
-        let (frontmatter, _headings, html_output, _outbound_links, _has_h1) = markdown::render(
-            input_path,
-            config.root_dir.as_path(),
-            config.oembed_timeout_ms,
-            link_transform_config,
-            false, // server_mode is false in CLI mode
-            false, // transcode is disabled in CLI mode
-            valid_tag_sources,
-        )
-        .await
-        .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
+        let (frontmatter, _headings, html_output, _outbound_links, _has_h1, _word_count) =
+            markdown::render(
+                input_path,
+                config.root_dir.as_path(),
+                config.oembed_timeout_ms,
+                link_transform_config,
+                false, // server_mode is false in CLI mode
+                false, // transcode is disabled in CLI mode
+                valid_tag_sources,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
         let templates =
             templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
                 .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
