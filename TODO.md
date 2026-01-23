@@ -2,11 +2,14 @@
 
 ## What's Next
 
+* Bug with links in in the magic repo, dynamic
+
+* Do a full code review and suggest improvements to the code, uncover lurking bugs or issues, identify style issues, consider how it might be better organized, and make recommendations for improvements.  Consistency is important in that it sets developer and user expectations so if similar things are treated in different ways (variables sometimes passed in a namespace and sometimes not, or whatever) then we want to identify those issues. Also look for test coverage gaps in particular so that we can feel assured that any refactors don't cause regressions.  Look at how the config file and options are organized and look at how the docs are organized and consider improvements to these.
+
+* [ ] Add ability to search also media metadata (filename, title, whatever) beyond just pdfs so we can find videos and such, too.  Need to think about how to display the videos if selected though. Popup up a `<video>` overlay?  Ditto for pictures and audio.  For video, we'd want our usual transcript and chapters type stuff.
+
 * **Static build**
   * [ ] Setup some benchmarking and profiling
-
-* **UX**
-  * [ ] I don't think .mbr config overrides are being used in quicklook. i need to test html partials, but the theme= change doesn't seem to be honored.  Additionally, when resolving asset links, quicklook doesn't seem to take into account config (even the default config) for static files.  mbr will show images in a static folder while quicklook shows broken images when viewing the same file.
 
 * **Big repo (goodwiki) issues**
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.) or some sort of pagination
@@ -16,9 +19,8 @@
     * Answer: only if we submit PRs to pagefind or switch to something else
 
 * **Theming**
-  * [ ] Test html template overrides including partials and includes using the template to see if I can override just a footer and if so, make sure it's documented right
-  * [ ] Do I need a different mode that always shows nav and page info when on a wide screen? Maybe a configuration?  And if we have an autoexpanding browser, should we ditch the two column thing and do something more like normal doc sites?  Better: if we could auto-pin those items as a CSS option (like by looking at a CSS var?) that would be awesome.
   * Need a new browser widget
+    * [ ] Do I need a different mode that always shows nav and page info when on a wide screen? Maybe a configuration?  And if we have an autoexpanding browser, should we ditch the two column thing and do something more like normal doc sites?  Better: if we could auto-pin those items as a CSS option (like by looking at a CSS var?) that would be awesome.
     * [ ] Overhaul the browser widget so it is a single column folder hierarchy. This will remove extra info that's displayed inline, though maybe we can still use that somehow?
     * [ ] Enhance the browser widget to allow more keyboard shortcuts (hjkl for starters)
     * [ ] Enhance the browser widget to have a broader idea of tags and other frontmatter
@@ -27,16 +29,9 @@
 
 * [ ] when in server/gui mode and a new file is detected or a file is removed, we need to invalidate our search and browse caches and regenerate our site.json file either entirely or selectively.  i've been running this as a long running server and when i update files, they aren't showing up in the navigation unless i restart the service.
 
-
-* [ ] Add ability to specify code blocks of type mbr-search which will client-side produce search results that are displayed (for static sites, may need to build it out ahead of time, but this would slow things down)
-
-* [ ] Allow print from inside gui mode if we can do that cross platform.
-
 * [ ] Editing of metadata (tags and other yaml frontmatter) maybe including description recommendations using in-browser local AI for a given note.
 
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
-
-* [ ] Do we want a tui, too? maybe too much bloat?  or maybe awesomesauce?  if we did a tui for showing markdown then it would need to browse and jump around it, too, and have a key for launching an editor.  maybe re-use colors from pico variables in css?  my use case here is for the two linux machines i ssh into. locally i think i'd always just use the gui.  but it may be an awful lot to have gui and tui in one binary so the other option is to make different binaries?  or just feature flags?  thinking needed. (ratatui)
 
 * **Publish**
   * [ ] Publish to crates.io?
