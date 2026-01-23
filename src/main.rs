@@ -258,7 +258,7 @@ async fn main() -> Result<(), MbrError> {
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
         let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
-        let (frontmatter, _headings, html_output, _outbound_links) = markdown::render(
+        let (frontmatter, _headings, html_output, _outbound_links, _has_h1) = markdown::render(
             input_path,
             config.root_dir.as_path(),
             config.oembed_timeout_ms,

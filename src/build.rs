@@ -577,21 +577,22 @@ impl Builder {
         // Render markdown to HTML with shared oembed cache
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
         let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
-        let (mut frontmatter, headings, html, outbound_links) = markdown::render_with_cache(
-            path.to_path_buf(),
-            &self.config.root_dir,
-            self.config.oembed_timeout_ms,
-            link_transform_config,
-            Some(self.oembed_cache.clone()),
-            false, // server_mode is false in build mode
-            false, // transcode is disabled in build mode
-            valid_tag_sources,
-        )
-        .await
-        .map_err(|e| BuildError::RenderFailed {
-            path: path.to_path_buf(),
-            source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
-        })?;
+        let (mut frontmatter, headings, html, outbound_links, has_h1) =
+            markdown::render_with_cache(
+                path.to_path_buf(),
+                &self.config.root_dir,
+                self.config.oembed_timeout_ms,
+                link_transform_config,
+                Some(self.oembed_cache.clone()),
+                false, // server_mode is false in build mode
+                false, // transcode is disabled in build mode
+                valid_tag_sources,
+            )
+            .await
+            .map_err(|e| BuildError::RenderFailed {
+                path: path.to_path_buf(),
+                source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
+            })?;
 
         // Store outbound links in the build link index for generating links.json files
         if self.config.link_tracking && !outbound_links.is_empty() {
@@ -636,6 +637,7 @@ impl Builder {
             serde_json::json!(current_dir_name),
         );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
+        extra_context.insert("has_h1".to_string(), serde_json::json!(has_h1));
 
         // Add relative path variables for static builds
         extra_context.insert(

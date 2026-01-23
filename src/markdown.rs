@@ -67,6 +67,40 @@ struct EventState {
 
 pub type SimpleMetadata = HashMap<String, String>;
 
+/// Extracts the first H1 heading text from markdown content.
+///
+/// This is used to provide a title fallback when no frontmatter title exists.
+/// Only extracts the first H1 found; subsequent H1s are ignored.
+pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
+    let parser = MDParser::new_ext(markdown_input, markdown_options());
+    let parser = TextMergeStream::new(parser);
+
+    let mut in_h1 = false;
+    let mut h1_text = String::new();
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => {
+                in_h1 = true;
+            }
+            Event::Text(text) if in_h1 => {
+                h1_text.push_str(&text);
+            }
+            Event::End(TagEnd::Heading(HeadingLevel::H1)) => {
+                if !h1_text.is_empty() {
+                    return Some(h1_text);
+                }
+                in_h1 = false;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// First pass: extract headings and generate anchor IDs
 fn extract_headings(markdown_input: &str) -> (Vec<HeadingInfo>, HashMap<String, String>) {
     let parser = MDParser::new_ext(markdown_input, markdown_options());
@@ -187,8 +221,16 @@ pub async fn render(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
-) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String, Vec<OutboundLink>), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (
+        SimpleMetadata,
+        Vec<HeadingInfo>,
+        String,
+        Vec<OutboundLink>,
+        bool,
+    ),
+    Box<dyn std::error::Error>,
+> {
     render_with_cache(
         file,
         root_path,
@@ -208,11 +250,12 @@ pub async fn render(
 /// new results are cached for future use. URLs are fetched in parallel for improved
 /// performance when multiple bare URLs are present in the document.
 ///
-/// Returns: (frontmatter, headings, html, outbound_links)
+/// Returns: (frontmatter, headings, html, outbound_links, has_h1)
 ///
 /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
 /// - `transcode_enabled`: True when dynamic video transcoding is enabled
 /// - `valid_tag_sources`: Set of valid tag source names for wikilink transformation
+/// - `has_h1`: True if the document's first heading is an H1
 #[allow(clippy::too_many_arguments)]
 pub async fn render_with_cache(
     file: PathBuf,
@@ -223,8 +266,16 @@ pub async fn render_with_cache(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
-) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String, Vec<OutboundLink>), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (
+        SimpleMetadata,
+        Vec<HeadingInfo>,
+        String,
+        Vec<OutboundLink>,
+        bool,
+    ),
+    Box<dyn std::error::Error>,
+> {
     // Read markdown input
     let raw_markdown_input = fs::read_to_string(&file)?;
 
@@ -237,6 +288,9 @@ pub async fn render_with_cache(
 
     // First pass: extract headings and generate IDs
     let (headings, _heading_id_map) = extract_headings(&markdown_input);
+
+    // Detect if the first heading is an H1 (used for conditional title rendering in templates)
+    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
     // Second pass: collect and inject heading IDs into events
     let parser = MDParser::new_ext(&markdown_input, markdown_options());
@@ -348,11 +402,23 @@ pub async fn render_with_cache(
         section_attrs,
     );
 
+    // Extract frontmatter and inject H1 title if no frontmatter title exists
+    let mut frontmatter = yaml_frontmatter_simplified(&state.metadata_parsed);
+    if !frontmatter.contains_key("title")
+        && let Some(h1_text) = headings
+            .first()
+            .filter(|h| h.level == 1)
+            .map(|h| h.text.clone())
+    {
+        frontmatter.insert("title".to_string(), h1_text);
+    }
+
     Ok((
-        yaml_frontmatter_simplified(&state.metadata_parsed),
+        frontmatter,
         headings,
         html_output,
         deduplicated_links,
+        has_h1,
     ))
 }
 
@@ -538,7 +604,7 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
     let parser = MDParser::new_ext(&markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
     let mut in_metadata = false;
-    let hm = HashMap::new();
+    let mut hm = HashMap::new();
     for event in parser.take(4) {
         match &event {
             Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
@@ -552,12 +618,21 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
                     let metadata_parsed =
                         YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
 
-                    return Ok(yaml_frontmatter_simplified(&metadata_parsed));
+                    hm = yaml_frontmatter_simplified(&metadata_parsed);
+                    break;
                 }
             }
             _ => {}
         }
     }
+
+    // If no frontmatter title, try to extract the first H1 from the content
+    if !hm.contains_key("title")
+        && let Some(h1_text) = extract_first_h1(&markdown_input)
+    {
+        hm.insert("title".to_string(), h1_text);
+    }
+
     Ok(hm)
 }
 
@@ -785,7 +860,7 @@ mod tests {
             is_index_file,
         };
         // Tests run with server_mode=false, transcode_enabled=false
-        let (_, _, html, _) = render(path, &root, 100, config, false, false, tag_sources)
+        let (_, _, html, _, _) = render(path, &root, 100, config, false, false, tag_sources)
             .await
             .unwrap();
         html
@@ -854,10 +929,151 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _) = render(path, &root, 100, config, false, false, HashSet::new())
+        let (metadata, _, _, _, _) = render(path, &root, 100, config, false, false, HashSet::new())
             .await
             .unwrap();
         assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
+    }
+
+    // H1 extraction tests
+    #[test]
+    fn test_extract_first_h1_basic() {
+        let md = "# Hello World\n\nSome content";
+        let result = extract_first_h1(md);
+        assert_eq!(result, Some("Hello World".to_string()));
+    }
+
+    #[test]
+    fn test_extract_first_h1_with_inline_formatting() {
+        let md = "# Hello **World**\n\nSome content";
+        let result = extract_first_h1(md);
+        assert_eq!(result, Some("Hello World".to_string()));
+    }
+
+    #[test]
+    fn test_extract_first_h1_none_when_no_h1() {
+        let md = "## This is H2\n\nSome content";
+        let result = extract_first_h1(md);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_first_h1_returns_first_only() {
+        let md = "# First H1\n\n# Second H1";
+        let result = extract_first_h1(md);
+        assert_eq!(result, Some("First H1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_first_h1_empty_doc() {
+        let md = "";
+        let result = extract_first_h1(md);
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_has_h1_true_when_first_heading_is_h1() {
+        let md = "# Main Title\n\n## Subsection";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (_, _, _, _, has_h1) = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(has_h1);
+    }
+
+    #[tokio::test]
+    async fn test_has_h1_false_when_first_heading_is_h2() {
+        let md = "## Subsection\n\n# Late H1";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (_, _, _, _, has_h1) = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(!has_h1);
+    }
+
+    #[tokio::test]
+    async fn test_title_fallback_from_h1() {
+        // No frontmatter title, but has H1 - should extract title from H1
+        let md = "# My Document Title\n\nSome content here.";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _, _, _, has_h1) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(has_h1);
+        assert_eq!(
+            metadata.get("title"),
+            Some(&"My Document Title".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_frontmatter_title_takes_precedence() {
+        // Frontmatter title should take precedence over H1
+        let md = "---\ntitle: Frontmatter Title\n---\n\n# H1 Title";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _, _, _, has_h1) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(has_h1);
+        assert_eq!(
+            metadata.get("title"),
+            Some(&"Frontmatter Title".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_title_when_no_frontmatter_and_no_h1() {
+        // No frontmatter and no H1 - should have no title
+        let md = "## Subsection\n\nSome content.";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _, _, _, has_h1) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(!has_h1);
+        assert_eq!(metadata.get("title"), None);
     }
 
     // Media embed tests

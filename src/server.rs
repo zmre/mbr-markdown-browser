@@ -1114,7 +1114,7 @@ impl Server {
                     )
                     .await
                     {
-                        Ok((_frontmatter, _headings, _html, outbound_links)) => {
+                        Ok((_frontmatter, _headings, _html, outbound_links, _has_h1)) => {
                             // Resolve relative URLs to absolute before caching
                             let resolved_links =
                                 resolve_outbound_links(&page_url_path, outbound_links);
@@ -1564,7 +1564,7 @@ impl Server {
         let transcode_enabled = false;
 
         let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
-        let (mut frontmatter, headings, inner_html_output, outbound_links) =
+        let (mut frontmatter, headings, inner_html_output, outbound_links, has_h1) =
             markdown::render_with_cache(
                 md_path.to_path_buf(),
                 root_path,
@@ -1638,6 +1638,7 @@ impl Server {
             serde_json::json!(current_dir_name),
         );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
+        extra_context.insert("has_h1".to_string(), serde_json::json!(has_h1));
 
         let full_html_output = config
             .templates
