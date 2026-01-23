@@ -167,6 +167,7 @@ pub fn render_preview_with_config(
         &root_path,
         &base_url,
         &ql_config,
+        &config,
     )
 }
 
@@ -187,38 +188,72 @@ fn find_config_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Resolve an asset path, checking the direct path first, then falling back to static folder.
+///
+/// This mirrors the logic in `path_resolver.rs` for consistent behavior between
+/// server mode and QuickLook previews.
+fn resolve_asset_path(root_path: &Path, static_folder: &str, url_path: &str) -> PathBuf {
+    // url_path is like "/images/photo.jpg" - remove leading slash for join
+    let relative_path = url_path.trim_start_matches('/');
+
+    // Check direct path first
+    let direct = root_path.join(relative_path);
+    if direct.exists() {
+        return direct;
+    }
+
+    // Fallback to static folder
+    if !static_folder.is_empty() {
+        let static_path = root_path.join(static_folder).join(relative_path);
+        if static_path.exists() {
+            return static_path;
+        }
+    }
+
+    // Neither exists - return direct path (will 404, but that's expected)
+    direct
+}
+
 /// Convert root-relative URLs (starting with /) to mbrfile:// URLs.
 /// This is necessary because WKWebView's loadHTMLString() cannot access file:// URLs.
 /// The Swift side registers a WKURLSchemeHandler for the mbrfile:// scheme that
 /// serves local files from disk.
-fn convert_root_relative_urls(html: &str, root_path: &Path) -> String {
-    let root_str = root_path.to_str().unwrap_or("");
+///
+/// Uses the same fallback logic as the server: checks the direct path first,
+/// then falls back to the static folder if configured.
+fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str) -> String {
+    use regex::Regex;
 
-    // Replace src="/... with src="mbrfile://{root}/...
-    // Replace src='/... with src='mbrfile://{root}/...
-    // Same for href and poster attributes
-    //
-    // Note: The patterns match the start of root-relative paths (e.g., src="/)
-    // and replace with the mbrfile scheme plus the root path, preserving the rest.
-    let mut result = html.to_string();
+    // Match src="/.../", href="/.../", poster="/.../..." with double quotes
+    // We use two separate patterns since Rust's regex crate doesn't support backreferences
+    let re_double = Regex::new(r#"(src|href|poster)="(/[^"]*)""#).unwrap();
+    let re_single = Regex::new(r#"(src|href|poster)='(/[^']*)'"#).unwrap();
 
-    // Handle double-quoted attributes
-    result = result.replace(r#"src="/"#, &format!(r#"src="mbrfile://{}/"#, root_str));
-    result = result.replace(r#"href="/"#, &format!(r#"href="mbrfile://{}/"#, root_str));
-    result = result.replace(
-        r#"poster="/"#,
-        &format!(r#"poster="mbrfile://{}/"#, root_str),
-    );
+    // First pass: handle double-quoted attributes
+    let result = re_double.replace_all(html, |caps: &regex::Captures| {
+        let attr = &caps[1];
+        let url_path = &caps[2];
 
-    // Handle single-quoted attributes
-    result = result.replace(r#"src='/"#, &format!(r#"src='mbrfile://{}/"#, root_str));
-    result = result.replace(r#"href='/"#, &format!(r#"href='mbrfile://{}/"#, root_str));
-    result = result.replace(
-        r#"poster='/"#,
-        &format!(r#"poster='mbrfile://{}/"#, root_str),
-    );
+        // Resolve the path with static folder fallback
+        let resolved = resolve_asset_path(root_path, static_folder, url_path);
+        let resolved_str = resolved.to_str().unwrap_or(url_path);
 
-    result
+        format!("{}=\"mbrfile://{}\"", attr, resolved_str)
+    });
+
+    // Second pass: handle single-quoted attributes
+    re_single
+        .replace_all(&result, |caps: &regex::Captures| {
+            let attr = &caps[1];
+            let url_path = &caps[2];
+
+            // Resolve the path with static folder fallback
+            let resolved = resolve_asset_path(root_path, static_folder, url_path);
+            let resolved_str = resolved.to_str().unwrap_or(url_path);
+
+            format!("{}='mbrfile://{}'", attr, resolved_str)
+        })
+        .to_string()
 }
 
 /// Render the QuickLook HTML template with inlined assets.
@@ -228,20 +263,22 @@ fn render_quicklook_template(
     headings: Vec<markdown::HeadingInfo>,
     root_path: &Path,
     base_url: &str,
-    config: &QuickLookConfig,
+    ql_config: &QuickLookConfig,
+    config: &Config,
 ) -> Result<String, QuickLookError> {
     // Convert root-relative URLs to absolute file:// URLs for QuickLook
-    let markdown_html = convert_root_relative_urls(markdown_html, root_path);
+    // Uses static_folder fallback logic to find files in the correct location
+    let markdown_html = convert_root_relative_urls(markdown_html, root_path, &config.static_folder);
 
     // Load custom theme CSS if available
     let custom_theme = load_custom_theme(root_path);
     let custom_user_css = load_custom_user_css(root_path);
 
-    // Build inline CSS
-    let inline_css = build_inline_css(config, &custom_theme, &custom_user_css);
+    // Build inline CSS using configured theme
+    let inline_css = build_inline_css(ql_config, &config.theme, &custom_theme, &custom_user_css);
 
     // Build inline JavaScript
-    let inline_js = build_inline_js(config);
+    let inline_js = build_inline_js(ql_config);
 
     // Create Tera template engine with QuickLook template
     let mut tera = Tera::default();
@@ -293,17 +330,18 @@ fn load_custom_user_css(root_path: &Path) -> Option<String> {
 /// Build the inline CSS string from embedded and custom sources.
 fn build_inline_css(
     config: &QuickLookConfig,
+    theme: &str,
     custom_theme: &Option<String>,
     custom_user_css: &Option<String>,
 ) -> String {
     let mut css = String::with_capacity(64 * 1024); // Pre-allocate for performance
 
-    // Base CSS (pico.min.css) - use default theme for QuickLook
-    if let Some(pico_css) = embedded_pico::get_pico_css("default") {
-        if let Ok(pico_str) = std::str::from_utf8(pico_css) {
-            css.push_str(pico_str);
-            css.push('\n');
-        }
+    // Base CSS (pico.min.css) - use configured theme
+    if let Some(pico_css) = embedded_pico::get_pico_css(theme)
+        && let Ok(pico_str) = std::str::from_utf8(pico_css)
+    {
+        css.push_str(pico_str);
+        css.push('\n');
     }
 
     // Theme CSS (custom or default)
@@ -321,11 +359,11 @@ fn build_inline_css(
     }
 
     // Syntax highlighting CSS - use embedded_hljs module
-    if config.include_syntax_highlighting {
-        if let Ok(hljs_css) = std::str::from_utf8(embedded_hljs::HLJS_DARK_CSS) {
-            css.push_str(hljs_css);
-            css.push('\n');
-        }
+    if config.include_syntax_highlighting
+        && let Ok(hljs_css) = std::str::from_utf8(embedded_hljs::HLJS_DARK_CSS)
+    {
+        css.push_str(hljs_css);
+        css.push('\n');
     }
 
     // QuickLook-specific overrides
@@ -605,11 +643,37 @@ mod tests {
     #[test]
     fn test_quicklook_css_includes_overrides() {
         let config = QuickLookConfig::default();
-        let css = build_inline_css(&config, &None, &None);
+        let css = build_inline_css(&config, "default", &None, &None);
 
         // Should include QuickLook-specific overrides
         assert!(css.contains("browse-trigger"));
         assert!(css.contains("display: none"));
+    }
+
+    #[test]
+    fn test_quicklook_uses_configured_theme() {
+        // Test that theme from config is used
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mbr_dir = temp_dir.path().join(".mbr");
+        std::fs::create_dir(&mbr_dir).unwrap();
+
+        // Create config with amber theme
+        std::fs::write(mbr_dir.join("config.toml"), r#"theme = "amber""#).unwrap();
+
+        // Create a simple markdown file
+        let file_path = temp_dir.path().join("test.md");
+        std::fs::write(&file_path, "# Test").unwrap();
+
+        let path = file_path.to_str().unwrap().to_string();
+        let html = render_preview(path, None).unwrap();
+
+        // Amber theme should include amber-specific CSS
+        // The pico amber theme includes specific amber color values
+        // Check for presence of amber primary color (--pico-primary: #...)
+        assert!(
+            html.contains("amber") || html.contains("#ff8c00") || html.contains("pico.amber"),
+            "Expected amber theme CSS. Got different theme."
+        );
     }
 
     #[test]
@@ -647,7 +711,7 @@ mod tests {
     fn test_convert_root_relative_urls_double_quotes() {
         let html = r#"<img src="/images/test.png" alt="test">"#;
         let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root);
+        let result = convert_root_relative_urls(html, root, "");
         assert_eq!(
             result,
             r#"<img src="mbrfile:///Users/test/notes/images/test.png" alt="test">"#
@@ -658,7 +722,7 @@ mod tests {
     fn test_convert_root_relative_urls_single_quotes() {
         let html = r#"<source src='/videos/test.mp4' type="video/mp4">"#;
         let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root);
+        let result = convert_root_relative_urls(html, root, "");
         assert_eq!(
             result,
             r#"<source src='mbrfile:///Users/test/notes/videos/test.mp4' type="video/mp4">"#
@@ -669,7 +733,7 @@ mod tests {
     fn test_convert_root_relative_urls_href() {
         let html = r#"<a href="/docs/readme.md">Link</a>"#;
         let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root);
+        let result = convert_root_relative_urls(html, root, "");
         assert_eq!(
             result,
             r#"<a href="mbrfile:///Users/test/notes/docs/readme.md">Link</a>"#
@@ -680,7 +744,7 @@ mod tests {
     fn test_convert_root_relative_urls_poster() {
         let html = r#"<video poster="/images/thumb.jpg"></video>"#;
         let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root);
+        let result = convert_root_relative_urls(html, root, "");
         assert_eq!(
             result,
             r#"<video poster="mbrfile:///Users/test/notes/images/thumb.jpg"></video>"#
@@ -692,7 +756,7 @@ mod tests {
         // Relative paths (not starting with /) should NOT be converted
         let html = r#"<img src="./images/test.png" alt="test">"#;
         let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root);
+        let result = convert_root_relative_urls(html, root, "");
         // Should remain unchanged
         assert_eq!(result, r#"<img src="./images/test.png" alt="test">"#);
     }
@@ -702,8 +766,108 @@ mod tests {
         // HTTP URLs should NOT be converted
         let html = r#"<img src="https://example.com/image.png">"#;
         let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root);
+        let result = convert_root_relative_urls(html, root, "");
         assert_eq!(result, r#"<img src="https://example.com/image.png">"#);
+    }
+
+    #[test]
+    fn test_convert_urls_static_folder_fallback() {
+        // Test that static folder fallback works when file only exists there
+        let temp_dir = tempfile::tempdir().unwrap();
+        let static_images = temp_dir.path().join("static/images");
+        std::fs::create_dir_all(&static_images).unwrap();
+        std::fs::write(static_images.join("photo.jpg"), b"image data").unwrap();
+
+        let html = r#"<img src="/images/photo.jpg">"#;
+        let result = convert_root_relative_urls(html, temp_dir.path(), "static");
+
+        // Should resolve to static/images/photo.jpg since /images/photo.jpg doesn't exist
+        let expected_path = temp_dir.path().join("static/images/photo.jpg");
+        assert!(
+            result.contains(&format!("mbrfile://{}", expected_path.display())),
+            "Expected URL to use static folder path. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_convert_urls_direct_path_preferred() {
+        // Test that direct path is preferred over static folder when both exist
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create file at direct path
+        let direct_images = temp_dir.path().join("images");
+        std::fs::create_dir_all(&direct_images).unwrap();
+        std::fs::write(direct_images.join("photo.jpg"), b"direct image").unwrap();
+
+        // Also create file in static folder
+        let static_images = temp_dir.path().join("static/images");
+        std::fs::create_dir_all(&static_images).unwrap();
+        std::fs::write(static_images.join("photo.jpg"), b"static image").unwrap();
+
+        let html = r#"<img src="/images/photo.jpg">"#;
+        let result = convert_root_relative_urls(html, temp_dir.path(), "static");
+
+        // Should resolve to direct path since it exists
+        let expected_path = temp_dir.path().join("images/photo.jpg");
+        assert!(
+            result.contains(&format!("mbrfile://{}", expected_path.display())),
+            "Expected URL to use direct path. Got: {}",
+            result
+        );
+        // Should NOT use static folder path
+        assert!(
+            !result.contains("static/images"),
+            "Should not use static folder when direct path exists"
+        );
+    }
+
+    #[test]
+    fn test_convert_urls_neither_exists() {
+        // Test that direct path is used when file exists in neither location
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let html = r#"<img src="/images/missing.jpg">"#;
+        let result = convert_root_relative_urls(html, temp_dir.path(), "static");
+
+        // Should still use direct path (will 404, but that's expected)
+        let expected_path = temp_dir.path().join("images/missing.jpg");
+        assert!(
+            result.contains(&format!("mbrfile://{}", expected_path.display())),
+            "Expected URL to use direct path even when missing. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_resolve_asset_path_direct_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let images = temp_dir.path().join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("test.png"), b"data").unwrap();
+
+        let result = resolve_asset_path(temp_dir.path(), "static", "/images/test.png");
+        assert_eq!(result, temp_dir.path().join("images/test.png"));
+    }
+
+    #[test]
+    fn test_resolve_asset_path_static_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let static_images = temp_dir.path().join("static/images");
+        std::fs::create_dir_all(&static_images).unwrap();
+        std::fs::write(static_images.join("test.png"), b"data").unwrap();
+
+        let result = resolve_asset_path(temp_dir.path(), "static", "/images/test.png");
+        assert_eq!(result, temp_dir.path().join("static/images/test.png"));
+    }
+
+    #[test]
+    fn test_resolve_asset_path_neither_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let result = resolve_asset_path(temp_dir.path(), "static", "/images/missing.png");
+        // Should return direct path
+        assert_eq!(result, temp_dir.path().join("images/missing.png"));
     }
 
     #[test]
