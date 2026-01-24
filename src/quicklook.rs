@@ -135,7 +135,7 @@ pub fn render_preview_with_config(
 
     // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
     // Use empty tag sources for QuickLook (no wikilink transformation)
-    let (frontmatter, headings, html, _outbound_links) = rt
+    let (frontmatter, headings, html, _outbound_links, _has_h1, _word_count) = rt
         .block_on(async {
             markdown::render(
                 path.clone(),
