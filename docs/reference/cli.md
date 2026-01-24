@@ -205,6 +205,46 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `enable_writes` | bool | `false` | Allow write operations |
 
+### Navigation Settings
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `sidebar_style` | string | `"panel"` | Sidebar navigation style: `"panel"` (modal 3-pane) or `"single"` (persistent sidebar) |
+| `sidebar_max_items` | number | `100` | Maximum items per section in sidebar navigation |
+
+**Sidebar styles:**
+
+- `"panel"` (default): Three-pane modal browser accessible via menu. Opens as an overlay with folders, files, and tags in separate columns.
+- `"single"`: Persistent single-column sidebar beside content (like picocss.com/docs). Shows folder tree, files, and tags in a scrollable sidebar.
+
+**Responsive behavior (single sidebar):**
+
+| Viewport | Behavior |
+|----------|----------|
+| \>= 1024px (desktop) | Sidebar appears beside content via CSS grid |
+| < 1024px (mobile) | Hamburger menu triggers slide-in drawer overlay |
+
+**CSS variables for customization:**
+
+```css
+:root {
+  --mbr-sidebar-width: 280px;    /* Sidebar width */
+  --mbr-hide-nav-bp: 1024px;     /* Breakpoint for mobile mode */
+  --mbr-show-tags: block;        /* Set to 'none' to hide tags */
+}
+```
+
+Example configuration:
+```toml
+# .mbr/config.toml
+
+# Use persistent sidebar instead of modal
+sidebar_style = "single"
+
+# Show more items in large repositories
+sidebar_max_items = 200
+```
+
 ### Tag Settings
 
 | Option | Type | Default | Description |

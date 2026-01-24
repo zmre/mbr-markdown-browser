@@ -77,6 +77,10 @@ pub struct ServerState {
     pub inbound_link_cache: Arc<InboundLinkCache>,
     /// Tag sources for frontmatter extraction
     pub tag_sources: Vec<TagSource>,
+    /// Sidebar navigation style ("panel" for mbr-browse, "single" for mbr-browse-single)
+    pub sidebar_style: String,
+    /// Maximum items per section in sidebar navigation
+    pub sidebar_max_items: usize,
 }
 
 impl Server {
@@ -100,12 +104,15 @@ impl Server {
         log_filter: Option<&str>,
         link_tracking: bool,
         tag_sources: &[TagSource],
+        sidebar_style: S,
+        sidebar_max_items: usize,
         #[cfg(feature = "media-metadata")] transcode_enabled: bool,
     ) -> Result<Self, ServerError> {
         let base_dir = base_dir.into();
         let static_folder = static_folder.into();
         let index_file = index_file.into();
         let theme = theme.into();
+        let sidebar_style = sidebar_style.into();
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
 
         // Initialize video metadata cache with same size as oembed cache
@@ -232,6 +239,8 @@ impl Server {
             link_cache,
             inbound_link_cache,
             tag_sources: tag_sources.to_vec(),
+            sidebar_style,
+            sidebar_max_items,
         };
 
         let router = Router::new()
@@ -453,6 +462,15 @@ impl Server {
             obj.insert(
                 "sort".to_string(),
                 serde_json::to_value(&config.sort).unwrap_or(serde_json::Value::Array(vec![])),
+            );
+            // Add sidebar navigation configuration
+            obj.insert(
+                "sidebar_style".to_string(),
+                serde_json::Value::String(config.sidebar_style.clone()),
+            );
+            obj.insert(
+                "sidebar_max_items".to_string(),
+                serde_json::json!(config.sidebar_max_items),
             );
         }
 
@@ -708,6 +726,7 @@ impl Server {
 
     /// Render an error page using the error.html template.
     /// Falls back to a plain text response if template rendering fails.
+    #[allow(clippy::too_many_arguments)]
     fn render_error_page(
         templates: &templates::Templates,
         status_code: StatusCode,
@@ -715,6 +734,8 @@ impl Server {
         error_message: Option<&str>,
         requested_url: &str,
         gui_mode: bool,
+        sidebar_style: &str,
+        sidebar_max_items: usize,
     ) -> Response<Body> {
         use std::collections::HashMap;
 
@@ -740,6 +761,15 @@ impl Server {
         // Server mode uses absolute paths
         context.insert("server_mode".to_string(), serde_json::Value::Bool(true));
         context.insert("gui_mode".to_string(), serde_json::Value::Bool(gui_mode));
+        // Sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::Value::String(sidebar_style.to_string()),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::Value::Number(sidebar_max_items.into()),
+        );
 
         match templates.render_error(context) {
             Ok(html) => Response::builder()
@@ -891,6 +921,8 @@ impl Server {
                     Some("The requested page could not be found."),
                     &requested_url,
                     config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
                 ))
             }
         }
@@ -1699,6 +1731,15 @@ impl Server {
             "file_path".to_string(),
             serde_json::json!(relative_md_path.to_string_lossy()),
         );
+        // Pass sidebar navigation configuration
+        extra_context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(config.sidebar_style),
+        );
+        extra_context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(config.sidebar_max_items),
+        );
 
         // Pass modified date from file metadata
         let modified_info = tokio::fs::metadata(md_path)
@@ -1921,6 +1962,13 @@ impl Server {
         .unwrap_or_else(|_| "[]".to_string());
         context.insert("tag_sources".to_string(), json!(tag_sources_json));
 
+        // Pass sidebar navigation configuration
+        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
+        context.insert(
+            "sidebar_max_items".to_string(),
+            json!(config.sidebar_max_items),
+        );
+
         // Detect if we're at the root directory
         let is_root =
             relative_path.as_os_str().is_empty() || relative_path == std::path::Path::new(".");
@@ -2011,6 +2059,12 @@ impl Server {
         context.insert("page_count".to_string(), json!(pages.len()));
         context.insert("server_mode".to_string(), json!(true));
         context.insert("relative_base".to_string(), json!("/.mbr/"));
+        // Pass sidebar navigation configuration
+        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
+        context.insert(
+            "sidebar_max_items".to_string(),
+            json!(config.sidebar_max_items),
+        );
 
         let html_output = config.templates.render_tag(context)?;
 
@@ -2072,6 +2126,12 @@ impl Server {
         context.insert("tag_count".to_string(), json!(tags.len()));
         context.insert("server_mode".to_string(), json!(true));
         context.insert("relative_base".to_string(), json!("/.mbr/"));
+        // Pass sidebar navigation configuration
+        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
+        context.insert(
+            "sidebar_max_items".to_string(),
+            json!(config.sidebar_max_items),
+        );
 
         let html_output = config.templates.render_tag_index(context)?;
 

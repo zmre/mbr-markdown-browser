@@ -44,6 +44,8 @@ impl TestServer {
                 None,                                // log_filter
                 true,                                // link_tracking
                 &mbr::config::default_tag_sources(), // tag_sources
+                "panel",                             // sidebar_style
+                100,                                 // sidebar_max_items
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -702,6 +704,8 @@ impl TestServerWithTemplates {
                 None,                                // log_filter
                 true,                                // link_tracking
                 &mbr::config::default_tag_sources(), // tag_sources
+                "panel",                             // sidebar_style
+                100,                                 // sidebar_max_items
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -1446,6 +1450,8 @@ impl TestServerWithTheme {
                 None,                                // log_filter
                 true,                                // link_tracking
                 &mbr::config::default_tag_sources(), // tag_sources
+                "panel",                             // sidebar_style
+                100,                                 // sidebar_max_items
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )
@@ -1802,6 +1808,8 @@ impl TestServerNoLinkTracking {
                 None,                                // log_filter
                 false,                               // link_tracking DISABLED
                 &mbr::config::default_tag_sources(), // tag_sources
+                "panel",                             // sidebar_style
+                100,                                 // sidebar_max_items
                 #[cfg(feature = "media-metadata")]
                 false, // transcode_enabled
             )

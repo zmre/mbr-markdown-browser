@@ -29,6 +29,10 @@ function isModalOpen(): boolean {
   const browse = document.querySelector('mbr-browse');
   if (browse && (browse as any)._isOpen) return true;
 
+  // Check for mbr-browse-single drawer (in overlay mode)
+  const browseSingle = document.querySelector('mbr-browse-single');
+  if (browseSingle && (browseSingle as any)._isDrawerOpen) return true;
+
   // Check for mbr-fuzzy-nav modal
   const fuzzyNav = document.querySelector('mbr-fuzzy-nav');
   if (fuzzyNav && (fuzzyNav as any)._isOpen) return true;

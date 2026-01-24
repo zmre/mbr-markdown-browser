@@ -298,6 +298,8 @@ async fn main() -> Result<(), MbrError> {
             None, // Logging already initialized
             config.link_tracking,
             &config.tag_sources,
+            &config.sidebar_style,
+            config.sidebar_max_items,
             #[cfg(feature = "media-metadata")]
             config.transcode,
         )?;
@@ -341,6 +343,8 @@ async fn main() -> Result<(), MbrError> {
                     None, // Logging already initialized
                     config_copy.link_tracking,
                     &config_copy.tag_sources,
+                    &config_copy.sidebar_style,
+                    config_copy.sidebar_max_items,
                     #[cfg(feature = "media-metadata")]
                     config_copy.transcode,
                 );

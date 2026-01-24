@@ -684,6 +684,16 @@ impl Builder {
             serde_json::json!(tag_sources_json),
         );
 
+        // Pass sidebar navigation configuration
+        extra_context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        extra_context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
         // Pass word count and reading time (200 words per minute)
         let reading_time_minutes = word_count.div_ceil(200);
         extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
@@ -1017,6 +1027,16 @@ impl Builder {
             serde_json::json!(tag_sources_json),
         );
 
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
         // Render template
         let html_output = if is_root {
             self.templates.render_home(context).await?
@@ -1213,6 +1233,16 @@ impl Builder {
             serde_json::Value::String(display_value),
         );
 
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
         // Render template
         let html_output = self.templates.render_tag(context)?;
 
@@ -1315,6 +1345,16 @@ impl Builder {
         context.insert(
             "current_dir_name".to_string(),
             serde_json::Value::String(plural_label),
+        );
+
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
         );
 
         // Render template
@@ -1631,6 +1671,16 @@ impl Builder {
                 "name": "Home",
                 "url": "./"
             })]),
+        );
+
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
         );
 
         let html = self.templates.render_error(context)?;

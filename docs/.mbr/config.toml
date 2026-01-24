@@ -3,6 +3,7 @@ port = 5201
 index_file = "index.md"
 ignore_dirs = ["node_modules", ".git", "target", "build"]
 oembed_timeout_ms = 300
+sidebar_style = "single"
 
 # Sort documentation sections by order field first, then by title
 [[sort]]

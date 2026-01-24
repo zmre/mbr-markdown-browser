@@ -281,6 +281,8 @@ fn reinit_server(
             None, // Logging already initialized
             config_copy.link_tracking,
             &config_copy.tag_sources,
+            &config_copy.sidebar_style,
+            config_copy.sidebar_max_items,
             #[cfg(feature = "media-metadata")]
             config_copy.transcode,
         );

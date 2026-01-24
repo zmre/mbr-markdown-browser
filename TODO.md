@@ -2,8 +2,6 @@
 
 ## What's Next
 
-* Bug with links in in the magic repo, dynamic
-
 * Do a full code review and suggest improvements to the code, uncover lurking bugs or issues, identify style issues, consider how it might be better organized, and make recommendations for improvements.  Consistency is important in that it sets developer and user expectations so if similar things are treated in different ways (variables sometimes passed in a namespace and sometimes not, or whatever) then we want to identify those issues. Also look for test coverage gaps in particular so that we can feel assured that any refactors don't cause regressions.  Look at how the config file and options are organized and look at how the docs are organized and consider improvements to these.
 
 * [ ] Add ability to search also media metadata (filename, title, whatever) beyond just pdfs so we can find videos and such, too.  Need to think about how to display the videos if selected though. Popup up a `<video>` overlay?  Ditto for pictures and audio.  For video, we'd want our usual transcript and chapters type stuff.
@@ -20,11 +18,6 @@
 
 * **Theming**
   * Need a new browser widget
-    * [ ] Do I need a different mode that always shows nav and page info when on a wide screen? Maybe a configuration?  And if we have an autoexpanding browser, should we ditch the two column thing and do something more like normal doc sites?  Better: if we could auto-pin those items as a CSS option (like by looking at a CSS var?) that would be awesome.
-    * [ ] Overhaul the browser widget so it is a single column folder hierarchy. This will remove extra info that's displayed inline, though maybe we can still use that somehow?
-    * [ ] Enhance the browser widget to allow more keyboard shortcuts (hjkl for starters)
-    * [ ] Enhance the browser widget to have a broader idea of tags and other frontmatter
-    * [ ] Bug in browser widget not showing all tags or full counts; also not hiding tags section if there aren't any
     * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
 
 * [ ] when in server/gui mode and a new file is detected or a file is removed, we need to invalidate our search and browse caches and regenerate our site.json file either entirely or selectively.  i've been running this as a long running server and when i update files, they aren't showing up in the navigation unless i restart the service.

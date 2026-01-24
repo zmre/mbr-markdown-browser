@@ -40,6 +40,14 @@ fn default_build_tag_pages() -> bool {
     true
 }
 
+fn default_sidebar_style() -> String {
+    "panel".to_string()
+}
+
+fn default_sidebar_max_items() -> usize {
+    100
+}
+
 /// Configuration for a tag source - a frontmatter field that contains tags.
 ///
 /// # Examples
@@ -248,6 +256,15 @@ pub struct Config {
     /// Default: true (enabled).
     #[serde(default = "default_build_tag_pages")]
     pub build_tag_pages: bool,
+    /// Sidebar navigation style.
+    /// - "panel": Three-pane modal browser (default, existing mbr-browse)
+    /// - "single": Persistent single-column sidebar (new mbr-browse-single)
+    #[serde(default = "default_sidebar_style")]
+    pub sidebar_style: String,
+    /// Maximum items per section in sidebar navigation.
+    /// Default: 100. Only applies when sidebar_style = "single".
+    #[serde(default = "default_sidebar_max_items")]
+    pub sidebar_max_items: usize,
 }
 
 impl std::fmt::Display for IpArray {
@@ -329,6 +346,8 @@ impl Default for Config {
             link_tracking: true,     // Bidirectional link tracking enabled by default
             tag_sources: default_tag_sources(),
             build_tag_pages: true, // Tag pages enabled by default
+            sidebar_style: default_sidebar_style(),
+            sidebar_max_items: default_sidebar_max_items(),
         }
     }
 }
