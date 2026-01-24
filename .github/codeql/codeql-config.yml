@@ -3,5 +3,8 @@ paths:
   - src
   - components
   - templates/*.html
+  - macos
+  - quicklook
+  - scripts
 paths-ignore:
   - templates/*.js

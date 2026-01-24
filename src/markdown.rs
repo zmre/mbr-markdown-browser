@@ -5,6 +5,7 @@ use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
 use crate::vid::Vid;
+use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use pulldown_cmark::{
     CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd,
     TextMergeStream,
@@ -17,6 +18,23 @@ use std::{
     sync::Arc,
 };
 use yaml_rust2::{Yaml, YamlLoader};
+
+/// Markdown parser options.
+///
+/// Uses `Options::all()` to enable all pulldown-cmark features including wikilinks.
+///
+/// Wikilink processing flow:
+/// 1. `transform_wikilinks` runs FIRST on raw markdown, converting tag-style wikilinks
+///    like `[[Tags:rust]]` to standard markdown links `[rust](/tags/rust/)`
+/// 2. pulldown-cmark then parses the result, handling plain wikilinks like `[[Whatever]]`
+///    natively with its ENABLE_WIKILINKS support
+///
+/// This hybrid approach allows us to:
+/// - Support custom tag-source links (`[[Source:value]]`)
+/// - Preserve standard wikilink behavior for plain `[[page]]` links
+fn markdown_options() -> Options {
+    Options::all()
+}
 
 /// Represents a heading in the document for table of contents generation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -49,13 +67,53 @@ struct EventState {
     current_link_dest: Option<String>,
     /// Current link text being accumulated
     current_link_text: String,
+    /// Valid tag sources for detecting tag links (e.g., "tags", "performers")
+    valid_tag_sources: HashSet<String>,
+    /// Word count accumulator for text content
+    word_count: usize,
+    /// Track if we're inside a code block (to exclude from word count)
+    in_code_block: bool,
 }
 
-pub type SimpleMetadata = HashMap<String, String>;
+pub type SimpleMetadata = HashMap<String, serde_json::Value>;
+
+/// Extracts the first H1 heading text from markdown content.
+///
+/// This is used to provide a title fallback when no frontmatter title exists.
+/// Only extracts the first H1 found; subsequent H1s are ignored.
+pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
+    let parser = MDParser::new_ext(markdown_input, markdown_options());
+    let parser = TextMergeStream::new(parser);
+
+    let mut in_h1 = false;
+    let mut h1_text = String::new();
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => {
+                in_h1 = true;
+            }
+            Event::Text(text) if in_h1 => {
+                h1_text.push_str(&text);
+            }
+            Event::End(TagEnd::Heading(HeadingLevel::H1)) => {
+                if !h1_text.is_empty() {
+                    return Some(h1_text);
+                }
+                in_h1 = false;
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 /// First pass: extract headings and generate anchor IDs
 fn extract_headings(markdown_input: &str) -> (Vec<HeadingInfo>, HashMap<String, String>) {
-    let parser = MDParser::new_ext(markdown_input, Options::all());
+    let parser = MDParser::new_ext(markdown_input, markdown_options());
     let parser = TextMergeStream::new(parser);
 
     let mut headings = Vec::new();
@@ -172,8 +230,18 @@ pub async fn render(
     link_transform_config: LinkTransformConfig,
     server_mode: bool,
     transcode_enabled: bool,
-) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String, Vec<OutboundLink>), Box<dyn std::error::Error>>
-{
+    valid_tag_sources: HashSet<String>,
+) -> Result<
+    (
+        SimpleMetadata,
+        Vec<HeadingInfo>,
+        String,
+        Vec<OutboundLink>,
+        bool,
+        usize,
+    ),
+    Box<dyn std::error::Error>,
+> {
     render_with_cache(
         file,
         root_path,
@@ -182,6 +250,7 @@ pub async fn render(
         None,
         server_mode,
         transcode_enabled,
+        valid_tag_sources,
     )
     .await
 }
@@ -192,10 +261,13 @@ pub async fn render(
 /// new results are cached for future use. URLs are fetched in parallel for improved
 /// performance when multiple bare URLs are present in the document.
 ///
-/// Returns: (frontmatter, headings, html, outbound_links)
+/// Returns: (frontmatter, headings, html, outbound_links, has_h1)
 ///
 /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
 /// - `transcode_enabled`: True when dynamic video transcoding is enabled
+/// - `valid_tag_sources`: Set of valid tag source names for wikilink transformation
+/// - `has_h1`: True if the document's first heading is an H1
+#[allow(clippy::too_many_arguments)]
 pub async fn render_with_cache(
     file: PathBuf,
     root_path: &Path,
@@ -204,16 +276,36 @@ pub async fn render_with_cache(
     oembed_cache: Option<Arc<OembedCache>>,
     server_mode: bool,
     transcode_enabled: bool,
-) -> Result<(SimpleMetadata, Vec<HeadingInfo>, String, Vec<OutboundLink>), Box<dyn std::error::Error>>
-{
+    valid_tag_sources: HashSet<String>,
+) -> Result<
+    (
+        SimpleMetadata,
+        Vec<HeadingInfo>,
+        String,
+        Vec<OutboundLink>,
+        bool,
+        usize, // word_count
+    ),
+    Box<dyn std::error::Error>,
+> {
     // Read markdown input
-    let markdown_input = fs::read_to_string(&file)?;
+    let raw_markdown_input = fs::read_to_string(&file)?;
+
+    // Transform [[Source:value]] wikilinks to standard markdown links before parsing
+    let markdown_input = if valid_tag_sources.is_empty() {
+        raw_markdown_input
+    } else {
+        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
+    };
 
     // First pass: extract headings and generate IDs
     let (headings, _heading_id_map) = extract_headings(&markdown_input);
 
+    // Detect if the first heading is an H1 (used for conditional title rendering in templates)
+    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
+
     // Second pass: collect and inject heading IDs into events
-    let parser = MDParser::new_ext(&markdown_input, Options::all());
+    let parser = MDParser::new_ext(&markdown_input, markdown_options());
     let parser = TextMergeStream::new(parser);
 
     let mut events_with_ids = Vec::new();
@@ -294,6 +386,9 @@ pub async fn render_with_cache(
         collected_links: Vec::new(),
         current_link_dest: None,
         current_link_text: String::new(),
+        valid_tag_sources,
+        word_count: 0,
+        in_code_block: false,
     };
     let mut processed_events = Vec::new();
 
@@ -321,11 +416,24 @@ pub async fn render_with_cache(
         section_attrs,
     );
 
+    // Extract frontmatter and inject H1 title if no frontmatter title exists
+    let mut frontmatter = yaml_frontmatter_simplified(&state.metadata_parsed);
+    if !frontmatter.contains_key("title")
+        && let Some(h1_text) = headings
+            .first()
+            .filter(|h| h.level == 1)
+            .map(|h| h.text.clone())
+    {
+        frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
+    }
+
     Ok((
-        yaml_frontmatter_simplified(&state.metadata_parsed),
+        frontmatter,
         headings,
         html_output,
         deduplicated_links,
+        has_h1,
+        state.word_count,
     ))
 }
 
@@ -442,44 +550,45 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
                 match (k, v) {
                     (Yaml::String(key), Yaml::String(value)) => {
                         tracing::trace!("Frontmatter: {key} = {value}");
-                        hm.insert(key.to_string(), value.to_string());
+                        hm.insert(
+                            key.to_string(),
+                            serde_json::Value::String(value.to_string()),
+                        );
                     }
                     (Yaml::String(key), Yaml::Array(vals)) => {
-                        let vals = vals
+                        // Preserve arrays as JSON arrays instead of joining them
+                        let arr: Vec<serde_json::Value> = vals
                             .iter()
                             .filter_map(|val| val.clone().into_string())
-                            .fold(String::new(), |accum, i| {
-                                let join = if !accum.is_empty() { ", " } else { "" };
-                                accum + join + i.as_str()
-                            });
-                        tracing::trace!("Frontmatter: {key} = [{vals}]");
-                        hm.insert(key.to_string(), vals);
+                            .map(serde_json::Value::String)
+                            .collect();
+                        tracing::trace!("Frontmatter: {key} = {:?}", &arr);
+                        hm.insert(key.to_string(), serde_json::Value::Array(arr));
                     }
                     (Yaml::String(key), Yaml::Hash(hash)) => {
                         tracing::trace!("Frontmatter: {key} = (nested hash)");
-                        // TODO: recursively parse this, then modify all keys
-                        // to have a leading `key.` before inserting
-                        let hash = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
-                        for (k, v) in hash {
+                        // Recursively parse nested hashes and flatten with dot notation
+                        let nested = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
+                        for (k, v) in nested {
                             hm.insert(key.to_string() + "." + k.as_str(), v);
                         }
                     }
                     (Yaml::String(key), Yaml::Integer(val)) => {
                         tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), val.to_string());
+                        hm.insert(key.to_string(), serde_json::json!(val));
                     }
                     (Yaml::String(key), Yaml::Real(val)) => {
                         tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), val.to_string());
+                        hm.insert(key.to_string(), serde_json::Value::String(val.to_string()));
                     }
                     (Yaml::String(key), Yaml::Boolean(val)) => {
                         tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), val.to_string());
+                        hm.insert(key.to_string(), serde_json::json!(val));
                     }
                     (Yaml::String(key), other_val) => {
                         tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
                         if let Some(str_val) = other_val.clone().into_string() {
-                            hm.insert(key.to_string(), str_val);
+                            hm.insert(key.to_string(), serde_json::Value::String(str_val));
                         }
                     }
                     (k, v) => {
@@ -511,7 +620,7 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
     let parser = MDParser::new_ext(&markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
     let mut in_metadata = false;
-    let hm = HashMap::new();
+    let mut hm = HashMap::new();
     for event in parser.take(4) {
         match &event {
             Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
@@ -525,12 +634,21 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
                     let metadata_parsed =
                         YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
 
-                    return Ok(yaml_frontmatter_simplified(&metadata_parsed));
+                    hm = yaml_frontmatter_simplified(&metadata_parsed);
+                    break;
                 }
             }
             _ => {}
         }
     }
+
+    // If no frontmatter title, try to extract the first H1 from the content
+    if !hm.contains_key("title")
+        && let Some(h1_text) = extract_first_h1(&markdown_input)
+    {
+        hm.insert("title".to_string(), serde_json::Value::String(h1_text));
+    }
+
     Ok(hm)
 }
 
@@ -630,6 +748,7 @@ fn process_event(
         }
         // Track when we're inside a link (including autolinks like <http://...>)
         // and transform the link URL for trailing-slash URL convention
+        // Also detect and transform tag links like [text](Tags:rust) -> [text](/tags/rust/)
         Event::Start(Tag::Link {
             link_type,
             dest_url,
@@ -640,7 +759,17 @@ fn process_event(
             // Store the original destination URL for link tracking
             state.current_link_dest = Some(dest_url.to_string());
             state.current_link_text.clear();
-            let transformed_url = transform_link(dest_url, &state.link_transform_config);
+
+            // First check if this is a tag link (e.g., Tags:rust, performers:Joshua Jay)
+            // If so, transform to the tag URL path (/tags/rust/, /performers/joshua_jay/)
+            let transformed_url =
+                if let Some(wikilink) = parse_tag_link(dest_url, &state.valid_tag_sources) {
+                    wikilink.url_path()
+                } else {
+                    // Not a tag link, use regular link transformation
+                    transform_link(dest_url, &state.link_transform_config)
+                };
+
             let new_event = Event::Start(Tag::Link {
                 link_type: *link_type,
                 dest_url: CowStr::from(transformed_url),
@@ -665,10 +794,23 @@ fn process_event(
             }
             (event, state)
         }
+        // Track code blocks to exclude from word count
+        Event::Start(Tag::CodeBlock(_)) => {
+            state.in_code_block = true;
+            (event, state)
+        }
+        Event::End(TagEnd::CodeBlock) => {
+            state.in_code_block = false;
+            (event, state)
+        }
         Event::Text(text) => {
             // Accumulate link text when inside a link
             if state.in_link {
                 state.current_link_text.push_str(text);
+            }
+            // Count words in text content (excluding metadata and code blocks)
+            if !state.in_metadata && !state.in_code_block {
+                state.word_count += text.split_whitespace().count();
             }
             if state.in_metadata {
                 state.metadata_parsed = YamlLoader::load_from_str(text)
@@ -725,10 +867,18 @@ mod tests {
     use tempfile::NamedTempFile;
 
     async fn render_markdown(content: &str) -> String {
-        render_markdown_with_config(content, false).await
+        render_markdown_with_config(content, false, HashSet::new()).await
     }
 
-    async fn render_markdown_with_config(content: &str, is_index_file: bool) -> String {
+    async fn render_markdown_with_tags(content: &str, tag_sources: HashSet<String>) -> String {
+        render_markdown_with_config(content, false, tag_sources).await
+    }
+
+    async fn render_markdown_with_config(
+        content: &str,
+        is_index_file: bool,
+        tag_sources: HashSet<String>,
+    ) -> String {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
@@ -739,7 +889,7 @@ mod tests {
             is_index_file,
         };
         // Tests run with server_mode=false, transcode_enabled=false
-        let (_, _, html, _) = render(path, &root, 100, config, false, false)
+        let (_, _, html, _, _, _) = render(path, &root, 100, config, false, false, tag_sources)
             .await
             .unwrap();
         html
@@ -808,10 +958,157 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _) = render(path, &root, 100, config, false, false)
-            .await
-            .unwrap();
-        assert_eq!(metadata.get("title"), Some(&"Test Title".to_string()));
+        let (metadata, _, _, _, _, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert_eq!(
+            metadata.get("title"),
+            Some(&serde_json::Value::String("Test Title".to_string()))
+        );
+    }
+
+    // H1 extraction tests
+    #[test]
+    fn test_extract_first_h1_basic() {
+        let md = "# Hello World\n\nSome content";
+        let result = extract_first_h1(md);
+        assert_eq!(result, Some("Hello World".to_string()));
+    }
+
+    #[test]
+    fn test_extract_first_h1_with_inline_formatting() {
+        let md = "# Hello **World**\n\nSome content";
+        let result = extract_first_h1(md);
+        assert_eq!(result, Some("Hello World".to_string()));
+    }
+
+    #[test]
+    fn test_extract_first_h1_none_when_no_h1() {
+        let md = "## This is H2\n\nSome content";
+        let result = extract_first_h1(md);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_first_h1_returns_first_only() {
+        let md = "# First H1\n\n# Second H1";
+        let result = extract_first_h1(md);
+        assert_eq!(result, Some("First H1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_first_h1_empty_doc() {
+        let md = "";
+        let result = extract_first_h1(md);
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_has_h1_true_when_first_heading_is_h1() {
+        let md = "# Main Title\n\n## Subsection";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (_, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(has_h1);
+    }
+
+    #[tokio::test]
+    async fn test_has_h1_false_when_first_heading_is_h2() {
+        let md = "## Subsection\n\n# Late H1";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (_, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(!has_h1);
+    }
+
+    #[tokio::test]
+    async fn test_title_fallback_from_h1() {
+        // No frontmatter title, but has H1 - should extract title from H1
+        let md = "# My Document Title\n\nSome content here.";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(has_h1);
+        assert_eq!(
+            metadata.get("title"),
+            Some(&serde_json::Value::String("My Document Title".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_frontmatter_title_takes_precedence() {
+        // Frontmatter title should take precedence over H1
+        let md = "---\ntitle: Frontmatter Title\n---\n\n# H1 Title";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(has_h1);
+        assert_eq!(
+            metadata.get("title"),
+            Some(&serde_json::Value::String("Frontmatter Title".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_title_when_no_frontmatter_and_no_h1() {
+        // No frontmatter and no H1 - should have no title
+        let md = "## Subsection\n\nSome content.";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+        };
+        let (metadata, _, _, _, has_h1, _) =
+            render(path, &root, 100, config, false, false, HashSet::new())
+                .await
+                .unwrap();
+        assert!(!has_h1);
+        assert_eq!(metadata.get("title"), None);
     }
 
     // Media embed tests
@@ -948,7 +1245,7 @@ mod tests {
     async fn test_link_transformation_regular_markdown() {
         // Regular markdown file (not index) - links get ../ prefix
         let md = "[Other Doc](other.md)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains(r#"href="../other/""#),
             "Regular markdown should transform other.md to ../other/. Got: {}",
@@ -960,7 +1257,7 @@ mod tests {
     async fn test_link_transformation_index_file() {
         // Index file - links don't get ../ prefix
         let md = "[Other Doc](other.md)";
-        let html = render_markdown_with_config(md, true).await;
+        let html = render_markdown_with_config(md, true, HashSet::new()).await;
         assert!(
             html.contains(r#"href="other/""#),
             "Index file should transform other.md to other/. Got: {}",
@@ -981,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn test_link_transformation_with_anchor() {
         let md = "[Section](other.md#section)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains(r#"href="../other/#section""#),
             "Links with anchors should transform correctly. Got: {}",
@@ -993,7 +1290,7 @@ mod tests {
     async fn test_image_transformation_regular_markdown() {
         // Regular images (not media embeds) should also be transformed
         let md = "![Alt](images/photo.jpg)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains(r#"src="../images/photo.jpg""#),
             "Image URLs should be transformed. Got: {}",
@@ -1004,7 +1301,7 @@ mod tests {
     #[tokio::test]
     async fn test_image_transformation_index_file() {
         let md = "![Alt](images/photo.jpg)";
-        let html = render_markdown_with_config(md, true).await;
+        let html = render_markdown_with_config(md, true, HashSet::new()).await;
         assert!(
             html.contains(r#"src="images/photo.jpg""#),
             "Index file image URLs shouldn't get ../. Got: {}",
@@ -1017,7 +1314,7 @@ mod tests {
     async fn test_video_embed_url_transformation() {
         // Video embeds in regular markdown files should get ../ prefix
         let md = "![My Video](video.mp4)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains("../video.mp4"),
             "Video URLs should be transformed with ../. Got: {}",
@@ -1029,7 +1326,7 @@ mod tests {
     async fn test_video_embed_url_transformation_index_file() {
         // Video embeds in index files should NOT get ../ prefix
         let md = "![My Video](video.mp4)";
-        let html = render_markdown_with_config(md, true).await;
+        let html = render_markdown_with_config(md, true, HashSet::new()).await;
         assert!(
             !html.contains("../video.mp4"),
             "Index file video URLs shouldn't get ../. Got: {}",
@@ -1046,7 +1343,7 @@ mod tests {
     async fn test_audio_embed_url_transformation() {
         // Audio embeds in regular markdown files should get ../ prefix
         let md = "![Podcast](episode.mp3)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains("../episode.mp3"),
             "Audio URLs should be transformed with ../. Got: {}",
@@ -1058,7 +1355,7 @@ mod tests {
     async fn test_pdf_embed_url_transformation() {
         // PDF embeds in regular markdown files should get ../ prefix
         let md = "![Document](report.pdf)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains("../report.pdf"),
             "PDF URLs should be transformed with ../. Got: {}",
@@ -1070,7 +1367,7 @@ mod tests {
     async fn test_pdf_embed_url_transformation_index_file() {
         // PDF embeds in index files should NOT get ../ prefix
         let md = "![Document](report.pdf)";
-        let html = render_markdown_with_config(md, true).await;
+        let html = render_markdown_with_config(md, true, HashSet::new()).await;
         assert!(
             !html.contains("../report.pdf"),
             "Index file PDF URLs shouldn't get ../. Got: {}",
@@ -1089,7 +1386,7 @@ mod tests {
         // Markdown: docs/guide.md references peer-video.mp4 (docs/peer-video.mp4)
         // When served at /docs/guide/, browser sees ../peer-video.mp4 → /docs/peer-video.mp4 (correct!)
         let md = "![](peer-video.mp4)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains("../peer-video.mp4"),
             "Peer file video should get ../ prefix. Got: {}",
@@ -1101,7 +1398,7 @@ mod tests {
     async fn test_media_embed_explicit_relative_path() {
         // Test ./file.mp4 syntax also gets transformed correctly
         let md = "![](./peer-video.mp4)";
-        let html = render_markdown_with_config(md, false).await;
+        let html = render_markdown_with_config(md, false, HashSet::new()).await;
         assert!(
             html.contains("../peer-video.mp4"),
             "./peer-video.mp4 should transform to ../peer-video.mp4. Got: {}",
@@ -1227,6 +1524,232 @@ mod tests {
         assert!(
             html.contains("—"),
             "Em dash should be preserved. Got: {}",
+            html
+        );
+    }
+
+    // Wikilink and tag link tests
+
+    fn make_sources(sources: &[&str]) -> HashSet<String> {
+        sources.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn test_wikilink_transformation() {
+        // [[Tags:rust]] should become a link to /tags/rust/
+        let sources = make_sources(&["tags"]);
+        let md = "Check out [[Tags:rust]] for more info.";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="/tags/rust/""#),
+            "Wikilink should transform to tag URL. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(">rust<"),
+            "Link text should be the tag value. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wikilink_with_spaces() {
+        // [[performers:Joshua Jay]] should become a link to /performers/joshua_jay/
+        let sources = make_sources(&["performers"]);
+        let md = "Watch [[performers:Joshua Jay]] perform!";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="/performers/joshua_jay/""#),
+            "Wikilink with spaces should normalize URL. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(">Joshua Jay<"),
+            "Link text should preserve original case. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wikilink_unknown_source_becomes_native_wikilink() {
+        // [[category:books]] - category is not a valid tag source, so transform_wikilinks
+        // leaves it alone. But pulldown-cmark's native wikilink support picks it up
+        // and renders it as a link to "category:books".
+        let sources = make_sources(&["tags"]);
+        let md = "See [[category:books]] for more.";
+        let html = render_markdown_with_tags(md, sources).await;
+        // With native wikilink support, this becomes a link (not literal text)
+        assert!(
+            html.contains("<a"),
+            "Wikilink should become a link via pulldown-cmark. Got: {}",
+            html
+        );
+        // The link destination should be the wikilink content
+        assert!(
+            html.contains("category:books"),
+            "Link should reference the wikilink content. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_markdown_tag_link() {
+        // [text](Tags:rust) should become a link to /tags/rust/
+        let sources = make_sources(&["tags"]);
+        let md = "[Learn Rust](Tags:rust)";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="/tags/rust/""#),
+            "Tag link should transform to tag URL. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(">Learn Rust<"),
+            "Link text should be preserved. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_markdown_tag_link_normalized() {
+        // [Great performer](performers:joshua_jay) -> /performers/joshua_jay/
+        // Note: Markdown link destinations can't contain unescaped spaces,
+        // so tag values in [text](Source:value) format must be pre-normalized.
+        // Use [[Source:value with spaces]] wikilink format for values with spaces.
+        let sources = make_sources(&["performers"]);
+        let md = "[Great performer](performers:joshua_jay)";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="/performers/joshua_jay/""#),
+            "Tag link should transform to tag URL. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_url_scheme_not_treated_as_tag() {
+        // [Example](https://example.com) should remain a regular URL
+        let sources = make_sources(&["tags", "https"]); // Even if https is a source
+        let md = "[Example](https://example.com)";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="https://example.com""#),
+            "URL schemes should not be treated as tag sources. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_wikilinks() {
+        // Multiple wikilinks in one document
+        let sources = make_sources(&["tags"]);
+        let md = "Learn [[Tags:rust]] and [[Tags:python]] today!";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="/tags/rust/""#),
+            "First wikilink should work. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"href="/tags/python/""#),
+            "Second wikilink should work. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_tag_source() {
+        // [[taxonomy.tags:rust]] for nested frontmatter fields
+        let sources = make_sources(&["taxonomy.tags"]);
+        let md = "See [[taxonomy.tags:rust]] for more.";
+        let html = render_markdown_with_tags(md, sources).await;
+        assert!(
+            html.contains(r#"href="/taxonomy.tags/rust/""#),
+            "Nested tag source should work. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_tag_sources_uses_native_wikilinks() {
+        // When no tag sources configured, transform_wikilinks is skipped entirely.
+        // pulldown-cmark's native wikilink support still applies, rendering
+        // [[Tags:rust]] as a link to "Tags:rust".
+        let sources = HashSet::new();
+        let md = "See [[Tags:rust]] for more.";
+        let html = render_markdown_with_tags(md, sources).await;
+        // With native wikilink support, this becomes a link (not literal text)
+        assert!(
+            html.contains("<a"),
+            "Wikilink should become a link via pulldown-cmark. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("Tags:rust"),
+            "Link should reference the wikilink content. Got: {}",
+            html
+        );
+    }
+
+    // Regression tests for plain wikilinks (no colon/source prefix)
+    // These verify that pulldown-cmark's native wikilink support works correctly
+
+    #[tokio::test]
+    async fn test_plain_wikilink_works() {
+        // Plain [[MyPage]] should become a link to MyPage
+        let html = render_markdown("Check out [[MyPage]] for more.").await;
+        assert!(
+            html.contains("<a"),
+            "Plain wikilink should become a link. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("MyPage"),
+            "Link should reference MyPage. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plain_wikilink_with_spaces() {
+        // [[My Page]] should work with spaces
+        let html = render_markdown("See [[My Page]] here.").await;
+        assert!(
+            html.contains("<a"),
+            "Wikilink with spaces should become a link. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("My Page"),
+            "Link should preserve the page name. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tag_and_plain_wikilinks_together() {
+        // Both tag-style and plain wikilinks should work in the same document
+        let sources = make_sources(&["tags"]);
+        let md = "See [[Tags:rust]] and also [[MyPage]] for info.";
+        let html = render_markdown_with_tags(md, sources).await;
+        // Tag wikilink should go to /tags/rust/
+        assert!(
+            html.contains(r#"href="/tags/rust/""#),
+            "Tag wikilink should transform to /tags/rust/. Got: {}",
+            html
+        );
+        // Plain wikilink should become a link to MyPage
+        assert!(
+            html.contains("MyPage"),
+            "Plain wikilink should reference MyPage. Got: {}",
+            html
+        );
+        // Should have two links
+        let link_count = html.matches("<a").count();
+        assert!(
+            link_count >= 2,
+            "Should have at least 2 links. Got {} in: {}",
+            link_count,
             html
         );
     }

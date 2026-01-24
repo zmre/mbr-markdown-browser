@@ -1,5 +1,6 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { getTagSources, resolveUrl, type TagSourceConfig } from './shared.js';
 
 interface Heading {
   level: number;
@@ -29,10 +30,25 @@ interface PageLinks {
   outbound: OutboundLink[];
 }
 
+interface PageNavLink {
+  url: string;
+  title: string;
+}
+
+interface ExtendedMeta {
+  wordCount: number;
+  readingTimeMinutes: number;
+  filePath: string;
+  modifiedTimestamp: number;
+  prevPage?: PageNavLink;
+  nextPage?: PageNavLink;
+}
+
 declare global {
   interface Window {
     frontmatter?: Frontmatter;
     headings?: Heading[];
+    extendedMeta?: ExtendedMeta;
   }
   interface HTMLElementTagNameMap {
     'mbr-info': MbrInfoElement;
@@ -63,8 +79,11 @@ export class MbrInfoElement extends LitElement {
   @state()
   private _linksError: string | null = null;
 
+  @state()
+  private _extendedMeta: ExtendedMeta | null = null;
+
   // Keys to skip (internal/technical fields)
-  private static skipKeys = new Set(['markdown_source', 'server_mode']);
+  private static skipKeys = new Set(['markdown_source', 'server_mode', 'gui_mode']);
 
   // Preferred display order for common keys
   private static preferredOrder = [
@@ -79,6 +98,7 @@ export class MbrInfoElement extends LitElement {
     // Load frontmatter and headings from window
     this._frontmatter = window.frontmatter || {};
     this._headings = window.headings || [];
+    this._extendedMeta = window.extendedMeta || null;
   }
 
   override disconnectedCallback() {
@@ -161,7 +181,12 @@ export class MbrInfoElement extends LitElement {
     ];
   }
 
-  private _formatKey(key: string): string {
+  private _formatKey(key: string, tagSource?: TagSourceConfig): string {
+    // Use configured label if this is a tag field
+    if (tagSource) {
+      return tagSource.label;
+    }
+    // Default: title-case the field name
     return key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ');
   }
 
@@ -173,6 +198,95 @@ export class MbrInfoElement extends LitElement {
     } else {
       return String(value);
     }
+  }
+
+  // ========================================
+  // Tag Linking Helpers
+  // ========================================
+
+  /**
+   * Normalize a tag value for URL construction.
+   * Converts to lowercase and replaces spaces with underscores.
+   */
+  private _normalizeTagValue(value: string): string {
+    return value.toLowerCase().replace(/\s+/g, '_');
+  }
+
+  /**
+   * Find a matching TagSource config for a frontmatter field.
+   * Matches field names case-insensitively.
+   */
+  private _getTagSourceForField(field: string): TagSourceConfig | undefined {
+    const lowerField = field.toLowerCase();
+    return getTagSources().find(ts => ts.field.toLowerCase() === lowerField);
+  }
+
+  /**
+   * Build a URL for a tag value using the tag source's URL pattern.
+   * E.g., for urlSource="tags" and value="Rust", returns "/tags/rust/"
+   */
+  private _buildTagUrl(tagSource: TagSourceConfig, value: string): string {
+    const normalized = this._normalizeTagValue(value);
+    return resolveUrl(`/${tagSource.urlSource}/${normalized}/`);
+  }
+
+  /**
+   * Render a tag value as a clickable link.
+   */
+  private _renderTagLink(tagSource: TagSourceConfig, value: string): TemplateResult {
+    const url = this._buildTagUrl(tagSource, value);
+    return html`<a href="${url}" class="tag-link" @click=${() => this._close()}>${value}</a>`;
+  }
+
+  /**
+   * Render a metadata value, using links for tag fields.
+   */
+  private _renderValue(key: string, value: unknown): TemplateResult | string {
+    const tagSource = this._getTagSourceForField(key);
+
+    // If not a tag field, use simple formatting
+    if (!tagSource) {
+      return this._formatValue(value);
+    }
+
+    // Handle arrays of tags
+    if (Array.isArray(value)) {
+      const links = value.map((v, i) => {
+        const str = String(v);
+        const link = this._renderTagLink(tagSource, str);
+        return i < value.length - 1 ? html`${link}, ` : link;
+      });
+      return html`${links}`;
+    }
+
+    // Handle single tag value
+    return this._renderTagLink(tagSource, String(value));
+  }
+
+  // ========================================
+  // Extended Metadata Helpers
+  // ========================================
+
+  /**
+   * Format a UNIX timestamp to a readable date string.
+   */
+  private _formatModifiedDate(timestamp: number): string {
+    if (!timestamp) return '';
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+
+  /**
+   * Format reading time in a human-friendly way.
+   */
+  private _formatReadingTime(minutes: number): string {
+    if (minutes < 1) return '< 1 min read';
+    if (minutes === 1) return '1 min read';
+    return `${minutes} min read`;
   }
 
   // ========================================
@@ -210,13 +324,55 @@ export class MbrInfoElement extends LitElement {
       if (value === null || value === undefined || value === '') {
         return nothing;
       }
+      const tagSource = this._getTagSourceForField(key);
       return html`
                   <tr>
-                    <th scope="row">${this._formatKey(key)}</th>
-                    <td>${this._formatValue(value)}</td>
+                    <th scope="row">${this._formatKey(key, tagSource)}</th>
+                    <td>${this._renderValue(key, value)}</td>
                   </tr>
                 `;
     })}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    `;
+  }
+
+  private _renderDocumentInfoSection(): TemplateResult | typeof nothing {
+    const meta = this._extendedMeta;
+    if (!meta || (!meta.wordCount && !meta.modifiedTimestamp && !meta.filePath)) {
+      return nothing;
+    }
+
+    return html`
+      <details class="info-section" open>
+        <summary><strong>Document Info</strong></summary>
+        <div class="info-content">
+          <table class="metadata-table striped">
+            <tbody>
+              ${meta.readingTimeMinutes > 0 ? html`
+                <tr>
+                  <th scope="row">Reading Time</th>
+                  <td>
+                    <span class="reading-time" title="${meta.wordCount.toLocaleString()} words">
+                      ${this._formatReadingTime(meta.readingTimeMinutes)}
+                    </span>
+                  </td>
+                </tr>
+              ` : nothing}
+              ${meta.modifiedTimestamp > 0 ? html`
+                <tr>
+                  <th scope="row">Modified</th>
+                  <td>${this._formatModifiedDate(meta.modifiedTimestamp)}</td>
+                </tr>
+              ` : nothing}
+              ${meta.filePath ? html`
+                <tr>
+                  <th scope="row">File</th>
+                  <td><code class="file-path">${meta.filePath}</code></td>
+                </tr>
+              ` : nothing}
             </tbody>
           </table>
         </div>
@@ -350,6 +506,36 @@ export class MbrInfoElement extends LitElement {
     `;
   }
 
+  private _renderPageNavSection(): TemplateResult | typeof nothing {
+    const meta = this._extendedMeta;
+    if (!meta || (!meta.prevPage && !meta.nextPage)) {
+      return nothing;
+    }
+
+    return html`
+      <div class="page-nav">
+        ${meta.prevPage
+          ? html`
+            <a href="${meta.prevPage.url}" class="nav-prev" @click=${() => this._close()}>
+              <span class="nav-arrow">←</span>
+              <span class="nav-label">Previous</span>
+              <span class="nav-title">${meta.prevPage.title}</span>
+            </a>
+          `
+          : html`<div class="nav-spacer"></div>`}
+        ${meta.nextPage
+          ? html`
+            <a href="${meta.nextPage.url}" class="nav-next" @click=${() => this._close()}>
+              <span class="nav-label">Next</span>
+              <span class="nav-title">${meta.nextPage.title}</span>
+              <span class="nav-arrow">→</span>
+            </a>
+          `
+          : html`<div class="nav-spacer"></div>`}
+      </div>
+    `;
+  }
+
   private _renderPanel(): TemplateResult {
     return html`
       <div class="info-panel-backdrop" @click=${() => this._close()}></div>
@@ -362,9 +548,11 @@ export class MbrInfoElement extends LitElement {
           <h2>Info</h2>
 
           ${this._renderMetadataSection()}
+          ${this._renderDocumentInfoSection()}
           ${this._renderTocSection()}
           ${this._renderLinksOutSection()}
           ${this._renderLinksInSection()}
+          ${this._renderPageNavSection()}
         </div>
       </aside>
     `;
@@ -545,6 +733,31 @@ export class MbrInfoElement extends LitElement {
       border-bottom: 1px solid var(--pico-muted-border-color);
     }
 
+    /* Tag link styling */
+    .tag-link {
+      color: var(--pico-primary, #1095c1);
+      text-decoration: none;
+      transition: color 0.2s ease;
+    }
+
+    .tag-link:hover {
+      text-decoration: underline;
+      color: var(--pico-primary-hover, #0d7a9e);
+    }
+
+    /* Extended metadata styling */
+    .reading-time {
+      cursor: help;
+    }
+
+    .file-path {
+      font-size: 0.85em;
+      background-color: var(--pico-code-background-color, #f4f4f4);
+      padding: 0.1em 0.3em;
+      border-radius: 3px;
+      word-break: break-all;
+    }
+
     /* Table of Contents styling */
     .toc-nav {
       padding: 1rem 0;
@@ -687,6 +900,78 @@ export class MbrInfoElement extends LitElement {
     .loading-text {
       color: var(--pico-muted-color, #666);
       font-style: italic;
+    }
+
+    /* Page navigation styling */
+    .page-nav {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--pico-muted-border-color, #e0e0e0);
+    }
+
+    .nav-prev,
+    .nav-next {
+      display: flex;
+      flex-direction: column;
+      padding: 0.75rem 1rem;
+      border-radius: 4px;
+      text-decoration: none;
+      background-color: var(--pico-secondary-background, #f8f8f8);
+      transition: background-color 0.2s ease;
+      max-width: 45%;
+    }
+
+    .nav-prev {
+      align-items: flex-start;
+    }
+
+    .nav-next {
+      align-items: flex-end;
+      text-align: right;
+    }
+
+    .nav-prev:hover,
+    .nav-next:hover {
+      background-color: var(--pico-primary-hover-background, #1095c1);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .nav-prev:hover .nav-label,
+    .nav-prev:hover .nav-title,
+    .nav-prev:hover .nav-arrow,
+    .nav-next:hover .nav-label,
+    .nav-next:hover .nav-title,
+    .nav-next:hover .nav-arrow {
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .nav-arrow {
+      font-size: 1.2rem;
+      color: var(--pico-primary, #1095c1);
+    }
+
+    .nav-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--pico-muted-color, #666);
+    }
+
+    .nav-title {
+      font-size: 0.9rem;
+      color: var(--pico-color, #333);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 150px;
+    }
+
+    .nav-spacer {
+      flex: 1;
     }
 
     /* Responsive design for tablets */

@@ -134,15 +134,17 @@ pub fn render_preview_with_config(
         })?;
 
     // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
-    let (frontmatter, headings, html, _outbound_links) = rt
+    // Use empty tag sources for QuickLook (no wikilink transformation)
+    let (frontmatter, headings, html, _outbound_links, _has_h1, _word_count) = rt
         .block_on(async {
             markdown::render(
                 path.clone(),
                 &root_path,
                 0,
                 link_config,
-                false, // server_mode is false in QuickLook
-                false, // transcode is disabled in QuickLook
+                false,                            // server_mode is false in QuickLook
+                false,                            // transcode is disabled in QuickLook
+                std::collections::HashSet::new(), // No tag sources in QuickLook
             )
             .await
         })
@@ -259,7 +261,7 @@ fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str)
 /// Render the QuickLook HTML template with inlined assets.
 fn render_quicklook_template(
     markdown_html: &str,
-    frontmatter: HashMap<String, String>,
+    frontmatter: HashMap<String, serde_json::Value>,
     headings: Vec<markdown::HeadingInfo>,
     root_path: &Path,
     base_url: &str,

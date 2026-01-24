@@ -1,0 +1,45 @@
+{% set asset_base = relative_base | default(value="/.mbr/") %}
+<!doctype html>
+<html lang="en">
+  <head>
+{% include "_head.html" %}
+    <title>{{ tag_label }}: {{ tag_display_value }}</title>
+  </head>
+  <body>
+{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
+{% include "_nav.html" %}
+    <main id="wrapper" class="container" data-pagefind-body>
+      <span class="sr-only" data-pagefind-weight="10">{{ tag_display_value }}</span>
+      <h1 data-pagefind-meta="title">{{ tag_label }}: {{ tag_display_value }}</h1>
+      <p class="description">{{ page_count }} page{% if page_count != 1 %}s{% endif %} tagged with "{{ tag_display_value }}"</p>
+
+      {% if pages %}
+      <section>
+        {% for page in pages %}
+        <article>
+          <header>
+            <h3><a href="{{ page.url_path }}">{{ page.title | default(value="Untitled") }}</a></h3>
+            {% if page.description %}
+            <p>{{ page.description }}</p>
+            {% endif %}
+          </header>
+        </article>
+        {% endfor %}
+      </section>
+      {% else %}
+      <p><em>No pages found with this tag.</em></p>
+      {% endif %}
+    </main>
+    <footer class="container" data-pagefind-ignore>
+      <nav>
+        <ul>
+          <li>
+            <a href="/{{ tag_source }}/" role="button" class="outline secondary">&lt; All {{ tag_label_plural }}</a>
+          </li>
+        </ul>
+      </nav>
+    </footer>
+{% include "_footer.html" %}
+  </body>
+{% include "_scripts.html" %}
+</html>

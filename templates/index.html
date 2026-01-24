@@ -6,9 +6,10 @@
 {% include "_head_custom.html" %}
   </head>
   <body{% if style %} class="{{ style | replace(from=", ", to=" ") }}"{% endif %}>
+{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
 {% include "_breadcrumbs.html" %}
-    <main id="wrapper" class="container" data-pagefind-body>{% if title %}<span class="sr-only" data-pagefind-weight="10">{{ title }}</span>{% endif %}{{ markdown | safe}}</main>
+    <main id="wrapper" class="container" data-pagefind-body>{% if title %}<span class="sr-only" data-pagefind-weight="10">{{ title }}</span>{% endif %}{% if title and not has_h1 %}<h1>{{ title }}</h1>{% endif %}{{ markdown | safe}}</main>
     <footer class="container" data-pagefind-ignore>
       <mbr-nav></mbr-nav>
     </footer>

@@ -1,0 +1,45 @@
+{% set asset_base = relative_base | default(value="/.mbr/") %}
+<!doctype html>
+<html lang="en">
+  <head>
+{% include "_head.html" %}
+    <title>{{ tag_label_plural }}</title>
+  </head>
+  <body>
+{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
+{% include "_nav.html" %}
+    <main id="wrapper" class="container" data-pagefind-body>
+      <span class="sr-only" data-pagefind-weight="10">{{ tag_label_plural }}</span>
+      <h1 data-pagefind-meta="title">{{ tag_label_plural }}</h1>
+      <p class="description">{{ tag_count }} {{ tag_label | lower }}{% if tag_count != 1 %}s{% endif %} with tagged content</p>
+
+      {% if tags %}
+      <section>
+        <ul class="tag-list">
+          {% for tag in tags %}
+          <li>
+            <a href="/{{ tag_source }}/{{ tag.url_value }}/">
+              <strong>{{ tag.display_value }}</strong>
+            </a>
+            <span class="tag-count">({{ tag.page_count }})</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% else %}
+      <p><em>No tags found.</em></p>
+      {% endif %}
+    </main>
+    <footer class="container" data-pagefind-ignore>
+      <nav>
+        <ul>
+          <li>
+            <a href="/" role="button" class="outline secondary">&lt; Home</a>
+          </li>
+        </ul>
+      </nav>
+    </footer>
+{% include "_footer.html" %}
+  </body>
+{% include "_scripts.html" %}
+</html>

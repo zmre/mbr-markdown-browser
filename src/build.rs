@@ -213,6 +213,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 pub struct BuildStats {
     pub markdown_pages: usize,
     pub section_pages: usize,
+    pub tag_pages: usize,
     pub assets_linked: usize,
     pub duration: Duration,
     /// Whether Pagefind search indexing succeeded (None = not attempted)
@@ -299,6 +300,13 @@ impl Builder {
 
         // Generate directory/section pages
         stats.section_pages = self.render_directory_pages().await?;
+
+        // Generate tag pages (if enabled)
+        if self.config.build_tag_pages {
+            stats.tag_pages = self.render_tag_pages().await?;
+        } else {
+            println!("Generating tag pages ... skipped");
+        }
 
         // Symlink assets (images, PDFs, etc.)
         print_stage("Linking assets...");
@@ -468,6 +476,22 @@ impl Builder {
             for (_, info) in self.repo.markdown_files.pin().iter() {
                 urls.insert(info.url_path.clone());
             }
+
+            // Include tag page URLs if tag pages are enabled
+            if self.config.build_tag_pages {
+                for tag_source in &self.config.tag_sources {
+                    let source = tag_source.url_source();
+
+                    // Add tag source index URL (e.g., "/tags/")
+                    urls.insert(format!("/{}/", source));
+
+                    // Add individual tag page URLs (e.g., "/tags/rust/")
+                    for tag in self.repo.tag_index.get_all_tags(&source) {
+                        urls.insert(format!("/{}/{}/", source, tag.normalized));
+                    }
+                }
+            }
+
             urls
         };
 
@@ -511,7 +535,10 @@ impl Builder {
         outbound_index: &HashMap<String, Vec<OutboundLink>>,
         inbound_index: &HashMap<String, Vec<InboundLink>>,
     ) -> Result<(), BuildError> {
-        let outbound = outbound_index.get(url_path).cloned().unwrap_or_default();
+        // Try to build tag page outbound links, or fall back to the index
+        let outbound = self
+            .try_build_tag_outbound(url_path)
+            .unwrap_or_else(|| outbound_index.get(url_path).cloned().unwrap_or_default());
         let inbound = inbound_index.get(url_path).cloned().unwrap_or_default();
 
         let page_links = PageLinks { inbound, outbound };
@@ -568,20 +595,23 @@ impl Builder {
 
         // Render markdown to HTML with shared oembed cache
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
-        let (mut frontmatter, headings, html, outbound_links) = markdown::render_with_cache(
-            path.to_path_buf(),
-            &self.config.root_dir,
-            self.config.oembed_timeout_ms,
-            link_transform_config,
-            Some(self.oembed_cache.clone()),
-            false, // server_mode is false in build mode
-            false, // transcode is disabled in build mode
-        )
-        .await
-        .map_err(|e| BuildError::RenderFailed {
-            path: path.to_path_buf(),
-            source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
-        })?;
+        let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
+        let (mut frontmatter, headings, html, outbound_links, has_h1, word_count) =
+            markdown::render_with_cache(
+                path.to_path_buf(),
+                &self.config.root_dir,
+                self.config.oembed_timeout_ms,
+                link_transform_config,
+                Some(self.oembed_cache.clone()),
+                false, // server_mode is false in build mode
+                false, // transcode is disabled in build mode
+                valid_tag_sources,
+            )
+            .await
+            .map_err(|e| BuildError::RenderFailed {
+                path: path.to_path_buf(),
+                source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
+            })?;
 
         // Store outbound links in the build link index for generating links.json files
         if self.config.link_tracking && !outbound_links.is_empty() {
@@ -593,11 +623,14 @@ impl Builder {
         tracing::debug!("build: rendered {}", path.display());
 
         // Add markdown_source to frontmatter
-        frontmatter.insert("markdown_source".to_string(), info.url_path.clone());
+        frontmatter.insert(
+            "markdown_source".to_string(),
+            serde_json::Value::String(info.url_path.clone()),
+        );
 
         // Indicate static mode (no dynamic search endpoint)
-        // Empty string is falsy in Tera templates
-        frontmatter.insert("server_mode".to_string(), String::new());
+        // Boolean false is falsy in Tera templates
+        frontmatter.insert("server_mode".to_string(), serde_json::json!(false));
 
         // Calculate page depth for relative path generation
         let depth = url_depth(&info.url_path);
@@ -626,6 +659,122 @@ impl Builder {
             serde_json::json!(current_dir_name),
         );
         extra_context.insert("headings".to_string(), serde_json::json!(headings));
+        extra_context.insert("has_h1".to_string(), serde_json::json!(has_h1));
+
+        // Pass tag sources configuration for frontend tag linking
+        // Pre-serialize as JSON string for safe template rendering in JavaScript context
+        let tag_sources_json = serde_json::to_string(
+            &self
+                .config
+                .tag_sources
+                .iter()
+                .map(|ts| {
+                    serde_json::json!({
+                        "field": ts.field,
+                        "urlSource": ts.url_source(),
+                        "label": ts.singular_label(),
+                        "labelPlural": ts.plural_label()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".to_string());
+        extra_context.insert(
+            "tag_sources".to_string(),
+            serde_json::json!(tag_sources_json),
+        );
+
+        // Pass sidebar navigation configuration
+        extra_context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        extra_context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
+        // Pass word count and reading time (200 words per minute)
+        let reading_time_minutes = word_count.div_ceil(200);
+        extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
+        extra_context.insert(
+            "reading_time_minutes".to_string(),
+            serde_json::json!(reading_time_minutes),
+        );
+
+        // Pass file path (relative to root) for reference
+        let relative_path = path
+            .strip_prefix(&self.config.root_dir)
+            .unwrap_or(path)
+            .to_string_lossy();
+        extra_context.insert("file_path".to_string(), serde_json::json!(relative_path));
+
+        // Pass modified date from file metadata
+        if let Ok(metadata) = std::fs::metadata(path)
+            && let Ok(modified) = metadata.modified()
+            && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            extra_context.insert(
+                "modified_timestamp".to_string(),
+                serde_json::json!(duration.as_secs()),
+            );
+        }
+
+        // Compute prev/next sibling pages for navigation
+        let parent_dir = path
+            .strip_prefix(&self.config.root_dir)
+            .unwrap_or(path)
+            .parent()
+            .unwrap_or(std::path::Path::new(""));
+
+        // Get sibling markdown files in the same directory
+        let mut siblings: Vec<_> = self
+            .repo
+            .markdown_files
+            .pin()
+            .iter()
+            .filter_map(|(_, sibling_info)| {
+                let file_parent = sibling_info.raw_path.parent()?;
+                if file_parent == parent_dir {
+                    Some(crate::server::markdown_file_to_json(sibling_info))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort siblings using configured sort order
+        crate::sorting::sort_files(&mut siblings, &self.config.sort);
+
+        // Find current position and get prev/next
+        if let Some(current_idx) = siblings.iter().position(|f| {
+            f.get("url_path")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p == info.url_path)
+        }) {
+            if current_idx > 0
+                && let Some(prev) = siblings.get(current_idx - 1)
+            {
+                let prev_url = prev.get("url_path").and_then(|v| v.as_str()).unwrap_or("/");
+                extra_context.insert(
+                    "prev_page".to_string(),
+                    serde_json::json!({
+                        "url": make_relative_url(prev_url, depth),
+                        "title": prev.get("title").and_then(|v| v.as_str()).unwrap_or("Previous")
+                    }),
+                );
+            }
+            if let Some(next) = siblings.get(current_idx + 1) {
+                let next_url = next.get("url_path").and_then(|v| v.as_str()).unwrap_or("/");
+                extra_context.insert(
+                    "next_page".to_string(),
+                    serde_json::json!({
+                        "url": make_relative_url(next_url, depth),
+                        "title": next.get("title").and_then(|v| v.as_str()).unwrap_or("Next")
+                    }),
+                );
+            }
+        }
 
         // Add relative path variables for static builds
         extra_context.insert(
@@ -855,6 +1004,39 @@ impl Builder {
         // Indicate static mode (no dynamic search endpoint)
         context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
 
+        // Pass tag_sources configuration for frontend (consistent with markdown pages)
+        // Pre-serialize as JSON string for safe template rendering in JavaScript context
+        let tag_sources_json = serde_json::to_string(
+            &self
+                .config
+                .tag_sources
+                .iter()
+                .map(|ts| {
+                    serde_json::json!({
+                        "field": ts.field,
+                        "urlSource": ts.url_source(),
+                        "label": ts.singular_label(),
+                        "labelPlural": ts.plural_label()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".to_string());
+        context.insert(
+            "tag_sources".to_string(),
+            serde_json::json!(tag_sources_json),
+        );
+
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
         // Render template
         let html_output = if is_root {
             self.templates.render_home(context).await?
@@ -870,6 +1052,318 @@ impl Builder {
         };
 
         // Only write if file doesn't exist (markdown files take precedence)
+        if !output_path.exists() {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Generates tag pages in parallel.
+    ///
+    /// For each configured tag source, generates:
+    /// - A tag source index page at `/{source}/`
+    /// - Individual tag pages at `/{source}/{value}/`
+    async fn render_tag_pages(&self) -> Result<usize, BuildError> {
+        // Collect all tag pages to render (source index + individual tags)
+        let mut tasks: Vec<(String, Option<String>)> = Vec::new(); // (source, Some(value)) or (source, None for index)
+
+        for tag_source in &self.config.tag_sources {
+            let source = tag_source.url_source();
+
+            // Check if this source has any tags
+            if !self.repo.tag_index.has_source(&source) {
+                continue;
+            }
+
+            // Add source index page
+            tasks.push((source.clone(), None));
+
+            // Add individual tag pages
+            for tag_info in self.repo.tag_index.get_all_tags(&source) {
+                tasks.push((source.clone(), Some(tag_info.normalized)));
+            }
+        }
+
+        if tasks.is_empty() {
+            println!("Generating tag pages ... skipped (no tags)");
+            return Ok(0);
+        }
+
+        let count = tasks.len();
+        let concurrency = self.get_concurrency();
+
+        tracing::info!(
+            "Rendering {} tag pages with concurrency {}",
+            count,
+            concurrency
+        );
+
+        // Progress counter for parallel rendering
+        let completed = Arc::new(AtomicUsize::new(0));
+        print_progress("Generating tag pages", 0, count);
+
+        let completed_clone = completed.clone();
+        stream::iter(tasks)
+            .map(|(source, value)| {
+                let completed = completed_clone.clone();
+                async move {
+                    let result = if let Some(ref tag_value) = value {
+                        self.render_single_tag_page(&source, tag_value).await
+                    } else {
+                        self.render_tag_source_index(&source).await
+                    };
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    print_progress("Generating tag pages", done, count);
+                    result
+                }
+            })
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        print_stage_done("Generating tag pages", count);
+        Ok(count)
+    }
+
+    /// Renders a single tag page showing all pages with that tag.
+    async fn render_single_tag_page(&self, source: &str, value: &str) -> Result<(), BuildError> {
+        // Find the TagSource config for labels
+        let tag_source = self
+            .config
+            .tag_sources
+            .iter()
+            .find(|ts| ts.url_source() == source);
+
+        let (singular_label, plural_label) = match tag_source {
+            Some(ts) => (ts.singular_label(), ts.plural_label()),
+            None => (source.to_string(), format!("{}s", source)),
+        };
+
+        // Get display value for the tag
+        let display_value = self
+            .repo
+            .tag_index
+            .get_tag_display(source, value)
+            .unwrap_or_else(|| value.to_string());
+
+        // Get pages with this tag
+        let pages = self.repo.tag_index.get_pages(source, value);
+
+        // Calculate URL path and depth
+        let url_path = format!("/{}/{}/", source, value);
+        let depth = url_depth(&url_path);
+
+        // Build context
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Tag information
+        context.insert(
+            "tag_source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        context.insert(
+            "tag_display_value".to_string(),
+            serde_json::Value::String(display_value.clone()),
+        );
+        context.insert(
+            "tag_label".to_string(),
+            serde_json::Value::String(singular_label),
+        );
+        context.insert(
+            "tag_label_plural".to_string(),
+            serde_json::Value::String(plural_label),
+        );
+        context.insert(
+            "page_count".to_string(),
+            serde_json::Value::Number(pages.len().into()),
+        );
+
+        // Pages array with relative URLs
+        let pages_json: Vec<serde_json::Value> = pages
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "url_path": make_relative_url(&p.url_path, depth),
+                    "title": p.title,
+                    "description": p.description
+                })
+            })
+            .collect();
+        context.insert("pages".to_string(), serde_json::Value::Array(pages_json));
+
+        // Static build settings
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
+        context.insert(
+            "relative_base".to_string(),
+            serde_json::Value::String(relative_base(depth)),
+        );
+        context.insert(
+            "relative_root".to_string(),
+            serde_json::Value::String(relative_root(depth)),
+        );
+
+        // Breadcrumbs with relative URLs
+        let breadcrumbs_json = vec![
+            serde_json::json!({
+                "name": "Home",
+                "url": make_relative_url("/", depth)
+            }),
+            serde_json::json!({
+                "name": context.get("tag_label_plural").and_then(|v| v.as_str()).unwrap_or(source),
+                "url": make_relative_url(&format!("/{}/", source), depth)
+            }),
+        ];
+        context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::Value::Array(breadcrumbs_json),
+        );
+        context.insert(
+            "current_dir_name".to_string(),
+            serde_json::Value::String(display_value),
+        );
+
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
+        // Render template
+        let html_output = self.templates.render_tag(context)?;
+
+        // Determine output path
+        let output_path = self.output_dir.join(source).join(value).join("index.html");
+
+        // Create parent directories and write file (only if not exists - files take precedence)
+        if !output_path.exists() {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Renders a tag source index page showing all tags from that source.
+    async fn render_tag_source_index(&self, source: &str) -> Result<(), BuildError> {
+        // Find the TagSource config for labels
+        let tag_source = self
+            .config
+            .tag_sources
+            .iter()
+            .find(|ts| ts.url_source() == source);
+
+        let (singular_label, plural_label) = match tag_source {
+            Some(ts) => (ts.singular_label(), ts.plural_label()),
+            None => (source.to_string(), format!("{}s", source)),
+        };
+
+        // Get all tags for this source
+        let tags = self.repo.tag_index.get_all_tags(source);
+
+        // Calculate URL path and depth
+        let url_path = format!("/{}/", source);
+        let depth = url_depth(&url_path);
+
+        // Build context
+        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Tag source information
+        context.insert(
+            "tag_source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        context.insert(
+            "tag_label".to_string(),
+            serde_json::Value::String(singular_label),
+        );
+        context.insert(
+            "tag_label_plural".to_string(),
+            serde_json::Value::String(plural_label.clone()),
+        );
+        context.insert(
+            "tag_count".to_string(),
+            serde_json::Value::Number(tags.len().into()),
+        );
+
+        // Tags array with relative URLs
+        let tags_json: Vec<serde_json::Value> = tags
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "url_value": t.normalized.clone(),
+                    "display_value": t.display.clone(),
+                    "page_count": t.count
+                })
+            })
+            .collect();
+        context.insert("tags".to_string(), serde_json::Value::Array(tags_json));
+
+        // Static build settings
+        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
+        context.insert(
+            "relative_base".to_string(),
+            serde_json::Value::String(relative_base(depth)),
+        );
+        context.insert(
+            "relative_root".to_string(),
+            serde_json::Value::String(relative_root(depth)),
+        );
+
+        // Breadcrumbs with relative URLs
+        let breadcrumbs_json = vec![serde_json::json!({
+            "name": "Home",
+            "url": make_relative_url("/", depth)
+        })];
+        context.insert(
+            "breadcrumbs".to_string(),
+            serde_json::Value::Array(breadcrumbs_json),
+        );
+        context.insert(
+            "current_dir_name".to_string(),
+            serde_json::Value::String(plural_label),
+        );
+
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
+        );
+
+        // Render template
+        let html_output = self.templates.render_tag_index(context)?;
+
+        // Determine output path
+        let output_path = self.output_dir.join(source).join("index.html");
+
+        // Create parent directories and write file (only if not exists - files take precedence)
         if !output_path.exists() {
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
@@ -1079,16 +1573,51 @@ impl Builder {
             })?;
         }
 
-        // Step 4: Generate site.json with sort config
+        // Step 4: Generate site.json with sort config and tags
         let mut response = serde_json::to_value(&self.repo)
             .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
 
-        // Add sort config to the response
+        // Add sort config and tags to the response
         if let Some(obj) = response.as_object_mut() {
             obj.insert(
                 "sort".to_string(),
                 serde_json::to_value(&self.config.sort).unwrap_or(serde_json::Value::Array(vec![])),
             );
+
+            // Add tag sources with their tags
+            let mut tags_data: HashMap<String, serde_json::Value> = HashMap::new();
+            for tag_source in &self.config.tag_sources {
+                let source = tag_source.url_source();
+                if self.repo.tag_index.has_source(&source) {
+                    let tags = self.repo.tag_index.get_all_tags(&source);
+                    let tags_json: Vec<serde_json::Value> = tags
+                        .iter()
+                        .map(|t| {
+                            serde_json::json!({
+                                "normalized": t.normalized,
+                                "display": t.display,
+                                "count": t.count,
+                                "url": format!("/{}/{}/", source, t.normalized)
+                            })
+                        })
+                        .collect();
+                    tags_data.insert(
+                        source,
+                        serde_json::json!({
+                            "label": tag_source.singular_label(),
+                            "label_plural": tag_source.plural_label(),
+                            "tags": tags_json
+                        }),
+                    );
+                }
+            }
+            if !tags_data.is_empty() {
+                obj.insert(
+                    "tag_sources".to_string(),
+                    serde_json::to_value(tags_data)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                );
+            }
         }
 
         let site_json = serde_json::to_string(&response)
@@ -1142,6 +1671,16 @@ impl Builder {
                 "name": "Home",
                 "url": "./"
             })]),
+        );
+
+        // Pass sidebar navigation configuration
+        context.insert(
+            "sidebar_style".to_string(),
+            serde_json::json!(self.config.sidebar_style),
+        );
+        context.insert(
+            "sidebar_max_items".to_string(),
+            serde_json::json!(self.config.sidebar_max_items),
         );
 
         let html = self.templates.render_error(context)?;
@@ -1411,6 +1950,96 @@ impl Builder {
 
         Ok(())
     }
+
+    // ============================================================================
+    // Tag page link helpers
+    // ============================================================================
+
+    /// Returns outbound links if url_path is a tag page, None otherwise.
+    fn try_build_tag_outbound(&self, url_path: &str) -> Option<Vec<OutboundLink>> {
+        let path = url_path.trim_matches('/');
+        if path.is_empty() {
+            return None;
+        }
+
+        let segments: Vec<&str> = path.split('/').collect();
+        let tag_sources: Vec<String> = self
+            .config
+            .tag_sources
+            .iter()
+            .map(|ts| ts.url_source())
+            .collect();
+
+        match segments.len() {
+            1 => {
+                // Tag source index (e.g., "tags")
+                let source = segments[0].to_lowercase();
+                if tag_sources.contains(&source) {
+                    Some(self.build_tag_index_outbound(&source))
+                } else {
+                    None
+                }
+            }
+            2 => {
+                // Tag page (e.g., "tags/rust")
+                let source = segments[0].to_lowercase();
+                let value = segments[1];
+                if tag_sources.contains(&source) {
+                    Some(self.build_tag_page_outbound(&source, value))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Builds outbound links for a tag page (e.g., /tags/rust/).
+    fn build_tag_page_outbound(&self, source: &str, value: &str) -> Vec<OutboundLink> {
+        let mut outbound = Vec::new();
+
+        for page in self.repo.tag_index.get_pages(source, value) {
+            outbound.push(OutboundLink {
+                to: page.url_path,
+                text: page.title,
+                anchor: None,
+                internal: true,
+            });
+        }
+
+        // Link back to tag source index
+        let label = self
+            .config
+            .tag_sources
+            .iter()
+            .find(|ts| ts.url_source() == source)
+            .map(|ts| ts.plural_label())
+            .unwrap_or_else(|| source.to_string());
+
+        outbound.push(OutboundLink {
+            to: format!("/{}/", source),
+            text: label,
+            anchor: None,
+            internal: true,
+        });
+
+        outbound
+    }
+
+    /// Builds outbound links for a tag source index page (e.g., /tags/).
+    fn build_tag_index_outbound(&self, source: &str) -> Vec<OutboundLink> {
+        self.repo
+            .tag_index
+            .get_all_tags(source)
+            .into_iter()
+            .map(|tag| OutboundLink {
+                to: format!("/{}/{}/", source, tag.normalized),
+                text: tag.display,
+                anchor: None,
+                internal: true,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1422,6 +2051,7 @@ mod tests {
         let stats = BuildStats::default();
         assert_eq!(stats.markdown_pages, 0);
         assert_eq!(stats.section_pages, 0);
+        assert_eq!(stats.tag_pages, 0);
         assert_eq!(stats.assets_linked, 0);
         assert_eq!(stats.pagefind_indexed, None);
         assert_eq!(stats.broken_links, 0);

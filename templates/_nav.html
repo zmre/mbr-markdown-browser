@@ -1,7 +1,8 @@
     <header class="container" data-pagefind-ignore>
       <nav role="navigation" aria-label="Main menu">
         <ul>
-          <li><mbr-browse></mbr-browse></li>
+          {% if sidebar_style == "single" %}<li><mbr-sidebar-trigger></mbr-sidebar-trigger></li>{% endif %}
+          {% if sidebar_style != "single" %}<li><mbr-browse></mbr-browse></li>{% endif %}
           <li><mbr-slides></mbr-slides></li>
         </ul>
         <ul>

@@ -33,6 +33,7 @@ pub mod repo;
 pub mod search;
 pub mod server;
 pub mod sorting;
+pub mod tag_index;
 pub mod templates;
 pub mod vid;
 #[cfg(feature = "media-metadata")]
@@ -44,9 +45,10 @@ pub mod video_transcode;
 #[cfg(feature = "media-metadata")]
 pub mod video_transcode_cache;
 pub mod watcher;
+pub mod wikilink;
 
 pub use build::{BuildStats, Builder};
-pub use config::{Config, SortField};
+pub use config::{Config, SortField, TagSource};
 #[cfg(feature = "media-metadata")]
 pub use errors::MetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};

@@ -48,7 +48,7 @@ async fn main() -> Result<(), MbrError> {
     // Suppress ffmpeg warnings/info messages from the metadata crate
     // These would otherwise clutter stdout/stderr when processing video files
     #[cfg(feature = "media-metadata")]
-    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Error);
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Fatal);
 
     let args = cli::Args::parse();
 
@@ -257,16 +257,19 @@ async fn main() -> Result<(), MbrError> {
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
-        let (frontmatter, _headings, html_output, _outbound_links) = markdown::render(
-            input_path,
-            config.root_dir.as_path(),
-            config.oembed_timeout_ms,
-            link_transform_config,
-            false, // server_mode is false in CLI mode
-            false, // transcode is disabled in CLI mode
-        )
-        .await
-        .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
+        let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
+        let (frontmatter, _headings, html_output, _outbound_links, _has_h1, _word_count) =
+            markdown::render(
+                input_path,
+                config.root_dir.as_path(),
+                config.oembed_timeout_ms,
+                link_transform_config,
+                false, // server_mode is false in CLI mode
+                false, // transcode is disabled in CLI mode
+                valid_tag_sources,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
         let templates =
             templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
                 .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
@@ -294,6 +297,9 @@ async fn main() -> Result<(), MbrError> {
             &config.theme,
             None, // Logging already initialized
             config.link_tracking,
+            &config.tag_sources,
+            &config.sidebar_style,
+            config.sidebar_max_items,
             #[cfg(feature = "media-metadata")]
             config.transcode,
         )?;
@@ -336,6 +342,9 @@ async fn main() -> Result<(), MbrError> {
                     &config_copy.theme,
                     None, // Logging already initialized
                     config_copy.link_tracking,
+                    &config_copy.tag_sources,
+                    &config_copy.sidebar_style,
+                    config_copy.sidebar_max_items,
                     #[cfg(feature = "media-metadata")]
                     config_copy.transcode,
                 );

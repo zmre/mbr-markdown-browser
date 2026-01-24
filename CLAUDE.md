@@ -79,15 +79,17 @@ Add or update tests when:
 
 ## Build Commands
 
+When running, pick a port to use randomly between 5202 and 5999 and then specify that port so as not to clash with coincidental use of the tool elsewhere or feature dev in other worktrees. Swap the chosen port for the 5220 used in the examples below.
+
 ```bash
 # Build and run (CLI mode - outputs HTML to stdout)
-cargo run -- README.md
+cargo run -- -p 5220 README.md
 
 # Run with web server
-cargo run -- -s README.md
+cargo run -- -s -p 5220 README.md
 
 # Run with GUI window (launches native browser via wry/tao)
-cargo run -- -g README.md
+cargo run -- -g -p 5220 README.md
 
 # Generate static site (outputs to build/ folder)
 cargo run -- -b /path/to/markdown/repo
@@ -96,7 +98,7 @@ cargo run -- -b /path/to/markdown/repo
 cargo run -- -b --output ./public /path/to/markdown/repo
 
 # Development with auto-reload
-cargo watch -q -c -x 'run --release -- -s README.md'
+cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 ```
 
 ### Key CLI Options

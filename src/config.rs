@@ -36,6 +36,144 @@ fn default_link_tracking() -> bool {
     true
 }
 
+fn default_build_tag_pages() -> bool {
+    true
+}
+
+fn default_sidebar_style() -> String {
+    "panel".to_string()
+}
+
+fn default_sidebar_max_items() -> usize {
+    100
+}
+
+/// Configuration for a tag source - a frontmatter field that contains tags.
+///
+/// # Examples
+///
+/// Basic tag source:
+/// ```toml
+/// tag_sources = [
+///     { field = "tags" }
+/// ]
+/// ```
+///
+/// Tag source with custom labels:
+/// ```toml
+/// tag_sources = [
+///     { field = "taxonomy.performers", label = "Performer", label_plural = "Performers" }
+/// ]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TagSource {
+    /// The frontmatter field to extract tags from.
+    /// Supports dot-notation for nested fields (e.g., "taxonomy.tags").
+    pub field: String,
+
+    /// Singular label for the tag source (e.g., "Tag", "Performer").
+    /// Auto-derived from field name if not specified.
+    #[serde(default)]
+    pub label: Option<String>,
+
+    /// Plural label for the tag source (e.g., "Tags", "Performers").
+    /// Auto-derived from field name if not specified.
+    #[serde(default)]
+    pub label_plural: Option<String>,
+}
+
+impl TagSource {
+    /// Returns the singular label for this tag source.
+    ///
+    /// Priority:
+    /// 1. Explicit `label` field
+    /// 2. Title-cased field name (last segment for dot-notation)
+    pub fn singular_label(&self) -> String {
+        if let Some(ref label) = self.label {
+            return label.clone();
+        }
+
+        // Extract last segment for dot-notation (taxonomy.tags -> tags)
+        let field_name = self.field.rsplit('.').next().unwrap_or(&self.field);
+
+        // Title case the field name
+        title_case(field_name)
+    }
+
+    /// Returns the plural label for this tag source.
+    ///
+    /// Priority:
+    /// 1. Explicit `label_plural` field
+    /// 2. Singular label + "s"
+    pub fn plural_label(&self) -> String {
+        if let Some(ref label) = self.label_plural {
+            return label.clone();
+        }
+
+        // Simple pluralization: add "s"
+        format!("{}s", self.singular_label())
+    }
+
+    /// Returns the URL source identifier for this tag source.
+    ///
+    /// This is the normalized field name used in URLs.
+    /// For dot-notation fields, uses the full path with dots (e.g., "taxonomy.performers").
+    /// Lowercased for URL consistency.
+    pub fn url_source(&self) -> String {
+        self.field.to_lowercase()
+    }
+}
+
+/// Simple title-case conversion for a field name.
+///
+/// Converts "tags" to "Tag", "performers" to "Performer", etc.
+/// Removes trailing 's' for simple singular form.
+fn title_case(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+
+    // Remove trailing 's' for simple singular form
+    let base = s.strip_suffix('s').unwrap_or(s);
+    if base.is_empty() {
+        return "S".to_string();
+    }
+
+    // Capitalize first letter
+    let mut chars = base.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Returns the default tag sources configuration.
+///
+/// Default: a single source extracting from the "tags" frontmatter field.
+pub fn default_tag_sources() -> Vec<TagSource> {
+    vec![TagSource {
+        field: "tags".to_string(),
+        label: None,
+        label_plural: None,
+    }]
+}
+
+/// Converts tag sources to a HashSet of field names for wikilink matching.
+///
+/// The HashSet contains the field names from each TagSource, which are used
+/// to detect valid tag link patterns like `[[Tags:rust]]` or `[text](tags:value)`.
+pub fn tag_sources_to_set(sources: &[TagSource]) -> std::collections::HashSet<String> {
+    sources.iter().map(|s| s.field.clone()).collect()
+}
+
+/// Converts tag sources to a Vec of URL source identifiers.
+///
+/// Each TagSource is converted to its lowercase URL identifier via `url_source()`.
+/// This is used for path resolution to detect tag URLs like `/tags/rust/`.
+pub fn tag_sources_to_url_sources(sources: &[TagSource]) -> Vec<String> {
+    sources.iter().map(|s| s.url_source()).collect()
+}
+
 impl Default for SortField {
     fn default() -> Self {
         Self {
@@ -107,6 +245,26 @@ pub struct Config {
     /// Default: true (enabled).
     #[serde(default = "default_link_tracking")]
     pub link_tracking: bool,
+    /// Tag sources configuration for extracting tags from frontmatter fields.
+    /// Supports dot-notation for nested fields (e.g., "taxonomy.tags").
+    /// Default: extract from "tags" field.
+    #[serde(default = "default_tag_sources")]
+    pub tag_sources: Vec<TagSource>,
+    /// Generate tag landing pages during static site builds.
+    /// When enabled, creates /{source}/{value}/ pages for each tag value
+    /// and /{source}/ index pages listing all tags.
+    /// Default: true (enabled).
+    #[serde(default = "default_build_tag_pages")]
+    pub build_tag_pages: bool,
+    /// Sidebar navigation style.
+    /// - "panel": Three-pane modal browser (default, existing mbr-browse)
+    /// - "single": Persistent single-column sidebar (new mbr-browse-single)
+    #[serde(default = "default_sidebar_style")]
+    pub sidebar_style: String,
+    /// Maximum items per section in sidebar navigation.
+    /// Default: 100. Only applies when sidebar_style = "single".
+    #[serde(default = "default_sidebar_max_items")]
+    pub sidebar_max_items: usize,
 }
 
 impl std::fmt::Display for IpArray {
@@ -186,6 +344,10 @@ impl Default for Config {
             transcode: false,        // Disabled by default
             skip_link_checks: false, // Link checking enabled by default
             link_tracking: true,     // Bidirectional link tracking enabled by default
+            tag_sources: default_tag_sources(),
+            build_tag_pages: true, // Tag pages enabled by default
+            sidebar_style: default_sidebar_style(),
+            sidebar_max_items: default_sidebar_max_items(),
         }
     }
 }
@@ -271,5 +433,127 @@ impl Config {
             .map(|ancestor| ancestor.join(search_file))
             .find(|candidate| candidate.as_path().is_file())
             .and_then(|file_path| file_path.parent().map(|p| p.to_path_buf()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_title_case() {
+        assert_eq!(title_case("tags"), "Tag");
+        assert_eq!(title_case("performers"), "Performer");
+        assert_eq!(title_case("category"), "Category");
+        assert_eq!(title_case("Tag"), "Tag");
+        assert_eq!(title_case("s"), "S");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn test_tag_source_singular_label_explicit() {
+        let source = TagSource {
+            field: "taxonomy.performers".to_string(),
+            label: Some("Performer".to_string()),
+            label_plural: None,
+        };
+        assert_eq!(source.singular_label(), "Performer");
+    }
+
+    #[test]
+    fn test_tag_source_singular_label_derived() {
+        let source = TagSource {
+            field: "tags".to_string(),
+            label: None,
+            label_plural: None,
+        };
+        assert_eq!(source.singular_label(), "Tag");
+    }
+
+    #[test]
+    fn test_tag_source_singular_label_derived_nested() {
+        let source = TagSource {
+            field: "taxonomy.performers".to_string(),
+            label: None,
+            label_plural: None,
+        };
+        assert_eq!(source.singular_label(), "Performer");
+    }
+
+    #[test]
+    fn test_tag_source_plural_label_explicit() {
+        let source = TagSource {
+            field: "taxonomy.performers".to_string(),
+            label: None,
+            label_plural: Some("Performers".to_string()),
+        };
+        assert_eq!(source.plural_label(), "Performers");
+    }
+
+    #[test]
+    fn test_tag_source_plural_label_derived() {
+        let source = TagSource {
+            field: "tags".to_string(),
+            label: None,
+            label_plural: None,
+        };
+        assert_eq!(source.plural_label(), "Tags");
+    }
+
+    #[test]
+    fn test_tag_source_url_source() {
+        let source = TagSource {
+            field: "Tags".to_string(),
+            label: None,
+            label_plural: None,
+        };
+        assert_eq!(source.url_source(), "tags");
+
+        let source = TagSource {
+            field: "taxonomy.Performers".to_string(),
+            label: None,
+            label_plural: None,
+        };
+        assert_eq!(source.url_source(), "taxonomy.performers");
+    }
+
+    #[test]
+    fn test_default_tag_sources() {
+        let sources = default_tag_sources();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].field, "tags");
+        assert_eq!(sources[0].singular_label(), "Tag");
+        assert_eq!(sources[0].plural_label(), "Tags");
+        assert_eq!(sources[0].url_source(), "tags");
+    }
+
+    #[test]
+    fn test_config_default_has_tag_sources() {
+        let config = Config::default();
+        assert_eq!(config.tag_sources.len(), 1);
+        assert_eq!(config.tag_sources[0].field, "tags");
+        assert!(config.build_tag_pages);
+    }
+
+    #[test]
+    fn test_tag_source_serialization() {
+        let source = TagSource {
+            field: "taxonomy.tags".to_string(),
+            label: Some("Tag".to_string()),
+            label_plural: Some("Tags".to_string()),
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        let parsed: TagSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_tag_source_deserialization_minimal() {
+        let json = r#"{"field": "tags"}"#;
+        let source: TagSource = serde_json::from_str(json).unwrap();
+        assert_eq!(source.field, "tags");
+        assert!(source.label.is_none());
+        assert!(source.label_plural.is_none());
     }
 }

@@ -9,7 +9,7 @@
  */
 import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
-import { waitForDom, loadScript, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
+import { waitForDom, loadScript, getMbrAssetBase } from './dynamic-loader.ts'
 
 /** Mermaid initialization options type */
 interface MermaidConfig {
@@ -17,10 +17,16 @@ interface MermaidConfig {
   theme: string
 }
 
+/** Options for mermaid.run() */
+interface MermaidRunOptions {
+  nodes: HTMLElement[]
+}
+
 /** Window with mermaid global */
 interface WindowWithMermaid extends Window {
   mermaid?: {
     initialize: (config: MermaidConfig) => void
+    run: (options: MermaidRunOptions) => Promise<void>
   }
 }
 
@@ -49,15 +55,19 @@ export class MbrMermaidElement extends LitElement {
     // Load mermaid.js (no CSS needed - it's self-contained)
     await loadScript(`${assetBase}mermaid.min.js`)
 
-    // Initialize in idle time to avoid blocking main thread
-    // Mermaid is ~680KB and does heavy SVG generation
-    scheduleIdleTask(() => {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-      const mermaid = (window as WindowWithMermaid).mermaid
-      mermaid?.initialize({
-        startOnLoad: true,
-        theme: prefersDark ? 'dark' : 'default',
-      })
+    // Initialize mermaid and manually trigger rendering
+    // Using startOnLoad: false + explicit run() avoids race conditions
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    const mermaid = (window as WindowWithMermaid).mermaid
+
+    mermaid?.initialize({
+      startOnLoad: false,
+      theme: prefersDark ? 'dark' : 'default',
+    })
+
+    // Manually render the diagrams we found
+    mermaid?.run({
+      nodes: Array.from(mermaidBlocks) as HTMLElement[]
     })
   }
 

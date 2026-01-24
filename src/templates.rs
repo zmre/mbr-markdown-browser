@@ -78,7 +78,7 @@ impl Templates {
     pub async fn render_markdown(
         &self,
         html: &str,
-        frontmatter: HashMap<String, String>,
+        frontmatter: HashMap<String, serde_json::Value>,
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         tracing::debug!("frontmatter: {:?}", &frontmatter);
@@ -178,6 +178,63 @@ impl Templates {
             })?;
         Ok(html_output)
     }
+
+    /// Renders a tag page showing all pages with a specific tag.
+    ///
+    /// Context variables:
+    /// - `tag_source`: URL identifier for the tag source (e.g., "tags", "performers")
+    /// - `tag_display_value`: Original display value of the tag (e.g., "Rust", "Joshua Jay")
+    /// - `tag_label`: Singular label for the tag source (e.g., "Tag", "Performer")
+    /// - `tag_label_plural`: Plural label for the tag source (e.g., "Tags", "Performers")
+    /// - `pages`: Array of page objects with url_path, title, description
+    /// - `page_count`: Number of pages with this tag
+    /// - `server_mode`: Boolean indicating server vs static mode
+    /// - `relative_base`: Path prefix to .mbr assets
+    pub fn render_tag(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let mut context = Context::new();
+        context_data.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        let html_output = self.tera.read().render("tag.html", &context).map_err(|e| {
+            TemplateError::RenderFailed {
+                template_name: "tag.html".to_string(),
+                source: e,
+            }
+        })?;
+        Ok(html_output)
+    }
+
+    /// Renders a tag source index showing all tags from a source.
+    ///
+    /// Context variables:
+    /// - `tag_source`: URL identifier for the tag source (e.g., "tags", "performers")
+    /// - `tag_label`: Singular label for the tag source (e.g., "Tag", "Performer")
+    /// - `tag_label_plural`: Plural label for the tag source (e.g., "Tags", "Performers")
+    /// - `tags`: Array of tag objects with url_value, display_value, page_count
+    /// - `tag_count`: Total number of unique tags
+    /// - `server_mode`: Boolean indicating server vs static mode
+    /// - `relative_base`: Path prefix to .mbr assets
+    pub fn render_tag_index(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let mut context = Context::new();
+        context_data.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        let html_output = self
+            .tera
+            .read()
+            .render("tag_index.html", &context)
+            .map_err(|e| TemplateError::RenderFailed {
+                template_name: "tag_index.html".to_string(),
+                source: e,
+            })?;
+        Ok(html_output)
+    }
 }
 
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
@@ -211,4 +268,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     ("section.html", include_str!("../templates/section.html")),
     ("home.html", include_str!("../templates/home.html")),
     ("error.html", include_str!("../templates/error.html")),
+    // Tag templates
+    ("tag.html", include_str!("../templates/tag.html")),
+    (
+        "tag_index.html",
+        include_str!("../templates/tag_index.html"),
+    ),
 ];

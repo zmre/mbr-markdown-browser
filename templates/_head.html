@@ -12,10 +12,12 @@
       // MBR configuration
       // - serverMode is set when live server available (server or GUI mode)
       // - guiMode is set when running in native window (no browser URL bar)
+      // - tagSources: configuration for tag linking in info panel
       window.__MBR_CONFIG__ = {
         serverMode: {% if server_mode %}true{% else %}false{% endif %},
         guiMode: {% if gui_mode %}true{% else %}false{% endif %},
         searchEndpoint: "{{ asset_base | safe }}search",
-        basePath: "{{ relative_root | default(value='') | safe }}"
+        basePath: "{{ relative_root | default(value='') | safe }}",
+        tagSources: {{ tag_sources | default(value="[]") | safe }}
       };
     </script>

@@ -1,6 +1,17 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
-import { resolveUrl } from './shared.js';
+import { resolveUrl, subscribeSiteNav } from './shared.js';
+
+/**
+ * Markdown file from site.json.
+ */
+interface MarkdownFile {
+  url_path: string;
+  frontmatter?: {
+    title?: string;
+    [key: string]: unknown;
+  };
+}
 
 /**
  * Heading from window.headings (injected by template).
@@ -115,11 +126,15 @@ export class MbrFuzzyNavElement extends LitElement {
   @state()
   private _visibleHeadingIds = new Set<string>();
 
+  @state()
+  private _urlToTitle: Map<string, string> = new Map();
+
   @query('#fuzzy-search-input')
   private _searchInput!: HTMLInputElement;
 
   private _observer: IntersectionObserver | null = null;
   private _linksCache: PageLinks | null = null;
+  private _unsubscribeSiteNav?: () => void;
 
   // ========================================
   // Lifecycle
@@ -129,11 +144,19 @@ export class MbrFuzzyNavElement extends LitElement {
     super.connectedCallback();
     this._headings = window.headings || [];
     this._setupIntersectionObserver();
+
+    // Subscribe to site.json data for page titles
+    this._unsubscribeSiteNav = subscribeSiteNav((state) => {
+      if (state.data?.markdown_files) {
+        this._buildTitleMap(state.data.markdown_files as MarkdownFile[]);
+      }
+    });
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
     this._cleanupIntersectionObserver();
+    this._unsubscribeSiteNav?.();
   }
 
   // ========================================
@@ -369,15 +392,24 @@ export class MbrFuzzyNavElement extends LitElement {
   private _getLinksOutItems(): NavItem[] {
     if (!this._links) return [];
 
-    return this._links.outbound.map((link, index) => ({
-      id: `out-${index}`,
-      text: link.text || link.to,
-      url: link.internal ? link.to + (link.anchor || '') : link.to,
-      type: 'link-out' as const,
-      anchor: link.anchor,
-      isVisible: false,
-      isInternal: link.internal,
-    }));
+    return this._links.outbound.map((link, index) => {
+      // For internal links without explicit text, use title from site.json
+      let text = link.text;
+      if (!text && link.internal) {
+        text = this._getPageTitle(link.to);
+      }
+      text = text || link.to;
+
+      return {
+        id: `out-${index}`,
+        text,
+        url: link.internal ? link.to + (link.anchor || '') : link.to,
+        type: 'link-out' as const,
+        anchor: link.anchor,
+        isVisible: false,
+        isInternal: link.internal,
+      };
+    });
   }
 
   private _getLinksInItems(): NavItem[] {
@@ -385,9 +417,9 @@ export class MbrFuzzyNavElement extends LitElement {
 
     return this._links.inbound.map((link, index) => ({
       id: `in-${index}`,
-      // For backlinks, show the source page path (where the link comes FROM)
-      // not the link text (which is often just the current page's title)
-      text: this._formatPagePath(link.from),
+      // For backlinks, show the source page title (where the link comes FROM)
+      // Uses title from site.json if available, falls back to path
+      text: this._getPageTitle(link.from),
       url: link.from,
       type: 'link-in' as const,
       anchor: link.anchor,
@@ -401,6 +433,34 @@ export class MbrFuzzyNavElement extends LitElement {
   private _formatPagePath(urlPath: string): string {
     // Remove leading/trailing slashes and return a clean path
     return urlPath.replace(/^\/|\/$/g, '') || 'Home';
+  }
+
+  /**
+   * Builds a map from URL paths to page titles from site.json data.
+   */
+  private _buildTitleMap(files: MarkdownFile[]) {
+    const map = new Map<string, string>();
+    for (const file of files) {
+      // Use frontmatter title, or fall back to last path segment
+      const title = file.frontmatter?.title ||
+        file.url_path.split('/').filter(p => p).pop() ||
+        'Untitled';
+      map.set(file.url_path, title);
+    }
+    this._urlToTitle = map;
+  }
+
+  /**
+   * Gets the page title for a URL path.
+   * Uses title from site.json if available, falls back to formatted path.
+   */
+  private _getPageTitle(urlPath: string): string {
+    // Try title from site.json first
+    const title = this._urlToTitle.get(urlPath);
+    if (title) return title;
+
+    // Fall back to formatted path
+    return this._formatPagePath(urlPath);
   }
 
   private _getTocItems(): NavItem[] {

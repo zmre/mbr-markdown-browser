@@ -1,4 +1,14 @@
 /**
+ * Tag source configuration for linking tag values.
+ */
+export interface TagSourceConfig {
+  field: string;
+  urlSource: string;
+  label: string;
+  labelPlural: string;
+}
+
+/**
  * MBR configuration from the page.
  */
 declare global {
@@ -8,6 +18,7 @@ declare global {
       guiMode: boolean;
       searchEndpoint?: string;
       basePath?: string;
+      tagSources?: TagSourceConfig[];
     };
   }
 }
@@ -46,6 +57,14 @@ export function resolveUrl(path: string): string {
   // Static mode - make relative by prepending basePath and stripping leading slash
   const basePath = getBasePath();
   return basePath + path.replace(/^\//, '');
+}
+
+/**
+ * Get tag sources configuration for linking tag values.
+ * Used by mbr-info to create clickable links for tag fields.
+ */
+export function getTagSources(): TagSourceConfig[] {
+  return window.__MBR_CONFIG__?.tagSources ?? [];
 }
 
 /**

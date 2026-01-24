@@ -1,3 +1,4 @@
+use crate::media::MediaEmbed;
 use regex::Regex;
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
@@ -241,6 +242,17 @@ impl PageInfo {
             return Ok(PageInfo {
                 url: url.to_string(),
                 embed_html: Some(embed_html),
+                ..Default::default()
+            });
+        }
+
+        // Check for media extension (video/audio/PDF) - embed without fetching
+        // Parameters: server_mode=false (safe default for static builds),
+        // transcode_enabled=true, hls_enabled=false
+        if let Some(media) = MediaEmbed::from_bare_url(url) {
+            return Ok(PageInfo {
+                url: url.to_string(),
+                embed_html: Some(media.to_html(false, true, false)),
                 ..Default::default()
             });
         }
@@ -574,5 +586,81 @@ mod tests {
         let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
         let embed = PageInfo::gist_embed(url);
         assert!(embed.is_none());
+    }
+
+    // Bare media URL tests
+    #[tokio::test]
+    async fn test_bare_mp4_url_returns_video_embed() {
+        let url = "https://example.com/videos/demo.mp4";
+        let result = PageInfo::new_from_url(url, 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        let html = info.embed_html.unwrap();
+        assert!(html.contains("<video"));
+        assert!(html.contains(url));
+    }
+
+    #[tokio::test]
+    async fn test_bare_mp3_url_returns_audio_embed() {
+        let url = "https://example.com/audio/podcast.mp3";
+        let result = PageInfo::new_from_url(url, 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        let html = info.embed_html.unwrap();
+        assert!(html.contains("<audio"));
+        assert!(html.contains(url));
+    }
+
+    #[tokio::test]
+    async fn test_bare_pdf_url_returns_pdf_embed() {
+        let url = "https://example.com/docs/report.pdf";
+        let result = PageInfo::new_from_url(url, 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        let html = info.embed_html.unwrap();
+        assert!(html.contains("pdf-embed"));
+        assert!(html.contains(r#"type="application/pdf""#));
+        assert!(html.contains(url));
+    }
+
+    #[tokio::test]
+    async fn test_mp4_in_path_but_not_extension_goes_to_opengraph() {
+        // URL has .mp4 in the path but not as the file extension
+        // This should NOT match media detection and should proceed to OpenGraph
+        let url = "https://example.com/videos/mp4-format/info";
+        let result = PageInfo::new_from_url(url, 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        // Should NOT have embed_html (or if it times out, it's a plain link)
+        // The key is that it shouldn't detect as video
+        if let Some(html) = &info.embed_html {
+            assert!(!html.contains("<video"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bare_m4v_url_returns_video_embed() {
+        // .m4v is a supported video extension (unlike .mov which Vid doesn't detect)
+        let url = "https://example.com/videos/clip.m4v";
+        let result = PageInfo::new_from_url(url, 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        let html = info.embed_html.unwrap();
+        assert!(html.contains("<video"));
+    }
+
+    #[tokio::test]
+    async fn test_bare_wav_url_returns_audio_embed() {
+        let url = "https://example.com/sounds/effect.wav";
+        let result = PageInfo::new_from_url(url, 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_some());
+        let html = info.embed_html.unwrap();
+        assert!(html.contains("<audio"));
     }
 }
