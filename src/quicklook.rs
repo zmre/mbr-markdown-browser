@@ -261,7 +261,7 @@ fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str)
 /// Render the QuickLook HTML template with inlined assets.
 fn render_quicklook_template(
     markdown_html: &str,
-    frontmatter: HashMap<String, String>,
+    frontmatter: HashMap<String, serde_json::Value>,
     headings: Vec<markdown::HeadingInfo>,
     root_path: &Path,
     base_url: &str,
