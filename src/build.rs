@@ -596,22 +596,27 @@ impl Builder {
         // Render markdown to HTML with shared oembed cache
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
         let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
-        let (mut frontmatter, headings, html, outbound_links, has_h1, word_count) =
-            markdown::render_with_cache(
-                path.to_path_buf(),
-                &self.config.root_dir,
-                self.config.oembed_timeout_ms,
-                link_transform_config,
-                Some(self.oembed_cache.clone()),
-                false, // server_mode is false in build mode
-                false, // transcode is disabled in build mode
-                valid_tag_sources,
-            )
-            .await
-            .map_err(|e| BuildError::RenderFailed {
-                path: path.to_path_buf(),
-                source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
-            })?;
+        let render_result = markdown::render_with_cache(
+            path.to_path_buf(),
+            &self.config.root_dir,
+            self.config.oembed_timeout_ms,
+            link_transform_config,
+            Some(self.oembed_cache.clone()),
+            false, // server_mode is false in build mode
+            false, // transcode is disabled in build mode
+            valid_tag_sources,
+        )
+        .await
+        .map_err(|e| BuildError::RenderFailed {
+            path: path.to_path_buf(),
+            source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
+        })?;
+        let mut frontmatter = render_result.frontmatter;
+        let headings = render_result.headings;
+        let html = render_result.html;
+        let outbound_links = render_result.outbound_links;
+        let has_h1 = render_result.has_h1;
+        let word_count = render_result.word_count;
 
         // Store outbound links in the build link index for generating links.json files
         if self.config.link_tracking && !outbound_links.is_empty() {
@@ -789,8 +794,7 @@ impl Builder {
         // Render through template
         let html_output = self
             .templates
-            .render_markdown(&html, frontmatter, extra_context)
-            .await?;
+            .render_markdown(&html, frontmatter, extra_context)?;
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');
@@ -1039,9 +1043,9 @@ impl Builder {
 
         // Render template
         let html_output = if is_root {
-            self.templates.render_home(context).await?
+            self.templates.render_home(context)?
         } else {
-            self.templates.render_section(context).await?
+            self.templates.render_section(context)?
         };
 
         // Determine output path
@@ -1884,29 +1888,26 @@ impl Builder {
     /// Checks if a link target exists in the output directory.
     ///
     /// Handles both files and directories (checking for index.html in directories).
+    /// Important: A directory is only considered valid if it contains index.html,
+    /// since the link indexer creates directories with just links.json for non-existent pages.
     fn link_target_exists(&self, path: &Path) -> bool {
-        if path.exists() {
+        // If it's a file that exists, it's valid
+        if path.is_file() {
             return true;
         }
 
-        // If path ends with /, check for index.html
-        let path_str = path.to_string_lossy();
-        if path_str.ends_with('/') || path_str.ends_with(std::path::MAIN_SEPARATOR) {
-            return path.join("index.html").exists();
-        }
-
-        // Check if it's a directory with index.html
+        // If it's a directory, check for index.html
+        // Note: We must explicitly check for index.html because the link indexer
+        // creates directories with just links.json for pages that are linked to
+        // but don't exist
         if path.is_dir() {
             return path.join("index.html").exists();
         }
 
-        // Try adding index.html for directory-style paths
+        // Path doesn't exist - check if path/index.html exists
+        // (handles trailing slash URL convention)
         let with_index = path.join("index.html");
-        if with_index.exists() {
-            return true;
-        }
-
-        false
+        with_index.exists()
     }
 
     /// Recursively copies a directory.
@@ -2214,5 +2215,565 @@ mod tests {
     fn test_resolve_relative_url_to_root() {
         assert_eq!(resolve_relative_url("/source/", "../"), "/");
         assert_eq!(resolve_relative_url("/docs/guide/", "../../"), "/");
+    }
+
+    // ============================================================================
+    // Link Validation Tests
+    // ============================================================================
+
+    /// Helper to create a minimal Builder for testing link-related methods.
+    pub(super) fn test_builder(output_dir: PathBuf, root_dir: PathBuf) -> Builder {
+        use crate::config::Config;
+        use crate::oembed_cache::OembedCache;
+        use crate::repo::Repo;
+        use crate::templates::Templates;
+        use papaya::HashMap as ConcurrentHashMap;
+        use std::sync::Arc;
+
+        let config = Config {
+            root_dir: root_dir.clone(),
+            ..Default::default()
+        };
+        let templates =
+            Templates::new(&root_dir, None).expect("Failed to create templates for test");
+        let repo = Repo::init_from_config(&config);
+        let oembed_cache = Arc::new(OembedCache::new(1024));
+        let build_link_index = Arc::new(ConcurrentHashMap::new());
+
+        Builder {
+            config,
+            templates,
+            output_dir,
+            repo,
+            oembed_cache,
+            build_link_index,
+        }
+    }
+
+    // ---------------------- resolve_link tests ----------------------
+
+    #[test]
+    fn test_resolve_link_absolute_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+
+        // Absolute path within site
+        let source = temp_path.join("docs").join("index.html");
+        let result = builder.resolve_link(&source, "/readme/");
+
+        assert_eq!(result, Some(temp_path.join("readme/")));
+    }
+
+    #[test]
+    fn test_resolve_link_relative_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+
+        // Create source directory structure
+        let docs_dir = temp_path.join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        let source = docs_dir.join("index.html");
+
+        // Relative path - sibling
+        let result = builder.resolve_link(&source, "guide/");
+        assert_eq!(result, Some(docs_dir.join("guide")));
+
+        // Relative path - parent
+        let result = builder.resolve_link(&source, "../readme/");
+        assert_eq!(result, Some(temp_path.join("readme")));
+    }
+
+    #[test]
+    fn test_resolve_link_with_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+        let source = temp_path.join("index.html");
+
+        // Anchor should be stripped
+        let result = builder.resolve_link(&source, "/docs/#section");
+        assert_eq!(result, Some(temp_path.join("docs/")));
+
+        // Just anchor returns None (empty after stripping)
+        let result = builder.resolve_link(&source, "#section");
+        // Note: "#section" starts with "#" so it's filtered in validate_links,
+        // but resolve_link strips it to empty and returns None
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_link_with_query_string() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+        let source = temp_path.join("index.html");
+
+        // Query string should be stripped
+        let result = builder.resolve_link(&source, "/search/?q=test");
+        assert_eq!(result, Some(temp_path.join("search/")));
+    }
+
+    #[test]
+    fn test_resolve_link_url_encoded() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+        let source = temp_path.join("index.html");
+
+        // URL-encoded spaces should be decoded
+        let result = builder.resolve_link(&source, "/my%20file/");
+        assert_eq!(result, Some(temp_path.join("my file/")));
+    }
+
+    #[test]
+    fn test_resolve_link_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let source = PathBuf::from("/some/source.html");
+
+        // Empty href returns None
+        let result = builder.resolve_link(&source, "");
+        assert_eq!(result, None);
+    }
+
+    // ---------------------- link_target_exists tests ----------------------
+
+    #[test]
+    fn test_link_target_exists_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create a file
+        let file_path = temp_path.join("readme.html");
+        std::fs::write(&file_path, "content").unwrap();
+
+        let builder = test_builder(temp_path, root);
+
+        assert!(builder.link_target_exists(&file_path));
+    }
+
+    #[test]
+    fn test_link_target_exists_directory_with_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create a directory with index.html
+        let dir_path = temp_path.join("docs");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        std::fs::write(dir_path.join("index.html"), "content").unwrap();
+
+        let builder = test_builder(temp_path, root);
+
+        assert!(builder.link_target_exists(&dir_path));
+    }
+
+    #[test]
+    fn test_link_target_exists_directory_without_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create a directory without index.html
+        let dir_path = temp_path.join("docs");
+        std::fs::create_dir_all(&dir_path).unwrap();
+
+        let builder = test_builder(temp_path, root);
+
+        // Directory exists but has no index.html, so returns false
+        // This is important because the link indexer creates directories
+        // with just links.json for pages that don't exist
+        assert!(!builder.link_target_exists(&dir_path));
+    }
+
+    #[test]
+    fn test_link_target_exists_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+
+        // Non-existent path
+        let missing = temp_path.join("nonexistent");
+        assert!(!builder.link_target_exists(&missing));
+    }
+
+    #[test]
+    fn test_link_target_exists_path_with_trailing_slash() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create a directory with index.html
+        let dir_path = temp_path.join("docs");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        std::fs::write(dir_path.join("index.html"), "content").unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+
+        // Path with trailing slash should check for index.html
+        let path_with_slash = temp_path.join("docs/");
+        assert!(builder.link_target_exists(&path_with_slash));
+
+        // Non-existent directory with trailing slash
+        let missing_with_slash = temp_path.join("missing/");
+        assert!(!builder.link_target_exists(&missing_with_slash));
+    }
+
+    // ---------------------- validate_links tests ----------------------
+
+    #[test]
+    fn test_validate_links_skips_external() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create HTML with external links
+        let html_path = temp_path.join("test.html");
+        std::fs::write(
+            &html_path,
+            r##"<html><body>
+            <a href="https://example.com">External HTTPS</a>
+            <a href="http://example.com">External HTTP</a>
+            <a href="//cdn.example.com">Protocol-relative</a>
+            <a href="mailto:test@example.com">Email</a>
+            <a href="tel:+1234567890">Phone</a>
+            <a href="javascript:void(0)">JavaScript</a>
+            <a href="data:text/html,Hello">Data URI</a>
+            <a href="#section">Anchor</a>
+        </body></html>"##,
+        )
+        .unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let broken = builder.validate_links();
+
+        // All links should be skipped (external/special protocols)
+        assert!(
+            broken.is_empty(),
+            "Expected no broken links, got: {:?}",
+            broken
+        );
+    }
+
+    #[test]
+    fn test_validate_links_finds_broken() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create HTML with broken internal link
+        let html_path = temp_path.join("test.html");
+        std::fs::write(
+            &html_path,
+            r#"<html><body>
+            <a href="/nonexistent/">Broken link</a>
+        </body></html>"#,
+        )
+        .unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let broken = builder.validate_links();
+
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0].link_url, "/nonexistent/");
+    }
+
+    #[test]
+    fn test_validate_links_valid_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create target directory with index.html
+        let docs_dir = temp_path.join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("index.html"), "content").unwrap();
+
+        // Create HTML with valid internal link
+        let html_path = temp_path.join("test.html");
+        std::fs::write(
+            &html_path,
+            r#"<html><body>
+            <a href="/docs/">Valid link</a>
+        </body></html>"#,
+        )
+        .unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let broken = builder.validate_links();
+
+        assert!(
+            broken.is_empty(),
+            "Expected no broken links, got: {:?}",
+            broken
+        );
+    }
+
+    #[test]
+    fn test_validate_links_skips_mbr_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create .mbr directory with HTML containing broken links
+        let mbr_dir = temp_path.join(".mbr");
+        std::fs::create_dir_all(&mbr_dir).unwrap();
+        std::fs::write(
+            mbr_dir.join("pagefind-ui.html"),
+            r#"<html><body><a href="/broken/">Broken</a></body></html>"#,
+        )
+        .unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let broken = builder.validate_links();
+
+        // Should skip .mbr directory
+        assert!(broken.is_empty());
+    }
+
+    #[test]
+    fn test_validate_links_relative_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        // Create directory structure
+        let docs_dir = temp_path.join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+
+        // Create target
+        let guide_dir = docs_dir.join("guide");
+        std::fs::create_dir_all(&guide_dir).unwrap();
+        std::fs::write(guide_dir.join("index.html"), "content").unwrap();
+
+        // Create HTML with relative link
+        std::fs::write(
+            docs_dir.join("index.html"),
+            r#"<html><body>
+            <a href="guide/">Valid relative link</a>
+            <a href="missing/">Broken relative link</a>
+        </body></html>"#,
+        )
+        .unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let broken = builder.validate_links();
+
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0].link_url, "missing/");
+    }
+
+    // ---------------------- calculate_relative_symlink tests ----------------------
+
+    fn symlink_helper(from: &str, to: &str) -> PathBuf {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(&root).unwrap();
+        let builder = test_builder(temp.path().to_path_buf(), root);
+        builder
+            .calculate_relative_symlink(Path::new(from), Path::new(to))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_symlink_same_directory() {
+        // Symlink and target in same directory
+        let result = symlink_helper("/a/b/link", "/a/b/target");
+        assert_eq!(result, PathBuf::from("target"));
+    }
+
+    #[test]
+    fn test_symlink_parent_directory() {
+        // Target is in parent directory of symlink
+        let result = symlink_helper("/a/b/link", "/a/target");
+        assert_eq!(result, PathBuf::from("../target"));
+    }
+
+    #[test]
+    fn test_symlink_sibling_directory() {
+        // Target is in sibling directory
+        let result = symlink_helper("/a/b/link", "/a/c/target");
+        assert_eq!(result, PathBuf::from("../c/target"));
+    }
+
+    #[test]
+    fn test_symlink_deeply_nested_up() {
+        // Target is many levels up
+        let result = symlink_helper("/a/b/c/d/link", "/a/target");
+        assert_eq!(result, PathBuf::from("../../../target"));
+    }
+
+    #[test]
+    fn test_symlink_deeply_nested_both() {
+        // Both symlink and target are deeply nested
+        let result = symlink_helper("/a/b/c/link", "/a/x/y/z/target");
+        assert_eq!(result, PathBuf::from("../../x/y/z/target"));
+    }
+
+    #[test]
+    fn test_symlink_to_root_level() {
+        // Target is at root level
+        let result = symlink_helper("/a/b/c/link", "/target");
+        assert_eq!(result, PathBuf::from("../../../target"));
+    }
+
+    #[test]
+    fn test_symlink_from_root_level() {
+        // Symlink is at root level (edge case)
+        let result = symlink_helper("/link", "/a/b/target");
+        assert_eq!(result, PathBuf::from("a/b/target"));
+    }
+
+    #[test]
+    fn test_symlink_no_common_prefix() {
+        // No common prefix beyond root
+        let result = symlink_helper("/a/b/link", "/x/y/z/target");
+        assert_eq!(result, PathBuf::from("../../x/y/z/target"));
+    }
+
+    #[test]
+    fn test_symlink_same_path() {
+        // Unusual: symlink pointing to itself (edge case)
+        let result = symlink_helper("/a/b/link", "/a/b/link");
+        assert_eq!(result, PathBuf::from("link"));
+    }
+
+    #[test]
+    fn test_symlink_resolution_property() {
+        // Property: from.parent().join(relative) normalized should equal to
+        let from = PathBuf::from("/project/build/docs/images/link");
+        let to = PathBuf::from("/project/source/assets/image.png");
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(&root).unwrap();
+        let builder = test_builder(temp.path().to_path_buf(), root);
+        let relative = builder.calculate_relative_symlink(&from, &to).unwrap();
+
+        // Build the resolved path
+        let from_dir = from.parent().unwrap();
+        let resolved = from_dir.join(&relative);
+        let normalized = normalize_path(&resolved);
+
+        assert_eq!(normalized, to);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generate a reasonable path component (no special chars that break paths)
+    fn path_component() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9_]{0,10}".prop_map(|s| s.to_string())
+    }
+
+    /// Generate a path with 1-8 components
+    fn reasonable_path() -> impl Strategy<Value = PathBuf> {
+        prop::collection::vec(path_component(), 1..8).prop_map(|components| {
+            let mut path = PathBuf::from("/");
+            for c in components {
+                path.push(c);
+            }
+            path
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn prop_symlink_resolution_correct(from in reasonable_path(), to in reasonable_path()) {
+            // Skip if from has no parent (edge case we don't need to test)
+            if from.parent().is_none() {
+                return Ok(());
+            }
+
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().to_path_buf();
+            std::fs::create_dir_all(&root).unwrap();
+            let builder = super::tests::test_builder(temp.path().to_path_buf(), root);
+
+            // Add a filename to 'from' to make it a symlink path
+            let from_link = from.join("link");
+            let relative = builder.calculate_relative_symlink(&from_link, &to).unwrap();
+
+            // Resolve the path: start from from_link's parent, apply relative
+            let from_dir = from_link.parent().unwrap();
+            let resolved = from_dir.join(&relative);
+            let normalized = normalize_path(&resolved);
+
+            prop_assert_eq!(normalized, to.clone(),
+                "from={:?}, to={:?}, relative={:?}, resolved={:?}",
+                from_link, to, relative, resolved
+            );
+        }
+
+        #[test]
+        fn prop_symlink_no_absolute_in_result(from in reasonable_path(), to in reasonable_path()) {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().to_path_buf();
+            std::fs::create_dir_all(&root).unwrap();
+            let builder = super::tests::test_builder(temp.path().to_path_buf(), root);
+
+            let from_link = from.join("link");
+            let relative = builder.calculate_relative_symlink(&from_link, &to).unwrap();
+
+            // Result should never be absolute
+            prop_assert!(!relative.is_absolute(),
+                "Relative symlink should not be absolute: {:?}", relative);
+        }
+
+        #[test]
+        fn prop_symlink_starts_with_parent_or_component(from in reasonable_path(), to in reasonable_path()) {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().to_path_buf();
+            std::fs::create_dir_all(&root).unwrap();
+            let builder = super::tests::test_builder(temp.path().to_path_buf(), root);
+
+            let from_link = from.join("link");
+            let relative = builder.calculate_relative_symlink(&from_link, &to).unwrap();
+
+            // First component should be ".." or a path component (never absolute)
+            if let Some(first) = relative.components().next() {
+                let is_parent_dir = matches!(first, std::path::Component::ParentDir);
+                let is_normal = matches!(first, std::path::Component::Normal(_));
+                prop_assert!(is_parent_dir || is_normal,
+                    "First component should be '..' or normal: {:?}", first);
+            }
+        }
     }
 }

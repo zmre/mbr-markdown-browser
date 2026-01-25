@@ -7,23 +7,25 @@ description: Get started with mbr in 5 minutes
 
 This guide gets you productive with mbr in 5 minutes.
 
-## 1. Preview a Single File
+## 1. Launch the GUI
 
-The simplest use case - render a markdown file to HTML:
-
-```bash
-mbr README.md
-```
-
-This outputs HTML to stdout, which you can pipe to other tools or redirect to a file:
+The simplest use case - open a markdown file in a native window:
 
 ```bash
-mbr README.md > output.html
+mbr README.md         # Opens in GUI (default mode)
+mbr ~/notes           # Browse a folder in GUI
 ```
 
-## 2. Browse Your Notes
+This opens a native window with:
 
-Start a local web server to browse and search your markdown files:
+- Native menu bar (File, Edit, View, History)
+- Keyboard shortcuts (Cmd+O to open folder, Cmd+R to reload)
+- History navigation (Cmd+[ and Cmd+])
+- Developer tools (Cmd+Option+I)
+
+## 2. Browse with Server Mode
+
+Start a local web server to browse in your regular browser:
 
 ```bash
 mbr -s ~/notes
@@ -47,22 +49,14 @@ Open [http://127.0.0.1:5200/](http://127.0.0.1:5200/) in your browser.
 | `/` | Open search dialog |
 | `Escape` | Close sidebar or search |
 
-## 3. Launch the GUI
+## 3. Output to Stdout (CLI Mode)
 
-For a native desktop experience:
+Render a markdown file to HTML for scripting:
 
 ```bash
-mbr -g ~/notes  # open index.md by default or browse the dir
-# OR
-mbr -g ~/notes/my-note.md  # preview a specific file
+mbr -o README.md > output.html       # Redirect to file
+mbr -o README.md | pbcopy            # Copy to clipboard (macOS)
 ```
-
-This opens a native window with:
-
-- Native menu bar (File, Edit, View, History)
-- Keyboard shortcuts (Cmd+O to open folder, Cmd+R to reload)
-- History navigation (Cmd+[ and Cmd+])
-- Developer tools (Cmd+Option+I)
 
 ## 4. Build a Static Site
 

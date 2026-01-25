@@ -36,6 +36,97 @@ pub struct Server {
     pub router: Router,
     pub port: u16,
     pub ip: [u8; 4],
+    /// File watcher handle - kept alive for the lifetime of the server.
+    /// When Server is dropped, this is dropped, stopping the watcher.
+    _watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>,
+}
+
+/// Configuration for initializing a Server instance.
+///
+/// This struct consolidates all parameters needed by `Server::init`,
+/// making it easier to construct and pass around configuration.
+///
+/// # Example
+///
+/// ```ignore
+/// use mbr::server::ServerConfig;
+/// use mbr::config::Config;
+///
+/// let config = Config::default();
+/// let server_config = ServerConfig::from(&config)
+///     .with_gui_mode(false)
+///     .with_log_filter(Some("mbr=debug"));
+/// let server = Server::init(server_config)?;
+/// ```
+#[derive(Clone)]
+pub struct ServerConfig {
+    pub ip: [u8; 4],
+    pub port: u16,
+    pub base_dir: std::path::PathBuf,
+    pub static_folder: String,
+    pub markdown_extensions: Vec<String>,
+    pub ignore_dirs: Vec<String>,
+    pub ignore_globs: Vec<String>,
+    pub watcher_ignore_dirs: Vec<String>,
+    pub index_file: String,
+    pub oembed_timeout_ms: u64,
+    pub oembed_cache_size: usize,
+    pub template_folder: Option<std::path::PathBuf>,
+    pub sort: Vec<SortField>,
+    pub gui_mode: bool,
+    pub theme: String,
+    pub log_filter: Option<String>,
+    pub link_tracking: bool,
+    pub tag_sources: Vec<TagSource>,
+    pub sidebar_style: String,
+    pub sidebar_max_items: usize,
+    #[cfg(feature = "media-metadata")]
+    pub transcode_enabled: bool,
+}
+
+impl ServerConfig {
+    /// Set whether the server is running in GUI mode (native window).
+    #[must_use]
+    pub fn with_gui_mode(mut self, gui_mode: bool) -> Self {
+        self.gui_mode = gui_mode;
+        self
+    }
+
+    /// Set the log filter for tracing (e.g., "mbr=debug,tower_http=warn").
+    #[must_use]
+    pub fn with_log_filter(mut self, filter: Option<&str>) -> Self {
+        self.log_filter = filter.map(|s| s.to_string());
+        self
+    }
+}
+
+impl From<&crate::config::Config> for ServerConfig {
+    fn from(config: &crate::config::Config) -> Self {
+        Self {
+            ip: config.host.0,
+            port: config.port,
+            base_dir: config.root_dir.clone(),
+            static_folder: config.static_folder.clone(),
+            markdown_extensions: config.markdown_extensions.clone(),
+            ignore_dirs: config.ignore_dirs.clone(),
+            ignore_globs: config.ignore_globs.clone(),
+            watcher_ignore_dirs: config.watcher_ignore_dirs.clone(),
+            index_file: config.index_file.clone(),
+            oembed_timeout_ms: config.oembed_timeout_ms,
+            oembed_cache_size: config.oembed_cache_size,
+            template_folder: config.template_folder.clone(),
+            sort: config.sort.clone(),
+            gui_mode: false, // Default to server mode
+            theme: config.theme.clone(),
+            log_filter: None, // Set via with_log_filter()
+            link_tracking: config.link_tracking,
+            tag_sources: config.tag_sources.clone(),
+            sidebar_style: config.sidebar_style.clone(),
+            sidebar_max_items: config.sidebar_max_items,
+            #[cfg(feature = "media-metadata")]
+            transcode_enabled: config.transcode,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -84,35 +175,33 @@ pub struct ServerState {
 }
 
 impl Server {
-    #[allow(clippy::too_many_arguments)]
-    pub fn init<S: Into<String>, P: Into<std::path::PathBuf>>(
-        ip: [u8; 4],
-        port: u16,
-        base_dir: P,
-        static_folder: S,
-        markdown_extensions: &[String],
-        ignore_dirs: &[String],
-        ignore_globs: &[String],
-        watcher_ignore_dirs: &[String],
-        index_file: S,
-        oembed_timeout_ms: u64,
-        oembed_cache_size: usize,
-        template_folder: Option<std::path::PathBuf>,
-        sort: Vec<SortField>,
-        gui_mode: bool,
-        theme: S,
-        log_filter: Option<&str>,
-        link_tracking: bool,
-        tag_sources: &[TagSource],
-        sidebar_style: S,
-        sidebar_max_items: usize,
-        #[cfg(feature = "media-metadata")] transcode_enabled: bool,
-    ) -> Result<Self, ServerError> {
-        let base_dir = base_dir.into();
-        let static_folder = static_folder.into();
-        let index_file = index_file.into();
-        let theme = theme.into();
-        let sidebar_style = sidebar_style.into();
+    /// Initialize a new server instance with the given configuration.
+    pub fn init(config: ServerConfig) -> Result<Self, ServerError> {
+        let ServerConfig {
+            ip,
+            port,
+            base_dir,
+            static_folder,
+            markdown_extensions,
+            ignore_dirs,
+            ignore_globs,
+            watcher_ignore_dirs,
+            index_file,
+            oembed_timeout_ms,
+            oembed_cache_size,
+            template_folder,
+            sort,
+            gui_mode,
+            theme,
+            log_filter,
+            link_tracking,
+            tag_sources,
+            sidebar_style,
+            sidebar_max_items,
+            #[cfg(feature = "media-metadata")]
+            transcode_enabled,
+        } = config;
+
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
 
         // Initialize video metadata cache with same size as oembed cache
@@ -125,7 +214,7 @@ impl Server {
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
-        let default_filter = log_filter.unwrap_or("mbr=warn,tower_http=warn");
+        let default_filter = log_filter.as_deref().unwrap_or("mbr=warn,tower_http=warn");
         let _ = tracing_subscriber::registry()
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -140,11 +229,11 @@ impl Server {
         let repo = Arc::new(Repo::init(
             &base_dir,
             &static_folder,
-            markdown_extensions,
-            ignore_dirs,
-            ignore_globs,
+            &markdown_extensions,
+            &ignore_dirs,
+            &ignore_globs,
             &index_file,
-            tag_sources,
+            &tag_sources,
         ));
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
@@ -156,20 +245,30 @@ impl Server {
         // PollWatcher's recursive scan can take 10+ seconds for large directories
         let base_dir_for_watcher = base_dir.clone();
         let template_folder_for_watcher = template_folder.clone();
-        let watcher_ignore_dirs = watcher_ignore_dirs.to_vec();
-        let ignore_globs_for_watcher = ignore_globs.to_vec();
+        let watcher_ignore_dirs_for_watcher = watcher_ignore_dirs.clone();
+        let ignore_globs_for_watcher = ignore_globs.clone();
+
+        // Create a handle to store the watcher once it's initialized.
+        // This ensures proper cleanup when Server is dropped.
+        let watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let watcher_handle_for_thread = Arc::clone(&watcher_handle);
+
         std::thread::spawn(move || {
             match crate::watcher::FileWatcher::new_with_sender(
                 &base_dir_for_watcher,
                 template_folder_for_watcher.as_deref(),
-                &watcher_ignore_dirs,
+                &watcher_ignore_dirs_for_watcher,
                 &ignore_globs_for_watcher,
                 tx_for_watcher,
             ) {
                 Ok(watcher) => {
                     tracing::info!("File watcher initialized successfully (background)");
-                    // Keep the watcher alive by leaking it (it runs in background thread)
-                    std::mem::forget(watcher);
+                    // Store the watcher in the shared handle so it stays alive
+                    // and can be properly dropped when Server is dropped
+                    if let Ok(mut guard) = watcher_handle_for_thread.lock() {
+                        *guard = Some(watcher);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -213,12 +312,12 @@ impl Server {
         let link_cache = Arc::new(LinkCache::new(2 * 1024 * 1024));
         let inbound_link_cache = Arc::new(InboundLinkCache::new(1024 * 1024, 60));
 
-        let config = ServerState {
+        let state = ServerState {
             base_dir,
             static_folder,
-            markdown_extensions: markdown_extensions.to_owned(),
-            ignore_dirs: ignore_dirs.to_owned(),
-            ignore_globs: ignore_globs.to_owned(),
+            markdown_extensions,
+            ignore_dirs,
+            ignore_globs,
             index_file,
             templates,
             repo,
@@ -238,7 +337,7 @@ impl Server {
             link_tracking,
             link_cache,
             inbound_link_cache,
-            tag_sources: tag_sources.to_vec(),
+            tag_sources,
             sidebar_style,
             sidebar_max_items,
         };
@@ -252,9 +351,14 @@ impl Server {
             .route("/{*path}", get(Self::handle))
             .layer(CompressionLayer::new())
             .layer(TraceLayer::new_for_http())
-            .with_state(config);
+            .with_state(state);
 
-        Ok(Server { router, ip, port })
+        Ok(Server {
+            router,
+            ip,
+            port,
+            _watcher_handle: watcher_handle,
+        })
     }
 
     pub async fn start(&self) -> Result<(), ServerError> {
@@ -282,8 +386,10 @@ impl Server {
         println!("Server running at http://{}/", local_addr);
 
         // Signal that server is ready before starting to serve
-        if let Some(tx) = ready_tx {
-            let _ = tx.send(());
+        if let Some(tx) = ready_tx
+            && tx.send(()).is_err()
+        {
+            tracing::debug!("Ready signal receiver dropped (shutdown in progress)");
         }
 
         axum::serve(listener, self.router.clone())
@@ -318,8 +424,10 @@ impl Server {
                     println!("Server running at http://{}/", local_addr);
 
                     // Signal that server is ready with the actual port
-                    if let Some(tx) = ready_tx {
-                        let _ = tx.send(self.port);
+                    if let Some(tx) = ready_tx
+                        && tx.send(self.port).is_err()
+                    {
+                        tracing::debug!("Port signal receiver dropped (shutdown in progress)");
                     }
 
                     axum::serve(listener, self.router.clone())
@@ -329,7 +437,14 @@ impl Server {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < max_retries => {
                     let old_port = self.port;
-                    self.port = self.port.saturating_add(1);
+                    // Fail fast if we've hit the maximum port number
+                    if self.port == 65535 {
+                        return Err(ServerError::BindFailed {
+                            addr: "port range exhausted (reached port 65535)".into(),
+                            source: e,
+                        });
+                    }
+                    self.port += 1;
                     attempts += 1;
                     eprintln!(
                         "Warning: Port {} already in use, trying port {}",
@@ -365,11 +480,14 @@ impl Server {
         // If file watcher is not initialized, close the connection
         let Some(file_change_tx) = config.file_change_tx else {
             tracing::warn!("WebSocket connection attempted but file watcher is disabled");
-            let _ = sender
+            if let Err(e) = sender
                 .send(axum::extract::ws::Message::Text(
-                    r#"{"error":"File watcher not available"}"#.to_string().into(),
+                    r#"{"error":"File watcher not available"}"#.into(),
                 ))
-                .await;
+                .await
+            {
+                tracing::debug!("Failed to send error to WebSocket client: {e}");
+            }
             return;
         };
 
@@ -1146,17 +1264,12 @@ impl Server {
                     )
                     .await
                     {
-                        Ok((
-                            _frontmatter,
-                            _headings,
-                            _html,
-                            outbound_links,
-                            _has_h1,
-                            _word_count,
-                        )) => {
+                        Ok(render_result) => {
                             // Resolve relative URLs to absolute before caching
-                            let resolved_links =
-                                resolve_outbound_links(&page_url_path, outbound_links);
+                            let resolved_links = resolve_outbound_links(
+                                &page_url_path,
+                                render_result.outbound_links,
+                            );
                             // Cache the outbound links
                             config
                                 .link_cache
@@ -1620,19 +1733,24 @@ impl Server {
         let transcode_enabled = false;
 
         let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
-        let (mut frontmatter, headings, inner_html_output, outbound_links, has_h1, word_count) =
-            markdown::render_with_cache(
-                md_path.to_path_buf(),
-                root_path,
-                config.oembed_timeout_ms,
-                link_transform_config,
-                Some(config.oembed_cache.clone()),
-                true, // server_mode is always true in server
-                transcode_enabled,
-                valid_tag_sources,
-            )
-            .await
-            .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
+        let render_result = markdown::render_with_cache(
+            md_path.to_path_buf(),
+            root_path,
+            config.oembed_timeout_ms,
+            link_transform_config,
+            Some(config.oembed_cache.clone()),
+            true, // server_mode is always true in server
+            transcode_enabled,
+            valid_tag_sources,
+        )
+        .await
+        .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
+        let mut frontmatter = render_result.frontmatter;
+        let headings = render_result.headings;
+        let inner_html_output = render_result.html;
+        let outbound_links = render_result.outbound_links;
+        let has_h1 = render_result.has_h1;
+        let word_count = render_result.word_count;
         // Use relative path for markdown_source so live reload can match it
         let relative_md_path =
             pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
@@ -1808,7 +1926,6 @@ impl Server {
         let full_html_output = config
             .templates
             .render_markdown(&inner_html_output, frontmatter, extra_context)
-            .await
             .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?;
         tracing::debug!("generated the html");
 
@@ -1979,12 +2096,10 @@ impl Server {
         let full_html_output = if is_root {
             templates
                 .render_home(context)
-                .await
                 .inspect_err(|e| tracing::error!("Error rendering home template: {e}"))?
         } else {
             templates
                 .render_section(context)
-                .await
                 .inspect_err(|e| tracing::error!("Error rendering section template: {e}"))?
         };
 

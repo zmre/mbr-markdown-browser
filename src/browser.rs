@@ -1,7 +1,7 @@
 extern crate image;
 use crate::Config;
 use crate::errors::BrowserError;
-use crate::server::Server;
+use crate::server::{Server, ServerConfig};
 use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
@@ -262,30 +262,8 @@ fn reinit_server(
 
     let config_copy = config.clone();
     let handle = runtime.spawn(async move {
-        let server = Server::init(
-            config_copy.ip.0,
-            config_copy.port,
-            config_copy.root_dir.clone(),
-            &config_copy.static_folder,
-            &config_copy.markdown_extensions,
-            &config_copy.ignore_dirs,
-            &config_copy.ignore_globs,
-            &config_copy.watcher_ignore_dirs,
-            &config_copy.index_file,
-            config_copy.oembed_timeout_ms,
-            config_copy.oembed_cache_size,
-            config_copy.template_folder.clone(),
-            config_copy.sort.clone(),
-            true, // gui_mode: native window mode
-            &config_copy.theme,
-            None, // Logging already initialized
-            config_copy.link_tracking,
-            &config_copy.tag_sources,
-            &config_copy.sidebar_style,
-            config_copy.sidebar_max_items,
-            #[cfg(feature = "media-metadata")]
-            config_copy.transcode,
-        );
+        let server_config = ServerConfig::from(&config_copy).with_gui_mode(true);
+        let server = Server::init(server_config);
         match server {
             Ok(mut s) => {
                 if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
@@ -304,7 +282,7 @@ fn reinit_server(
         .block_on(ready_rx)
         .map_err(|_| BrowserError::ServerStartFailed)?;
 
-    let url = format!("http://{}:{}/", config.ip, port);
+    let url = format!("http://{}:{}/", config.host, port);
     Ok((handle, url, config))
 }
 

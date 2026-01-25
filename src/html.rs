@@ -888,3 +888,125 @@ where
 {
     HtmlWriter::new_with_config(iter, FmtWriter(writer), config).run()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pulldown_cmark::Parser;
+
+    /// Helper to render markdown with custom config
+    fn render_with_config(markdown: &str, config: HtmlConfig) -> String {
+        let parser = Parser::new(markdown);
+        let mut html = String::new();
+        push_html_with_config(&mut html, parser, config);
+        html
+    }
+
+    #[test]
+    fn test_sections_disabled() {
+        // With enable_sections: false, no section wrappers should be added
+        let config = HtmlConfig {
+            enable_sections: false,
+            enable_mermaid: false,
+            section_attrs: HashMap::new(),
+        };
+        let html = render_with_config("Hello\n\n---\n\nWorld", config);
+
+        // Should NOT have section tags
+        assert!(
+            !html.contains("<section"),
+            "Sections disabled should not produce section tags. Got: {}",
+            html
+        );
+        // Should still have hr
+        assert!(
+            html.contains("<hr />"),
+            "Should still have hr divider. Got: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_sections_enabled_default() {
+        // With mbr_defaults, sections should be enabled
+        let config = HtmlConfig::mbr_defaults();
+        let html = render_with_config("Hello\n\n---\n\nWorld", config);
+
+        // Should have section tags
+        assert!(
+            html.contains("<section>"),
+            "Sections enabled should produce section tags. Got: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_sections_with_attrs() {
+        // Section attrs should be applied to the corresponding section
+        let mut section_attrs = HashMap::new();
+        section_attrs.insert(
+            1,
+            ParsedAttrs {
+                id: Some("second".to_string()),
+                classes: vec!["highlight".to_string()],
+                attrs: vec![],
+            },
+        );
+        let config = HtmlConfig::mbr_with_section_attrs(section_attrs);
+        let html = render_with_config("First\n\n---\n\nSecond", config);
+
+        // Second section should have the attrs
+        assert!(
+            html.contains(r#"id="second""#),
+            "Section should have id. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"class="highlight""#),
+            "Section should have class. Got: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_mermaid_disabled() {
+        // With enable_mermaid: false, mermaid blocks render as normal code
+        let config = HtmlConfig {
+            enable_sections: false,
+            enable_mermaid: false,
+            section_attrs: HashMap::new(),
+        };
+        let html = render_with_config("```mermaid\ngraph TD\n```", config);
+
+        // Should have standard code block structure
+        assert!(
+            html.contains("<pre><code"),
+            "Mermaid disabled should use standard code. Got: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_mermaid_enabled() {
+        // With enable_mermaid: true, mermaid blocks render as <pre class="mermaid">
+        let config = HtmlConfig {
+            enable_sections: false,
+            enable_mermaid: true,
+            section_attrs: HashMap::new(),
+        };
+        let html = render_with_config("```mermaid\ngraph TD\n```", config);
+
+        // Should have mermaid-specific structure
+        assert!(
+            html.contains(r#"<pre class="mermaid">"#),
+            "Mermaid enabled should use mermaid class. Got: {}",
+            html
+        );
+        // Should NOT have <code> wrapper
+        assert!(
+            !html.contains("<code"),
+            "Mermaid should not have code wrapper. Got: {}",
+            html
+        );
+    }
+}

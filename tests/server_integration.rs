@@ -4,7 +4,42 @@ mod common;
 
 use common::{TestRepo, assert_html_contains, find_available_port};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// Create a test ServerConfig with sensible defaults for integration tests.
+fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig {
+    mbr::server::ServerConfig {
+        ip: [127, 0, 0, 1],
+        port,
+        base_dir: root_dir,
+        static_folder: "static".to_string(),
+        markdown_extensions: vec!["md".to_string()],
+        ignore_dirs: vec!["target".to_string(), "node_modules".to_string()],
+        ignore_globs: vec!["*.log".to_string()],
+        watcher_ignore_dirs: vec![
+            ".direnv".to_string(),
+            ".git".to_string(),
+            "result".to_string(),
+            "target".to_string(),
+            "build".to_string(),
+        ],
+        index_file: "index.md".to_string(),
+        oembed_timeout_ms: 100,
+        oembed_cache_size: 2 * 1024 * 1024,
+        template_folder: None,
+        sort: mbr::config::default_sort_config(),
+        gui_mode: false,
+        theme: "default".to_string(),
+        log_filter: None,
+        link_tracking: true,
+        tag_sources: mbr::config::default_tag_sources(),
+        sidebar_style: "panel".to_string(),
+        sidebar_max_items: 100,
+        #[cfg(feature = "media-metadata")]
+        transcode_enabled: false,
+    }
+}
 
 /// Helper to start a test server and make requests.
 struct TestServer {
@@ -19,37 +54,8 @@ impl TestServer {
         let root_dir = repo.path().to_path_buf();
 
         let handle = tokio::spawn(async move {
-            let server = mbr::server::Server::init(
-                [127, 0, 0, 1],
-                port,
-                root_dir,
-                "static",
-                &["md".to_string()],
-                &["target".to_string(), "node_modules".to_string()],
-                &["*.log".to_string()],
-                &[
-                    ".direnv".to_string(),
-                    ".git".to_string(),
-                    "result".to_string(),
-                    "target".to_string(),
-                    "build".to_string(),
-                ],
-                "index.md",
-                100,                                 // oembed_timeout_ms
-                2 * 1024 * 1024,                     // oembed_cache_size (2MB)
-                None,                                // template_folder
-                mbr::config::default_sort_config(),  // sort
-                false,                               // gui_mode
-                "default",                           // theme
-                None,                                // log_filter
-                true,                                // link_tracking
-                &mbr::config::default_tag_sources(), // tag_sources
-                "panel",                             // sidebar_style
-                100,                                 // sidebar_max_items
-                #[cfg(feature = "media-metadata")]
-                false, // transcode_enabled
-            )
-            .expect("Failed to initialize server");
+            let config = test_server_config(port, root_dir);
+            let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
             // Start server (will run until task is dropped)
             let _ = server.start().await;
@@ -679,37 +685,9 @@ impl TestServerWithTemplates {
         let root_dir = repo.path().to_path_buf();
 
         let handle = tokio::spawn(async move {
-            let server = mbr::server::Server::init(
-                [127, 0, 0, 1],
-                port,
-                root_dir,
-                "static",
-                &["md".to_string()],
-                &["target".to_string(), "node_modules".to_string()],
-                &["*.log".to_string()],
-                &[
-                    ".direnv".to_string(),
-                    ".git".to_string(),
-                    "result".to_string(),
-                    "target".to_string(),
-                    "build".to_string(),
-                ],
-                "index.md",
-                100,             // oembed_timeout_ms
-                2 * 1024 * 1024, // oembed_cache_size (2MB)
-                template_folder,
-                mbr::config::default_sort_config(),  // sort
-                false,                               // gui_mode
-                "default",                           // theme
-                None,                                // log_filter
-                true,                                // link_tracking
-                &mbr::config::default_tag_sources(), // tag_sources
-                "panel",                             // sidebar_style
-                100,                                 // sidebar_max_items
-                #[cfg(feature = "media-metadata")]
-                false, // transcode_enabled
-            )
-            .expect("Failed to initialize server");
+            let mut config = test_server_config(port, root_dir);
+            config.template_folder = template_folder;
+            let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
             let _ = server.start().await;
         });
@@ -1425,37 +1403,9 @@ impl TestServerWithTheme {
         let theme = theme.to_string();
 
         let handle = tokio::spawn(async move {
-            let server = mbr::server::Server::init(
-                [127, 0, 0, 1],
-                port,
-                root_dir,
-                "static",
-                &["md".to_string()],
-                &["target".to_string(), "node_modules".to_string()],
-                &["*.log".to_string()],
-                &[
-                    ".direnv".to_string(),
-                    ".git".to_string(),
-                    "result".to_string(),
-                    "target".to_string(),
-                    "build".to_string(),
-                ],
-                "index.md",
-                100,
-                2 * 1024 * 1024,                     // oembed_cache_size (2MB)
-                None,                                // template_folder
-                mbr::config::default_sort_config(),  // sort
-                false,                               // gui_mode
-                &theme,                              // theme
-                None,                                // log_filter
-                true,                                // link_tracking
-                &mbr::config::default_tag_sources(), // tag_sources
-                "panel",                             // sidebar_style
-                100,                                 // sidebar_max_items
-                #[cfg(feature = "media-metadata")]
-                false, // transcode_enabled
-            )
-            .expect("Failed to initialize server");
+            let mut config = test_server_config(port, root_dir);
+            config.theme = theme;
+            let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
             let _ = server.start().await;
         });
@@ -1783,37 +1733,9 @@ impl TestServerNoLinkTracking {
         let root_dir = repo.path().to_path_buf();
 
         let handle = tokio::spawn(async move {
-            let server = mbr::server::Server::init(
-                [127, 0, 0, 1],
-                port,
-                root_dir,
-                "static",
-                &["md".to_string()],
-                &["target".to_string(), "node_modules".to_string()],
-                &["*.log".to_string()],
-                &[
-                    ".direnv".to_string(),
-                    ".git".to_string(),
-                    "result".to_string(),
-                    "target".to_string(),
-                    "build".to_string(),
-                ],
-                "index.md",
-                100,                                 // oembed_timeout_ms
-                2 * 1024 * 1024,                     // oembed_cache_size (2MB)
-                None,                                // template_folder
-                mbr::config::default_sort_config(),  // sort
-                false,                               // gui_mode
-                "default",                           // theme
-                None,                                // log_filter
-                false,                               // link_tracking DISABLED
-                &mbr::config::default_tag_sources(), // tag_sources
-                "panel",                             // sidebar_style
-                100,                                 // sidebar_max_items
-                #[cfg(feature = "media-metadata")]
-                false, // transcode_enabled
-            )
-            .expect("Failed to initialize server");
+            let mut config = test_server_config(port, root_dir);
+            config.link_tracking = false; // DISABLED
+            let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
             let _ = server.start().await;
         });
@@ -1855,5 +1777,216 @@ async fn test_links_json_404_when_link_tracking_disabled() {
         response.status(),
         404,
         "links.json should return 404 when link tracking is disabled"
+    );
+}
+
+// ============================================================================
+// Error Scenario Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_path_traversal_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Basic path traversal attempt
+    let response = server.get("/../../etc/passwd").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Path traversal should return 404, not expose system files"
+    );
+}
+
+#[tokio::test]
+async fn test_path_traversal_url_encoded_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded path traversal attempt
+    let response = server.get("/%2e%2e%2f%2e%2e%2fetc/passwd").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "URL-encoded path traversal should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_double_encoded_path_traversal_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Double URL-encoded path traversal
+    let response = server
+        .get("/%252e%252e%252f%252e%252e%252fetc/passwd")
+        .await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Double-encoded path traversal should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_malformed_frontmatter_still_renders() {
+    let repo = TestRepo::new();
+    // Invalid YAML: unclosed string
+    repo.create_markdown(
+        "malformed.md",
+        "---\ntitle: \"Unclosed string\n---\n\n# Content Still Works",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/malformed/").await;
+
+    // Should still render (gracefully handle malformed frontmatter)
+    assert_eq!(
+        response.status(),
+        200,
+        "Malformed frontmatter should not prevent page from rendering"
+    );
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Content Still Works");
+}
+
+#[tokio::test]
+async fn test_invalid_yaml_frontmatter_renders() {
+    let repo = TestRepo::new();
+    // Invalid YAML: bad indentation
+    repo.create_markdown(
+        "bad-yaml.md",
+        "---\ntitle: Test\n   invalid: indentation\n---\n\n# Works Anyway",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/bad-yaml/").await;
+
+    assert_eq!(response.status(), 200);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Works Anyway");
+}
+
+#[tokio::test]
+async fn test_file_with_spaces_in_path() {
+    let repo = TestRepo::new();
+    repo.create_dir("my folder");
+    repo.create_markdown("my folder/my file.md", "# Spaces Work");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded spaces
+    let response = server.get("/my%20folder/my%20file/").await;
+    assert_eq!(response.status(), 200);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Spaces Work");
+}
+
+#[tokio::test]
+async fn test_file_with_unicode_in_path() {
+    let repo = TestRepo::new();
+    repo.create_dir("文档"); // Chinese for "documents"
+    repo.create_markdown("文档/测试.md", "# Unicode Works");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded unicode path
+    let encoded_path = "/%E6%96%87%E6%A1%A3/%E6%B5%8B%E8%AF%95/";
+    let response = server.get(encoded_path).await;
+    assert_eq!(response.status(), 200);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Unicode Works");
+}
+
+#[tokio::test]
+async fn test_nonexistent_path_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("exists.md", "# Exists");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/does-not-exist/").await;
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn test_deep_nonexistent_path_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_dir("real");
+    repo.create_markdown("real/exists.md", "# Exists");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/real/fake/deep/path/").await;
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn test_null_byte_in_path_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Null byte in URL
+    let response = server.get("/readme%00.md").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Null byte in path should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_very_long_path_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Very long path (1000 characters)
+    let long_segment = "a".repeat(200);
+    let long_path = format!(
+        "/{}/{}/{}/{}/{}/",
+        long_segment, long_segment, long_segment, long_segment, long_segment
+    );
+    let response = server.get(&long_path).await;
+
+    // Should return 404 (not crash or hang)
+    assert_eq!(response.status(), 404);
+}
+
+// Note: Dot file filtering (e.g., .env, .git) is not currently implemented.
+// The server serves all static files. This could be a future security enhancement.
+
+#[tokio::test]
+async fn test_empty_markdown_file() {
+    let repo = TestRepo::new();
+    repo.create_markdown("empty.md", "");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/empty/").await;
+
+    assert_eq!(response.status(), 200, "Empty markdown should still render");
+}
+
+#[tokio::test]
+async fn test_markdown_with_only_frontmatter() {
+    let repo = TestRepo::new();
+    repo.create_markdown("only-frontmatter.md", "---\ntitle: Just Frontmatter\n---\n");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/only-frontmatter/").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Markdown with only frontmatter should render"
     );
 }

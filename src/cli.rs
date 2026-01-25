@@ -131,3 +131,224 @@ impl Args {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Helper to create Args with specific verbosity settings
+    fn args_with_verbosity(verbose: u8, quiet: bool) -> Args {
+        Args {
+            gui: false,
+            server: false,
+            stdout: false,
+            build: false,
+            #[cfg(feature = "media-metadata")]
+            extract_video_metadata: false,
+            output: PathBuf::from("build"),
+            path: PathBuf::from("."),
+            oembed_timeout_ms: None,
+            oembed_cache_size: None,
+            template_folder: None,
+            verbose,
+            quiet,
+            port: None,
+            host: None,
+            theme: None,
+            build_concurrency: None,
+            skip_link_checks: false,
+            no_link_tracking: false,
+            #[cfg(feature = "media-metadata")]
+            transcode: false,
+        }
+    }
+
+    #[test]
+    fn test_log_level_default_is_warn() {
+        let args = args_with_verbosity(0, false);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=warn"));
+        assert!(filter.contains("tower_http=warn"));
+    }
+
+    #[test]
+    fn test_log_level_verbose_once_is_info() {
+        let args = args_with_verbosity(1, false);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=info"));
+        assert!(filter.contains("tower_http=info"));
+    }
+
+    #[test]
+    fn test_log_level_verbose_twice_is_debug() {
+        let args = args_with_verbosity(2, false);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=debug"));
+        assert!(filter.contains("tower_http=debug"));
+    }
+
+    #[test]
+    fn test_log_level_verbose_three_times_is_trace() {
+        let args = args_with_verbosity(3, false);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=trace"));
+        assert!(filter.contains("tower_http=trace"));
+    }
+
+    #[test]
+    fn test_log_level_verbose_more_than_three_is_still_trace() {
+        let args = args_with_verbosity(10, false);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=trace"));
+    }
+
+    #[test]
+    fn test_log_level_quiet_is_error() {
+        let args = args_with_verbosity(0, true);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=error"));
+        assert!(filter.contains("tower_http=error"));
+    }
+
+    #[test]
+    fn test_log_level_quiet_overrides_verbose() {
+        // When both quiet and verbose are set, quiet takes precedence
+        let args = args_with_verbosity(3, true);
+        let filter = args.log_level_filter();
+        assert!(filter.contains("=error"));
+    }
+
+    #[test]
+    fn test_log_level_includes_crate_name() {
+        let args = args_with_verbosity(0, false);
+        let filter = args.log_level_filter();
+        // Should include the crate name (mbr)
+        assert!(filter.contains("mbr="));
+    }
+
+    // Test CLI parsing with clap
+    #[test]
+    fn test_parse_default_args() {
+        // Parse with no arguments (just the program name)
+        let args = Args::parse_from(["mbr"]);
+        assert!(!args.gui);
+        assert!(!args.server);
+        assert!(!args.stdout);
+        assert!(!args.build);
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.output, PathBuf::from("build"));
+        assert_eq!(args.verbose, 0);
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_parse_server_mode() {
+        let args = Args::parse_from(["mbr", "-s"]);
+        assert!(args.server);
+        assert!(!args.gui);
+    }
+
+    #[test]
+    fn test_parse_gui_mode() {
+        let args = Args::parse_from(["mbr", "-g"]);
+        assert!(args.gui);
+        assert!(!args.server);
+    }
+
+    #[test]
+    fn test_parse_build_mode() {
+        let args = Args::parse_from(["mbr", "-b"]);
+        assert!(args.build);
+        assert!(!args.server);
+        assert!(!args.gui);
+    }
+
+    #[test]
+    fn test_parse_stdout_mode() {
+        let args = Args::parse_from(["mbr", "-o"]);
+        assert!(args.stdout);
+    }
+
+    #[test]
+    fn test_parse_verbose_flags() {
+        let args = Args::parse_from(["mbr", "-v"]);
+        assert_eq!(args.verbose, 1);
+
+        let args = Args::parse_from(["mbr", "-vv"]);
+        assert_eq!(args.verbose, 2);
+
+        let args = Args::parse_from(["mbr", "-vvv"]);
+        assert_eq!(args.verbose, 3);
+    }
+
+    #[test]
+    fn test_parse_quiet_flag() {
+        let args = Args::parse_from(["mbr", "-q"]);
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_parse_port() {
+        let args = Args::parse_from(["mbr", "-p", "8080"]);
+        assert_eq!(args.port, Some(8080));
+    }
+
+    #[test]
+    fn test_parse_host() {
+        let args = Args::parse_from(["mbr", "--host", "0.0.0.0"]);
+        assert_eq!(args.host, Some("0.0.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_theme() {
+        let args = Args::parse_from(["mbr", "--theme", "amber"]);
+        assert_eq!(args.theme, Some("amber".to_string()));
+    }
+
+    #[test]
+    fn test_parse_output_directory() {
+        let args = Args::parse_from(["mbr", "-b", "--output", "./public"]);
+        assert!(args.build);
+        assert_eq!(args.output, PathBuf::from("./public"));
+    }
+
+    #[test]
+    fn test_parse_path_argument() {
+        let args = Args::parse_from(["mbr", "/path/to/notes"]);
+        assert_eq!(args.path, PathBuf::from("/path/to/notes"));
+    }
+
+    #[test]
+    fn test_parse_oembed_timeout() {
+        let args = Args::parse_from(["mbr", "--oembed-timeout-ms", "1000"]);
+        assert_eq!(args.oembed_timeout_ms, Some(1000));
+    }
+
+    #[test]
+    fn test_parse_build_concurrency() {
+        let args = Args::parse_from(["mbr", "-b", "--build-concurrency", "8"]);
+        assert_eq!(args.build_concurrency, Some(8));
+    }
+
+    #[test]
+    fn test_parse_skip_link_checks() {
+        let args = Args::parse_from(["mbr", "-b", "--skip-link-checks"]);
+        assert!(args.skip_link_checks);
+    }
+
+    #[test]
+    fn test_parse_no_link_tracking() {
+        let args = Args::parse_from(["mbr", "--no-link-tracking"]);
+        assert!(args.no_link_tracking);
+    }
+
+    #[test]
+    fn test_parse_template_folder() {
+        let args = Args::parse_from(["mbr", "--template-folder", "/custom/templates"]);
+        assert_eq!(
+            args.template_folder,
+            Some(PathBuf::from("/custom/templates"))
+        );
+    }
+}

@@ -2,8 +2,6 @@
 
 ## What's Next
 
-* Do a full code review and suggest improvements to the code, uncover lurking bugs or issues, identify style issues, consider how it might be better organized, and make recommendations for improvements.  Consistency is important in that it sets developer and user expectations so if similar things are treated in different ways (variables sometimes passed in a namespace and sometimes not, or whatever) then we want to identify those issues. Also look for test coverage gaps in particular so that we can feel assured that any refactors don't cause regressions.  Look at how the config file and options are organized and look at how the docs are organized and consider improvements to these.
-
 * [ ] Add ability to search also media metadata (filename, title, whatever) beyond just pdfs so we can find videos and such, too.  Need to think about how to display the videos if selected though. Popup up a `<video>` overlay?  Ditto for pictures and audio.  For video, we'd want our usual transcript and chapters type stuff.
 
 * **Static build**

@@ -117,7 +117,13 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--build-concurrency <N>` | Parallel file processing limit | auto (2x cores, max 32) |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--transcode` | Enable HLS video transcoding for 720p/480p variants (server/GUI only) | `false` |
+| `--skip-link-checks` | Skip internal link validation during build | `false` |
+| `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
 | `-v, --verbose` | Increase log verbosity | warn level |
+
+**Boolean flag naming convention:**
+- `--skip-X` — Skips a build-time operation (e.g., `--skip-link-checks` skips validation during build)
+- `--no-X` — Disables a runtime feature (e.g., `--no-link-tracking` disables backlink tracking)
 
 See `docs/reference/cli.md` for complete documentation.
 
