@@ -362,7 +362,37 @@ impl Config {
             .map_err(|e| ConfigError::ParseFailed(Box::new(e)))?;
         tracing::debug!("Loaded config: {:?}", &config);
         config.root_dir = root_dir;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validates the configuration values.
+    ///
+    /// Checks that numeric configuration options are within valid bounds:
+    /// - `port`: Must be 1-65535 (port 0 means "auto-assign", which isn't useful for display)
+    /// - `sidebar_max_items`: Must be > 0
+    /// - `build_concurrency`: If set, must be > 0
+    ///
+    /// Note: `oembed_cache_size` of 0 is valid (disables caching).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // Port 0 means "let OS pick a port" which isn't useful for a server URL
+        if self.port == 0 {
+            return Err(ConfigError::InvalidPort { port: self.port });
+        }
+
+        // sidebar_max_items of 0 would show no items
+        if self.sidebar_max_items == 0 {
+            return Err(ConfigError::InvalidSidebarMaxItems {
+                value: self.sidebar_max_items,
+            });
+        }
+
+        // build_concurrency of 0 would mean no parallelism (None means auto-detect)
+        if matches!(self.build_concurrency, Some(0)) {
+            return Err(ConfigError::InvalidBuildConcurrency { value: 0 });
+        }
+
+        Ok(())
     }
 
     fn find_root_dir(start_dir: &PathBuf) -> PathBuf {
@@ -553,5 +583,146 @@ mod tests {
         assert_eq!(source.field, "tags");
         assert!(source.label.is_none());
         assert!(source.label_plural.is_none());
+    }
+
+    // ==================== Config Validation Tests ====================
+
+    #[test]
+    fn test_validate_default_config_passes() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_port_zero_fails() {
+        let config = Config {
+            port: 0,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPort { port: 0 }));
+    }
+
+    #[test]
+    fn test_validate_valid_ports_pass() {
+        // Test minimum valid port
+        let config = Config {
+            port: 1,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Test common ports
+        let config = Config {
+            port: 80,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = Config {
+            port: 443,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Test maximum valid port
+        let config = Config {
+            port: 65535,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_sidebar_max_items_zero_fails() {
+        let config = Config {
+            sidebar_max_items: 0,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidSidebarMaxItems { value: 0 }
+        ));
+    }
+
+    #[test]
+    fn test_validate_valid_sidebar_max_items_pass() {
+        let config = Config {
+            sidebar_max_items: 1,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = Config {
+            sidebar_max_items: 100,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = Config {
+            sidebar_max_items: 10000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_build_concurrency_zero_fails() {
+        let config = Config {
+            build_concurrency: Some(0),
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBuildConcurrency { value: 0 }
+        ));
+    }
+
+    #[test]
+    fn test_validate_build_concurrency_none_passes() {
+        let config = Config {
+            build_concurrency: None, // Auto-detect
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_valid_build_concurrency_pass() {
+        let config = Config {
+            build_concurrency: Some(1),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = Config {
+            build_concurrency: Some(8),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = Config {
+            build_concurrency: Some(32),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_oembed_cache_size_zero_is_valid() {
+        // Zero means disabled, which is valid
+        let config = Config {
+            oembed_cache_size: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
     }
 }

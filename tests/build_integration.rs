@@ -765,3 +765,148 @@ async fn test_build_no_links_json_when_disabled() {
         "links.json should not exist when link tracking is disabled"
     );
 }
+
+// ============================================================================
+// Broken link detection tests
+// ============================================================================
+
+/// Helper to run a build and return both output directory and stats
+async fn build_site_with_stats(repo: &TestRepo) -> (std::path::PathBuf, mbr::BuildStats) {
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+
+    let stats = builder.build().await.expect("Build failed");
+
+    (output_dir, stats)
+}
+
+#[tokio::test]
+async fn test_build_detects_broken_internal_links() {
+    let repo = TestRepo::new();
+    // Create a page with a broken link to a non-existent page (absolute path)
+    repo.create_markdown("page.md", "# Page\n\n[Broken link](/missing/)");
+
+    let (_output, stats) = build_site_with_stats(&repo).await;
+
+    // Should detect the broken link
+    assert_eq!(
+        stats.broken_links, 1,
+        "Expected 1 broken link, got {}",
+        stats.broken_links
+    );
+}
+
+#[tokio::test]
+async fn test_build_no_false_positives_for_valid_links() {
+    let repo = TestRepo::new();
+    // Create pages with valid internal links
+    repo.create_markdown("page.md", "# Page\n\n[Valid link](other/)");
+    repo.create_markdown("other.md", "# Other");
+
+    let (_, stats) = build_site_with_stats(&repo).await;
+
+    // Should not report broken links for valid links
+    assert_eq!(
+        stats.broken_links, 0,
+        "Expected 0 broken links, got {}",
+        stats.broken_links
+    );
+}
+
+#[tokio::test]
+async fn test_build_ignores_external_links() {
+    let repo = TestRepo::new();
+    // Create a page with external links (should be ignored in validation)
+    repo.create_markdown(
+        "page.md",
+        r#"# Page
+
+[External HTTPS](https://example.com)
+[External HTTP](http://example.com)
+[Email](mailto:test@example.com)
+[Phone](tel:+1234567890)
+"#,
+    );
+
+    let (_, stats) = build_site_with_stats(&repo).await;
+
+    // External links should be ignored (not counted as broken)
+    assert_eq!(
+        stats.broken_links, 0,
+        "Expected 0 broken links for external links, got {}",
+        stats.broken_links
+    );
+}
+
+#[tokio::test]
+async fn test_build_validates_relative_links() {
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    // Create a page with relative links (one valid, one broken)
+    repo.create_markdown(
+        "docs/page.md",
+        "# Page\n\n[Valid](../readme/)\n[Broken](../missing/)",
+    );
+    repo.create_markdown("readme.md", "# Readme");
+
+    let (_, stats) = build_site_with_stats(&repo).await;
+
+    // Should detect the one broken relative link
+    assert_eq!(
+        stats.broken_links, 1,
+        "Expected 1 broken link, got {}",
+        stats.broken_links
+    );
+}
+
+#[tokio::test]
+async fn test_build_skip_link_checks() {
+    let repo = TestRepo::new();
+    // Create a page with broken links
+    repo.create_markdown("page.md", "# Page\n\n[Broken](missing/)");
+
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        skip_link_checks: true, // Skip link validation
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    let stats = builder.build().await.expect("Build failed");
+
+    // When skip_link_checks is true, no links should be checked
+    assert_eq!(
+        stats.broken_links, 0,
+        "Expected 0 broken links when skipping checks, got {}",
+        stats.broken_links
+    );
+}
+
+#[tokio::test]
+async fn test_build_validates_symlinked_assets() {
+    let repo = TestRepo::new();
+
+    // Create a static folder with an asset
+    repo.create_dir("static/images");
+    repo.create_static_file("static/images/logo.png", b"fake image data");
+
+    // Create a page linking to the symlinked asset
+    repo.create_markdown("page.md", "# Page\n\n![Logo](/images/logo.png)");
+
+    let (_, stats) = build_site_with_stats(&repo).await;
+
+    // The symlinked asset should be valid
+    assert_eq!(
+        stats.broken_links, 0,
+        "Expected 0 broken links for symlinked assets, got {}",
+        stats.broken_links
+    );
+}

@@ -97,8 +97,12 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
         return url.to_string();
     }
 
-    // Mailto links (these are handled specially elsewhere, but be safe)
-    if url.starts_with("mailto:") {
+    // Special protocol links (mailto, tel, sms, etc.) - leave unchanged
+    if url.starts_with("mailto:")
+        || url.starts_with("tel:")
+        || url.starts_with("sms:")
+        || url.starts_with("callto:")
+    {
         return url.to_string();
     }
 

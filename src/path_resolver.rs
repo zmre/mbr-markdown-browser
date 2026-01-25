@@ -6,6 +6,42 @@
 
 use std::path::{Path, PathBuf};
 
+/// Safely joins a base directory with a request path, preventing path traversal.
+///
+/// Returns `None` if the resulting path would escape the base directory.
+/// The path is canonicalized to resolve symlinks and `..` components.
+///
+/// # Security
+///
+/// This function guards against path traversal attacks by:
+/// 1. Canonicalizing both the base directory and the joined path
+/// 2. Verifying the resolved path starts with the base directory
+fn safe_join(base_dir: &Path, request_path: &str) -> Option<PathBuf> {
+    // Canonicalize base_dir first to handle any symlinks in the base
+    let canonical_base = base_dir.canonicalize().ok()?;
+    let candidate = base_dir.join(request_path);
+
+    // Try to canonicalize - this resolves ".." and symlinks
+    // If canonicalize fails (path doesn't exist), try the parent
+    if let Ok(canonical) = candidate.canonicalize()
+        && canonical.starts_with(&canonical_base)
+    {
+        return Some(canonical);
+    }
+
+    // For paths that don't exist yet (checking markdown extensions),
+    // we need to verify the parent is safe and construct the full path
+    if let Some(parent) = candidate.parent()
+        && let Ok(canonical_parent) = parent.canonicalize()
+        && canonical_parent.starts_with(&canonical_base)
+        && let Some(filename) = candidate.file_name()
+    {
+        return Some(canonical_parent.join(filename));
+    }
+
+    None
+}
+
 /// The result of resolving a URL path to a resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedPath {
@@ -62,50 +98,58 @@ pub struct PathResolverConfig<'a> {
 ///
 /// Note: Filesystem paths (steps 1-6) always take precedence over tag URLs (steps 7-8).
 /// If a file or directory named "tags" exists, it will be served instead of the tag index.
+///
+/// # Security
+///
+/// Path traversal attacks (e.g., `../../../etc/passwd`) are blocked by validating
+/// that all resolved paths remain within the configured base directory.
 pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> ResolvedPath {
-    let candidate_path = config.base_dir.join(request_path);
-
-    // 1. Direct file match
-    if candidate_path.is_file() {
-        return if is_markdown_file(&candidate_path, config.markdown_extensions) {
-            ResolvedPath::MarkdownFile(candidate_path)
-        } else {
-            ResolvedPath::StaticFile(candidate_path)
-        };
-    }
-
-    // 2. Directory with configured index file
-    if candidate_path.is_dir() {
-        let index_path = candidate_path.join(config.index_file);
-        if index_path.is_file() {
-            return ResolvedPath::MarkdownFile(index_path);
+    // Use safe_join to prevent path traversal attacks
+    // If the path would escape base_dir, skip to tag resolution or NotFound
+    if let Some(candidate_path) = safe_join(config.base_dir, request_path) {
+        // 1. Direct file match
+        if candidate_path.is_file() {
+            return if is_markdown_file(&candidate_path, config.markdown_extensions) {
+                ResolvedPath::MarkdownFile(candidate_path)
+            } else {
+                ResolvedPath::StaticFile(candidate_path)
+            };
         }
-    }
 
-    // 3. Try markdown extensions on base path (for /foo/ → foo.md)
-    let candidate_base = strip_trailing_separator(&candidate_path);
+        // 2. Directory with configured index file
+        if candidate_path.is_dir() {
+            let index_path = candidate_path.join(config.index_file);
+            if index_path.is_file() {
+                return ResolvedPath::MarkdownFile(index_path);
+            }
+        }
 
-    if let Some(md_path) = find_markdown_file(&candidate_base, config.markdown_extensions) {
-        return ResolvedPath::MarkdownFile(md_path);
-    }
+        // 3. Try markdown extensions on base path (for /foo/ → foo.md)
+        let candidate_base = strip_trailing_separator(&candidate_path);
 
-    // 4. Check static folder
-    if let Some(static_path) = find_in_static_folder(config, request_path) {
-        return ResolvedPath::StaticFile(static_path);
-    }
-
-    // 5. Directory with index.{markdown_ext}
-    if candidate_base.is_dir() {
-        let index_base = candidate_base.join("index");
-        if let Some(md_path) = find_markdown_file(&index_base, config.markdown_extensions) {
+        if let Some(md_path) = find_markdown_file(&candidate_base, config.markdown_extensions) {
             return ResolvedPath::MarkdownFile(md_path);
         }
 
-        // 6. Directory without index → listing
-        return ResolvedPath::DirectoryListing(candidate_base);
+        // 4. Check static folder (has its own path traversal protection)
+        if let Some(static_path) = find_in_static_folder(config, request_path) {
+            return ResolvedPath::StaticFile(static_path);
+        }
+
+        // 5. Directory with index.{markdown_ext}
+        if candidate_base.is_dir() {
+            let index_base = candidate_base.join("index");
+            if let Some(md_path) = find_markdown_file(&index_base, config.markdown_extensions) {
+                return ResolvedPath::MarkdownFile(md_path);
+            }
+
+            // 6. Directory without index → listing
+            return ResolvedPath::DirectoryListing(candidate_base);
+        }
     }
 
     // 7-8. Check for tag URLs (only if nothing matched in filesystem)
+    // This is also reached if safe_join returned None (path traversal blocked)
     if let Some(tag_result) = try_resolve_tag_url(request_path, config.tag_sources) {
         return tag_result;
     }
@@ -142,6 +186,11 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 }
 
 /// Finds a file in the static folder.
+///
+/// # Security
+///
+/// This function guards against path traversal attacks by canonicalizing
+/// the resolved path and verifying it remains within the static directory.
 fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Option<PathBuf> {
     let static_dir = config
         .base_dir
@@ -149,8 +198,11 @@ fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Opt
         .canonicalize()
         .ok()?;
     let candidate = static_dir.join(request_path);
-    if candidate.is_file() {
-        Some(candidate)
+
+    // Canonicalize to resolve any ".." or symlinks, then verify containment
+    let canonical = candidate.canonicalize().ok()?;
+    if canonical.starts_with(&static_dir) && canonical.is_file() {
+        Some(canonical)
     } else {
         None
     }
@@ -269,6 +321,11 @@ mod tests {
         fn path(&self) -> &Path {
             self.dir.path()
         }
+
+        /// Returns the canonicalized base path (resolves symlinks like /var -> /private/var on macOS)
+        fn canonical_path(&self) -> PathBuf {
+            self.dir.path().canonicalize().unwrap()
+        }
     }
 
     #[test]
@@ -278,9 +335,10 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "readme.md");
 
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::MarkdownFile(fixture.path().join("readme.md"))
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("readme.md"))
         );
     }
 
@@ -291,9 +349,10 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "image.png");
 
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::StaticFile(fixture.path().join("image.png"))
+            ResolvedPath::StaticFile(fixture.canonical_path().join("image.png"))
         );
     }
 
@@ -306,7 +365,9 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "docs");
 
-        assert_eq!(result, ResolvedPath::MarkdownFile(subdir.join("index.md")));
+        // safe_join returns canonicalized paths
+        let expected = fixture.canonical_path().join("docs/index.md");
+        assert_eq!(result, ResolvedPath::MarkdownFile(expected));
     }
 
     #[test]
@@ -316,9 +377,10 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "about/");
 
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::MarkdownFile(fixture.path().join("about.md"))
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("about.md"))
         );
     }
 
@@ -347,7 +409,9 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "posts/");
 
-        assert_eq!(result, ResolvedPath::DirectoryListing(subdir));
+        // safe_join returns canonicalized paths
+        let expected = fixture.canonical_path().join("posts");
+        assert_eq!(result, ResolvedPath::DirectoryListing(expected));
     }
 
     #[test]
@@ -368,7 +432,9 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "blog/2024");
 
-        assert_eq!(result, ResolvedPath::MarkdownFile(nested.join("index.md")));
+        // safe_join returns canonicalized paths
+        let expected = fixture.canonical_path().join("blog/2024/index.md");
+        assert_eq!(result, ResolvedPath::MarkdownFile(expected));
     }
 
     #[test]
@@ -379,9 +445,10 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "notes/");
 
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::MarkdownFile(fixture.path().join("notes.markdown"))
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("notes.markdown"))
         );
     }
 
@@ -395,10 +462,10 @@ mod tests {
 
         let result = resolve_request_path(&fixture.config(), "test/");
 
-        // Should prefer .md (first in list)
+        // Should prefer .md (first in list), safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::MarkdownFile(fixture.path().join("test.md"))
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("test.md"))
         );
     }
 
@@ -410,9 +477,10 @@ mod tests {
         let result = resolve_request_path(&fixture.config(), "");
 
         // Empty path resolves to base_dir, which is a directory with index.md
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::MarkdownFile(fixture.path().join("index.md"))
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("index.md"))
         );
     }
 
@@ -572,9 +640,10 @@ mod tests {
         // File should take precedence over tag source index
         let result = resolve_request_path(&fixture.config(), "tags/");
 
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::MarkdownFile(fixture.path().join("tags.md"))
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("tags.md"))
         );
     }
 
@@ -587,9 +656,10 @@ mod tests {
         // Directory listing should take precedence
         let result = resolve_request_path(&fixture.config(), "tags/");
 
+        // safe_join returns canonicalized paths
         assert_eq!(
             result,
-            ResolvedPath::DirectoryListing(fixture.path().join("tags"))
+            ResolvedPath::DirectoryListing(fixture.canonical_path().join("tags"))
         );
     }
 
@@ -632,6 +702,149 @@ mod tests {
 
         // Empty sources
         assert_eq!(try_resolve_tag_url("tags/rust", &[]), None);
+    }
+
+    // ==================== Path Traversal Security Tests ====================
+
+    #[test]
+    fn test_path_traversal_blocked_with_dotdot() {
+        let fixture = TestFixture::new();
+        // Create a file outside the temp directory (simulating /etc/passwd)
+        // We can't actually create /etc/passwd, so we test that path traversal returns NotFound
+
+        // Various path traversal attempts should all return NotFound
+        let attacks = vec![
+            "../../../etc/passwd",
+            "..%2F..%2F..%2Fetc/passwd",
+            "foo/../../../etc/passwd",
+            "foo/bar/../../../etc/passwd",
+            "....//....//etc/passwd",
+        ];
+
+        for attack in attacks {
+            let result = resolve_request_path(&fixture.config(), attack);
+            assert_eq!(
+                result,
+                ResolvedPath::NotFound,
+                "Path traversal should be blocked for: {}",
+                attack
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_traversal_blocked_in_static_folder() {
+        let fixture = TestFixture::new();
+        // Create a file in static folder
+        fs::write(fixture.path().join("static/safe.txt"), "safe content").unwrap();
+
+        // Path traversal within static folder should be blocked
+        let attacks = vec![
+            "../readme.md",     // Try to escape static to base_dir
+            "../../etc/passwd", // Try to escape completely
+            "foo/../../../etc/passwd",
+        ];
+
+        for attack in &attacks {
+            let result = find_in_static_folder(&fixture.config(), attack);
+            assert!(
+                result.is_none(),
+                "Static folder path traversal should be blocked for: {}",
+                attack
+            );
+        }
+
+        // But valid file should still work
+        let valid = find_in_static_folder(&fixture.config(), "safe.txt");
+        assert!(valid.is_some(), "Valid static file should be found");
+    }
+
+    #[test]
+    fn test_safe_join_blocks_traversal() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a file inside
+        fs::write(base.join("inside.txt"), "inside").unwrap();
+
+        // Valid path should work
+        let valid = safe_join(base, "inside.txt");
+        assert!(valid.is_some(), "Valid path should work");
+        assert!(valid.unwrap().ends_with("inside.txt"));
+
+        // Path traversal should be blocked
+        let attack = safe_join(base, "../../../etc/passwd");
+        assert!(attack.is_none(), "Path traversal should be blocked");
+
+        // Complex traversal should be blocked
+        let attack2 = safe_join(base, "foo/../../../etc/passwd");
+        assert!(
+            attack2.is_none(),
+            "Complex path traversal should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_safe_join_allows_internal_dotdot() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create nested structure
+        fs::create_dir_all(base.join("foo/bar")).unwrap();
+        fs::write(base.join("foo/sibling.txt"), "sibling").unwrap();
+
+        // Going up and back down within base_dir should work
+        let valid = safe_join(base, "foo/bar/../sibling.txt");
+        assert!(valid.is_some(), "Internal navigation should work");
+        let resolved = valid.unwrap();
+        assert!(
+            resolved.ends_with("sibling.txt"),
+            "Should resolve to sibling.txt, got: {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn test_path_traversal_returns_not_found_not_error() {
+        let fixture = TestFixture::new();
+
+        // Path traversal should cleanly return NotFound, not panic or error
+        let result = resolve_request_path(&fixture.config(), "../../../../etc/passwd");
+
+        // Should be NotFound, not a panic or file access
+        assert_eq!(result, ResolvedPath::NotFound);
+    }
+
+    #[test]
+    fn test_symlink_escape_blocked() {
+        // This test verifies that symlinks pointing outside base_dir are blocked
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        fs::create_dir(base.join("static")).unwrap();
+
+        // Create a symlink in static folder pointing outside
+        // (This is OS-dependent and may not work on all systems)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link_path = base.join("static/escape");
+            // Try to create symlink to /tmp (which exists on most Unix systems)
+            if symlink("/tmp", &link_path).is_ok() {
+                let extensions = vec![String::from("md")];
+                let tag_sources: Vec<String> = vec![];
+                let config = PathResolverConfig {
+                    base_dir: base,
+                    static_folder: "static",
+                    markdown_extensions: &extensions,
+                    index_file: "index.md",
+                    tag_sources: &tag_sources,
+                };
+
+                // Following the symlink should be blocked
+                let result = find_in_static_folder(&config, "escape/some_file");
+                assert!(result.is_none(), "Symlink escape should be blocked");
+            }
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::attrs::ParsedAttrs;
+use crate::errors::MarkdownError;
 use crate::link_index::{OutboundLink, is_internal_link, split_url_anchor};
 use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
@@ -42,6 +43,25 @@ pub struct HeadingInfo {
     pub level: u8,
     pub text: String,
     pub id: String,
+}
+
+/// Result of rendering a markdown file to HTML.
+///
+/// Contains the rendered HTML along with metadata extracted during parsing.
+#[derive(Debug, Clone)]
+pub struct MarkdownRenderResult {
+    /// Frontmatter metadata (from YAML block at top of file)
+    pub frontmatter: SimpleMetadata,
+    /// Table of contents (headings extracted from document)
+    pub headings: Vec<HeadingInfo>,
+    /// Rendered HTML content
+    pub html: String,
+    /// Links discovered during rendering (for backlink tracking)
+    pub outbound_links: Vec<OutboundLink>,
+    /// True if the document's first heading is an H1 (affects title rendering)
+    pub has_h1: bool,
+    /// Word count of the document (excluding code blocks and metadata)
+    pub word_count: usize,
 }
 
 struct EventState {
@@ -231,17 +251,7 @@ pub async fn render(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
-) -> Result<
-    (
-        SimpleMetadata,
-        Vec<HeadingInfo>,
-        String,
-        Vec<OutboundLink>,
-        bool,
-        usize,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<MarkdownRenderResult, MarkdownError> {
     render_with_cache(
         file,
         root_path,
@@ -261,12 +271,9 @@ pub async fn render(
 /// new results are cached for future use. URLs are fetched in parallel for improved
 /// performance when multiple bare URLs are present in the document.
 ///
-/// Returns: (frontmatter, headings, html, outbound_links, has_h1)
-///
 /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
 /// - `transcode_enabled`: True when dynamic video transcoding is enabled
 /// - `valid_tag_sources`: Set of valid tag source names for wikilink transformation
-/// - `has_h1`: True if the document's first heading is an H1
 #[allow(clippy::too_many_arguments)]
 pub async fn render_with_cache(
     file: PathBuf,
@@ -277,19 +284,12 @@ pub async fn render_with_cache(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
-) -> Result<
-    (
-        SimpleMetadata,
-        Vec<HeadingInfo>,
-        String,
-        Vec<OutboundLink>,
-        bool,
-        usize, // word_count
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input
-    let raw_markdown_input = fs::read_to_string(&file)?;
+    let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+        path: file.clone(),
+        source: e,
+    })?;
 
     // Transform [[Source:value]] wikilinks to standard markdown links before parsing
     let markdown_input = if valid_tag_sources.is_empty() {
@@ -427,14 +427,14 @@ pub async fn render_with_cache(
         frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
-    Ok((
+    Ok(MarkdownRenderResult {
         frontmatter,
         headings,
-        html_output,
-        deduplicated_links,
+        html: html_output,
+        outbound_links: deduplicated_links,
         has_h1,
-        state.word_count,
-    ))
+        word_count: state.word_count,
+    })
 }
 
 /// Pre-pass to collect all bare URLs that need oembed fetching.
@@ -608,14 +608,21 @@ const FRONTMATTER_MAX_BYTES: usize = 8 * 1024;
 
 pub fn extract_metadata_from_file<P: AsRef<Path>>(
     path: P,
-) -> Result<SimpleMetadata, Box<dyn std::error::Error>> {
+) -> Result<SimpleMetadata, MarkdownError> {
     let path = path.as_ref();
     // Only read the first 8KB - frontmatter is always at the top
-    let mut file = File::open(path)?;
+    let mut file = File::open(path).map_err(|e| MarkdownError::ReadFailed {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
     let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
     let read_len = file_len.min(FRONTMATTER_MAX_BYTES);
     let mut buffer = vec![0u8; read_len];
-    file.read_exact(&mut buffer)?;
+    file.read_exact(&mut buffer)
+        .map_err(|e| MarkdownError::ReadFailed {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
     let markdown_input = String::from_utf8_lossy(&buffer);
     let parser = MDParser::new_ext(&markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
@@ -889,10 +896,10 @@ mod tests {
             is_index_file,
         };
         // Tests run with server_mode=false, transcode_enabled=false
-        let (_, _, html, _, _, _) = render(path, &root, 100, config, false, false, tag_sources)
+        let result = render(path, &root, 100, config, false, false, tag_sources)
             .await
             .unwrap();
-        html
+        result.html
     }
 
     #[tokio::test]
@@ -958,12 +965,11 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, _, _) =
-            render(path, &root, 100, config, false, false, HashSet::new())
-                .await
-                .unwrap();
+        let result = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
         assert_eq!(
-            metadata.get("title"),
+            result.frontmatter.get("title"),
             Some(&serde_json::Value::String("Test Title".to_string()))
         );
     }
@@ -1016,11 +1022,10 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (_, _, _, _, has_h1, _) =
-            render(path, &root, 100, config, false, false, HashSet::new())
-                .await
-                .unwrap();
-        assert!(has_h1);
+        let result = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(result.has_h1);
     }
 
     #[tokio::test]
@@ -1035,11 +1040,10 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (_, _, _, _, has_h1, _) =
-            render(path, &root, 100, config, false, false, HashSet::new())
-                .await
-                .unwrap();
-        assert!(!has_h1);
+        let result = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(!result.has_h1);
     }
 
     #[tokio::test]
@@ -1055,13 +1059,12 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, has_h1, _) =
-            render(path, &root, 100, config, false, false, HashSet::new())
-                .await
-                .unwrap();
-        assert!(has_h1);
+        let result = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(result.has_h1);
         assert_eq!(
-            metadata.get("title"),
+            result.frontmatter.get("title"),
             Some(&serde_json::Value::String("My Document Title".to_string()))
         );
     }
@@ -1079,13 +1082,12 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, has_h1, _) =
-            render(path, &root, 100, config, false, false, HashSet::new())
-                .await
-                .unwrap();
-        assert!(has_h1);
+        let result = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(result.has_h1);
         assert_eq!(
-            metadata.get("title"),
+            result.frontmatter.get("title"),
             Some(&serde_json::Value::String("Frontmatter Title".to_string()))
         );
     }
@@ -1103,12 +1105,11 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
         };
-        let (metadata, _, _, _, has_h1, _) =
-            render(path, &root, 100, config, false, false, HashSet::new())
-                .await
-                .unwrap();
-        assert!(!has_h1);
-        assert_eq!(metadata.get("title"), None);
+        let result = render(path, &root, 100, config, false, false, HashSet::new())
+            .await
+            .unwrap();
+        assert!(!result.has_h1);
+        assert_eq!(result.frontmatter.get("title"), None);
     }
 
     // Media embed tests
@@ -1524,6 +1525,76 @@ mod tests {
         assert!(
             html.contains("—"),
             "Em dash should be preserved. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_empty_attrs() {
+        // Test that --- {} creates a section without any attributes
+        let md = "First section\n\n--- {}\n\nSecond section";
+        let html = render_markdown(md).await;
+        // Should have a plain section (no id, class, or attrs)
+        // The section should close and reopen with just <section>
+        assert!(
+            html.contains("<section>"),
+            "Empty attrs should create plain section. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("<hr />"),
+            "Should contain <hr /> divider. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_with_whitespace() {
+        // Test that whitespace inside braces is handled
+        let md = "First section\n\n--- {  #intro  .highlight  }\n\nSecond section";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"id="intro""#),
+            "Whitespace should not affect ID parsing. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"class="highlight""#),
+            "Whitespace should not affect class parsing. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_curly_quotes() {
+        // Test curly quotes from smart punctuation (pulldown-cmark converts " to "")
+        // Build the attrs string with explicit curly quotes
+        let md = "First section\n\n--- {data-x=\u{201C}value\u{201D}}\n\nSecond section";
+        let html = render_markdown(md).await;
+        // The curly quotes should be normalized to straight quotes in output
+        assert!(
+            html.contains(r#"data-x="value""#),
+            "Curly quotes should be normalized. Got: {}",
+            html
+        );
+    }
+
+    #[tokio::test]
+    async fn test_section_attrs_html_escaping() {
+        // Test that attribute values with HTML special chars are escaped
+        // Note: Can't use <script> directly as pulldown-cmark interprets it as HTML
+        // Use & and ' which need escaping but don't break markdown parsing
+        let md = "First section\n\n--- {data-val=\"a & b\"}\n\nSecond section";
+        let html = render_markdown(md).await;
+        // The & should be escaped to &amp;
+        assert!(
+            html.contains("&amp;"),
+            "HTML special chars should be escaped. Got: {}",
+            html
+        );
+        assert!(
+            html.contains(r#"data-val="a &amp; b""#),
+            "Value should have escaped &. Got: {}",
             html
         );
     }

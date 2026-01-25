@@ -198,7 +198,7 @@ And renders a rich preview card.
 
 - URL must be on its own line
 - Blank lines before and after
-- URL must be accessible (timeout: 300ms default)
+- URL must be accessible (timeout: 500ms default)
 
 ### Timeout Configuration
 

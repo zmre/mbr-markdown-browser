@@ -663,4 +663,213 @@ mod tests {
         let html = info.embed_html.unwrap();
         assert!(html.contains("<audio"));
     }
+
+    // Tests for format_error_chain
+    #[test]
+    fn test_format_error_chain_single() {
+        let err = std::io::Error::other("simple error");
+        let chain = format_error_chain(&err);
+        assert_eq!(chain, "simple error");
+    }
+
+    #[test]
+    fn test_format_error_chain_nested() {
+        // Create a nested error chain using Box<dyn Error>
+        #[derive(Debug)]
+        struct OuterError {
+            source: Box<dyn Error + Send + Sync>,
+        }
+        impl std::fmt::Display for OuterError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "outer error")
+            }
+        }
+        impl Error for OuterError {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(self.source.as_ref())
+            }
+        }
+
+        let inner = std::io::Error::other("inner error");
+        let outer = OuterError {
+            source: Box::new(inner),
+        };
+        let chain = format_error_chain(&outer);
+        assert!(chain.contains("outer error"));
+        assert!(chain.contains("inner error"));
+        assert!(chain.contains(" -> "));
+    }
+
+    // Tests for is_supported_favicon_type
+    #[test]
+    fn test_supported_favicon_type_none() {
+        // No type attribute means assume supported
+        assert!(is_supported_favicon_type(None));
+    }
+
+    #[test]
+    fn test_supported_favicon_type_png() {
+        assert!(is_supported_favicon_type(Some("image/png")));
+    }
+
+    #[test]
+    fn test_supported_favicon_type_svg() {
+        assert!(is_supported_favicon_type(Some("image/svg+xml")));
+    }
+
+    #[test]
+    fn test_supported_favicon_type_ico() {
+        assert!(is_supported_favicon_type(Some("image/x-icon")));
+        assert!(is_supported_favicon_type(Some("image/vnd.microsoft.icon")));
+    }
+
+    #[test]
+    fn test_unsupported_favicon_type() {
+        assert!(!is_supported_favicon_type(Some("image/webp")));
+        assert!(!is_supported_favicon_type(Some("text/html")));
+    }
+
+    // Tests for extract_youtube_id - additional patterns
+    #[test]
+    fn test_youtube_embed_url() {
+        let url = "https://www.youtube.com/embed/dQw4w9WgXcQ";
+        let id = PageInfo::extract_youtube_id(url);
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
+    }
+
+    #[test]
+    fn test_youtube_v_url() {
+        let url = "https://www.youtube.com/v/dQw4w9WgXcQ";
+        let id = PageInfo::extract_youtube_id(url);
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
+    }
+
+    #[test]
+    fn test_youtube_watch_with_extra_params() {
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&list=PLtest";
+        let id = PageInfo::extract_youtube_id(url);
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
+    }
+
+    #[test]
+    fn test_youtube_without_www() {
+        let url = "https://youtube.com/watch?v=dQw4w9WgXcQ";
+        let id = PageInfo::extract_youtube_id(url);
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
+    }
+
+    #[test]
+    fn test_youtube_invalid_id_length() {
+        // YouTube IDs are exactly 11 characters
+        let url = "https://www.youtube.com/watch?v=short";
+        let id = PageInfo::extract_youtube_id(url);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_youtube_not_youtube() {
+        let url = "https://example.com/watch?v=dQw4w9WgXcQ";
+        let id = PageInfo::extract_youtube_id(url);
+        assert!(id.is_none());
+    }
+
+    // Tests for PageInfo::text()
+    #[test]
+    fn test_text_with_title() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            title: Some("My Title".to_string()),
+            ..Default::default()
+        };
+        let text = info.text();
+        assert_eq!(text, "My Title: https://example.com");
+    }
+
+    #[test]
+    fn test_text_without_title() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            ..Default::default()
+        };
+        let text = info.text();
+        assert_eq!(text, "no title: https://example.com");
+    }
+
+    // Tests for PageInfo::html()
+    #[test]
+    fn test_html_with_embed() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            embed_html: Some("<div>embedded</div>".to_string()),
+            ..Default::default()
+        };
+        let html = info.html();
+        assert_eq!(html, "<div>embedded</div>");
+    }
+
+    #[test]
+    fn test_html_with_title_and_image() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            title: Some("My Title".to_string()),
+            description: Some("My description".to_string()),
+            image: Some("https://example.com/image.png".to_string()),
+            embed_html: None,
+        };
+        let html = info.html();
+        assert!(html.contains("mbr-social-link-box"));
+        assert!(html.contains("My Title"));
+        assert!(html.contains("My description"));
+        assert!(html.contains("<img src='https://example.com/image.png'/>"));
+    }
+
+    #[test]
+    fn test_html_with_title_no_image() {
+        let info = PageInfo {
+            url: "https://example.com".to_string(),
+            title: Some("Just Title".to_string()),
+            description: None,
+            image: None,
+            embed_html: None,
+        };
+        let html = info.html();
+        assert!(html.contains("mbr-social-link-box"));
+        assert!(html.contains("Just Title"));
+        assert!(!html.contains("<img"));
+    }
+
+    #[test]
+    fn test_html_no_title_plain_link() {
+        let info = PageInfo {
+            url: "https://example.com/page".to_string(),
+            title: None,
+            description: Some("ignored without title".to_string()),
+            image: None,
+            embed_html: None,
+        };
+        let html = info.html();
+        // Should be a plain link
+        assert!(html.contains("<a href='https://example.com/page'>"));
+        assert!(html.contains("https://example.com/page</a>"));
+        assert!(!html.contains("mbr-social-link-box"));
+    }
+
+    // Tests for Giphy URL with query params
+    #[test]
+    fn test_giphy_page_url_with_query() {
+        let url = "https://giphy.com/gifs/cat-funny-CAxbo8KC2A0y4?utm_source=test";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains("https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif"));
+    }
+
+    #[test]
+    fn test_giphy_webp_extension() {
+        let url = "https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.webp";
+        let embed = PageInfo::giphy_embed(url);
+        assert!(embed.is_some());
+        let html = embed.unwrap();
+        assert!(html.contains(url));
+    }
 }

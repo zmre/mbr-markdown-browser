@@ -258,51 +258,30 @@ async fn main() -> Result<(), MbrError> {
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
         let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
-        let (frontmatter, _headings, html_output, _outbound_links, _has_h1, _word_count) =
-            markdown::render(
-                input_path,
-                config.root_dir.as_path(),
-                config.oembed_timeout_ms,
-                link_transform_config,
-                false, // server_mode is false in CLI mode
-                false, // transcode is disabled in CLI mode
-                valid_tag_sources,
-            )
-            .await
-            .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
+        let render_result = markdown::render(
+            input_path,
+            config.root_dir.as_path(),
+            config.oembed_timeout_ms,
+            link_transform_config,
+            false, // server_mode is false in CLI mode
+            false, // transcode is disabled in CLI mode
+            valid_tag_sources,
+        )
+        .await
+        .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
         let templates =
             templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
                 .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
-        let html_output = templates
-            .render_markdown(&html_output, frontmatter, std::collections::HashMap::new())
-            .await?;
+        let html_output = templates.render_markdown(
+            &render_result.html,
+            render_result.frontmatter,
+            std::collections::HashMap::new(),
+        )?;
         println!("{}", &html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
-        let server = server::Server::init(
-            config.host.0,
-            config.port,
-            &config.root_dir,
-            &config.static_folder,
-            &config.markdown_extensions,
-            &config.ignore_dirs,
-            &config.ignore_globs,
-            &config.watcher_ignore_dirs,
-            &config.index_file.clone(),
-            config.oembed_timeout_ms,
-            config.oembed_cache_size,
-            config.template_folder.clone(),
-            config.sort.clone(),
-            false, // gui_mode: browser access, not native window
-            &config.theme,
-            None, // Logging already initialized
-            config.link_tracking,
-            &config.tag_sources,
-            &config.sidebar_style,
-            config.sidebar_max_items,
-            #[cfg(feature = "media-metadata")]
-            config.transcode,
-        )?;
+        let server_config = server::ServerConfig::from(&config).with_gui_mode(false);
+        let server = server::Server::init(server_config)?;
 
         let url_path = build_url_path(
             &path_relative_to_root,
@@ -324,30 +303,8 @@ async fn main() -> Result<(), MbrError> {
             let config_copy = config.clone();
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
             let handle = tokio::spawn(async move {
-                let server = server::Server::init(
-                    config_copy.host.0,
-                    config_copy.port,
-                    config_copy.root_dir.clone(),
-                    &config_copy.static_folder,
-                    &config_copy.markdown_extensions.clone(),
-                    &config_copy.ignore_dirs.clone(),
-                    &config_copy.ignore_globs.clone(),
-                    &config_copy.watcher_ignore_dirs.clone(),
-                    &config_copy.index_file.clone(),
-                    config_copy.oembed_timeout_ms,
-                    config_copy.oembed_cache_size,
-                    config_copy.template_folder.clone(),
-                    config_copy.sort.clone(),
-                    true, // gui_mode: native window mode
-                    &config_copy.theme,
-                    None, // Logging already initialized
-                    config_copy.link_tracking,
-                    &config_copy.tag_sources,
-                    &config_copy.sidebar_style,
-                    config_copy.sidebar_max_items,
-                    #[cfg(feature = "media-metadata")]
-                    config_copy.transcode,
-                );
+                let server_config = server::ServerConfig::from(&config_copy).with_gui_mode(true);
+                let server = server::Server::init(server_config);
                 match server {
                     Ok(mut s) => {
                         // Try up to 10 port increments if address is in use

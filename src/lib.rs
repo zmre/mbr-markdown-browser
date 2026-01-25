@@ -52,6 +52,7 @@ pub use config::{Config, SortField, TagSource};
 #[cfg(feature = "media-metadata")]
 pub use errors::MetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
+pub use markdown::MarkdownRenderResult;
 #[cfg(feature = "ffi")]
 pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};

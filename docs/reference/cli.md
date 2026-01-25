@@ -21,9 +21,9 @@ These flags are mutually exclusive:
 
 | Flag | Description |
 |------|-------------|
-| (none) | Render markdown to stdout |
-| `-s, --server` | Start web server |
-| `-g, --gui` | Launch native GUI window |
+| (none) | Launch GUI window (default with `gui` feature) |
+| `-s, --server` | Start web server only (no GUI) |
+| `-g, --gui` | Launch native GUI window (explicit) |
 | `-b, --build` | Generate static site |
 | `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
 
@@ -44,6 +44,13 @@ These flags are mutually exclusive:
 | `--help` | Print help message | |
 | `--version` | Print version | |
 
+### Boolean Flag Naming Convention
+
+mbr uses two patterns for boolean flags that disable behavior:
+
+- **`--skip-X`**: Skips a build-time operation. Example: `--skip-link-checks` skips link validation during static builds.
+- **`--no-X`**: Disables a runtime feature. Example: `--no-link-tracking` disables bidirectional link tracking.
+
 ### Verbosity Levels
 
 | Flag | Level |
@@ -58,8 +65,13 @@ The `RUST_LOG` environment variable overrides these flags.
 ## Examples
 
 ```bash
-# Render single file to stdout
+# Launch GUI (default mode)
+mbr ~/notes
 mbr README.md
+
+# Render single file to stdout (CLI mode)
+mbr -o README.md
+mbr -o README.md > output.html
 
 # Start server on default port
 mbr -s ~/notes
@@ -67,7 +79,7 @@ mbr -s ~/notes
 # Start server with debug logging
 mbr -s -vv ~/notes
 
-# Launch GUI window
+# Launch GUI window (explicit)
 mbr -g ~/notes
 
 # Build static site

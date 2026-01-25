@@ -17,9 +17,9 @@ flowchart LR
     end
 
     subgraph Modes
-        CLI["CLI Mode<br/>(default)"]
+        GUI["GUI Mode<br/>(default)"]
         SRV["Server Mode<br/>-s"]
-        GUI["GUI Mode<br/>-g"]
+        CLI["CLI Mode<br/>-o"]
         BLD["Build Mode<br/>-b"]
     end
 
@@ -30,9 +30,9 @@ flowchart LR
         STATIC[Static Site]
     end
 
-    MD --> CLI --> HTML
-    MD --> SRV --> WEB
     MD --> GUI --> APP
+    MD --> SRV --> WEB
+    MD --> CLI --> HTML
     MD --> BLD --> STATIC
 ```
 
@@ -40,9 +40,9 @@ flowchart LR
 
 | Mode | Flag | Use Case | Live Reload | Search |
 |------|------|----------|-------------|--------|
-| CLI | (none) | Pipe to tools, scripts | No | No |
+| GUI | (none) or `-g` | Desktop app experience | Yes | Yes (Live grep) |
 | Server | `-s` | Development, browsing | Yes | Yes (Live grep) |
-| GUI | `-g` | Desktop app experience | Yes | Yes (Live grep) |
+| CLI | `-o` | Pipe to tools, scripts | No | No |
 | Build | `-b` | Deploy to static hosts | N/A | Yes (Pagefind) |
 
 ## Choosing a Mode
@@ -54,8 +54,8 @@ flowchart LR
 - Single-file processing
 
 ```bash
-mbr document.md > output.html
-mbr document.md | pbcopy  # Copy to clipboard (macOS)
+mbr -o document.md > output.html
+mbr -o document.md | pbcopy  # Copy to clipboard (macOS)
 ```
 
 ### Use Server Mode When...
@@ -77,7 +77,8 @@ mbr -s ~/notes
 - Prefer a dedicated window
 
 ```bash
-mbr -g ~/notes
+mbr ~/notes         # Default mode (launches GUI)
+mbr -g ~/notes      # Explicit flag (same result)
 ```
 
 ### Use Build Mode When...

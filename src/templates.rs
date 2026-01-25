@@ -75,7 +75,7 @@ impl Templates {
         Ok(())
     }
 
-    pub async fn render_markdown(
+    pub fn render_markdown(
         &self,
         html: &str,
         frontmatter: HashMap<String, serde_json::Value>,
@@ -110,7 +110,7 @@ impl Templates {
         Ok(html_output)
     }
 
-    pub async fn render_section(
+    pub fn render_section(
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
@@ -131,7 +131,7 @@ impl Templates {
 
     /// Renders the home page (root directory) using home.html template.
     /// This allows users to customize their home page differently from section pages.
-    pub async fn render_home(
+    pub fn render_home(
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {

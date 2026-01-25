@@ -135,7 +135,7 @@ pub fn render_preview_with_config(
 
     // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
     // Use empty tag sources for QuickLook (no wikilink transformation)
-    let (frontmatter, headings, html, _outbound_links, _has_h1, _word_count) = rt
+    let render_result = rt
         .block_on(async {
             markdown::render(
                 path.clone(),
@@ -151,6 +151,9 @@ pub fn render_preview_with_config(
         .map_err(|e| QuickLookError::MarkdownRenderError {
             message: e.to_string(),
         })?;
+    let frontmatter = render_result.frontmatter;
+    let headings = render_result.headings;
+    let html = render_result.html;
 
     // Calculate base URL for relative asset resolution
     // Use root_path (markdown repo root) to properly resolve root-relative paths like /videos/
