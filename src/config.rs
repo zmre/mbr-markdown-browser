@@ -195,10 +195,9 @@ pub struct IpArray(pub [u8; 4]);
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub root_dir: PathBuf,
-    pub ip: IpArray,
+    pub host: IpArray,
     pub port: u16,
     pub static_folder: String,
-    pub enable_writes: bool,
     pub markdown_extensions: Vec<String>,
     pub theme: String,
     pub index_file: String,
@@ -218,7 +217,7 @@ pub struct Config {
     pub oembed_cache_size: usize,
     /// Optional template folder that overrides the default .mbr/ and compiled defaults.
     /// Files found here take precedence; missing files fall back to compiled defaults.
-    #[serde(skip)]
+    #[serde(default)]
     pub template_folder: Option<PathBuf>,
     /// Sort configuration for file listings. Supports multi-level sorting by any field.
     /// Default: sort by title (falling back to filename), ascending, string comparison.
@@ -303,10 +302,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             root_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ip: IpArray([127, 0, 0, 1]),
+            host: IpArray([127, 0, 0, 1]),
             port: 5200,
             static_folder: "static".to_string(),
-            enable_writes: false,
             markdown_extensions: vec!["md".to_string()],
             theme: "default".to_string(),
             index_file: "index.md".to_string(),

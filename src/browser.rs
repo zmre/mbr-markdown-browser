@@ -263,7 +263,7 @@ fn reinit_server(
     let config_copy = config.clone();
     let handle = runtime.spawn(async move {
         let server = Server::init(
-            config_copy.ip.0,
+            config_copy.host.0,
             config_copy.port,
             config_copy.root_dir.clone(),
             &config_copy.static_folder,
@@ -304,7 +304,7 @@ fn reinit_server(
         .block_on(ready_rx)
         .map_err(|_| BrowserError::ServerStartFailed)?;
 
-    let url = format!("http://{}:{}/", config.ip, port);
+    let url = format!("http://{}:{}/", config.host, port);
     Ok((handle, url, config))
 }
 

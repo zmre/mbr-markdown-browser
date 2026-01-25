@@ -282,8 +282,10 @@ impl Server {
         println!("Server running at http://{}/", local_addr);
 
         // Signal that server is ready before starting to serve
-        if let Some(tx) = ready_tx {
-            let _ = tx.send(());
+        if let Some(tx) = ready_tx
+            && tx.send(()).is_err()
+        {
+            tracing::debug!("Ready signal receiver dropped (shutdown in progress)");
         }
 
         axum::serve(listener, self.router.clone())
@@ -318,8 +320,10 @@ impl Server {
                     println!("Server running at http://{}/", local_addr);
 
                     // Signal that server is ready with the actual port
-                    if let Some(tx) = ready_tx {
-                        let _ = tx.send(self.port);
+                    if let Some(tx) = ready_tx
+                        && tx.send(self.port).is_err()
+                    {
+                        tracing::debug!("Port signal receiver dropped (shutdown in progress)");
                     }
 
                     axum::serve(listener, self.router.clone())
@@ -329,7 +333,14 @@ impl Server {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < max_retries => {
                     let old_port = self.port;
-                    self.port = self.port.saturating_add(1);
+                    // Fail fast if we've hit the maximum port number
+                    if self.port == 65535 {
+                        return Err(ServerError::BindFailed {
+                            addr: "port range exhausted (reached port 65535)".into(),
+                            source: e,
+                        });
+                    }
+                    self.port += 1;
                     attempts += 1;
                     eprintln!(
                         "Warning: Port {} already in use, trying port {}",
@@ -365,11 +376,14 @@ impl Server {
         // If file watcher is not initialized, close the connection
         let Some(file_change_tx) = config.file_change_tx else {
             tracing::warn!("WebSocket connection attempted but file watcher is disabled");
-            let _ = sender
+            if let Err(e) = sender
                 .send(axum::extract::ws::Message::Text(
-                    r#"{"error":"File watcher not available"}"#.to_string().into(),
+                    r#"{"error":"File watcher not available"}"#.into(),
                 ))
-                .await;
+                .await
+            {
+                tracing::debug!("Failed to send error to WebSocket client: {e}");
+            }
             return;
         };
 

@@ -87,6 +87,10 @@ impl OembedCache {
 
         // Insert the entry
         self.cache.pin().insert(url.clone(), entry);
+        // SAFETY: Relaxed ordering is acceptable here because:
+        // 1. The size tracking is approximate - we don't need perfect synchronization
+        // 2. Worst case: cache temporarily exceeds max_size until next eviction
+        // 3. No data dependency with other operations requires acquire/release
         let new_size = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
 
         tracing::debug!("oembed cached: {} ({} bytes)", url, size_bytes);
@@ -121,6 +125,7 @@ impl OembedCache {
             if guard.remove(&url).is_some() {
                 freed += size;
                 evict_count += 1;
+                // Relaxed: approximate tracking, same rationale as insert
                 self.current_size.fetch_sub(size, Ordering::Relaxed);
             }
         }

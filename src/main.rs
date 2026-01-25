@@ -133,7 +133,7 @@ async fn main() -> Result<(), MbrError> {
             .map_err(|_| ConfigError::InvalidHost { host: host.clone() })?;
         match ip {
             std::net::IpAddr::V4(v4) => {
-                config.ip = mbr::config::IpArray(v4.octets());
+                config.host = mbr::config::IpArray(v4.octets());
             }
             std::net::IpAddr::V6(_) => {
                 return Err(ConfigError::InvalidHost { host: host.clone() }.into());
@@ -280,7 +280,7 @@ async fn main() -> Result<(), MbrError> {
     } else if args.server {
         // Server mode - HTTP server only, no GUI
         let server = server::Server::init(
-            config.ip.0,
+            config.host.0,
             config.port,
             &config.root_dir,
             &config.static_folder,
@@ -311,7 +311,7 @@ async fn main() -> Result<(), MbrError> {
         );
         tracing::info!(
             "Server running at http://{}:{}/{}",
-            config.ip,
+            config.host,
             config.port,
             url_path
         );
@@ -325,7 +325,7 @@ async fn main() -> Result<(), MbrError> {
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
             let handle = tokio::spawn(async move {
                 let server = server::Server::init(
-                    config_copy.ip.0,
+                    config_copy.host.0,
                     config_copy.port,
                     config_copy.root_dir.clone(),
                     &config_copy.static_folder,
@@ -374,7 +374,7 @@ async fn main() -> Result<(), MbrError> {
                 }
             };
 
-            let url = url::Url::parse(format!("http://{}:{}/", config.ip, actual_port).as_str())?;
+            let url = url::Url::parse(format!("http://{}:{}/", config.host, actual_port).as_str())?;
             let url_path = build_url_path(
                 &path_relative_to_root,
                 is_directory,

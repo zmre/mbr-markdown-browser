@@ -1170,13 +1170,14 @@ export class MbrBrowseSingleElement extends LitElement {
       align-items: center;
       gap: 0.25rem;
       padding: 0.2rem 0.5rem;
-      background: var(--pico-secondary-background, #f0f0f0);
+      background: var(--pico-card-background-color, #f8f9fa);
+      border: 1px solid var(--pico-muted-border-color, #e0e0e0);
       border-radius: 1rem;
       font-size: 0.75rem;
-      color: var(--pico-muted-color, #666);
+      color: var(--pico-color, #333);
       text-decoration: none;
       max-width: 200px;
-      transition: background 0.15s ease, color 0.15s ease;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
     }
 
     .tag-pill:hover {

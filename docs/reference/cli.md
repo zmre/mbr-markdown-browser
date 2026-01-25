@@ -39,7 +39,6 @@ These flags are mutually exclusive:
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
-| `--transcode-max-size <MB>` | Skip transcoding for files larger than this | `500` |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -119,7 +118,7 @@ Create `.mbr/config.toml` in your markdown repository:
 # .mbr/config.toml
 
 # Server settings
-ip = "127.0.0.1"
+host = "127.0.0.1"
 port = 5200
 
 # Markdown settings
@@ -156,8 +155,6 @@ watcher_ignore_dirs = [
 # Note: Build mode defaults to 0 (disabled) for performance. Override with CLI if needed.
 oembed_timeout_ms = 500
 
-# Enable write operations (future feature)
-enable_writes = false
 ```
 
 ## Configuration Options
@@ -166,7 +163,7 @@ enable_writes = false
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `ip` | string | `"127.0.0.1"` | IP address to bind |
+| `host` | string | `"127.0.0.1"` | IP address to bind |
 | `port` | number | `5200` | Port number |
 
 ### Content Settings
@@ -203,7 +200,6 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
-| `enable_writes` | bool | `false` | Allow write operations |
 
 ### Navigation Settings
 
@@ -467,7 +463,7 @@ Every configuration option can be set via environment variable with the `MBR_` p
 
 ```bash
 # Server settings
-MBR_IP=0.0.0.0
+MBR_HOST=0.0.0.0
 MBR_PORT=3000
 
 # Content settings
@@ -480,7 +476,6 @@ MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
 
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true
-MBR_TRANSCODE_MAX_SIZE=500  # MB
 ```
 
 Environment variables override config file settings.
