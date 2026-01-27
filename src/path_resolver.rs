@@ -183,6 +183,13 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
         }
     }
 
+    // 4b. Static folder check - ALSO check here for paths not in base_dir
+    // This handles the case where the path doesn't exist in base_dir but exists in static folder
+    // (e.g., /images/blog/photo.png where images/ only exists under static/)
+    if let Some(static_path) = find_in_static_folder(config, request_path) {
+        return ResolvedPath::StaticFile(static_path);
+    }
+
     // 7-8. Check for tag URLs (only if nothing matched in filesystem)
     // This is also reached if safe_join returned None (path traversal blocked)
     if let Some(tag_result) = try_resolve_tag_url(request_path, config.tag_sources) {
@@ -430,6 +437,27 @@ mod tests {
         let expected = fixture
             .path()
             .join("static/style.css")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(result, ResolvedPath::StaticFile(expected));
+    }
+
+    #[test]
+    fn test_static_folder_nested_path() {
+        let fixture = TestFixture::new();
+        fs::create_dir_all(fixture.path().join("static/images/blog")).unwrap();
+        fs::write(
+            fixture.path().join("static/images/blog/photo.png"),
+            "fake image",
+        )
+        .unwrap();
+
+        // Request for /images/blog/photo.png should find static/images/blog/photo.png
+        let result = resolve_request_path(&fixture.config(), "images/blog/photo.png");
+
+        let expected = fixture
+            .path()
+            .join("static/images/blog/photo.png")
             .canonicalize()
             .unwrap();
         assert_eq!(result, ResolvedPath::StaticFile(expected));
@@ -944,6 +972,148 @@ mod tests {
                 assert!(result.is_none(), "Symlink escape should be blocked");
             }
         }
+    }
+
+    // ==================== Static Folder Tests ====================
+
+    #[test]
+    fn test_precedence_base_dir_over_static() {
+        // Request /image.png with file in BOTH locations
+        // Should prefer base_dir (step 1 wins over step 4b)
+        let fixture = TestFixture::new();
+        fs::write(fixture.path().join("image.png"), "direct").unwrap();
+        fs::write(fixture.path().join("static/image.png"), "static").unwrap();
+
+        let result = resolve_request_path(&fixture.config(), "image.png");
+
+        // Should return base_dir file, not static folder
+        assert_eq!(
+            result,
+            ResolvedPath::StaticFile(fixture.canonical_path().join("image.png"))
+        );
+
+        // Verify the correct file would be served by checking content
+        let resolved_path = match result {
+            ResolvedPath::StaticFile(p) => p,
+            _ => panic!("Expected StaticFile"),
+        };
+        let content = fs::read_to_string(resolved_path).unwrap();
+        assert_eq!(
+            content, "direct",
+            "Should serve file from base_dir, not static folder"
+        );
+    }
+
+    #[test]
+    fn test_safe_join_failure_static_fallback() {
+        // Request /images/blog/photo.png where:
+        // - base_dir/images/ does NOT exist (safe_join fails)
+        // - static/images/blog/photo.png DOES exist
+        // This is the exact regression case
+        let fixture = TestFixture::new();
+        fs::create_dir_all(fixture.path().join("static/images/blog")).unwrap();
+        fs::write(fixture.path().join("static/images/blog/photo.png"), "image").unwrap();
+        // Note: base_dir/images/ does NOT exist
+
+        let result = resolve_request_path(&fixture.config(), "images/blog/photo.png");
+
+        let expected = fixture
+            .path()
+            .join("static/images/blog/photo.png")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(result, ResolvedPath::StaticFile(expected));
+    }
+
+    #[test]
+    fn test_empty_static_folder_config() {
+        // Config with static_folder = ""
+        // Static folder lookup should be skipped
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("static")).unwrap();
+        fs::write(dir.path().join("static/file.txt"), "content").unwrap();
+
+        let extensions = vec![String::from("md")];
+        let tag_sources: Vec<String> = vec![];
+        let config = PathResolverConfig {
+            base_dir: dir.path(),
+            static_folder: "", // Empty!
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+        };
+
+        let result = resolve_request_path(&config, "file.txt");
+        assert_eq!(result, ResolvedPath::NotFound);
+    }
+
+    #[test]
+    fn test_deeply_nested_static_path() {
+        // Test 5+ levels of nesting
+        let fixture = TestFixture::new();
+        fs::create_dir_all(fixture.path().join("static/a/b/c/d/e")).unwrap();
+        fs::write(fixture.path().join("static/a/b/c/d/e/deep.png"), "deep").unwrap();
+
+        let result = resolve_request_path(&fixture.config(), "a/b/c/d/e/deep.png");
+
+        let expected = fixture
+            .path()
+            .join("static/a/b/c/d/e/deep.png")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(result, ResolvedPath::StaticFile(expected));
+    }
+
+    #[test]
+    fn test_static_folder_with_trailing_slash_request() {
+        // Request "images/photo.png/" with trailing slash
+        // Behavior is platform-dependent:
+        // - macOS: canonicalize() tolerates trailing slashes on file paths
+        // - Linux: canonicalize() rejects trailing slashes on file paths
+        let fixture = TestFixture::new();
+        fs::create_dir_all(fixture.path().join("static/images")).unwrap();
+        fs::write(fixture.path().join("static/images/photo.png"), "img").unwrap();
+
+        let result = resolve_request_path(&fixture.config(), "images/photo.png/");
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS tolerates trailing slash on file paths
+            let expected = fixture
+                .path()
+                .join("static/images/photo.png")
+                .canonicalize()
+                .unwrap();
+            assert_eq!(result, ResolvedPath::StaticFile(expected));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux rejects trailing slash on file paths (stricter behavior)
+            assert_eq!(result, ResolvedPath::NotFound);
+        }
+    }
+
+    #[test]
+    fn test_static_folder_url_encoded_spaces() {
+        // Test that paths with spaces work through static folder
+        let fixture = TestFixture::new();
+        fs::create_dir_all(fixture.path().join("static/my images")).unwrap();
+        fs::write(
+            fixture.path().join("static/my images/photo file.jpg"),
+            "img",
+        )
+        .unwrap();
+
+        // URL-decoded path (as server would provide after decoding)
+        let result = resolve_request_path(&fixture.config(), "my images/photo file.jpg");
+
+        let expected = fixture
+            .path()
+            .join("static/my images/photo file.jpg")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(result, ResolvedPath::StaticFile(expected));
     }
 }
 
