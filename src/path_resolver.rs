@@ -65,6 +65,8 @@ pub enum ResolvedPath {
     },
     /// Resource not found
     NotFound,
+    /// Redirect to canonical URL (e.g., /x/index/ → /x/)
+    Redirect(String),
 }
 
 /// Configuration for path resolution.
@@ -126,6 +128,39 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
 
         // 3. Try markdown extensions on base path (for /foo/ → foo.md)
         let candidate_base = strip_trailing_separator(&candidate_path);
+
+        // 3a. Check for non-canonical index URL (e.g., /x/index/ should redirect to /x/)
+        // This must come before step 3 to catch URLs like /docs/index/ before they resolve
+        let index_stem = Path::new(config.index_file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("index");
+
+        if let Some(file_name) = candidate_base.file_name().and_then(|f| f.to_str())
+            && file_name == index_stem
+        {
+            // Check if parent directory contains the actual index file
+            if let Some(parent) = candidate_base.parent() {
+                let index_path = parent.join(config.index_file);
+                if index_path.is_file() {
+                    // Build canonical URL: /x/index/ → /x/
+                    // Use canonicalized base_dir since parent is also canonicalized from safe_join
+                    let canonical_base = config.base_dir.canonicalize().ok();
+                    let canonical = canonical_base
+                        .and_then(|base| pathdiff::diff_paths(parent, base))
+                        .map(|p| {
+                            let s = p.to_string_lossy();
+                            if s.is_empty() {
+                                "/".to_string()
+                            } else {
+                                format!("/{}/", s)
+                            }
+                        })
+                        .unwrap_or_else(|| "/".to_string());
+                    return ResolvedPath::Redirect(canonical);
+                }
+            }
+        }
 
         if let Some(md_path) = find_markdown_file(&candidate_base, config.markdown_extensions) {
             return ResolvedPath::MarkdownFile(md_path);
@@ -702,6 +737,70 @@ mod tests {
 
         // Empty sources
         assert_eq!(try_resolve_tag_url("tags/rust", &[]), None);
+    }
+
+    // ==================== Non-Canonical Index URL Redirect Tests ====================
+
+    #[test]
+    fn test_non_canonical_index_redirects() {
+        let fixture = TestFixture::new();
+        let docs = fixture.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        fs::write(docs.join("index.md"), "# Docs Index").unwrap();
+
+        // /docs/index/ should redirect to /docs/
+        let result = resolve_request_path(&fixture.config(), "docs/index/");
+        assert_eq!(result, ResolvedPath::Redirect("/docs/".to_string()));
+    }
+
+    #[test]
+    fn test_root_index_redirects() {
+        let fixture = TestFixture::new();
+        fs::write(fixture.path().join("index.md"), "# Home").unwrap();
+
+        // /index/ should redirect to /
+        let result = resolve_request_path(&fixture.config(), "index/");
+        assert_eq!(result, ResolvedPath::Redirect("/".to_string()));
+    }
+
+    #[test]
+    fn test_nested_index_redirects() {
+        let fixture = TestFixture::new();
+        let nested = fixture.path().join("a/b/c");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("index.md"), "# Nested").unwrap();
+
+        // /a/b/c/index/ should redirect to /a/b/c/
+        let result = resolve_request_path(&fixture.config(), "a/b/c/index/");
+        assert_eq!(result, ResolvedPath::Redirect("/a/b/c/".to_string()));
+    }
+
+    #[test]
+    fn test_regular_file_named_index_no_redirect() {
+        let fixture = TestFixture::new();
+        // Create a regular file that happens to be named index.md (not in a directory with index)
+        fs::write(fixture.path().join("index.md"), "# Regular Index").unwrap();
+
+        // But also create docs/readme.md as a standalone file (no parent index)
+        let docs = fixture.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        fs::write(docs.join("readme.md"), "# Readme").unwrap();
+
+        // /docs/readme/ should NOT redirect (readme is not the index file)
+        let result = resolve_request_path(&fixture.config(), "docs/readme/");
+        assert!(matches!(result, ResolvedPath::MarkdownFile(_)));
+    }
+
+    #[test]
+    fn test_index_without_trailing_slash_redirects() {
+        let fixture = TestFixture::new();
+        let docs = fixture.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        fs::write(docs.join("index.md"), "# Docs Index").unwrap();
+
+        // /docs/index (without trailing slash) should also redirect to /docs/
+        let result = resolve_request_path(&fixture.config(), "docs/index");
+        assert_eq!(result, ResolvedPath::Redirect("/docs/".to_string()));
     }
 
     // ==================== Path Traversal Security Tests ====================

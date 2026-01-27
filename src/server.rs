@@ -1041,6 +1041,14 @@ impl Server {
                         StatusCode::INTERNAL_SERVER_ERROR
                     })
             }
+            ResolvedPath::Redirect(canonical_url) => {
+                tracing::debug!("redirecting to canonical URL: {}", &canonical_url);
+                Ok(Response::builder()
+                    .status(StatusCode::MOVED_PERMANENTLY)
+                    .header(header::LOCATION, &canonical_url)
+                    .body(Body::empty())
+                    .unwrap())
+            }
             ResolvedPath::NotFound => {
                 // Try to serve HLS content (playlist or segment) for transcoded variants
                 #[cfg(feature = "media-metadata")]
