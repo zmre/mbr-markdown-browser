@@ -470,10 +470,11 @@ body {
     }
 }
 
-/* Info panel adjustments for QuickLook */
-.info-panel {
-    max-height: 50vh;
-    overflow-y: auto;
+/* Hide info panel - doesn't work in QuickLook context */
+.info-trigger,
+.info-panel,
+#info-panel-toggle {
+    display: none !important;
 }
 "##;
 
