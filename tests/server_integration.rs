@@ -185,6 +185,136 @@ async fn test_static_file_serving() {
     assert_eq!(text, "Hello from static file");
 }
 
+// ============================================================================
+// Static Folder Serving Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_static_folder_file_serving() {
+    // Create temp repo with static folder structure
+    let repo = TestRepo::new();
+    repo.create_dir("static/images");
+    repo.create_static_file("static/images/test.png", b"PNG data");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request /images/test.png should find static/images/test.png
+    let response = server.get("/images/test.png").await;
+
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"PNG data");
+}
+
+#[tokio::test]
+async fn test_static_folder_nested_path_serving() {
+    // Test deeply nested paths through actual HTTP requests
+    let repo = TestRepo::new();
+    repo.create_dir("static/images/blog/2024");
+    repo.create_static_file("static/images/blog/2024/photo.jpg", b"JPEG");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/images/blog/2024/photo.jpg").await;
+
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"JPEG");
+}
+
+#[tokio::test]
+async fn test_static_folder_deeply_nested_path() {
+    // Test 5+ levels of nesting through HTTP
+    let repo = TestRepo::new();
+    repo.create_dir("static/a/b/c/d/e");
+    repo.create_static_file("static/a/b/c/d/e/deep.txt", b"deep content");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/a/b/c/d/e/deep.txt").await;
+
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"deep content");
+}
+
+#[tokio::test]
+async fn test_static_folder_precedence_base_dir_wins() {
+    // When file exists in BOTH base_dir and static folder, base_dir should win
+    let repo = TestRepo::new();
+    repo.create_static_file("image.png", b"from base_dir");
+    repo.create_dir("static");
+    repo.create_static_file("static/image.png", b"from static folder");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/image.png").await;
+
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(
+        bytes.as_ref(),
+        b"from base_dir",
+        "Should serve file from base_dir, not static folder"
+    );
+}
+
+#[tokio::test]
+async fn test_static_folder_fallback_when_not_in_base() {
+    // When file ONLY exists in static folder, it should be served
+    let repo = TestRepo::new();
+    // Note: NOT creating base_dir/images/
+    repo.create_dir("static/images");
+    repo.create_static_file("static/images/only-here.png", b"static only");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/images/only-here.png").await;
+
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"static only");
+}
+
+#[tokio::test]
+async fn test_static_folder_with_spaces_in_path() {
+    // Test URL-encoded spaces in static folder paths
+    let repo = TestRepo::new();
+    repo.create_dir("static/my images");
+    repo.create_static_file("static/my images/photo file.jpg", b"spaced content");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded spaces
+    let response = server.get("/my%20images/photo%20file.jpg").await;
+
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"spaced content");
+}
+
+#[tokio::test]
+async fn test_static_folder_trailing_slash_still_serves_file() {
+    // On Unix, requesting a static file with trailing slash still works
+    // because canonicalize() handles trailing slashes on file paths.
+    let repo = TestRepo::new();
+    repo.create_dir("static/images");
+    repo.create_static_file("static/images/photo.png", b"image");
+
+    let server = TestServer::start(&repo).await;
+
+    // Trailing slash on a file path is tolerated on Unix
+    let response = server.get("/images/photo.png/").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Static file with trailing slash should still serve on Unix"
+    );
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"image");
+}
+
 #[tokio::test]
 async fn test_404_for_missing_file() {
     let repo = TestRepo::new();
