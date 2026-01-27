@@ -1067,21 +1067,31 @@ mod tests {
     #[test]
     fn test_static_folder_with_trailing_slash_request() {
         // Request "images/photo.png/" with trailing slash
-        // On Unix, canonicalize() handles trailing slashes on file paths,
-        // so the file is still resolved successfully.
+        // Behavior is platform-dependent:
+        // - macOS: canonicalize() tolerates trailing slashes on file paths
+        // - Linux: canonicalize() rejects trailing slashes on file paths
         let fixture = TestFixture::new();
         fs::create_dir_all(fixture.path().join("static/images")).unwrap();
         fs::write(fixture.path().join("static/images/photo.png"), "img").unwrap();
 
         let result = resolve_request_path(&fixture.config(), "images/photo.png/");
 
-        // On Unix, trailing slash on a file path is tolerated by canonicalize()
-        let expected = fixture
-            .path()
-            .join("static/images/photo.png")
-            .canonicalize()
-            .unwrap();
-        assert_eq!(result, ResolvedPath::StaticFile(expected));
+        #[cfg(target_os = "macos")]
+        {
+            // macOS tolerates trailing slash on file paths
+            let expected = fixture
+                .path()
+                .join("static/images/photo.png")
+                .canonicalize()
+                .unwrap();
+            assert_eq!(result, ResolvedPath::StaticFile(expected));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux rejects trailing slash on file paths (stricter behavior)
+            assert_eq!(result, ResolvedPath::NotFound);
+        }
     }
 
     #[test]

@@ -294,25 +294,36 @@ async fn test_static_folder_with_spaces_in_path() {
 }
 
 #[tokio::test]
-async fn test_static_folder_trailing_slash_still_serves_file() {
-    // On Unix, requesting a static file with trailing slash still works
-    // because canonicalize() handles trailing slashes on file paths.
+async fn test_static_folder_trailing_slash_platform_behavior() {
+    // Behavior is platform-dependent:
+    // - macOS: canonicalize() tolerates trailing slashes on file paths (200)
+    // - Linux: canonicalize() rejects trailing slashes on file paths (404)
     let repo = TestRepo::new();
     repo.create_dir("static/images");
     repo.create_static_file("static/images/photo.png", b"image");
 
     let server = TestServer::start(&repo).await;
-
-    // Trailing slash on a file path is tolerated on Unix
     let response = server.get("/images/photo.png/").await;
 
-    assert_eq!(
-        response.status(),
-        200,
-        "Static file with trailing slash should still serve on Unix"
-    );
-    let bytes = response.bytes().await.unwrap();
-    assert_eq!(bytes.as_ref(), b"image");
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(
+            response.status(),
+            200,
+            "macOS: trailing slash on file path should serve file"
+        );
+        let bytes = response.bytes().await.unwrap();
+        assert_eq!(bytes.as_ref(), b"image");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(
+            response.status(),
+            404,
+            "Linux: trailing slash on file path should return 404"
+        );
+    }
 }
 
 #[tokio::test]
