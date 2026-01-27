@@ -183,6 +183,13 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
         }
     }
 
+    // 4b. Static folder check - ALSO check here for paths not in base_dir
+    // This handles the case where the path doesn't exist in base_dir but exists in static folder
+    // (e.g., /images/blog/photo.png where images/ only exists under static/)
+    if let Some(static_path) = find_in_static_folder(config, request_path) {
+        return ResolvedPath::StaticFile(static_path);
+    }
+
     // 7-8. Check for tag URLs (only if nothing matched in filesystem)
     // This is also reached if safe_join returned None (path traversal blocked)
     if let Some(tag_result) = try_resolve_tag_url(request_path, config.tag_sources) {
@@ -430,6 +437,27 @@ mod tests {
         let expected = fixture
             .path()
             .join("static/style.css")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(result, ResolvedPath::StaticFile(expected));
+    }
+
+    #[test]
+    fn test_static_folder_nested_path() {
+        let fixture = TestFixture::new();
+        fs::create_dir_all(fixture.path().join("static/images/blog")).unwrap();
+        fs::write(
+            fixture.path().join("static/images/blog/photo.png"),
+            "fake image",
+        )
+        .unwrap();
+
+        // Request for /images/blog/photo.png should find static/images/blog/photo.png
+        let result = resolve_request_path(&fixture.config(), "images/blog/photo.png");
+
+        let expected = fixture
+            .path()
+            .join("static/images/blog/photo.png")
             .canonicalize()
             .unwrap();
         assert_eq!(result, ResolvedPath::StaticFile(expected));
