@@ -90,7 +90,14 @@ impl Templates {
 
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
-            context.insert(k, v);
+            // Normalize "style" frontmatter: if it's an array, join with spaces
+            // This allows `style: ['slides', 'other']` to work as body classes
+            if k == "style" {
+                let normalized = normalize_style_value(v);
+                context.insert(k, &normalized);
+            } else {
+                context.insert(k, v);
+            }
         });
         // Add extra context (breadcrumbs, current_dir_name, etc.)
         extra_context.iter().for_each(|(k, v)| {
@@ -237,6 +244,24 @@ impl Templates {
     }
 }
 
+/// Normalize a style frontmatter value to a space-separated string.
+///
+/// Handles:
+/// - String: returned as-is
+/// - Array: elements joined with spaces
+/// - Other: converted to string representation
+fn normalize_style_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    }
+}
+
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     // Partials (underscore prefix indicates internal-only templates)
     ("_head.html", include_str!("../templates/_head.html")),
@@ -275,3 +300,51 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../templates/tag_index.html"),
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_normalize_style_string() {
+        let value = json!("slides");
+        assert_eq!(normalize_style_value(&value), "slides");
+    }
+
+    #[test]
+    fn test_normalize_style_string_with_spaces() {
+        let value = json!("slides other");
+        assert_eq!(normalize_style_value(&value), "slides other");
+    }
+
+    #[test]
+    fn test_normalize_style_array() {
+        let value = json!(["slides", "other"]);
+        assert_eq!(normalize_style_value(&value), "slides other");
+    }
+
+    #[test]
+    fn test_normalize_style_array_single_element() {
+        let value = json!(["slides"]);
+        assert_eq!(normalize_style_value(&value), "slides");
+    }
+
+    #[test]
+    fn test_normalize_style_array_empty() {
+        let value = json!([]);
+        assert_eq!(normalize_style_value(&value), "");
+    }
+
+    #[test]
+    fn test_normalize_style_null() {
+        let value = json!(null);
+        assert_eq!(normalize_style_value(&value), "null");
+    }
+
+    #[test]
+    fn test_normalize_style_number() {
+        let value = json!(42);
+        assert_eq!(normalize_style_value(&value), "42");
+    }
+}

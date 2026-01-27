@@ -102,6 +102,7 @@ export class MbrBrowseSingleElement extends LitElement {
   private _keyboardHandler: ((e: KeyboardEvent) => void) | null = null;
   private _toggleHandler: ((e: Event) => void) | null = null;
   private _unsubscribeSiteNav: (() => void) | null = null;
+  private _slidesStartHandler: (() => void) | null = null;
   private _focusedIndex = -1;
   private _flatItems: Array<{ type: 'folder' | 'file' | 'tag'; path: string; depth: number }> = [];
 
@@ -161,6 +162,10 @@ export class MbrBrowseSingleElement extends LitElement {
     // Listen for toggle events from mbr-sidebar-trigger
     this._toggleHandler = () => this.toggle();
     window.addEventListener('mbr-sidebar-toggle', this._toggleHandler);
+
+    // Close drawer when slides presentation starts
+    this._slidesStartHandler = () => this.close();
+    window.addEventListener('mbr-slides-start', this._slidesStartHandler);
   }
 
   override disconnectedCallback() {
@@ -180,6 +185,9 @@ export class MbrBrowseSingleElement extends LitElement {
     }
     if (this._toggleHandler) {
       window.removeEventListener('mbr-sidebar-toggle', this._toggleHandler);
+    }
+    if (this._slidesStartHandler) {
+      window.removeEventListener('mbr-slides-start', this._slidesStartHandler);
     }
 
     // Remove body class

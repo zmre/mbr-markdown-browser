@@ -162,7 +162,7 @@ export class MbrSlidesElement extends LitElement {
       // Load Reveal.js CSS, JS, and notes plugin
       await Promise.all([
         loadCss(`${assetBase}reveal.css`),
-        loadCss(`${assetBase}reveal-theme-black.css`),
+        loadCss(`${assetBase}reveal-theme-blank.css`),
         loadCss(`${assetBase}reveal-slides.css`),
         loadScript(`${assetBase}reveal.js`),
         loadScript(`${assetBase}reveal-notes.js`),
@@ -246,10 +246,17 @@ export class MbrSlidesElement extends LitElement {
       outer.parentElement?.replaceChild(notes, outer)
     })
 
-    // Hide nav/breadcrumbs/footer in slides mode
+    // Hide nav/breadcrumbs/footer/sidebar in slides mode
     document.querySelector('nav')?.setAttribute('style', 'display: none')
     document.querySelector('.breadcrumbs')?.setAttribute('style', 'display: none')
     document.querySelector('footer')?.setAttribute('style', 'display: none')
+    document.querySelector('mbr-browse-single')?.setAttribute('style', 'display: none')
+
+    // Remove sidebar layout class so it doesn't reserve space
+    document.body.classList.remove('mbr-has-sidebar')
+
+    // Dispatch event so browser components can close any open panels
+    window.dispatchEvent(new CustomEvent('mbr-slides-start'))
 
     // Create Reveal.js wrapper structure
     const revealDiv = document.createElement('div')
@@ -283,9 +290,9 @@ export class MbrSlidesElement extends LitElement {
         title="Start presentation mode (P)"
       >
         ${this._isLoading
-          ? html`<span class="loading-spinner"></span>`
-          : html`<span class="play-icon"></span>`
-        }
+        ? html`<span class="loading-spinner"></span>`
+        : html`<span class="play-icon"></span>`
+      }
         <span>${this._isLoading ? 'Loading...' : 'Play Slides (P)'}</span>
       </button>
     `

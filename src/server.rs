@@ -2627,6 +2627,11 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "text/css",
     ),
     (
+        "/reveal-theme-blank.css",
+        include_bytes!("../templates/reveal.theme.blank.5.2.1.css"),
+        "text/css",
+    ),
+    (
         "/reveal-theme-black.css",
         include_bytes!("../templates/reveal.theme.black.5.2.1.css"),
         "text/css",
