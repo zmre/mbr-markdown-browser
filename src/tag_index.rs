@@ -236,6 +236,16 @@ impl TagIndex {
     pub fn total_sources(&self) -> usize {
         self.sources.pin().len()
     }
+
+    /// Clear all indexed tags and display values.
+    ///
+    /// Call this when the underlying files have changed and the index
+    /// needs to be rebuilt on next scan.
+    pub fn clear(&self) {
+        self.index.pin().clear();
+        self.display_values.pin().clear();
+        self.sources.pin().clear();
+    }
 }
 
 #[cfg(test)]

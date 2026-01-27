@@ -590,6 +590,18 @@ impl Repo {
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string(self)
     }
+
+    /// Clear all cached data, forcing a full rescan on next scan_all() call.
+    ///
+    /// Call this when files are added, removed, or modified to ensure
+    /// the next scan picks up the changes.
+    pub fn clear(&self) {
+        self.scanned_folders.pin().clear();
+        self.markdown_files.pin().clear();
+        self.other_files.pin().clear();
+        self.queued_folders.pin().clear();
+        self.tag_index.clear();
+    }
 }
 
 /// Returns file_size, created_secs, modified_secs

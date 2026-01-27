@@ -107,6 +107,7 @@ export class MbrBrowseElement extends LitElement {
 
   private _keyboardHandler: ((e: KeyboardEvent) => void) | null = null;
   private _unsubscribeSiteNav: (() => void) | null = null;
+  private _slidesStartHandler: (() => void) | null = null;
 
   // ========================================
   // Lifecycle
@@ -182,6 +183,10 @@ export class MbrBrowseElement extends LitElement {
     };
 
     document.addEventListener('keydown', this._keyboardHandler);
+
+    // Close when slides presentation starts
+    this._slidesStartHandler = () => this.close();
+    window.addEventListener('mbr-slides-start', this._slidesStartHandler);
   }
 
   override disconnectedCallback() {
@@ -191,6 +196,9 @@ export class MbrBrowseElement extends LitElement {
     }
     if (this._unsubscribeSiteNav) {
       this._unsubscribeSiteNav();
+    }
+    if (this._slidesStartHandler) {
+      window.removeEventListener('mbr-slides-start', this._slidesStartHandler);
     }
   }
 

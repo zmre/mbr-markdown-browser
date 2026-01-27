@@ -196,6 +196,47 @@ async fn test_404_for_missing_file() {
 }
 
 #[tokio::test]
+async fn test_non_canonical_index_url_redirects() {
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/index.md", "# Docs");
+
+    let server = TestServer::start(&repo).await;
+
+    // Use a client that doesn't follow redirects
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Request /docs/index/ should get 301 redirect to /docs/
+    let response = client.get(server.url("/docs/index/")).send().await.unwrap();
+
+    assert_eq!(response.status(), 301);
+    assert_eq!(response.headers().get("location").unwrap(), "/docs/");
+}
+
+#[tokio::test]
+async fn test_root_index_url_redirects() {
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home");
+
+    let server = TestServer::start(&repo).await;
+
+    // Use a client that doesn't follow redirects
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Request /index/ should get 301 redirect to /
+    let response = client.get(server.url("/index/")).send().await.unwrap();
+
+    assert_eq!(response.status(), 301);
+    assert_eq!(response.headers().get("location").unwrap(), "/");
+}
+
+#[tokio::test]
 async fn test_markdown_with_frontmatter() {
     let repo = TestRepo::new();
     let mut frontmatter = HashMap::new();

@@ -307,6 +307,37 @@ impl Server {
             }
         });
 
+        // Spawn background task to invalidate repo cache when files change
+        let repo_for_invalidation = Arc::clone(&repo);
+        let markdown_extensions_for_invalidation = markdown_extensions.clone();
+        let mut repo_change_rx = file_change_tx.subscribe();
+        tokio::spawn(async move {
+            while let Ok(event) = repo_change_rx.recv().await {
+                // Invalidate cache for:
+                // - Created files (new file added)
+                // - Deleted files (file removed)
+                // - Modified markdown files (frontmatter may have changed)
+                let should_invalidate = match event.event {
+                    crate::watcher::ChangeEventType::Created => true,
+                    crate::watcher::ChangeEventType::Deleted => true,
+                    crate::watcher::ChangeEventType::Modified => {
+                        // Only invalidate for markdown files (frontmatter changes)
+                        markdown_extensions_for_invalidation
+                            .iter()
+                            .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
+                    }
+                };
+
+                if should_invalidate {
+                    tracing::debug!(
+                        "Invalidating repo cache due to file change: {:?}",
+                        event.relative_path
+                    );
+                    repo_for_invalidation.clear();
+                }
+            }
+        });
+
         // Initialize link caches (use same size strategy as oembed cache)
         // 2MB for outbound links, 1MB for inbound with 60 second TTL
         let link_cache = Arc::new(LinkCache::new(2 * 1024 * 1024));
@@ -1009,6 +1040,14 @@ impl Server {
                         tracing::error!("Error generating tag source index: {e}");
                         StatusCode::INTERNAL_SERVER_ERROR
                     })
+            }
+            ResolvedPath::Redirect(canonical_url) => {
+                tracing::debug!("redirecting to canonical URL: {}", &canonical_url);
+                Ok(Response::builder()
+                    .status(StatusCode::MOVED_PERMANENTLY)
+                    .header(header::LOCATION, &canonical_url)
+                    .body(Body::empty())
+                    .unwrap())
             }
             ResolvedPath::NotFound => {
                 // Try to serve HLS content (playlist or segment) for transcoded variants
@@ -2624,6 +2663,11 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/reveal.css",
         include_bytes!("../templates/reveal.5.2.1.css"),
+        "text/css",
+    ),
+    (
+        "/reveal-theme-blank.css",
+        include_bytes!("../templates/reveal.theme.blank.5.2.1.css"),
         "text/css",
     ),
     (
