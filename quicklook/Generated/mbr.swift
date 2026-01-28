@@ -352,19 +352,29 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
+// Initial value and increment amount for handles. 
+// These ensure that SWIFT handles always have the lowest bit set
+fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
+fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
+
 fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
     // All mutation happens with this lock held, which is why we implement @unchecked Sendable.
     private let lock = NSLock()
     private var map: [UInt64: T] = [:]
-    private var currentHandle: UInt64 = 1
+    private var currentHandle: UInt64 = UNIFFI_HANDLEMAP_INITIAL
 
     func insert(obj: T) -> UInt64 {
         lock.withLock {
-            let handle = currentHandle
-            currentHandle += 1
-            map[handle] = obj
-            return handle
+            return doInsert(obj)
         }
+    }
+
+    // Low-level insert function, this assumes `lock` is held.
+    private func doInsert(_ obj: T) -> UInt64 {
+        let handle = currentHandle
+        currentHandle += UNIFFI_HANDLEMAP_DELTA
+        map[handle] = obj
+        return handle
     }
 
      func get(handle: UInt64) throws -> T {
@@ -373,6 +383,15 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
                 throw UniffiInternalError.unexpectedStaleHandle
             }
             return obj
+        }
+    }
+
+     func clone(handle: UInt64) throws -> UInt64 {
+        try lock.withLock {
+            guard let obj = map[handle] else {
+                throw UniffiInternalError.unexpectedStaleHandle
+            }
+            return doInsert(obj)
         }
     }
 
@@ -463,53 +482,27 @@ fileprivate struct FfiConverterString: FfiConverter {
 }
 
 
-public struct QuickLookConfig {
+public struct QuickLookConfig: Equatable, Hashable {
     public var includeSyntaxHighlighting: Bool
     public var includeMermaid: Bool
-    public var includeVidstack: Bool
     public var baseUrl: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(includeSyntaxHighlighting: Bool, includeMermaid: Bool, includeVidstack: Bool, baseUrl: String?) {
+    public init(includeSyntaxHighlighting: Bool, includeMermaid: Bool, baseUrl: String?) {
         self.includeSyntaxHighlighting = includeSyntaxHighlighting
         self.includeMermaid = includeMermaid
-        self.includeVidstack = includeVidstack
         self.baseUrl = baseUrl
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension QuickLookConfig: Sendable {}
 #endif
-
-
-extension QuickLookConfig: Equatable, Hashable {
-    public static func ==(lhs: QuickLookConfig, rhs: QuickLookConfig) -> Bool {
-        if lhs.includeSyntaxHighlighting != rhs.includeSyntaxHighlighting {
-            return false
-        }
-        if lhs.includeMermaid != rhs.includeMermaid {
-            return false
-        }
-        if lhs.includeVidstack != rhs.includeVidstack {
-            return false
-        }
-        if lhs.baseUrl != rhs.baseUrl {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(includeSyntaxHighlighting)
-        hasher.combine(includeMermaid)
-        hasher.combine(includeVidstack)
-        hasher.combine(baseUrl)
-    }
-}
-
-
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -520,7 +513,6 @@ public struct FfiConverterTypeQuickLookConfig: FfiConverterRustBuffer {
             try QuickLookConfig(
                 includeSyntaxHighlighting: FfiConverterBool.read(from: &buf), 
                 includeMermaid: FfiConverterBool.read(from: &buf), 
-                includeVidstack: FfiConverterBool.read(from: &buf), 
                 baseUrl: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -528,7 +520,6 @@ public struct FfiConverterTypeQuickLookConfig: FfiConverterRustBuffer {
     public static func write(_ value: QuickLookConfig, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.includeSyntaxHighlighting, into: &buf)
         FfiConverterBool.write(value.includeMermaid, into: &buf)
-        FfiConverterBool.write(value.includeVidstack, into: &buf)
         FfiConverterOptionString.write(value.baseUrl, into: &buf)
     }
 }
@@ -549,7 +540,7 @@ public func FfiConverterTypeQuickLookConfig_lower(_ value: QuickLookConfig) -> R
 }
 
 
-public enum QuickLookError: Swift.Error {
+public enum QuickLookError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
     
     
@@ -562,8 +553,21 @@ public enum QuickLookError: Swift.Error {
     case ConfigError(message: String
     )
     case InvalidPathEncoding
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
 }
 
+#if compiler(>=6)
+extension QuickLookError: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -645,21 +649,6 @@ public func FfiConverterTypeQuickLookError_lower(_ value: QuickLookError) -> Rus
     return FfiConverterTypeQuickLookError.lower(value)
 }
 
-
-extension QuickLookError: Equatable, Hashable {}
-
-
-
-
-extension QuickLookError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
-}
-
-
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -710,7 +699,7 @@ private enum InitializationResult {
 // the code inside is only computed once.
 private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
-    let bindings_contract_version = 29
+    let bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
     let scaffolding_contract_version = ffi_mbr_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
