@@ -3,8 +3,10 @@ use regex::Regex;
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
 use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::LazyLock;
 use std::time::Duration;
+use url::Url;
 
 /// Formats an error with its full source chain for detailed logging.
 /// Walks the `source()` chain to reveal nested errors (e.g., reqwest -> hyper -> io).
@@ -87,6 +89,113 @@ static GIPHY_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 // GIST regex patterns
 static GIST_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"https?://gist\.github\.com/").unwrap());
+
+/// Check if an IPv4 address is in a private/reserved range (SSRF protection)
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_private()              // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        || ip.is_loopback()      // 127.0.0.0/8
+        || ip.is_link_local()    // 169.254.0.0/16
+        || ip.is_broadcast()     // 255.255.255.255
+        || ip.is_unspecified()   // 0.0.0.0
+        || ip.is_documentation() // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+        || ip.octets()[0] == 0 // 0.0.0.0/8 (current network)
+}
+
+/// Check if an IPv6 address is in a private/reserved range (SSRF protection)
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()       // ::1
+        || ip.is_unspecified() // ::
+        // Unique local addresses (fc00::/7) - check first byte
+        || (ip.segments()[0] & 0xfe00) == 0xfc00
+        // Link-local addresses (fe80::/10)
+        || (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Check if an IP address is private/reserved (SSRF protection)
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_ipv4(v4),
+        IpAddr::V6(v6) => is_private_ipv6(v6),
+    }
+}
+
+/// Check if a hostname is explicitly local (SSRF protection)
+fn is_local_hostname(host: &str) -> bool {
+    let host_lower = host.to_lowercase();
+    host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".localdomain")
+        || host_lower == "127.0.0.1"
+        || host_lower == "::1"
+        || host_lower == "[::1]"
+        || host_lower.starts_with("192.168.")
+        || host_lower.starts_with("10.")
+        || host_lower.starts_with("172.16.")
+        || host_lower.starts_with("172.17.")
+        || host_lower.starts_with("172.18.")
+        || host_lower.starts_with("172.19.")
+        || host_lower.starts_with("172.20.")
+        || host_lower.starts_with("172.21.")
+        || host_lower.starts_with("172.22.")
+        || host_lower.starts_with("172.23.")
+        || host_lower.starts_with("172.24.")
+        || host_lower.starts_with("172.25.")
+        || host_lower.starts_with("172.26.")
+        || host_lower.starts_with("172.27.")
+        || host_lower.starts_with("172.28.")
+        || host_lower.starts_with("172.29.")
+        || host_lower.starts_with("172.30.")
+        || host_lower.starts_with("172.31.")
+}
+
+/// Validate that a URL is safe to fetch (SSRF protection).
+/// Returns Ok(()) if safe, Err with reason if blocked.
+fn validate_url_for_ssrf(url_str: &str) -> Result<(), String> {
+    let parsed = Url::parse(url_str).map_err(|e| format!("Invalid URL: {e}"))?;
+
+    // Only allow http/https
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("Blocked scheme: {scheme}"));
+    }
+
+    // Check hostname
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+
+    // Check for obviously local hostnames
+    if is_local_hostname(host) {
+        return Err(format!("Blocked local hostname: {host}"));
+    }
+
+    // Try to parse as IP address directly
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_private_ip(ip)
+    {
+        return Err(format!("Blocked private IP: {ip}"));
+    }
+
+    // For hostnames, resolve and check all IPs
+    // Use port 80 for resolution (port doesn't affect DNS lookup)
+    let socket_addr = format!("{host}:80");
+    if let Ok(addrs) = socket_addr.to_socket_addrs() {
+        for addr in addrs {
+            if is_private_ip(addr.ip()) {
+                return Err(format!(
+                    "Hostname {host} resolves to private IP: {}",
+                    addr.ip()
+                ));
+            }
+        }
+    }
+    // Note: If DNS resolution fails, we allow the request to proceed.
+    // The HTTP client will fail with a more descriptive error.
+
+    Ok(())
+}
 
 #[derive(Default, Clone)]
 pub struct PageInfo {
@@ -253,6 +362,15 @@ impl PageInfo {
             return Ok(PageInfo {
                 url: url.to_string(),
                 embed_html: Some(media.to_html(false, true, false)),
+                ..Default::default()
+            });
+        }
+
+        // SSRF protection: validate URL before making network request
+        if let Err(reason) = validate_url_for_ssrf(url) {
+            tracing::warn!("SSRF protection blocked URL ({}): {}", url, reason);
+            return Ok(PageInfo {
+                url: url.to_string(),
                 ..Default::default()
             });
         }
@@ -871,5 +989,155 @@ mod tests {
         assert!(embed.is_some());
         let html = embed.unwrap();
         assert!(html.contains(url));
+    }
+
+    // SSRF protection tests
+    #[test]
+    fn test_ssrf_blocks_localhost() {
+        let result = validate_url_for_ssrf("http://localhost/admin");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Blocked local hostname"));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_localhost_variant() {
+        let result = validate_url_for_ssrf("http://test.localhost/admin");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_127_0_0_1() {
+        let result = validate_url_for_ssrf("http://127.0.0.1/secret");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Blocked"));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_private_10_x() {
+        let result = validate_url_for_ssrf("http://10.0.0.1/internal");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_private_172_16_x() {
+        let result = validate_url_for_ssrf("http://172.16.0.1/internal");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_private_192_168_x() {
+        let result = validate_url_for_ssrf("http://192.168.1.1/router");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv6_loopback() {
+        let result = validate_url_for_ssrf("http://[::1]/admin");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_local_domain() {
+        let result = validate_url_for_ssrf("http://printer.local/config");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_internal_domain() {
+        let result = validate_url_for_ssrf("http://db.internal/");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_allows_public_url() {
+        let result = validate_url_for_ssrf("https://example.com/page");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ssrf_allows_https() {
+        let result = validate_url_for_ssrf("https://github.com/user/repo");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_file_scheme() {
+        let result = validate_url_for_ssrf("file:///etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Blocked scheme"));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ftp_scheme() {
+        let result = validate_url_for_ssrf("ftp://ftp.example.com/file");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Blocked scheme"));
+    }
+
+    #[test]
+    fn test_is_private_ipv4() {
+        use std::net::Ipv4Addr;
+
+        // Private ranges
+        assert!(is_private_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(10, 255, 255, 255)));
+        assert!(is_private_ipv4(Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(172, 31, 255, 255)));
+        assert!(is_private_ipv4(Ipv4Addr::new(192, 168, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(192, 168, 255, 255)));
+
+        // Loopback
+        assert!(is_private_ipv4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(127, 255, 255, 255)));
+
+        // Link-local
+        assert!(is_private_ipv4(Ipv4Addr::new(169, 254, 0, 1)));
+
+        // Public IPs should NOT be private
+        assert!(!is_private_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_private_ipv4(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_private_ipv4(Ipv4Addr::new(93, 184, 216, 34)));
+    }
+
+    #[test]
+    fn test_is_private_ipv6() {
+        use std::net::Ipv6Addr;
+
+        // Loopback
+        assert!(is_private_ipv6(Ipv6Addr::LOCALHOST));
+
+        // Unspecified
+        assert!(is_private_ipv6(Ipv6Addr::UNSPECIFIED));
+
+        // Unique local (fc00::/7)
+        assert!(is_private_ipv6("fc00::1".parse().unwrap()));
+        assert!(is_private_ipv6("fd00::1".parse().unwrap()));
+
+        // Link-local (fe80::/10)
+        assert!(is_private_ipv6("fe80::1".parse().unwrap()));
+
+        // Public IPv6 should NOT be private
+        assert!(!is_private_ipv6("2001:4860:4860::8888".parse().unwrap())); // Google DNS
+    }
+
+    #[tokio::test]
+    async fn test_ssrf_protection_in_new_from_url() {
+        // Attempting to fetch a localhost URL should return plain link, not error
+        let result = PageInfo::new_from_url("http://localhost/admin", 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        // Should return a plain link (no embed, no title fetched)
+        assert!(info.embed_html.is_none());
+        assert!(info.title.is_none());
+        assert_eq!(info.url, "http://localhost/admin");
+    }
+
+    #[tokio::test]
+    async fn test_ssrf_protection_private_ip() {
+        let result = PageInfo::new_from_url("http://192.168.1.1/", 500).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.embed_html.is_none());
+        assert!(info.title.is_none());
     }
 }

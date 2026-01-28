@@ -120,12 +120,15 @@ jobs:
 
       - name: Extract and validate version
         id: version
+        env:
+          # Use intermediate env var to prevent command injection from workflow_dispatch input
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           # Determine version from tag or input
           if [[ "${{ github.event_name }}" == "push" ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           else
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="$INPUT_VERSION"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
