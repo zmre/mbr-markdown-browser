@@ -176,21 +176,47 @@ pub fn render_preview_with_config(
     )
 }
 
-/// Search upward from the given path to find a directory containing `.mbr/`.
+/// Search upward from the given path to find a repository root.
+///
+/// Searches for the same markers as Config::find_root_dir() to ensure
+/// consistent root detection between QuickLook and server modes.
 fn find_config_root(path: &Path) -> Option<PathBuf> {
-    let mut current = if path.is_file() { path.parent()? } else { path };
+    // Directory markers (same as Config::find_root_dir)
+    const DIR_MARKERS: &[&str] = &[".mbr", ".git", ".zk", ".obsidian"];
+    // File markers (same as Config::find_root_dir)
+    const FILE_MARKERS: &[&str] = &["book.toml", "mkdocs.yml", "docusaurus.config.js"];
 
-    loop {
-        let mbr_path = current.join(".mbr");
-        if mbr_path.is_dir() {
-            return Some(current.to_path_buf());
-        }
+    let start_dir = if path.is_file() { path.parent()? } else { path };
 
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return None,
+    // Search for directory markers
+    for marker in DIR_MARKERS {
+        if let Some(root) = search_folder_in_ancestors(start_dir, marker) {
+            return Some(root);
         }
     }
+
+    // Search for file markers
+    for marker in FILE_MARKERS {
+        if let Some(root) = search_file_in_ancestors(start_dir, marker) {
+            return Some(root);
+        }
+    }
+
+    None
+}
+
+fn search_folder_in_ancestors(start_dir: &Path, folder_name: &str) -> Option<PathBuf> {
+    start_dir
+        .ancestors()
+        .find(|ancestor| ancestor.join(folder_name).is_dir())
+        .map(|p| p.to_path_buf())
+}
+
+fn search_file_in_ancestors(start_dir: &Path, file_name: &str) -> Option<PathBuf> {
+    start_dir
+        .ancestors()
+        .find(|ancestor| ancestor.join(file_name).is_file())
+        .map(|p| p.to_path_buf())
 }
 
 /// Resolve an asset path, checking the direct path first, then falling back to static folder.
@@ -923,5 +949,173 @@ mod tests {
             html.contains("mbrfile://"),
             "HTML should contain mbrfile:// URLs for video sources"
         );
+    }
+
+    #[test]
+    fn test_render_preview_with_static_folder_image() {
+        // Create temp dir with .mbr folder
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mbr_dir = temp_dir.path().join(".mbr");
+        std::fs::create_dir(&mbr_dir).unwrap();
+
+        // Create image in static/images/blog/
+        let static_images = temp_dir.path().join("static/images/blog");
+        std::fs::create_dir_all(&static_images).unwrap();
+        std::fs::write(static_images.join("test.png"), b"fake image data").unwrap();
+
+        // Create markdown file with root-relative image reference
+        let file_path = temp_dir.path().join("article.md");
+        std::fs::write(
+            &file_path,
+            "# Test Article\n\n![caption](/images/blog/test.png)\n",
+        )
+        .unwrap();
+
+        let path = file_path.to_str().unwrap().to_string();
+        let html = render_preview(path, None).unwrap();
+
+        // The image should resolve to static/images/blog/test.png
+        let expected_static_path = temp_dir.path().join("static/images/blog/test.png");
+        assert!(
+            html.contains(&format!("mbrfile://{}", expected_static_path.display())),
+            "Expected image to use static folder path.\nHTML excerpt: {}",
+            html.lines()
+                .filter(|l| l.contains("img") || l.contains("mbrfile") || l.contains("/images"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn test_render_preview_with_git_only_repo() {
+        // Repo with .git but no .mbr - common case!
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_dir = temp_dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+
+        // Create image in static folder
+        let static_images = temp_dir.path().join("static/images");
+        std::fs::create_dir_all(&static_images).unwrap();
+        std::fs::write(static_images.join("photo.jpg"), b"image").unwrap();
+
+        // Create markdown in subdirectory
+        let docs_dir = temp_dir.path().join("docs");
+        std::fs::create_dir(&docs_dir).unwrap();
+        let file_path = docs_dir.join("readme.md");
+        std::fs::write(&file_path, "![photo](/images/photo.jpg)").unwrap();
+
+        let html = render_preview(file_path.to_str().unwrap().to_string(), None).unwrap();
+
+        let expected = temp_dir.path().join("static/images/photo.jpg");
+        assert!(
+            html.contains(&format!("mbrfile://{}", expected.display())),
+            "Should find static folder in .git-only repo"
+        );
+    }
+
+    #[test]
+    fn test_find_config_root_with_git_only() {
+        // Test that find_config_root finds .git folders too
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_dir = temp_dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+
+        let subdir = temp_dir.path().join("docs/nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let file_path = subdir.join("test.md");
+        std::fs::write(&file_path, "# Test").unwrap();
+
+        let found_root = find_config_root(&file_path);
+        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_find_config_root_mbr_takes_precedence() {
+        // When both .mbr and .git exist, .mbr should take precedence
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mbr_dir = temp_dir.path().join(".mbr");
+        let git_dir = temp_dir.path().join(".git");
+        std::fs::create_dir(&mbr_dir).unwrap();
+        std::fs::create_dir(&git_dir).unwrap();
+
+        let file_path = temp_dir.path().join("test.md");
+        std::fs::write(&file_path, "# Test").unwrap();
+
+        let found_root = find_config_root(&file_path);
+        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_find_config_root_with_book_toml() {
+        // Test file marker (book.toml for mdbook)
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("book.toml"),
+            "[book]\ntitle = \"Test\"",
+        )
+        .unwrap();
+
+        let subdir = temp_dir.path().join("src");
+        std::fs::create_dir(&subdir).unwrap();
+        let file_path = subdir.join("SUMMARY.md");
+        std::fs::write(&file_path, "# Summary").unwrap();
+
+        let found_root = find_config_root(&file_path);
+        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test --features ffi -- --ignored --nocapture test_debug_real_file
+    fn test_debug_real_file() {
+        let file_path = "/Users/pwalsh/src/icl/website.worktree/2026-01-28-test/src/routes/blog/2026/ai-coding-agents-drawing-the-line/+page.md";
+
+        if !std::path::Path::new(file_path).exists() {
+            eprintln!("File not found, skipping debug test");
+            return;
+        }
+
+        // Check what root is found
+        let path = std::path::PathBuf::from(file_path);
+        let root = find_config_root(&path);
+        eprintln!("\n=== Root found: {:?} ===", root);
+
+        // Check config
+        if let Some(ref root_path) = root {
+            let config = crate::config::Config::read(root_path).unwrap_or_default();
+            eprintln!("=== Config static_folder: {:?} ===", config.static_folder);
+
+            // Check if static folder exists
+            let static_path = root_path.join(&config.static_folder);
+            eprintln!(
+                "=== Static folder exists: {} at {:?} ===",
+                static_path.exists(),
+                static_path
+            );
+        }
+
+        // Render and check output
+        let html = render_preview(file_path.to_string(), None).unwrap();
+
+        eprintln!("\n=== Image-related lines in HTML ===");
+        for line in html.lines() {
+            let line_lower = line.to_lowercase();
+            if line_lower.contains("<img")
+                || line_lower.contains("mbrfile")
+                || line_lower.contains("/images/blog")
+            {
+                eprintln!("{}", line.trim());
+            }
+        }
+
+        // Extract all src attributes
+        eprintln!("\n=== All src= attributes ===");
+        let re = regex::Regex::new(r#"src="([^"]+)""#).unwrap();
+        for cap in re.captures_iter(&html) {
+            let src = &cap[1];
+            if src.contains("images") || src.contains("mbrfile") {
+                eprintln!("src=\"{}\"", src);
+            }
+        }
     }
 }
