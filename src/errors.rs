@@ -50,6 +50,12 @@ pub enum MbrError {
 
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    #[error("Invalid media path: {0}")]
+    InvalidMediaPath(String),
+
+    #[error("Directory traversal attempt detected")]
+    DirectoryTraversal,
 }
 
 /// Errors related to the HTTP server.

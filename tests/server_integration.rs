@@ -2326,3 +2326,307 @@ async fn test_pdf_cover_no_sidecar_returns_404_without_pdfium() {
         status
     );
 }
+
+// ============================================================================
+// Media Viewer Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_media_viewer_video_missing_path_returns_error() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request video viewer without path parameter should return 400 Bad Request
+    let response = server.get("/.mbr/videos/").await;
+
+    assert_eq!(
+        response.status(),
+        400,
+        "Missing path parameter should return 400 Bad Request"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("Bad Request") || html.contains("Missing"),
+        "Error page should indicate missing path. Got: {}",
+        &html[..std::cmp::min(500, html.len())]
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_valid_path_returns_200() {
+    let repo = TestRepo::new();
+
+    // Create a test video file
+    repo.create_dir("videos");
+    repo.create_static_file("videos/test.mp4", b"fake video content");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request video viewer with valid path
+    let response = server.get("/.mbr/videos/?path=/videos/test.mp4").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid video path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+
+    // Verify the media viewer template is rendered
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain mbr-media-viewer component. Got: {}",
+        &html[..std::cmp::min(1000, html.len())]
+    );
+
+    // Verify media type is set correctly
+    assert!(
+        html.contains("video") || html.contains("Video"),
+        "Response should indicate video media type"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_directory_traversal_blocked() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Attempt directory traversal via path parameter
+    let response = server.get("/.mbr/videos/?path=/../etc/passwd").await;
+
+    assert_eq!(
+        response.status(),
+        403,
+        "Directory traversal should return 403 Forbidden"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("Forbidden") || html.contains("Access denied"),
+        "Error page should indicate access denied. Got: {}",
+        &html[..std::cmp::min(500, html.len())]
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_url_encoded_traversal_blocked() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded ".." = "%2e%2e"
+    let response = server
+        .get("/.mbr/videos/?path=%2f%2e%2e%2fetc%2fpasswd")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        403,
+        "URL-encoded directory traversal should return 403 Forbidden"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_nonexistent_file_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request a video file that doesn't exist
+    let response = server
+        .get("/.mbr/videos/?path=/videos/nonexistent.mp4")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        404,
+        "Nonexistent video file should return 404 Not Found"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_nested_path() {
+    let repo = TestRepo::new();
+
+    // Create a nested video structure
+    repo.create_dir("videos/2024/january");
+    repo.create_static_file("videos/2024/january/event.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .get("/.mbr/videos/?path=/videos/2024/january/event.mp4")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Nested video path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain media viewer component"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_with_spaces_in_path() {
+    let repo = TestRepo::new();
+
+    // Create a video file with spaces in the name
+    repo.create_dir("videos");
+    repo.create_static_file("videos/my video file.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded path with spaces
+    let response = server
+        .get("/.mbr/videos/?path=/videos/my%20video%20file.mp4")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Video path with spaces should return 200 OK"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_pdf_missing_path_returns_error() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request PDF viewer without path parameter
+    let response = server.get("/.mbr/pdfs/").await;
+
+    assert_eq!(
+        response.status(),
+        400,
+        "Missing path parameter should return 400 Bad Request"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_pdf_valid_path_returns_200() {
+    let repo = TestRepo::new();
+
+    // Create a test PDF file
+    repo.create_dir("documents");
+    repo.create_static_file("documents/report.pdf", b"%PDF-1.4 fake pdf");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/.mbr/pdfs/?path=/documents/report.pdf").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid PDF path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain mbr-media-viewer component"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_audio_missing_path_returns_error() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request audio viewer without path parameter
+    let response = server.get("/.mbr/audio/").await;
+
+    assert_eq!(
+        response.status(),
+        400,
+        "Missing path parameter should return 400 Bad Request"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_audio_valid_path_returns_200() {
+    let repo = TestRepo::new();
+
+    // Create a test audio file
+    repo.create_dir("audio");
+    repo.create_static_file("audio/song.mp3", b"fake mp3 content");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/.mbr/audio/?path=/audio/song.mp3").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid audio path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain mbr-media-viewer component"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_has_breadcrumbs() {
+    let repo = TestRepo::new();
+
+    repo.create_dir("videos/tutorials");
+    repo.create_static_file("videos/tutorials/lesson.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .get("/.mbr/videos/?path=/videos/tutorials/lesson.mp4")
+        .await;
+
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+
+    // Check for breadcrumb navigation
+    assert!(
+        html.contains("tutorials") || html.contains("videos"),
+        "Response should contain breadcrumb navigation"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_has_back_navigation() {
+    let repo = TestRepo::new();
+
+    repo.create_dir("videos");
+    repo.create_static_file("videos/demo.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/.mbr/videos/?path=/videos/demo.mp4").await;
+
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+
+    // Check for back navigation
+    assert!(
+        html.contains("Back") || html.contains("parent_path") || html.contains("/videos/"),
+        "Response should contain back navigation"
+    );
+}

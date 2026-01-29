@@ -224,6 +224,8 @@ enum StaticFileKind {
         height: Option<u32>,
         duration: Option<String>,
         title: Option<String>,
+        genre: Option<String>,
+        album: Option<String>,
     },
     Audio {
         duration: Option<String>,
@@ -307,6 +309,8 @@ impl StaticFileMetadata {
                     height: None,
                     duration: None,
                     title: None,
+                    genre: None,
+                    album: None,
                 },
                 ..Default::default()
             },
@@ -371,11 +375,29 @@ impl StaticFileMetadata {
                     let metadata =
                         metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
 
+                    // Extract genre from tags (case-insensitive search)
+                    let genre = metadata.as_ref().and_then(|m| {
+                        m.tags
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("genre"))
+                            .map(|(_, v)| v.clone())
+                    });
+
+                    // Extract album from tags (case-insensitive search)
+                    let album = metadata.as_ref().and_then(|m| {
+                        m.tags
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("album"))
+                            .map(|(_, v)| v.clone())
+                    });
+
                     StaticFileKind::Video {
                         width: metadata.as_ref().and_then(|m| m.width),
                         height: metadata.as_ref().and_then(|m| m.height),
                         duration: metadata.as_ref().and_then(|m| m.duration.clone()),
                         title: metadata.as_ref().and_then(|m| m.title.clone()),
+                        genre,
+                        album,
                     }
                 }
                 _ => me.kind,

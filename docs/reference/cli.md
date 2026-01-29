@@ -638,3 +638,99 @@ Useful for:
 - Theme development
 - Testing template changes
 - Sharing themes across repositories
+
+---
+
+## Media Viewer Endpoints
+
+mbr provides dedicated viewer pages for media files. These endpoints render media content within the site's navigation chrome (header, breadcrumbs, theme) for a consistent browsing experience.
+
+### Available Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/.mbr/videos/` | Video player page |
+| `/.mbr/pdfs/` | PDF viewer page |
+| `/.mbr/audio/` | Audio player page |
+
+### Usage
+
+Each endpoint accepts a `path` query parameter specifying the media file location (relative to repository root):
+
+```bash
+# Video viewer
+http://localhost:5200/.mbr/videos/?path=/videos/demo.mp4
+
+# PDF viewer
+http://localhost:5200/.mbr/pdfs/?path=/docs/report.pdf
+
+# Audio player
+http://localhost:5200/.mbr/audio/?path=/music/track.mp3
+```
+
+The `path` parameter should be URL-encoded if it contains spaces or special characters:
+
+```bash
+# Path with spaces
+http://localhost:5200/.mbr/videos/?path=/videos/My%20Video.mp4
+```
+
+### Features
+
+**Video viewer:**
+- Native HTML5 video player with controls
+- Automatic poster image from `.cover.png` sidecar files
+- Chapter navigation via `mbr-video-extras` component (if `.chapters.en.vtt` exists)
+- Captions/transcripts support (if `.captions.en.vtt` exists)
+
+**PDF viewer:**
+- Embedded PDF viewer using native browser support
+- Fallback link to open PDF in new tab
+
+**Audio player:**
+- Native HTML5 audio player with controls
+- Cover art display from `.cover.png` sidecar files
+- Filename display
+
+### Security
+
+The media viewer validates all paths to prevent directory traversal attacks:
+
+- Paths containing `..` are rejected
+- Paths must resolve within the repository root
+- URL-encoded traversal attempts are detected and blocked
+
+Invalid paths return an error page rather than exposing file system contents.
+
+### Static Builds
+
+During static site generation (`-b`), media viewer pages are generated at:
+
+```
+build/
+└── .mbr/
+    ├── videos/
+    │   └── index.html
+    ├── pdfs/
+    │   └── index.html
+    └── audio/
+        └── index.html
+```
+
+These pages work identically in static builds using client-side JavaScript to load and display media based on the `path` query parameter.
+
+### Examples
+
+```bash
+# Start server and open video viewer
+mbr -s ~/notes
+open "http://localhost:5200/.mbr/videos/?path=/videos/demo.mp4"
+
+# Generate static site with media viewers
+mbr -b ~/notes
+# Viewer pages are at build/.mbr/videos/index.html, etc.
+
+# Test directory traversal protection (should show error)
+curl -s "http://localhost:5200/.mbr/videos/?path=/../../../etc/passwd"
+# Returns error page, not file contents
+```

@@ -1,19 +1,20 @@
 use axum::{
     Router,
     body::Body,
-    extract::{self, State, ws::WebSocketUpgrade},
+    extract::{self, OriginalUri, State, ws::WebSocketUpgrade},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use percent_encoding::percent_decode_str;
+use std::{net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::config::{SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
-use crate::errors::ServerError;
+use crate::errors::{MbrError, ServerError};
 use crate::link_grep::InboundLinkCache;
 use crate::link_index::{LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
@@ -31,6 +32,121 @@ use crate::{markdown, repo::Repo};
 use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Type of media for the viewer page.
+///
+/// Used to route requests to the appropriate media viewer template
+/// at `/.mbr/videos/`, `/.mbr/pdfs/`, or `/.mbr/audio/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaViewerType {
+    Video,
+    Pdf,
+    Audio,
+}
+
+impl MediaViewerType {
+    /// Parse from route path.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/videos/"), Some(MediaViewerType::Video));
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/pdfs/"), Some(MediaViewerType::Pdf));
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/audio/"), Some(MediaViewerType::Audio));
+    /// assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
+    /// ```
+    #[must_use]
+    pub fn from_route(path: &str) -> Option<Self> {
+        match path {
+            "/.mbr/videos/" => Some(Self::Video),
+            "/.mbr/pdfs/" => Some(Self::Pdf),
+            "/.mbr/audio/" => Some(Self::Audio),
+            _ => None,
+        }
+    }
+
+    /// Template name for this media type.
+    #[must_use]
+    pub const fn template_name(&self) -> &'static str {
+        "media_viewer.html"
+    }
+
+    /// Human-readable label for this media type.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Video => "Video",
+            Self::Pdf => "PDF",
+            Self::Audio => "Audio",
+        }
+    }
+
+    /// Lowercase string representation for template context.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Pdf => "pdf",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+/// Query parameters for media viewer routes.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaViewerQuery {
+    /// Path to the media file (URL-encoded)
+    pub path: Option<String>,
+}
+
+/// Validates a media path from a query parameter.
+///
+/// - URL-decodes the path
+/// - Rejects paths containing ".." (directory traversal)
+/// - Validates the path resolves within the repository root
+///
+/// # Arguments
+///
+/// * `path` - The URL-encoded path from the query parameter
+/// * `repo_root` - The repository root directory
+///
+/// # Returns
+///
+/// * `Ok(PathBuf)` - The validated, canonical path to the media file
+/// * `Err(MbrError)` - If the path is invalid or attempts directory traversal
+pub fn validate_media_path(path: &str, repo_root: &Path) -> Result<PathBuf, MbrError> {
+    // URL-decode the path
+    let decoded = percent_decode_str(path)
+        .decode_utf8()
+        .map_err(|_| MbrError::InvalidMediaPath("Invalid UTF-8 in path".to_string()))?;
+
+    // Reject paths containing ".." to prevent directory traversal
+    if decoded.contains("..") {
+        return Err(MbrError::DirectoryTraversal);
+    }
+
+    // Remove leading slash if present for path joining
+    let clean_path = decoded.trim_start_matches('/');
+
+    // Construct the full path
+    let full_path = repo_root.join(clean_path);
+
+    // Canonicalize to resolve any symlinks and get the real path
+    let canonical_path = full_path
+        .canonicalize()
+        .map_err(|_| MbrError::InvalidMediaPath(format!("Path does not exist: {}", decoded)))?;
+
+    // Verify the canonical path is within the repo root
+    let canonical_root = repo_root
+        .canonicalize()
+        .map_err(|_| MbrError::InvalidMediaPath("Repository root not found".to_string()))?;
+
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(MbrError::DirectoryTraversal);
+    }
+
+    Ok(canonical_path)
+}
 
 pub struct Server {
     pub router: Router,
@@ -378,6 +494,10 @@ impl Server {
             .route("/.mbr/site.json", get(Self::get_site_info))
             .route("/.mbr/search", post(Self::search_handler))
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
+            // Media viewer routes - must be before the catch-all /.mbr/{*path}
+            .route("/.mbr/videos/", get(Self::serve_media_viewer))
+            .route("/.mbr/pdfs/", get(Self::serve_media_viewer))
+            .route("/.mbr/audio/", get(Self::serve_media_viewer))
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
             .layer(CompressionLayer::new())
@@ -730,6 +850,183 @@ impl Server {
             StatusCode::OK,
             Json(serde_json::to_value(response).unwrap()),
         )
+    }
+
+    /// Media viewer endpoint for video, PDF, and audio content.
+    ///
+    /// GET /.mbr/videos/?path=<encoded_path>
+    /// GET /.mbr/pdfs/?path=<encoded_path>
+    /// GET /.mbr/audio/?path=<encoded_path>
+    ///
+    /// Renders the media_viewer.html template with the appropriate media type
+    /// and validated media path. The path query parameter must be URL-encoded
+    /// and point to a valid file within the repository.
+    pub async fn serve_media_viewer(
+        State(config): State<ServerState>,
+        OriginalUri(uri): OriginalUri,
+        extract::Query(query): extract::Query<MediaViewerQuery>,
+    ) -> impl IntoResponse {
+        use serde_json::json;
+
+        // Determine media type from route path (the URI path without query string)
+        let route_path = uri.path();
+        let media_type = match MediaViewerType::from_route(route_path) {
+            Some(mt) => mt,
+            None => {
+                tracing::error!("Invalid media viewer route: {}", route_path);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::NOT_FOUND,
+                    "Not Found",
+                    Some("Invalid media viewer route"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                );
+            }
+        };
+
+        // Check for missing path parameter
+        let media_path = match &query.path {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                tracing::warn!("Media viewer called without path parameter");
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    Some("Missing required 'path' query parameter"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                );
+            }
+        };
+
+        // Validate the media path
+        let validated_path = match validate_media_path(media_path, &config.base_dir) {
+            Ok(p) => p,
+            Err(MbrError::DirectoryTraversal) => {
+                tracing::warn!("Directory traversal attempt: {}", media_path);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::FORBIDDEN,
+                    "Forbidden",
+                    Some("Access denied: Invalid path"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                );
+            }
+            Err(MbrError::InvalidMediaPath(msg)) => {
+                tracing::warn!("Invalid media path: {} - {}", media_path, msg);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::NOT_FOUND,
+                    "Not Found",
+                    Some(&format!("Media file not found: {}", msg)),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                );
+            }
+            Err(e) => {
+                tracing::error!("Unexpected error validating media path: {}", e);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    Some("Failed to validate media path"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                );
+            }
+        };
+
+        // Extract title from filename
+        let title = validated_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Media Viewer")
+            .to_string();
+
+        // Calculate relative path for display and parent path for navigation
+        let relative_path = validated_path
+            .strip_prefix(&config.base_dir)
+            .unwrap_or(&validated_path);
+
+        // Generate breadcrumbs from the media file's directory path
+        let breadcrumbs =
+            generate_breadcrumbs(relative_path.parent().unwrap_or(std::path::Path::new("")));
+        let breadcrumbs_json: Vec<_> = breadcrumbs
+            .iter()
+            .map(|b| json!({"name": b.name, "url": b.url}))
+            .collect();
+
+        // Get parent path for back navigation
+        let parent_path = relative_path.parent().and_then(|p| p.to_str()).map(|p| {
+            if p.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}/", p)
+            }
+        });
+
+        // Build template context
+        let mut context = std::collections::HashMap::new();
+        context.insert("media_type".to_string(), json!(media_type.as_str()));
+        context.insert("title".to_string(), json!(title));
+        context.insert("media_path".to_string(), json!(media_path));
+        context.insert("breadcrumbs".to_string(), json!(breadcrumbs_json));
+        if let Some(parent) = parent_path {
+            context.insert("parent_path".to_string(), json!(parent));
+        }
+        context.insert("server_mode".to_string(), json!(true));
+        context.insert("gui_mode".to_string(), json!(config.gui_mode));
+        context.insert("relative_base".to_string(), json!("/.mbr/"));
+        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
+        context.insert(
+            "sidebar_max_items".to_string(),
+            json!(config.sidebar_max_items),
+        );
+
+        // Render the media viewer template
+        match config.templates.render_media_viewer(context) {
+            Ok(html) => {
+                let etag = generate_etag(html.as_bytes());
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+                    .header(header::ETAG, etag)
+                    .body(Body::from(html))
+                    .unwrap_or_else(|_| {
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("Internal Server Error"))
+                            .unwrap()
+                    })
+            }
+            Err(e) => {
+                tracing::error!("Failed to render media viewer template: {}", e);
+                Self::render_error_page(
+                    &config.templates,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    Some("Failed to render media viewer"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                )
+            }
+        }
     }
 
     /// Serves assets from /.mbr/* path.
@@ -3176,6 +3473,138 @@ mod tests {
         assert_eq!(b1, b2);
         assert_ne!(b1, b3);
     }
+
+    // ==================== MediaViewerType Tests ====================
+
+    #[test]
+    fn test_media_viewer_type_from_route_videos() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/videos/"),
+            Some(MediaViewerType::Video)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_pdfs() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/pdfs/"),
+            Some(MediaViewerType::Pdf)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_audio() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/audio/"),
+            Some(MediaViewerType::Audio)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_invalid() {
+        assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
+        assert_eq!(MediaViewerType::from_route("/.mbr/videos"), None); // missing trailing slash
+        assert_eq!(MediaViewerType::from_route("/.mbr/images/"), None);
+    }
+
+    #[test]
+    fn test_media_viewer_type_template_name() {
+        assert_eq!(MediaViewerType::Video.template_name(), "media_viewer.html");
+        assert_eq!(MediaViewerType::Pdf.template_name(), "media_viewer.html");
+        assert_eq!(MediaViewerType::Audio.template_name(), "media_viewer.html");
+    }
+
+    #[test]
+    fn test_media_viewer_type_label() {
+        assert_eq!(MediaViewerType::Video.label(), "Video");
+        assert_eq!(MediaViewerType::Pdf.label(), "PDF");
+        assert_eq!(MediaViewerType::Audio.label(), "Audio");
+    }
+
+    #[test]
+    fn test_media_viewer_type_as_str() {
+        assert_eq!(MediaViewerType::Video.as_str(), "video");
+        assert_eq!(MediaViewerType::Pdf.as_str(), "pdf");
+        assert_eq!(MediaViewerType::Audio.as_str(), "audio");
+    }
+
+    // ==================== validate_media_path Tests ====================
+
+    #[test]
+    fn test_validate_media_path_rejects_directory_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = validate_media_path("../etc/passwd", temp_dir.path());
+        assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_embedded_directory_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = validate_media_path("some/../../etc/passwd", temp_dir.path());
+        assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_url_encoded_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // URL-encoded ".." = "%2e%2e"
+        let result = validate_media_path("%2e%2e/etc/passwd", temp_dir.path());
+        assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_nonexistent_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = validate_media_path("nonexistent.mp4", temp_dir.path());
+        assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
+    }
+
+    #[test]
+    fn test_validate_media_path_accepts_valid_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.mp4");
+        std::fs::write(&test_file, "dummy content").unwrap();
+
+        let result = validate_media_path("test.mp4", temp_dir.path());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_handles_leading_slash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.mp4");
+        std::fs::write(&test_file, "dummy content").unwrap();
+
+        let result = validate_media_path("/test.mp4", temp_dir.path());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_handles_url_encoded_spaces() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test file.mp4");
+        std::fs::write(&test_file, "dummy content").unwrap();
+
+        // URL-encoded space = "%20"
+        let result = validate_media_path("test%20file.mp4", temp_dir.path());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_handles_nested_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let subdir = temp_dir.path().join("videos").join("2024");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let test_file = subdir.join("demo.mp4");
+        std::fs::write(&test_file, "dummy content").unwrap();
+
+        let result = validate_media_path("videos/2024/demo.mp4", temp_dir.path());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
 }
 
 #[cfg(test)]
@@ -3332,6 +3761,126 @@ mod proptests {
                     parent_trimmed,
                     path_str
                 );
+            }
+        }
+
+        // ==================== validate_media_path Property Tests ====================
+
+        /// Any path containing ".." should be rejected
+        #[test]
+        fn prop_validate_media_path_rejects_dotdot(
+            prefix in "[a-zA-Z0-9_-]{0,10}",
+            suffix in "[a-zA-Z0-9_-]{0,10}"
+        ) {
+            let temp_dir = tempfile::tempdir().unwrap();
+            // Test various ".." patterns
+            let test_paths = vec![
+                format!("{}/../{}", prefix, suffix),
+                format!("../{}/{}", prefix, suffix),
+                format!("{}/{}/..", prefix, suffix),
+                format!("{}%2F..%2F{}", prefix, suffix), // URL-encoded /
+            ];
+
+            for path in test_paths {
+                // Any path with ".." should be rejected as directory traversal
+                // Note: URL-decoded path is what matters
+                if path.contains("..") {
+                    let result = validate_media_path(&path, temp_dir.path());
+                    // Path either doesn't exist or is rejected as traversal
+                    prop_assert!(
+                        result.is_err(),
+                        "Path containing '..' should be rejected: {:?}",
+                        path
+                    );
+                }
+            }
+        }
+
+        /// validate_media_path is deterministic - same input always gives same output
+        #[test]
+        fn prop_validate_media_path_deterministic(
+            path in "[a-zA-Z0-9_/-]{1,30}"
+        ) {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let result1 = validate_media_path(&path, temp_dir.path());
+            let result2 = validate_media_path(&path, temp_dir.path());
+
+            // Both should be the same (both errors or both same Ok value)
+            match (&result1, &result2) {
+                (Ok(p1), Ok(p2)) => prop_assert_eq!(p1, p2),
+                (Err(_), Err(_)) => (), // Both errors is fine
+                _ => prop_assert!(false, "Results should be consistent: {:?} vs {:?}", result1, result2),
+            }
+        }
+
+        /// URL-encoded paths decode correctly
+        #[test]
+        fn prop_validate_media_path_decodes_url_encoding(
+            filename in "[a-zA-Z0-9]{1,15}"
+        ) {
+            let temp_dir = tempfile::tempdir().unwrap();
+
+            // Create a test file
+            let test_file = temp_dir.path().join(&filename);
+            std::fs::write(&test_file, "test").unwrap();
+
+            // Test with URL-encoded path (spaces as %20)
+            let encoded = format!("%20{}", filename); // Leading space encoded
+            let result = validate_media_path(&encoded, temp_dir.path());
+
+            // The decoded path " filename" doesn't exist, so should fail
+            prop_assert!(result.is_err(), "Encoded path with non-existent target should fail");
+
+            // Test with the actual filename - should succeed
+            let result = validate_media_path(&filename, temp_dir.path());
+            prop_assert!(result.is_ok(), "Valid path should succeed: {:?}", filename);
+        }
+
+        /// Valid paths within repo root succeed
+        #[test]
+        fn prop_validate_media_path_valid_paths_succeed(
+            filename in "[a-zA-Z0-9_-]{1,15}"
+        ) {
+            let temp_dir = tempfile::tempdir().unwrap();
+
+            // Create a test file
+            let test_file = temp_dir.path().join(&filename);
+            std::fs::write(&test_file, "test content").unwrap();
+
+            // Validate the path
+            let result = validate_media_path(&filename, temp_dir.path());
+            prop_assert!(result.is_ok(), "Valid file path should succeed: {:?}", filename);
+
+            // Result should be the canonical path to the file
+            if let Ok(canonical) = result {
+                let expected_canonical = test_file.canonicalize().unwrap();
+                prop_assert_eq!(canonical, expected_canonical);
+            }
+        }
+
+        /// Paths with leading slash are handled correctly
+        #[test]
+        fn prop_validate_media_path_handles_leading_slash(
+            filename in "[a-zA-Z0-9_-]{1,15}"
+        ) {
+            let temp_dir = tempfile::tempdir().unwrap();
+
+            // Create a test file
+            let test_file = temp_dir.path().join(&filename);
+            std::fs::write(&test_file, "test content").unwrap();
+
+            // Test with leading slash
+            let path_with_slash = format!("/{}", filename);
+            let result = validate_media_path(&path_with_slash, temp_dir.path());
+            prop_assert!(result.is_ok(), "Path with leading slash should work: {:?}", path_with_slash);
+
+            // Test without leading slash
+            let result_no_slash = validate_media_path(&filename, temp_dir.path());
+            prop_assert!(result_no_slash.is_ok(), "Path without leading slash should work: {:?}", filename);
+
+            // Both should resolve to the same canonical path
+            if let (Ok(p1), Ok(p2)) = (result, result_no_slash) {
+                prop_assert_eq!(p1, p2, "Leading slash should not change result");
             }
         }
     }

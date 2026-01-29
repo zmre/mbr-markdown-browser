@@ -910,3 +910,112 @@ async fn test_build_validates_symlinked_assets() {
         stats.broken_links
     );
 }
+
+// ============================================================================
+// Media viewer page tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_build_generates_media_viewer_pages() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+
+    // Should create media viewer pages under .mbr
+    let videos_page = output.join(".mbr/videos/index.html");
+    assert!(
+        videos_page.exists(),
+        "Expected videos viewer page at {:?}",
+        videos_page
+    );
+
+    let pdfs_page = output.join(".mbr/pdfs/index.html");
+    assert!(
+        pdfs_page.exists(),
+        "Expected PDFs viewer page at {:?}",
+        pdfs_page
+    );
+
+    let audio_page = output.join(".mbr/audio/index.html");
+    assert!(
+        audio_page.exists(),
+        "Expected audio viewer page at {:?}",
+        audio_page
+    );
+}
+
+#[tokio::test]
+async fn test_build_media_viewer_pages_have_correct_media_type() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+
+    // Check videos page has video media type
+    let videos_html = fs::read_to_string(output.join(".mbr/videos/index.html")).unwrap();
+    assert!(
+        videos_html.contains("mediaType: \"video\"")
+            || videos_html.contains("media-type=\"video\""),
+        "Videos page should have video media type"
+    );
+
+    // Check PDFs page has pdf media type
+    let pdfs_html = fs::read_to_string(output.join(".mbr/pdfs/index.html")).unwrap();
+    assert!(
+        pdfs_html.contains("mediaType: \"pdf\"") || pdfs_html.contains("media-type=\"pdf\""),
+        "PDFs page should have pdf media type"
+    );
+
+    // Check audio page has audio media type
+    let audio_html = fs::read_to_string(output.join(".mbr/audio/index.html")).unwrap();
+    assert!(
+        audio_html.contains("mediaType: \"audio\"") || audio_html.contains("media-type=\"audio\""),
+        "Audio page should have audio media type"
+    );
+}
+
+#[tokio::test]
+async fn test_build_media_viewer_pages_use_relative_paths() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+
+    let videos_html = fs::read_to_string(output.join(".mbr/videos/index.html")).unwrap();
+
+    // Should use relative paths to .mbr/ assets from depth 2
+    // The page is at .mbr/videos/index.html, so it needs ../../.mbr/ to reach root
+    assert!(
+        videos_html.contains("../../.mbr/") || videos_html.contains("../.mbr/"),
+        "Media viewer page should use relative paths to assets"
+    );
+
+    // Should have serverMode: false for static build
+    assert!(
+        videos_html.contains("serverMode: false") || videos_html.contains("serverMode:false"),
+        "Media viewer page should have serverMode: false for static builds"
+    );
+}
+
+#[tokio::test]
+async fn test_build_media_viewer_pages_include_navigation() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+
+    let videos_html = fs::read_to_string(output.join(".mbr/videos/index.html")).unwrap();
+
+    // Should have back navigation (parent_path)
+    assert!(
+        videos_html.contains("Back") || videos_html.contains("Home"),
+        "Media viewer page should have navigation"
+    );
+
+    // Should have breadcrumbs
+    assert!(
+        videos_html.contains("breadcrumb") || videos_html.contains("Home"),
+        "Media viewer page should have breadcrumbs"
+    );
+}

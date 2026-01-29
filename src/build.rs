@@ -31,8 +31,8 @@ use crate::{
     oembed_cache::OembedCache,
     repo::{MarkdownInfo, Repo},
     server::{
-        DEFAULT_FILES, generate_breadcrumbs, get_current_dir_name, get_parent_path,
-        markdown_file_to_json,
+        DEFAULT_FILES, MediaViewerType, generate_breadcrumbs, get_current_dir_name,
+        get_parent_path, markdown_file_to_json,
     },
     sorting::sort_files,
     templates::Templates,
@@ -325,6 +325,9 @@ impl Builder {
 
         // Generate 404.html for GitHub Pages compatibility
         self.generate_404_page()?;
+
+        // Generate media viewer pages (videos, pdfs, audio)
+        self.generate_media_viewer_pages()?;
 
         // Validate internal links and report broken ones
         if self.config.skip_link_checks {
@@ -1693,6 +1696,103 @@ impl Builder {
             path: output_path,
             source: e,
         })?;
+
+        Ok(())
+    }
+
+    /// Generates media viewer pages for videos, PDFs, and audio.
+    ///
+    /// Creates:
+    /// - `.mbr/videos/index.html`
+    /// - `.mbr/pdfs/index.html`
+    /// - `.mbr/audio/index.html`
+    ///
+    /// These pages use client-side JavaScript to load the media based on
+    /// a `?path=` query parameter. In static builds, the media viewer
+    /// works entirely client-side.
+    fn generate_media_viewer_pages(&self) -> Result<(), BuildError> {
+        use std::collections::HashMap;
+
+        let media_types = [
+            MediaViewerType::Video,
+            MediaViewerType::Pdf,
+            MediaViewerType::Audio,
+        ];
+
+        for media_type in media_types {
+            // Determine output path based on media type
+            let output_path = match media_type {
+                MediaViewerType::Video => self.output_dir.join(".mbr/videos/index.html"),
+                MediaViewerType::Pdf => self.output_dir.join(".mbr/pdfs/index.html"),
+                MediaViewerType::Audio => self.output_dir.join(".mbr/audio/index.html"),
+            };
+
+            // Create parent directories
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            // Build context for media viewer template
+            // The page is at depth 2 from root (e.g., .mbr/videos/index.html)
+            let depth = 2;
+            let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+
+            // Media type specific context
+            context.insert(
+                "media_type".to_string(),
+                serde_json::Value::String(media_type.as_str().to_string()),
+            );
+            context.insert(
+                "title".to_string(),
+                serde_json::Value::String(format!("{} Viewer", media_type.label())),
+            );
+
+            // Static mode settings
+            context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
+            context.insert(
+                "relative_base".to_string(),
+                serde_json::Value::String(relative_base(depth)),
+            );
+            context.insert(
+                "relative_root".to_string(),
+                serde_json::Value::String(relative_root(depth)),
+            );
+
+            // Breadcrumbs: Home link only (relative from depth 2)
+            context.insert(
+                "breadcrumbs".to_string(),
+                serde_json::Value::Array(vec![serde_json::json!({
+                    "name": "Home",
+                    "url": "../../"
+                })]),
+            );
+
+            // Parent path for back navigation (go to root)
+            context.insert(
+                "parent_path".to_string(),
+                serde_json::Value::String("../../".to_string()),
+            );
+
+            // Pass sidebar navigation configuration
+            context.insert(
+                "sidebar_style".to_string(),
+                serde_json::json!(self.config.sidebar_style),
+            );
+            context.insert(
+                "sidebar_max_items".to_string(),
+                serde_json::json!(self.config.sidebar_max_items),
+            );
+
+            let html = self.templates.render_media_viewer(context)?;
+
+            fs::write(&output_path, html).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
 
         Ok(())
     }
