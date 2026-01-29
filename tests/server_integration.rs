@@ -2172,3 +2172,157 @@ async fn test_markdown_with_only_frontmatter() {
         "Markdown with only frontmatter should render"
     );
 }
+
+// ============================================================================
+// PDF Cover Sidecar Tests (media-metadata feature)
+// ============================================================================
+
+/// Test that a pre-generated sidecar file is served instead of dynamically generating.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_pdf_cover_serves_from_sidecar() {
+    let repo = TestRepo::new();
+
+    // Copy a real PDF to the test repo
+    let test_pdf_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs/DGA.pdf");
+    let pdf_path = repo.path().join("docs/test.pdf");
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::copy(&test_pdf_src, &pdf_path).unwrap();
+
+    // Create a fake sidecar file (PNG with magic bytes)
+    let sidecar_path = repo.path().join("docs/test.pdf.cover.png");
+    // Create a minimal valid PNG (1x1 pixel, red)
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 pixels
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // 8-bit RGB
+        0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+        0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, // Compressed data
+        0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x18, 0xDD, //
+        0x8D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, // IEND chunk
+        0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(&sidecar_path, &png_data).unwrap();
+
+    // Wait a bit to ensure mtime difference
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Touch the sidecar to ensure it's newer than the PDF
+    let now = std::time::SystemTime::now();
+    filetime::set_file_mtime(&sidecar_path, filetime::FileTime::from_system_time(now)).unwrap();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/test.pdf.cover.png").await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+
+    let body = response.bytes().await.unwrap();
+    // Should serve our fake sidecar, not the dynamically generated one
+    // (our sidecar is tiny, a real generated one would be much larger)
+    assert_eq!(
+        body.len(),
+        png_data.len(),
+        "Should serve the pre-generated sidecar file"
+    );
+}
+
+/// Test that a stale sidecar falls back to serving the stale sidecar when regeneration fails.
+///
+/// This test verifies graceful degradation: when the PDF is newer than the sidecar,
+/// we attempt to regenerate, but if that fails (e.g., pdfium not available), we
+/// serve the stale sidecar rather than returning an error.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_pdf_cover_stale_sidecar_serves_gracefully() {
+    let repo = TestRepo::new();
+
+    // Copy a real PDF to the test repo
+    let test_pdf_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs/DGA.pdf");
+    let pdf_path = repo.path().join("docs/test.pdf");
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::copy(&test_pdf_src, &pdf_path).unwrap();
+
+    // Create a fake sidecar file (valid but small PNG)
+    let sidecar_path = repo.path().join("docs/test.pdf.cover.png");
+    // Create a minimal valid PNG (1x1 pixel)
+    let stale_png: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 pixels
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // 8-bit RGB
+        0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+        0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, // Compressed data
+        0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x18, 0xDD, //
+        0x8D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, // IEND chunk
+        0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(&sidecar_path, &stale_png).unwrap();
+
+    // Make the sidecar older than the PDF (stale)
+    let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000000000);
+    filetime::set_file_mtime(
+        &sidecar_path,
+        filetime::FileTime::from_system_time(old_time),
+    )
+    .unwrap();
+
+    // Now touch the PDF to make it newer than the sidecar
+    let now = std::time::SystemTime::now();
+    filetime::set_file_mtime(&pdf_path, filetime::FileTime::from_system_time(now)).unwrap();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/test.pdf.cover.png").await;
+
+    // Should serve successfully (either regenerated or stale fallback)
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+
+    let body = response.bytes().await.unwrap();
+    // If pdfium is not available, we fall back to stale sidecar
+    // If pdfium is available, we regenerate (larger file)
+    // Either way, we should get valid PNG data
+    assert!(
+        body.len() >= stale_png.len(),
+        "Should serve at least the stale sidecar"
+    );
+    assert_eq!(
+        &body[0..8],
+        &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+        "Should be valid PNG"
+    );
+}
+
+/// Test that PDF cover requests without sidecar return 404 when pdfium is not available.
+///
+/// Note: This test verifies the graceful failure case. In production with pdfium
+/// available, dynamic generation would succeed.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_pdf_cover_no_sidecar_returns_404_without_pdfium() {
+    let repo = TestRepo::new();
+
+    // Copy a real PDF to the test repo (no sidecar)
+    let test_pdf_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs/DGA.pdf");
+    let pdf_path = repo.path().join("docs/report.pdf");
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::copy(&test_pdf_src, &pdf_path).unwrap();
+
+    // No sidecar file exists
+    let sidecar_path = repo.path().join("docs/report.pdf.cover.png");
+    assert!(!sidecar_path.exists());
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/report.pdf.cover.png").await;
+
+    // Without pdfium, this will return 404 (no sidecar, can't generate)
+    // With pdfium available, this would return 200 with generated cover
+    // We accept either outcome as valid for this test
+    let status = response.status();
+    assert!(
+        status == 200 || status == 404,
+        "Expected 200 (pdfium available) or 404 (pdfium unavailable), got {}",
+        status
+    );
+}

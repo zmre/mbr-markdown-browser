@@ -175,6 +175,52 @@ object[type="application/pdf"] {
 }
 ```
 
+### PDF Cover Images
+
+mbr can extract cover images (first page) from PDF files, useful for creating visual thumbnails or link previews.
+
+**Using PDF covers in markdown:**
+
+```markdown
+![Report Cover](document.pdf.cover.png)
+```
+
+This renders the first page of `document.pdf` as a PNG image.
+
+**How it works:**
+
+| Mode | Behavior |
+|------|----------|
+| Server/GUI | Cover images are generated on-the-fly when requested |
+| Static Build | Pre-generate covers before building (see below) |
+
+**Pre-generating covers for static builds:**
+
+```bash
+# Extract cover from a single PDF
+mbr --extract-pdf-cover document.pdf
+
+# Extract covers from all PDFs in a directory (recursive)
+mbr --extract-pdf-cover ~/docs
+```
+
+This creates sidecar files named `{pdf}.cover.png` next to each PDF. These files are then included in static builds automatically.
+
+**Example workflow:**
+
+```markdown
+<!-- Link to a PDF with a visual preview -->
+[![Report Cover](reports/annual-report.pdf.cover.png)](reports/annual-report.pdf)
+
+<!-- Gallery of PDF documents -->
+| Document | Preview |
+|----------|---------|
+| [Budget](budget.pdf) | ![](budget.pdf.cover.png) |
+| [Plan](plan.pdf) | ![](plan.pdf.cover.png) |
+```
+
+> **Note:** PDF cover extraction requires the `media-metadata` Cargo feature. See [CLI Reference](/reference/cli/) for details on the `--extract-pdf-cover` option.
+
 ## OpenGraph Link Enrichment
 
 Bare URLs on their own line get enriched with metadata:

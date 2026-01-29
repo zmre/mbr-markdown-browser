@@ -337,10 +337,19 @@ impl StaticFileMetadata {
         #[cfg(feature = "media-metadata")]
         {
             me.kind = match me.kind {
-                /* StaticFileKind::Pdf {
-                                ..me
-                            }, // TODO: get PDF metadata using https://docs.rs/pdf-extract/latest/pdf_extract/ -- but see if there's a way to just process some of the file
-                // */
+                StaticFileKind::Pdf { .. } => match crate::pdf_metadata::probe_pdf(&me.path) {
+                    Ok(meta) => StaticFileKind::Pdf {
+                        title: meta.title,
+                        author: meta.author,
+                        subject: meta.subject,
+                        description: None,
+                        num_pages: Some(meta.num_pages as usize),
+                    },
+                    Err(e) => {
+                        tracing::debug!("Failed to extract PDF metadata from {:?}: {}", me.path, e);
+                        me.kind
+                    }
+                },
                 StaticFileKind::Image { .. } => {
                     let metadata =
                         metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();

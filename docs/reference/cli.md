@@ -26,6 +26,7 @@ These flags are mutually exclusive:
 | `-g, --gui` | Launch native GUI window (explicit) |
 | `-b, --build` | Generate static site |
 | `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
+| `--extract-pdf-cover` | Extract cover images from PDF files (requires `media-metadata` feature) |
 
 ## Options
 
@@ -465,6 +466,69 @@ Cache evicts oldest segments when full, prioritizing keeping playlists cached.
 - Local browsing on the same machine (default: off)
 - Users primarily on Chrome/Firefox (they get original MP4 anyway)
 - Static site generation (transcoding is server-only)
+
+### PDF Cover Extraction
+
+> **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.
+
+mbr can extract cover images (first page) from PDF files. This works in two ways:
+
+**Server Mode (Dynamic Generation):**
+When running with `-s` or `-g`, mbr automatically generates cover images on-the-fly when requested. Request `{pdf}.cover.png` to get the cover:
+
+| Pattern | Description |
+|---------|-------------|
+| `{pdf}.cover.png` | Cover image (first page rendered at max 1200px width) |
+
+Example: If you have `docs/report.pdf`, requesting `/docs/report.pdf.cover.png` will dynamically extract and return the cover image.
+
+**Pre-generated covers:** If a file `{pdf}.cover.png` already exists on disk (as a sidecar file), it will be served directly without extraction. This is useful for static builds.
+
+**CLI Mode (Pre-generation):**
+Use `--extract-pdf-cover` to extract covers and save as sidecar files:
+
+```bash
+# Extract cover from a single PDF
+mbr --extract-pdf-cover ~/docs/report.pdf
+
+# Output:
+# Extracting cover: /Users/you/docs/report.pdf -> /Users/you/docs/report.pdf.cover.png
+# ✓ Created 1 cover image
+
+# Extract covers from all PDFs in a directory (recursive)
+mbr --extract-pdf-cover ~/docs
+
+# Output:
+# Extracting cover: docs/report.pdf -> docs/report.pdf.cover.png
+# Extracting cover: docs/manual.pdf -> docs/manual.pdf.cover.png
+# ✓ Created 2 cover images
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success (all covers created) |
+| `1` | Partial failure (some PDFs failed, others succeeded) |
+| `2` | Total failure (no covers created) |
+
+**Error handling:**
+- Password-protected PDFs are skipped with an error message
+- Corrupt or unreadable PDFs are reported to stderr
+- The process continues even when individual PDFs fail
+
+**Static builds:**
+For static site generation, pre-generate covers before building:
+
+```bash
+# 1. Extract all PDF covers
+mbr --extract-pdf-cover ~/notes
+
+# 2. Build static site (covers are included as assets)
+mbr -b ~/notes
+```
+
+The sidecar `.cover.png` files are automatically included in static builds via asset symlinking.
 
 ## Environment Variables
 

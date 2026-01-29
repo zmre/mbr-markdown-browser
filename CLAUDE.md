@@ -447,3 +447,10 @@ nix flake check
 The flake uses `rustPlatform.buildRustPackage` with a `postInstall` phase that copies the macOS app bundle and performs ad-hoc code signing. Release archives are created in `release/`.
 
 **Note:** Code signing verification may fail in Nix sandbox environment due to metadata changes, but the app still runs correctly.
+
+## Active Technologies
+- Rust (stable, matches project) (001-pdf-cover-images)
+- Filesystem (sidecar files: `.pdf.cover.png`) (001-pdf-cover-images)
+
+## Recent Changes
+- 001-pdf-cover-images: Added Rust (stable, matches project)

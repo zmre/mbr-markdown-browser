@@ -176,6 +176,7 @@
       commonBuildInputs = with pkgs;
         [
           ffmpeg_7-full.dev
+          pdfium-binaries
         ]
         ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [
           # Required by wry/tao for Linux webview
@@ -198,6 +199,7 @@
       commonEnvVars = {
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
+        PDFIUM_DYNAMIC_LIB_PATH = "${pkgs.pdfium-binaries}/lib";
         # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
         BINDGEN_EXTRA_CLANG_ARGS =
           pkgs.lib.optionalString pkgs.stdenv.isLinux

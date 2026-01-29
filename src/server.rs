@@ -997,6 +997,13 @@ impl Server {
 
         match resolve_request_path(&resolver_config, &path) {
             ResolvedPath::StaticFile(file_path) => {
+                // Check if this is a PDF cover sidecar file that might be stale
+                #[cfg(feature = "media-metadata")]
+                if let Some(response) =
+                    Self::try_serve_pdf_cover_sidecar(&path, &file_path, &config).await
+                {
+                    return Ok(response);
+                }
                 tracing::debug!("serving static file: {:?}", &file_path);
                 Self::serve_static_file(file_path, req).await
             }
@@ -1061,6 +1068,12 @@ impl Server {
                 // Try to serve dynamically generated video metadata (server mode only)
                 #[cfg(feature = "media-metadata")]
                 if let Some(response) = Self::try_serve_video_metadata(&path, &config).await {
+                    return Ok(response);
+                }
+
+                // Try to serve dynamically generated PDF cover image (server mode only)
+                #[cfg(feature = "media-metadata")]
+                if let Some(response) = Self::try_serve_pdf_cover(&path, &config).await {
                     return Ok(response);
                 }
 
@@ -1219,6 +1232,239 @@ impl Server {
                 }
             },
         }
+    }
+
+    /// Try to serve a PDF cover sidecar file, handling staleness detection.
+    ///
+    /// This is called from the StaticFile branch when a `.pdf.cover.png` sidecar exists.
+    /// It checks if the sidecar is stale (PDF modified after sidecar) and regenerates if needed.
+    ///
+    /// Returns:
+    /// - `Some(Response)` if the sidecar is stale and we regenerated the cover
+    /// - `None` if the sidecar is fresh (caller should serve as normal static file)
+    ///   or if this is not a PDF cover sidecar request
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_pdf_cover_sidecar(
+        url_path: &str,
+        sidecar_file_path: &std::path::Path,
+        config: &ServerState,
+    ) -> Option<Response<Body>> {
+        use crate::pdf_metadata::parse_pdf_cover_request;
+        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+
+        // Check if this is a PDF cover request
+        let pdf_url_path = parse_pdf_cover_request(url_path)?;
+
+        // Build cache key
+        let key = cache_key(pdf_url_path, "pdf_cover");
+
+        // Check memory cache first
+        if let Some(cached) = config.video_metadata_cache.get(&key) {
+            return match cached {
+                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::NotAvailable => None, // Cached negative result
+                _ => None,                            // Other types not relevant for PDF covers
+            };
+        }
+
+        // Find the PDF file path (corresponding to this sidecar)
+        // The sidecar is at {pdf_path}.cover.png, so remove .cover.png to get pdf_path
+        let pdf_file = {
+            let sidecar_str = sidecar_file_path.to_str()?;
+            let pdf_path_str = sidecar_str.strip_suffix(".cover.png")?;
+            std::path::PathBuf::from(pdf_path_str)
+        };
+
+        // If PDF doesn't exist, let static file serving handle it
+        if !pdf_file.is_file() {
+            // Cache and serve the sidecar contents
+            if let Ok(bytes) = tokio::fs::read(sidecar_file_path).await {
+                tracing::debug!(
+                    "Serving PDF cover sidecar (orphaned, no PDF): {}",
+                    sidecar_file_path.display()
+                );
+                config
+                    .video_metadata_cache
+                    .insert(key, CachedMetadata::Cover(bytes.clone()));
+                return Some(Self::build_png_response(bytes));
+            }
+            return None;
+        }
+
+        // Compare modification times
+        let pdf_meta = tokio::fs::metadata(&pdf_file).await.ok()?;
+        let sidecar_meta = tokio::fs::metadata(sidecar_file_path).await.ok()?;
+        let pdf_mtime = pdf_meta.modified().ok()?;
+        let sidecar_mtime = sidecar_meta.modified().ok()?;
+
+        if pdf_mtime > sidecar_mtime {
+            // Sidecar is stale - regenerate
+            tracing::debug!(
+                "Sidecar is stale (PDF modified after sidecar), regenerating: {}",
+                sidecar_file_path.display()
+            );
+
+            // Generate new cover
+            match crate::pdf_metadata::extract_cover(&pdf_file) {
+                Ok(bytes) => {
+                    config
+                        .video_metadata_cache
+                        .insert(key, CachedMetadata::Cover(bytes.clone()));
+                    return Some(Self::build_png_response(bytes));
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to regenerate PDF cover: {}", e);
+                    // Fall through to serve stale sidecar instead of failing
+                }
+            }
+        }
+
+        // Sidecar is fresh (or regeneration failed) - read, cache, and serve
+        if let Ok(bytes) = tokio::fs::read(sidecar_file_path).await {
+            tracing::debug!(
+                "Serving PDF cover from fresh sidecar: {}",
+                sidecar_file_path.display()
+            );
+            config
+                .video_metadata_cache
+                .insert(key, CachedMetadata::Cover(bytes.clone()));
+            return Some(Self::build_png_response(bytes));
+        }
+
+        // Let static file serving handle it
+        None
+    }
+
+    /// Try to serve dynamically generated PDF cover image.
+    ///
+    /// Returns Some(Response) if the request was for a PDF cover image and we successfully
+    /// generated it, None otherwise (fall through to 404).
+    ///
+    /// Request pattern: `/path/to/document.pdf.cover.png` -> extract cover from `/path/to/document.pdf`
+    ///
+    /// This function implements accelerated serving with pre-generated covers:
+    /// 1. If a sidecar file (e.g., `document.pdf.cover.png`) exists and is newer than the PDF,
+    ///    it is served directly from disk (with memory caching for subsequent requests).
+    /// 2. If the sidecar is stale (PDF modified after sidecar), the cover is regenerated.
+    /// 3. If no sidecar exists, the cover is dynamically generated from the PDF.
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_pdf_cover(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::pdf_metadata::parse_pdf_cover_request;
+        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+
+        // Check if this is a PDF cover request
+        let pdf_url_path = parse_pdf_cover_request(path)?;
+
+        // Build cache key
+        let key = cache_key(pdf_url_path, "pdf_cover");
+
+        // Check memory cache first
+        if let Some(cached) = config.video_metadata_cache.get(&key) {
+            return match cached {
+                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::NotAvailable => None, // Cached negative result
+                _ => None,                            // Other types not relevant for PDF covers
+            };
+        }
+
+        // Try to resolve the PDF file path
+        // First, try the direct path, then try with static_folder prefix
+        let pdf_file = {
+            let direct = config.base_dir.join(pdf_url_path);
+            if direct.is_file() {
+                direct
+            } else {
+                let with_static = config
+                    .base_dir
+                    .join(&config.static_folder)
+                    .join(pdf_url_path);
+                if with_static.is_file() {
+                    with_static
+                } else {
+                    tracing::debug!("PDF file not found for cover generation: {}", pdf_url_path);
+                    return None;
+                }
+            }
+        };
+
+        // Build sidecar path: {pdf_path}.cover.png
+        let sidecar_path = {
+            let mut sidecar = pdf_file.clone();
+            let file_name = sidecar.file_name()?.to_str()?;
+            sidecar.set_file_name(format!("{}.cover.png", file_name));
+            sidecar
+        };
+
+        // Check if we can serve from sidecar file
+        if let Some(bytes) = Self::try_serve_from_sidecar(&pdf_file, &sidecar_path).await {
+            tracing::debug!("Serving PDF cover from sidecar: {}", sidecar_path.display());
+            // Cache the sidecar contents for subsequent requests
+            config
+                .video_metadata_cache
+                .insert(key, CachedMetadata::Cover(bytes.clone()));
+            return Some(Self::build_png_response(bytes));
+        }
+
+        // Sidecar doesn't exist or is stale - generate dynamically
+        tracing::debug!("Generating PDF cover for: {}", pdf_file.display());
+
+        // Generate the cover image
+        match crate::pdf_metadata::extract_cover(&pdf_file) {
+            Ok(bytes) => {
+                config
+                    .video_metadata_cache
+                    .insert(key, CachedMetadata::Cover(bytes.clone()));
+                Some(Self::build_png_response(bytes))
+            }
+            Err(crate::errors::PdfMetadataError::PasswordProtected { .. }) => {
+                tracing::debug!("PDF is password-protected: {}", pdf_file.display());
+                config
+                    .video_metadata_cache
+                    .insert(key, CachedMetadata::NotAvailable);
+                None
+            }
+            Err(e) => {
+                tracing::debug!("Failed to extract PDF cover: {}", e);
+                config
+                    .video_metadata_cache
+                    .insert(key, CachedMetadata::NotAvailable);
+                None
+            }
+        }
+    }
+
+    /// Try to serve a PDF cover from a pre-generated sidecar file.
+    ///
+    /// Returns `Some(bytes)` if:
+    /// 1. The sidecar file exists
+    /// 2. The sidecar is newer than the PDF (not stale)
+    /// 3. The file can be read successfully
+    ///
+    /// Returns `None` if the sidecar doesn't exist, is stale, or can't be read.
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_from_sidecar(
+        pdf_path: &std::path::Path,
+        sidecar_path: &std::path::Path,
+    ) -> Option<Vec<u8>> {
+        // Check if sidecar exists
+        let sidecar_meta = tokio::fs::metadata(sidecar_path).await.ok()?;
+
+        // Get PDF modification time for staleness check
+        let pdf_meta = tokio::fs::metadata(pdf_path).await.ok()?;
+        let pdf_mtime = pdf_meta.modified().ok()?;
+        let sidecar_mtime = sidecar_meta.modified().ok()?;
+
+        // If PDF is newer than sidecar, sidecar is stale
+        if pdf_mtime > sidecar_mtime {
+            tracing::debug!(
+                "Sidecar is stale (PDF modified after sidecar): {}",
+                sidecar_path.display()
+            );
+            return None;
+        }
+
+        // Read and return sidecar contents
+        tokio::fs::read(sidecar_path).await.ok()
     }
 
     /// Try to serve links.json for bidirectional link tracking.

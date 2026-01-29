@@ -21,8 +21,8 @@ default = ["gui", "media-metadata"]
 # GUI feature enables native window/browser functionality (wry, tao, muda, rfd)
 # Disable for QuickLook builds: cargo build --release --no-default-features
 gui = ["dep:wry", "dep:tao", "dep:muda", "dep:rfd"]
-# Media metadata extraction (requires ffmpeg) - disable for QuickLook to avoid SDL dependency
-media-metadata = ["dep:metadata", "dep:ffmpeg-next"]
+# Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
+media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render"]
 # FFI for QuickLook extension - only needed when building the staticlib
 ffi = ["dep:uniffi"]
 
@@ -40,6 +40,7 @@ html-escape = "0.2.13"
 itertools = "0.14.0"
 metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/audio metadata extraction
 ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
+pdfium-render = { version = "0.8", optional = true, features = ["image"] } # PDF cover image rendering
 papaya = "0.2.3"
 pathdiff = "0.2.3"
 lopdf = { version = "0.39", default-features = false, features = ["rayon"] }
@@ -88,6 +89,7 @@ muda = { version = "0.17", features = ["gtk", "libxdo"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
+filetime = "0.2"
 flate2 = "1.0"
 proptest = "1.5"
 tempfile = "3.14"
