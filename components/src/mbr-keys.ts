@@ -10,8 +10,11 @@ const SCROLL_FULL_PAGE = () => window.innerHeight - 100; // Leave some context
 
 /**
  * Check if the event target is an input element where we shouldn't intercept keys.
+ * Uses composedPath to correctly identify inputs inside shadow DOMs.
  */
-function isInputTarget(target: EventTarget | null): boolean {
+function isInputTarget(e: KeyboardEvent): boolean {
+  // Use composedPath to get the actual target, even inside shadow DOMs
+  const target = e.composedPath()[0];
   if (!target || !(target instanceof HTMLElement)) return false;
   const tagName = target.tagName.toLowerCase();
   return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
@@ -209,7 +212,7 @@ export class MbrKeysElement extends LitElement {
     }
 
     // Don't intercept when typing in inputs (unless it's a ctrl/cmd combo)
-    if (isInputTarget(e.target) && !e.ctrlKey && !e.metaKey) {
+    if (isInputTarget(e) && !e.ctrlKey && !e.metaKey) {
       return;
     }
 
@@ -270,7 +273,7 @@ export class MbrKeysElement extends LitElement {
     }
 
     // Don't intercept plain keys when in input
-    if (isInputTarget(e.target)) {
+    if (isInputTarget(e)) {
       return;
     }
 

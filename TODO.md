@@ -2,13 +2,6 @@
 
 ## What's Next
 
-* [ ] Add ability to search also media metadata (filename, title, whatever) beyond just pdfs so we can find videos and such, too.  Need to think about how to display the videos if selected though. Popup up a `<video>` overlay?  Ditto for pictures and audio.  For video, we'd want our usual transcript and chapters type stuff.
-
-* we want to enhance the mbr-video-extras component to keep track of progress in watched videos. use browser local storage to store off the video url (minus any extra bits after the path to the media starting with `#` or `?`) and the timecode in that file. this is only added or updated on play of a video. later, when a video is loaded, we should look to see if we remember the last play point and, if so, set the playhead there.  but this is important: only do so if that play point is within our start and end boundaries, if we have them. otherwise do nothing, but update the saved state if the video is played.
-
-
-* Instead of making a button and linking from inside search, let's make a second search icon with a magnifying glass like the first but with a media icon inside?
-
 * [ ] Fix video enhancement bar under the video -- needs to be flex and stuff to avoid weird vertical stuff -- maybe a human here
 
 * **Static build**

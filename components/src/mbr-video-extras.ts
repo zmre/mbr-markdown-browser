@@ -92,6 +92,51 @@ function parseVtt(vttContent: string): VttCue[] {
 }
 
 /**
+ * Get the localStorage key for storing video progress.
+ * Resolves relative paths to absolute paths and strips query strings/fragments.
+ * Using window.location.href as base ensures relative paths are resolved
+ * correctly based on the current page location.
+ * Decodes the pathname to canonicalize URLs with different encoding styles.
+ */
+function getProgressKey(src: string): string {
+  try {
+    const url = new URL(src, window.location.href);
+    // Decode to canonicalize: both "Rubik%27s" and "Rubik's" become "Rubik's"
+    return `mbr-video-progress:${decodeURIComponent(url.pathname)}`;
+  } catch {
+    // Fallback for malformed URLs - also try to decode
+    try {
+      return `mbr-video-progress:${decodeURIComponent(src.split(/[?#]/)[0])}`;
+    } catch {
+      return `mbr-video-progress:${src.split(/[?#]/)[0]}`;
+    }
+  }
+}
+
+/**
+ * Save video progress to localStorage with error handling.
+ */
+function saveProgress(key: string, time: number): void {
+  try {
+    localStorage.setItem(key, time.toString());
+  } catch {
+    // Quota exceeded or unavailable—silently continue
+  }
+}
+
+/**
+ * Load video progress from localStorage with error handling.
+ */
+function loadProgress(key: string): number | null {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? parseFloat(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Video extras component that displays additional information about embedded videos.
  * Renders inside figcaption elements alongside video elements.
  *
@@ -387,6 +432,10 @@ export class MbrVideoExtrasElement extends LitElement {
   private _chaptersTrack: TextTrack | null = null;
   private _boundTimeUpdate = this._onTimeUpdate.bind(this);
   private _boundCueChange = this._onCueChange.bind(this);
+  private _boundPlay = this._onPlay.bind(this);
+  private _boundPause = this._onPause.bind(this);
+  private _lastSaveTime = 0;
+  private _hasPlayed = false;
 
   override connectedCallback() {
     super.connectedCallback();
@@ -402,6 +451,8 @@ export class MbrVideoExtrasElement extends LitElement {
   private _cleanup() {
     if (this._videoElement) {
       this._videoElement.removeEventListener('timeupdate', this._boundTimeUpdate);
+      this._videoElement.removeEventListener('play', this._boundPlay);
+      this._videoElement.removeEventListener('pause', this._boundPause);
     }
     if (this._chaptersTrack) {
       this._chaptersTrack.removeEventListener('cuechange', this._boundCueChange);
@@ -425,6 +476,13 @@ export class MbrVideoExtrasElement extends LitElement {
 
     // Always add timeupdate for captions tracking
     video.addEventListener('timeupdate', this._boundTimeUpdate);
+
+    // Add play and pause listeners for progress tracking
+    video.addEventListener('play', this._boundPlay);
+    video.addEventListener('pause', this._boundPause);
+
+    // Restore saved position if within bounds
+    this._restoreSavedPosition();
 
     // Try to use the chapters track element first (browser handles VTT parsing)
     const chaptersTrack = this._findTrackByKind(video, 'chapters');
@@ -577,10 +635,65 @@ export class MbrVideoExtrasElement extends LitElement {
     }
   }
 
+  /**
+   * Handle video play event - save progress and mark that playback has started.
+   */
+  private _onPlay() {
+    if (!this._videoElement || !this.src) return;
+
+    this._hasPlayed = true;
+    const key = getProgressKey(this.src);
+    saveProgress(key, this._videoElement.currentTime);
+  }
+
+  /**
+   * Handle video pause event - save current progress.
+   */
+  private _onPause() {
+    if (!this._videoElement || !this.src) return;
+
+    const key = getProgressKey(this.src);
+    saveProgress(key, this._videoElement.currentTime);
+  }
+
+  /**
+   * Check if a position is within the configured start/end boundaries.
+   */
+  private _isWithinBounds(position: number): boolean {
+    const startTime = this.start ? parseVttTime(this.start) : 0;
+    const endTime = this.end ? parseVttTime(this.end) : Infinity;
+    return position >= startTime && position <= endTime;
+  }
+
+  /**
+   * Restore saved position from localStorage if valid and within bounds.
+   */
+  private _restoreSavedPosition() {
+    if (!this._videoElement || !this.src) return;
+
+    const key = getProgressKey(this.src);
+    const savedPosition = loadProgress(key);
+
+    if (savedPosition !== null && this._isWithinBounds(savedPosition)) {
+      this._videoElement.currentTime = savedPosition;
+    }
+  }
+
   private _onTimeUpdate() {
     if (!this._videoElement) return;
 
     const currentTime = this._videoElement.currentTime;
+
+    // Throttled progress saving: save every 5 seconds during playback
+    // Only save if user has played the video (not on initial load)
+    if (this._hasPlayed && this.src) {
+      const now = Date.now();
+      if (now - this._lastSaveTime >= 5000) {
+        this._lastSaveTime = now;
+        const key = getProgressKey(this.src);
+        saveProgress(key, currentTime);
+      }
+    }
 
     // Update chapter from manually parsed chapters (if not using track)
     if (this._chapters.length > 0 && !this._chaptersTrack) {
