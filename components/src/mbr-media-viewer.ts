@@ -4,7 +4,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 /**
  * Supported media types for the viewer.
  */
-export type MediaType = 'video' | 'pdf' | 'audio';
+export type MediaType = 'video' | 'pdf' | 'audio' | 'image';
 
 /**
  * Props for the media viewer component.
@@ -22,6 +22,7 @@ export interface MediaViewerProps {
  * - Video: Native HTML5 video player with mbr-video-extras for chapters/transcripts
  * - PDF: Embedded PDF viewer using object/embed fallback
  * - Audio: Native HTML5 audio player with waveform visualization (future)
+ * - Image: Native image display with responsive sizing
  *
  * @attr media-type - The type of media to render ('video', 'pdf', or 'audio')
  *
@@ -139,6 +140,28 @@ export class MbrMediaViewerElement extends LitElement {
 
     .audio-info {
       margin-top: 0.5rem;
+      font-size: 0.9em;
+      color: var(--pico-muted-color, #666);
+      text-align: center;
+    }
+
+    /* Image styles */
+    .image-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .image-wrapper img {
+      max-width: 100%;
+      max-height: 85vh;
+      object-fit: contain;
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    .image-info {
       font-size: 0.9em;
       color: var(--pico-muted-color, #666);
       text-align: center;
@@ -360,6 +383,36 @@ export class MbrMediaViewerElement extends LitElement {
   }
 
   /**
+   * Render image content with native img element.
+   */
+  private _renderImage(): TemplateResult {
+    if (!this._path) return html``;
+
+    // Extract filename from path for display
+    const filename = this._path.split('/').pop() ?? 'Image';
+
+    return html`
+      <div class="media-wrapper image-wrapper">
+        <img
+          src="${this._path}"
+          alt="${filename}"
+          @error="${this._handleImageError}"
+        />
+        <div class="image-info">
+          <span>${filename}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Handle image load errors.
+   */
+  private _handleImageError(): void {
+    this._error = 'Failed to load image';
+  }
+
+  /**
    * Render content based on media type.
    */
   private _renderContent(): TemplateResult {
@@ -370,6 +423,8 @@ export class MbrMediaViewerElement extends LitElement {
         return this._renderPdf();
       case 'audio':
         return this._renderAudio();
+      case 'image':
+        return this._renderImage();
       default:
         return html`<div class="error">Unknown media type: ${this.mediaType}</div>`;
     }

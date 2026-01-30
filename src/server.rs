@@ -36,12 +36,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 /// Type of media for the viewer page.
 ///
 /// Used to route requests to the appropriate media viewer template
-/// at `/.mbr/videos/`, `/.mbr/pdfs/`, or `/.mbr/audio/`.
+/// at `/.mbr/videos/`, `/.mbr/pdfs/`, `/.mbr/audio/`, or `/.mbr/images/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaViewerType {
     Video,
     Pdf,
     Audio,
+    Image,
 }
 
 impl MediaViewerType {
@@ -53,6 +54,7 @@ impl MediaViewerType {
     /// assert_eq!(MediaViewerType::from_route("/.mbr/videos/"), Some(MediaViewerType::Video));
     /// assert_eq!(MediaViewerType::from_route("/.mbr/pdfs/"), Some(MediaViewerType::Pdf));
     /// assert_eq!(MediaViewerType::from_route("/.mbr/audio/"), Some(MediaViewerType::Audio));
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/images/"), Some(MediaViewerType::Image));
     /// assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
     /// ```
     #[must_use]
@@ -61,6 +63,7 @@ impl MediaViewerType {
             "/.mbr/videos/" => Some(Self::Video),
             "/.mbr/pdfs/" => Some(Self::Pdf),
             "/.mbr/audio/" => Some(Self::Audio),
+            "/.mbr/images/" => Some(Self::Image),
             _ => None,
         }
     }
@@ -78,6 +81,7 @@ impl MediaViewerType {
             Self::Video => "Video",
             Self::Pdf => "PDF",
             Self::Audio => "Audio",
+            Self::Image => "Image",
         }
     }
 
@@ -88,6 +92,7 @@ impl MediaViewerType {
             Self::Video => "video",
             Self::Pdf => "pdf",
             Self::Audio => "audio",
+            Self::Image => "image",
         }
     }
 }
@@ -498,6 +503,7 @@ impl Server {
             .route("/.mbr/videos/", get(Self::serve_media_viewer))
             .route("/.mbr/pdfs/", get(Self::serve_media_viewer))
             .route("/.mbr/audio/", get(Self::serve_media_viewer))
+            .route("/.mbr/images/", get(Self::serve_media_viewer))
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
             .layer(CompressionLayer::new())
@@ -852,11 +858,12 @@ impl Server {
         )
     }
 
-    /// Media viewer endpoint for video, PDF, and audio content.
+    /// Media viewer endpoint for video, PDF, audio, and image content.
     ///
     /// GET /.mbr/videos/?path=<encoded_path>
     /// GET /.mbr/pdfs/?path=<encoded_path>
     /// GET /.mbr/audio/?path=<encoded_path>
+    /// GET /.mbr/images/?path=<encoded_path>
     ///
     /// Renders the media_viewer.html template with the appropriate media type
     /// and validated media path. The path query parameter must be URL-encoded
@@ -3501,10 +3508,18 @@ mod tests {
     }
 
     #[test]
+    fn test_media_viewer_type_from_route_images() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/images/"),
+            Some(MediaViewerType::Image)
+        );
+    }
+
+    #[test]
     fn test_media_viewer_type_from_route_invalid() {
         assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
         assert_eq!(MediaViewerType::from_route("/.mbr/videos"), None); // missing trailing slash
-        assert_eq!(MediaViewerType::from_route("/.mbr/images/"), None);
+        assert_eq!(MediaViewerType::from_route("/.mbr/unknown/"), None);
     }
 
     #[test]

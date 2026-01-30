@@ -317,16 +317,16 @@ export function getCoverImageUrl(file: OtherFileInfo): string | null {
  * - Video: `/.mbr/videos/?path={encoded_url_path}`
  * - PDF: `/.mbr/pdfs/?path={encoded_url_path}`
  * - Audio: `/.mbr/audio/?path={encoded_url_path}`
- * - Image: Direct link to the file (no dedicated viewer)
+ * - Image: `/.mbr/images/?path={encoded_url_path}`
  *
  * @param file - The file info to get viewer URL from
- * @returns The viewer URL (direct file URL for images and non-media)
+ * @returns The viewer URL (direct file URL for non-media types)
  *
  * @example
  * ```typescript
  * const viewerUrl = getViewerUrl(file);
  * // For video: "/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4"
- * // For image: "/images/photo.jpg"
+ * // For image: "/.mbr/images/?path=%2Fimages%2Fphoto.jpg"
  * window.location.href = viewerUrl;
  * ```
  */
@@ -341,8 +341,7 @@ export function getViewerUrl(file: OtherFileInfo): string {
     case 'audio':
       return `/.mbr/audio/?path=${encodeURIComponent(file.url_path)}`;
     case 'image':
-      // Images link directly to the file
-      return file.url_path;
+      return `/.mbr/images/?path=${encodeURIComponent(file.url_path)}`;
     default:
       // Non-media types link directly to the file
       return file.url_path;

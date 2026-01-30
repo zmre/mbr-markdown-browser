@@ -1717,6 +1717,7 @@ impl Builder {
             MediaViewerType::Video,
             MediaViewerType::Pdf,
             MediaViewerType::Audio,
+            MediaViewerType::Image,
         ];
 
         for media_type in media_types {
@@ -1725,6 +1726,7 @@ impl Builder {
                 MediaViewerType::Video => self.output_dir.join(".mbr/videos/index.html"),
                 MediaViewerType::Pdf => self.output_dir.join(".mbr/pdfs/index.html"),
                 MediaViewerType::Audio => self.output_dir.join(".mbr/audio/index.html"),
+                MediaViewerType::Image => self.output_dir.join(".mbr/images/index.html"),
             };
 
             // Create parent directories
