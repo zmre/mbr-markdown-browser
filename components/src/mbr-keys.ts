@@ -101,6 +101,7 @@ const SHORTCUTS: ShortcutCategory[] = [
     title: 'Panels',
     shortcuts: [
       { keys: '/', description: 'Open search' },
+      { keys: '=', description: 'Open media browser' },
       { keys: '- or F2', description: 'Open file browser' },
       { keys: 'Ctrl+g', description: 'Toggle info panel' },
       { keys: 'Esc', description: 'Close panel' },
@@ -296,6 +297,16 @@ export class MbrKeysElement extends LitElement {
           const search = document.querySelector('mbr-search');
           if (search && typeof (search as any)._openSearch === 'function') {
             (search as any)._openSearch();
+          }
+        }
+        break;
+
+      case '=': // Open media browser
+        if (!isModalOpen()) {
+          e.preventDefault();
+          const searchForMedia = document.querySelector('mbr-search');
+          if (searchForMedia && typeof (searchForMedia as any)._openMediaBrowser === 'function') {
+            (searchForMedia as any)._openMediaBrowser();
           }
         }
         break;

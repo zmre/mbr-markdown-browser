@@ -26,6 +26,7 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 |-----|--------|
 | `/` | Open search |
 | `-` or `F2` | Open file browser |
+| `=` | Open media browser |
 | `Ctrl+g` | Toggle info panel |
 | `Esc` | Close current panel |
 

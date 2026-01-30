@@ -1121,6 +1121,159 @@ async fn test_site_json_includes_frontmatter() {
     assert_eq!(tagged["frontmatter"]["title"].as_str(), Some("My Title"));
 }
 
+#[tokio::test]
+async fn test_site_json_other_files_kind_structure() {
+    // Test T013: Verify other_files include metadata.kind with type structure
+    let repo = TestRepo::new();
+
+    // Create a video file (will be classified as video type)
+    repo.create_dir("videos");
+    repo.create_static_file("videos/demo.mp4", b"fake video data");
+
+    // Create an image file
+    repo.create_dir("images");
+    repo.create_static_file("images/photo.jpg", b"fake jpg data");
+
+    // Create a PDF file
+    repo.create_static_file("document.pdf", b"%PDF-1.4 fake pdf");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    // Should have other_files array
+    assert!(
+        body["other_files"].is_array(),
+        "Expected other_files array in site.json"
+    );
+
+    let other_files = body["other_files"].as_array().unwrap();
+    assert!(
+        !other_files.is_empty(),
+        "Expected at least one file in other_files"
+    );
+
+    // Find the video file
+    let video_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("demo.mp4"));
+
+    assert!(
+        video_file.is_some(),
+        "Expected to find demo.mp4 in other_files"
+    );
+
+    let video = video_file.unwrap();
+    // Verify the metadata.kind structure has a "type" field
+    assert!(
+        video["metadata"]["kind"]["type"].is_string(),
+        "Expected metadata.kind.type to be a string in video file"
+    );
+    assert_eq!(
+        video["metadata"]["kind"]["type"].as_str(),
+        Some("video"),
+        "Expected video file to have kind.type = 'video'"
+    );
+
+    // Find the image file
+    let image_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("photo.jpg"));
+
+    assert!(
+        image_file.is_some(),
+        "Expected to find photo.jpg in other_files"
+    );
+
+    let image = image_file.unwrap();
+    assert_eq!(
+        image["metadata"]["kind"]["type"].as_str(),
+        Some("image"),
+        "Expected image file to have kind.type = 'image'"
+    );
+
+    // Find the PDF file
+    let pdf_file = other_files.iter().find(|f| {
+        f["url_path"]
+            .as_str()
+            .unwrap_or("")
+            .contains("document.pdf")
+    });
+
+    assert!(
+        pdf_file.is_some(),
+        "Expected to find document.pdf in other_files"
+    );
+
+    let pdf = pdf_file.unwrap();
+    assert_eq!(
+        pdf["metadata"]["kind"]["type"].as_str(),
+        Some("pdf"),
+        "Expected PDF file to have kind.type = 'pdf'"
+    );
+}
+
+#[tokio::test]
+async fn test_site_json_srt_file_classified_as_text() {
+    // Test T014: Verify .srt files are classified as text type
+    let repo = TestRepo::new();
+
+    // Create an .srt subtitle file
+    repo.create_dir("subtitles");
+    repo.create_static_file(
+        "subtitles/movie.srt",
+        b"1\n00:00:01,000 --> 00:00:04,000\nSubtitle text here",
+    );
+
+    // Also create a .vtt file to verify other text types
+    repo.create_static_file(
+        "subtitles/movie.vtt",
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nSubtitle text here",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    let other_files = body["other_files"].as_array().unwrap();
+
+    // Find the .srt file
+    let srt_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("movie.srt"));
+
+    assert!(
+        srt_file.is_some(),
+        "Expected to find movie.srt in other_files"
+    );
+
+    let srt = srt_file.unwrap();
+    assert!(
+        srt["metadata"]["kind"]["type"].is_string(),
+        "Expected metadata.kind.type to be a string in srt file"
+    );
+    assert_eq!(
+        srt["metadata"]["kind"]["type"].as_str(),
+        Some("text"),
+        "Expected .srt file to have kind.type = 'text'"
+    );
+
+    // Verify .vtt is also classified as text
+    let vtt_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("movie.vtt"));
+
+    assert!(
+        vtt_file.is_some(),
+        "Expected to find movie.vtt in other_files"
+    );
+
+    let vtt = vtt_file.unwrap();
+    assert_eq!(
+        vtt["metadata"]["kind"]["type"].as_str(),
+        Some("text"),
+        "Expected .vtt file to have kind.type = 'text'"
+    );
+}
+
 // ============================================================================
 // HTTP Range Request Tests
 // ============================================================================

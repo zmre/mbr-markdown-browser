@@ -2,11 +2,22 @@
 //!
 //! Provides functionality to extract metadata and generate cover images
 //! from PDF files using lopdf (for metadata) and pdfium-render (for rendering).
+//!
+//! # Thread Safety
+//!
+//! PDFium is a C++ library with global state that is NOT thread-safe for
+//! concurrent document operations. We use a semaphore to limit concurrent
+//! pdfium operations to prevent segfaults when many PDF cover requests
+//! arrive simultaneously.
 
 use crate::errors::PdfMetadataError;
 use std::path::Path;
 #[cfg(feature = "media-metadata")]
 use std::path::PathBuf;
+#[cfg(feature = "media-metadata")]
+use std::sync::OnceLock;
+#[cfg(feature = "media-metadata")]
+use tokio::sync::Semaphore;
 
 /// Metadata extracted from a PDF file.
 #[derive(Debug, Clone, Default)]
@@ -130,12 +141,52 @@ pub fn parse_pdf_cover_request(path: &str) -> Option<&str> {
     }
 }
 
-/// Extract the first page of a PDF as a PNG image.
+/// Global semaphore to limit concurrent pdfium operations.
+///
+/// PDFium is not thread-safe for concurrent document operations from
+/// multiple library instances. Limiting to 1 permit ensures only one
+/// PDF is being rendered at a time, preventing segfaults.
+#[cfg(feature = "media-metadata")]
+static PDFIUM_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+
+/// Get or initialize the pdfium semaphore.
+#[cfg(feature = "media-metadata")]
+fn pdfium_semaphore() -> &'static Semaphore {
+    PDFIUM_SEMAPHORE.get_or_init(|| Semaphore::new(1))
+}
+
+/// Extract the first page of a PDF as a PNG image (async version with concurrency control).
+///
+/// This is the preferred entry point for server use. It acquires a semaphore
+/// to ensure only one PDF is rendered at a time, preventing pdfium segfaults.
+#[cfg(feature = "media-metadata")]
+pub async fn extract_cover_async(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
+    let path = path.to_path_buf();
+    let _permit = pdfium_semaphore().acquire().await.map_err(|_| {
+        PdfMetadataError::RenderFailed("Failed to acquire pdfium semaphore".to_string())
+    })?;
+
+    // Run the blocking pdfium operation in a separate thread
+    tokio::task::spawn_blocking(move || extract_cover_sync(&path))
+        .await
+        .map_err(|e| PdfMetadataError::RenderFailed(format!("Task join error: {}", e)))?
+}
+
+/// Extract the first page of a PDF as a PNG image (sync version).
 ///
 /// Uses pdfium-render to render the first page at a reasonable resolution
 /// (max width 1200px, preserving aspect ratio).
+///
+/// **Warning**: This function is NOT thread-safe when called concurrently.
+/// For server use, prefer `extract_cover_async` which handles concurrency.
 #[cfg(feature = "media-metadata")]
 pub fn extract_cover(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
+    extract_cover_sync(path)
+}
+
+/// Internal sync implementation of cover extraction.
+#[cfg(feature = "media-metadata")]
+fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
     use image::ImageFormat;
     use pdfium_render::prelude::*;
 
@@ -185,55 +236,89 @@ pub fn extract_cover(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
     Ok(png_bytes)
 }
 
-/// Create a Pdfium instance, trying PDFIUM_DYNAMIC_LIB_PATH env var first,
-/// then falling back to system library search.
+/// Get the platform-specific pdfium library filename.
+#[cfg(feature = "media-metadata")]
+fn pdfium_lib_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else {
+        "libpdfium.so"
+    }
+}
+
+/// Get candidate paths for the pdfium library, in order of preference.
+///
+/// Search order:
+/// 1. PDFIUM_DYNAMIC_LIB_PATH environment variable
+/// 2. Next to the executable (for bundled releases)
+/// 3. lib/ subdirectory next to executable
+/// 4. macOS app bundle Frameworks directory
+#[cfg(feature = "media-metadata")]
+fn pdfium_candidate_paths() -> Vec<PathBuf> {
+    let lib_name = pdfium_lib_name();
+    let mut candidates = Vec::new();
+
+    // 1. Environment variable (explicit override)
+    if let Ok(lib_path) = std::env::var("PDFIUM_DYNAMIC_LIB_PATH") {
+        candidates.push(PathBuf::from(&lib_path).join(lib_name));
+    }
+
+    // Get executable directory for relative paths
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        // 2. Next to executable (e.g., /usr/local/bin/libpdfium.dylib)
+        candidates.push(exe_dir.join(lib_name));
+
+        // 3. lib/ subdirectory (e.g., /usr/local/bin/lib/libpdfium.dylib)
+        candidates.push(exe_dir.join("lib").join(lib_name));
+
+        // 4. macOS app bundle: Contents/Frameworks/
+        // Executable is at Contents/MacOS/mbr, so go up to Contents/
+        if cfg!(target_os = "macos")
+            && let Some(contents_dir) = exe_dir.parent()
+        {
+            candidates.push(contents_dir.join("Frameworks").join(lib_name));
+        }
+    }
+
+    candidates
+}
+
+/// Create a Pdfium instance by searching multiple locations.
+///
+/// Search order:
+/// 1. PDFIUM_DYNAMIC_LIB_PATH environment variable
+/// 2. Next to the executable (for bundled releases)
+/// 3. lib/ subdirectory next to executable
+/// 4. macOS app bundle Frameworks directory
+/// 5. System library search (fallback)
 #[cfg(feature = "media-metadata")]
 fn create_pdfium_instance() -> Result<pdfium_render::prelude::Pdfium, PdfMetadataError> {
     use pdfium_render::prelude::Pdfium;
 
-    // Try PDFIUM_DYNAMIC_LIB_PATH environment variable first
-    if let Ok(lib_path) = std::env::var("PDFIUM_DYNAMIC_LIB_PATH") {
-        // Try .dylib first (macOS)
-        let lib_file = PathBuf::from(&lib_path).join("libpdfium.dylib");
-        if lib_file.exists() {
-            tracing::debug!("Attempting to load pdfium from: {:?}", lib_file);
-            match Pdfium::bind_to_library(&lib_file) {
+    // Try each candidate path in order
+    for candidate in pdfium_candidate_paths() {
+        if candidate.exists() {
+            tracing::debug!("Attempting to load pdfium from: {:?}", candidate);
+            match Pdfium::bind_to_library(&candidate) {
                 Ok(bindings) => {
-                    tracing::debug!("Successfully loaded pdfium from {:?}", lib_file);
+                    tracing::debug!("Successfully loaded pdfium from {:?}", candidate);
                     return Ok(Pdfium::new(bindings));
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to bind to pdfium at {:?}: {}", lib_file, e);
-                    // Return early with the specific error from the explicit path
-                    return Err(PdfMetadataError::RenderFailed(format!(
-                        "Failed to load pdfium from {:?}: {}",
-                        lib_file, e
-                    )));
+                    tracing::warn!("Failed to bind to pdfium at {:?}: {}", candidate, e);
+                    // Continue trying other locations
                 }
             }
-        }
-        // Try .so (Linux)
-        let lib_file_so = PathBuf::from(&lib_path).join("libpdfium.so");
-        if lib_file_so.exists() {
-            tracing::debug!("Attempting to load pdfium from: {:?}", lib_file_so);
-            match Pdfium::bind_to_library(&lib_file_so) {
-                Ok(bindings) => {
-                    tracing::debug!("Successfully loaded pdfium from {:?}", lib_file_so);
-                    return Ok(Pdfium::new(bindings));
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to bind to pdfium at {:?}: {}", lib_file_so, e);
-                    // Return early with the specific error from the explicit path
-                    return Err(PdfMetadataError::RenderFailed(format!(
-                        "Failed to load pdfium from {:?}: {}",
-                        lib_file_so, e
-                    )));
-                }
-            }
+        } else {
+            tracing::trace!("Pdfium not found at {:?}", candidate);
         }
     }
 
-    // Fall back to system library
+    // Fall back to system library search
     tracing::debug!("Attempting to load pdfium from system library");
     match Pdfium::bind_to_system_library() {
         Ok(bindings) => {
@@ -243,7 +328,7 @@ fn create_pdfium_instance() -> Result<pdfium_render::prelude::Pdfium, PdfMetadat
         Err(e) => {
             tracing::warn!("Failed to load pdfium from system library: {}", e);
             Err(PdfMetadataError::RenderFailed(format!(
-                "Failed to initialize pdfium library: {}",
+                "Pdfium library not found. Install pdfium or set PDFIUM_DYNAMIC_LIB_PATH. Error: {}",
                 e
             )))
         }

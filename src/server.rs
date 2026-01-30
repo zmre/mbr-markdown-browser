@@ -1601,8 +1601,8 @@ impl Server {
                 sidecar_file_path.display()
             );
 
-            // Generate new cover
-            match crate::pdf_metadata::extract_cover(&pdf_file) {
+            // Generate new cover (async with concurrency control)
+            match crate::pdf_metadata::extract_cover_async(&pdf_file).await {
                 Ok(bytes) => {
                     config
                         .video_metadata_cache
@@ -1705,8 +1705,8 @@ impl Server {
         // Sidecar doesn't exist or is stale - generate dynamically
         tracing::debug!("Generating PDF cover for: {}", pdf_file.display());
 
-        // Generate the cover image
-        match crate::pdf_metadata::extract_cover(&pdf_file) {
+        // Generate the cover image (async with concurrency control)
+        match crate::pdf_metadata::extract_cover_async(&pdf_file).await {
             Ok(bytes) => {
                 config
                     .video_metadata_cache

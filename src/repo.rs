@@ -207,6 +207,7 @@ pub struct StaticFileMetadata {
 }
 
 #[derive(Clone, Default, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 enum StaticFileKind {
     Pdf {
         description: Option<String>,
@@ -314,8 +315,8 @@ impl StaticFileMetadata {
                 },
                 ..Default::default()
             },
-            Some("txt") | Some("css") | Some("vtt") | Some("toml") | Some("json") | Some("js")
-            | Some("ts") => Self {
+            Some("txt") | Some("css") | Some("vtt") | Some("srt") | Some("toml") | Some("json")
+            | Some("js") | Some("ts") => Self {
                 path: file,
                 kind: StaticFileKind::Text,
                 ..Default::default()

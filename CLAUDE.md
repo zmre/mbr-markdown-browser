@@ -451,6 +451,8 @@ The flake uses `rustPlatform.buildRustPackage` with a `postInstall` phase that c
 ## Active Technologies
 - Rust (stable, matches project) (001-pdf-cover-images)
 - Filesystem (sidecar files: `.pdf.cover.png`) (001-pdf-cover-images)
+- Rust 2024 Edition (1.85+) for backend; TypeScript 5.x (strict mode) for components + Lit 3.x (web components), Pico CSS (styling), serde (JSON serialization) (003-media-browser-component)
+- N/A - client-side only, data from site.json (003-media-browser-component)
 
 ## Recent Changes
 - 001-pdf-cover-images: Added Rust (stable, matches project)

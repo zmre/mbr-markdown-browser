@@ -1,7 +1,11 @@
-import { LitElement, css, html, nothing } from 'lit'
+import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state, query } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { getBasePath, resolveUrl } from './shared.js'
+import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
+
+// Dynamically import the media browser component when needed
+const loadMediaBrowser = () => import('./mbr-media-browser.js')
 
 /**
  * MBR configuration injected by the server/build.
@@ -162,6 +166,12 @@ export class MbrSearchElement extends LitElement {
   @state()
   private _isPagefindLoading = false;
 
+  @state()
+  private _isMediaBrowserOpen = false;
+
+  @query('mbr-media-browser')
+  private _mediaBrowser!: MbrMediaBrowserElement;
+
   private _debounceTimeout: number | null = null;
   private _abortController: AbortController | null = null;
   private _pagefind: Pagefind | null = null;
@@ -242,10 +252,15 @@ export class MbrSearchElement extends LitElement {
       e.preventDefault();
       this._openSearch();
     }
-    // Escape to close
-    if (e.key === 'Escape' && this._isOpen) {
-      e.preventDefault();
-      this._closeSearch();
+    // Escape to close - media browser popup first, then search modal
+    if (e.key === 'Escape') {
+      if (this._isMediaBrowserOpen) {
+        e.preventDefault();
+        this._closeMediaBrowser();
+      } else if (this._isOpen) {
+        e.preventDefault();
+        this._closeSearch();
+      }
     }
   };
 
@@ -262,6 +277,20 @@ export class MbrSearchElement extends LitElement {
     this._results = [];
     this._selectedIndex = -1;
     this._error = null;
+  }
+
+  private async _openMediaBrowser() {
+    // Dynamically load the media browser component
+    await loadMediaBrowser();
+    this._isMediaBrowserOpen = true;
+    // Focus the text filter after the component renders
+    this.updateComplete.then(() => {
+      this._mediaBrowser?.focusTextFilter();
+    });
+  }
+
+  private _closeMediaBrowser() {
+    this._isMediaBrowserOpen = false;
   }
 
   private _handleInput(e: Event) {
@@ -651,6 +680,14 @@ export class MbrSearchElement extends LitElement {
           </div>
 
           <div class="search-footer">
+            <button class="media-browser-button" @click=${this._openMediaBrowser} title="Browse media files (=)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+              </svg>
+              <span>Browse Media</span>
+              <kbd>=</kbd>
+            </button>
             <span class="footer-hint">
               <kbd>^n</kbd><kbd>^p</kbd> navigate
               <kbd>↵</kbd> select
@@ -663,10 +700,38 @@ export class MbrSearchElement extends LitElement {
     `;
   }
 
+  private _renderMediaBrowserPopup(): TemplateResult | typeof nothing {
+    if (!this._isMediaBrowserOpen) return nothing;
+
+    return html`
+      <div class="media-browser-backdrop" @click=${this._closeMediaBrowser}>
+        <div class="media-browser-popup" @click=${(e: Event) => e.stopPropagation()}>
+          <div class="media-browser-header">
+            <h2>Browse Media</h2>
+            <button
+              class="media-browser-close"
+              @click=${this._closeMediaBrowser}
+              aria-label="Close media browser"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="media-browser-content">
+            <mbr-media-browser></mbr-media-browser>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   override render() {
     return html`
       ${this._renderTrigger()}
       ${this._renderModal()}
+      ${this._renderMediaBrowserPopup()}
     `;
   }
 
@@ -974,10 +1039,47 @@ export class MbrSearchElement extends LitElement {
 
     /* Footer */
     .search-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       padding: 0.5rem 0.75rem;
       border-top: 1px solid var(--pico-muted-border-color, #eee);
       font-size: 0.75rem;
       color: var(--pico-muted-color, #999);
+    }
+
+    .media-browser-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.35rem 0.6rem;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      border-radius: 5px;
+      background: var(--pico-background-color, #fff);
+      color: var(--pico-muted-color, #666);
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: all 0.15s ease;
+    }
+
+    .media-browser-button:hover {
+      border-color: var(--pico-primary, #0d6efd);
+      color: var(--pico-primary, #0d6efd);
+      background: var(--pico-primary-focus, rgba(13, 110, 253, 0.1));
+    }
+
+    .media-browser-button svg {
+      flex-shrink: 0;
+    }
+
+    .media-browser-button kbd {
+      padding: 0.1rem 0.3rem;
+      margin-left: 0.25rem;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      border-radius: 3px;
+      background: var(--pico-secondary-background, #f5f5f5);
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.7rem;
     }
 
     .footer-hint {
@@ -994,6 +1096,102 @@ export class MbrSearchElement extends LitElement {
       color: var(--pico-primary-inverse, #eee);
       font-family: inherit;
       font-size: 0.7rem;
+    }
+
+    /* Media Browser Popup */
+    .media-browser-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1100;
+      padding: 1rem;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .media-browser-popup {
+      width: 90vw;
+      max-width: 90vw;
+      height: 90vh;
+      max-height: 90vh;
+      background: var(--pico-background-color, #fff);
+      border-radius: 12px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: slideUp 0.25s ease;
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .media-browser-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--pico-muted-border-color, #eee);
+      flex-shrink: 0;
+    }
+
+    .media-browser-header h2 {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--pico-color, #333);
+    }
+
+    .media-browser-close {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--pico-muted-color, #666);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .media-browser-close:hover {
+      background: var(--pico-secondary-background, #f5f5f5);
+      color: var(--pico-color, #333);
+    }
+
+    .media-browser-content {
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .media-browser-content mbr-media-browser {
+      height: 100%;
+    }
+
+    /* Responsive adjustments for media browser */
+    @media (max-width: 768px) {
+      .media-browser-popup {
+        max-width: 100%;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+      }
+
+      .media-browser-backdrop {
+        padding: 0;
+      }
     }
   `;
 }

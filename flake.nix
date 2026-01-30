@@ -360,14 +360,26 @@
             # No source needed - we're wrapping mbr-cli
             dontUnpack = true;
 
+            nativeBuildInputs = [pkgs.makeWrapper];
+
             installPhase = ''
-              # CLI binary accessible at $out/bin/mbr
+              # CLI binary accessible at $out/bin/mbr (wrapped with pdfium path)
               mkdir -p $out/bin
-              cp ${packages.mbr-cli}/bin/mbr $out/bin/mbr
+              makeWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
+                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
 
               # macOS app bundle
               mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources,PlugIns}
-              cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
+
+              # Create wrapper script for app bundle that sets pdfium path
+              cat > $out/Applications/MBR.app/Contents/MacOS/mbr <<'LAUNCHER'
+              #!/bin/bash
+              export PDFIUM_DYNAMIC_LIB_PATH="${pkgs.pdfium-binaries}/lib"
+              exec "$(dirname "$0")/.mbr-unwrapped" "$@"
+              LAUNCHER
+              chmod +x $out/Applications/MBR.app/Contents/MacOS/mbr
+              cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/.mbr-unwrapped
+
               cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
               cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
@@ -390,7 +402,20 @@
               platforms = platforms.darwin;
             };
           }
-        else packages.mbr-cli; # On Linux, mbr = mbr-cli
+        else
+          # Linux: wrap the CLI binary with pdfium path
+          pkgs.stdenv.mkDerivation {
+            pname = "mbr";
+            inherit version;
+            dontUnpack = true;
+            nativeBuildInputs = [pkgs.makeWrapper];
+            installPhase = ''
+              mkdir -p $out/bin
+              makeWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
+                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+            '';
+            meta = packages.mbr-cli.meta;
+          };
 
       # Clippy check - runs lints without full build
       packages.clippy = craneLib.cargoClippy (commonArgs
@@ -467,6 +492,7 @@
         };
 
       # Release package: creates distributable archives from the built package
+      # Bundles pdfium library for PDF cover image generation
       packages.release =
         pkgs.runCommand "mbr-release-${version}" {
           nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
@@ -475,15 +501,23 @@
           then ''
             mkdir -p $out
 
-            # Create .app bundle archive
+            # Create staging directory for app bundle with pdfium
+            mkdir -p staging/MBR.app/Contents/Frameworks
+            cp -R ${packages.mbr}/Applications/MBR.app/* staging/MBR.app/Contents/
+            cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging/MBR.app/Contents/Frameworks/
+
+            # Create .app bundle archive (includes bundled pdfium)
             tar -czvf $out/mbr-${archString}.tar.gz \
-              -C ${packages.mbr}/Applications \
+              -C staging \
               MBR.app
 
-            # Create CLI-only archive
+            # Create CLI archive with bundled pdfium in lib/ subdirectory
+            mkdir -p staging-cli/lib
+            cp ${packages.mbr-cli}/bin/mbr staging-cli/
+            cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging-cli/lib/
             tar -czvf $out/mbr-cli-${archString}.tar.gz \
-              -C ${packages.mbr}/bin \
-              mbr
+              -C staging-cli \
+              mbr lib
 
             # Create checksums
             cd $out
@@ -496,10 +530,13 @@
           else ''
             mkdir -p $out
 
-            # Create CLI archive (Linux)
+            # Create CLI archive with bundled pdfium in lib/ subdirectory
+            mkdir -p staging/lib
+            cp ${packages.mbr}/bin/mbr staging/
+            cp ${pkgs.pdfium-binaries}/lib/libpdfium.so staging/lib/
             tar -czvf $out/mbr-${archString}.tar.gz \
-              -C ${packages.mbr}/bin \
-              mbr
+              -C staging \
+              mbr lib
 
             # Create checksums
             cd $out
