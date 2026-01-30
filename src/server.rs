@@ -153,6 +153,74 @@ pub fn validate_media_path(path: &str, repo_root: &Path) -> Result<PathBuf, MbrE
     Ok(canonical_path)
 }
 
+/// Safely join a base directory with a relative path for serving MBR assets.
+///
+/// Returns `Some(PathBuf)` if the path is safe (within base_dir and exists as a file),
+/// `None` otherwise. This prevents path traversal attacks.
+///
+/// # Security
+///
+/// This function guards against path traversal attacks by:
+/// 1. Rejecting paths containing ".." before any filesystem operations
+/// 2. Canonicalizing both the base directory and the joined path
+/// 3. Verifying the resolved path starts with the base directory
+/// 4. Ensuring the path is a file (not a directory)
+fn safe_join_asset(base_dir: &Path, relative_path: &str) -> Option<PathBuf> {
+    // Early rejection of obvious path traversal attempts
+    if relative_path.contains("..") {
+        tracing::warn!(
+            "Path traversal attempt blocked in MBR assets: {}",
+            relative_path
+        );
+        return None;
+    }
+
+    let clean_path = relative_path.trim_start_matches('/');
+    let candidate = base_dir.join(clean_path);
+
+    // Canonicalize base_dir first to handle any symlinks in the base
+    let canonical_base = base_dir.canonicalize().ok()?;
+
+    // Canonicalize the candidate path - this resolves symlinks and ".."
+    let canonical = candidate.canonicalize().ok()?;
+
+    // Verify containment and that it's a file
+    if canonical.starts_with(&canonical_base) && canonical.is_file() {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
+/// Verify that a file path is safely contained within a base directory.
+///
+/// Returns `Some(PathBuf)` with the canonical path if valid, `None` if the path
+/// escapes the base directory (path traversal) or doesn't exist as a file.
+///
+/// This is used for defense-in-depth validation of paths that have already
+/// been constructed from URL paths.
+///
+/// # Security
+///
+/// Guards against path traversal by canonicalizing both paths and verifying containment.
+#[cfg(feature = "media-metadata")]
+fn validate_path_containment(file_path: &Path, base_dir: &Path) -> Option<PathBuf> {
+    // Early rejection of obvious path traversal in the path string
+    if file_path.to_string_lossy().contains("..") {
+        tracing::warn!("Path traversal attempt blocked: {}", file_path.display());
+        return None;
+    }
+
+    let canonical_base = base_dir.canonicalize().ok()?;
+    let canonical_file = file_path.canonicalize().ok()?;
+
+    if canonical_file.starts_with(&canonical_base) && canonical_file.is_file() {
+        Some(canonical_file)
+    } else {
+        None
+    }
+}
+
 pub struct Server {
     pub router: Router,
     pub port: u16,
@@ -1042,6 +1110,11 @@ impl Server {
     /// 1. If template_folder is set, serve from there (js/ for components, rest from root)
     /// 2. Otherwise, check .mbr/ directory in base_dir
     /// 3. Fall back to compiled-in DEFAULT_FILES
+    ///
+    /// # Security
+    ///
+    /// Path traversal attacks are blocked by `safe_join_asset` which validates
+    /// that resolved paths remain within the intended directory.
     pub async fn serve_mbr_assets(
         extract::Path(path): extract::Path<String>,
         State(config): State<ServerState>,
@@ -1055,32 +1128,30 @@ impl Server {
             format!("/{}", path)
         };
 
-        // Try template_folder first if set
+        // Try template_folder first if set (with path traversal protection)
         if let Some(ref template_folder) = config.template_folder {
-            // Map components/* -> js/* in template folder
-            let file_path = if asset_path.starts_with("/components/") {
+            // Map components/* -> components-js/* in template folder
+            let relative_path = if asset_path.starts_with("/components/") {
                 let component_name = asset_path
                     .strip_prefix("/components/")
                     .unwrap_or(&asset_path);
-                template_folder.join("components-js").join(component_name)
+                format!("components-js/{}", component_name)
             } else {
-                // Strip leading slash for joining
-                template_folder.join(asset_path.trim_start_matches('/'))
+                asset_path.trim_start_matches('/').to_string()
             };
 
-            tracing::trace!("Checking template folder: {}", file_path.display());
+            tracing::trace!("Checking template folder for: {}", relative_path);
 
-            if file_path.is_file() {
+            if let Some(file_path) = safe_join_asset(template_folder, &relative_path) {
                 return Self::serve_file_from_path(&file_path).await;
             }
         }
 
-        // Try .mbr/ directory in base_dir
+        // Try .mbr/ directory in base_dir (with path traversal protection)
         let mbr_dir = config.base_dir.join(".mbr");
-        let file_path = mbr_dir.join(asset_path.trim_start_matches('/'));
-        tracing::trace!("Checking .mbr dir: {}", file_path.display());
+        tracing::trace!("Checking .mbr dir for: {}", asset_path);
 
-        if file_path.is_file() {
+        if let Some(file_path) = safe_join_asset(&mbr_dir, &asset_path) {
             return Self::serve_file_from_path(&file_path).await;
         }
 
@@ -1459,19 +1530,19 @@ impl Server {
             };
         }
 
-        // Try to resolve the video file path
+        // Try to resolve the video file path with path traversal protection
         // First, try the direct path, then try with static_folder prefix
         let video_file = {
             let direct = config.base_dir.join(video_url_path);
-            if direct.is_file() {
-                direct
+            // Validate path stays within base_dir (defense in depth)
+            if let Some(validated) = validate_path_containment(&direct, &config.base_dir) {
+                validated
             } else {
-                let with_static = config
-                    .base_dir
-                    .join(&config.static_folder)
-                    .join(video_url_path);
-                if with_static.is_file() {
-                    with_static
+                let static_dir = config.base_dir.join(&config.static_folder);
+                let with_static = static_dir.join(video_url_path);
+                // Validate path stays within static folder
+                if let Some(validated) = validate_path_containment(&with_static, &static_dir) {
+                    validated
                 } else {
                     tracing::debug!(
                         "Video file not found for metadata generation: {}",
@@ -1671,19 +1742,19 @@ impl Server {
             };
         }
 
-        // Try to resolve the PDF file path
+        // Try to resolve the PDF file path with path traversal protection
         // First, try the direct path, then try with static_folder prefix
         let pdf_file = {
             let direct = config.base_dir.join(pdf_url_path);
-            if direct.is_file() {
-                direct
+            // Validate path stays within base_dir (defense in depth)
+            if let Some(validated) = validate_path_containment(&direct, &config.base_dir) {
+                validated
             } else {
-                let with_static = config
-                    .base_dir
-                    .join(&config.static_folder)
-                    .join(pdf_url_path);
-                if with_static.is_file() {
-                    with_static
+                let static_dir = config.base_dir.join(&config.static_folder);
+                let with_static = static_dir.join(pdf_url_path);
+                // Validate path stays within static folder
+                if let Some(validated) = validate_path_containment(&with_static, &static_dir) {
+                    validated
                 } else {
                     tracing::debug!("PDF file not found for cover generation: {}", pdf_url_path);
                     return None;
@@ -3619,6 +3690,99 @@ mod tests {
         let result = validate_media_path("videos/2024/demo.mp4", temp_dir.path());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    // ==================== safe_join_asset Tests ====================
+
+    #[test]
+    fn test_safe_join_asset_accepts_valid_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("theme.css");
+        std::fs::write(&test_file, "body {}").unwrap();
+
+        let result = safe_join_asset(temp_dir.path(), "theme.css");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_safe_join_asset_handles_leading_slash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("theme.css");
+        std::fs::write(&test_file, "body {}").unwrap();
+
+        let result = safe_join_asset(temp_dir.path(), "/theme.css");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_safe_join_asset_rejects_directory_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Various path traversal attempts
+        let attacks = vec![
+            "../etc/passwd",
+            "../../etc/passwd",
+            "foo/../../../etc/passwd",
+            "../theme.css",
+        ];
+
+        for attack in attacks {
+            let result = safe_join_asset(temp_dir.path(), attack);
+            assert!(
+                result.is_none(),
+                "Path traversal should be blocked for: {}",
+                attack
+            );
+        }
+    }
+
+    #[test]
+    fn test_safe_join_asset_rejects_nonexistent_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let result = safe_join_asset(temp_dir.path(), "nonexistent.css");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_safe_join_asset_rejects_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let subdir = temp_dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let result = safe_join_asset(temp_dir.path(), "subdir");
+        assert!(result.is_none(), "Directories should not be served");
+    }
+
+    #[test]
+    fn test_safe_join_asset_handles_nested_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested = temp_dir.path().join("components-js").join("module");
+        std::fs::create_dir_all(&nested).unwrap();
+        let test_file = nested.join("app.js");
+        std::fs::write(&test_file, "export {}").unwrap();
+
+        let result = safe_join_asset(temp_dir.path(), "components-js/module/app.js");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_safe_join_asset_blocks_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a symlink pointing outside the base directory
+        let link_path = temp_dir.path().join("escape");
+        if symlink("/tmp", &link_path).is_ok() {
+            // Try to access a file through the symlink
+            let result = safe_join_asset(temp_dir.path(), "escape/some_file");
+            assert!(result.is_none(), "Symlink escape should be blocked");
+        }
     }
 }
 

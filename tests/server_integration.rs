@@ -2783,3 +2783,120 @@ async fn test_media_viewer_has_back_navigation() {
         "Response should contain back navigation"
     );
 }
+
+// ==================== MBR Assets Path Traversal Tests ====================
+//
+// Note: Axum normalizes URL paths BEFORE route matching, providing first-layer defense.
+// For example, `/.mbr/../readme.md` becomes `/readme.md` at the framework level.
+// Our `safe_join_asset` function provides defense-in-depth for edge cases.
+// These tests verify the combined security behavior.
+
+#[tokio::test]
+async fn test_mbr_assets_traversal_normalized_by_framework() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Axum normalizes `/.mbr/../readme.md` to `/readme.md` before routing
+    // This means the request never reaches serve_mbr_assets at all
+    // Instead it routes to the markdown handler and returns 200 for readme.md
+    // This is framework-level security - the traversal is neutralized
+    let response = server.get("/.mbr/../readme.md").await;
+    // The normalized path /readme.md routes to markdown handler
+    assert!(
+        response.status() == 200 || response.status() == 301,
+        "Framework normalizes path - should route to markdown handler"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_nonexistent_file_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request for nonexistent .mbr file should return 404
+    let response = server.get("/.mbr/nonexistent.css").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Nonexistent .mbr file should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_cannot_access_files_outside_mbr_dir() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+    repo.create_markdown("secret.md", "# Secret content");
+    repo.create_dir(".mbr");
+    repo.create_static_file(".mbr/user.css", b"body {}");
+
+    let server = TestServer::start(&repo).await;
+
+    // Even if somehow a path like "/../secret.md" reached serve_mbr_assets,
+    // safe_join_asset would reject it. We can't easily test this at integration
+    // level due to Axum's normalization, but the unit tests in server.rs verify it.
+    // Here we verify that .mbr serves only .mbr content.
+    let response = server.get("/.mbr/user.css").await;
+    assert_eq!(response.status(), 200, ".mbr file should be accessible");
+
+    // A file that exists at root but not in .mbr should not be found via /.mbr/
+    let response = server.get("/.mbr/secret.md").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Files outside .mbr dir should not be accessible via /.mbr/ route"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_valid_file_still_works() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    // Create a custom CSS file in .mbr directory
+    repo.create_dir(".mbr");
+    repo.create_static_file(".mbr/user.css", b"body { color: red; }");
+
+    let server = TestServer::start(&repo).await;
+
+    // Valid .mbr asset request should still work
+    let response = server.get("/.mbr/user.css").await;
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid .mbr asset should return 200 OK"
+    );
+
+    let content = response.text().await.unwrap();
+    assert!(
+        content.contains("body { color: red; }"),
+        "Should return the correct CSS content"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_nested_path_works() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    // Create nested directory structure in .mbr
+    repo.create_dir(".mbr/custom/styles");
+    repo.create_static_file(
+        ".mbr/custom/styles/theme.css",
+        b".theme { display: block; }",
+    );
+
+    let server = TestServer::start(&repo).await;
+
+    // Nested path should work
+    let response = server.get("/.mbr/custom/styles/theme.css").await;
+    assert_eq!(
+        response.status(),
+        200,
+        "Nested .mbr asset path should return 200 OK"
+    );
+}
