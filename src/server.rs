@@ -1821,6 +1821,26 @@ impl Server {
         pdf_path: &std::path::Path,
         sidecar_path: &std::path::Path,
     ) -> Option<Vec<u8>> {
+        // Ensure the sidecar path stays within the same directory as the validated PDF path.
+        // This provides an additional defense-in-depth check against path traversal before
+        // performing any filesystem operations on the sidecar file.
+        if let Some(pdf_dir) = pdf_path.parent() {
+            if validate_path_containment(sidecar_path, pdf_dir).is_none() {
+                tracing::warn!(
+                    "Sidecar path failed containment validation: {}",
+                    sidecar_path.display()
+                );
+                return None;
+            }
+        } else {
+            // If the PDF has no parent directory, treat this as invalid and do not use the sidecar.
+            tracing::warn!(
+                "PDF path has no parent directory; skipping sidecar: {}",
+                pdf_path.display()
+            );
+            return None;
+        }
+
         // Check if sidecar exists
         let sidecar_meta = tokio::fs::metadata(sidecar_path).await.ok()?;
 
