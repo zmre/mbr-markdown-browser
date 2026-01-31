@@ -219,9 +219,9 @@ describe('getViewerUrl', () => {
     expect(getViewerUrl(file)).toBe('/.mbr/audio/?path=%2Fmusic%2Fsong.mp3');
   });
 
-  it('returns direct url for image', () => {
+  it('returns image viewer url for image', () => {
     const file = createFileInfo('/images/photo.jpg', { type: 'image' });
-    expect(getViewerUrl(file)).toBe('/images/photo.jpg');
+    expect(getViewerUrl(file)).toBe('/.mbr/images/?path=%2Fimages%2Fphoto.jpg');
   });
 
   it('returns direct url for text', () => {
