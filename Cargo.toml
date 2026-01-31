@@ -40,7 +40,7 @@ html-escape = "0.2.13"
 itertools = "0.14.0"
 metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/audio metadata extraction
 ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
-pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_7350"] } # PDF cover; pdfium_7350 matches nixpkgs pdfium-binaries 7363
+pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_latest"] } # PDF cover; pdfium_latest (7543) forward-compatible with nixpkgs pdfium-binaries 7643
 papaya = "0.2.3"
 pathdiff = "0.2.3"
 lopdf = { version = "0.39", default-features = false, features = ["rayon"] }

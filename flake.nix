@@ -146,6 +146,7 @@
           || (builtins.match ".*\\.png$" path != null)
           || (builtins.match ".*\\.icns$" path != null)
           || (builtins.match ".*\\.udl$" path != null) # UniFFI interface definitions
+          || (builtins.match ".*/tests/pdfs/.*\\.pdf$" path != null) # Test PDF files
           # QuickLook extension sources
           || (builtins.match ".*\\.swift$" path != null)
           || (builtins.match ".*\\.plist$" path != null)
