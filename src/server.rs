@@ -1825,6 +1825,30 @@ impl Server {
         // This provides an additional defense-in-depth check against path traversal before
         // performing any filesystem operations on the sidecar file.
         if let Some(pdf_dir) = pdf_path.parent() {
+            // First, ensure that the sidecar's parent directory is exactly the same as the PDF's
+            // parent directory. Since `sidecar_path` was constructed from `pdf_path` by only
+            // changing the file name, any deviation here indicates an unexpected or unsafe path.
+            if let Some(sidecar_dir) = sidecar_path.parent() {
+                if sidecar_dir != pdf_dir {
+                    tracing::warn!(
+                        "Sidecar path is not in the same directory as PDF; skipping sidecar. \
+                         pdf_dir='{}', sidecar_dir='{}'",
+                        pdf_dir.display(),
+                        sidecar_dir.display()
+                    );
+                    return None;
+                }
+            } else {
+                // A sidecar without a parent directory is unexpected; treat as invalid.
+                tracing::warn!(
+                    "Sidecar path has no parent directory; skipping sidecar: {}",
+                    sidecar_path.display()
+                );
+                return None;
+            }
+
+            // Additionally, validate that the sidecar path, once canonicalized, still resides
+            // under the PDF's directory. This guards against any remaining path traversal risks.
             if validate_path_containment(sidecar_path, pdf_dir).is_none() {
                 tracing::warn!(
                     "Sidecar path failed containment validation: {}",
