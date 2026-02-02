@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { subscribeSiteNav, resolveUrl, getTagSources, type TagSourceConfig } from './shared.js'
+import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, type TagSourceConfig } from './shared.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -147,8 +147,8 @@ export class MbrBrowseSingleElement extends LitElement {
         this._tagSources = getTagSources();
         this._tagGroups = this._buildTagGroups(this._allFiles);
 
-        // Auto-expand current path
-        const currentPath = window.location.pathname;
+        // Auto-expand current path (use canonical path for static mode)
+        const currentPath = getCanonicalPath();
         this._autoExpandCurrentPath(currentPath);
       }
     });
@@ -418,8 +418,8 @@ export class MbrBrowseSingleElement extends LitElement {
   private _initializeFocusIfNeeded() {
     if (this._focusedIndex >= 0) return;
 
-    // Find current page in flat items
-    const currentPath = window.location.pathname;
+    // Find current page in flat items (use canonical path for static mode)
+    const currentPath = getCanonicalPath();
     const normalizedCurrent = currentPath.endsWith('/') ? currentPath : currentPath + '/';
 
     const currentIndex = this._flatItems.findIndex(item => {
@@ -622,7 +622,8 @@ export class MbrBrowseSingleElement extends LitElement {
   }
 
   private _isCurrentPath(path: string): boolean {
-    const currentPath = window.location.pathname;
+    // Use canonical path to handle static mode with subdirectory deployment
+    const currentPath = getCanonicalPath();
     const normalizedCurrent = currentPath.endsWith('/') ? currentPath : currentPath + '/';
     const normalizedPath = path.endsWith('/') ? path : path + '/';
     return normalizedCurrent === normalizedPath;

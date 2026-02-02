@@ -68,6 +68,50 @@ export function getTagSources(): TagSourceConfig[] {
 }
 
 /**
+ * Get the canonical path from window.location.pathname.
+ *
+ * In server mode, the pathname is already canonical (e.g., "/docs/guide/").
+ * In static mode deployed at a subdirectory, we need to strip the deployment
+ * prefix to get the canonical path that matches site.json entries.
+ *
+ * The basePath tells us the depth (number of "../" segments), which we use
+ * to extract just the canonical portion of the pathname.
+ *
+ * Example:
+ *   Deployed at: https://example.com/my-site/
+ *   Current page: https://example.com/my-site/docs/guide/
+ *   window.location.pathname = "/my-site/docs/guide/"
+ *   basePath = "../../" (depth 2)
+ *   Result: "/docs/guide/"
+ */
+export function getCanonicalPath(): string {
+  const pathname = window.location.pathname;
+
+  // In server mode, pathname is already canonical
+  if (window.__MBR_CONFIG__?.serverMode) {
+    return pathname;
+  }
+
+  const basePath = window.__MBR_CONFIG__?.basePath || './';
+
+  // Count depth from basePath (each "../" is one level)
+  const depth = (basePath.match(/\.\.\//g) || []).length;
+
+  // If depth is 0 (at root level), the pathname is already canonical
+  if (depth === 0) {
+    return pathname;
+  }
+
+  // Split pathname and get last `depth` segments
+  const segments = pathname.split('/').filter(p => p);
+  const canonicalSegments = segments.slice(-depth);
+
+  // Reconstruct canonical path
+  const canonical = '/' + canonicalSegments.join('/');
+  return canonical.endsWith('/') || canonical === '/' ? canonical : canonical + '/';
+}
+
+/**
  * Reactive state for site navigation loading.
  * Components can subscribe to changes via the callback pattern.
  */
