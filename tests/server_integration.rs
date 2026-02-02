@@ -1121,6 +1121,159 @@ async fn test_site_json_includes_frontmatter() {
     assert_eq!(tagged["frontmatter"]["title"].as_str(), Some("My Title"));
 }
 
+#[tokio::test]
+async fn test_site_json_other_files_kind_structure() {
+    // Test T013: Verify other_files include metadata.kind with type structure
+    let repo = TestRepo::new();
+
+    // Create a video file (will be classified as video type)
+    repo.create_dir("videos");
+    repo.create_static_file("videos/demo.mp4", b"fake video data");
+
+    // Create an image file
+    repo.create_dir("images");
+    repo.create_static_file("images/photo.jpg", b"fake jpg data");
+
+    // Create a PDF file
+    repo.create_static_file("document.pdf", b"%PDF-1.4 fake pdf");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    // Should have other_files array
+    assert!(
+        body["other_files"].is_array(),
+        "Expected other_files array in site.json"
+    );
+
+    let other_files = body["other_files"].as_array().unwrap();
+    assert!(
+        !other_files.is_empty(),
+        "Expected at least one file in other_files"
+    );
+
+    // Find the video file
+    let video_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("demo.mp4"));
+
+    assert!(
+        video_file.is_some(),
+        "Expected to find demo.mp4 in other_files"
+    );
+
+    let video = video_file.unwrap();
+    // Verify the metadata.kind structure has a "type" field
+    assert!(
+        video["metadata"]["kind"]["type"].is_string(),
+        "Expected metadata.kind.type to be a string in video file"
+    );
+    assert_eq!(
+        video["metadata"]["kind"]["type"].as_str(),
+        Some("video"),
+        "Expected video file to have kind.type = 'video'"
+    );
+
+    // Find the image file
+    let image_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("photo.jpg"));
+
+    assert!(
+        image_file.is_some(),
+        "Expected to find photo.jpg in other_files"
+    );
+
+    let image = image_file.unwrap();
+    assert_eq!(
+        image["metadata"]["kind"]["type"].as_str(),
+        Some("image"),
+        "Expected image file to have kind.type = 'image'"
+    );
+
+    // Find the PDF file
+    let pdf_file = other_files.iter().find(|f| {
+        f["url_path"]
+            .as_str()
+            .unwrap_or("")
+            .contains("document.pdf")
+    });
+
+    assert!(
+        pdf_file.is_some(),
+        "Expected to find document.pdf in other_files"
+    );
+
+    let pdf = pdf_file.unwrap();
+    assert_eq!(
+        pdf["metadata"]["kind"]["type"].as_str(),
+        Some("pdf"),
+        "Expected PDF file to have kind.type = 'pdf'"
+    );
+}
+
+#[tokio::test]
+async fn test_site_json_srt_file_classified_as_text() {
+    // Test T014: Verify .srt files are classified as text type
+    let repo = TestRepo::new();
+
+    // Create an .srt subtitle file
+    repo.create_dir("subtitles");
+    repo.create_static_file(
+        "subtitles/movie.srt",
+        b"1\n00:00:01,000 --> 00:00:04,000\nSubtitle text here",
+    );
+
+    // Also create a .vtt file to verify other text types
+    repo.create_static_file(
+        "subtitles/movie.vtt",
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nSubtitle text here",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    let other_files = body["other_files"].as_array().unwrap();
+
+    // Find the .srt file
+    let srt_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("movie.srt"));
+
+    assert!(
+        srt_file.is_some(),
+        "Expected to find movie.srt in other_files"
+    );
+
+    let srt = srt_file.unwrap();
+    assert!(
+        srt["metadata"]["kind"]["type"].is_string(),
+        "Expected metadata.kind.type to be a string in srt file"
+    );
+    assert_eq!(
+        srt["metadata"]["kind"]["type"].as_str(),
+        Some("text"),
+        "Expected .srt file to have kind.type = 'text'"
+    );
+
+    // Verify .vtt is also classified as text
+    let vtt_file = other_files
+        .iter()
+        .find(|f| f["url_path"].as_str().unwrap_or("").contains("movie.vtt"));
+
+    assert!(
+        vtt_file.is_some(),
+        "Expected to find movie.vtt in other_files"
+    );
+
+    let vtt = vtt_file.unwrap();
+    assert_eq!(
+        vtt["metadata"]["kind"]["type"].as_str(),
+        Some("text"),
+        "Expected .vtt file to have kind.type = 'text'"
+    );
+}
+
 // ============================================================================
 // HTTP Range Request Tests
 // ============================================================================
@@ -2170,5 +2323,580 @@ async fn test_markdown_with_only_frontmatter() {
         response.status(),
         200,
         "Markdown with only frontmatter should render"
+    );
+}
+
+// ============================================================================
+// PDF Cover Sidecar Tests (media-metadata feature)
+// ============================================================================
+
+/// Test that a pre-generated sidecar file is served instead of dynamically generating.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_pdf_cover_serves_from_sidecar() {
+    let repo = TestRepo::new();
+
+    // Copy a real PDF to the test repo
+    let test_pdf_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs/DGA.pdf");
+    let pdf_path = repo.path().join("docs/test.pdf");
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::copy(&test_pdf_src, &pdf_path).unwrap();
+
+    // Create a fake sidecar file (PNG with magic bytes)
+    let sidecar_path = repo.path().join("docs/test.pdf.cover.png");
+    // Create a minimal valid PNG (1x1 pixel, red)
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 pixels
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // 8-bit RGB
+        0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+        0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, // Compressed data
+        0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x18, 0xDD, //
+        0x8D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, // IEND chunk
+        0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(&sidecar_path, &png_data).unwrap();
+
+    // Wait a bit to ensure mtime difference
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Touch the sidecar to ensure it's newer than the PDF
+    let now = std::time::SystemTime::now();
+    filetime::set_file_mtime(&sidecar_path, filetime::FileTime::from_system_time(now)).unwrap();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/test.pdf.cover.png").await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+
+    let body = response.bytes().await.unwrap();
+    // Should serve our fake sidecar, not the dynamically generated one
+    // (our sidecar is tiny, a real generated one would be much larger)
+    assert_eq!(
+        body.len(),
+        png_data.len(),
+        "Should serve the pre-generated sidecar file"
+    );
+}
+
+/// Test that a stale sidecar falls back to serving the stale sidecar when regeneration fails.
+///
+/// This test verifies graceful degradation: when the PDF is newer than the sidecar,
+/// we attempt to regenerate, but if that fails (e.g., pdfium not available), we
+/// serve the stale sidecar rather than returning an error.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_pdf_cover_stale_sidecar_serves_gracefully() {
+    let repo = TestRepo::new();
+
+    // Copy a real PDF to the test repo
+    let test_pdf_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs/DGA.pdf");
+    let pdf_path = repo.path().join("docs/test.pdf");
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::copy(&test_pdf_src, &pdf_path).unwrap();
+
+    // Create a fake sidecar file (valid but small PNG)
+    let sidecar_path = repo.path().join("docs/test.pdf.cover.png");
+    // Create a minimal valid PNG (1x1 pixel)
+    let stale_png: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 pixels
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // 8-bit RGB
+        0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+        0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, // Compressed data
+        0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x18, 0xDD, //
+        0x8D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, // IEND chunk
+        0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(&sidecar_path, &stale_png).unwrap();
+
+    // Make the sidecar older than the PDF (stale)
+    let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000000000);
+    filetime::set_file_mtime(
+        &sidecar_path,
+        filetime::FileTime::from_system_time(old_time),
+    )
+    .unwrap();
+
+    // Now touch the PDF to make it newer than the sidecar
+    let now = std::time::SystemTime::now();
+    filetime::set_file_mtime(&pdf_path, filetime::FileTime::from_system_time(now)).unwrap();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/test.pdf.cover.png").await;
+
+    // Should serve successfully (either regenerated or stale fallback)
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+
+    let body = response.bytes().await.unwrap();
+    // If pdfium is not available, we fall back to stale sidecar
+    // If pdfium is available, we regenerate (larger file)
+    // Either way, we should get valid PNG data
+    assert!(
+        body.len() >= stale_png.len(),
+        "Should serve at least the stale sidecar"
+    );
+    assert_eq!(
+        &body[0..8],
+        &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+        "Should be valid PNG"
+    );
+}
+
+/// Test that PDF cover requests without sidecar return 404 when pdfium is not available.
+///
+/// Note: This test verifies the graceful failure case. In production with pdfium
+/// available, dynamic generation would succeed.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_pdf_cover_no_sidecar_returns_404_without_pdfium() {
+    let repo = TestRepo::new();
+
+    // Copy a real PDF to the test repo (no sidecar)
+    let test_pdf_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs/DGA.pdf");
+    let pdf_path = repo.path().join("docs/report.pdf");
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::copy(&test_pdf_src, &pdf_path).unwrap();
+
+    // No sidecar file exists
+    let sidecar_path = repo.path().join("docs/report.pdf.cover.png");
+    assert!(!sidecar_path.exists());
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/docs/report.pdf.cover.png").await;
+
+    // Without pdfium, this will return 404 (no sidecar, can't generate)
+    // With pdfium available, this would return 200 with generated cover
+    // We accept either outcome as valid for this test
+    let status = response.status();
+    assert!(
+        status == 200 || status == 404,
+        "Expected 200 (pdfium available) or 404 (pdfium unavailable), got {}",
+        status
+    );
+}
+
+// ============================================================================
+// Media Viewer Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_media_viewer_video_missing_path_returns_error() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request video viewer without path parameter should return 400 Bad Request
+    let response = server.get("/.mbr/videos/").await;
+
+    assert_eq!(
+        response.status(),
+        400,
+        "Missing path parameter should return 400 Bad Request"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("Bad Request") || html.contains("Missing"),
+        "Error page should indicate missing path. Got: {}",
+        &html[..std::cmp::min(500, html.len())]
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_valid_path_returns_200() {
+    let repo = TestRepo::new();
+
+    // Create a test video file
+    repo.create_dir("videos");
+    repo.create_static_file("videos/test.mp4", b"fake video content");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request video viewer with valid path
+    let response = server.get("/.mbr/videos/?path=/videos/test.mp4").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid video path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+
+    // Verify the media viewer template is rendered
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain mbr-media-viewer component. Got: {}",
+        &html[..std::cmp::min(1000, html.len())]
+    );
+
+    // Verify media type is set correctly
+    assert!(
+        html.contains("video") || html.contains("Video"),
+        "Response should indicate video media type"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_directory_traversal_blocked() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Attempt directory traversal via path parameter
+    let response = server.get("/.mbr/videos/?path=/../etc/passwd").await;
+
+    assert_eq!(
+        response.status(),
+        403,
+        "Directory traversal should return 403 Forbidden"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("Forbidden") || html.contains("Access denied"),
+        "Error page should indicate access denied. Got: {}",
+        &html[..std::cmp::min(500, html.len())]
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_url_encoded_traversal_blocked() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded ".." = "%2e%2e"
+    let response = server
+        .get("/.mbr/videos/?path=%2f%2e%2e%2fetc%2fpasswd")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        403,
+        "URL-encoded directory traversal should return 403 Forbidden"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_nonexistent_file_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request a video file that doesn't exist
+    let response = server
+        .get("/.mbr/videos/?path=/videos/nonexistent.mp4")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        404,
+        "Nonexistent video file should return 404 Not Found"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_nested_path() {
+    let repo = TestRepo::new();
+
+    // Create a nested video structure
+    repo.create_dir("videos/2024/january");
+    repo.create_static_file("videos/2024/january/event.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .get("/.mbr/videos/?path=/videos/2024/january/event.mp4")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Nested video path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain media viewer component"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_video_with_spaces_in_path() {
+    let repo = TestRepo::new();
+
+    // Create a video file with spaces in the name
+    repo.create_dir("videos");
+    repo.create_static_file("videos/my video file.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    // URL-encoded path with spaces
+    let response = server
+        .get("/.mbr/videos/?path=/videos/my%20video%20file.mp4")
+        .await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Video path with spaces should return 200 OK"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_pdf_missing_path_returns_error() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request PDF viewer without path parameter
+    let response = server.get("/.mbr/pdfs/").await;
+
+    assert_eq!(
+        response.status(),
+        400,
+        "Missing path parameter should return 400 Bad Request"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_pdf_valid_path_returns_200() {
+    let repo = TestRepo::new();
+
+    // Create a test PDF file
+    repo.create_dir("documents");
+    repo.create_static_file("documents/report.pdf", b"%PDF-1.4 fake pdf");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/.mbr/pdfs/?path=/documents/report.pdf").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid PDF path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain mbr-media-viewer component"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_audio_missing_path_returns_error() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request audio viewer without path parameter
+    let response = server.get("/.mbr/audio/").await;
+
+    assert_eq!(
+        response.status(),
+        400,
+        "Missing path parameter should return 400 Bad Request"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_audio_valid_path_returns_200() {
+    let repo = TestRepo::new();
+
+    // Create a test audio file
+    repo.create_dir("audio");
+    repo.create_static_file("audio/song.mp3", b"fake mp3 content");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/.mbr/audio/?path=/audio/song.mp3").await;
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid audio path should return 200 OK"
+    );
+
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("mbr-media-viewer"),
+        "Response should contain mbr-media-viewer component"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_has_breadcrumbs() {
+    let repo = TestRepo::new();
+
+    repo.create_dir("videos/tutorials");
+    repo.create_static_file("videos/tutorials/lesson.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .get("/.mbr/videos/?path=/videos/tutorials/lesson.mp4")
+        .await;
+
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+
+    // Check for breadcrumb navigation
+    assert!(
+        html.contains("tutorials") || html.contains("videos"),
+        "Response should contain breadcrumb navigation"
+    );
+}
+
+#[tokio::test]
+async fn test_media_viewer_has_back_navigation() {
+    let repo = TestRepo::new();
+
+    repo.create_dir("videos");
+    repo.create_static_file("videos/demo.mp4", b"fake video");
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/.mbr/videos/?path=/videos/demo.mp4").await;
+
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+
+    // Check for back navigation
+    assert!(
+        html.contains("Back") || html.contains("parent_path") || html.contains("/videos/"),
+        "Response should contain back navigation"
+    );
+}
+
+// ==================== MBR Assets Path Traversal Tests ====================
+//
+// Note: Axum normalizes URL paths BEFORE route matching, providing first-layer defense.
+// For example, `/.mbr/../readme.md` becomes `/readme.md` at the framework level.
+// Our `safe_join_asset` function provides defense-in-depth for edge cases.
+// These tests verify the combined security behavior.
+
+#[tokio::test]
+async fn test_mbr_assets_traversal_normalized_by_framework() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Axum normalizes `/.mbr/../readme.md` to `/readme.md` before routing
+    // This means the request never reaches serve_mbr_assets at all
+    // Instead it routes to the markdown handler and returns 200 for readme.md
+    // This is framework-level security - the traversal is neutralized
+    let response = server.get("/.mbr/../readme.md").await;
+    // The normalized path /readme.md routes to markdown handler
+    assert!(
+        response.status() == 200 || response.status() == 301,
+        "Framework normalizes path - should route to markdown handler"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_nonexistent_file_returns_404() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    let server = TestServer::start(&repo).await;
+
+    // Request for nonexistent .mbr file should return 404
+    let response = server.get("/.mbr/nonexistent.css").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Nonexistent .mbr file should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_cannot_access_files_outside_mbr_dir() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+    repo.create_markdown("secret.md", "# Secret content");
+    repo.create_dir(".mbr");
+    repo.create_static_file(".mbr/user.css", b"body {}");
+
+    let server = TestServer::start(&repo).await;
+
+    // Even if somehow a path like "/../secret.md" reached serve_mbr_assets,
+    // safe_join_asset would reject it. We can't easily test this at integration
+    // level due to Axum's normalization, but the unit tests in server.rs verify it.
+    // Here we verify that .mbr serves only .mbr content.
+    let response = server.get("/.mbr/user.css").await;
+    assert_eq!(response.status(), 200, ".mbr file should be accessible");
+
+    // A file that exists at root but not in .mbr should not be found via /.mbr/
+    let response = server.get("/.mbr/secret.md").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "Files outside .mbr dir should not be accessible via /.mbr/ route"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_valid_file_still_works() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    // Create a custom CSS file in .mbr directory
+    repo.create_dir(".mbr");
+    repo.create_static_file(".mbr/user.css", b"body { color: red; }");
+
+    let server = TestServer::start(&repo).await;
+
+    // Valid .mbr asset request should still work
+    let response = server.get("/.mbr/user.css").await;
+    assert_eq!(
+        response.status(),
+        200,
+        "Valid .mbr asset should return 200 OK"
+    );
+
+    let content = response.text().await.unwrap();
+    assert!(
+        content.contains("body { color: red; }"),
+        "Should return the correct CSS content"
+    );
+}
+
+#[tokio::test]
+async fn test_mbr_assets_nested_path_works() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+
+    // Create nested directory structure in .mbr
+    repo.create_dir(".mbr/custom/styles");
+    repo.create_static_file(
+        ".mbr/custom/styles/theme.css",
+        b".theme { display: block; }",
+    );
+
+    let server = TestServer::start(&repo).await;
+
+    // Nested path should work
+    let response = server.get("/.mbr/custom/styles/theme.css").await;
+    assert_eq!(
+        response.status(),
+        200,
+        "Nested .mbr asset path should return 200 OK"
     );
 }

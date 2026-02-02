@@ -27,6 +27,8 @@ pub mod media;
 pub mod oembed;
 pub mod oembed_cache;
 pub mod path_resolver;
+#[cfg(feature = "media-metadata")]
+pub mod pdf_metadata;
 #[cfg(feature = "ffi")]
 pub mod quicklook;
 pub mod repo;
@@ -51,6 +53,8 @@ pub use build::{BuildStats, Builder};
 pub use config::{Config, SortField, TagSource};
 #[cfg(feature = "media-metadata")]
 pub use errors::MetadataError;
+#[cfg(feature = "media-metadata")]
+pub use errors::PdfMetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
 pub use markdown::MarkdownRenderResult;
 #[cfg(feature = "ffi")]

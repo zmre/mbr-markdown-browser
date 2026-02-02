@@ -63,9 +63,13 @@ async fn main() -> Result<(), MbrError> {
         .with(tracing_subscriber::fmt::layer())
         .try_init();
 
-    // Determine if we're in GUI mode (no --server, --stdout, --build, --extract-video-metadata flags)
+    // Determine if we're in GUI mode (no --server, --stdout, --build, --extract-video-metadata, --extract-pdf-cover flags)
     #[cfg(all(feature = "gui", feature = "media-metadata"))]
-    let is_gui_mode = !args.server && !args.stdout && !args.build && !args.extract_video_metadata;
+    let is_gui_mode = !args.server
+        && !args.stdout
+        && !args.build
+        && !args.extract_video_metadata
+        && !args.extract_pdf_cover;
     #[cfg(all(feature = "gui", not(feature = "media-metadata")))]
     let is_gui_mode = !args.server && !args.stdout && !args.build;
     #[cfg(not(feature = "gui"))]
@@ -185,6 +189,82 @@ async fn main() -> Result<(), MbrError> {
 
         mbr::video_metadata::extract_and_save(&absolute_path)?;
         return Ok(());
+    }
+
+    // Extract PDF cover mode - extract cover images from PDFs
+    #[cfg(feature = "media-metadata")]
+    if args.extract_pdf_cover {
+        use mbr::pdf_metadata::{extract_pdf_covers_recursive, save_cover};
+
+        if is_directory {
+            // Recursive directory mode
+            let result = extract_pdf_covers_recursive(&absolute_path, |pdf_path, sidecar_path| {
+                if let Some(sidecar) = sidecar_path {
+                    println!(
+                        "Extracting cover: {} -> {}",
+                        pdf_path.display(),
+                        sidecar.display()
+                    );
+                }
+            });
+
+            // Report failures to stderr
+            for (path, error) in &result.failures {
+                eprintln!("Error: {} - {}", path.display(), error);
+            }
+
+            // Print summary
+            if result.failure_count > 0 && result.success_count > 0 {
+                eprintln!(
+                    "\u{26a0} {} PDFs failed, {} succeeded",
+                    result.failure_count, result.success_count
+                );
+                std::process::exit(1); // Partial failure
+            } else if result.failure_count > 0 && result.success_count == 0 {
+                eprintln!(
+                    "\u{26a0} {} PDFs failed, none succeeded",
+                    result.failure_count
+                );
+                std::process::exit(2); // Total failure
+            } else if result.success_count > 0 {
+                println!("\u{2713} Created {} cover images", result.success_count);
+                std::process::exit(0); // Success
+            } else {
+                println!("No PDF files found in directory.");
+                std::process::exit(0);
+            }
+        } else {
+            // Single file mode
+            // Verify the file has a .pdf extension
+            let extension = absolute_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+
+            if extension.as_deref() != Some("pdf") {
+                eprintln!(
+                    "Error: {} is not a PDF file (expected .pdf extension)",
+                    absolute_path.display()
+                );
+                std::process::exit(2);
+            }
+
+            match save_cover(&absolute_path) {
+                Ok(sidecar_path) => {
+                    println!(
+                        "Extracting cover: {} -> {}",
+                        absolute_path.display(),
+                        sidecar_path.display()
+                    );
+                    println!("\u{2713} Created 1 cover image");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Error: {} - {}", absolute_path.display(), e);
+                    std::process::exit(2);
+                }
+            }
+        }
     }
 
     if args.build {

@@ -30,24 +30,49 @@ pub struct VideoMetadata {
     pub duration_secs: f64,
 }
 
+/// Known video file extensions (lowercase).
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "3gp", "ogv", "mpeg", "mpg", "ts",
+    "mts", "m2ts", "vob", "divx", "xvid", "asf", "rm", "rmvb", "f4v",
+];
+
+/// Check if a path has a video file extension.
+fn has_video_extension(path: &str) -> bool {
+    let path_lower = path.to_lowercase();
+    VIDEO_EXTENSIONS
+        .iter()
+        .any(|ext| path_lower.ends_with(&format!(".{}", ext)))
+}
+
 /// Parse a request path to determine if it's a video metadata request.
 ///
 /// Returns the video path (without metadata suffix) and the type of metadata requested.
+/// Only matches paths where the base file has a known video extension.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let result = parse_metadata_request("videos/foo.mp4.cover.png");
 /// assert_eq!(result, Some(("videos/foo.mp4", MetadataType::Cover)));
+///
+/// // Does NOT match PDF covers
+/// let result = parse_metadata_request("docs/foo.pdf.cover.png");
+/// assert_eq!(result, None);
 /// ```
 pub fn parse_metadata_request(path: &str) -> Option<(&str, MetadataType)> {
-    if let Some(video_path) = path.strip_suffix(".cover.png") {
+    if let Some(video_path) = path.strip_suffix(".cover.png")
+        && has_video_extension(video_path)
+    {
         return Some((video_path, MetadataType::Cover));
     }
-    if let Some(video_path) = path.strip_suffix(".chapters.en.vtt") {
+    if let Some(video_path) = path.strip_suffix(".chapters.en.vtt")
+        && has_video_extension(video_path)
+    {
         return Some((video_path, MetadataType::Chapters));
     }
-    if let Some(video_path) = path.strip_suffix(".captions.en.vtt") {
+    if let Some(video_path) = path.strip_suffix(".captions.en.vtt")
+        && has_video_extension(video_path)
+    {
         return Some((video_path, MetadataType::Captions));
     }
     None
@@ -595,6 +620,38 @@ mod tests {
         assert_eq!(parse_metadata_request("videos/foo.mp4"), None);
         assert_eq!(parse_metadata_request("videos/foo.png"), None);
         assert_eq!(parse_metadata_request("videos/foo.mp4.jpg"), None);
+    }
+
+    #[test]
+    fn test_parse_metadata_request_not_pdf() {
+        // PDF cover requests should NOT be matched by video parser
+        assert_eq!(parse_metadata_request("docs/report.pdf.cover.png"), None);
+        assert_eq!(parse_metadata_request("docs/Report.PDF.cover.png"), None);
+        assert_eq!(
+            parse_metadata_request("docs/report.pdf.chapters.en.vtt"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_metadata_request_various_video_extensions() {
+        // Various video extensions should be recognized
+        assert!(parse_metadata_request("foo.mkv.cover.png").is_some());
+        assert!(parse_metadata_request("foo.webm.cover.png").is_some());
+        assert!(parse_metadata_request("foo.mov.cover.png").is_some());
+        assert!(parse_metadata_request("foo.avi.cover.png").is_some());
+        assert!(parse_metadata_request("foo.m4v.cover.png").is_some());
+        assert!(parse_metadata_request("foo.MKV.cover.png").is_some()); // case insensitive
+    }
+
+    #[test]
+    fn test_has_video_extension() {
+        assert!(has_video_extension("foo.mp4"));
+        assert!(has_video_extension("foo.MP4")); // case insensitive
+        assert!(has_video_extension("path/to/video.mkv"));
+        assert!(!has_video_extension("foo.pdf"));
+        assert!(!has_video_extension("foo.png"));
+        assert!(!has_video_extension("foo.mp3")); // audio, not video
     }
 
     #[test]

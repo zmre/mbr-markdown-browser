@@ -19,7 +19,11 @@ use std::path::{Path, PathBuf};
 fn safe_join(base_dir: &Path, request_path: &str) -> Option<PathBuf> {
     // Canonicalize base_dir first to handle any symlinks in the base
     let canonical_base = base_dir.canonicalize().ok()?;
-    let candidate = base_dir.join(request_path);
+
+    // Build candidate from canonical_base (not base_dir) to ensure all path
+    // construction happens in canonical space. This prevents subtle issues
+    // if base_dir itself contains symlinks.
+    let candidate = canonical_base.join(request_path);
 
     // Try to canonicalize - this resolves ".." and symlinks
     // If canonicalize fails (path doesn't exist), try the parent

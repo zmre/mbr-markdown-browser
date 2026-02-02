@@ -1,0 +1,46 @@
+{% set asset_base = relative_base | default(value="/.mbr/") %}
+<!doctype html>
+<html lang="en">
+  <head>
+{% include "_head.html" %}
+    <title>{{ title | default(value="Media Viewer") | safe }}</title>
+    <script>
+      // Media viewer configuration
+      window.__MBR_MEDIA_VIEWER__ = {
+        mediaType: "{{ media_type | default(value='') | safe }}",
+        title: "{{ title | default(value='Media Viewer') | safe }}"
+      };
+    </script>
+  </head>
+  <body>
+{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
+{% include "_nav.html" %}
+{% include "_breadcrumbs.html" %}
+    <main id="wrapper" class="container">
+      <h1>{{ title | default(value="Media Viewer") }}</h1>
+
+      <noscript>
+        <p>JavaScript is required to view media content. Please enable JavaScript in your browser settings.</p>
+      </noscript>
+
+      <div id="media-container" data-media-type="{{ media_type | default(value='') | safe }}">
+        <mbr-media-viewer media-type="{{ media_type | default(value='') | safe }}"></mbr-media-viewer>
+      </div>
+    </main>
+    <footer class="container" data-pagefind-ignore>
+      <nav>
+        <ul>
+          <li>
+            {% if parent_path %}
+            <a href="{{ parent_path }}" role="button" class="outline secondary">&lt; Back</a>
+            {% else %}
+            <a href="/" role="button" class="outline secondary">&lt; Home</a>
+            {% endif %}
+          </li>
+        </ul>
+      </nav>
+    </footer>
+{% include "_footer.html" %}
+  </body>
+{% include "_scripts.html" %}
+</html>

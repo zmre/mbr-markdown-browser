@@ -41,11 +41,21 @@ pub enum MbrError {
     #[error("Video metadata error: {0}")]
     Metadata(#[from] MetadataError),
 
+    #[cfg(feature = "media-metadata")]
+    #[error("PDF metadata error: {0}")]
+    PdfMetadata(#[from] PdfMetadataError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    #[error("Invalid media path: {0}")]
+    InvalidMediaPath(String),
+
+    #[error("Directory traversal attempt detected")]
+    DirectoryTraversal,
 }
 
 /// Errors related to the HTTP server.
@@ -277,6 +287,36 @@ pub enum MetadataError {
 
     #[error("Video too short for thumbnail (duration: {duration_secs:.1}s)")]
     VideoTooShort { duration_secs: f64 },
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Errors related to PDF metadata and cover extraction.
+#[cfg(feature = "media-metadata")]
+#[derive(Debug, Error)]
+pub enum PdfMetadataError {
+    #[error("Failed to open PDF file: {}", path.display())]
+    OpenFailed {
+        path: PathBuf,
+        #[source]
+        source: lopdf::Error,
+    },
+
+    #[error("Failed to initialize PDF renderer")]
+    RendererInitFailed,
+
+    #[error("PDF has no pages: {}", path.display())]
+    NoPages { path: PathBuf },
+
+    #[error("Failed to render PDF page: {0}")]
+    RenderFailed(String),
+
+    #[error("Failed to encode image: {0}")]
+    EncodeFailed(String),
+
+    #[error("PDF is password-protected: {}", path.display())]
+    PasswordProtected { path: PathBuf },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

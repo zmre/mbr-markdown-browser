@@ -6,27 +6,34 @@ use std::path::PathBuf;
 #[command(version, about, long_about = None)]
 pub struct Args {
     /// Launch GUI window (default if no mode specified)
-    #[arg(short, long, conflicts_with_all = ["server", "stdout", "build", "extract_video_metadata"])]
+    #[arg(short, long, conflicts_with_all = ["server", "stdout", "build", "extract_video_metadata", "extract_pdf_cover"])]
     pub gui: bool,
 
     /// Launch HTTP server only (no GUI)
-    #[arg(short, long, conflicts_with_all = ["gui", "stdout", "build", "extract_video_metadata"])]
+    #[arg(short, long, conflicts_with_all = ["gui", "stdout", "build", "extract_video_metadata", "extract_pdf_cover"])]
     pub server: bool,
 
     /// Render single markdown file to stdout (CLI mode)
-    #[arg(short = 'o', long, conflicts_with_all = ["gui", "server", "build", "extract_video_metadata"])]
+    #[arg(short = 'o', long, conflicts_with_all = ["gui", "server", "build", "extract_video_metadata", "extract_pdf_cover"])]
     pub stdout: bool,
 
     /// Build static site (generate HTML for all markdown files)
-    #[arg(short, long, conflicts_with_all = ["gui", "server", "stdout", "extract_video_metadata"])]
+    #[arg(short, long, conflicts_with_all = ["gui", "server", "stdout", "extract_video_metadata", "extract_pdf_cover"])]
     pub build: bool,
 
     /// Extract video metadata (cover, chapters, captions) and save as sidecar files.
     /// Takes a video file path and generates .cover.png, .chapters.en.vtt, and
     /// .captions.en.vtt files next to it (if the video contains this data).
     #[cfg(feature = "media-metadata")]
-    #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build"])]
+    #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build", "extract_pdf_cover"])]
     pub extract_video_metadata: bool,
+
+    /// Extract cover images from PDF files and save as sidecar files.
+    /// Takes a PDF file or directory path and generates {file}.cover.png next to each PDF.
+    /// For directories, recursively processes all .pdf files.
+    #[cfg(feature = "media-metadata")]
+    #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build", "extract_video_metadata"])]
+    pub extract_pdf_cover: bool,
 
     /// Output directory for static site build (default: "build")
     #[arg(long, default_value = "build")]
@@ -146,6 +153,8 @@ mod tests {
             build: false,
             #[cfg(feature = "media-metadata")]
             extract_video_metadata: false,
+            #[cfg(feature = "media-metadata")]
+            extract_pdf_cover: false,
             output: PathBuf::from("build"),
             path: PathBuf::from("."),
             oembed_timeout_ms: None,
@@ -341,6 +350,14 @@ mod tests {
     fn test_parse_no_link_tracking() {
         let args = Args::parse_from(["mbr", "--no-link-tracking"]);
         assert!(args.no_link_tracking);
+    }
+
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_parse_extract_pdf_cover() {
+        let args = Args::parse_from(["mbr", "--extract-pdf-cover", "/path/to/pdfs"]);
+        assert!(args.extract_pdf_cover);
+        assert_eq!(args.path, PathBuf::from("/path/to/pdfs"));
     }
 
     #[test]

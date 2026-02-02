@@ -242,6 +242,37 @@ impl Templates {
             })?;
         Ok(html_output)
     }
+
+    /// Renders a media viewer page for video, PDF, or audio content.
+    ///
+    /// Context variables:
+    /// - `media_type`: Type of media ("video", "pdf", "audio")
+    /// - `title`: Page title (defaults to filename)
+    /// - `media_path`: Path to the media file
+    /// - `breadcrumbs`: Navigation breadcrumbs
+    /// - `parent_path`: URL to parent directory for back navigation
+    /// - `server_mode`: Boolean indicating server vs static mode
+    /// - `relative_base`: Path prefix to .mbr assets
+    /// - `sidebar_style`: Sidebar navigation style
+    /// - `sidebar_max_items`: Maximum items per section in sidebar
+    pub fn render_media_viewer(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let mut context = Context::new();
+        context_data.iter().for_each(|(k, v)| {
+            context.insert(k, v);
+        });
+        let html_output = self
+            .tera
+            .read()
+            .render("media_viewer.html", &context)
+            .map_err(|e| TemplateError::RenderFailed {
+                template_name: "media_viewer.html".to_string(),
+                source: e,
+            })?;
+        Ok(html_output)
+    }
 }
 
 /// Normalize a style frontmatter value to a space-separated string.
@@ -298,6 +329,11 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     (
         "tag_index.html",
         include_str!("../templates/tag_index.html"),
+    ),
+    // Media viewer template
+    (
+        "media_viewer.html",
+        include_str!("../templates/media_viewer.html"),
     ),
 ];
 

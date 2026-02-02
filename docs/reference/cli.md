@@ -26,6 +26,7 @@ These flags are mutually exclusive:
 | `-g, --gui` | Launch native GUI window (explicit) |
 | `-b, --build` | Generate static site |
 | `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
+| `--extract-pdf-cover` | Extract cover images from PDF files (requires `media-metadata` feature) |
 
 ## Options
 
@@ -466,6 +467,69 @@ Cache evicts oldest segments when full, prioritizing keeping playlists cached.
 - Users primarily on Chrome/Firefox (they get original MP4 anyway)
 - Static site generation (transcoding is server-only)
 
+### PDF Cover Extraction
+
+> **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.
+
+mbr can extract cover images (first page) from PDF files. This works in two ways:
+
+**Server Mode (Dynamic Generation):**
+When running with `-s` or `-g`, mbr automatically generates cover images on-the-fly when requested. Request `{pdf}.cover.png` to get the cover:
+
+| Pattern | Description |
+|---------|-------------|
+| `{pdf}.cover.png` | Cover image (first page rendered at max 1200px width) |
+
+Example: If you have `docs/report.pdf`, requesting `/docs/report.pdf.cover.png` will dynamically extract and return the cover image.
+
+**Pre-generated covers:** If a file `{pdf}.cover.png` already exists on disk (as a sidecar file), it will be served directly without extraction. This is useful for static builds.
+
+**CLI Mode (Pre-generation):**
+Use `--extract-pdf-cover` to extract covers and save as sidecar files:
+
+```bash
+# Extract cover from a single PDF
+mbr --extract-pdf-cover ~/docs/report.pdf
+
+# Output:
+# Extracting cover: /Users/you/docs/report.pdf -> /Users/you/docs/report.pdf.cover.png
+# ✓ Created 1 cover image
+
+# Extract covers from all PDFs in a directory (recursive)
+mbr --extract-pdf-cover ~/docs
+
+# Output:
+# Extracting cover: docs/report.pdf -> docs/report.pdf.cover.png
+# Extracting cover: docs/manual.pdf -> docs/manual.pdf.cover.png
+# ✓ Created 2 cover images
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success (all covers created) |
+| `1` | Partial failure (some PDFs failed, others succeeded) |
+| `2` | Total failure (no covers created) |
+
+**Error handling:**
+- Password-protected PDFs are skipped with an error message
+- Corrupt or unreadable PDFs are reported to stderr
+- The process continues even when individual PDFs fail
+
+**Static builds:**
+For static site generation, pre-generate covers before building:
+
+```bash
+# 1. Extract all PDF covers
+mbr --extract-pdf-cover ~/notes
+
+# 2. Build static site (covers are included as assets)
+mbr -b ~/notes
+```
+
+The sidecar `.cover.png` files are automatically included in static builds via asset symlinking.
+
 ## Environment Variables
 
 > [!CAUTION]
@@ -574,3 +638,99 @@ Useful for:
 - Theme development
 - Testing template changes
 - Sharing themes across repositories
+
+---
+
+## Media Viewer Endpoints
+
+mbr provides dedicated viewer pages for media files. These endpoints render media content within the site's navigation chrome (header, breadcrumbs, theme) for a consistent browsing experience.
+
+### Available Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/.mbr/videos/` | Video player page |
+| `/.mbr/pdfs/` | PDF viewer page |
+| `/.mbr/audio/` | Audio player page |
+
+### Usage
+
+Each endpoint accepts a `path` query parameter specifying the media file location (relative to repository root):
+
+```bash
+# Video viewer
+http://localhost:5200/.mbr/videos/?path=/videos/demo.mp4
+
+# PDF viewer
+http://localhost:5200/.mbr/pdfs/?path=/docs/report.pdf
+
+# Audio player
+http://localhost:5200/.mbr/audio/?path=/music/track.mp3
+```
+
+The `path` parameter should be URL-encoded if it contains spaces or special characters:
+
+```bash
+# Path with spaces
+http://localhost:5200/.mbr/videos/?path=/videos/My%20Video.mp4
+```
+
+### Features
+
+**Video viewer:**
+- Native HTML5 video player with controls
+- Automatic poster image from `.cover.png` sidecar files
+- Chapter navigation via `mbr-video-extras` component (if `.chapters.en.vtt` exists)
+- Captions/transcripts support (if `.captions.en.vtt` exists)
+
+**PDF viewer:**
+- Embedded PDF viewer using native browser support
+- Fallback link to open PDF in new tab
+
+**Audio player:**
+- Native HTML5 audio player with controls
+- Cover art display from `.cover.png` sidecar files
+- Filename display
+
+### Security
+
+The media viewer validates all paths to prevent directory traversal attacks:
+
+- Paths containing `..` are rejected
+- Paths must resolve within the repository root
+- URL-encoded traversal attempts are detected and blocked
+
+Invalid paths return an error page rather than exposing file system contents.
+
+### Static Builds
+
+During static site generation (`-b`), media viewer pages are generated at:
+
+```
+build/
+└── .mbr/
+    ├── videos/
+    │   └── index.html
+    ├── pdfs/
+    │   └── index.html
+    └── audio/
+        └── index.html
+```
+
+These pages work identically in static builds using client-side JavaScript to load and display media based on the `path` query parameter.
+
+### Examples
+
+```bash
+# Start server and open video viewer
+mbr -s ~/notes
+open "http://localhost:5200/.mbr/videos/?path=/videos/demo.mp4"
+
+# Generate static site with media viewers
+mbr -b ~/notes
+# Viewer pages are at build/.mbr/videos/index.html, etc.
+
+# Test directory traversal protection (should show error)
+curl -s "http://localhost:5200/.mbr/videos/?path=/../../../etc/passwd"
+# Returns error page, not file contents
+```

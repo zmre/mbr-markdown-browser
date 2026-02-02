@@ -2,7 +2,7 @@
 
 ## What's Next
 
-* [ ] Add ability to search also media metadata (filename, title, whatever) beyond just pdfs so we can find videos and such, too.  Need to think about how to display the videos if selected though. Popup up a `<video>` overlay?  Ditto for pictures and audio.  For video, we'd want our usual transcript and chapters type stuff.
+* [ ] Fix video enhancement bar under the video -- needs to be flex and stuff to avoid weird vertical stuff -- maybe a human here
 
 * **Static build**
   * [ ] Setup some benchmarking and profiling
