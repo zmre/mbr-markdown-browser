@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
-import { subscribeSiteNav } from './shared.js';
+import { subscribeMediaNav } from './shared.js';
 import {
   type OtherFileInfo,
   type MediaType,
@@ -91,7 +91,7 @@ export class MbrMediaBrowserElement extends LitElement {
   @query('#text-filter')
   private _textFilterInput!: HTMLInputElement;
 
-  private _unsubscribeSiteNav: (() => void) | null = null;
+  private _unsubscribeMediaNav: (() => void) | null = null;
 
   // ========================================
   // Lifecycle
@@ -100,21 +100,21 @@ export class MbrMediaBrowserElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
 
-    // Subscribe to site navigation data
-    this._unsubscribeSiteNav = subscribeSiteNav((siteNavState) => {
-      this._isLoading = siteNavState.isLoading;
-      this._error = siteNavState.error;
+    // Subscribe to media navigation data (separate endpoint for media files)
+    this._unsubscribeMediaNav = subscribeMediaNav((mediaNavState) => {
+      this._isLoading = mediaNavState.isLoading;
+      this._error = mediaNavState.error;
 
-      if (siteNavState.data?.other_files) {
-        this._processMediaFiles(siteNavState.data.other_files);
+      if (mediaNavState.data?.other_files) {
+        this._processMediaFiles(mediaNavState.data.other_files);
       }
     });
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
-    if (this._unsubscribeSiteNav) {
-      this._unsubscribeSiteNav();
+    if (this._unsubscribeMediaNav) {
+      this._unsubscribeMediaNav();
     }
   }
 

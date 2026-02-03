@@ -1019,3 +1019,121 @@ async fn test_build_media_viewer_pages_include_navigation() {
         "Media viewer page should have breadcrumbs"
     );
 }
+
+// ============================================================================
+// Tag page path traversal tests
+// ============================================================================
+
+/// Helper to run a build with tag pages enabled and return the output directory
+async fn build_site_with_tags(repo: &TestRepo) -> std::path::PathBuf {
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        build_tag_pages: true,
+        tag_sources: vec![mbr::config::TagSource {
+            field: "tags".to_string(),
+            label: None,
+            label_plural: None,
+        }],
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+
+    builder.build().await.expect("Build failed");
+
+    output_dir
+}
+
+#[tokio::test]
+async fn test_tag_with_leading_slash_does_not_escape_output_dir() {
+    let repo = TestRepo::new();
+
+    // Create a markdown file with a tag that starts with /
+    // This previously caused path traversal: output_dir.join("/pol/_phenomena")
+    // would replace the base path entirely on Unix
+    repo.create_markdown(
+        "article.md",
+        "---\ntitle: Test Article\ntags:\n  - /pol/_phenomena\n---\n\nSome content.",
+    );
+
+    let output = build_site_with_tags(&repo).await;
+
+    // The tag page should be created INSIDE the output directory (sanitized)
+    // not at the root filesystem path
+    let safe_tag_path = output
+        .join("tags")
+        .join("pol/_phenomena")
+        .join("index.html");
+
+    // The important thing is that no file was created outside the output dir
+    // Check that /pol/_phenomena/index.html does NOT exist at filesystem root
+    assert!(
+        !Path::new("/pol/_phenomena/index.html").exists(),
+        "Tag page should NOT be written to root filesystem"
+    );
+
+    // The sanitized path should exist inside output dir
+    // (after stripping leading slash, /pol/_phenomena becomes pol/_phenomena)
+    if safe_tag_path.exists() {
+        let content = fs::read_to_string(&safe_tag_path).unwrap();
+        assert!(
+            content.contains("html"),
+            "Tag page should contain valid HTML"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tag_with_dotdot_does_not_escape_output_dir() {
+    let repo = TestRepo::new();
+
+    // A tag with .. path components should not escape the output directory
+    repo.create_markdown(
+        "article.md",
+        "---\ntitle: Test\ntags:\n  - ../../etc/shadow\n---\n\nContent.",
+    );
+
+    let output = build_site_with_tags(&repo).await;
+
+    // The tag value after sanitization: ../../etc/shadow -> etc/shadow
+    // So the path should be output/tags/etc/shadow/index.html
+    assert!(
+        !Path::new("/etc/shadow/index.html").exists(),
+        "Tag page should NOT escape to /etc/"
+    );
+
+    // Should stay within output dir
+    let safe_path = output.join("tags").join("etc/shadow").join("index.html");
+    // If it exists, it should be inside the output dir
+    if safe_path.exists() {
+        assert!(
+            safe_path.starts_with(&output),
+            "Tag page must be inside output directory"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_normal_tags_still_generate_pages() {
+    let repo = TestRepo::new();
+
+    repo.create_markdown(
+        "article.md",
+        "---\ntitle: Test\ntags:\n  - rust\n  - programming\n---\n\nContent.",
+    );
+
+    let output = build_site_with_tags(&repo).await;
+
+    // Normal tag pages should still be generated
+    let rust_tag = output.join("tags").join("rust").join("index.html");
+    assert!(rust_tag.exists(), "Tag page for 'rust' should exist");
+
+    let prog_tag = output.join("tags").join("programming").join("index.html");
+    assert!(prog_tag.exists(), "Tag page for 'programming' should exist");
+
+    // Tag source index should exist
+    let tags_index = output.join("tags").join("index.html");
+    assert!(tags_index.exists(), "Tags index page should exist");
+}

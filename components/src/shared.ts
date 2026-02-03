@@ -183,3 +183,79 @@ export const siteNav = fetch(siteJsonUrl)
     siteNavListeners.forEach(cb => cb({ ...siteNavState }));
     throw err;
   })
+
+// ============================================================================
+// Media Navigation (separate endpoint for media/static file metadata)
+// ============================================================================
+
+/**
+ * Reactive state for media navigation loading.
+ * Components can subscribe to changes via the callback pattern.
+ */
+interface MediaNavState {
+  isLoading: boolean;
+  data: any | null;
+  error: string | null;
+}
+
+const mediaNavState: MediaNavState = {
+  isLoading: true,
+  data: null,
+  error: null,
+};
+
+const mediaNavListeners: Set<(state: MediaNavState) => void> = new Set();
+
+/**
+ * Subscribe to media navigation state changes.
+ * Returns an unsubscribe function.
+ */
+export function subscribeMediaNav(callback: (state: MediaNavState) => void): () => void {
+  mediaNavListeners.add(callback);
+  // Immediately notify with current state
+  callback(mediaNavState);
+  return () => mediaNavListeners.delete(callback);
+}
+
+/**
+ * Get current media navigation loading state.
+ */
+export function getMediaNavState(): MediaNavState {
+  return { ...mediaNavState };
+}
+
+// Determine the URL for media.json based on mode
+function getMediaJsonUrl(): string {
+  if (window.__MBR_CONFIG__?.serverMode) {
+    return '/.mbr/media.json'; // Absolute path in server mode
+  }
+  return getBasePath() + '.mbr/media.json'; // Relative path in static mode
+}
+
+/**
+ * Promise-based access to media navigation data.
+ *
+ * In server mode, fetches from the dedicated /.mbr/media.json endpoint.
+ * In static mode, fetches from .mbr/media.json (generated during build).
+ */
+export const mediaNav: Promise<any> = fetch(getMediaJsonUrl())
+  .then((resp) => {
+    if (!resp.ok) {
+      throw new Error(`Failed to load media data: ${resp.status}`);
+    }
+    return resp.json();
+  })
+  .then((data) => {
+    mediaNavState.isLoading = false;
+    mediaNavState.data = data;
+    mediaNavState.error = null;
+    mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+    return data;
+  })
+  .catch((err) => {
+    mediaNavState.isLoading = false;
+    mediaNavState.data = null;
+    mediaNavState.error = err.message || 'Failed to load media data';
+    mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+    throw err;
+  })

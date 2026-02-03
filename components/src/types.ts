@@ -144,8 +144,6 @@ export interface StaticFileMetadata {
  * Mirrors Rust: OtherFileInfo struct
  */
 export interface OtherFileInfo {
-  /** Filesystem path relative to repo root */
-  readonly raw_path: string;
   /** URL path for serving (starts with /) */
   readonly url_path: string;
   /** File metadata including kind-specific fields */

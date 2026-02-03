@@ -24,7 +24,6 @@ function createFileInfo(
   kind: StaticFileKind
 ): OtherFileInfo {
   return {
-    raw_path: urlPath.replace(/^\//, ''),
     url_path: urlPath,
     metadata: {
       path: urlPath.replace(/^\//, ''),

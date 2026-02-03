@@ -118,9 +118,9 @@ impl TagSource {
     ///
     /// This is the normalized field name used in URLs.
     /// For dot-notation fields, uses the full path with dots (e.g., "taxonomy.performers").
-    /// Lowercased for URL consistency.
+    /// Lowercased for URL consistency and sanitized against path traversal.
     pub fn url_source(&self) -> String {
-        self.field.to_lowercase()
+        crate::wikilink::sanitize_path_component(&self.field.to_lowercase())
     }
 }
 

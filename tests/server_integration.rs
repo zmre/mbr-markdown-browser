@@ -1124,6 +1124,7 @@ async fn test_site_json_includes_frontmatter() {
 #[tokio::test]
 async fn test_site_json_other_files_kind_structure() {
     // Test T013: Verify other_files include metadata.kind with type structure
+    // Note: other_files are served via /.mbr/media.json (not site.json) in server mode
     let repo = TestRepo::new();
 
     // Create a video file (will be classified as video type)
@@ -1138,12 +1139,21 @@ async fn test_site_json_other_files_kind_structure() {
     repo.create_static_file("document.pdf", b"%PDF-1.4 fake pdf");
 
     let server = TestServer::start(&repo).await;
-    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    // Verify site.json no longer contains other_files in server mode
+    let site_body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+    assert!(
+        site_body["other_files"].is_null(),
+        "site.json should NOT contain other_files in server mode"
+    );
+
+    // Fetch media.json which has other_files
+    let body: serde_json::Value = server.get("/.mbr/media.json").await.json().await.unwrap();
 
     // Should have other_files array
     assert!(
         body["other_files"].is_array(),
-        "Expected other_files array in site.json"
+        "Expected other_files array in media.json"
     );
 
     let other_files = body["other_files"].as_array().unwrap();
@@ -1215,6 +1225,7 @@ async fn test_site_json_other_files_kind_structure() {
 #[tokio::test]
 async fn test_site_json_srt_file_classified_as_text() {
     // Test T014: Verify .srt files are classified as text type
+    // Note: other_files are served via /.mbr/media.json (not site.json) in server mode
     let repo = TestRepo::new();
 
     // Create an .srt subtitle file
@@ -1231,7 +1242,7 @@ async fn test_site_json_srt_file_classified_as_text() {
     );
 
     let server = TestServer::start(&repo).await;
-    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+    let body: serde_json::Value = server.get("/.mbr/media.json").await.json().await.unwrap();
 
     let other_files = body["other_files"].as_array().unwrap();
 

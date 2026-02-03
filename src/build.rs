@@ -450,6 +450,27 @@ impl Builder {
             concurrency
         );
 
+        // Pre-build sibling index: group files by parent directory and sort each group once.
+        // This turns O(n²) per-file sibling scanning into O(n log n) total.
+        let sibling_index = {
+            let mut index: HashMap<PathBuf, Vec<serde_json::Value>> = HashMap::new();
+            for (_, info) in &markdown_files {
+                let parent = info
+                    .raw_path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+                index
+                    .entry(parent)
+                    .or_default()
+                    .push(markdown_file_to_json(info));
+            }
+            for siblings in index.values_mut() {
+                sort_files(siblings, &self.config.sort);
+            }
+            Arc::new(index)
+        };
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Rendering markdown", 0, count);
@@ -458,8 +479,11 @@ impl Builder {
         stream::iter(markdown_files)
             .map(|(path, info)| {
                 let completed = completed_clone.clone();
+                let sibling_index = sibling_index.clone();
                 async move {
-                    let result = self.render_single_markdown(&path, &info).await;
+                    let result = self
+                        .render_single_markdown(&path, &info, &sibling_index)
+                        .await;
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     print_progress("Rendering markdown", done, count);
                     result
@@ -626,6 +650,7 @@ impl Builder {
         &self,
         path: &Path,
         info: &MarkdownInfo,
+        sibling_index: &HashMap<PathBuf, Vec<serde_json::Value>>,
     ) -> Result<(), BuildError> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = path
@@ -773,31 +798,15 @@ impl Builder {
             );
         }
 
-        // Compute prev/next sibling pages for navigation
-        let parent_dir = path
-            .strip_prefix(&self.config.root_dir)
-            .unwrap_or(path)
+        // Compute prev/next sibling pages for navigation using the pre-built index
+        let parent_dir = info
+            .raw_path
             .parent()
-            .unwrap_or(std::path::Path::new(""));
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
 
-        // Get sibling markdown files in the same directory
-        let mut siblings: Vec<_> = self
-            .repo
-            .markdown_files
-            .pin()
-            .iter()
-            .filter_map(|(_, sibling_info)| {
-                let file_parent = sibling_info.raw_path.parent()?;
-                if file_parent == parent_dir {
-                    Some(crate::server::markdown_file_to_json(sibling_info))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Sort siblings using configured sort order
-        crate::sorting::sort_files(&mut siblings, &self.config.sort);
+        let empty_siblings = Vec::new();
+        let siblings = sibling_index.get(&parent_dir).unwrap_or(&empty_siblings);
 
         // Find current position and get prev/next
         if let Some(current_idx) = siblings.iter().position(|f| {
@@ -1300,8 +1309,30 @@ impl Builder {
         // Render template
         let html_output = self.templates.render_tag(context)?;
 
+        // Sanitize source and value to prevent path traversal (defense-in-depth)
+        let safe_source = crate::wikilink::sanitize_path_component(source);
+        let safe_value = crate::wikilink::sanitize_path_component(value);
+        if safe_source.is_empty() || safe_value.is_empty() {
+            tracing::warn!(
+                "Skipping tag page with empty sanitized source={source:?} value={value:?}"
+            );
+            return Ok(());
+        }
+
         // Determine output path
-        let output_path = self.output_dir.join(source).join(value).join("index.html");
+        let output_path = self
+            .output_dir
+            .join(&safe_source)
+            .join(&safe_value)
+            .join("index.html");
+
+        // Defense-in-depth: verify the output path stays within output_dir
+        if !output_path.starts_with(&self.output_dir) {
+            tracing::warn!(
+                "Tag page path escaped output directory: source={source:?} value={value:?}"
+            );
+            return Ok(());
+        }
 
         // Create parent directories and write file (only if not exists - files take precedence)
         if !output_path.exists() {
@@ -1414,8 +1445,21 @@ impl Builder {
         // Render template
         let html_output = self.templates.render_tag_index(context)?;
 
+        // Sanitize source to prevent path traversal (defense-in-depth)
+        let safe_source = crate::wikilink::sanitize_path_component(source);
+        if safe_source.is_empty() {
+            tracing::warn!("Skipping tag source index with empty sanitized source={source:?}");
+            return Ok(());
+        }
+
         // Determine output path
-        let output_path = self.output_dir.join(source).join("index.html");
+        let output_path = self.output_dir.join(&safe_source).join("index.html");
+
+        // Defense-in-depth: verify the output path stays within output_dir
+        if !output_path.starts_with(&self.output_dir) {
+            tracing::warn!("Tag source index path escaped output directory: source={source:?}");
+            return Ok(());
+        }
 
         // Create parent directories and write file (only if not exists - files take precedence)
         if !output_path.exists() {
@@ -1679,6 +1723,18 @@ impl Builder {
         let site_json_path = mbr_output.join("site.json");
         fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
             path: site_json_path,
+            source: e,
+        })?;
+
+        // Step 4b: Generate media.json with only other_files
+        let media_data = serde_json::json!({
+            "other_files": &self.repo.other_files,
+        });
+        let media_json = serde_json::to_string(&media_data)
+            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
+        let media_json_path = mbr_output.join("media.json");
+        fs::write(&media_json_path, media_json).map_err(|e| BuildError::WriteFailed {
+            path: media_json_path,
             source: e,
         })?;
 

@@ -453,6 +453,20 @@ impl Server {
             &tag_sources,
         ));
 
+        // Spawn background repo scan so site.json is ready before first request.
+        // Phase 1: basic scan (file listing + frontmatter). Phase 2: media metadata (ffmpeg/lopdf).
+        let repo_for_scan = Arc::clone(&repo);
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = repo_for_scan.scan_all() {
+                tracing::error!("Background scan failed: {e}");
+            }
+            repo_for_scan.mark_scan_complete();
+
+            // Phase 2: populate media metadata in background (non-blocking for site.json)
+            repo_for_scan.populate_media_metadata();
+            repo_for_scan.notify_media_populated();
+        });
+
         // Create a broadcast channel for file changes - watcher will be initialized in background
         let (file_change_tx, _rx) =
             tokio::sync::broadcast::channel::<crate::watcher::FileChangeEvent>(100);
@@ -593,6 +607,7 @@ impl Server {
         let router = Router::new()
             .route("/", get(Self::home_page))
             .route("/.mbr/site.json", get(Self::get_site_info))
+            .route("/.mbr/media.json", get(Self::get_media_info))
             .route("/.mbr/search", post(Self::search_handler))
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
             // Media viewer routes - must be before the catch-all /.mbr/{*path}
@@ -817,19 +832,33 @@ impl Server {
     pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
+        let scan_start = std::time::Instant::now();
+        // Wait for background scan to complete (or run scan if not yet started)
+        if config.repo.is_scan_complete() {
+            tracing::debug!("get_site_info: scan already complete");
+        } else {
+            tracing::debug!("get_site_info: waiting for background scan...");
+            config.repo.wait_for_scan().await;
+        }
+        // Re-scan if cache was cleared (e.g., file change invalidation)
         config
             .repo
             .scan_all()
             .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tracing::debug!("get_site_info scan_all: {:?}", scan_start.elapsed());
 
         // Build combined response with repo data and config
+        let json_start = std::time::Instant::now();
         let mut response = serde_json::to_value(&*config.repo)
             .inspect_err(|e| tracing::error!("Error creating json: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // Add sort config to the response
+        // Add sort config to the response and remove other_files (served via media.json)
         if let Some(obj) = response.as_object_mut() {
+            // Remove other_files from site.json - media data is served separately via media.json
+            obj.remove("other_files");
+
             obj.insert(
                 "sort".to_string(),
                 serde_json::to_value(&config.sort).unwrap_or(serde_json::Value::Array(vec![])),
@@ -855,6 +884,62 @@ impl Server {
             )
             .inspect_err(|e| tracing::error!("Error rendering site file: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tracing::debug!(
+            "get_site_info JSON serialization: {:?}",
+            json_start.elapsed()
+        );
+        Ok(resp.into_response())
+    }
+
+    /// Returns media metadata (other_files) as JSON.
+    ///
+    /// Waits for both the initial scan and media metadata population to complete
+    /// before returning, ensuring rich metadata (dimensions, duration, etc.) is available.
+    pub async fn get_media_info(
+        State(config): State<ServerState>,
+    ) -> Result<impl IntoResponse, StatusCode> {
+        let start = std::time::Instant::now();
+
+        // Wait for background scan to complete first
+        if !config.repo.is_scan_complete() {
+            tracing::debug!("get_media_info: waiting for background scan...");
+            config.repo.wait_for_scan().await;
+        }
+
+        // Wait for media metadata population (phase 2 of background scan)
+        if !config.repo.is_media_populated() {
+            tracing::debug!("get_media_info: waiting for media metadata...");
+            config.repo.wait_for_media().await;
+        }
+
+        // Re-scan if cache was cleared (e.g., file change invalidation)
+        config
+            .repo
+            .scan_all()
+            .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Build response with only other_files
+        let json_start = std::time::Instant::now();
+        let media_data = serde_json::json!({
+            "other_files": &config.repo.other_files,
+        });
+
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_string(&media_data)
+                    .inspect_err(|e| tracing::error!("Error serializing media json: {e}"))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            )
+            .inspect_err(|e| tracing::error!("Error rendering media file: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tracing::debug!(
+            "get_media_info completed in {:?} (JSON: {:?})",
+            start.elapsed(),
+            json_start.elapsed()
+        );
         Ok(resp.into_response())
     }
 
@@ -888,7 +973,10 @@ impl Server {
     ) -> impl IntoResponse {
         tracing::debug!("Search request: q={:?}, scope={:?}", query.q, query.scope);
 
-        // Ensure repo is scanned (may already be from background scan)
+        // Wait for background scan if still in progress
+        config.repo.wait_for_scan().await;
+
+        // Ensure repo is scanned (handles cache invalidation re-scans)
         if let Err(e) = config.repo.scan_all() {
             tracing::error!("Error scanning repo for search: {e}");
             return (
@@ -902,6 +990,9 @@ impl Server {
                 })),
             );
         }
+
+        // Ensure text has been extracted from searchable files (deferred from scan)
+        config.repo.ensure_text_extracted();
 
         // Create search engine and execute search
         let engine = SearchEngine::new(config.repo.clone(), config.base_dir.clone());

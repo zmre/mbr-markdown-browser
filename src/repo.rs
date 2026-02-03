@@ -1,8 +1,11 @@
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::UNIX_EPOCH,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Instant, UNIX_EPOCH},
 };
 
 use papaya::{HashMap, HashSet};
@@ -44,6 +47,21 @@ pub struct Repo {
     /// Configured tag sources for frontmatter extraction.
     #[serde(skip)]
     tag_sources: Vec<TagSource>,
+    /// Whether text extraction has been performed for searchable files.
+    #[serde(skip)]
+    text_extracted: Arc<AtomicBool>,
+    /// Whether media metadata has been populated (phase 2 of scan).
+    #[serde(skip)]
+    media_populated: Arc<AtomicBool>,
+    /// Whether initial scan_all has completed.
+    #[serde(skip)]
+    scan_complete: Arc<AtomicBool>,
+    /// Notifier for scan completion (signals waiters when scan_all finishes).
+    #[serde(skip)]
+    scan_notify: Arc<tokio::sync::Notify>,
+    /// Notifier for media metadata population (signals waiters when populate_media_metadata finishes).
+    #[serde(skip)]
+    media_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -100,6 +118,7 @@ pub struct MarkdownInfo {
 
 #[derive(Clone, Serialize)]
 pub struct OtherFileInfo {
+    #[serde(skip)]
     pub raw_path: PathBuf,
     pub url_path: String,
     metadata: StaticFileMetadata,
@@ -329,81 +348,111 @@ impl StaticFileMetadata {
         }
     }
 
-    pub fn populate(self) -> Self {
+    /// Populate basic file metadata (size, timestamps) without expensive media extraction.
+    pub fn populate_basic(self) -> Self {
         let mut me = self;
+        let file_details_start = Instant::now();
         let (filesize, created, modified) = match file_details_from_path(&me.path).ok() {
             Some((fs, c, m)) => (Some(fs), Some(c), Some(m)),
             _ => (None, None, None),
         };
+        tracing::debug!(
+            "populate file_details for {:?}: {:?}",
+            me.path,
+            file_details_start.elapsed()
+        );
         me.file_size_bytes = filesize;
         me.created = created;
         me.modified = modified;
-        // Extract media metadata when available (requires ffmpeg)
-        #[cfg(feature = "media-metadata")]
-        {
-            me.kind = match me.kind {
-                StaticFileKind::Pdf { .. } => match crate::pdf_metadata::probe_pdf(&me.path) {
-                    Ok(meta) => StaticFileKind::Pdf {
-                        title: meta.title,
-                        author: meta.author,
-                        subject: meta.subject,
-                        description: None,
-                        num_pages: Some(meta.num_pages as usize),
-                    },
-                    Err(e) => {
-                        tracing::debug!("Failed to extract PDF metadata from {:?}: {}", me.path, e);
-                        me.kind
-                    }
+        me
+    }
+
+    /// Populate media-specific metadata (ffmpeg, lopdf) - expensive operation.
+    #[cfg(feature = "media-metadata")]
+    pub fn populate_media(self) -> Self {
+        let mut me = self;
+        let media_start = Instant::now();
+        let kind_name = match &me.kind {
+            StaticFileKind::Pdf { .. } => "pdf",
+            StaticFileKind::Image { .. } => "image",
+            StaticFileKind::Video { .. } => "video",
+            StaticFileKind::Audio { .. } => "audio",
+            StaticFileKind::Text => "text",
+            StaticFileKind::Other => "other",
+        };
+        me.kind = match me.kind {
+            StaticFileKind::Pdf { .. } => match crate::pdf_metadata::probe_pdf(&me.path) {
+                Ok(meta) => StaticFileKind::Pdf {
+                    title: meta.title,
+                    author: meta.author,
+                    subject: meta.subject,
+                    description: None,
+                    num_pages: Some(meta.num_pages as usize),
                 },
-                StaticFileKind::Image { .. } => {
-                    let metadata =
-                        metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
-
-                    StaticFileKind::Image {
-                        width: metadata.as_ref().and_then(|m| m.width),
-                        height: metadata.as_ref().and_then(|m| m.height),
-                    }
+                Err(e) => {
+                    tracing::debug!("Failed to extract PDF metadata from {:?}: {}", me.path, e);
+                    me.kind
                 }
-                StaticFileKind::Audio { .. } => {
-                    let metadata =
-                        metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
-                    StaticFileKind::Audio {
-                        duration: metadata.as_ref().and_then(|m| m.duration.clone()),
-                        title: metadata.as_ref().and_then(|m| m.title.clone()),
-                    }
+            },
+            StaticFileKind::Image { .. } => {
+                let metadata = metadata::media_file::MediaFileMetadata::new(&me.path).ok();
+
+                StaticFileKind::Image {
+                    width: metadata.as_ref().and_then(|m| m.width),
+                    height: metadata.as_ref().and_then(|m| m.height),
                 }
-                StaticFileKind::Video { .. } => {
-                    let metadata =
-                        metadata::media_file::MediaFileMetadata::new(&me.path.as_path()).ok();
-
-                    // Extract genre from tags (case-insensitive search)
-                    let genre = metadata.as_ref().and_then(|m| {
-                        m.tags
-                            .iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case("genre"))
-                            .map(|(_, v)| v.clone())
-                    });
-
-                    // Extract album from tags (case-insensitive search)
-                    let album = metadata.as_ref().and_then(|m| {
-                        m.tags
-                            .iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case("album"))
-                            .map(|(_, v)| v.clone())
-                    });
-
-                    StaticFileKind::Video {
-                        width: metadata.as_ref().and_then(|m| m.width),
-                        height: metadata.as_ref().and_then(|m| m.height),
-                        duration: metadata.as_ref().and_then(|m| m.duration.clone()),
-                        title: metadata.as_ref().and_then(|m| m.title.clone()),
-                        genre,
-                        album,
-                    }
+            }
+            StaticFileKind::Audio { .. } => {
+                let metadata = metadata::media_file::MediaFileMetadata::new(&me.path).ok();
+                StaticFileKind::Audio {
+                    duration: metadata.as_ref().and_then(|m| m.duration.clone()),
+                    title: metadata.as_ref().and_then(|m| m.title.clone()),
                 }
-                _ => me.kind,
-            };
-        }
+            }
+            StaticFileKind::Video { .. } => {
+                let metadata = metadata::media_file::MediaFileMetadata::new(&me.path).ok();
+
+                // Extract genre from tags (case-insensitive search)
+                let genre = metadata.as_ref().and_then(|m| {
+                    m.tags
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("genre"))
+                        .map(|(_, v)| v.clone())
+                });
+
+                // Extract album from tags (case-insensitive search)
+                let album = metadata.as_ref().and_then(|m| {
+                    m.tags
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("album"))
+                        .map(|(_, v)| v.clone())
+                });
+
+                StaticFileKind::Video {
+                    width: metadata.as_ref().and_then(|m| m.width),
+                    height: metadata.as_ref().and_then(|m| m.height),
+                    duration: metadata.as_ref().and_then(|m| m.duration.clone()),
+                    title: metadata.as_ref().and_then(|m| m.title.clone()),
+                    genre,
+                    album,
+                }
+            }
+            _ => me.kind,
+        };
+        tracing::debug!(
+            "populate media metadata ({}) for {:?}: {:?}",
+            kind_name,
+            me.path,
+            media_start.elapsed()
+        );
+        me
+    }
+
+    /// Full populate: basic + media metadata (used by build mode).
+    pub fn populate(self) -> Self {
+        let me = self.populate_basic();
+        #[cfg(feature = "media-metadata")]
+        let me = me.populate_media();
         me
     }
 
@@ -459,6 +508,11 @@ impl Repo {
             other_files: OtherFiles(HashMap::new()),
             tag_index: Arc::new(TagIndex::new()),
             tag_sources: tag_sources.to_vec(),
+            text_extracted: Arc::new(AtomicBool::new(false)),
+            media_populated: Arc::new(AtomicBool::new(false)),
+            scan_complete: Arc::new(AtomicBool::new(false)),
+            scan_notify: Arc::new(tokio::sync::Notify::new()),
+            media_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -480,6 +534,7 @@ impl Repo {
         self.scanned_folders.pin().insert(start_folder.clone());
 
         // Walk directory with filtering (using pre-compiled patterns for efficiency)
+        let walkdir_start = Instant::now();
         let dir_walker = WalkDir::new(start_folder.clone())
             .follow_links(true)
             .min_depth(1)
@@ -530,8 +585,16 @@ impl Repo {
                 other.insert(path.to_path_buf(), other_file);
             }
         }
+        tracing::debug!(
+            "scan_folder WalkDir for {:?}: {} markdown, {} other files in {:?}",
+            relative_folder_path_ref,
+            markdown.len(),
+            other.len(),
+            walkdir_start.elapsed()
+        );
 
         // Parallel processing: extract frontmatter from markdown files and build tag index
+        let frontmatter_start = Instant::now();
         markdown
             .into_par_iter()
             .for_each(|(mdfile, mddetails): (PathBuf, MarkdownInfo)| {
@@ -573,24 +636,34 @@ impl Repo {
                 };
                 self.markdown_files.pin().insert(mdfile, details);
             });
+        tracing::debug!(
+            "scan_folder frontmatter extraction for {:?}: {:?}",
+            relative_folder_path_ref,
+            frontmatter_start.elapsed()
+        );
 
-        // Parallel processing: populate static file metadata and extract text from searchable files
+        // Parallel processing: populate basic static file metadata (size, timestamps only).
+        // Media metadata (ffmpeg/lopdf) and text extraction are deferred to background tasks.
+        let static_meta_start = Instant::now();
         other.into_par_iter().for_each(|(file, other_file)| {
-            let mut other_file = OtherFileInfo {
-                metadata: other_file.metadata.populate(),
+            let other_file = OtherFileInfo {
+                metadata: other_file.metadata.populate_basic(),
                 ..other_file
             };
-            // Extract text from PDFs and text files for search indexing
-            if other_file.is_searchable() {
-                other_file.extracted_text = other_file.extract_text();
-            }
             self.other_files.pin().insert(file, other_file);
         });
+        tracing::debug!(
+            "scan_folder static metadata for {:?}: {:?}",
+            relative_folder_path_ref,
+            static_meta_start.elapsed()
+        );
 
         Ok(())
     }
 
     pub fn scan_all(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let scan_all_start = Instant::now();
+
         self.scan_folder(&PathBuf::from("."))?; // the . is relative to the root_dir, so this scans the root dir
 
         // Only scan static folder if it exists
@@ -616,11 +689,144 @@ impl Repo {
                 }) // ignores errors
             });
         }
+
+        // Log file counts and type breakdown
+        let markdown_count = self.markdown_files.len();
+        let other_count = self.other_files.len();
+        let other_pin = self.other_files.pin();
+        let mut pdf_count: usize = 0;
+        let mut image_count: usize = 0;
+        let mut video_count: usize = 0;
+        let mut audio_count: usize = 0;
+        let mut text_count: usize = 0;
+        let mut misc_count: usize = 0;
+        for (_, info) in other_pin.iter() {
+            match info.filetype() {
+                "pdf" => pdf_count += 1,
+                "image" => image_count += 1,
+                "video" => video_count += 1,
+                "audio" => audio_count += 1,
+                "text" => text_count += 1,
+                _ => misc_count += 1,
+            }
+        }
+
+        tracing::info!(
+            "scan_all completed in {:?}: {} markdown files, {} other files (pdf={}, image={}, video={}, audio={}, text={}, other={})",
+            scan_all_start.elapsed(),
+            markdown_count,
+            other_count,
+            pdf_count,
+            image_count,
+            video_count,
+            audio_count,
+            text_count,
+            misc_count,
+        );
+
         Ok(())
+    }
+
+    /// Mark the initial scan as complete and notify any waiters.
+    pub fn mark_scan_complete(&self) {
+        self.scan_complete.store(true, Ordering::SeqCst);
+        self.scan_notify.notify_waiters();
+    }
+
+    /// Returns true if the initial scan has completed.
+    pub fn is_scan_complete(&self) -> bool {
+        self.scan_complete.load(Ordering::SeqCst)
+    }
+
+    /// Wait for the initial scan to complete. Returns immediately if already done.
+    pub async fn wait_for_scan(&self) {
+        if self.is_scan_complete() {
+            return;
+        }
+        // Wait for notification, then re-check in case of spurious wakeup
+        loop {
+            self.scan_notify.notified().await;
+            if self.is_scan_complete() {
+                return;
+            }
+        }
+    }
+
+    /// Returns true if media metadata has been populated.
+    pub fn is_media_populated(&self) -> bool {
+        self.media_populated.load(Ordering::Acquire)
+    }
+
+    /// Notify waiters that media metadata population is complete.
+    pub fn notify_media_populated(&self) {
+        self.media_notify.notify_waiters();
+    }
+
+    /// Wait for media metadata to be populated. Returns immediately if already done.
+    pub async fn wait_for_media(&self) {
+        if self.is_media_populated() {
+            return;
+        }
+        loop {
+            self.media_notify.notified().await;
+            if self.is_media_populated() {
+                return;
+            }
+        }
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string(self)
+    }
+
+    /// Populate media metadata (ffmpeg/lopdf) for all static files.
+    /// This is deferred from initial scan to avoid blocking the first site.json response.
+    pub fn populate_media_metadata(&self) {
+        if self.media_populated.swap(true, Ordering::SeqCst) {
+            return; // Already populated
+        }
+        let start = Instant::now();
+        let pin = self.other_files.pin();
+        let entries: Vec<_> = pin.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        drop(pin);
+
+        #[cfg(feature = "media-metadata")]
+        {
+            entries.into_par_iter().for_each(|(key, info)| {
+                let updated = OtherFileInfo {
+                    metadata: info.metadata.populate_media(),
+                    ..info
+                };
+                self.other_files.pin().insert(key, updated);
+            });
+        }
+        #[cfg(not(feature = "media-metadata"))]
+        let _ = entries;
+
+        tracing::info!("populate_media_metadata completed in {:?}", start.elapsed());
+    }
+
+    /// Extract text from searchable files (PDFs, text files) for search indexing.
+    /// Deferred from initial scan since text is only needed for search.
+    pub fn ensure_text_extracted(&self) {
+        if self.text_extracted.swap(true, Ordering::SeqCst) {
+            return; // Already extracted
+        }
+        let start = Instant::now();
+        let pin = self.other_files.pin();
+        let entries: Vec<_> = pin
+            .iter()
+            .filter(|(_, info)| info.is_searchable() && info.extracted_text.is_none())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        drop(pin);
+
+        entries.into_par_iter().for_each(|(key, mut info)| {
+            info.extracted_text = info.extract_text();
+            self.other_files.pin().insert(key, info);
+        });
+
+        tracing::info!("ensure_text_extracted completed in {:?}", start.elapsed());
     }
 
     /// Clear all cached data, forcing a full rescan on next scan_all() call.
@@ -633,6 +839,10 @@ impl Repo {
         self.other_files.pin().clear();
         self.queued_folders.pin().clear();
         self.tag_index.clear();
+        self.text_extracted.store(false, Ordering::SeqCst);
+        self.media_populated.store(false, Ordering::SeqCst);
+        // Note: scan_complete is NOT reset here. It tracks whether the initial background
+        // scan finished. After clear(), scan_all() will re-scan synchronously in handlers.
     }
 }
 
