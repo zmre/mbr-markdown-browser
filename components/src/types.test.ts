@@ -177,17 +177,17 @@ describe('getCoverImageUrl', () => {
 
   it('returns sidecar cover for video', () => {
     const file = createFileInfo('/videos/demo.mp4', { type: 'video' });
-    expect(getCoverImageUrl(file)).toBe('/videos/demo.mp4.cover.png');
+    expect(getCoverImageUrl(file)).toBe('/videos/demo.mp4.cover.jpg');
   });
 
   it('returns sidecar cover for pdf', () => {
     const file = createFileInfo('/docs/manual.pdf', { type: 'pdf' });
-    expect(getCoverImageUrl(file)).toBe('/docs/manual.pdf.cover.png');
+    expect(getCoverImageUrl(file)).toBe('/docs/manual.pdf.cover.jpg');
   });
 
   it('returns sidecar cover for audio', () => {
     const file = createFileInfo('/music/song.mp3', { type: 'audio' });
-    expect(getCoverImageUrl(file)).toBe('/music/song.mp3.cover.png');
+    expect(getCoverImageUrl(file)).toBe('/music/song.mp3.cover.jpg');
   });
 
   it('returns null for text kind', () => {

@@ -273,7 +273,7 @@ export function getMediaTitle(file: OtherFileInfo): string {
  *
  * Cover image sources:
  * - Images: The image file itself is the cover
- * - Videos, PDFs, Audio: Sidecar `.cover.png` file (e.g., `/path/to/file.mp4.cover.png`)
+ * - Videos, PDFs, Audio: Sidecar `.cover.jpg` file (e.g., `/path/to/file.mp4.cover.jpg`)
  *
  * Note: The returned URL may not exist. The component should handle
  * fallback to CSS-based type indicators when the cover image fails to load.
@@ -303,8 +303,8 @@ export function getCoverImageUrl(file: OtherFileInfo): string | null {
     kind.type === 'pdf' ||
     kind.type === 'audio'
   ) {
-    // Sidecar cover image convention: /path/to/file.ext.cover.png
-    return `${file.url_path}.cover.png`;
+    // Sidecar cover image convention: /path/to/file.ext.cover.jpg
+    return `${file.url_path}.cover.jpg`;
   }
 
   return null;

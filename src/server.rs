@@ -1522,7 +1522,7 @@ impl Server {
         let key = cache_key(video_url_path, cache_type_str);
         if let Some(cached) = config.video_metadata_cache.get(&key) {
             return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
                 CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
                     Some(Self::build_vtt_response(vtt))
                 }
@@ -1566,7 +1566,7 @@ impl Server {
                     config
                         .video_metadata_cache
                         .insert(key, CachedMetadata::Cover(bytes.clone()));
-                    Some(Self::build_png_response(bytes))
+                    Some(Self::build_jpg_response(bytes))
                 }
                 Err(e) => {
                     tracing::debug!("Failed to extract cover: {}", e);
@@ -1611,7 +1611,7 @@ impl Server {
 
     /// Try to serve a PDF cover sidecar file, handling staleness detection.
     ///
-    /// This is called from the StaticFile branch when a `.pdf.cover.png` sidecar exists.
+    /// This is called from the StaticFile branch when a `.pdf.cover.jpg` sidecar exists.
     /// It checks if the sidecar is stale (PDF modified after sidecar) and regenerates if needed.
     ///
     /// Returns:
@@ -1636,17 +1636,17 @@ impl Server {
         // Check memory cache first
         if let Some(cached) = config.video_metadata_cache.get(&key) {
             return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
                 CachedMetadata::NotAvailable => None, // Cached negative result
                 _ => None,                            // Other types not relevant for PDF covers
             };
         }
 
         // Find the PDF file path (corresponding to this sidecar)
-        // The sidecar is at {pdf_path}.cover.png, so remove .cover.png to get pdf_path
+        // The sidecar is at {pdf_path}.cover.jpg, so remove .cover.jpg to get pdf_path
         let pdf_file = {
             let sidecar_str = sidecar_file_path.to_str()?;
-            let pdf_path_str = sidecar_str.strip_suffix(".cover.png")?;
+            let pdf_path_str = sidecar_str.strip_suffix(".cover.jpg")?;
             std::path::PathBuf::from(pdf_path_str)
         };
 
@@ -1661,7 +1661,7 @@ impl Server {
                 config
                     .video_metadata_cache
                     .insert(key, CachedMetadata::Cover(bytes.clone()));
-                return Some(Self::build_png_response(bytes));
+                return Some(Self::build_jpg_response(bytes));
             }
             return None;
         }
@@ -1685,7 +1685,7 @@ impl Server {
                     config
                         .video_metadata_cache
                         .insert(key, CachedMetadata::Cover(bytes.clone()));
-                    return Some(Self::build_png_response(bytes));
+                    return Some(Self::build_jpg_response(bytes));
                 }
                 Err(e) => {
                     tracing::debug!("Failed to regenerate PDF cover: {}", e);
@@ -1703,7 +1703,7 @@ impl Server {
             config
                 .video_metadata_cache
                 .insert(key, CachedMetadata::Cover(bytes.clone()));
-            return Some(Self::build_png_response(bytes));
+            return Some(Self::build_jpg_response(bytes));
         }
 
         // Let static file serving handle it
@@ -1715,10 +1715,10 @@ impl Server {
     /// Returns Some(Response) if the request was for a PDF cover image and we successfully
     /// generated it, None otherwise (fall through to 404).
     ///
-    /// Request pattern: `/path/to/document.pdf.cover.png` -> extract cover from `/path/to/document.pdf`
+    /// Request pattern: `/path/to/document.pdf.cover.jpg` -> extract cover from `/path/to/document.pdf`
     ///
     /// This function implements accelerated serving with pre-generated covers:
-    /// 1. If a sidecar file (e.g., `document.pdf.cover.png`) exists and is newer than the PDF,
+    /// 1. If a sidecar file (e.g., `document.pdf.cover.jpg`) exists and is newer than the PDF,
     ///    it is served directly from disk (with memory caching for subsequent requests).
     /// 2. If the sidecar is stale (PDF modified after sidecar), the cover is regenerated.
     /// 3. If no sidecar exists, the cover is dynamically generated from the PDF.
@@ -1736,7 +1736,7 @@ impl Server {
         // Check memory cache first
         if let Some(cached) = config.video_metadata_cache.get(&key) {
             return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
                 CachedMetadata::NotAvailable => None, // Cached negative result
                 _ => None,                            // Other types not relevant for PDF covers
             };
@@ -1762,11 +1762,11 @@ impl Server {
             }
         };
 
-        // Build sidecar path: {pdf_path}.cover.png
+        // Build sidecar path: {pdf_path}.cover.jpg
         let sidecar_path = {
             let mut sidecar = pdf_file.clone();
             let file_name = sidecar.file_name()?.to_str()?;
-            sidecar.set_file_name(format!("{}.cover.png", file_name));
+            sidecar.set_file_name(format!("{}.cover.jpg", file_name));
             sidecar
         };
 
@@ -1777,7 +1777,7 @@ impl Server {
             config
                 .video_metadata_cache
                 .insert(key, CachedMetadata::Cover(bytes.clone()));
-            return Some(Self::build_png_response(bytes));
+            return Some(Self::build_jpg_response(bytes));
         }
 
         // Sidecar doesn't exist or is stale - generate dynamically
@@ -1789,7 +1789,7 @@ impl Server {
                 config
                     .video_metadata_cache
                     .insert(key, CachedMetadata::Cover(bytes.clone()));
-                Some(Self::build_png_response(bytes))
+                Some(Self::build_jpg_response(bytes))
             }
             Err(crate::errors::PdfMetadataError::PasswordProtected { .. }) => {
                 tracing::debug!("PDF is password-protected: {}", pdf_file.display());
@@ -2050,12 +2050,12 @@ impl Server {
         )
     }
 
-    /// Build a PNG image response.
+    /// Build a JPEG image response.
     #[cfg(feature = "media-metadata")]
-    fn build_png_response(bytes: Vec<u8>) -> Response<Body> {
+    fn build_jpg_response(bytes: Vec<u8>) -> Response<Body> {
         Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CONTENT_TYPE, "image/jpeg")
             .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
             .body(Body::from(bytes))
             .unwrap()

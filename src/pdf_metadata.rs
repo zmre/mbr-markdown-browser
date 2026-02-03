@@ -124,15 +124,15 @@ fn decode_pdf_string(bytes: &[u8]) -> Option<String> {
 
 /// Parse a request path to check if it's a PDF cover image request.
 ///
-/// Returns the base PDF path (without .cover.png suffix) if valid.
+/// Returns the base PDF path (without .cover.jpg suffix) if valid.
 ///
 /// # Examples
 /// ```ignore
-/// assert_eq!(parse_pdf_cover_request("docs/report.pdf.cover.png"), Some("docs/report.pdf"));
+/// assert_eq!(parse_pdf_cover_request("docs/report.pdf.cover.jpg"), Some("docs/report.pdf"));
 /// assert_eq!(parse_pdf_cover_request("docs/report.pdf"), None);
 /// ```
 pub fn parse_pdf_cover_request(path: &str) -> Option<&str> {
-    let base = path.strip_suffix(".cover.png")?;
+    let base = path.strip_suffix(".cover.jpg")?;
     // Verify the base ends with .pdf (case-insensitive)
     if base.to_lowercase().ends_with(".pdf") {
         Some(base)
@@ -155,7 +155,7 @@ fn pdfium_semaphore() -> &'static Semaphore {
     PDFIUM_SEMAPHORE.get_or_init(|| Semaphore::new(1))
 }
 
-/// Extract the first page of a PDF as a PNG image (async version with concurrency control).
+/// Extract the first page of a PDF as a JPEG image (async version with concurrency control).
 ///
 /// This is the preferred entry point for server use. It acquires a semaphore
 /// to ensure only one PDF is rendered at a time, preventing pdfium segfaults.
@@ -172,7 +172,7 @@ pub async fn extract_cover_async(path: &Path) -> Result<Vec<u8>, PdfMetadataErro
         .map_err(|e| PdfMetadataError::RenderFailed(format!("Task join error: {}", e)))?
 }
 
-/// Extract the first page of a PDF as a PNG image (sync version).
+/// Extract the first page of a PDF as a JPEG image (sync version).
 ///
 /// Uses pdfium-render to render the first page at a reasonable resolution
 /// (max width 1200px, preserving aspect ratio).
@@ -187,7 +187,7 @@ pub fn extract_cover(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
 /// Internal sync implementation of cover extraction.
 #[cfg(feature = "media-metadata")]
 fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
-    use image::ImageFormat;
+    use image::codecs::jpeg::JpegEncoder;
     use pdfium_render::prelude::*;
 
     // Initialize pdfium - try environment variable first, then system library
@@ -226,14 +226,15 @@ fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
         .render_with_config(&config)
         .map_err(|e| PdfMetadataError::RenderFailed(format!("Render failed: {}", e)))?;
 
-    // Convert to image and encode as PNG
+    // Convert to image and encode as JPEG (quality 85 for good size/quality balance)
     let image = bitmap.as_image();
-    let mut png_bytes = Vec::new();
+    let mut jpg_bytes = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut jpg_bytes, 85);
     image
-        .write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
-        .map_err(|e| PdfMetadataError::EncodeFailed(format!("PNG encode failed: {}", e)))?;
+        .write_with_encoder(encoder)
+        .map_err(|e| PdfMetadataError::EncodeFailed(format!("JPEG encode failed: {}", e)))?;
 
-    Ok(png_bytes)
+    Ok(jpg_bytes)
 }
 
 /// Get the platform-specific pdfium library filename.
@@ -350,21 +351,21 @@ fn map_pdfium_error(e: pdfium_render::prelude::PdfiumError, path: PathBuf) -> Pd
 
 /// Extract the cover image of a PDF and save it as a sidecar file.
 ///
-/// Creates a file named `{path}.cover.png` next to the PDF file.
+/// Creates a file named `{path}.cover.jpg` next to the PDF file.
 /// Returns the path to the created sidecar file on success.
 ///
 /// # Examples
 /// ```ignore
 /// let sidecar = save_cover(Path::new("docs/report.pdf"))?;
-/// assert_eq!(sidecar, PathBuf::from("docs/report.pdf.cover.png"));
+/// assert_eq!(sidecar, PathBuf::from("docs/report.pdf.cover.jpg"));
 /// ```
 #[cfg(feature = "media-metadata")]
 pub fn save_cover(path: &Path) -> Result<PathBuf, PdfMetadataError> {
-    let png_bytes = extract_cover(path)?;
+    let jpg_bytes = extract_cover(path)?;
 
-    let sidecar_path = PathBuf::from(format!("{}.cover.png", path.display()));
+    let sidecar_path = PathBuf::from(format!("{}.cover.jpg", path.display()));
 
-    std::fs::write(&sidecar_path, png_bytes)?;
+    std::fs::write(&sidecar_path, jpg_bytes)?;
 
     Ok(sidecar_path)
 }
@@ -384,7 +385,7 @@ pub struct ExtractCoversResult {
 /// Recursively extract cover images from all PDF files in a directory.
 ///
 /// Walks the directory tree, finds all `.pdf` files (case-insensitive),
-/// and creates `.cover.png` sidecar files for each.
+/// and creates `.cover.jpg` sidecar files for each.
 ///
 /// # Arguments
 /// * `dir` - Path to the directory to process
@@ -445,17 +446,17 @@ mod tests {
     #[test]
     fn test_parse_pdf_cover_request_valid() {
         assert_eq!(
-            parse_pdf_cover_request("docs/report.pdf.cover.png"),
+            parse_pdf_cover_request("docs/report.pdf.cover.jpg"),
             Some("docs/report.pdf")
         );
         assert_eq!(
-            parse_pdf_cover_request("docs/REPORT.PDF.cover.png"),
+            parse_pdf_cover_request("docs/REPORT.PDF.cover.jpg"),
             Some("docs/REPORT.PDF")
         );
-        assert_eq!(parse_pdf_cover_request("a.pdf.cover.png"), Some("a.pdf"));
+        assert_eq!(parse_pdf_cover_request("a.pdf.cover.jpg"), Some("a.pdf"));
         // Test with spaces in path
         assert_eq!(
-            parse_pdf_cover_request("some dir/my file.pdf.cover.png"),
+            parse_pdf_cover_request("some dir/my file.pdf.cover.jpg"),
             Some("some dir/my file.pdf")
         );
     }
@@ -464,9 +465,9 @@ mod tests {
     fn test_parse_pdf_cover_request_invalid() {
         assert_eq!(parse_pdf_cover_request("docs/report.pdf"), None);
         assert_eq!(parse_pdf_cover_request("docs/report.png"), None);
-        assert_eq!(parse_pdf_cover_request("docs/report.txt.cover.png"), None);
-        assert_eq!(parse_pdf_cover_request("docs/report.cover.png"), None);
-        assert_eq!(parse_pdf_cover_request("docs/report.pdf.cover.jpg"), None);
+        assert_eq!(parse_pdf_cover_request("docs/report.txt.cover.jpg"), None);
+        assert_eq!(parse_pdf_cover_request("docs/report.cover.jpg"), None);
+        assert_eq!(parse_pdf_cover_request("docs/report.pdf.cover.png"), None);
         assert_eq!(parse_pdf_cover_request(""), None);
     }
 
@@ -480,13 +481,9 @@ mod tests {
 
         match result {
             Ok(bytes) => {
-                // Verify PNG magic bytes
-                assert!(bytes.len() > 8, "PNG should have at least 8 bytes");
-                assert_eq!(
-                    &bytes[0..4],
-                    &[0x89, 0x50, 0x4E, 0x47],
-                    "Should be valid PNG"
-                );
+                // Verify JPEG magic bytes (0xFF 0xD8)
+                assert!(bytes.len() > 2, "JPEG should have at least 2 bytes");
+                assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "Should be valid JPEG");
             }
             Err(e) => {
                 // If pdfium library not available, skip test
@@ -623,21 +620,17 @@ mod tests {
                 // Verify sidecar path is correct
                 assert_eq!(
                     sidecar_path,
-                    test_dir.path().join("test.pdf.cover.png"),
-                    "Sidecar path should be {{pdf}}.cover.png"
+                    test_dir.path().join("test.pdf.cover.jpg"),
+                    "Sidecar path should be {{pdf}}.cover.jpg"
                 );
 
                 // Verify file exists
                 assert!(sidecar_path.exists(), "Sidecar file should exist");
 
-                // Verify it's a valid PNG
+                // Verify it's a valid JPEG
                 let bytes = std::fs::read(&sidecar_path).expect("read sidecar");
-                assert!(bytes.len() > 8, "PNG should have at least 8 bytes");
-                assert_eq!(
-                    &bytes[0..4],
-                    &[0x89, 0x50, 0x4E, 0x47],
-                    "Should be valid PNG"
-                );
+                assert!(bytes.len() > 2, "JPEG should have at least 2 bytes");
+                assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "Should be valid JPEG");
             }
             Err(e) => {
                 // If pdfium library not available, skip test
@@ -719,11 +712,11 @@ mod tests {
 
         // Verify sidecar files exist
         assert!(
-            test_dir.path().join("test.pdf.cover.png").exists(),
+            test_dir.path().join("test.pdf.cover.jpg").exists(),
             "First sidecar should exist"
         );
         assert!(
-            subdir.join("test2.pdf.cover.png").exists(),
+            subdir.join("test2.pdf.cover.jpg").exists(),
             "Second sidecar should exist"
         );
     }
@@ -801,45 +794,45 @@ mod tests {
                 Some(d) => format!("{}/{}.{}", d, name, ext_case),
                 None => format!("{}.{}", name, ext_case),
             };
-            let full_path = format!("{}.cover.png", base);
+            let full_path = format!("{}.cover.jpg", base);
 
             let result = parse_pdf_cover_request(&full_path);
             prop_assert!(result.is_some(), "Valid PDF cover request should return Some");
             prop_assert_eq!(result.unwrap(), base.as_str());
         }
 
-        /// Paths not ending in .cover.png always return None
+        /// Paths not ending in .cover.jpg always return None
         #[test]
         fn prop_non_cover_suffix_returns_none(
             path in "[a-zA-Z0-9_/.\\-]{1,50}",
-            suffix in prop_oneof![".png", ".jpg", ".pdf", ".cover.jpg", ""]
+            suffix in prop_oneof![".png", ".jpg", ".pdf", ".cover.png", ""]
         ) {
-            // Skip if it accidentally ends with .cover.png
+            // Skip if it accidentally ends with .cover.jpg
             let full_path = format!("{}{}", path, suffix);
-            if full_path.ends_with(".cover.png") {
+            if full_path.ends_with(".cover.jpg") {
                 return Ok(());
             }
             let result = parse_pdf_cover_request(&full_path);
-            prop_assert!(result.is_none(), "Non .cover.png paths should return None");
+            prop_assert!(result.is_none(), "Non .cover.jpg paths should return None");
         }
 
-        /// Paths with .cover.png but not .pdf before it return None
+        /// Paths with .cover.jpg but not .pdf before it return None
         #[test]
         fn prop_non_pdf_cover_returns_none(
             name in pdf_basename_strategy(),
             ext in prop_oneof!["txt", "doc", "jpg", "png", ""]
         ) {
             let path = if ext.is_empty() {
-                format!("{}.cover.png", name)
+                format!("{}.cover.jpg", name)
             } else {
-                format!("{}.{}.cover.png", name, ext)
+                format!("{}.{}.cover.jpg", name, ext)
             };
 
             let result = parse_pdf_cover_request(&path);
-            prop_assert!(result.is_none(), "Non-PDF .cover.png should return None: {}", path);
+            prop_assert!(result.is_none(), "Non-PDF .cover.jpg should return None: {}", path);
         }
 
-        /// The returned base path when stripped from input leaves only .cover.png
+        /// The returned base path when stripped from input leaves only .cover.jpg
         #[test]
         fn prop_base_path_plus_suffix_equals_input(
             dir in proptest::option::of(path_component_strategy()),
@@ -849,10 +842,10 @@ mod tests {
                 Some(d) => format!("{}/{}.pdf", d, name),
                 None => format!("{}.pdf", name),
             };
-            let full_path = format!("{}.cover.png", base);
+            let full_path = format!("{}.cover.jpg", base);
 
             if let Some(result_base) = parse_pdf_cover_request(&full_path) {
-                let reconstructed = format!("{}.cover.png", result_base);
+                let reconstructed = format!("{}.cover.jpg", result_base);
                 prop_assert_eq!(reconstructed, full_path);
             }
         }
@@ -863,10 +856,10 @@ mod tests {
             name in pdf_basename_strategy()
         ) {
             let variations = [
-                format!("{}.pdf.cover.png", name),
-                format!("{}.PDF.cover.png", name),
-                format!("{}.Pdf.cover.png", name),
-                format!("{}.pDf.cover.png", name),
+                format!("{}.pdf.cover.jpg", name),
+                format!("{}.PDF.cover.jpg", name),
+                format!("{}.Pdf.cover.jpg", name),
+                format!("{}.pDf.cover.jpg", name),
             ];
 
             for path in &variations {

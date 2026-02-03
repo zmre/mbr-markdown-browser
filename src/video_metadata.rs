@@ -52,15 +52,15 @@ fn has_video_extension(path: &str) -> bool {
 /// # Examples
 ///
 /// ```ignore
-/// let result = parse_metadata_request("videos/foo.mp4.cover.png");
+/// let result = parse_metadata_request("videos/foo.mp4.cover.jpg");
 /// assert_eq!(result, Some(("videos/foo.mp4", MetadataType::Cover)));
 ///
 /// // Does NOT match PDF covers
-/// let result = parse_metadata_request("docs/foo.pdf.cover.png");
+/// let result = parse_metadata_request("docs/foo.pdf.cover.jpg");
 /// assert_eq!(result, None);
 /// ```
 pub fn parse_metadata_request(path: &str) -> Option<(&str, MetadataType)> {
-    if let Some(video_path) = path.strip_suffix(".cover.png")
+    if let Some(video_path) = path.strip_suffix(".cover.jpg")
         && has_video_extension(video_path)
     {
         return Some((video_path, MetadataType::Cover));
@@ -112,10 +112,12 @@ pub fn probe_video(video_path: &Path) -> Result<VideoMetadata, MetadataError> {
 
 /// Try to extract an embedded thumbnail (attached_pic) from the video.
 ///
-/// Returns Some(png_bytes) if an embedded cover is found, None otherwise.
+/// Returns Some(jpg_bytes) if an embedded cover is found, None otherwise.
 fn extract_attached_pic(
     input: &mut ffmpeg::format::context::Input,
 ) -> Result<Option<Vec<u8>>, MetadataError> {
+    use image::codecs::jpeg::JpegEncoder;
+
     // Find a stream with the attached_pic disposition
     let attached_pic_stream = input.streams().find(|s| {
         s.disposition()
@@ -147,29 +149,29 @@ fn extract_attached_pic(
             MetadataError::DecodeFailed("Attached pic packet has no data".to_string())
         })?;
 
-        // Check if it's already PNG (starts with PNG magic bytes)
-        if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
-            tracing::debug!("Attached pic is already PNG ({} bytes)", data.len());
+        // Check if it's already JPEG (starts with FFD8) - pass through as-is
+        if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+            tracing::debug!("Attached pic is already JPEG ({} bytes)", data.len());
             return Ok(Some(data.to_vec()));
         }
 
-        // Check if it's JPEG (starts with FFD8)
-        if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
-            tracing::debug!("Attached pic is JPEG, converting to PNG");
-            // Decode JPEG and re-encode as PNG
+        // Check if it's PNG (starts with PNG magic bytes) - convert to JPEG
+        if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+            tracing::debug!("Attached pic is PNG, converting to JPEG");
             let img = image::load_from_memory(data).map_err(|e| {
-                MetadataError::DecodeFailed(format!("Failed to decode attached JPEG: {}", e))
+                MetadataError::DecodeFailed(format!("Failed to decode attached PNG: {}", e))
             })?;
 
-            let mut png_data = Vec::new();
-            let mut cursor = std::io::Cursor::new(&mut png_data);
-            img.write_to(&mut cursor, image::ImageFormat::Png)
-                .map_err(|e| MetadataError::EncodeFailed(format!("Failed to encode PNG: {}", e)))?;
+            let mut jpg_data = Vec::new();
+            let encoder = JpegEncoder::new_with_quality(&mut jpg_data, 85);
+            img.write_with_encoder(encoder).map_err(|e| {
+                MetadataError::EncodeFailed(format!("Failed to encode JPEG: {}", e))
+            })?;
 
-            return Ok(Some(png_data));
+            return Ok(Some(jpg_data));
         }
 
-        // For other formats, try to decode with the image crate
+        // For other formats, try to decode with the image crate and convert to JPEG
         tracing::debug!(
             "Attached pic has unknown format (first bytes: {:02x?}), trying image crate",
             &data[..std::cmp::min(16, data.len())]
@@ -177,13 +179,12 @@ fn extract_attached_pic(
 
         match image::load_from_memory(data) {
             Ok(img) => {
-                let mut png_data = Vec::new();
-                let mut cursor = std::io::Cursor::new(&mut png_data);
-                img.write_to(&mut cursor, image::ImageFormat::Png)
-                    .map_err(|e| {
-                        MetadataError::EncodeFailed(format!("Failed to encode PNG: {}", e))
-                    })?;
-                return Ok(Some(png_data));
+                let mut jpg_data = Vec::new();
+                let encoder = JpegEncoder::new_with_quality(&mut jpg_data, 85);
+                img.write_with_encoder(encoder).map_err(|e| {
+                    MetadataError::EncodeFailed(format!("Failed to encode JPEG: {}", e))
+                })?;
+                return Ok(Some(jpg_data));
             }
             Err(e) => {
                 tracing::warn!(
@@ -204,7 +205,7 @@ fn extract_attached_pic(
 /// 1. First check for an embedded thumbnail (attached_pic disposition)
 /// 2. If no embedded thumbnail, capture frame at 5 seconds (or earlier for short videos)
 ///
-/// Returns PNG image data.
+/// Returns JPEG image data.
 pub fn extract_cover(video_path: &Path) -> Result<Vec<u8>, MetadataError> {
     let mut input = ffmpeg::format::input(video_path).map_err(|e| MetadataError::OpenFailed {
         path: video_path.to_path_buf(),
@@ -286,8 +287,8 @@ pub fn extract_cover(video_path: &Path) -> Result<Vec<u8>, MetadataError> {
                 .map_err(|e| MetadataError::DecodeFailed(format!("Send packet failed: {}", e)))?;
 
             if decoder.receive_frame(&mut frame).is_ok() {
-                // Got a frame, convert to PNG
-                return frame_to_png(&frame, decoder.width(), decoder.height());
+                // Got a frame, convert to JPEG
+                return frame_to_jpg(&frame, decoder.width(), decoder.height());
             }
         }
     }
@@ -298,7 +299,7 @@ pub fn extract_cover(video_path: &Path) -> Result<Vec<u8>, MetadataError> {
         .map_err(|e| MetadataError::DecodeFailed(format!("Send EOF failed: {}", e)))?;
 
     if decoder.receive_frame(&mut frame).is_ok() {
-        return frame_to_png(&frame, decoder.width(), decoder.height());
+        return frame_to_jpg(&frame, decoder.width(), decoder.height());
     }
 
     Err(MetadataError::DecodeFailed(
@@ -306,12 +307,14 @@ pub fn extract_cover(video_path: &Path) -> Result<Vec<u8>, MetadataError> {
     ))
 }
 
-/// Convert an ffmpeg Video frame to PNG bytes.
-fn frame_to_png(
+/// Convert an ffmpeg Video frame to JPEG bytes.
+fn frame_to_jpg(
     frame: &ffmpeg::frame::Video,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, MetadataError> {
+    use image::codecs::jpeg::JpegEncoder;
+
     // Create a scaler to convert to RGB
     let mut scaler = ffmpeg::software::scaling::Context::get(
         frame.format(),
@@ -342,19 +345,19 @@ fn frame_to_png(
         rgb_data.extend_from_slice(&data[row_start..row_end]);
     }
 
-    // Create image buffer and encode to PNG
+    // Create image buffer and encode to JPEG (quality 85)
     let img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
         image::ImageBuffer::from_raw(width, height, rgb_data).ok_or_else(|| {
             MetadataError::EncodeFailed("Failed to create image buffer".to_string())
         })?;
 
-    let mut png_data = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut png_data);
+    let mut jpg_data = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut jpg_data, 85);
 
-    img.write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|e| MetadataError::EncodeFailed(format!("Failed to encode PNG: {}", e)))?;
+    img.write_with_encoder(encoder)
+        .map_err(|e| MetadataError::EncodeFailed(format!("Failed to encode JPEG: {}", e)))?;
 
-    Ok(png_data)
+    Ok(jpg_data)
 }
 
 /// Extract chapters from the video and convert to WebVTT format.
@@ -530,7 +533,7 @@ pub fn extract_and_save(video_path: &Path) -> Result<(), MetadataError> {
     );
 
     // Extract cover
-    let cover_path = format!("{}.cover.png", video_path.display());
+    let cover_path = format!("{}.cover.jpg", video_path.display());
     let cover_path = Path::new(&cover_path);
     if cover_path.exists() {
         println!("- Skipped: {} (already exists)", cover_path.display());
@@ -587,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_parse_metadata_request_cover() {
-        let result = parse_metadata_request("videos/foo.mp4.cover.png");
+        let result = parse_metadata_request("videos/foo.mp4.cover.jpg");
         assert_eq!(result, Some(("videos/foo.mp4", MetadataType::Cover)));
     }
 
@@ -605,7 +608,7 @@ mod tests {
 
     #[test]
     fn test_parse_metadata_request_with_spaces() {
-        let result = parse_metadata_request("videos/Eric Jones/Eric Jones - Metal 1.mp4.cover.png");
+        let result = parse_metadata_request("videos/Eric Jones/Eric Jones - Metal 1.mp4.cover.jpg");
         assert_eq!(
             result,
             Some((
@@ -619,14 +622,14 @@ mod tests {
     fn test_parse_metadata_request_not_metadata() {
         assert_eq!(parse_metadata_request("videos/foo.mp4"), None);
         assert_eq!(parse_metadata_request("videos/foo.png"), None);
-        assert_eq!(parse_metadata_request("videos/foo.mp4.jpg"), None);
+        assert_eq!(parse_metadata_request("videos/foo.mp4.png"), None);
     }
 
     #[test]
     fn test_parse_metadata_request_not_pdf() {
         // PDF cover requests should NOT be matched by video parser
-        assert_eq!(parse_metadata_request("docs/report.pdf.cover.png"), None);
-        assert_eq!(parse_metadata_request("docs/Report.PDF.cover.png"), None);
+        assert_eq!(parse_metadata_request("docs/report.pdf.cover.jpg"), None);
+        assert_eq!(parse_metadata_request("docs/Report.PDF.cover.jpg"), None);
         assert_eq!(
             parse_metadata_request("docs/report.pdf.chapters.en.vtt"),
             None
@@ -636,12 +639,12 @@ mod tests {
     #[test]
     fn test_parse_metadata_request_various_video_extensions() {
         // Various video extensions should be recognized
-        assert!(parse_metadata_request("foo.mkv.cover.png").is_some());
-        assert!(parse_metadata_request("foo.webm.cover.png").is_some());
-        assert!(parse_metadata_request("foo.mov.cover.png").is_some());
-        assert!(parse_metadata_request("foo.avi.cover.png").is_some());
-        assert!(parse_metadata_request("foo.m4v.cover.png").is_some());
-        assert!(parse_metadata_request("foo.MKV.cover.png").is_some()); // case insensitive
+        assert!(parse_metadata_request("foo.mkv.cover.jpg").is_some());
+        assert!(parse_metadata_request("foo.webm.cover.jpg").is_some());
+        assert!(parse_metadata_request("foo.mov.cover.jpg").is_some());
+        assert!(parse_metadata_request("foo.avi.cover.jpg").is_some());
+        assert!(parse_metadata_request("foo.m4v.cover.jpg").is_some());
+        assert!(parse_metadata_request("foo.MKV.cover.jpg").is_some()); // case insensitive
     }
 
     #[test]
