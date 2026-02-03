@@ -156,9 +156,37 @@ fn print_progress(stage: &str, current: usize, total: usize) {
     let _ = io::stdout().flush();
 }
 
+/// Formats a duration for display: "1.23s" or "1m 23.4s" for longer durations.
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs >= 60.0 {
+        format!("{:.0}m {:.1}s", (secs / 60.0).floor(), secs % 60.0)
+    } else {
+        format!("{:.2}s", secs)
+    }
+}
+
 /// Prints a completed stage message with a newline.
-fn print_stage_done(stage: &str, count: usize) {
-    println!("\r\x1b[K{} ... {} done", stage, count);
+fn print_stage_done(stage: &str, count: usize, duration: Option<Duration>) {
+    if let Some(d) = duration {
+        println!(
+            "\r\x1b[K{} ... {} done ({})",
+            stage,
+            count,
+            format_duration(d)
+        );
+    } else {
+        println!("\r\x1b[K{} ... {} done", stage, count);
+    }
+}
+
+/// Prints a completed stage message without count.
+fn print_done(stage: &str, duration: Option<Duration>) {
+    if let Some(d) = duration {
+        println!("\r\x1b[K{} ... done ({})", stage, format_duration(d));
+    } else {
+        println!("\r\x1b[K{} ... done", stage);
+    }
 }
 
 /// Convert an absolute URL path to a relative URL from the given depth.
@@ -275,6 +303,7 @@ impl Builder {
         let mut stats = BuildStats::default();
 
         // Scan repository for all files
+        let stage_start = Instant::now();
         print_stage("Scanning repository...");
         self.repo
             .scan_all()
@@ -283,12 +312,17 @@ impl Builder {
                 source: std::io::Error::other(e.to_string()),
             })?;
         let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
-        print_stage_done("Scanning repository", file_count);
+        print_stage_done(
+            "Scanning repository",
+            file_count,
+            Some(stage_start.elapsed()),
+        );
 
         // Prepare output directory
+        let stage_start = Instant::now();
         print_stage("Cleaning output directory...");
         self.prepare_output_dir()?;
-        println!("\r\x1b[KCleaning output directory ... done");
+        print_done("Cleaning output directory", Some(stage_start.elapsed()));
 
         // Render all markdown files
         stats.markdown_pages = self.render_markdown_files().await?;
@@ -309,19 +343,26 @@ impl Builder {
         }
 
         // Symlink assets (images, PDFs, etc.)
+        let stage_start = Instant::now();
         print_stage("Linking assets...");
         stats.assets_linked = self.symlink_assets()?;
-        print_stage_done("Linking assets", stats.assets_linked);
+        print_stage_done(
+            "Linking assets",
+            stats.assets_linked,
+            Some(stage_start.elapsed()),
+        );
 
         // Handle static folder overlay
+        let stage_start = Instant::now();
         print_stage("Processing static folder...");
         self.handle_static_folder()?;
-        println!("\r\x1b[KProcessing static folder ... done");
+        print_done("Processing static folder", Some(stage_start.elapsed()));
 
         // Handle .mbr folder (copy, write defaults, generate site.json)
+        let stage_start = Instant::now();
         print_stage("Copying theme and assets...");
         self.handle_mbr_folder()?;
-        println!("\r\x1b[KCopying theme and assets ... done");
+        print_done("Copying theme and assets", Some(stage_start.elapsed()));
 
         // Generate 404.html for GitHub Pages compatibility
         self.generate_404_page()?;
@@ -333,10 +374,11 @@ impl Builder {
         if self.config.skip_link_checks {
             println!("Validating links ... skipped");
         } else {
+            let stage_start = Instant::now();
             print_stage("Validating links...");
             let broken_links = self.validate_links();
             stats.broken_links = broken_links.len();
-            println!("\r\x1b[KValidating links ... done");
+            print_done("Validating links", Some(stage_start.elapsed()));
 
             if !broken_links.is_empty() {
                 eprintln!(
@@ -351,10 +393,11 @@ impl Builder {
         }
 
         // Run Pagefind to generate search index
+        let stage_start = Instant::now();
         print_stage("Building search index...");
         stats.pagefind_indexed = Some(self.run_pagefind().await);
         if stats.pagefind_indexed == Some(true) {
-            println!("\r\x1b[KBuilding search index ... done");
+            print_done("Building search index", Some(stage_start.elapsed()));
         } else {
             println!("\r\x1b[KBuilding search index ... skipped");
         }
@@ -389,6 +432,7 @@ impl Builder {
 
     /// Renders all markdown files to HTML in parallel.
     async fn render_markdown_files(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         let markdown_files: Vec<_> = self
             .repo
             .markdown_files
@@ -425,7 +469,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Rendering markdown", count);
+        print_stage_done("Rendering markdown", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -435,6 +479,7 @@ impl Builder {
     /// 1. Builds an inbound link index by inverting the outbound links
     /// 2. Writes links.json files in parallel for each page
     async fn write_link_files(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         print_stage("Building link index...");
 
         // Step 1: Build the inbound index by inverting outbound links
@@ -527,7 +572,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Writing link files", count);
+        print_stage_done("Writing link files", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -826,6 +871,7 @@ impl Builder {
 
     /// Generates directory/section pages in parallel.
     async fn render_directory_pages(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         // Collect all directories that need section pages
         let mut directories: HashSet<PathBuf> = HashSet::new();
 
@@ -881,7 +927,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Generating sections", count);
+        print_stage_done("Generating sections", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -1082,6 +1128,7 @@ impl Builder {
     /// - A tag source index page at `/{source}/`
     /// - Individual tag pages at `/{source}/{value}/`
     async fn render_tag_pages(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         // Collect all tag pages to render (source index + individual tags)
         let mut tasks: Vec<(String, Option<String>)> = Vec::new(); // (source, Some(value)) or (source, None for index)
 
@@ -1139,7 +1186,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Generating tag pages", count);
+        print_stage_done("Generating tag pages", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
