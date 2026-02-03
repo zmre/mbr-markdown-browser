@@ -233,14 +233,12 @@ fn safe_join_asset(base_dir: &Path, relative_path: &str) -> Option<PathBuf> {
 /// # Security
 ///
 /// Guards against path traversal by canonicalizing both paths and verifying containment.
+/// Note: We intentionally do NOT reject paths containing ".." before canonicalization
+/// because the base_dir itself may be constructed with ".." (e.g., when static_folder
+/// is "../static"). The canonicalization resolves all ".." components, and the
+/// starts_with check ensures the resolved path is within bounds.
 #[cfg(feature = "media-metadata")]
 fn validate_path_containment(file_path: &Path, base_dir: &Path) -> Option<PathBuf> {
-    // Early rejection of obvious path traversal in the path string
-    if file_path.to_string_lossy().contains("..") {
-        tracing::warn!("Path traversal attempt blocked: {}", file_path.display());
-        return None;
-    }
-
     let canonical_base = base_dir.canonicalize().ok()?;
     let canonical_file = file_path.canonicalize().ok()?;
 
