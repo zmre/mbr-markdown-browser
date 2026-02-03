@@ -1062,25 +1062,24 @@ impl Server {
             .unwrap_or("Media Viewer")
             .to_string();
 
-        // Calculate relative path for display and parent path for navigation
-        let relative_path = validated_path
-            .strip_prefix(&config.base_dir)
-            .unwrap_or(&validated_path);
-
-        // Generate breadcrumbs from the media file's directory path
+        // Generate breadcrumbs from the URL path (media_path), not the filesystem path
+        // The media_path is already the URL path (e.g., "/videos/Jay Sankey/video.mp4")
+        let url_path = std::path::Path::new(media_path);
         let breadcrumbs =
-            generate_breadcrumbs(relative_path.parent().unwrap_or(std::path::Path::new("")));
+            generate_breadcrumbs(url_path.parent().unwrap_or(std::path::Path::new("")));
         let breadcrumbs_json: Vec<_> = breadcrumbs
             .iter()
             .map(|b| json!({"name": b.name, "url": b.url}))
             .collect();
 
-        // Get parent path for back navigation
-        let parent_path = relative_path.parent().and_then(|p| p.to_str()).map(|p| {
-            if p.is_empty() {
+        // Get parent path for back navigation (from URL path)
+        let parent_path = url_path.parent().and_then(|p| p.to_str()).map(|p| {
+            if p.is_empty() || p == "/" {
                 "/".to_string()
             } else {
-                format!("/{}/", p)
+                // Ensure trailing slash and clean up leading slash for format
+                let clean = p.trim_start_matches('/');
+                format!("/{}/", clean)
             }
         });
 
