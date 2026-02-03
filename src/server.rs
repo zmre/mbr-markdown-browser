@@ -108,18 +108,30 @@ pub struct MediaViewerQuery {
 ///
 /// - URL-decodes the path
 /// - Rejects paths containing ".." (directory traversal)
-/// - Validates the path resolves within the repository root
+/// - Validates the path resolves within the repository root OR the static folder
 ///
 /// # Arguments
 ///
 /// * `path` - The URL-encoded path from the query parameter
 /// * `repo_root` - The repository root directory
+/// * `static_folder` - The static folder path (may be relative to repo_root, e.g., "../static")
 ///
 /// # Returns
 ///
 /// * `Ok(PathBuf)` - The validated, canonical path to the media file
 /// * `Err(MbrError)` - If the path is invalid or attempts directory traversal
-pub fn validate_media_path(path: &str, repo_root: &Path) -> Result<PathBuf, MbrError> {
+///
+/// # Security
+///
+/// When `static_folder` points outside `repo_root` (e.g., `../static`), paths are validated
+/// against BOTH directories. This allows serving assets from external static folders while
+/// maintaining path traversal protection. Content root takes precedence if the file exists
+/// in both locations.
+pub fn validate_media_path(
+    path: &str,
+    repo_root: &Path,
+    static_folder: &str,
+) -> Result<PathBuf, MbrError> {
     // URL-decode the path
     let decoded = percent_decode_str(path)
         .decode_utf8()
@@ -133,24 +145,42 @@ pub fn validate_media_path(path: &str, repo_root: &Path) -> Result<PathBuf, MbrE
     // Remove leading slash if present for path joining
     let clean_path = decoded.trim_start_matches('/');
 
-    // Construct the full path
+    // Try repo_root first
     let full_path = repo_root.join(clean_path);
 
-    // Canonicalize to resolve any symlinks and get the real path
-    let canonical_path = full_path
-        .canonicalize()
-        .map_err(|_| MbrError::InvalidMediaPath(format!("Path does not exist: {}", decoded)))?;
-
-    // Verify the canonical path is within the repo root
+    // Canonicalize repo root for validation
     let canonical_root = repo_root
         .canonicalize()
         .map_err(|_| MbrError::InvalidMediaPath("Repository root not found".to_string()))?;
 
-    if !canonical_path.starts_with(&canonical_root) {
-        return Err(MbrError::DirectoryTraversal);
+    // Try to resolve within repo_root
+    if let Ok(canonical_path) = full_path.canonicalize()
+        && canonical_path.starts_with(&canonical_root)
+    {
+        return Ok(canonical_path);
     }
 
-    Ok(canonical_path)
+    // If static_folder is non-empty, try resolving against it as a fallback
+    if !static_folder.is_empty() {
+        let static_root = repo_root.join(static_folder);
+
+        // The static folder must exist
+        if let Ok(canonical_static_root) = static_root.canonicalize() {
+            let static_full_path = static_root.join(clean_path);
+
+            if let Ok(canonical_path) = static_full_path.canonicalize()
+                && canonical_path.starts_with(&canonical_static_root)
+            {
+                return Ok(canonical_path);
+            }
+        }
+    }
+
+    // Neither repo_root nor static_folder contained a valid path
+    Err(MbrError::InvalidMediaPath(format!(
+        "Path does not exist: {}",
+        decoded
+    )))
 }
 
 /// Safely join a base directory with a relative path for serving MBR assets.
@@ -981,48 +1011,49 @@ impl Server {
         };
 
         // Validate the media path
-        let validated_path = match validate_media_path(media_path, &config.base_dir) {
-            Ok(p) => p,
-            Err(MbrError::DirectoryTraversal) => {
-                tracing::warn!("Directory traversal attempt: {}", media_path);
-                return Self::render_error_page(
-                    &config.templates,
-                    StatusCode::FORBIDDEN,
-                    "Forbidden",
-                    Some("Access denied: Invalid path"),
-                    route_path,
-                    config.gui_mode,
-                    &config.sidebar_style,
-                    config.sidebar_max_items,
-                );
-            }
-            Err(MbrError::InvalidMediaPath(msg)) => {
-                tracing::warn!("Invalid media path: {} - {}", media_path, msg);
-                return Self::render_error_page(
-                    &config.templates,
-                    StatusCode::NOT_FOUND,
-                    "Not Found",
-                    Some(&format!("Media file not found: {}", msg)),
-                    route_path,
-                    config.gui_mode,
-                    &config.sidebar_style,
-                    config.sidebar_max_items,
-                );
-            }
-            Err(e) => {
-                tracing::error!("Unexpected error validating media path: {}", e);
-                return Self::render_error_page(
-                    &config.templates,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal Server Error",
-                    Some("Failed to validate media path"),
-                    route_path,
-                    config.gui_mode,
-                    &config.sidebar_style,
-                    config.sidebar_max_items,
-                );
-            }
-        };
+        let validated_path =
+            match validate_media_path(media_path, &config.base_dir, &config.static_folder) {
+                Ok(p) => p,
+                Err(MbrError::DirectoryTraversal) => {
+                    tracing::warn!("Directory traversal attempt: {}", media_path);
+                    return Self::render_error_page(
+                        &config.templates,
+                        StatusCode::FORBIDDEN,
+                        "Forbidden",
+                        Some("Access denied: Invalid path"),
+                        route_path,
+                        config.gui_mode,
+                        &config.sidebar_style,
+                        config.sidebar_max_items,
+                    );
+                }
+                Err(MbrError::InvalidMediaPath(msg)) => {
+                    tracing::warn!("Invalid media path: {} - {}", media_path, msg);
+                    return Self::render_error_page(
+                        &config.templates,
+                        StatusCode::NOT_FOUND,
+                        "Not Found",
+                        Some(&format!("Media file not found: {}", msg)),
+                        route_path,
+                        config.gui_mode,
+                        &config.sidebar_style,
+                        config.sidebar_max_items,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Unexpected error validating media path: {}", e);
+                    return Self::render_error_page(
+                        &config.templates,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        Some("Failed to validate media path"),
+                        route_path,
+                        config.gui_mode,
+                        &config.sidebar_style,
+                        config.sidebar_max_items,
+                    );
+                }
+            };
 
         // Extract title from filename
         let title = validated_path
@@ -3663,14 +3694,14 @@ mod tests {
     #[test]
     fn test_validate_media_path_rejects_directory_traversal() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let result = validate_media_path("../etc/passwd", temp_dir.path());
+        let result = validate_media_path("../etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
     }
 
     #[test]
     fn test_validate_media_path_rejects_embedded_directory_traversal() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let result = validate_media_path("some/../../etc/passwd", temp_dir.path());
+        let result = validate_media_path("some/../../etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
     }
 
@@ -3678,14 +3709,14 @@ mod tests {
     fn test_validate_media_path_rejects_url_encoded_traversal() {
         let temp_dir = tempfile::tempdir().unwrap();
         // URL-encoded ".." = "%2e%2e"
-        let result = validate_media_path("%2e%2e/etc/passwd", temp_dir.path());
+        let result = validate_media_path("%2e%2e/etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
     }
 
     #[test]
     fn test_validate_media_path_rejects_nonexistent_file() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let result = validate_media_path("nonexistent.mp4", temp_dir.path());
+        let result = validate_media_path("nonexistent.mp4", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
     }
 
@@ -3695,7 +3726,7 @@ mod tests {
         let test_file = temp_dir.path().join("test.mp4");
         std::fs::write(&test_file, "dummy content").unwrap();
 
-        let result = validate_media_path("test.mp4", temp_dir.path());
+        let result = validate_media_path("test.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
     }
@@ -3706,7 +3737,7 @@ mod tests {
         let test_file = temp_dir.path().join("test.mp4");
         std::fs::write(&test_file, "dummy content").unwrap();
 
-        let result = validate_media_path("/test.mp4", temp_dir.path());
+        let result = validate_media_path("/test.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
     }
@@ -3718,7 +3749,7 @@ mod tests {
         std::fs::write(&test_file, "dummy content").unwrap();
 
         // URL-encoded space = "%20"
-        let result = validate_media_path("test%20file.mp4", temp_dir.path());
+        let result = validate_media_path("test%20file.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
     }
@@ -3731,9 +3762,110 @@ mod tests {
         let test_file = subdir.join("demo.mp4");
         std::fs::write(&test_file, "dummy content").unwrap();
 
-        let result = validate_media_path("videos/2024/demo.mp4", temp_dir.path());
+        let result = validate_media_path("videos/2024/demo.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    // ==================== validate_media_path External Static Folder Tests ====================
+
+    #[test]
+    fn test_validate_media_path_external_static_folder_works() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::create_dir_all(static_dir.join("videos")).unwrap();
+
+        // Create a video file in the external static folder
+        let video_file = static_dir.join("videos").join("test.mp4");
+        std::fs::write(&video_file, "video content").unwrap();
+
+        // static_folder = "../static" relative to content_dir
+        let result = validate_media_path("videos/test.mp4", &content_dir, "../static");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), video_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_content_root_takes_precedence() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(content_dir.join("videos")).unwrap();
+        std::fs::create_dir_all(static_dir.join("videos")).unwrap();
+
+        // Create the same file in both locations
+        let content_video = content_dir.join("videos").join("test.mp4");
+        let static_video = static_dir.join("videos").join("test.mp4");
+        std::fs::write(&content_video, "content version").unwrap();
+        std::fs::write(&static_video, "static version").unwrap();
+
+        // Content root should take precedence
+        let result = validate_media_path("videos/test.mp4", &content_dir, "../static");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), content_video.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_traversal_in_external_static() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::create_dir_all(&static_dir).unwrap();
+
+        // Even with an external static folder, path traversal should be rejected
+        let result = validate_media_path("../etc/passwd", &content_dir, "../static");
+        assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn test_validate_media_path_empty_static_folder_disables_fallback() {
+        // Create a single directory
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // With empty static_folder, only content root is checked
+        let result = validate_media_path("nonexistent.mp4", temp_dir.path(), "");
+        assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
+    }
+
+    #[test]
+    fn test_validate_media_path_external_static_nested_path() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let nested_dir = static_dir.join("videos").join("Jay Sankey").join("2024");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+
+        // Create a video file in nested directory
+        let video_file = nested_dir.join("performance.mp4");
+        std::fs::write(&video_file, "video content").unwrap();
+
+        let result = validate_media_path(
+            "videos/Jay%20Sankey/2024/performance.mp4",
+            &content_dir,
+            "../static",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), video_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_nonexistent_static_folder_fallback_fails() {
+        // Create content directory only
+        let temp_dir = tempfile::tempdir().unwrap();
+        let content_dir = temp_dir.path().join("content");
+        std::fs::create_dir_all(&content_dir).unwrap();
+
+        // Static folder doesn't exist - should fail gracefully
+        let result = validate_media_path("videos/test.mp4", &content_dir, "../nonexistent");
+        assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
     }
 
     // ==================== safe_join_asset Tests ====================
@@ -4008,7 +4140,7 @@ mod proptests {
                 // Any path with ".." should be rejected as directory traversal
                 // Note: URL-decoded path is what matters
                 if path.contains("..") {
-                    let result = validate_media_path(&path, temp_dir.path());
+                    let result = validate_media_path(&path, temp_dir.path(), "");
                     // Path either doesn't exist or is rejected as traversal
                     prop_assert!(
                         result.is_err(),
@@ -4025,8 +4157,8 @@ mod proptests {
             path in "[a-zA-Z0-9_/-]{1,30}"
         ) {
             let temp_dir = tempfile::tempdir().unwrap();
-            let result1 = validate_media_path(&path, temp_dir.path());
-            let result2 = validate_media_path(&path, temp_dir.path());
+            let result1 = validate_media_path(&path, temp_dir.path(), "");
+            let result2 = validate_media_path(&path, temp_dir.path(), "");
 
             // Both should be the same (both errors or both same Ok value)
             match (&result1, &result2) {
@@ -4049,13 +4181,13 @@ mod proptests {
 
             // Test with URL-encoded path (spaces as %20)
             let encoded = format!("%20{}", filename); // Leading space encoded
-            let result = validate_media_path(&encoded, temp_dir.path());
+            let result = validate_media_path(&encoded, temp_dir.path(), "");
 
             // The decoded path " filename" doesn't exist, so should fail
             prop_assert!(result.is_err(), "Encoded path with non-existent target should fail");
 
             // Test with the actual filename - should succeed
-            let result = validate_media_path(&filename, temp_dir.path());
+            let result = validate_media_path(&filename, temp_dir.path(), "");
             prop_assert!(result.is_ok(), "Valid path should succeed: {:?}", filename);
         }
 
@@ -4071,7 +4203,7 @@ mod proptests {
             std::fs::write(&test_file, "test content").unwrap();
 
             // Validate the path
-            let result = validate_media_path(&filename, temp_dir.path());
+            let result = validate_media_path(&filename, temp_dir.path(), "");
             prop_assert!(result.is_ok(), "Valid file path should succeed: {:?}", filename);
 
             // Result should be the canonical path to the file
@@ -4094,11 +4226,11 @@ mod proptests {
 
             // Test with leading slash
             let path_with_slash = format!("/{}", filename);
-            let result = validate_media_path(&path_with_slash, temp_dir.path());
+            let result = validate_media_path(&path_with_slash, temp_dir.path(), "");
             prop_assert!(result.is_ok(), "Path with leading slash should work: {:?}", path_with_slash);
 
             // Test without leading slash
-            let result_no_slash = validate_media_path(&filename, temp_dir.path());
+            let result_no_slash = validate_media_path(&filename, temp_dir.path(), "");
             prop_assert!(result_no_slash.is_ok(), "Path without leading slash should work: {:?}", filename);
 
             // Both should resolve to the same canonical path
