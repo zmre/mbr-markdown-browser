@@ -3,20 +3,20 @@
 //! This module provides a file watcher that monitors the entire repository directory
 //! for changes and broadcasts change events via a tokio broadcast channel.
 //!
-//! Uses PollWatcher for reliability on macOS (kqueue has issues with NonRecursive mode).
+//! Uses RecommendedWatcher (FSEvents on macOS) for kernel-level efficiency —
+//! no per-file stat polling, handles large directories without CPU overhead.
 
 use crate::errors::WatcherError;
-use notify::{Config, Event, EventKind, PollWatcher, RecursiveMode, Watcher as NotifyWatcher};
+use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, trace};
 
 /// Capacity of the broadcast channel for file change events.
 /// If clients don't keep up, the oldest messages will be dropped.
-const BROADCAST_CAPACITY: usize = 100;
+pub(crate) const BROADCAST_CAPACITY: usize = 100;
 
 /// Represents a file system change event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,7 +40,7 @@ pub enum ChangeEventType {
 
 /// File watcher that monitors the repository for changes.
 pub struct FileWatcher {
-    _watcher: PollWatcher,
+    _watcher: notify::RecommendedWatcher,
     pub sender: broadcast::Sender<FileChangeEvent>,
 }
 
@@ -97,11 +97,9 @@ impl FileWatcher {
         let tx_clone = tx.clone();
         let base_dir_clone = base_dir.clone();
 
-        // Configure poll watcher with 1 second interval for responsive live reload
-        let poll_config = Config::default().with_poll_interval(Duration::from_secs(1));
-
-        // Create PollWatcher - more reliable on macOS than kqueue-based watcher
-        let mut watcher = PollWatcher::new(
+        // Create RecommendedWatcher (FSEvents on macOS, inotify on Linux)
+        // Kernel-level: no polling, no CPU overhead for large directories
+        let mut watcher = notify::RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 match res {
                     Ok(event) => {
@@ -169,12 +167,12 @@ impl FileWatcher {
                     }
                 }
             },
-            poll_config,
+            notify::Config::default(),
         )
         .map_err(WatcherError::WatcherInit)?;
 
         // Watch the entire directory recursively
-        // PollWatcher handles this reliably unlike kqueue on macOS
+        // FSEvents handles this efficiently at the kernel level
         // Events from ignored directories are filtered in the callback
         watcher
             .watch(base_dir.as_ref(), RecursiveMode::Recursive)
@@ -183,7 +181,7 @@ impl FileWatcher {
                 source: e,
             })?;
 
-        info!("File watcher started for {:?} (polling every 1s)", base_dir);
+        info!("File watcher started for {:?} (FSEvents/inotify)", base_dir);
 
         // Also watch template_folder if provided (for dev mode hot reload of templates/assets)
         if let Some(template_path) = template_folder {
@@ -217,10 +215,11 @@ impl FileWatcher {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Duration;
     use tempfile::TempDir;
 
-    // PollWatcher uses 1 second intervals, so tests need longer timeouts
-    const POLL_TIMEOUT_SECS: u64 = 3;
+    // RecommendedWatcher delivers events faster than PollWatcher, but allow headroom
+    const WATCH_TIMEOUT_SECS: u64 = 5;
 
     #[tokio::test]
     async fn test_watcher_creates_and_receives_events() {
@@ -233,8 +232,8 @@ mod tests {
         let test_file = base_path.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
-        // Wait for the event (PollWatcher checks every 1 second)
-        let event = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
+        // Wait for the event
+        let event = tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx.recv()).await;
 
         assert!(event.is_ok(), "Should receive file change event");
         let change = event.unwrap().unwrap();
@@ -255,8 +254,8 @@ mod tests {
         let visible_file = base_path.join("visible.md");
         fs::write(&visible_file, "visible content").unwrap();
 
-        // Wait for the event (PollWatcher checks every 1 second)
-        let event = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
+        // Wait for the event
+        let event = tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx.recv()).await;
         assert!(event.is_ok(), "Should receive event for visible.md");
         let change = event.unwrap().unwrap();
         assert!(
@@ -273,7 +272,7 @@ mod tests {
         let ignored_file = target_dir.join("ignored.txt");
         fs::write(&ignored_file, "ignored content").unwrap();
 
-        // Wait for one polling cycle and check that we didn't receive the ignored file
+        // Wait and check that we didn't receive the ignored file
         let mut saw_ignored_file = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
@@ -307,9 +306,11 @@ mod tests {
         let test_file = base_path.join("multi.md");
         fs::write(&test_file, "# Multi").unwrap();
 
-        // Both receivers should get the event (PollWatcher checks every 1 second)
-        let event1 = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx1.recv()).await;
-        let event2 = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx2.recv()).await;
+        // Both receivers should get the event
+        let event1 =
+            tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx1.recv()).await;
+        let event2 =
+            tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx2.recv()).await;
 
         assert!(event1.is_ok());
         assert!(event2.is_ok());
@@ -337,7 +338,7 @@ mod tests {
         fs::write(&template_file, "/* custom css */").unwrap();
 
         // Should receive the event from template folder
-        let event = tokio::time::timeout(Duration::from_secs(POLL_TIMEOUT_SECS), rx.recv()).await;
+        let event = tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx.recv()).await;
 
         assert!(
             event.is_ok(),

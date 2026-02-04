@@ -20,9 +20,9 @@
     <meta name="keywords" content="{{taxonomy.tags | join(sep=', ')}}" data-pagefind-filter="tag[content]" />
         {% endif %}
     {% endif %}
-    <title>{{title | default(value="") | safe}}</title>
-    <meta name="title" content="{{title | default(value="") | safe}}" data-pagefind-meta="title[content]" />
-    <meta name="description" content="{{description | default(value="") | safe}}" data-pagefind-meta="description[content]" />
+    <title>{{title | default(value="") | escape}}</title>
+    <meta name="title" content="{{title | default(value="") | escape}}" data-pagefind-meta="title[content]" />
+    <meta name="description" content="{{description | default(value="") | escape}}" data-pagefind-meta="description[content]" />
     <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" data-pagefind-sort="date[content]" />
     <script>
       // Frontmatter available to page scripts (excludes rendered markdown for efficiency)

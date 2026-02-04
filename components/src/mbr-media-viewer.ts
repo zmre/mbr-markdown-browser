@@ -1,5 +1,6 @@
 import { LitElement, html, css, nothing, type CSSResultGroup, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { resolveUrl } from './shared.js';
 
 /**
  * Supported media types for the viewer.
@@ -235,8 +236,9 @@ export class MbrMediaViewerElement extends LitElement {
         return;
       }
 
-      // Ensure path starts with /
-      this._path = path.startsWith('/') ? path : '/' + path;
+      // Ensure path starts with / then resolve for static builds
+      const absPath = path.startsWith('/') ? path : '/' + path;
+      this._path = resolveUrl(absPath);
       this._error = null;
       this._loading = false;
     } catch (e) {
@@ -247,15 +249,15 @@ export class MbrMediaViewerElement extends LitElement {
 
   /**
    * Get the poster URL for a video path.
-   * Follows the sidecar pattern: video.mp4 -> video.mp4.cover.png
+   * Follows the sidecar pattern: video.mp4 -> video.mp4.cover.jpg
    */
   private _getPosterUrl(videoPath: string): string {
-    return `${videoPath}.cover.png`;
+    return `${videoPath}.cover.jpg`;
   }
 
   /**
    * Render video content with native HTML5 player.
-   * Includes poster image support for .cover.png sidecar files.
+   * Includes poster image support for .cover.jpg sidecar files.
    */
   private _renderVideo(): TemplateResult {
     if (!this._path) return html``;
@@ -313,10 +315,10 @@ export class MbrMediaViewerElement extends LitElement {
 
   /**
    * Get the cover art URL for an audio path.
-   * Follows the sidecar pattern: audio.mp3 -> audio.mp3.cover.png
+   * Follows the sidecar pattern: audio.mp3 -> audio.mp3.cover.jpg
    */
   private _getCoverArtUrl(audioPath: string): string {
-    return `${audioPath}.cover.png`;
+    return `${audioPath}.cover.jpg`;
   }
 
   /**
@@ -348,7 +350,7 @@ export class MbrMediaViewerElement extends LitElement {
 
   /**
    * Render audio content with native HTML5 player.
-   * Includes cover art support for .cover.png sidecar files.
+   * Includes cover art support for .cover.jpg sidecar files.
    */
   private _renderAudio(): TemplateResult {
     if (!this._path) return html``;

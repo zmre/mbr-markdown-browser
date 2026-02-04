@@ -38,6 +38,12 @@ use crate::{
     templates::Templates,
 };
 
+/// Maximum build concurrency (parallel file processing limit).
+const MAX_BUILD_CONCURRENCY: usize = 32;
+
+/// Fallback concurrency when CPU core count detection fails.
+const FALLBACK_BUILD_CONCURRENCY: usize = 4;
+
 /// Calculate the directory depth from a URL path.
 ///
 /// Examples:
@@ -156,9 +162,37 @@ fn print_progress(stage: &str, current: usize, total: usize) {
     let _ = io::stdout().flush();
 }
 
+/// Formats a duration for display: "1.23s" or "1m 23.4s" for longer durations.
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs >= 60.0 {
+        format!("{:.0}m {:.1}s", (secs / 60.0).floor(), secs % 60.0)
+    } else {
+        format!("{:.2}s", secs)
+    }
+}
+
 /// Prints a completed stage message with a newline.
-fn print_stage_done(stage: &str, count: usize) {
-    println!("\r\x1b[K{} ... {} done", stage, count);
+fn print_stage_done(stage: &str, count: usize, duration: Option<Duration>) {
+    if let Some(d) = duration {
+        println!(
+            "\r\x1b[K{} ... {} done ({})",
+            stage,
+            count,
+            format_duration(d)
+        );
+    } else {
+        println!("\r\x1b[K{} ... {} done", stage, count);
+    }
+}
+
+/// Prints a completed stage message without count.
+fn print_done(stage: &str, duration: Option<Duration>) {
+    if let Some(d) = duration {
+        println!("\r\x1b[K{} ... done ({})", stage, format_duration(d));
+    } else {
+        println!("\r\x1b[K{} ... done", stage);
+    }
 }
 
 /// Convert an absolute URL path to a relative URL from the given depth.
@@ -275,6 +309,7 @@ impl Builder {
         let mut stats = BuildStats::default();
 
         // Scan repository for all files
+        let stage_start = Instant::now();
         print_stage("Scanning repository...");
         self.repo
             .scan_all()
@@ -282,13 +317,24 @@ impl Builder {
                 path: self.config.root_dir.clone(),
                 source: std::io::Error::other(e.to_string()),
             })?;
+        self.repo
+            .scan_static_folder()
+            .map_err(|e| crate::errors::RepoError::ScanFailed {
+                path: self.config.root_dir.clone(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
         let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
-        print_stage_done("Scanning repository", file_count);
+        print_stage_done(
+            "Scanning repository",
+            file_count,
+            Some(stage_start.elapsed()),
+        );
 
         // Prepare output directory
+        let stage_start = Instant::now();
         print_stage("Cleaning output directory...");
         self.prepare_output_dir()?;
-        println!("\r\x1b[KCleaning output directory ... done");
+        print_done("Cleaning output directory", Some(stage_start.elapsed()));
 
         // Render all markdown files
         stats.markdown_pages = self.render_markdown_files().await?;
@@ -309,19 +355,26 @@ impl Builder {
         }
 
         // Symlink assets (images, PDFs, etc.)
+        let stage_start = Instant::now();
         print_stage("Linking assets...");
         stats.assets_linked = self.symlink_assets()?;
-        print_stage_done("Linking assets", stats.assets_linked);
+        print_stage_done(
+            "Linking assets",
+            stats.assets_linked,
+            Some(stage_start.elapsed()),
+        );
 
         // Handle static folder overlay
+        let stage_start = Instant::now();
         print_stage("Processing static folder...");
         self.handle_static_folder()?;
-        println!("\r\x1b[KProcessing static folder ... done");
+        print_done("Processing static folder", Some(stage_start.elapsed()));
 
         // Handle .mbr folder (copy, write defaults, generate site.json)
+        let stage_start = Instant::now();
         print_stage("Copying theme and assets...");
         self.handle_mbr_folder()?;
-        println!("\r\x1b[KCopying theme and assets ... done");
+        print_done("Copying theme and assets", Some(stage_start.elapsed()));
 
         // Generate 404.html for GitHub Pages compatibility
         self.generate_404_page()?;
@@ -333,10 +386,11 @@ impl Builder {
         if self.config.skip_link_checks {
             println!("Validating links ... skipped");
         } else {
+            let stage_start = Instant::now();
             print_stage("Validating links...");
             let broken_links = self.validate_links();
             stats.broken_links = broken_links.len();
-            println!("\r\x1b[KValidating links ... done");
+            print_done("Validating links", Some(stage_start.elapsed()));
 
             if !broken_links.is_empty() {
                 eprintln!(
@@ -351,10 +405,11 @@ impl Builder {
         }
 
         // Run Pagefind to generate search index
+        let stage_start = Instant::now();
         print_stage("Building search index...");
         stats.pagefind_indexed = Some(self.run_pagefind().await);
         if stats.pagefind_indexed == Some(true) {
-            println!("\r\x1b[KBuilding search index ... done");
+            print_done("Building search index", Some(stage_start.elapsed()));
         } else {
             println!("\r\x1b[KBuilding search index ... skipped");
         }
@@ -382,13 +437,14 @@ impl Builder {
     fn get_concurrency(&self) -> usize {
         self.config.build_concurrency.unwrap_or_else(|| {
             std::thread::available_parallelism()
-                .map(|n| std::cmp::min(n.get() * 2, 32))
-                .unwrap_or(4)
+                .map(|n| std::cmp::min(n.get() * 2, MAX_BUILD_CONCURRENCY))
+                .unwrap_or(FALLBACK_BUILD_CONCURRENCY)
         })
     }
 
     /// Renders all markdown files to HTML in parallel.
     async fn render_markdown_files(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         let markdown_files: Vec<_> = self
             .repo
             .markdown_files
@@ -406,6 +462,27 @@ impl Builder {
             concurrency
         );
 
+        // Pre-build sibling index: group files by parent directory and sort each group once.
+        // This turns O(n²) per-file sibling scanning into O(n log n) total.
+        let sibling_index = {
+            let mut index: HashMap<PathBuf, Vec<serde_json::Value>> = HashMap::new();
+            for (_, info) in &markdown_files {
+                let parent = info
+                    .raw_path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+                index
+                    .entry(parent)
+                    .or_default()
+                    .push(markdown_file_to_json(info));
+            }
+            for siblings in index.values_mut() {
+                sort_files(siblings, &self.config.sort);
+            }
+            Arc::new(index)
+        };
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Rendering markdown", 0, count);
@@ -414,8 +491,11 @@ impl Builder {
         stream::iter(markdown_files)
             .map(|(path, info)| {
                 let completed = completed_clone.clone();
+                let sibling_index = sibling_index.clone();
                 async move {
-                    let result = self.render_single_markdown(&path, &info).await;
+                    let result = self
+                        .render_single_markdown(&path, &info, &sibling_index)
+                        .await;
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     print_progress("Rendering markdown", done, count);
                     result
@@ -425,7 +505,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Rendering markdown", count);
+        print_stage_done("Rendering markdown", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -435,6 +515,7 @@ impl Builder {
     /// 1. Builds an inbound link index by inverting the outbound links
     /// 2. Writes links.json files in parallel for each page
     async fn write_link_files(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         print_stage("Building link index...");
 
         // Step 1: Build the inbound index by inverting outbound links
@@ -527,7 +608,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Writing link files", count);
+        print_stage_done("Writing link files", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -581,6 +662,7 @@ impl Builder {
         &self,
         path: &Path,
         info: &MarkdownInfo,
+        sibling_index: &HashMap<PathBuf, Vec<serde_json::Value>>,
     ) -> Result<(), BuildError> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = path
@@ -703,7 +785,7 @@ impl Builder {
         );
 
         // Pass word count and reading time (200 words per minute)
-        let reading_time_minutes = word_count.div_ceil(200);
+        let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
         extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
         extra_context.insert(
             "reading_time_minutes".to_string(),
@@ -728,31 +810,15 @@ impl Builder {
             );
         }
 
-        // Compute prev/next sibling pages for navigation
-        let parent_dir = path
-            .strip_prefix(&self.config.root_dir)
-            .unwrap_or(path)
+        // Compute prev/next sibling pages for navigation using the pre-built index
+        let parent_dir = info
+            .raw_path
             .parent()
-            .unwrap_or(std::path::Path::new(""));
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
 
-        // Get sibling markdown files in the same directory
-        let mut siblings: Vec<_> = self
-            .repo
-            .markdown_files
-            .pin()
-            .iter()
-            .filter_map(|(_, sibling_info)| {
-                let file_parent = sibling_info.raw_path.parent()?;
-                if file_parent == parent_dir {
-                    Some(crate::server::markdown_file_to_json(sibling_info))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Sort siblings using configured sort order
-        crate::sorting::sort_files(&mut siblings, &self.config.sort);
+        let empty_siblings = Vec::new();
+        let siblings = sibling_index.get(&parent_dir).unwrap_or(&empty_siblings);
 
         // Find current position and get prev/next
         if let Some(current_idx) = siblings.iter().position(|f| {
@@ -826,6 +892,7 @@ impl Builder {
 
     /// Generates directory/section pages in parallel.
     async fn render_directory_pages(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         // Collect all directories that need section pages
         let mut directories: HashSet<PathBuf> = HashSet::new();
 
@@ -881,7 +948,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Generating sections", count);
+        print_stage_done("Generating sections", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -1082,6 +1149,7 @@ impl Builder {
     /// - A tag source index page at `/{source}/`
     /// - Individual tag pages at `/{source}/{value}/`
     async fn render_tag_pages(&self) -> Result<usize, BuildError> {
+        let stage_start = Instant::now();
         // Collect all tag pages to render (source index + individual tags)
         let mut tasks: Vec<(String, Option<String>)> = Vec::new(); // (source, Some(value)) or (source, None for index)
 
@@ -1139,7 +1207,7 @@ impl Builder {
             .try_collect::<Vec<_>>()
             .await?;
 
-        print_stage_done("Generating tag pages", count);
+        print_stage_done("Generating tag pages", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
@@ -1253,8 +1321,30 @@ impl Builder {
         // Render template
         let html_output = self.templates.render_tag(context)?;
 
+        // Sanitize source and value to prevent path traversal (defense-in-depth)
+        let safe_source = crate::wikilink::sanitize_path_component(source);
+        let safe_value = crate::wikilink::sanitize_path_component(value);
+        if safe_source.is_empty() || safe_value.is_empty() {
+            tracing::warn!(
+                "Skipping tag page with empty sanitized source={source:?} value={value:?}"
+            );
+            return Ok(());
+        }
+
         // Determine output path
-        let output_path = self.output_dir.join(source).join(value).join("index.html");
+        let output_path = self
+            .output_dir
+            .join(&safe_source)
+            .join(&safe_value)
+            .join("index.html");
+
+        // Defense-in-depth: verify the output path stays within output_dir
+        if !output_path.starts_with(&self.output_dir) {
+            tracing::warn!(
+                "Tag page path escaped output directory: source={source:?} value={value:?}"
+            );
+            return Ok(());
+        }
 
         // Create parent directories and write file (only if not exists - files take precedence)
         if !output_path.exists() {
@@ -1367,8 +1457,21 @@ impl Builder {
         // Render template
         let html_output = self.templates.render_tag_index(context)?;
 
+        // Sanitize source to prevent path traversal (defense-in-depth)
+        let safe_source = crate::wikilink::sanitize_path_component(source);
+        if safe_source.is_empty() {
+            tracing::warn!("Skipping tag source index with empty sanitized source={source:?}");
+            return Ok(());
+        }
+
         // Determine output path
-        let output_path = self.output_dir.join(source).join("index.html");
+        let output_path = self.output_dir.join(&safe_source).join("index.html");
+
+        // Defense-in-depth: verify the output path stays within output_dir
+        if !output_path.starts_with(&self.output_dir) {
+            tracing::warn!("Tag source index path escaped output directory: source={source:?}");
+            return Ok(());
+        }
 
         // Create parent directories and write file (only if not exists - files take precedence)
         if !output_path.exists() {
@@ -1632,6 +1735,18 @@ impl Builder {
         let site_json_path = mbr_output.join("site.json");
         fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
             path: site_json_path,
+            source: e,
+        })?;
+
+        // Step 4b: Generate media.json with only other_files
+        let media_data = serde_json::json!({
+            "other_files": &self.repo.other_files,
+        });
+        let media_json = serde_json::to_string(&media_data)
+            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
+        let media_json_path = mbr_output.join("media.json");
+        fs::write(&media_json_path, media_json).map_err(|e| BuildError::WriteFailed {
+            path: media_json_path,
             source: e,
         })?;
 

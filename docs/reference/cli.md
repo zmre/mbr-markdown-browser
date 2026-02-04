@@ -378,11 +378,11 @@ When running with `-s` or `-g`, mbr automatically generates metadata files on-th
 
 | Pattern | Description |
 |---------|-------------|
-| `{video}.cover.png` | Cover image (frame captured at 5 seconds, or earlier for short videos) |
+| `{video}.cover.jpg` | Cover image (frame captured at 5 seconds, or earlier for short videos) |
 | `{video}.chapters.en.vtt` | Chapter markers in WebVTT format |
 | `{video}.captions.en.vtt` | Subtitles/captions in WebVTT format |
 
-Example: If you have `videos/demo.mp4`, requesting `/videos/demo.mp4.cover.png` will dynamically extract and return a cover image.
+Example: If you have `videos/demo.mp4`, requesting `/videos/demo.mp4.cover.jpg` will dynamically extract and return a cover image.
 
 Generated metadata is cached in memory to avoid repeated ffmpeg operations.
 
@@ -396,7 +396,7 @@ mbr --extract-video-metadata ~/videos/demo.mp4
 # Output:
 # Analyzing video: /Users/you/videos/demo.mp4
 #   Duration: 120.5s, Chapters: yes, Subtitles: no
-# + Created: /Users/you/videos/demo.mp4.cover.png
+# + Created: /Users/you/videos/demo.mp4.cover.jpg
 # + Created: /Users/you/videos/demo.mp4.chapters.en.vtt
 # - No captions found in video
 ```
@@ -474,15 +474,15 @@ Cache evicts oldest segments when full, prioritizing keeping playlists cached.
 mbr can extract cover images (first page) from PDF files. This works in two ways:
 
 **Server Mode (Dynamic Generation):**
-When running with `-s` or `-g`, mbr automatically generates cover images on-the-fly when requested. Request `{pdf}.cover.png` to get the cover:
+When running with `-s` or `-g`, mbr automatically generates cover images on-the-fly when requested. Request `{pdf}.cover.jpg` to get the cover:
 
 | Pattern | Description |
 |---------|-------------|
-| `{pdf}.cover.png` | Cover image (first page rendered at max 1200px width) |
+| `{pdf}.cover.jpg` | Cover image (first page rendered at max 1200px width) |
 
-Example: If you have `docs/report.pdf`, requesting `/docs/report.pdf.cover.png` will dynamically extract and return the cover image.
+Example: If you have `docs/report.pdf`, requesting `/docs/report.pdf.cover.jpg` will dynamically extract and return the cover image.
 
-**Pre-generated covers:** If a file `{pdf}.cover.png` already exists on disk (as a sidecar file), it will be served directly without extraction. This is useful for static builds.
+**Pre-generated covers:** If a file `{pdf}.cover.jpg` already exists on disk (as a sidecar file), it will be served directly without extraction. This is useful for static builds.
 
 **CLI Mode (Pre-generation):**
 Use `--extract-pdf-cover` to extract covers and save as sidecar files:
@@ -492,15 +492,15 @@ Use `--extract-pdf-cover` to extract covers and save as sidecar files:
 mbr --extract-pdf-cover ~/docs/report.pdf
 
 # Output:
-# Extracting cover: /Users/you/docs/report.pdf -> /Users/you/docs/report.pdf.cover.png
+# Extracting cover: /Users/you/docs/report.pdf -> /Users/you/docs/report.pdf.cover.jpg
 # ✓ Created 1 cover image
 
 # Extract covers from all PDFs in a directory (recursive)
 mbr --extract-pdf-cover ~/docs
 
 # Output:
-# Extracting cover: docs/report.pdf -> docs/report.pdf.cover.png
-# Extracting cover: docs/manual.pdf -> docs/manual.pdf.cover.png
+# Extracting cover: docs/report.pdf -> docs/report.pdf.cover.jpg
+# Extracting cover: docs/manual.pdf -> docs/manual.pdf.cover.jpg
 # ✓ Created 2 cover images
 ```
 
@@ -528,7 +528,7 @@ mbr --extract-pdf-cover ~/notes
 mbr -b ~/notes
 ```
 
-The sidecar `.cover.png` files are automatically included in static builds via asset symlinking.
+The sidecar `.cover.jpg` files are automatically included in static builds via asset symlinking.
 
 ## Environment Variables
 
@@ -679,7 +679,7 @@ http://localhost:5200/.mbr/videos/?path=/videos/My%20Video.mp4
 
 **Video viewer:**
 - Native HTML5 video player with controls
-- Automatic poster image from `.cover.png` sidecar files
+- Automatic poster image from `.cover.jpg` sidecar files
 - Chapter navigation via `mbr-video-extras` component (if `.chapters.en.vtt` exists)
 - Captions/transcripts support (if `.captions.en.vtt` exists)
 
@@ -689,7 +689,7 @@ http://localhost:5200/.mbr/videos/?path=/videos/My%20Video.mp4
 
 **Audio player:**
 - Native HTML5 audio player with controls
-- Cover art display from `.cover.png` sidecar files
+- Cover art display from `.cover.jpg` sidecar files
 - Filename display
 
 ### Security

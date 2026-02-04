@@ -22,14 +22,14 @@ pub struct Args {
     pub build: bool,
 
     /// Extract video metadata (cover, chapters, captions) and save as sidecar files.
-    /// Takes a video file path and generates .cover.png, .chapters.en.vtt, and
+    /// Takes a video file path and generates .cover.jpg, .chapters.en.vtt, and
     /// .captions.en.vtt files next to it (if the video contains this data).
     #[cfg(feature = "media-metadata")]
     #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build", "extract_pdf_cover"])]
     pub extract_video_metadata: bool,
 
     /// Extract cover images from PDF files and save as sidecar files.
-    /// Takes a PDF file or directory path and generates {file}.cover.png next to each PDF.
+    /// Takes a PDF file or directory path and generates {file}.cover.jpg next to each PDF.
     /// For directories, recursively processes all .pdf files.
     #[cfg(feature = "media-metadata")]
     #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build", "extract_video_metadata"])]

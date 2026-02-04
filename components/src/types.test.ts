@@ -1,7 +1,7 @@
 /**
  * Unit tests for types.ts helper functions.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   type OtherFileInfo,
   type StaticFileKind,
@@ -18,13 +18,17 @@ import {
   MEDIA_TYPE_PRIORITY,
 } from './types.ts';
 
+// Set up server mode so resolveUrl returns absolute paths
+beforeAll(() => {
+  window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+});
+
 // Helper to create test file info
 function createFileInfo(
   urlPath: string,
   kind: StaticFileKind
 ): OtherFileInfo {
   return {
-    raw_path: urlPath.replace(/^\//, ''),
     url_path: urlPath,
     metadata: {
       path: urlPath.replace(/^\//, ''),
@@ -177,17 +181,17 @@ describe('getCoverImageUrl', () => {
 
   it('returns sidecar cover for video', () => {
     const file = createFileInfo('/videos/demo.mp4', { type: 'video' });
-    expect(getCoverImageUrl(file)).toBe('/videos/demo.mp4.cover.png');
+    expect(getCoverImageUrl(file)).toBe('/videos/demo.mp4.cover.jpg');
   });
 
   it('returns sidecar cover for pdf', () => {
     const file = createFileInfo('/docs/manual.pdf', { type: 'pdf' });
-    expect(getCoverImageUrl(file)).toBe('/docs/manual.pdf.cover.png');
+    expect(getCoverImageUrl(file)).toBe('/docs/manual.pdf.cover.jpg');
   });
 
   it('returns sidecar cover for audio', () => {
     const file = createFileInfo('/music/song.mp3', { type: 'audio' });
-    expect(getCoverImageUrl(file)).toBe('/music/song.mp3.cover.png');
+    expect(getCoverImageUrl(file)).toBe('/music/song.mp3.cover.jpg');
   });
 
   it('returns null for text kind', () => {

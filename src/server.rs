@@ -33,6 +33,19 @@ use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Default HLS cache size: 200 MB.
+#[cfg(feature = "media-metadata")]
+const DEFAULT_HLS_CACHE_SIZE: usize = 200 * 1024 * 1024;
+
+/// Default outbound link cache size: 2 MB.
+const DEFAULT_LINK_CACHE_SIZE: usize = 2 * 1024 * 1024;
+
+/// Default inbound link cache size: 1 MB.
+const DEFAULT_INBOUND_LINK_CACHE_SIZE: usize = 1024 * 1024;
+
+/// TTL for inbound link cache entries in seconds.
+const INBOUND_LINK_CACHE_TTL_SECS: u64 = 60;
+
 /// Type of media for the viewer page.
 ///
 /// Used to route requests to the appropriate media viewer template
@@ -108,18 +121,30 @@ pub struct MediaViewerQuery {
 ///
 /// - URL-decodes the path
 /// - Rejects paths containing ".." (directory traversal)
-/// - Validates the path resolves within the repository root
+/// - Validates the path resolves within the repository root OR the static folder
 ///
 /// # Arguments
 ///
 /// * `path` - The URL-encoded path from the query parameter
 /// * `repo_root` - The repository root directory
+/// * `static_folder` - The static folder path (may be relative to repo_root, e.g., "../static")
 ///
 /// # Returns
 ///
 /// * `Ok(PathBuf)` - The validated, canonical path to the media file
 /// * `Err(MbrError)` - If the path is invalid or attempts directory traversal
-pub fn validate_media_path(path: &str, repo_root: &Path) -> Result<PathBuf, MbrError> {
+///
+/// # Security
+///
+/// When `static_folder` points outside `repo_root` (e.g., `../static`), paths are validated
+/// against BOTH directories. This allows serving assets from external static folders while
+/// maintaining path traversal protection. Content root takes precedence if the file exists
+/// in both locations.
+pub fn validate_media_path(
+    path: &str,
+    repo_root: &Path,
+    static_folder: &str,
+) -> Result<PathBuf, MbrError> {
     // URL-decode the path
     let decoded = percent_decode_str(path)
         .decode_utf8()
@@ -133,24 +158,42 @@ pub fn validate_media_path(path: &str, repo_root: &Path) -> Result<PathBuf, MbrE
     // Remove leading slash if present for path joining
     let clean_path = decoded.trim_start_matches('/');
 
-    // Construct the full path
+    // Try repo_root first
     let full_path = repo_root.join(clean_path);
 
-    // Canonicalize to resolve any symlinks and get the real path
-    let canonical_path = full_path
-        .canonicalize()
-        .map_err(|_| MbrError::InvalidMediaPath(format!("Path does not exist: {}", decoded)))?;
-
-    // Verify the canonical path is within the repo root
+    // Canonicalize repo root for validation
     let canonical_root = repo_root
         .canonicalize()
         .map_err(|_| MbrError::InvalidMediaPath("Repository root not found".to_string()))?;
 
-    if !canonical_path.starts_with(&canonical_root) {
-        return Err(MbrError::DirectoryTraversal);
+    // Try to resolve within repo_root
+    if let Ok(canonical_path) = full_path.canonicalize()
+        && canonical_path.starts_with(&canonical_root)
+    {
+        return Ok(canonical_path);
     }
 
-    Ok(canonical_path)
+    // If static_folder is non-empty, try resolving against it as a fallback
+    if !static_folder.is_empty() {
+        let static_root = repo_root.join(static_folder);
+
+        // The static folder must exist
+        if let Ok(canonical_static_root) = static_root.canonicalize() {
+            let static_full_path = static_root.join(clean_path);
+
+            if let Ok(canonical_path) = static_full_path.canonicalize()
+                && canonical_path.starts_with(&canonical_static_root)
+            {
+                return Ok(canonical_path);
+            }
+        }
+    }
+
+    // Neither repo_root nor static_folder contained a valid path
+    Err(MbrError::InvalidMediaPath(format!(
+        "Path does not exist: {}",
+        decoded
+    )))
 }
 
 /// Safely join a base directory with a relative path for serving MBR assets.
@@ -203,14 +246,12 @@ fn safe_join_asset(base_dir: &Path, relative_path: &str) -> Option<PathBuf> {
 /// # Security
 ///
 /// Guards against path traversal by canonicalizing both paths and verifying containment.
+/// Note: We intentionally do NOT reject paths containing ".." before canonicalization
+/// because the base_dir itself may be constructed with ".." (e.g., when static_folder
+/// is "../static"). The canonicalization resolves all ".." components, and the
+/// starts_with check ensures the resolved path is within bounds.
 #[cfg(feature = "media-metadata")]
 fn validate_path_containment(file_path: &Path, base_dir: &Path) -> Option<PathBuf> {
-    // Early rejection of obvious path traversal in the path string
-    if file_path.to_string_lossy().contains("..") {
-        tracing::warn!("Path traversal attempt blocked: {}", file_path.display());
-        return None;
-    }
-
     let canonical_base = base_dir.canonicalize().ok()?;
     let canonical_file = file_path.canonicalize().ok()?;
 
@@ -397,9 +438,8 @@ impl Server {
         #[cfg(feature = "media-metadata")]
         let video_metadata_cache = Arc::new(VideoMetadataCache::new(oembed_cache_size));
 
-        // Initialize HLS cache (200MB default size for playlists and segments)
         #[cfg(feature = "media-metadata")]
-        let hls_cache = Arc::new(HlsCache::new(200 * 1024 * 1024));
+        let hls_cache = Arc::new(HlsCache::new(DEFAULT_HLS_CACHE_SIZE));
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -425,13 +465,38 @@ impl Server {
             &tag_sources,
         ));
 
+        // Spawn background repo scan so site.json is ready before first request.
+        // Phase 1: basic scan (file listing + frontmatter). Phase 2: media metadata (ffmpeg/lopdf).
+        let repo_for_scan = Arc::clone(&repo);
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = repo_for_scan.scan_all() {
+                tracing::error!("Background scan failed: {e}");
+            }
+            repo_for_scan.mark_scan_complete();
+
+            // Phase 1.5: scan static folder (deferred from scan_all for faster search)
+            if let Err(e) = repo_for_scan.scan_static_folder() {
+                tracing::error!("Background static scan failed: {e}");
+            }
+
+            // Phase 2: populate basic file metadata (stat calls for size/timestamps)
+            repo_for_scan.populate_basic_metadata();
+
+            // Phase 3: populate media metadata in background (non-blocking for site.json)
+            repo_for_scan.populate_media_metadata();
+            repo_for_scan.notify_media_populated();
+
+            // Phase 4: extract text from PDFs/text files for search
+            repo_for_scan.ensure_text_extracted();
+        });
+
         // Create a broadcast channel for file changes - watcher will be initialized in background
-        let (file_change_tx, _rx) =
-            tokio::sync::broadcast::channel::<crate::watcher::FileChangeEvent>(100);
+        let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
+            crate::watcher::FileChangeEvent,
+        >(crate::watcher::BROADCAST_CAPACITY);
         let tx_for_watcher = file_change_tx.clone();
 
         // Initialize file watcher in background to avoid blocking server startup
-        // PollWatcher's recursive scan can take 10+ seconds for large directories
         let base_dir_for_watcher = base_dir.clone();
         let template_folder_for_watcher = template_folder.clone();
         let watcher_ignore_dirs_for_watcher = watcher_ignore_dirs.clone();
@@ -496,41 +561,144 @@ impl Server {
             }
         });
 
-        // Spawn background task to invalidate repo cache when files change
+        // Spawn background task to invalidate repo cache when files change.
+        // Uses debouncing: accumulate events for 2 seconds, then apply changes.
+        // For small batches (<=50 files): surgical per-file invalidation.
+        // For large batches: full clear + rescan.
         let repo_for_invalidation = Arc::clone(&repo);
+        let base_dir_for_invalidation = base_dir.clone();
         let markdown_extensions_for_invalidation = markdown_extensions.clone();
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
-            while let Ok(event) = repo_change_rx.recv().await {
-                // Invalidate cache for:
-                // - Created files (new file added)
-                // - Deleted files (file removed)
-                // - Modified markdown files (frontmatter may have changed)
-                let should_invalidate = match event.event {
-                    crate::watcher::ChangeEventType::Created => true,
-                    crate::watcher::ChangeEventType::Deleted => true,
-                    crate::watcher::ChangeEventType::Modified => {
-                        // Only invalidate for markdown files (frontmatter changes)
-                        markdown_extensions_for_invalidation
-                            .iter()
-                            .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
-                    }
+            const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
+            const SURGICAL_THRESHOLD: usize = 50;
+
+            loop {
+                // Wait for the first event
+                let first_event = match repo_change_rx.recv().await {
+                    Ok(e) => e,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 };
 
-                if should_invalidate {
+                // Accumulate events during the debounce window
+                let mut pending_events = vec![first_event];
+                let deadline = tokio::time::Instant::now() + DEBOUNCE_DURATION;
+
+                loop {
+                    tokio::select! {
+                        result = repo_change_rx.recv() => {
+                            match result {
+                                Ok(event) => pending_events.push(event),
+                                Err(broadcast::error::RecvError::Closed) => break,
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    // Too many events queued — force full rescan
+                                    pending_events.clear();
+                                    pending_events.push(crate::watcher::FileChangeEvent {
+                                        path: String::new(),
+                                        relative_path: String::new(),
+                                        event: crate::watcher::ChangeEventType::Created,
+                                    });
+                                    // Push over threshold to trigger full rescan
+                                    for _ in 0..SURGICAL_THRESHOLD {
+                                        pending_events.push(crate::watcher::FileChangeEvent {
+                                            path: String::new(),
+                                            relative_path: String::new(),
+                                            event: crate::watcher::ChangeEventType::Created,
+                                        });
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => break,
+                    }
+                }
+
+                // Filter to only relevant events
+                let relevant_events: Vec<_> = pending_events
+                    .into_iter()
+                    .filter(|event| match event.event {
+                        crate::watcher::ChangeEventType::Created
+                        | crate::watcher::ChangeEventType::Deleted => true,
+                        crate::watcher::ChangeEventType::Modified => {
+                            markdown_extensions_for_invalidation
+                                .iter()
+                                .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
+                        }
+                    })
+                    .collect();
+
+                if relevant_events.is_empty() {
+                    continue;
+                }
+
+                let repo = Arc::clone(&repo_for_invalidation);
+                let base_dir = base_dir_for_invalidation.clone();
+
+                if relevant_events.len() <= SURGICAL_THRESHOLD {
+                    // Surgical invalidation: update individual files
                     tracing::debug!(
-                        "Invalidating repo cache due to file change: {:?}",
-                        event.relative_path
+                        "Surgical invalidation for {} file(s)",
+                        relevant_events.len()
                     );
-                    repo_for_invalidation.clear();
+                    let has_tag_changes = relevant_events.iter().any(|e| {
+                        matches!(
+                            e.event,
+                            crate::watcher::ChangeEventType::Deleted
+                                | crate::watcher::ChangeEventType::Modified
+                        )
+                    });
+
+                    tokio::task::spawn_blocking(move || {
+                        for event in &relevant_events {
+                            let abs_path = if event.path.is_empty() {
+                                continue;
+                            } else {
+                                PathBuf::from(&event.path)
+                            };
+                            repo.invalidate_file(&abs_path, &event.event);
+                        }
+                        // Rebuild tag index if any files were deleted or modified
+                        // (created files add tags inline in invalidate_file)
+                        if has_tag_changes {
+                            repo.rebuild_tag_index();
+                        }
+                    })
+                    .await
+                    .ok();
+                } else {
+                    // Too many changes — full rescan
+                    tracing::info!(
+                        "Full rescan triggered: {} file changes exceed threshold",
+                        relevant_events.len()
+                    );
+                    tokio::task::spawn_blocking(move || {
+                        repo.clear();
+                        if let Err(e) = repo.scan_all() {
+                            tracing::error!("Background rescan failed: {e}");
+                            return;
+                        }
+                        if let Err(e) = repo.scan_static_folder() {
+                            tracing::error!("Background static rescan failed: {e}");
+                        }
+                        repo.populate_basic_metadata();
+                        repo.populate_media_metadata();
+                        repo.notify_media_populated();
+                        repo.ensure_text_extracted();
+                        let _ = base_dir; // keep alive for potential future use
+                    })
+                    .await
+                    .ok();
                 }
             }
         });
 
-        // Initialize link caches (use same size strategy as oembed cache)
-        // 2MB for outbound links, 1MB for inbound with 60 second TTL
-        let link_cache = Arc::new(LinkCache::new(2 * 1024 * 1024));
-        let inbound_link_cache = Arc::new(InboundLinkCache::new(1024 * 1024, 60));
+        let link_cache = Arc::new(LinkCache::new(DEFAULT_LINK_CACHE_SIZE));
+        let inbound_link_cache = Arc::new(InboundLinkCache::new(
+            DEFAULT_INBOUND_LINK_CACHE_SIZE,
+            INBOUND_LINK_CACHE_TTL_SECS,
+        ));
 
         let state = ServerState {
             base_dir,
@@ -565,6 +733,7 @@ impl Server {
         let router = Router::new()
             .route("/", get(Self::home_page))
             .route("/.mbr/site.json", get(Self::get_site_info))
+            .route("/.mbr/media.json", get(Self::get_media_info))
             .route("/.mbr/search", post(Self::search_handler))
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
             // Media viewer routes - must be before the catch-all /.mbr/{*path}
@@ -789,19 +958,23 @@ impl Server {
     pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
-        config
-            .repo
-            .scan_all()
-            .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        // Wait for background scan to complete (watcher handles updates)
+        if !config.repo.is_scan_complete() {
+            tracing::debug!("get_site_info: waiting for background scan...");
+            config.repo.wait_for_scan().await;
+        }
 
         // Build combined response with repo data and config
+        let json_start = std::time::Instant::now();
         let mut response = serde_json::to_value(&*config.repo)
             .inspect_err(|e| tracing::error!("Error creating json: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // Add sort config to the response
+        // Add sort config to the response and remove other_files (served via media.json)
         if let Some(obj) = response.as_object_mut() {
+            // Remove other_files from site.json - media data is served separately via media.json
+            obj.remove("other_files");
+
             obj.insert(
                 "sort".to_string(),
                 serde_json::to_value(&config.sort).unwrap_or(serde_json::Value::Array(vec![])),
@@ -827,6 +1000,53 @@ impl Server {
             )
             .inspect_err(|e| tracing::error!("Error rendering site file: {e}"))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tracing::debug!(
+            "get_site_info JSON serialization: {:?}",
+            json_start.elapsed()
+        );
+        Ok(resp.into_response())
+    }
+
+    /// Returns media metadata (other_files) as JSON.
+    ///
+    /// Waits for both the initial scan and media metadata population to complete
+    /// before returning, ensuring rich metadata (dimensions, duration, etc.) is available.
+    pub async fn get_media_info(
+        State(config): State<ServerState>,
+    ) -> Result<impl IntoResponse, StatusCode> {
+        let start = std::time::Instant::now();
+
+        // Wait for background scan + media metadata population (watcher handles updates)
+        if !config.repo.is_scan_complete() {
+            tracing::debug!("get_media_info: waiting for background scan...");
+            config.repo.wait_for_scan().await;
+        }
+        if !config.repo.is_media_populated() {
+            tracing::debug!("get_media_info: waiting for media metadata...");
+            config.repo.wait_for_media().await;
+        }
+
+        // Build response with only other_files
+        let json_start = std::time::Instant::now();
+        let media_data = serde_json::json!({
+            "other_files": &config.repo.other_files,
+        });
+
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_string(&media_data)
+                    .inspect_err(|e| tracing::error!("Error serializing media json: {e}"))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            )
+            .inspect_err(|e| tracing::error!("Error rendering media file: {e}"))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tracing::debug!(
+            "get_media_info completed in {:?} (JSON: {:?})",
+            start.elapsed(),
+            json_start.elapsed()
+        );
         Ok(resp.into_response())
     }
 
@@ -860,33 +1080,73 @@ impl Server {
     ) -> impl IntoResponse {
         tracing::debug!("Search request: q={:?}, scope={:?}", query.q, query.scope);
 
-        // Ensure repo is scanned (may already be from background scan)
-        if let Err(e) = config.repo.scan_all() {
-            tracing::error!("Error scanning repo for search: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to scan repository: {}", e),
-                    "query": query.q,
-                    "total_matches": 0,
-                    "results": [],
-                    "duration_ms": 0
-                })),
-            );
+        // Don't wait for scan — search with whatever files are available now.
+        let scan_in_progress = !config.repo.is_scan_complete();
+
+        // Only extract text for non-markdown searches (gated on scan completion)
+        if config.repo.is_scan_complete()
+            && (query.filetype.as_deref() == Some("all")
+                || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown")))
+        {
+            config.repo.ensure_text_extracted();
         }
 
-        // Create search engine and execute search
-        let engine = SearchEngine::new(config.repo.clone(), config.base_dir.clone());
+        let repo = config.repo.clone();
+        let base_dir = config.base_dir.clone();
 
-        let mut response = match engine.search(&query) {
-            Ok(r) => r,
-            Err(e) => {
+        // Clone query string for error handling (query is moved into closure)
+        let query_str = query.q.clone();
+
+        // Run search on blocking thread pool (grep does synchronous I/O)
+        let search_result = tokio::task::spawn_blocking(move || {
+            let engine = SearchEngine::new(repo.clone(), base_dir);
+            let mut response = engine.search(&query)?;
+
+            // If searching all filetypes or non-markdown, also search other files
+            if query.filetype.as_deref() == Some("all")
+                || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown"))
+            {
+                let other_results = search_other_files(
+                    &repo,
+                    &query.q,
+                    query.folder.as_deref(),
+                    query.filetype.as_deref(),
+                    query.limit,
+                );
+
+                // Merge and re-sort
+                response.results.extend(other_results);
+                response.results.sort_by(|a, b| b.score.cmp(&a.score));
+                response.results.truncate(query.limit);
+                response.total_matches = response.results.len();
+            }
+
+            Ok::<_, crate::errors::SearchError>(response)
+        })
+        .await;
+
+        let mut response = match search_result {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 tracing::error!("Search error: {e}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
                         "error": format!("Search failed: {}", e),
-                        "query": query.q,
+                        "query": query_str,
+                        "total_matches": 0,
+                        "results": [],
+                        "duration_ms": 0
+                    })),
+                );
+            }
+            Err(e) => {
+                tracing::error!("Search task panicked: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Search task failed",
+                        "query": query_str,
                         "total_matches": 0,
                         "results": [],
                         "duration_ms": 0
@@ -895,24 +1155,7 @@ impl Server {
             }
         };
 
-        // If searching all filetypes or non-markdown, also search other files
-        if query.filetype.as_deref() == Some("all")
-            || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown"))
-        {
-            let other_results = search_other_files(
-                &config.repo,
-                &query.q,
-                query.folder.as_deref(),
-                query.filetype.as_deref(),
-                query.limit,
-            );
-
-            // Merge and re-sort
-            response.results.extend(other_results);
-            response.results.sort_by(|a, b| b.score.cmp(&a.score));
-            response.results.truncate(query.limit);
-            response.total_matches = response.results.len();
-        }
+        response.scan_in_progress = scan_in_progress;
 
         tracing::debug!(
             "Search completed: {} results in {}ms",
@@ -981,48 +1224,49 @@ impl Server {
         };
 
         // Validate the media path
-        let validated_path = match validate_media_path(media_path, &config.base_dir) {
-            Ok(p) => p,
-            Err(MbrError::DirectoryTraversal) => {
-                tracing::warn!("Directory traversal attempt: {}", media_path);
-                return Self::render_error_page(
-                    &config.templates,
-                    StatusCode::FORBIDDEN,
-                    "Forbidden",
-                    Some("Access denied: Invalid path"),
-                    route_path,
-                    config.gui_mode,
-                    &config.sidebar_style,
-                    config.sidebar_max_items,
-                );
-            }
-            Err(MbrError::InvalidMediaPath(msg)) => {
-                tracing::warn!("Invalid media path: {} - {}", media_path, msg);
-                return Self::render_error_page(
-                    &config.templates,
-                    StatusCode::NOT_FOUND,
-                    "Not Found",
-                    Some(&format!("Media file not found: {}", msg)),
-                    route_path,
-                    config.gui_mode,
-                    &config.sidebar_style,
-                    config.sidebar_max_items,
-                );
-            }
-            Err(e) => {
-                tracing::error!("Unexpected error validating media path: {}", e);
-                return Self::render_error_page(
-                    &config.templates,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal Server Error",
-                    Some("Failed to validate media path"),
-                    route_path,
-                    config.gui_mode,
-                    &config.sidebar_style,
-                    config.sidebar_max_items,
-                );
-            }
-        };
+        let validated_path =
+            match validate_media_path(media_path, &config.base_dir, &config.static_folder) {
+                Ok(p) => p,
+                Err(MbrError::DirectoryTraversal) => {
+                    tracing::warn!("Directory traversal attempt: {}", media_path);
+                    return Self::render_error_page(
+                        &config.templates,
+                        StatusCode::FORBIDDEN,
+                        "Forbidden",
+                        Some("Access denied: Invalid path"),
+                        route_path,
+                        config.gui_mode,
+                        &config.sidebar_style,
+                        config.sidebar_max_items,
+                    );
+                }
+                Err(MbrError::InvalidMediaPath(msg)) => {
+                    tracing::warn!("Invalid media path: {} - {}", media_path, msg);
+                    return Self::render_error_page(
+                        &config.templates,
+                        StatusCode::NOT_FOUND,
+                        "Not Found",
+                        Some(&format!("Media file not found: {}", msg)),
+                        route_path,
+                        config.gui_mode,
+                        &config.sidebar_style,
+                        config.sidebar_max_items,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Unexpected error validating media path: {}", e);
+                    return Self::render_error_page(
+                        &config.templates,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        Some("Failed to validate media path"),
+                        route_path,
+                        config.gui_mode,
+                        &config.sidebar_style,
+                        config.sidebar_max_items,
+                    );
+                }
+            };
 
         // Extract title from filename
         let title = validated_path
@@ -1031,25 +1275,24 @@ impl Server {
             .unwrap_or("Media Viewer")
             .to_string();
 
-        // Calculate relative path for display and parent path for navigation
-        let relative_path = validated_path
-            .strip_prefix(&config.base_dir)
-            .unwrap_or(&validated_path);
-
-        // Generate breadcrumbs from the media file's directory path
+        // Generate breadcrumbs from the URL path (media_path), not the filesystem path
+        // The media_path is already the URL path (e.g., "/videos/Jay Sankey/video.mp4")
+        let url_path = std::path::Path::new(media_path);
         let breadcrumbs =
-            generate_breadcrumbs(relative_path.parent().unwrap_or(std::path::Path::new("")));
+            generate_breadcrumbs(url_path.parent().unwrap_or(std::path::Path::new("")));
         let breadcrumbs_json: Vec<_> = breadcrumbs
             .iter()
             .map(|b| json!({"name": b.name, "url": b.url}))
             .collect();
 
-        // Get parent path for back navigation
-        let parent_path = relative_path.parent().and_then(|p| p.to_str()).map(|p| {
-            if p.is_empty() {
+        // Get parent path for back navigation (from URL path)
+        let parent_path = url_path.parent().and_then(|p| p.to_str()).map(|p| {
+            if p.is_empty() || p == "/" {
                 "/".to_string()
             } else {
-                format!("/{}/", p)
+                // Ensure trailing slash and clean up leading slash for format
+                let clean = p.trim_start_matches('/');
+                format!("/{}/", clean)
             }
         });
 
@@ -1522,7 +1765,7 @@ impl Server {
         let key = cache_key(video_url_path, cache_type_str);
         if let Some(cached) = config.video_metadata_cache.get(&key) {
             return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
                 CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
                     Some(Self::build_vtt_response(vtt))
                 }
@@ -1566,7 +1809,7 @@ impl Server {
                     config
                         .video_metadata_cache
                         .insert(key, CachedMetadata::Cover(bytes.clone()));
-                    Some(Self::build_png_response(bytes))
+                    Some(Self::build_jpg_response(bytes))
                 }
                 Err(e) => {
                     tracing::debug!("Failed to extract cover: {}", e);
@@ -1611,7 +1854,7 @@ impl Server {
 
     /// Try to serve a PDF cover sidecar file, handling staleness detection.
     ///
-    /// This is called from the StaticFile branch when a `.pdf.cover.png` sidecar exists.
+    /// This is called from the StaticFile branch when a `.pdf.cover.jpg` sidecar exists.
     /// It checks if the sidecar is stale (PDF modified after sidecar) and regenerates if needed.
     ///
     /// Returns:
@@ -1636,17 +1879,17 @@ impl Server {
         // Check memory cache first
         if let Some(cached) = config.video_metadata_cache.get(&key) {
             return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
                 CachedMetadata::NotAvailable => None, // Cached negative result
                 _ => None,                            // Other types not relevant for PDF covers
             };
         }
 
         // Find the PDF file path (corresponding to this sidecar)
-        // The sidecar is at {pdf_path}.cover.png, so remove .cover.png to get pdf_path
+        // The sidecar is at {pdf_path}.cover.jpg, so remove .cover.jpg to get pdf_path
         let pdf_file = {
             let sidecar_str = sidecar_file_path.to_str()?;
-            let pdf_path_str = sidecar_str.strip_suffix(".cover.png")?;
+            let pdf_path_str = sidecar_str.strip_suffix(".cover.jpg")?;
             std::path::PathBuf::from(pdf_path_str)
         };
 
@@ -1661,7 +1904,7 @@ impl Server {
                 config
                     .video_metadata_cache
                     .insert(key, CachedMetadata::Cover(bytes.clone()));
-                return Some(Self::build_png_response(bytes));
+                return Some(Self::build_jpg_response(bytes));
             }
             return None;
         }
@@ -1685,7 +1928,7 @@ impl Server {
                     config
                         .video_metadata_cache
                         .insert(key, CachedMetadata::Cover(bytes.clone()));
-                    return Some(Self::build_png_response(bytes));
+                    return Some(Self::build_jpg_response(bytes));
                 }
                 Err(e) => {
                     tracing::debug!("Failed to regenerate PDF cover: {}", e);
@@ -1703,7 +1946,7 @@ impl Server {
             config
                 .video_metadata_cache
                 .insert(key, CachedMetadata::Cover(bytes.clone()));
-            return Some(Self::build_png_response(bytes));
+            return Some(Self::build_jpg_response(bytes));
         }
 
         // Let static file serving handle it
@@ -1715,10 +1958,10 @@ impl Server {
     /// Returns Some(Response) if the request was for a PDF cover image and we successfully
     /// generated it, None otherwise (fall through to 404).
     ///
-    /// Request pattern: `/path/to/document.pdf.cover.png` -> extract cover from `/path/to/document.pdf`
+    /// Request pattern: `/path/to/document.pdf.cover.jpg` -> extract cover from `/path/to/document.pdf`
     ///
     /// This function implements accelerated serving with pre-generated covers:
-    /// 1. If a sidecar file (e.g., `document.pdf.cover.png`) exists and is newer than the PDF,
+    /// 1. If a sidecar file (e.g., `document.pdf.cover.jpg`) exists and is newer than the PDF,
     ///    it is served directly from disk (with memory caching for subsequent requests).
     /// 2. If the sidecar is stale (PDF modified after sidecar), the cover is regenerated.
     /// 3. If no sidecar exists, the cover is dynamically generated from the PDF.
@@ -1736,7 +1979,7 @@ impl Server {
         // Check memory cache first
         if let Some(cached) = config.video_metadata_cache.get(&key) {
             return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_png_response(bytes)),
+                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
                 CachedMetadata::NotAvailable => None, // Cached negative result
                 _ => None,                            // Other types not relevant for PDF covers
             };
@@ -1762,11 +2005,11 @@ impl Server {
             }
         };
 
-        // Build sidecar path: {pdf_path}.cover.png
+        // Build sidecar path: {pdf_path}.cover.jpg
         let sidecar_path = {
             let mut sidecar = pdf_file.clone();
             let file_name = sidecar.file_name()?.to_str()?;
-            sidecar.set_file_name(format!("{}.cover.png", file_name));
+            sidecar.set_file_name(format!("{}.cover.jpg", file_name));
             sidecar
         };
 
@@ -1777,7 +2020,7 @@ impl Server {
             config
                 .video_metadata_cache
                 .insert(key, CachedMetadata::Cover(bytes.clone()));
-            return Some(Self::build_png_response(bytes));
+            return Some(Self::build_jpg_response(bytes));
         }
 
         // Sidecar doesn't exist or is stale - generate dynamically
@@ -1789,7 +2032,7 @@ impl Server {
                 config
                     .video_metadata_cache
                     .insert(key, CachedMetadata::Cover(bytes.clone()));
-                Some(Self::build_png_response(bytes))
+                Some(Self::build_jpg_response(bytes))
             }
             Err(crate::errors::PdfMetadataError::PasswordProtected { .. }) => {
                 tracing::debug!("PDF is password-protected: {}", pdf_file.display());
@@ -2050,12 +2293,12 @@ impl Server {
         )
     }
 
-    /// Build a PNG image response.
+    /// Build a JPEG image response.
     #[cfg(feature = "media-metadata")]
-    fn build_png_response(bytes: Vec<u8>) -> Response<Body> {
+    fn build_jpg_response(bytes: Vec<u8>) -> Response<Body> {
         Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CONTENT_TYPE, "image/jpeg")
             .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
             .body(Body::from(bytes))
             .unwrap()
@@ -2541,7 +2784,7 @@ impl Server {
         );
 
         // Pass word count and reading time (200 words per minute)
-        let reading_time_minutes = word_count.div_ceil(200);
+        let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
         extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
         extra_context.insert(
             "reading_time_minutes".to_string(),
@@ -3663,14 +3906,14 @@ mod tests {
     #[test]
     fn test_validate_media_path_rejects_directory_traversal() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let result = validate_media_path("../etc/passwd", temp_dir.path());
+        let result = validate_media_path("../etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
     }
 
     #[test]
     fn test_validate_media_path_rejects_embedded_directory_traversal() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let result = validate_media_path("some/../../etc/passwd", temp_dir.path());
+        let result = validate_media_path("some/../../etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
     }
 
@@ -3678,14 +3921,14 @@ mod tests {
     fn test_validate_media_path_rejects_url_encoded_traversal() {
         let temp_dir = tempfile::tempdir().unwrap();
         // URL-encoded ".." = "%2e%2e"
-        let result = validate_media_path("%2e%2e/etc/passwd", temp_dir.path());
+        let result = validate_media_path("%2e%2e/etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
     }
 
     #[test]
     fn test_validate_media_path_rejects_nonexistent_file() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let result = validate_media_path("nonexistent.mp4", temp_dir.path());
+        let result = validate_media_path("nonexistent.mp4", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
     }
 
@@ -3695,7 +3938,7 @@ mod tests {
         let test_file = temp_dir.path().join("test.mp4");
         std::fs::write(&test_file, "dummy content").unwrap();
 
-        let result = validate_media_path("test.mp4", temp_dir.path());
+        let result = validate_media_path("test.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
     }
@@ -3706,7 +3949,7 @@ mod tests {
         let test_file = temp_dir.path().join("test.mp4");
         std::fs::write(&test_file, "dummy content").unwrap();
 
-        let result = validate_media_path("/test.mp4", temp_dir.path());
+        let result = validate_media_path("/test.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
     }
@@ -3718,7 +3961,7 @@ mod tests {
         std::fs::write(&test_file, "dummy content").unwrap();
 
         // URL-encoded space = "%20"
-        let result = validate_media_path("test%20file.mp4", temp_dir.path());
+        let result = validate_media_path("test%20file.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
     }
@@ -3731,9 +3974,110 @@ mod tests {
         let test_file = subdir.join("demo.mp4");
         std::fs::write(&test_file, "dummy content").unwrap();
 
-        let result = validate_media_path("videos/2024/demo.mp4", temp_dir.path());
+        let result = validate_media_path("videos/2024/demo.mp4", temp_dir.path(), "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    // ==================== validate_media_path External Static Folder Tests ====================
+
+    #[test]
+    fn test_validate_media_path_external_static_folder_works() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::create_dir_all(static_dir.join("videos")).unwrap();
+
+        // Create a video file in the external static folder
+        let video_file = static_dir.join("videos").join("test.mp4");
+        std::fs::write(&video_file, "video content").unwrap();
+
+        // static_folder = "../static" relative to content_dir
+        let result = validate_media_path("videos/test.mp4", &content_dir, "../static");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), video_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_content_root_takes_precedence() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(content_dir.join("videos")).unwrap();
+        std::fs::create_dir_all(static_dir.join("videos")).unwrap();
+
+        // Create the same file in both locations
+        let content_video = content_dir.join("videos").join("test.mp4");
+        let static_video = static_dir.join("videos").join("test.mp4");
+        std::fs::write(&content_video, "content version").unwrap();
+        std::fs::write(&static_video, "static version").unwrap();
+
+        // Content root should take precedence
+        let result = validate_media_path("videos/test.mp4", &content_dir, "../static");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), content_video.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_traversal_in_external_static() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::create_dir_all(&static_dir).unwrap();
+
+        // Even with an external static folder, path traversal should be rejected
+        let result = validate_media_path("../etc/passwd", &content_dir, "../static");
+        assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn test_validate_media_path_empty_static_folder_disables_fallback() {
+        // Create a single directory
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // With empty static_folder, only content root is checked
+        let result = validate_media_path("nonexistent.mp4", temp_dir.path(), "");
+        assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
+    }
+
+    #[test]
+    fn test_validate_media_path_external_static_nested_path() {
+        // Create parent directory with content and static subdirs
+        let parent_dir = tempfile::tempdir().unwrap();
+        let content_dir = parent_dir.path().join("content");
+        let static_dir = parent_dir.path().join("static");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let nested_dir = static_dir.join("videos").join("Jay Sankey").join("2024");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+
+        // Create a video file in nested directory
+        let video_file = nested_dir.join("performance.mp4");
+        std::fs::write(&video_file, "video content").unwrap();
+
+        let result = validate_media_path(
+            "videos/Jay%20Sankey/2024/performance.mp4",
+            &content_dir,
+            "../static",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), video_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_media_path_nonexistent_static_folder_fallback_fails() {
+        // Create content directory only
+        let temp_dir = tempfile::tempdir().unwrap();
+        let content_dir = temp_dir.path().join("content");
+        std::fs::create_dir_all(&content_dir).unwrap();
+
+        // Static folder doesn't exist - should fail gracefully
+        let result = validate_media_path("videos/test.mp4", &content_dir, "../nonexistent");
+        assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
     }
 
     // ==================== safe_join_asset Tests ====================
@@ -4008,7 +4352,7 @@ mod proptests {
                 // Any path with ".." should be rejected as directory traversal
                 // Note: URL-decoded path is what matters
                 if path.contains("..") {
-                    let result = validate_media_path(&path, temp_dir.path());
+                    let result = validate_media_path(&path, temp_dir.path(), "");
                     // Path either doesn't exist or is rejected as traversal
                     prop_assert!(
                         result.is_err(),
@@ -4025,8 +4369,8 @@ mod proptests {
             path in "[a-zA-Z0-9_/-]{1,30}"
         ) {
             let temp_dir = tempfile::tempdir().unwrap();
-            let result1 = validate_media_path(&path, temp_dir.path());
-            let result2 = validate_media_path(&path, temp_dir.path());
+            let result1 = validate_media_path(&path, temp_dir.path(), "");
+            let result2 = validate_media_path(&path, temp_dir.path(), "");
 
             // Both should be the same (both errors or both same Ok value)
             match (&result1, &result2) {
@@ -4049,13 +4393,13 @@ mod proptests {
 
             // Test with URL-encoded path (spaces as %20)
             let encoded = format!("%20{}", filename); // Leading space encoded
-            let result = validate_media_path(&encoded, temp_dir.path());
+            let result = validate_media_path(&encoded, temp_dir.path(), "");
 
             // The decoded path " filename" doesn't exist, so should fail
             prop_assert!(result.is_err(), "Encoded path with non-existent target should fail");
 
             // Test with the actual filename - should succeed
-            let result = validate_media_path(&filename, temp_dir.path());
+            let result = validate_media_path(&filename, temp_dir.path(), "");
             prop_assert!(result.is_ok(), "Valid path should succeed: {:?}", filename);
         }
 
@@ -4071,7 +4415,7 @@ mod proptests {
             std::fs::write(&test_file, "test content").unwrap();
 
             // Validate the path
-            let result = validate_media_path(&filename, temp_dir.path());
+            let result = validate_media_path(&filename, temp_dir.path(), "");
             prop_assert!(result.is_ok(), "Valid file path should succeed: {:?}", filename);
 
             // Result should be the canonical path to the file
@@ -4094,11 +4438,11 @@ mod proptests {
 
             // Test with leading slash
             let path_with_slash = format!("/{}", filename);
-            let result = validate_media_path(&path_with_slash, temp_dir.path());
+            let result = validate_media_path(&path_with_slash, temp_dir.path(), "");
             prop_assert!(result.is_ok(), "Path with leading slash should work: {:?}", path_with_slash);
 
             // Test without leading slash
-            let result_no_slash = validate_media_path(&filename, temp_dir.path());
+            let result_no_slash = validate_media_path(&filename, temp_dir.path(), "");
             prop_assert!(result_no_slash.is_ok(), "Path without leading slash should work: {:?}", filename);
 
             // Both should resolve to the same canonical path

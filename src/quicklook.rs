@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 use tera::{Context, Tera};
 use thiserror::Error;
 
+/// Pre-allocation size for inline CSS string (64 KB).
+const CSS_PREALLOC_BYTES: usize = 64 * 1024;
+
+/// Pre-allocation size for inline JS string (512 KB).
+const JS_PREALLOC_BYTES: usize = 512 * 1024;
+
 /// Errors that can occur during QuickLook preview rendering.
 /// This type is exposed via UniFFI to Swift.
 #[derive(Debug, Error)]
@@ -365,7 +371,7 @@ fn build_inline_css(
     custom_theme: &Option<String>,
     custom_user_css: &Option<String>,
 ) -> String {
-    let mut css = String::with_capacity(64 * 1024); // Pre-allocate for performance
+    let mut css = String::with_capacity(CSS_PREALLOC_BYTES);
 
     // Base CSS (pico.min.css) - use configured theme
     if let Some(pico_css) = embedded_pico::get_pico_css(theme)
@@ -405,7 +411,7 @@ fn build_inline_css(
 
 /// Build the inline JavaScript string.
 fn build_inline_js(config: &QuickLookConfig) -> String {
-    let mut js = String::with_capacity(512 * 1024); // Pre-allocate for large JS files
+    let mut js = String::with_capacity(JS_PREALLOC_BYTES);
 
     // Syntax highlighting - use embedded_hljs module
     if config.include_syntax_highlighting {

@@ -27,7 +27,7 @@ For simple video embedding, the [standard image syntax](./media.md#video-embeddi
 This renders a video player with:
 
 - The video from `/videos/demo.mp4`
-- Automatic poster image detection (`demo.mp4.cover.png`)
+- Automatic poster image detection (`demo.mp4.cover.jpg`)
 - Automatic caption/chapter track detection
 - HTML5 video controls
 
@@ -83,7 +83,7 @@ The vid shortcode automatically looks for these companion files next to your vid
 ```
 videos/
 ├── demo.mp4
-├── demo.mp4.cover.png         # Poster/thumbnail image
+├── demo.mp4.cover.jpg         # Poster/thumbnail image
 ├── demo.mp4.captions.en.vtt   # English captions
 └── demo.mp4.chapters.en.vtt   # Chapter markers
 ```

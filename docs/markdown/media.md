@@ -182,7 +182,7 @@ mbr can extract cover images (first page) from PDF files, useful for creating vi
 **Using PDF covers in markdown:**
 
 ```markdown
-![Report Cover](document.pdf.cover.png)
+![Report Cover](document.pdf.cover.jpg)
 ```
 
 This renders the first page of `document.pdf` as a PNG image.
@@ -204,19 +204,19 @@ mbr --extract-pdf-cover document.pdf
 mbr --extract-pdf-cover ~/docs
 ```
 
-This creates sidecar files named `{pdf}.cover.png` next to each PDF. These files are then included in static builds automatically.
+This creates sidecar files named `{pdf}.cover.jpg` next to each PDF. These files are then included in static builds automatically.
 
 **Example workflow:**
 
 ```markdown
 <!-- Link to a PDF with a visual preview -->
-[![Report Cover](reports/annual-report.pdf.cover.png)](reports/annual-report.pdf)
+[![Report Cover](reports/annual-report.pdf.cover.jpg)](reports/annual-report.pdf)
 
 <!-- Gallery of PDF documents -->
 | Document | Preview |
 |----------|---------|
-| [Budget](budget.pdf) | ![](budget.pdf.cover.png) |
-| [Plan](plan.pdf) | ![](plan.pdf.cover.png) |
+| [Budget](budget.pdf) | ![](budget.pdf.cover.jpg) |
+| [Plan](plan.pdf) | ![](plan.pdf.cover.jpg) |
 ```
 
 > **Note:** PDF cover extraction requires the `media-metadata` Cargo feature. See [CLI Reference](/reference/cli/) for details on the `--extract-pdf-cover` option.

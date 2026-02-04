@@ -8,6 +8,8 @@ use crate::vid::Vid;
 use regex::Regex;
 use std::sync::LazyLock;
 
+const PDF_EMBED_HEIGHT: &str = "600px";
+
 static EXTENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\.([0-9a-zA-Z]+)([?#].*)?$").expect("Invalid EXTENSION_RE regex pattern")
 });
@@ -144,8 +146,8 @@ impl MediaEmbed {
             r#"
             <figure class="video-embed youtube-embed">
                 <iframe
-                    width="560"
-                    height="315"
+                    width="{yt_width}"
+                    height="{yt_height}"
                     src="https://www.youtube.com/embed/{video_id}"
                     title="YouTube video player"
                     frameborder="0"
@@ -154,6 +156,8 @@ impl MediaEmbed {
                     allowfullscreen>
                 </iframe>
                 <figcaption>{caption}{close}"#,
+            yt_width = crate::constants::YOUTUBE_EMBED_WIDTH,
+            yt_height = crate::constants::YOUTUBE_EMBED_HEIGHT,
             video_id = video_id,
             caption = caption.unwrap_or(""),
             close = if open_only {
@@ -170,7 +174,7 @@ impl MediaEmbed {
         format!(
             r#"
             <figure class="pdf-embed" data-pdf-url="{url}">
-                <object data="{url}" type="application/pdf" width="100%" height="600px">
+                <object data="{url}" type="application/pdf" width="100%" height="{pdf_height}">
                     <p class="pdf-fallback">
                         PDF cannot be displayed inline.
                         <a href="{url}" download data-pdf-fallback>Download PDF</a>
@@ -178,6 +182,7 @@ impl MediaEmbed {
                 </object>
                 <figcaption>{caption}{close}"#,
             url = url,
+            pdf_height = PDF_EMBED_HEIGHT,
             caption = caption.unwrap_or(""),
             close = if open_only {
                 ""

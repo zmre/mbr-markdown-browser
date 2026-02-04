@@ -35,9 +35,10 @@ figment = { version = "0.10", features = ["toml", "env"] }
 futures = "0.3.31"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 glob = "0.3.3"
-notify = { version = "8.2", default-features = false, features = ["macos_kqueue"] }
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 html-escape = "0.2.13"
 itertools = "0.14.0"
+lru = "0.12"
 metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/audio metadata extraction
 ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_latest"] } # PDF cover; pdfium_latest (7543) forward-compatible with nixpkgs pdfium-binaries 7643

@@ -76,11 +76,44 @@ impl ParsedWikilink {
     }
 }
 
+/// Sanitizes a string for safe use as a path component.
+///
+/// Removes characters and patterns that could cause path traversal or other
+/// filesystem safety issues:
+/// - Strips null bytes and control characters
+/// - Removes `..` path segments
+/// - Strips leading `/` characters
+/// - Collapses multiple `/` into single `/`
+///
+/// # Examples
+///
+/// ```
+/// use mbr::wikilink::sanitize_path_component;
+///
+/// assert_eq!(sanitize_path_component("rust"), "rust");
+/// assert_eq!(sanitize_path_component("/etc/passwd"), "etc/passwd");
+/// assert_eq!(sanitize_path_component("../../secret"), "secret");
+/// assert_eq!(sanitize_path_component("foo/../bar"), "foo/bar");
+/// ```
+pub fn sanitize_path_component(value: &str) -> String {
+    value
+        // Remove null bytes and control characters
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        // Split on `/`, remove empty and `..` segments, rejoin
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != ".." && *seg != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Normalizes a tag value for use in URLs.
 ///
 /// - Converts to lowercase
 /// - Replaces spaces with underscores
 /// - Trims leading/trailing whitespace
+/// - Sanitizes against path traversal
 ///
 /// # Examples
 ///
@@ -92,7 +125,7 @@ impl ParsedWikilink {
 /// assert_eq!(normalize_tag_value("  Spaced  "), "spaced");
 /// ```
 pub fn normalize_tag_value(value: &str) -> String {
-    value.trim().to_lowercase().replace(' ', "_")
+    sanitize_path_component(&value.trim().to_lowercase().replace(' ', "_"))
 }
 
 /// URL schemes that should NOT be treated as tag sources.
@@ -494,5 +527,74 @@ mod tests {
             None
         );
         assert_eq!(transform_tag_link_dest("/regular/path/", &sources), None);
+    }
+
+    // sanitize_path_component tests
+
+    #[test]
+    fn test_sanitize_path_component_normal_values() {
+        assert_eq!(sanitize_path_component("rust"), "rust");
+        assert_eq!(sanitize_path_component("hello_world"), "hello_world");
+        assert_eq!(sanitize_path_component("foo/bar"), "foo/bar");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_strips_leading_slash() {
+        assert_eq!(sanitize_path_component("/etc/passwd"), "etc/passwd");
+        assert_eq!(sanitize_path_component("//absolute"), "absolute");
+        assert_eq!(sanitize_path_component("///triple"), "triple");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_removes_dotdot() {
+        assert_eq!(sanitize_path_component("../../secret"), "secret");
+        assert_eq!(sanitize_path_component("foo/../bar"), "foo/bar");
+        assert_eq!(sanitize_path_component("../.."), "");
+        assert_eq!(sanitize_path_component("a/../../b"), "a/b");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_removes_single_dot() {
+        assert_eq!(sanitize_path_component("./foo"), "foo");
+        assert_eq!(sanitize_path_component("foo/./bar"), "foo/bar");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_null_bytes() {
+        assert_eq!(sanitize_path_component("foo\0bar"), "foobar");
+        assert_eq!(sanitize_path_component("\0"), "");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_control_chars() {
+        assert_eq!(sanitize_path_component("foo\x01bar"), "foobar");
+        assert_eq!(sanitize_path_component("hello\nworld"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_complex_attacks() {
+        // Wikipedia-style attack path from goodwiki
+        assert_eq!(sanitize_path_component("/pol/_phenomena"), "pol/_phenomena");
+        // Multiple traversals
+        assert_eq!(
+            sanitize_path_component("/../../../etc/shadow"),
+            "etc/shadow"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_path_component_empty() {
+        assert_eq!(sanitize_path_component(""), "");
+        assert_eq!(sanitize_path_component("/"), "");
+        assert_eq!(sanitize_path_component("//"), "");
+    }
+
+    // normalize_tag_value with path traversal
+
+    #[test]
+    fn test_normalize_tag_value_sanitizes_paths() {
+        assert_eq!(normalize_tag_value("/etc/passwd"), "etc/passwd");
+        assert_eq!(normalize_tag_value("../../secret"), "secret");
+        assert_eq!(normalize_tag_value("/pol/_phenomena"), "pol/_phenomena");
     }
 }

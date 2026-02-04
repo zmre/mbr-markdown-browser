@@ -68,6 +68,50 @@ export function getTagSources(): TagSourceConfig[] {
 }
 
 /**
+ * Get the canonical path from window.location.pathname.
+ *
+ * In server mode, the pathname is already canonical (e.g., "/docs/guide/").
+ * In static mode deployed at a subdirectory, we need to strip the deployment
+ * prefix to get the canonical path that matches site.json entries.
+ *
+ * The basePath tells us the depth (number of "../" segments), which we use
+ * to extract just the canonical portion of the pathname.
+ *
+ * Example:
+ *   Deployed at: https://example.com/my-site/
+ *   Current page: https://example.com/my-site/docs/guide/
+ *   window.location.pathname = "/my-site/docs/guide/"
+ *   basePath = "../../" (depth 2)
+ *   Result: "/docs/guide/"
+ */
+export function getCanonicalPath(): string {
+  const pathname = window.location.pathname;
+
+  // In server mode, pathname is already canonical
+  if (window.__MBR_CONFIG__?.serverMode) {
+    return pathname;
+  }
+
+  const basePath = window.__MBR_CONFIG__?.basePath || './';
+
+  // Count depth from basePath (each "../" is one level)
+  const depth = (basePath.match(/\.\.\//g) || []).length;
+
+  // If depth is 0 (at root level), the pathname is already canonical
+  if (depth === 0) {
+    return pathname;
+  }
+
+  // Split pathname and get last `depth` segments
+  const segments = pathname.split('/').filter(p => p);
+  const canonicalSegments = segments.slice(-depth);
+
+  // Reconstruct canonical path
+  const canonical = '/' + canonicalSegments.join('/');
+  return canonical.endsWith('/') || canonical === '/' ? canonical : canonical + '/';
+}
+
+/**
  * Reactive state for site navigation loading.
  * Components can subscribe to changes via the callback pattern.
  */
@@ -137,5 +181,81 @@ export const siteNav = fetch(siteJsonUrl)
     siteNavState.error = err.message || 'Failed to load site data';
     // Notify all listeners
     siteNavListeners.forEach(cb => cb({ ...siteNavState }));
+    throw err;
+  })
+
+// ============================================================================
+// Media Navigation (separate endpoint for media/static file metadata)
+// ============================================================================
+
+/**
+ * Reactive state for media navigation loading.
+ * Components can subscribe to changes via the callback pattern.
+ */
+interface MediaNavState {
+  isLoading: boolean;
+  data: any | null;
+  error: string | null;
+}
+
+const mediaNavState: MediaNavState = {
+  isLoading: true,
+  data: null,
+  error: null,
+};
+
+const mediaNavListeners: Set<(state: MediaNavState) => void> = new Set();
+
+/**
+ * Subscribe to media navigation state changes.
+ * Returns an unsubscribe function.
+ */
+export function subscribeMediaNav(callback: (state: MediaNavState) => void): () => void {
+  mediaNavListeners.add(callback);
+  // Immediately notify with current state
+  callback(mediaNavState);
+  return () => mediaNavListeners.delete(callback);
+}
+
+/**
+ * Get current media navigation loading state.
+ */
+export function getMediaNavState(): MediaNavState {
+  return { ...mediaNavState };
+}
+
+// Determine the URL for media.json based on mode
+function getMediaJsonUrl(): string {
+  if (window.__MBR_CONFIG__?.serverMode) {
+    return '/.mbr/media.json'; // Absolute path in server mode
+  }
+  return getBasePath() + '.mbr/media.json'; // Relative path in static mode
+}
+
+/**
+ * Promise-based access to media navigation data.
+ *
+ * In server mode, fetches from the dedicated /.mbr/media.json endpoint.
+ * In static mode, fetches from .mbr/media.json (generated during build).
+ */
+export const mediaNav: Promise<any> = fetch(getMediaJsonUrl())
+  .then((resp) => {
+    if (!resp.ok) {
+      throw new Error(`Failed to load media data: ${resp.status}`);
+    }
+    return resp.json();
+  })
+  .then((data) => {
+    mediaNavState.isLoading = false;
+    mediaNavState.data = data;
+    mediaNavState.error = null;
+    mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+    return data;
+  })
+  .catch((err) => {
+    mediaNavState.isLoading = false;
+    mediaNavState.data = null;
+    mediaNavState.error = err.message || 'Failed to load media data';
+    mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
     throw err;
   })

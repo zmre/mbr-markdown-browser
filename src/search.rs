@@ -9,7 +9,8 @@
 //! Supports faceted search with `key:value` syntax for filtering on specific
 //! frontmatter fields (e.g., `category:rust` or `tags:async`).
 //!
-//! Both modes use rayon for parallel processing across files.
+//! Both modes use sequential iteration to avoid rayon thread pool contention
+//! when multiple searches run concurrently (e.g., from per-keystroke queries).
 
 use std::sync::Arc;
 
@@ -18,7 +19,6 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::SearchError;
@@ -32,6 +32,15 @@ const MAX_SNIPPET_LENGTH: usize = 200;
 
 /// Context lines to show around content matches.
 const CONTENT_CONTEXT_LINES: usize = 1;
+
+/// Base score for facet (key:value) matches against metadata.
+const FACET_MATCH_BASE_SCORE: u32 = 100;
+
+/// Maximum score for content (full-text) matches.
+const MAX_CONTENT_MATCH_SCORE: u32 = 100;
+
+/// Maximum bytes of extracted text to sample for fuzzy matching.
+const MAX_TEXT_SAMPLE_BYTES: usize = 5000;
 
 /// Parsed query with separated terms and facets.
 ///
@@ -235,6 +244,10 @@ pub struct SearchResponse {
 
     /// Time taken to search in milliseconds.
     pub duration_ms: u64,
+
+    /// True when the background scan is still in progress (results may be incomplete).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub scan_in_progress: bool,
 }
 
 /// Search engine that combines metadata and content search.
@@ -264,6 +277,7 @@ impl SearchEngine {
                 total_matches: 0,
                 results: Vec::new(),
                 duration_ms: 0,
+                scan_in_progress: false,
             });
         }
 
@@ -271,20 +285,17 @@ impl SearchEngine {
 
         // Metadata search (always fast, data in memory)
         if query.scope != SearchScope::Content {
-            let metadata_results = self.search_metadata(query, &parsed)?;
-            all_results.extend(metadata_results);
+            all_results.extend(self.search_metadata(query, &parsed)?);
         }
 
         // Content search (requires file I/O) - only if we have search terms
         if query.scope != SearchScope::Metadata && !parsed.terms.is_empty() {
-            let content_results = self.search_content(query, &parsed)?;
-            all_results.extend(content_results);
+            all_results.extend(self.search_content(query, &parsed)?);
         }
 
         // Search other files (PDFs, text files) when filetype is "all"
         if self.should_search_other_files(&query.filetype) {
-            let other_results = self.search_other_files_metadata(query, &parsed)?;
-            all_results.extend(other_results);
+            all_results.extend(self.search_other_files_metadata(query, &parsed)?);
         }
 
         // Deduplicate results (same file might match both metadata and content)
@@ -305,6 +316,7 @@ impl SearchEngine {
             total_matches,
             results: all_results,
             duration_ms,
+            scan_in_progress: false,
         })
     }
 
@@ -344,21 +356,12 @@ impl SearchEngine {
                 .map(|(_, info)| info.clone())
                 .collect();
 
-        // Parallel fuzzy matching with nucleo-matcher
+        // Intentionally sequential: par_iter causes 30s stalls from rayon thread pool contention
+        // when multiple per-keystroke searches run concurrently.
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
         let results: Vec<SearchResult> = files
-            .into_par_iter()
-            .filter_map(|info| {
-                // Each thread gets its own matcher (thread-local)
-                thread_local! {
-                    static MATCHER: std::cell::RefCell<Matcher> =
-                        std::cell::RefCell::new(Matcher::new(Config::DEFAULT.match_paths()));
-                }
-
-                MATCHER.with(|matcher| {
-                    let mut matcher = matcher.borrow_mut();
-                    self.match_metadata(pattern.as_ref(), &info, &mut matcher)
-                })
-            })
+            .into_iter()
+            .filter_map(|info| self.match_metadata(pattern.as_ref(), &info, &mut matcher))
             .collect();
 
         Ok(results)
@@ -407,7 +410,7 @@ impl SearchEngine {
                     .frontmatter
                     .as_ref()
                     .and_then(|fm| extract_string(fm, "tags")),
-                score: 100, // Base score for facet matches
+                score: FACET_MATCH_BASE_SCORE,
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
@@ -522,9 +525,12 @@ impl SearchEngine {
                 .map(|(_, info)| info.clone())
                 .collect();
 
-        // Parallel content search
+        // Sequential content search.
+        // Same rationale as metadata: concurrent par_iter calls from rapid
+        // keystroke searches cause 30s rayon thread pool contention. Sequential
+        // grep over 276 files takes ~13ms.
         let results: Vec<SearchResult> = files
-            .into_par_iter()
+            .into_iter()
             .filter_map(|info| self.search_file_content(&matcher, &info).ok().flatten())
             .collect();
 
@@ -590,7 +596,7 @@ impl SearchEngine {
 
             // Score based on match count (more matches = higher score)
             // Content matches are weighted lower than metadata matches
-            let score = match_count.min(100);
+            let score = match_count.min(MAX_CONTENT_MATCH_SCORE);
 
             // Helper to extract string from frontmatter value
             let extract_string = |fm: &std::collections::HashMap<String, serde_json::Value>,
@@ -719,20 +725,11 @@ impl SearchEngine {
             .map(|(_, info)| info.clone())
             .collect();
 
-        // Parallel fuzzy matching
+        // Sequential fuzzy matching (same rayon contention rationale as search_metadata)
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
         let results: Vec<SearchResult> = files
-            .into_par_iter()
-            .filter_map(|info| {
-                thread_local! {
-                    static MATCHER: std::cell::RefCell<Matcher> =
-                        std::cell::RefCell::new(Matcher::new(Config::DEFAULT.match_paths()));
-                }
-
-                MATCHER.with(|matcher| {
-                    let mut matcher = matcher.borrow_mut();
-                    self.match_other_file(&pattern, &info, &mut matcher)
-                })
-            })
+            .into_iter()
+            .filter_map(|info| self.match_other_file(&pattern, &info, &mut matcher))
             .collect();
 
         Ok(results)
@@ -763,8 +760,8 @@ impl SearchEngine {
         if let Some(ref text) = info.extracted_text {
             // Sample the text for matching (first ~5000 bytes for performance)
             // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
-            let sample = if text.len() > 5000 {
-                &text[..text.floor_char_boundary(5000)]
+            let sample = if text.len() > MAX_TEXT_SAMPLE_BYTES {
+                &text[..text.floor_char_boundary(MAX_TEXT_SAMPLE_BYTES)]
             } else {
                 text.as_str()
             };
@@ -918,47 +915,40 @@ pub fn search_other_files(
         .map(|(_, info)| info.clone())
         .collect();
 
-    // Parallel fuzzy matching
+    // Sequential fuzzy matching (same rayon contention rationale as search_metadata)
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut results: Vec<SearchResult> = files
-        .into_par_iter()
+        .into_iter()
         .filter_map(|info| {
-            thread_local! {
-                static MATCHER: std::cell::RefCell<Matcher> =
-                    std::cell::RefCell::new(Matcher::new(Config::DEFAULT.match_paths()));
-            }
+            let mut buf = Vec::new();
+            let haystack = Utf32Str::new(&info.url_path, &mut buf);
 
-            MATCHER.with(|matcher| {
-                let mut matcher = matcher.borrow_mut();
-                let mut buf = Vec::new();
-                let haystack = Utf32Str::new(&info.url_path, &mut buf);
+            pattern.score(haystack, &mut matcher).map(|score| {
+                let ext = info
+                    .raw_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
 
-                pattern.score(haystack, &mut matcher).map(|score| {
-                    let ext = info
-                        .raw_path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
+                let filetype = match ext.as_str() {
+                    "pdf" => "pdf",
+                    "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" => "image",
+                    "mp4" | "webm" | "mov" | "avi" => "video",
+                    "mp3" | "wav" | "ogg" | "m4a" | "flac" => "audio",
+                    _ => "other",
+                };
 
-                    let filetype = match ext.as_str() {
-                        "pdf" => "pdf",
-                        "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" => "image",
-                        "mp4" | "webm" | "mov" | "avi" => "video",
-                        "mp3" | "wav" | "ogg" | "m4a" | "flac" => "audio",
-                        _ => "other",
-                    };
-
-                    SearchResult {
-                        url_path: info.url_path.clone(),
-                        title: None,
-                        description: None,
-                        tags: None,
-                        score,
-                        snippet: None,
-                        is_content_match: false,
-                        filetype: filetype.to_string(),
-                    }
-                })
+                SearchResult {
+                    url_path: info.url_path.clone(),
+                    title: None,
+                    description: None,
+                    tags: None,
+                    score,
+                    snippet: None,
+                    is_content_match: false,
+                    filetype: filetype.to_string(),
+                }
             })
         })
         .collect();
@@ -1260,5 +1250,29 @@ mod tests {
         let query: SearchQuery = serde_json::from_str(json).unwrap();
 
         assert_eq!(query.folder_scope, FolderScope::Everywhere);
+    }
+
+    // ==================== SearchResponse Serialization Tests ====================
+
+    #[test]
+    fn test_search_response_scan_in_progress_serialization() {
+        // Verify scan_in_progress is skipped when false (default)
+        let response = SearchResponse {
+            query: "test".to_string(),
+            total_matches: 0,
+            results: vec![],
+            duration_ms: 0,
+            scan_in_progress: false,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("scan_in_progress"));
+
+        // Verify scan_in_progress is present when true
+        let response2 = SearchResponse {
+            scan_in_progress: true,
+            ..response
+        };
+        let json2 = serde_json::to_string(&response2).unwrap();
+        assert!(json2.contains("\"scan_in_progress\":true"));
     }
 }
