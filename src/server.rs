@@ -462,9 +462,20 @@ impl Server {
             }
             repo_for_scan.mark_scan_complete();
 
-            // Phase 2: populate media metadata in background (non-blocking for site.json)
+            // Phase 1.5: scan static folder (deferred from scan_all for faster search)
+            if let Err(e) = repo_for_scan.scan_static_folder() {
+                tracing::error!("Background static scan failed: {e}");
+            }
+
+            // Phase 2: populate basic file metadata (stat calls for size/timestamps)
+            repo_for_scan.populate_basic_metadata();
+
+            // Phase 3: populate media metadata in background (non-blocking for site.json)
             repo_for_scan.populate_media_metadata();
             repo_for_scan.notify_media_populated();
+
+            // Phase 4: extract text from PDFs/text files for search
+            repo_for_scan.ensure_text_extracted();
         });
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
@@ -473,7 +484,6 @@ impl Server {
         let tx_for_watcher = file_change_tx.clone();
 
         // Initialize file watcher in background to avoid blocking server startup
-        // PollWatcher's recursive scan can take 10+ seconds for large directories
         let base_dir_for_watcher = base_dir.clone();
         let template_folder_for_watcher = template_folder.clone();
         let watcher_ignore_dirs_for_watcher = watcher_ignore_dirs.clone();
@@ -538,33 +548,135 @@ impl Server {
             }
         });
 
-        // Spawn background task to invalidate repo cache when files change
+        // Spawn background task to invalidate repo cache when files change.
+        // Uses debouncing: accumulate events for 2 seconds, then apply changes.
+        // For small batches (<=50 files): surgical per-file invalidation.
+        // For large batches: full clear + rescan.
         let repo_for_invalidation = Arc::clone(&repo);
+        let base_dir_for_invalidation = base_dir.clone();
         let markdown_extensions_for_invalidation = markdown_extensions.clone();
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
-            while let Ok(event) = repo_change_rx.recv().await {
-                // Invalidate cache for:
-                // - Created files (new file added)
-                // - Deleted files (file removed)
-                // - Modified markdown files (frontmatter may have changed)
-                let should_invalidate = match event.event {
-                    crate::watcher::ChangeEventType::Created => true,
-                    crate::watcher::ChangeEventType::Deleted => true,
-                    crate::watcher::ChangeEventType::Modified => {
-                        // Only invalidate for markdown files (frontmatter changes)
-                        markdown_extensions_for_invalidation
-                            .iter()
-                            .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
-                    }
+            const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
+            const SURGICAL_THRESHOLD: usize = 50;
+
+            loop {
+                // Wait for the first event
+                let first_event = match repo_change_rx.recv().await {
+                    Ok(e) => e,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 };
 
-                if should_invalidate {
+                // Accumulate events during the debounce window
+                let mut pending_events = vec![first_event];
+                let deadline = tokio::time::Instant::now() + DEBOUNCE_DURATION;
+
+                loop {
+                    tokio::select! {
+                        result = repo_change_rx.recv() => {
+                            match result {
+                                Ok(event) => pending_events.push(event),
+                                Err(broadcast::error::RecvError::Closed) => break,
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    // Too many events queued — force full rescan
+                                    pending_events.clear();
+                                    pending_events.push(crate::watcher::FileChangeEvent {
+                                        path: String::new(),
+                                        relative_path: String::new(),
+                                        event: crate::watcher::ChangeEventType::Created,
+                                    });
+                                    // Push over threshold to trigger full rescan
+                                    for _ in 0..SURGICAL_THRESHOLD {
+                                        pending_events.push(crate::watcher::FileChangeEvent {
+                                            path: String::new(),
+                                            relative_path: String::new(),
+                                            event: crate::watcher::ChangeEventType::Created,
+                                        });
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => break,
+                    }
+                }
+
+                // Filter to only relevant events
+                let relevant_events: Vec<_> = pending_events
+                    .into_iter()
+                    .filter(|event| match event.event {
+                        crate::watcher::ChangeEventType::Created
+                        | crate::watcher::ChangeEventType::Deleted => true,
+                        crate::watcher::ChangeEventType::Modified => {
+                            markdown_extensions_for_invalidation
+                                .iter()
+                                .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
+                        }
+                    })
+                    .collect();
+
+                if relevant_events.is_empty() {
+                    continue;
+                }
+
+                let repo = Arc::clone(&repo_for_invalidation);
+                let base_dir = base_dir_for_invalidation.clone();
+
+                if relevant_events.len() <= SURGICAL_THRESHOLD {
+                    // Surgical invalidation: update individual files
                     tracing::debug!(
-                        "Invalidating repo cache due to file change: {:?}",
-                        event.relative_path
+                        "Surgical invalidation for {} file(s)",
+                        relevant_events.len()
                     );
-                    repo_for_invalidation.clear();
+                    let has_tag_changes = relevant_events.iter().any(|e| {
+                        matches!(
+                            e.event,
+                            crate::watcher::ChangeEventType::Deleted
+                                | crate::watcher::ChangeEventType::Modified
+                        )
+                    });
+
+                    tokio::task::spawn_blocking(move || {
+                        for event in &relevant_events {
+                            let abs_path = if event.path.is_empty() {
+                                continue;
+                            } else {
+                                PathBuf::from(&event.path)
+                            };
+                            repo.invalidate_file(&abs_path, &event.event);
+                        }
+                        // Rebuild tag index if any files were deleted or modified
+                        // (created files add tags inline in invalidate_file)
+                        if has_tag_changes {
+                            repo.rebuild_tag_index();
+                        }
+                    })
+                    .await
+                    .ok();
+                } else {
+                    // Too many changes — full rescan
+                    tracing::info!(
+                        "Full rescan triggered: {} file changes exceed threshold",
+                        relevant_events.len()
+                    );
+                    tokio::task::spawn_blocking(move || {
+                        repo.clear();
+                        if let Err(e) = repo.scan_all() {
+                            tracing::error!("Background rescan failed: {e}");
+                            return;
+                        }
+                        if let Err(e) = repo.scan_static_folder() {
+                            tracing::error!("Background static rescan failed: {e}");
+                        }
+                        repo.populate_basic_metadata();
+                        repo.populate_media_metadata();
+                        repo.notify_media_populated();
+                        repo.ensure_text_extracted();
+                        let _ = base_dir; // keep alive for potential future use
+                    })
+                    .await
+                    .ok();
                 }
             }
         });
@@ -832,21 +944,11 @@ impl Server {
     pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
-        let scan_start = std::time::Instant::now();
-        // Wait for background scan to complete (or run scan if not yet started)
-        if config.repo.is_scan_complete() {
-            tracing::debug!("get_site_info: scan already complete");
-        } else {
+        // Wait for background scan to complete (watcher handles updates)
+        if !config.repo.is_scan_complete() {
             tracing::debug!("get_site_info: waiting for background scan...");
             config.repo.wait_for_scan().await;
         }
-        // Re-scan if cache was cleared (e.g., file change invalidation)
-        config
-            .repo
-            .scan_all()
-            .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        tracing::debug!("get_site_info scan_all: {:?}", scan_start.elapsed());
 
         // Build combined response with repo data and config
         let json_start = std::time::Instant::now();
@@ -900,24 +1002,15 @@ impl Server {
     ) -> Result<impl IntoResponse, StatusCode> {
         let start = std::time::Instant::now();
 
-        // Wait for background scan to complete first
+        // Wait for background scan + media metadata population (watcher handles updates)
         if !config.repo.is_scan_complete() {
             tracing::debug!("get_media_info: waiting for background scan...");
             config.repo.wait_for_scan().await;
         }
-
-        // Wait for media metadata population (phase 2 of background scan)
         if !config.repo.is_media_populated() {
             tracing::debug!("get_media_info: waiting for media metadata...");
             config.repo.wait_for_media().await;
         }
-
-        // Re-scan if cache was cleared (e.g., file change invalidation)
-        config
-            .repo
-            .scan_all()
-            .inspect_err(|e| tracing::error!("Error scanning repo: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         // Build response with only other_files
         let json_start = std::time::Instant::now();
@@ -973,39 +1066,73 @@ impl Server {
     ) -> impl IntoResponse {
         tracing::debug!("Search request: q={:?}, scope={:?}", query.q, query.scope);
 
-        // Wait for background scan if still in progress
-        config.repo.wait_for_scan().await;
+        // Don't wait for scan — search with whatever files are available now.
+        let scan_in_progress = !config.repo.is_scan_complete();
 
-        // Ensure repo is scanned (handles cache invalidation re-scans)
-        if let Err(e) = config.repo.scan_all() {
-            tracing::error!("Error scanning repo for search: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to scan repository: {}", e),
-                    "query": query.q,
-                    "total_matches": 0,
-                    "results": [],
-                    "duration_ms": 0
-                })),
-            );
+        // Only extract text for non-markdown searches (gated on scan completion)
+        if config.repo.is_scan_complete()
+            && (query.filetype.as_deref() == Some("all")
+                || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown")))
+        {
+            config.repo.ensure_text_extracted();
         }
 
-        // Ensure text has been extracted from searchable files (deferred from scan)
-        config.repo.ensure_text_extracted();
+        let repo = config.repo.clone();
+        let base_dir = config.base_dir.clone();
 
-        // Create search engine and execute search
-        let engine = SearchEngine::new(config.repo.clone(), config.base_dir.clone());
+        // Clone query string for error handling (query is moved into closure)
+        let query_str = query.q.clone();
 
-        let mut response = match engine.search(&query) {
-            Ok(r) => r,
-            Err(e) => {
+        // Run search on blocking thread pool (grep does synchronous I/O)
+        let search_result = tokio::task::spawn_blocking(move || {
+            let engine = SearchEngine::new(repo.clone(), base_dir);
+            let mut response = engine.search(&query)?;
+
+            // If searching all filetypes or non-markdown, also search other files
+            if query.filetype.as_deref() == Some("all")
+                || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown"))
+            {
+                let other_results = search_other_files(
+                    &repo,
+                    &query.q,
+                    query.folder.as_deref(),
+                    query.filetype.as_deref(),
+                    query.limit,
+                );
+
+                // Merge and re-sort
+                response.results.extend(other_results);
+                response.results.sort_by(|a, b| b.score.cmp(&a.score));
+                response.results.truncate(query.limit);
+                response.total_matches = response.results.len();
+            }
+
+            Ok::<_, crate::errors::SearchError>(response)
+        })
+        .await;
+
+        let mut response = match search_result {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 tracing::error!("Search error: {e}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
                         "error": format!("Search failed: {}", e),
-                        "query": query.q,
+                        "query": query_str,
+                        "total_matches": 0,
+                        "results": [],
+                        "duration_ms": 0
+                    })),
+                );
+            }
+            Err(e) => {
+                tracing::error!("Search task panicked: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Search task failed",
+                        "query": query_str,
                         "total_matches": 0,
                         "results": [],
                         "duration_ms": 0
@@ -1014,24 +1141,7 @@ impl Server {
             }
         };
 
-        // If searching all filetypes or non-markdown, also search other files
-        if query.filetype.as_deref() == Some("all")
-            || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown"))
-        {
-            let other_results = search_other_files(
-                &config.repo,
-                &query.q,
-                query.folder.as_deref(),
-                query.filetype.as_deref(),
-                query.limit,
-            );
-
-            // Merge and re-sort
-            response.results.extend(other_results);
-            response.results.sort_by(|a, b| b.score.cmp(&a.score));
-            response.results.truncate(query.limit);
-            response.total_matches = response.results.len();
-        }
+        response.scan_in_progress = scan_in_progress;
 
         tracing::debug!(
             "Search completed: {} results in {}ms",

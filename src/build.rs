@@ -311,6 +311,12 @@ impl Builder {
                 path: self.config.root_dir.clone(),
                 source: std::io::Error::other(e.to_string()),
             })?;
+        self.repo
+            .scan_static_folder()
+            .map_err(|e| crate::errors::RepoError::ScanFailed {
+                path: self.config.root_dir.clone(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
         let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
         print_stage_done(
             "Scanning repository",

@@ -642,20 +642,16 @@ impl Repo {
             frontmatter_start.elapsed()
         );
 
-        // Parallel processing: populate basic static file metadata (size, timestamps only).
-        // Media metadata (ffmpeg/lopdf) and text extraction are deferred to background tasks.
-        let static_meta_start = Instant::now();
-        other.into_par_iter().for_each(|(file, other_file)| {
-            let other_file = OtherFileInfo {
-                metadata: other_file.metadata.populate_basic(),
-                ..other_file
-            };
+        // Register other files without stat calls — basic metadata (size, timestamps)
+        // is deferred to populate_basic_metadata() to avoid blocking scan_all() completion.
+        let static_insert_start = Instant::now();
+        for (file, other_file) in other {
             self.other_files.pin().insert(file, other_file);
-        });
+        }
         tracing::debug!(
-            "scan_folder static metadata for {:?}: {:?}",
+            "scan_folder static file registration for {:?}: {:?}",
             relative_folder_path_ref,
-            static_meta_start.elapsed()
+            static_insert_start.elapsed()
         );
 
         Ok(())
@@ -664,13 +660,19 @@ impl Repo {
     pub fn scan_all(&self) -> Result<(), Box<dyn std::error::Error>> {
         let scan_all_start = Instant::now();
 
-        self.scan_folder(&PathBuf::from("."))?; // the . is relative to the root_dir, so this scans the root dir
+        // Pre-mark static folder as scanned to skip it during content scan.
+        // This defers static file registration to scan_static_folder() so
+        // mark_scan_complete() fires faster (search only needs markdown).
+        let static_deferred = self
+            .root_dir
+            .join(&self.static_folder)
+            .canonicalize()
+            .ok()
+            .inspect(|p| {
+                self.scanned_folders.pin().insert(p.clone());
+            });
 
-        // Only scan static folder if it exists
-        let static_path = self.root_dir.join(&self.static_folder);
-        if static_path.is_dir() {
-            self.scan_folder(&PathBuf::from(&self.static_folder))?;
-        }
+        self.scan_folder(&PathBuf::from("."))?; // the . is relative to the root_dir, so this scans the root dir
 
         while !self.queued_folders.is_empty() {
             // TODO: make sure this doesn't deadlock
@@ -688,6 +690,11 @@ impl Repo {
                     tracing::error!("Failed to scan folder {:?}: {e}", &rel_path)
                 }) // ignores errors
             });
+        }
+
+        // Un-mark static folder so scan_static_folder() can scan it later
+        if let Some(ref sp) = static_deferred {
+            self.scanned_folders.pin().remove(sp);
         }
 
         // Log file counts and type breakdown
@@ -727,10 +734,74 @@ impl Repo {
         Ok(())
     }
 
+    /// Scan the static folder and its subdirectories.
+    /// Deferred from scan_all() so mark_scan_complete() fires faster.
+    pub fn scan_static_folder(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let static_path = self.root_dir.join(&self.static_folder);
+        if !static_path.is_dir() {
+            return Ok(());
+        }
+
+        self.scan_folder(&PathBuf::from(&self.static_folder))?;
+
+        while !self.queued_folders.is_empty() {
+            let vec_folders: Vec<_> = self
+                .queued_folders
+                .pin()
+                .iter()
+                .map(|(_, relative)| relative.clone())
+                .collect();
+            self.queued_folders.pin().clear();
+            vec_folders.into_par_iter().for_each(|rel_path| {
+                self.scan_folder(&rel_path).unwrap_or_else(|e| {
+                    tracing::error!("Failed to scan folder {:?}: {e}", &rel_path)
+                })
+            });
+        }
+
+        let other_count = self.other_files.len();
+        tracing::info!(
+            "scan_static_folder completed in {:?}: {} other files total",
+            start.elapsed(),
+            other_count,
+        );
+        Ok(())
+    }
+
     /// Mark the initial scan as complete and notify any waiters.
     pub fn mark_scan_complete(&self) {
         self.scan_complete.store(true, Ordering::SeqCst);
         self.scan_notify.notify_waiters();
+    }
+
+    /// Populate basic file metadata (size, timestamps) for all other files.
+    /// Deferred from scan_folder() to avoid blocking scan_all() completion,
+    /// so search (which only needs markdown files) can proceed sooner.
+    pub fn populate_basic_metadata(&self) {
+        let start = Instant::now();
+        let pin = self.other_files.pin();
+        let entries: Vec<_> = pin
+            .iter()
+            .filter(|(_, info)| info.metadata.file_size_bytes.is_none())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let count = entries.len();
+        drop(pin);
+
+        entries.into_par_iter().for_each(|(key, info)| {
+            let updated = OtherFileInfo {
+                metadata: info.metadata.populate_basic(),
+                ..info
+            };
+            self.other_files.pin().insert(key, updated);
+        });
+
+        tracing::info!(
+            "populate_basic_metadata completed for {} files in {:?}",
+            count,
+            start.elapsed()
+        );
     }
 
     /// Returns true if the initial scan has completed.
@@ -843,6 +914,147 @@ impl Repo {
         self.media_populated.store(false, Ordering::SeqCst);
         // Note: scan_complete is NOT reset here. It tracks whether the initial background
         // scan finished. After clear(), scan_all() will re-scan synchronously in handlers.
+    }
+
+    /// Surgically invalidate a single file, updating only the affected cache entries.
+    ///
+    /// Much cheaper than `clear()` + `scan_all()` for small batches of file changes.
+    pub fn invalidate_file(&self, abs_path: &Path, event: &crate::watcher::ChangeEventType) {
+        let extension = abs_path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let is_markdown = is_markdown_extension(extension, &self.markdown_extensions);
+
+        match event {
+            crate::watcher::ChangeEventType::Deleted => {
+                if is_markdown {
+                    self.markdown_files.pin().remove(abs_path);
+                } else {
+                    self.other_files.pin().remove(abs_path);
+                }
+            }
+            crate::watcher::ChangeEventType::Created => {
+                if is_markdown {
+                    if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
+                        let url =
+                            build_markdown_url_path(abs_path, &self.root_dir, &self.index_file);
+                        let frontmatter =
+                            crate::markdown::extract_metadata_from_file(abs_path).ok();
+
+                        // Add tags from frontmatter
+                        if let Some(ref fm) = frontmatter {
+                            let title = get_page_title(fm, abs_path);
+                            let description = fm
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            for tag_source in &self.tag_sources {
+                                if let Some(tag_value_json) = fm.get(&tag_source.field) {
+                                    for tag_value in extract_tag_values(tag_value_json) {
+                                        let page = if let Some(ref desc) = description {
+                                            TaggedPage::with_description(
+                                                &url, &title, desc, &tag_value,
+                                            )
+                                        } else {
+                                            TaggedPage::new(&url, &title, &tag_value)
+                                        };
+                                        self.tag_index.add_page(
+                                            &tag_source.field,
+                                            &tag_value,
+                                            page,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        let info = MarkdownInfo {
+                            raw_path: abs_path.to_path_buf(),
+                            url_path: url,
+                            created,
+                            modified,
+                            frontmatter,
+                        };
+                        self.markdown_files
+                            .pin()
+                            .insert(abs_path.to_path_buf(), info);
+                    }
+                } else {
+                    let url = build_static_url_path(abs_path, &self.root_dir, &self.static_folder);
+                    let info = OtherFileInfo {
+                        raw_path: abs_path.to_path_buf(),
+                        url_path: url,
+                        metadata: StaticFileMetadata::empty(abs_path).populate_basic(),
+                        extracted_text: None,
+                    };
+                    self.other_files.pin().insert(abs_path.to_path_buf(), info);
+                }
+            }
+            crate::watcher::ChangeEventType::Modified => {
+                if is_markdown {
+                    // Re-extract frontmatter and update
+                    if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
+                        let url =
+                            build_markdown_url_path(abs_path, &self.root_dir, &self.index_file);
+                        let frontmatter =
+                            crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let info = MarkdownInfo {
+                            raw_path: abs_path.to_path_buf(),
+                            url_path: url,
+                            created,
+                            modified,
+                            frontmatter,
+                        };
+                        self.markdown_files
+                            .pin()
+                            .insert(abs_path.to_path_buf(), info);
+                    }
+                } else {
+                    // Update basic metadata for modified static files
+                    let url = build_static_url_path(abs_path, &self.root_dir, &self.static_folder);
+                    let info = OtherFileInfo {
+                        raw_path: abs_path.to_path_buf(),
+                        url_path: url,
+                        metadata: StaticFileMetadata::empty(abs_path).populate_basic(),
+                        extracted_text: None,
+                    };
+                    self.other_files.pin().insert(abs_path.to_path_buf(), info);
+                }
+            }
+        }
+    }
+
+    /// Rebuild the tag index from the current cached markdown files.
+    ///
+    /// Call this after surgical file invalidation when tags may have changed
+    /// (e.g., after deleting or modifying markdown files).
+    pub fn rebuild_tag_index(&self) {
+        self.tag_index.clear();
+        let pin = self.markdown_files.pin();
+        for (_, info) in pin.iter() {
+            if let Some(ref fm) = info.frontmatter {
+                let title = get_page_title(fm, &info.raw_path);
+                let description = fm
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                for tag_source in &self.tag_sources {
+                    if let Some(tag_value_json) = fm.get(&tag_source.field) {
+                        for tag_value in extract_tag_values(tag_value_json) {
+                            let page = if let Some(ref desc) = description {
+                                TaggedPage::with_description(
+                                    &info.url_path,
+                                    &title,
+                                    desc,
+                                    &tag_value,
+                                )
+                            } else {
+                                TaggedPage::new(&info.url_path, &title, &tag_value)
+                            };
+                            self.tag_index.add_page(&tag_source.field, &tag_value, page);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
