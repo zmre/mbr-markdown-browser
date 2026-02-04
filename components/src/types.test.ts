@@ -1,7 +1,7 @@
 /**
  * Unit tests for types.ts helper functions.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   type OtherFileInfo,
   type StaticFileKind,
@@ -17,6 +17,11 @@ import {
   formatDuration,
   MEDIA_TYPE_PRIORITY,
 } from './types.ts';
+
+// Set up server mode so resolveUrl returns absolute paths
+beforeAll(() => {
+  window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+});
 
 // Helper to create test file info
 function createFileInfo(
