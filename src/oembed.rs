@@ -88,6 +88,11 @@ static GIPHY_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 static GIST_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"https?://gist\.github\.com/").unwrap());
 
+// YouTube regex pattern - compiled once for efficiency
+static YOUTUBE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})").unwrap()
+});
+
 #[derive(Default, Clone)]
 pub struct PageInfo {
     pub url: String,
@@ -119,17 +124,10 @@ impl PageInfo {
         // - https://youtu.be/VIDEO_ID
         // - https://www.youtube.com/embed/VIDEO_ID
         // - https://www.youtube.com/v/VIDEO_ID
-        let patterns = [
-            r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})",
-        ];
-
-        patterns.iter().find_map(|pattern| {
-            Regex::new(pattern)
-                .ok()
-                .and_then(|re| re.captures(url))
-                .and_then(|caps| caps.get(1))
-                .map(|id| id.as_str().to_string())
-        })
+        YOUTUBE_RE
+            .captures(url)
+            .and_then(|caps| caps.get(1))
+            .map(|id| id.as_str().to_string())
     }
 
     /// Check if URL is a YouTube URL and create embed HTML
@@ -138,8 +136,8 @@ impl PageInfo {
             format!(
                 r#"<figure class="video-embed youtube-embed">
                     <iframe
-                        width="560"
-                        height="315"
+                        width="{}"
+                        height="{}"
                         src="https://www.youtube.com/embed/{}"
                         title="YouTube video player"
                         frameborder="0"
@@ -148,6 +146,8 @@ impl PageInfo {
                         allowfullscreen>
                     </iframe>
                 </figure>"#,
+                crate::constants::YOUTUBE_EMBED_WIDTH,
+                crate::constants::YOUTUBE_EMBED_HEIGHT,
                 video_id
             )
         })

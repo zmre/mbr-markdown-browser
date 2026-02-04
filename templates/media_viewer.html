@@ -3,12 +3,12 @@
 <html lang="en">
   <head>
 {% include "_head.html" %}
-    <title>{{ title | default(value="Media Viewer") | safe }}</title>
+    <title>{{ title | default(value="Media Viewer") | escape }}</title>
     <script>
       // Media viewer configuration
       window.__MBR_MEDIA_VIEWER__ = {
         mediaType: "{{ media_type | default(value='') | safe }}",
-        title: "{{ title | default(value='Media Viewer') | safe }}"
+        title: "{{ title | default(value='Media Viewer') | escape }}"
       };
     </script>
   </head>

@@ -33,6 +33,15 @@ const MAX_SNIPPET_LENGTH: usize = 200;
 /// Context lines to show around content matches.
 const CONTENT_CONTEXT_LINES: usize = 1;
 
+/// Base score for facet (key:value) matches against metadata.
+const FACET_MATCH_BASE_SCORE: u32 = 100;
+
+/// Maximum score for content (full-text) matches.
+const MAX_CONTENT_MATCH_SCORE: u32 = 100;
+
+/// Maximum bytes of extracted text to sample for fuzzy matching.
+const MAX_TEXT_SAMPLE_BYTES: usize = 5000;
+
 /// Parsed query with separated terms and facets.
 ///
 /// A query like `rust category:programming author:alice` is parsed into:
@@ -401,7 +410,7 @@ impl SearchEngine {
                     .frontmatter
                     .as_ref()
                     .and_then(|fm| extract_string(fm, "tags")),
-                score: 100, // Base score for facet matches
+                score: FACET_MATCH_BASE_SCORE,
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
@@ -587,7 +596,7 @@ impl SearchEngine {
 
             // Score based on match count (more matches = higher score)
             // Content matches are weighted lower than metadata matches
-            let score = match_count.min(100);
+            let score = match_count.min(MAX_CONTENT_MATCH_SCORE);
 
             // Helper to extract string from frontmatter value
             let extract_string = |fm: &std::collections::HashMap<String, serde_json::Value>,
@@ -751,8 +760,8 @@ impl SearchEngine {
         if let Some(ref text) = info.extracted_text {
             // Sample the text for matching (first ~5000 bytes for performance)
             // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
-            let sample = if text.len() > 5000 {
-                &text[..text.floor_char_boundary(5000)]
+            let sample = if text.len() > MAX_TEXT_SAMPLE_BYTES {
+                &text[..text.floor_char_boundary(MAX_TEXT_SAMPLE_BYTES)]
             } else {
                 text.as_str()
             };

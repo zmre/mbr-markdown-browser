@@ -27,6 +27,9 @@ pub const HLS_SEGMENT_DURATION: f64 = 10.0;
 /// All PTS/DTS values in MPEG-TS must be in units of 1/90000 seconds.
 const MPEG_TS_TIME_BASE: i64 = 90_000;
 
+/// Conversion factor from kilobits per second to bits per second.
+const KBPS_TO_BPS: usize = 1000;
+
 /// Target resolution for transcoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TranscodeTarget {
@@ -541,7 +544,7 @@ pub fn transcode_segment(
     video_encoder_setup.set_height(output_height);
     video_encoder_setup.set_format(ffmpeg::format::Pixel::YUV420P);
     video_encoder_setup.set_time_base(video_time_base);
-    video_encoder_setup.set_bit_rate(target.video_bitrate_kbps() as usize * 1000);
+    video_encoder_setup.set_bit_rate(target.video_bitrate_kbps() as usize * KBPS_TO_BPS);
 
     // Set encoder preset for faster encoding
     let mut encoder_options = ffmpeg::Dictionary::new();
@@ -584,7 +587,7 @@ pub fn transcode_segment(
             audio_enc_setup.set_channel_layout(audio_dec.channel_layout());
             audio_enc_setup.set_format(encoder_audio_format);
             audio_enc_setup.set_time_base(audio_time_base);
-            audio_enc_setup.set_bit_rate(target.audio_bitrate_kbps() as usize * 1000);
+            audio_enc_setup.set_bit_rate(target.audio_bitrate_kbps() as usize * KBPS_TO_BPS);
 
             let audio_enc = audio_enc_setup.open().map_err(|e| {
                 TranscodeError::TranscodeFailed(format!("Failed to open audio encoder: {e}"))
@@ -829,7 +832,7 @@ pub fn transcode_segment(
         let audio_time_base = if let Some(audio_idx) = audio_stream_index {
             input_ctx.stream(audio_idx).unwrap().time_base()
         } else {
-            ffmpeg::Rational::new(1, 90000) // Fallback to 90kHz
+            ffmpeg::Rational::new(1, MPEG_TS_TIME_BASE as i32)
         };
 
         // Flush decoder

@@ -781,20 +781,24 @@ impl Repo {
     pub fn populate_basic_metadata(&self) {
         let start = Instant::now();
         let pin = self.other_files.pin();
-        let entries: Vec<_> = pin
+        let keys: Vec<PathBuf> = pin
             .iter()
             .filter(|(_, info)| info.metadata.file_size_bytes.is_none())
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, _)| k.clone())
             .collect();
-        let count = entries.len();
+        let count = keys.len();
         drop(pin);
 
-        entries.into_par_iter().for_each(|(key, info)| {
-            let updated = OtherFileInfo {
-                metadata: info.metadata.populate_basic(),
-                ..info
-            };
-            self.other_files.pin().insert(key, updated);
+        keys.into_par_iter().for_each(|key| {
+            let pin = self.other_files.pin();
+            if let Some(info) = pin.get(&key) {
+                let updated = OtherFileInfo {
+                    metadata: info.metadata.clone().populate_basic(),
+                    ..info.clone()
+                };
+                drop(pin);
+                self.other_files.pin().insert(key, updated);
+            }
         });
 
         tracing::info!(
@@ -1145,19 +1149,20 @@ pub fn build_markdown_url_path(path: &Path, root_dir: &Path, index_file: &str) -
 
     // Ensure leading slash
     if !url.starts_with('/') {
-        url = "/".to_string() + &url;
+        url.insert(0, '/');
     }
 
     // Remove index file from path
     if url.ends_with(index_file) {
-        url = url.replace(index_file, "");
+        url.truncate(url.len() - index_file.len());
     }
 
     // Replace extension with trailing slash
-    if let Some((base, extension)) = url.rsplit_once('.')
-        && !extension.contains('/')
+    if let Some(dot_pos) = url.rfind('.')
+        && !url[dot_pos..].contains('/')
     {
-        url = base.to_string() + "/";
+        url.truncate(dot_pos);
+        url.push('/');
     }
 
     url
@@ -1172,11 +1177,11 @@ pub fn build_static_url_path(path: &Path, root_dir: &Path, static_folder: &str) 
     let mut url = pathdiff::diff_paths(path, root_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default()
-        .replace(static_folder, "");
+        .replacen(static_folder, "", 1);
 
     // Ensure leading slash
     if !url.starts_with('/') {
-        url = "/".to_string() + &url;
+        url.insert(0, '/');
     }
 
     url

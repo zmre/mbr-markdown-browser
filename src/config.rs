@@ -11,6 +11,10 @@ use figment::{
 
 use crate::errors::ConfigError;
 
+const DEFAULT_PORT: u16 = 5200;
+const DEFAULT_OEMBED_TIMEOUT_MS: u64 = 500;
+const DEFAULT_OEMBED_CACHE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+
 /// Configuration for a single sort field in multi-level sorting.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SortField {
@@ -44,8 +48,10 @@ fn default_sidebar_style() -> String {
     "panel".to_string()
 }
 
+const DEFAULT_SIDEBAR_MAX_ITEMS: usize = 100;
+
 fn default_sidebar_max_items() -> usize {
-    100
+    DEFAULT_SIDEBAR_MAX_ITEMS
 }
 
 /// Configuration for a tag source - a frontmatter field that contains tags.
@@ -303,7 +309,7 @@ impl Default for Config {
         Config {
             root_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             host: IpArray([127, 0, 0, 1]),
-            port: 5200,
+            port: DEFAULT_PORT,
             static_folder: "static".to_string(),
             markdown_extensions: vec!["md".to_string()],
             theme: "default".to_string(),
@@ -334,8 +340,8 @@ impl Default for Config {
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
-            oembed_timeout_ms: 500,
-            oembed_cache_size: 2 * 1024 * 1024, // 2MB default
+            oembed_timeout_ms: DEFAULT_OEMBED_TIMEOUT_MS,
+            oembed_cache_size: DEFAULT_OEMBED_CACHE_SIZE,
             template_folder: None,
             sort: default_sort_config(),
             build_concurrency: None, // Auto-detect based on CPU cores

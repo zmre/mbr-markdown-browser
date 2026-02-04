@@ -16,7 +16,7 @@ use tracing::{debug, error, info, trace};
 
 /// Capacity of the broadcast channel for file change events.
 /// If clients don't keep up, the oldest messages will be dropped.
-const BROADCAST_CAPACITY: usize = 100;
+pub(crate) const BROADCAST_CAPACITY: usize = 100;
 
 /// Represents a file system change event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

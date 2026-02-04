@@ -38,6 +38,12 @@ use crate::{
     templates::Templates,
 };
 
+/// Maximum build concurrency (parallel file processing limit).
+const MAX_BUILD_CONCURRENCY: usize = 32;
+
+/// Fallback concurrency when CPU core count detection fails.
+const FALLBACK_BUILD_CONCURRENCY: usize = 4;
+
 /// Calculate the directory depth from a URL path.
 ///
 /// Examples:
@@ -431,8 +437,8 @@ impl Builder {
     fn get_concurrency(&self) -> usize {
         self.config.build_concurrency.unwrap_or_else(|| {
             std::thread::available_parallelism()
-                .map(|n| std::cmp::min(n.get() * 2, 32))
-                .unwrap_or(4)
+                .map(|n| std::cmp::min(n.get() * 2, MAX_BUILD_CONCURRENCY))
+                .unwrap_or(FALLBACK_BUILD_CONCURRENCY)
         })
     }
 
@@ -779,7 +785,7 @@ impl Builder {
         );
 
         // Pass word count and reading time (200 words per minute)
-        let reading_time_minutes = word_count.div_ceil(200);
+        let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
         extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
         extra_context.insert(
             "reading_time_minutes".to_string(),

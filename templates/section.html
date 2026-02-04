@@ -3,7 +3,7 @@
 <html lang="en">
   <head>
 {% include "_head.html" %}
-    <title>{{current_path | default(value="Directory") | safe}}</title>
+    <title>{{current_path | default(value="Directory") | escape}}</title>
   </head>
   <body>
 {% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}

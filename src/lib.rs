@@ -14,6 +14,7 @@ pub mod browser;
 pub mod build;
 pub mod cli;
 pub mod config;
+pub mod constants;
 pub mod embedded_hljs;
 pub mod embedded_katex;
 pub mod embedded_pico;

@@ -33,6 +33,19 @@ use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Default HLS cache size: 200 MB.
+#[cfg(feature = "media-metadata")]
+const DEFAULT_HLS_CACHE_SIZE: usize = 200 * 1024 * 1024;
+
+/// Default outbound link cache size: 2 MB.
+const DEFAULT_LINK_CACHE_SIZE: usize = 2 * 1024 * 1024;
+
+/// Default inbound link cache size: 1 MB.
+const DEFAULT_INBOUND_LINK_CACHE_SIZE: usize = 1024 * 1024;
+
+/// TTL for inbound link cache entries in seconds.
+const INBOUND_LINK_CACHE_TTL_SECS: u64 = 60;
+
 /// Type of media for the viewer page.
 ///
 /// Used to route requests to the appropriate media viewer template
@@ -425,9 +438,8 @@ impl Server {
         #[cfg(feature = "media-metadata")]
         let video_metadata_cache = Arc::new(VideoMetadataCache::new(oembed_cache_size));
 
-        // Initialize HLS cache (200MB default size for playlists and segments)
         #[cfg(feature = "media-metadata")]
-        let hls_cache = Arc::new(HlsCache::new(200 * 1024 * 1024));
+        let hls_cache = Arc::new(HlsCache::new(DEFAULT_HLS_CACHE_SIZE));
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -479,8 +491,9 @@ impl Server {
         });
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
-        let (file_change_tx, _rx) =
-            tokio::sync::broadcast::channel::<crate::watcher::FileChangeEvent>(100);
+        let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
+            crate::watcher::FileChangeEvent,
+        >(crate::watcher::BROADCAST_CAPACITY);
         let tx_for_watcher = file_change_tx.clone();
 
         // Initialize file watcher in background to avoid blocking server startup
@@ -681,10 +694,11 @@ impl Server {
             }
         });
 
-        // Initialize link caches (use same size strategy as oembed cache)
-        // 2MB for outbound links, 1MB for inbound with 60 second TTL
-        let link_cache = Arc::new(LinkCache::new(2 * 1024 * 1024));
-        let inbound_link_cache = Arc::new(InboundLinkCache::new(1024 * 1024, 60));
+        let link_cache = Arc::new(LinkCache::new(DEFAULT_LINK_CACHE_SIZE));
+        let inbound_link_cache = Arc::new(InboundLinkCache::new(
+            DEFAULT_INBOUND_LINK_CACHE_SIZE,
+            INBOUND_LINK_CACHE_TTL_SECS,
+        ));
 
         let state = ServerState {
             base_dir,
@@ -2770,7 +2784,7 @@ impl Server {
         );
 
         // Pass word count and reading time (200 words per minute)
-        let reading_time_minutes = word_count.div_ceil(200);
+        let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
         extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
         extra_context.insert(
             "reading_time_minutes".to_string(),

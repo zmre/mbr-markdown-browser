@@ -1,5 +1,6 @@
 import { LitElement, html, css, nothing, type CSSResultGroup, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { resolveUrl } from './shared.js';
 
 /**
  * Supported media types for the viewer.
@@ -235,8 +236,9 @@ export class MbrMediaViewerElement extends LitElement {
         return;
       }
 
-      // Ensure path starts with /
-      this._path = path.startsWith('/') ? path : '/' + path;
+      // Ensure path starts with / then resolve for static builds
+      const absPath = path.startsWith('/') ? path : '/' + path;
+      this._path = resolveUrl(absPath);
       this._error = null;
       this._loading = false;
     } catch (e) {

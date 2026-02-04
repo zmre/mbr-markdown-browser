@@ -4,30 +4,31 @@
 //! to avoid redundant network requests when rendering multiple markdown files.
 
 use crate::oembed::PageInfo;
-use papaya::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
 
-/// A cached page info entry with metadata for eviction.
-#[derive(Clone)]
+/// Maximum number of entries in the oembed LRU cache.
+const OEMBED_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// A cached page info entry with size tracking.
 struct CacheEntry {
     /// The cached page information
     info: PageInfo,
-    /// When this entry was inserted (for LRU eviction)
-    inserted_at: Instant,
     /// Estimated memory size in bytes
     size_bytes: usize,
 }
 
 /// Thread-safe cache for OEmbed page information.
 ///
-/// Uses a papaya concurrent HashMap for lock-free reads and a size-based
-/// eviction strategy to bound memory usage.
+/// Uses an LRU cache with size-based eviction for O(1) get/insert
+/// and bounded memory usage.
 pub struct OembedCache {
-    /// The underlying concurrent cache
-    cache: HashMap<String, CacheEntry>,
-    /// Current total size in bytes (approximate)
-    current_size: AtomicUsize,
+    /// The underlying LRU cache, protected by a mutex.
+    /// Mutex is appropriate here because operations are fast (no I/O inside the lock).
+    cache: Mutex<LruCache<String, CacheEntry>>,
+    /// Current total size in bytes
+    current_size: Mutex<usize>,
     /// Maximum allowed size in bytes
     max_size: usize,
 }
@@ -40,9 +41,11 @@ impl OembedCache {
     /// * `max_size_bytes` - Maximum memory to use for cached entries.
     ///   Set to 0 to disable caching entirely.
     pub fn new(max_size_bytes: usize) -> Self {
+        // Use a generous count-based capacity since we manage eviction by size.
+        let cap = NonZeroUsize::new(OEMBED_CACHE_MAX_ENTRIES).unwrap();
         Self {
-            cache: HashMap::new(),
-            current_size: AtomicUsize::new(0),
+            cache: Mutex::new(LruCache::new(cap)),
+            current_size: Mutex::new(0),
             max_size: max_size_bytes,
         }
     }
@@ -50,13 +53,14 @@ impl OembedCache {
     /// Retrieves cached page info for a URL if present.
     ///
     /// Returns `None` if the URL is not in the cache.
+    /// Promotes the entry to most-recently-used on access.
     pub fn get(&self, url: &str) -> Option<PageInfo> {
         if self.max_size == 0 {
             return None;
         }
 
-        let guard = self.cache.pin();
-        match guard.get(url) {
+        let mut cache = self.cache.lock().unwrap();
+        match cache.get(url) {
             Some(entry) => {
                 tracing::debug!("oembed cache hit: {}", url);
                 Some(entry.info.clone())
@@ -70,8 +74,8 @@ impl OembedCache {
 
     /// Inserts page info into the cache.
     ///
-    /// If the cache exceeds its size limit after insertion, oldest entries
-    /// are evicted until the cache is within bounds.
+    /// If the cache exceeds its size limit after insertion, least-recently-used
+    /// entries are evicted until the cache is within bounds.
     pub fn insert(&self, url: String, info: PageInfo) {
         if self.max_size == 0 {
             return;
@@ -79,82 +83,45 @@ impl OembedCache {
 
         let size_bytes = info.estimated_size() + url.len() + std::mem::size_of::<CacheEntry>();
 
-        let entry = CacheEntry {
-            info,
-            inserted_at: Instant::now(),
-            size_bytes,
-        };
+        let entry = CacheEntry { info, size_bytes };
 
-        // Insert the entry
-        self.cache.pin().insert(url.clone(), entry);
-        // SAFETY: Relaxed ordering is acceptable here because:
-        // 1. The size tracking is approximate - we don't need perfect synchronization
-        // 2. Worst case: cache temporarily exceeds max_size until next eviction
-        // 3. No data dependency with other operations requires acquire/release
-        let new_size = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
+        let mut cache = self.cache.lock().unwrap();
+        let mut current_size = self.current_size.lock().unwrap();
+
+        // If overwriting an existing entry, subtract its old size
+        if let Some(old) = cache.push(url.clone(), entry) {
+            *current_size -= old.1.size_bytes;
+        }
+        *current_size += size_bytes;
 
         tracing::debug!("oembed cached: {} ({} bytes)", url, size_bytes);
 
-        // Evict if over limit
-        if new_size > self.max_size {
-            self.evict_oldest(new_size - self.max_size);
-        }
-    }
-
-    /// Evicts oldest entries until at least `target_bytes` have been freed.
-    ///
-    /// Uses a simple LRU-like strategy based on insertion time.
-    fn evict_oldest(&self, target_bytes: usize) {
-        // Collect entries with their timestamps
-        let guard = self.cache.pin();
-        let mut entries: Vec<(String, Instant, usize)> = guard
-            .iter()
-            .map(|(k, v)| (k.clone(), v.inserted_at, v.size_bytes))
-            .collect();
-
-        // Sort by insertion time (oldest first)
-        entries.sort_by_key(|(_, inserted_at, _)| *inserted_at);
-
-        let mut freed = 0usize;
-        let mut evict_count = 0usize;
-
-        for (url, _, size) in entries {
-            if freed >= target_bytes {
+        // Evict LRU entries until under the size limit
+        while *current_size > self.max_size {
+            if let Some((_evicted_key, evicted_entry)) = cache.pop_lru() {
+                *current_size -= evicted_entry.size_bytes;
+            } else {
                 break;
             }
-            if guard.remove(&url).is_some() {
-                freed += size;
-                evict_count += 1;
-                // Relaxed: approximate tracking, same rationale as insert
-                self.current_size.fetch_sub(size, Ordering::Relaxed);
-            }
-        }
-
-        if evict_count > 0 {
-            tracing::debug!(
-                "oembed cache evicted {} entries ({} bytes freed)",
-                evict_count,
-                freed
-            );
         }
     }
 
     /// Returns the current approximate size of the cache in bytes.
     #[cfg(test)]
     pub fn current_size(&self) -> usize {
-        self.current_size.load(Ordering::Relaxed)
+        *self.current_size.lock().unwrap()
     }
 
     /// Returns the number of entries in the cache.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.cache.pin().len()
+        self.cache.lock().unwrap().len()
     }
 
     /// Returns true if the cache is empty.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.cache.pin().is_empty()
+        self.cache.lock().unwrap().is_empty()
     }
 }
 
@@ -234,8 +201,7 @@ mod tests {
         }
 
         // Cache should have evicted some entries to stay within bounds
-        // The exact number depends on entry sizes
-        assert!(cache.current_size() <= 600); // Allow some slack due to concurrent operations
+        assert!(cache.current_size() <= 500);
     }
 
     #[test]

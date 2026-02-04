@@ -184,6 +184,14 @@ pub fn extract_cover(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
     extract_cover_sync(path)
 }
 
+/// Maximum render width for PDF cover images in pixels.
+#[cfg(feature = "media-metadata")]
+const PDF_COVER_MAX_WIDTH: f32 = 1200.0;
+
+/// Minimum render height for PDF cover images in pixels.
+#[cfg(feature = "media-metadata")]
+const PDF_COVER_MIN_HEIGHT: f32 = 1600.0;
+
 /// Internal sync implementation of cover extraction.
 #[cfg(feature = "media-metadata")]
 fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
@@ -209,13 +217,13 @@ fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
     // Calculate render dimensions - max 1200px width, preserve aspect ratio
     let page_width = page.width().value;
     let page_height = page.height().value;
-    let scale = if page_width > 1200.0 {
-        1200.0 / page_width
+    let scale = if page_width > PDF_COVER_MAX_WIDTH {
+        PDF_COVER_MAX_WIDTH / page_width
     } else {
         1.0
     };
     let render_width = (page_width * scale) as i32;
-    let max_height = (page_height * scale).max(1600.0) as i32;
+    let max_height = (page_height * scale).max(PDF_COVER_MIN_HEIGHT) as i32;
 
     // Render to bitmap
     let config = PdfRenderConfig::new()
@@ -226,10 +234,9 @@ fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
         .render_with_config(&config)
         .map_err(|e| PdfMetadataError::RenderFailed(format!("Render failed: {}", e)))?;
 
-    // Convert to image and encode as JPEG (quality 85 for good size/quality balance)
     let image = bitmap.as_image();
     let mut jpg_bytes = Vec::new();
-    let encoder = JpegEncoder::new_with_quality(&mut jpg_bytes, 85);
+    let encoder = JpegEncoder::new_with_quality(&mut jpg_bytes, crate::constants::JPEG_QUALITY);
     image
         .write_with_encoder(encoder)
         .map_err(|e| PdfMetadataError::EncodeFailed(format!("JPEG encode failed: {}", e)))?;

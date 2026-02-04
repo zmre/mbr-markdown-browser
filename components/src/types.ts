@@ -7,6 +7,8 @@
  * @module types
  */
 
+import { resolveUrl } from './shared.js';
+
 // ============================================================================
 // StaticFileKind discriminated union types
 // ============================================================================
@@ -293,7 +295,7 @@ export function getCoverImageUrl(file: OtherFileInfo): string | null {
 
   if (kind.type === 'image') {
     // Images are their own cover
-    return file.url_path;
+    return resolveUrl(file.url_path);
   }
 
   if (
@@ -302,7 +304,7 @@ export function getCoverImageUrl(file: OtherFileInfo): string | null {
     kind.type === 'audio'
   ) {
     // Sidecar cover image convention: /path/to/file.ext.cover.jpg
-    return `${file.url_path}.cover.jpg`;
+    return resolveUrl(`${file.url_path}.cover.jpg`);
   }
 
   return null;
@@ -333,16 +335,16 @@ export function getViewerUrl(file: OtherFileInfo): string {
 
   switch (kind.type) {
     case 'video':
-      return `/.mbr/videos/?path=${encodeURIComponent(file.url_path)}`;
+      return resolveUrl(`/.mbr/videos/?path=${encodeURIComponent(file.url_path)}`);
     case 'pdf':
-      return `/.mbr/pdfs/?path=${encodeURIComponent(file.url_path)}`;
+      return resolveUrl(`/.mbr/pdfs/?path=${encodeURIComponent(file.url_path)}`);
     case 'audio':
-      return `/.mbr/audio/?path=${encodeURIComponent(file.url_path)}`;
+      return resolveUrl(`/.mbr/audio/?path=${encodeURIComponent(file.url_path)}`);
     case 'image':
-      return `/.mbr/images/?path=${encodeURIComponent(file.url_path)}`;
+      return resolveUrl(`/.mbr/images/?path=${encodeURIComponent(file.url_path)}`);
     default:
       // Non-media types link directly to the file
-      return file.url_path;
+      return resolveUrl(file.url_path);
   }
 }
 
@@ -386,8 +388,8 @@ export function getFileExtension(urlPath: string): string {
  * @param bytes - File size in bytes
  * @returns Formatted size (e.g., "1.5 MB", "256 KB", "1.2 GB")
  */
-export function formatFileSize(bytes: number | undefined): string {
-  if (bytes === undefined || bytes < 0) {
+export function formatFileSize(bytes: number | null | undefined): string {
+  if (bytes == null || bytes < 0) {
     return '';
   }
 

@@ -163,7 +163,8 @@ fn extract_attached_pic(
             })?;
 
             let mut jpg_data = Vec::new();
-            let encoder = JpegEncoder::new_with_quality(&mut jpg_data, 85);
+            let encoder =
+                JpegEncoder::new_with_quality(&mut jpg_data, crate::constants::JPEG_QUALITY);
             img.write_with_encoder(encoder).map_err(|e| {
                 MetadataError::EncodeFailed(format!("Failed to encode JPEG: {}", e))
             })?;
@@ -180,7 +181,8 @@ fn extract_attached_pic(
         match image::load_from_memory(data) {
             Ok(img) => {
                 let mut jpg_data = Vec::new();
-                let encoder = JpegEncoder::new_with_quality(&mut jpg_data, 85);
+                let encoder =
+                    JpegEncoder::new_with_quality(&mut jpg_data, crate::constants::JPEG_QUALITY);
                 img.write_with_encoder(encoder).map_err(|e| {
                     MetadataError::EncodeFailed(format!("Failed to encode JPEG: {}", e))
                 })?;
@@ -352,7 +354,7 @@ fn frame_to_jpg(
         })?;
 
     let mut jpg_data = Vec::new();
-    let encoder = JpegEncoder::new_with_quality(&mut jpg_data, 85);
+    let encoder = JpegEncoder::new_with_quality(&mut jpg_data, crate::constants::JPEG_QUALITY);
 
     img.write_with_encoder(encoder)
         .map_err(|e| MetadataError::EncodeFailed(format!("Failed to encode JPEG: {}", e)))?;
