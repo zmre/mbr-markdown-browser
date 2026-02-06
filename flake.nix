@@ -361,25 +361,28 @@
             # No source needed - we're wrapping mbr-cli
             dontUnpack = true;
 
-            nativeBuildInputs = [pkgs.makeWrapper];
+            # Use makeBinaryWrapper for macOS - shell scripts can't be CFBundleExecutable
+            # for properly signed apps (Gatekeeper issues, code signing problems)
+            nativeBuildInputs = [pkgs.makeBinaryWrapper];
 
             installPhase = ''
               # CLI binary accessible at $out/bin/mbr (wrapped with pdfium path)
               mkdir -p $out/bin
-              makeWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
+              makeBinaryWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
                 --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
 
               # macOS app bundle
-              mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Resources,PlugIns}
+              mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Frameworks,Resources,PlugIns}
 
-              # Create wrapper script for app bundle that sets pdfium path
-              cat > $out/Applications/MBR.app/Contents/MacOS/mbr <<'LAUNCHER'
-              #!/bin/bash
-              export PDFIUM_DYNAMIC_LIB_PATH="${pkgs.pdfium-binaries}/lib"
-              exec "$(dirname "$0")/.mbr-unwrapped" "$@"
-              LAUNCHER
-              chmod +x $out/Applications/MBR.app/Contents/MacOS/mbr
-              cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/.mbr-unwrapped
+              # Use makeBinaryWrapper for app bundle executable (creates compiled binary, not shell script)
+              # This is required for proper code signing and Gatekeeper compatibility
+              makeBinaryWrapper ${packages.mbr-cli}/bin/mbr \
+                $out/Applications/MBR.app/Contents/MacOS/mbr \
+                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+
+              # Bundle pdfium in Frameworks/ for fallback (release builds need this when
+              # Nix store paths don't exist; Rust code searches Contents/Frameworks/)
+              cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib $out/Applications/MBR.app/Contents/Frameworks/
 
               cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
               cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
@@ -388,10 +391,15 @@
               cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
               chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
 
-              # Sign the extension first with its entitlements, then sign the app bundle
+              # Sign components from innermost to outermost:
+              # 1. Sign the bundled framework library
+              /usr/bin/codesign --force --sign - \
+                $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
+              # 2. Sign the QuickLook extension with its entitlements
               /usr/bin/codesign --force --sign - \
                 --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
                 $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+              # 3. Sign the app bundle
               /usr/bin/codesign --force --sign - $out/Applications/MBR.app
             '';
 
@@ -409,10 +417,10 @@
             pname = "mbr";
             inherit version;
             dontUnpack = true;
-            nativeBuildInputs = [pkgs.makeWrapper];
+            nativeBuildInputs = [pkgs.makeBinaryWrapper];
             installPhase = ''
               mkdir -p $out/bin
-              makeWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
+              makeBinaryWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
                 --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
             '';
             meta = packages.mbr-cli.meta;
@@ -502,12 +510,12 @@
           then ''
             mkdir -p $out
 
-            # Create staging directory for app bundle with pdfium
-            mkdir -p staging/MBR.app/Contents/Frameworks
-            cp -R ${packages.mbr}/Applications/MBR.app/* staging/MBR.app/Contents/
-            cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging/MBR.app/Contents/Frameworks/
+            # Create staging directory for app bundle
+            # The mbr package already has pdfium bundled in Contents/Frameworks/
+            mkdir -p staging
+            cp -R ${packages.mbr}/Applications/MBR.app staging/
 
-            # Create .app bundle archive (includes bundled pdfium)
+            # Create .app bundle archive (pdfium already bundled from packages.mbr)
             tar -czvf $out/mbr-${archString}.tar.gz \
               -C staging \
               MBR.app

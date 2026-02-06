@@ -33,3 +33,20 @@
 * [ ] Pull in lightningcss and auto combine and minify the pico.min.css + theme.css + user.css files.
 
 * [ ] Make demo videos
+  * Quick highlight reel
+  * Demo quicklook
+  * Demo simple preview
+    * Show live updates
+    * Show how it finds images
+    * Show how links are fixed automatically
+  * Demo markdown supported extensions
+  * Demo rich media -- media browser, video, inline pdf
+    * Covers, dynamic chapters and captions, and dynamic downscaling, too
+  * Demo oembed bare links
+  * Demo speed
+  * Demo slides
+  * Demo tags
+  * Demo customizations
+  * Demo search and browse
+    * Show advanced things like ordering
+    * Did I make a hide from browse feature? Should I?
