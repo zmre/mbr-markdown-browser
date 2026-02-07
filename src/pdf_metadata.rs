@@ -143,9 +143,9 @@ pub fn parse_pdf_cover_request(path: &str) -> Option<&str> {
 
 /// Global semaphore to limit concurrent pdfium operations.
 ///
-/// PDFium is not thread-safe for concurrent document operations from
-/// multiple library instances. Limiting to 1 permit ensures only one
-/// PDF is being rendered at a time, preventing segfaults.
+/// PDFium is a C++ library with global state that is NOT thread-safe for
+/// concurrent document operations. Limiting to 1 permit ensures only one
+/// PDF is being rendered at a time, preventing segfaults/SIGTRAP.
 #[cfg(feature = "media-metadata")]
 static PDFIUM_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
@@ -153,6 +153,19 @@ static PDFIUM_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 #[cfg(feature = "media-metadata")]
 fn pdfium_semaphore() -> &'static Semaphore {
     PDFIUM_SEMAPHORE.get_or_init(|| Semaphore::new(1))
+}
+
+/// Global mutex to serialize all pdfium operations (sync path).
+///
+/// The async path uses [`PDFIUM_SEMAPHORE`], but sync callers (including tests)
+/// need a blocking mutex to prevent concurrent library loads/operations.
+#[cfg(feature = "media-metadata")]
+static PDFIUM_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+/// Get or initialize the pdfium mutex for sync operations.
+#[cfg(feature = "media-metadata")]
+fn pdfium_mutex() -> &'static std::sync::Mutex<()> {
+    PDFIUM_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 /// Extract the first page of a PDF as a JPEG image (async version with concurrency control).
@@ -193,10 +206,19 @@ const PDF_COVER_MAX_WIDTH: f32 = 1200.0;
 const PDF_COVER_MIN_HEIGHT: f32 = 1600.0;
 
 /// Internal sync implementation of cover extraction.
+///
+/// Acquires [`PDFIUM_MUTEX`] to ensure only one thread loads or uses the
+/// PDFium library at a time. This prevents SIGTRAP/segfault from
+/// concurrent library initialization (e.g. during parallel tests).
 #[cfg(feature = "media-metadata")]
 fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
     use image::codecs::jpeg::JpegEncoder;
     use pdfium_render::prelude::*;
+
+    // Serialize all pdfium operations — the C library is not thread-safe.
+    let _guard = pdfium_mutex()
+        .lock()
+        .map_err(|e| PdfMetadataError::RenderFailed(format!("Pdfium mutex poisoned: {}", e)))?;
 
     // Initialize pdfium - try environment variable first, then system library
     let pdfium = create_pdfium_instance()?;
