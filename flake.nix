@@ -173,10 +173,10 @@
           pkgs.apple-sdk
         ]);
 
-      # Shared build inputs
+      # Shared build inputs — all builds use static ffmpeg (no runtime ffmpeg dependency)
       commonBuildInputs = with pkgs;
         [
-          ffmpeg_7-full.dev
+          ffmpegMinimalStatic
           pdfium-binaries
         ]
         ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [
@@ -196,15 +196,97 @@
           xdotool # provides libxdo needed by wry/tao
         ]);
 
+      # Static x264 for H.264 software encoding fallback
+      # Zero dependencies — only libc. ~3MB added to binary.
+      # nixpkgs' x264 only provides dynamic libs, so we build our own static lib.
+      # Source, rev, and patches match nixpkgs' x264 package for consistency.
+      x264Static = pkgs.stdenv.mkDerivation {
+        pname = "x264-static";
+        version = "unstable-2025-01-03";
+        src = pkgs.fetchFromGitLab {
+          domain = "code.videolan.org";
+          owner = "videolan";
+          repo = "x264";
+          rev = "373697b467f7cd0af88f1e9e32d4f10540df4687";
+          hash = "sha256-WWtS/UfKA4i1yakHErUnyT/3/+Wy2H5F0U0CmxW4ick=";
+        };
+        # nasm only needed on x86; ARM uses .S files assembled by $CC
+        nativeBuildInputs =
+          pkgs.lib.optional pkgs.stdenv.hostPlatform.isx86 pkgs.nasm
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [pkgs.apple-sdk];
+        enableParallelBuilding = true;
+        configurePlatforms = [];
+        # Match nixpkgs: on x86 unset AS (use nasm), on ARM set AS=$CC
+        # so .S assembly files go through the C preprocessor
+        preConfigure =
+          pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isx86 ''
+            unset AS
+          ''
+          + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isAarch ''
+            export AS=$CC
+          '';
+        configureFlags = [
+          "--enable-static"
+          "--disable-shared"
+          "--enable-pic"
+          "--disable-cli"
+        ];
+      };
+
+      # Minimal static ffmpeg used by all builds
+      # Zero external codec dependencies — only system frameworks + libc + libx264
+      # Static linking avoids hardcoded Nix store paths for ffmpeg dylibs in binaries
+      ffmpegMinimalStatic = pkgs.stdenv.mkDerivation {
+        pname = "ffmpeg-minimal-static";
+        version = "7.1";
+        src = pkgs.fetchurl {
+          url = "https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz";
+          hash = "sha256-QJc9RJcNvIPvMCsGCfLnSYK+LYWRbdLudHLTBninq+Y=";
+        };
+        unpackCmd = "tar xf $curSrc";
+        sourceRoot = "ffmpeg-7.1";
+        nativeBuildInputs = with pkgs;
+          [pkg-config perl yasm nasm]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [pkgs.apple-sdk];
+        buildInputs = [x264Static];
+
+        configurePhase = ''
+          ./configure \
+            --prefix=$out \
+            --cc=$CC --cxx=$CXX \
+            --enable-static --disable-shared --enable-pic \
+            --disable-autodetect --disable-programs --disable-doc \
+            --enable-gpl --enable-version3 \
+            --enable-avcodec --enable-avformat --enable-avfilter \
+            --enable-avdevice --enable-swscale --enable-swresample \
+            --enable-libx264 \
+            ${pkgs.lib.optionalString pkgs.stdenv.isDarwin
+              "--enable-videotoolbox --enable-audiotoolbox"} \
+            --extra-cflags="-w -O3"
+        '';
+        buildPhase = "make -j$NIX_BUILD_CORES";
+        installPhase = "make install";
+      };
+
       # Shared environment variables for builds
+      # All builds use static ffmpeg — no FFMPEG_DIR (which forces build.rs to skip
+      # pkg-config). Instead, PKG_CONFIG_PATH lets ffmpeg-sys-next discover our static libs.
       commonEnvVars = {
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        FFMPEG_DIR = "${pkgs.ffmpeg_7-full.dev}";
+        PKG_CONFIG_PATH = "${ffmpegMinimalStatic}/lib/pkgconfig";
         PDFIUM_DYNAMIC_LIB_PATH = "${pkgs.pdfium-binaries}/lib";
         # Tell bindgen where to find glibc headers on Linux (required by ffmpeg-sys-next)
         BINDGEN_EXTRA_CLANG_ARGS =
           pkgs.lib.optionalString pkgs.stdenv.isLinux
           "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
+        # ffmpeg-sys-next's build.rs unconditionally links deprecated macOS frameworks
+        # (QTKit, OpenGL, VideoDecodeAcceleration) when static linking is enabled.
+        # Our minimal ffmpeg doesn't use them, but they fail to load on macOS 15+.
+        # Use -weak_framework so dyld doesn't fail if they're absent at runtime.
+        RUSTFLAGS = pkgs.lib.optionalString pkgs.stdenv.isDarwin
+          (builtins.concatStringsSep " " (map (f: "-C link-arg=-Wl,-weak_framework,${f}") [
+            "QTKit" "OpenGL" "VideoDecodeAcceleration"
+          ]));
       };
 
       # Common arguments shared between builds
@@ -224,6 +306,7 @@
         // {
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
+          cargoExtraArgs = "--locked --features gui,media-metadata,ffmpeg-static,ffi";
           preBuild = ''
             # Create empty component files for dependency resolution
             # Must match the actual file names produced by vite build (see vite.config.ts)
@@ -329,11 +412,12 @@
       );
 
       # Core CLI binary (all platforms) - no app bundle, no QuickLook
+      # Statically links ffmpeg — no runtime ffmpeg dependency
       packages.mbr-cli = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
           pname = "mbr-cli";
-          cargoExtraArgs = "--locked --all-features";
+          cargoExtraArgs = "--locked --features gui,media-metadata,ffmpeg-static,ffi";
           doCheck = false; # Tests run separately via packages.tests
 
           preBuild = ''
@@ -344,7 +428,7 @@
           meta = with pkgs.lib; {
             description = "A markdown viewer, browser, and static site generator (CLI only)";
             homepage = "https://github.com/zmre/mbr";
-            license = licenses.mit;
+            license = licenses.gpl3Plus;
             mainProgram = "mbr";
             platforms = platforms.unix;
           };
@@ -406,7 +490,7 @@
             meta = with pkgs.lib; {
               description = "A markdown viewer, browser, and static site generator";
               homepage = "https://github.com/zmre/mbr";
-              license = licenses.mit;
+              license = licenses.gpl3Plus;
               mainProgram = "mbr";
               platforms = platforms.darwin;
             };
@@ -438,11 +522,11 @@
           '';
         });
 
-      # Test - runs all tests with all features enabled
+      # Test - runs all tests
       packages.tests = craneLib.cargoTest (commonArgs
         // {
           inherit cargoArtifacts;
-          cargoTestExtraArgs = "--all-features";
+          cargoTestExtraArgs = "--features gui,media-metadata,ffmpeg-static,ffi";
 
           preBuild = ''
             mkdir -p templates/components-js
@@ -489,6 +573,9 @@
         ''
       );
 
+      # Expose the minimal static ffmpeg for independent build/verification
+      packages.ffmpegMinimalStatic = ffmpegMinimalStatic;
+
       packages.default = packages.mbr;
 
       # Checks run by `nix flake check`
@@ -511,11 +598,39 @@
             mkdir -p $out
 
             # Create staging directory for app bundle
-            # The mbr package already has pdfium bundled in Contents/Frameworks/
+            # Start from the full app bundle (has pdfium, QuickLook, etc.)
             mkdir -p staging
             cp -R ${packages.mbr}/Applications/MBR.app staging/
 
-            # Create .app bundle archive (pdfium already bundled from packages.mbr)
+            # Replace the wrapper binary with the unwrapped binary (no pdfium env var wrapper)
+            # The release bundle has pdfium in Frameworks/ so the wrapper is unnecessary
+            chmod u+w staging/MBR.app/Contents/MacOS
+            chmod u+w staging/MBR.app/Contents/MacOS/mbr
+            cp ${packages.mbr-cli}/bin/mbr staging/MBR.app/Contents/MacOS/mbr
+
+            # Rewrite Nix store libiconv path to system libiconv
+            # Nix's linker uses its own libiconv, but macOS ships /usr/lib/libiconv.2.dylib
+            /usr/bin/install_name_tool -change \
+              ${pkgs.libiconv}/lib/libiconv.2.dylib \
+              /usr/lib/libiconv.2.dylib \
+              staging/MBR.app/Contents/MacOS/mbr
+
+            # Re-sign: replacing the binary invalidates the original signature.
+            # codesign may fail inside Nix sandbox, so allow failure and strip
+            # invalid signatures if signing doesn't work.
+            /usr/bin/codesign --force --sign - \
+              staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || \
+              /usr/bin/codesign --remove-signature \
+                staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || true
+            /usr/bin/codesign --force --sign - \
+              --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+              staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || \
+              /usr/bin/codesign --remove-signature \
+                staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
+            /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || \
+              /usr/bin/codesign --remove-signature staging/MBR.app 2>/dev/null || true
+
+            # Create .app bundle archive
             tar -czvf $out/mbr-${archString}.tar.gz \
               -C staging \
               MBR.app
@@ -524,6 +639,11 @@
             mkdir -p staging-cli/lib
             cp ${packages.mbr-cli}/bin/mbr staging-cli/
             cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging-cli/lib/
+            # Rewrite Nix store libiconv path to system libiconv
+            /usr/bin/install_name_tool -change \
+              ${pkgs.libiconv}/lib/libiconv.2.dylib \
+              /usr/lib/libiconv.2.dylib \
+              staging-cli/mbr
             tar -czvf $out/mbr-cli-${archString}.tar.gz \
               -C staging-cli \
               mbr lib
@@ -541,7 +661,7 @@
 
             # Create CLI archive with bundled pdfium in lib/ subdirectory
             mkdir -p staging/lib
-            cp ${packages.mbr}/bin/mbr staging/
+            cp ${packages.mbr-cli}/bin/mbr staging/
             cp ${pkgs.pdfium-binaries}/lib/libpdfium.so staging/lib/
             tar -czvf $out/mbr-${archString}.tar.gz \
               -C staging \
@@ -599,7 +719,6 @@
               swiftlint # Swift linter (like cargo clippy)
             ]);
 
-          PKG_CONFIG_PATH = "${pkgs.ffmpeg_7-full.dev}/lib/pkgconfig";
           LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
           RUST_LOG = "mbr=debug,tower_http=debug";
 

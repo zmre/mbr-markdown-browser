@@ -3,7 +3,7 @@ name = "mbr"
 version = "0.4.1"
 edition = "2024"
 authors = ["zmre"]
-license = "MIT"
+license = "GPL-3.0-or-later"
 readme = "README.md"
 description = "A markdown viewer and browser"
 repository = "https://github.com/zmre/mbr"
@@ -23,6 +23,8 @@ default = ["gui", "media-metadata"]
 gui = ["dep:wry", "dep:tao", "dep:muda", "dep:rfd"]
 # Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
 media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render"]
+# Static ffmpeg linking for (remove runtime ffmpeg dependency)
+ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
 # FFI for QuickLook extension - only needed when building the staticlib
 ffi = ["dep:uniffi"]
 
