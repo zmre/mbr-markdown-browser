@@ -283,7 +283,13 @@
         # (QTKit, OpenGL, VideoDecodeAcceleration) when static linking is enabled.
         # Our minimal ffmpeg doesn't use them, but they fail to load on macOS 15+.
         # Use -weak_framework so dyld doesn't fail if they're absent at runtime.
+        # RUSTDOCFLAGS is needed too: doc-tests are compiled by rustdoc (not rustc),
+        # so RUSTFLAGS alone doesn't cover them.
         RUSTFLAGS = pkgs.lib.optionalString pkgs.stdenv.isDarwin
+          (builtins.concatStringsSep " " (map (f: "-C link-arg=-Wl,-weak_framework,${f}") [
+            "QTKit" "OpenGL" "VideoDecodeAcceleration"
+          ]));
+        RUSTDOCFLAGS = pkgs.lib.optionalString pkgs.stdenv.isDarwin
           (builtins.concatStringsSep " " (map (f: "-C link-arg=-Wl,-weak_framework,${f}") [
             "QTKit" "OpenGL" "VideoDecodeAcceleration"
           ]));
