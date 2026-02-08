@@ -102,6 +102,14 @@ impl TestServer {
             .await
             .expect("Request failed")
     }
+
+    /// Wait for the background repo scan to complete.
+    ///
+    /// The `/.mbr/site.json` endpoint blocks until the scan is finished,
+    /// so fetching it serves as a reliable synchronization point.
+    async fn wait_for_scan(&self) {
+        let _ = self.get("/.mbr/site.json").await;
+    }
 }
 
 #[tokio::test]
@@ -428,6 +436,7 @@ async fn test_search_endpoint_returns_json() {
     repo.create_markdown("test.md", "# Test Page\n\nSome searchable content.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
     let response = server.post_json("/.mbr/search", r#"{"q": "test"}"#).await;
 
     assert_eq!(response.status(), 200);
@@ -443,6 +452,7 @@ async fn test_search_finds_by_title() {
     repo.create_markdown_with_frontmatter("findme.md", &frontmatter, "Some content.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
     let response = server
         .post_json("/.mbr/search", r#"{"q": "Unique Search"}"#)
         .await;
@@ -469,6 +479,7 @@ async fn test_search_with_scope_metadata() {
     repo.create_markdown_with_frontmatter("meta.md", &frontmatter, "Body text without match.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
     let response = server
         .post_json(
             "/.mbr/search",
@@ -491,6 +502,7 @@ async fn test_search_with_limit() {
     }
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
     let response = server
         .post_json("/.mbr/search", r#"{"q": "file", "limit": 2}"#)
         .await;
@@ -512,6 +524,7 @@ async fn test_search_includes_duration() {
     repo.create_markdown("test.md", "# Test");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
     let response = server.post_json("/.mbr/search", r#"{"q": "test"}"#).await;
 
     assert_eq!(response.status(), 200);
@@ -676,6 +689,7 @@ async fn test_search_with_facet() {
     repo.create_markdown_with_frontmatter("recipe.md", &other_fm, "Cooking recipes.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
 
     // Search with facet should only find matching file
     let response = server
@@ -711,6 +725,7 @@ async fn test_search_facet_contains_match() {
     repo.create_markdown_with_frontmatter("systems.md", &frontmatter, "Low-level code.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
 
     // Facet should use contains match
     let response = server
@@ -735,6 +750,7 @@ async fn test_search_facet_case_insensitive() {
     repo.create_markdown_with_frontmatter("code.md", &frontmatter, "Some code.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
 
     // Facet should be case-insensitive
     let response = server
@@ -758,6 +774,7 @@ async fn test_search_with_folder_scope() {
     repo.create_markdown("blog/post.md", "# Post\n\nBlog post about guides.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
 
     // Search everywhere
     let response = server
@@ -804,6 +821,7 @@ async fn test_search_arbitrary_frontmatter_field() {
     repo.create_markdown_with_frontmatter("article.md", &frontmatter, "Content.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
 
     // Should be able to search custom frontmatter fields
     let response = server
@@ -832,6 +850,7 @@ async fn test_search_mixed_terms_and_facets() {
     repo.create_markdown_with_frontmatter("python.md", &other_fm, "Learn Python basics.");
 
     let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
 
     // Search with both term and facet
     let response = server

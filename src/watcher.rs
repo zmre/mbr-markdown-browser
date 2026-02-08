@@ -221,6 +221,26 @@ mod tests {
     // RecommendedWatcher delivers events faster than PollWatcher, but allow headroom
     const WATCH_TIMEOUT_SECS: u64 = 5;
 
+    /// Drain events from the receiver until one matches the predicate, or timeout.
+    ///
+    /// Filesystem watchers can emit spurious events (directory metadata, temp files)
+    /// so tests must not assume the *first* event is the one they care about.
+    async fn recv_matching(
+        rx: &mut broadcast::Receiver<FileChangeEvent>,
+        predicate: impl Fn(&FileChangeEvent) -> bool,
+    ) -> Option<FileChangeEvent> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(WATCH_TIMEOUT_SECS);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(event)) if predicate(&event) => return Some(event),
+                Ok(Ok(_)) => continue, // spurious event, keep draining
+                Ok(Err(_)) => return None,
+                Err(_) => return None, // timed out
+            }
+        }
+        None
+    }
+
     #[tokio::test]
     async fn test_watcher_creates_and_receives_events() {
         let temp_dir = TempDir::new().unwrap();
@@ -232,13 +252,13 @@ mod tests {
         let test_file = base_path.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
-        // Wait for the event
-        let event = tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx.recv()).await;
-
-        assert!(event.is_ok(), "Should receive file change event");
-        let change = event.unwrap().unwrap();
-        assert_eq!(change.event, ChangeEventType::Created);
-        assert!(change.relative_path.contains("test.md"));
+        // Wait for an event matching our file (skip spurious events)
+        let change = recv_matching(&mut rx, |e| e.relative_path.contains("test.md")).await;
+        assert!(
+            change.is_some(),
+            "Should receive file change event for test.md"
+        );
+        assert_eq!(change.unwrap().event, ChangeEventType::Created);
     }
 
     #[tokio::test]
@@ -254,15 +274,9 @@ mod tests {
         let visible_file = base_path.join("visible.md");
         fs::write(&visible_file, "visible content").unwrap();
 
-        // Wait for the event
-        let event = tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx.recv()).await;
-        assert!(event.is_ok(), "Should receive event for visible.md");
-        let change = event.unwrap().unwrap();
-        assert!(
-            change.relative_path.contains("visible.md"),
-            "Event should be for visible.md, got: {}",
-            change.relative_path
-        );
+        // Wait for an event matching our file (skip spurious events)
+        let change = recv_matching(&mut rx, |e| e.relative_path.contains("visible.md")).await;
+        assert!(change.is_some(), "Should receive event for visible.md");
 
         // Now create an ignored directory and file
         let target_dir = base_path.join("target");
@@ -337,19 +351,12 @@ mod tests {
         let template_file = template_path.join("custom.css");
         fs::write(&template_file, "/* custom css */").unwrap();
 
-        // Should receive the event from template folder
-        let event = tokio::time::timeout(Duration::from_secs(WATCH_TIMEOUT_SECS), rx.recv()).await;
-
+        // Wait for an event matching our file (skip spurious events)
+        let change = recv_matching(&mut rx, |e| e.path.contains("custom.css")).await;
         assert!(
-            event.is_ok(),
-            "Should receive file change event from template folder"
+            change.is_some(),
+            "Should receive file change event for custom.css from template folder"
         );
-        let change = event.unwrap().unwrap();
-        assert_eq!(change.event, ChangeEventType::Created);
-        assert!(
-            change.path.contains("custom.css"),
-            "Event should be for custom.css, got: {}",
-            change.path
-        );
+        assert_eq!(change.unwrap().event, ChangeEventType::Created);
     }
 }
