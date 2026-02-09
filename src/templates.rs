@@ -137,23 +137,32 @@ impl Templates {
         Ok(html_output)
     }
 
-    pub fn render_section(
-        &self,
+    /// Lock-free generic template render that takes a `&Tera` directly.
+    ///
+    /// Use with `tera_clone()` to avoid `Arc<RwLock<Tera>>` contention when
+    /// rendering many pages in parallel (e.g., from a rayon thread pool).
+    pub fn render_template_with_tera(
+        tera: &Tera,
+        template_name: &str,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let mut context = Context::new();
         context_data.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
-        let html_output = self
-            .tera
-            .read()
-            .render("section.html", &context)
+        tera.render(template_name, &context)
             .map_err(|e| TemplateError::RenderFailed {
-                template_name: "section.html".to_string(),
+                template_name: template_name.to_string(),
                 source: e,
-            })?;
-        Ok(html_output)
+            })
+    }
+
+    pub fn render_section(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "section.html", context_data)
     }
 
     /// Renders the home page (root directory) using home.html template.
@@ -162,19 +171,8 @@ impl Templates {
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
-        let mut context = Context::new();
-        context_data.iter().for_each(|(k, v)| {
-            context.insert(k, v);
-        });
-        let html_output = self
-            .tera
-            .read()
-            .render("home.html", &context)
-            .map_err(|e| TemplateError::RenderFailed {
-                template_name: "home.html".to_string(),
-                source: e,
-            })?;
-        Ok(html_output)
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "home.html", context_data)
     }
 
     /// Renders an error page using error.html template.
@@ -221,17 +219,8 @@ impl Templates {
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
-        let mut context = Context::new();
-        context_data.iter().for_each(|(k, v)| {
-            context.insert(k, v);
-        });
-        let html_output = self.tera.read().render("tag.html", &context).map_err(|e| {
-            TemplateError::RenderFailed {
-                template_name: "tag.html".to_string(),
-                source: e,
-            }
-        })?;
-        Ok(html_output)
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "tag.html", context_data)
     }
 
     /// Renders a tag source index showing all tags from a source.
@@ -248,19 +237,8 @@ impl Templates {
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
-        let mut context = Context::new();
-        context_data.iter().for_each(|(k, v)| {
-            context.insert(k, v);
-        });
-        let html_output = self
-            .tera
-            .read()
-            .render("tag_index.html", &context)
-            .map_err(|e| TemplateError::RenderFailed {
-                template_name: "tag_index.html".to_string(),
-                source: e,
-            })?;
-        Ok(html_output)
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "tag_index.html", context_data)
     }
 
     /// Renders a media viewer page for video, PDF, or audio content.

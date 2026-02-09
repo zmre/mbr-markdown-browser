@@ -14,7 +14,6 @@ use std::{
 use percent_encoding::percent_decode_str;
 use walkdir::WalkDir;
 
-use futures::stream::{self, StreamExt, TryStreamExt};
 use scraper::{Html, Selector};
 
 use std::sync::Arc;
@@ -419,12 +418,28 @@ impl Builder {
     }
 
     /// Creates or cleans the output directory.
+    ///
+    /// Uses an atomic rename to move the old directory aside, then deletes it in a background
+    /// thread. This lets the build start immediately instead of waiting for recursive removal,
+    /// which is O(n) on the number of filesystem entries.
     fn prepare_output_dir(&self) -> Result<(), BuildError> {
         if self.output_dir.exists() {
-            fs::remove_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
+            // Rename old dir aside (O(1) atomic operation), then delete in background.
+            let tmp_dir = self
+                .output_dir
+                .with_extension(format!("old.{}", std::process::id()));
+            // If a stale temp dir exists from a previous interrupted build, remove it first
+            if tmp_dir.exists() {
+                let _ = fs::remove_dir_all(&tmp_dir);
+            }
+            fs::rename(&self.output_dir, &tmp_dir).map_err(|e| BuildError::CreateDirFailed {
                 path: self.output_dir.clone(),
                 source: e,
             })?;
+            // Spawn background thread to delete the old directory
+            std::thread::spawn(move || {
+                let _ = fs::remove_dir_all(&tmp_dir);
+            });
         }
         fs::create_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
             path: self.output_dir.clone(),
@@ -616,26 +631,43 @@ impl Builder {
         print_progress("Writing link files", 0, count);
 
         let page_urls: Vec<String> = all_page_urls.into_iter().collect();
-        let inbound_index = Arc::new(inbound_index);
-        let outbound_index = Arc::new(outbound_index);
-        let completed_clone = completed.clone();
 
-        stream::iter(page_urls)
-            .map(|url_path| {
-                let inbound_index = inbound_index.clone();
-                let outbound_index = outbound_index.clone();
-                let completed = completed_clone.clone();
-                async move {
-                    let result =
-                        self.write_single_link_file(&url_path, &outbound_index, &inbound_index);
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Writing link files", done, count);
-                    result
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            page_urls.par_iter().for_each(|url_path| {
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                match self.write_single_link_file(url_path, &outbound_index, &inbound_index) {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Writing link files", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Writing link files", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -961,34 +993,63 @@ impl Builder {
             concurrency
         );
 
+        // Clone Tera once before entering the rayon pool to avoid per-file lock contention
+        let tera_snapshot = self.templates.tera_clone();
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Generating sections", 0, count);
 
-        // Convert HashSet to Vec for stream iteration
+        // Convert HashSet to Vec for rayon iteration
         let directories: Vec<_> = directories.into_iter().collect();
 
-        let completed_clone = completed.clone();
-        stream::iter(directories)
-            .map(|dir| {
-                let completed = completed_clone.clone();
-                async move {
-                    let result = self.render_directory_page(&dir).await;
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Generating sections", done, count);
-                    result
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            directories.par_iter().for_each(|dir| {
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                match self.render_directory_page_sync(dir, &tera_snapshot) {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Generating sections", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Generating sections", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
-    /// Renders a single directory page.
-    async fn render_directory_page(&self, relative_dir: &Path) -> Result<(), BuildError> {
+    /// Renders a single directory page synchronously with a pre-cloned Tera.
+    fn render_directory_page_sync(
+        &self,
+        relative_dir: &Path,
+        tera: &tera::Tera,
+    ) -> Result<(), BuildError> {
         let is_root = relative_dir.as_os_str().is_empty();
 
         // Calculate page depth for relative path generation
@@ -1146,12 +1207,9 @@ impl Builder {
             serde_json::json!(self.config.sidebar_max_items),
         );
 
-        // Render template
-        let html_output = if is_root {
-            self.templates.render_home(context)?
-        } else {
-            self.templates.render_section(context)?
-        };
+        // Render template (lock-free — uses pre-cloned Tera)
+        let template_name = if is_root { "home.html" } else { "section.html" };
+        let html_output = Templates::render_template_with_tera(tera, template_name, context)?;
 
         // Determine output path
         let output_path = if is_root {
@@ -1219,36 +1277,129 @@ impl Builder {
             concurrency
         );
 
+        // Clone Tera once before entering the rayon pool to avoid per-file lock contention
+        let tera_snapshot = self.templates.tera_clone();
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Generating tag pages", 0, count);
 
-        let completed_clone = completed.clone();
-        stream::iter(tasks)
-            .map(|(source, value)| {
-                let completed = completed_clone.clone();
-                async move {
-                    let result = if let Some(ref tag_value) = value {
-                        self.render_single_tag_page(&source, tag_value).await
-                    } else {
-                        self.render_tag_source_index(&source).await
-                    };
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Generating tag pages", done, count);
-                    result
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            tasks.par_iter().for_each(|(source, value)| {
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                let result = if let Some(tag_value) = value {
+                    self.render_single_tag_page_sync(source, tag_value, &tera_snapshot)
+                } else {
+                    self.render_tag_source_index_sync(source, &tera_snapshot)
+                };
+                match result {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Generating tag pages", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Generating tag pages", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
-    /// Renders a single tag page showing all pages with that tag.
-    async fn render_single_tag_page(&self, source: &str, value: &str) -> Result<(), BuildError> {
-        // Find the TagSource config for labels
+    /// Synchronous version of tag page rendering for use with rayon.
+    /// Takes a pre-cloned `&Tera` to avoid lock contention.
+    fn render_single_tag_page_sync(
+        &self,
+        source: &str,
+        value: &str,
+        tera: &tera::Tera,
+    ) -> Result<(), BuildError> {
+        let context = self.build_single_tag_page_context(source, value);
+        let context = match context {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let html_output = Templates::render_template_with_tera(tera, "tag.html", context.0)?;
+
+        // Write file (context.1 = output_path)
+        if !context.1.exists() {
+            if let Some(parent) = context.1.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            fs::write(&context.1, html_output).map_err(|e| BuildError::WriteFailed {
+                path: context.1,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Synchronous version of tag source index rendering for use with rayon.
+    fn render_tag_source_index_sync(
+        &self,
+        source: &str,
+        tera: &tera::Tera,
+    ) -> Result<(), BuildError> {
+        let context = self.build_tag_source_index_context(source);
+        let context = match context {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let html_output = Templates::render_template_with_tera(tera, "tag_index.html", context.0)?;
+
+        if !context.1.exists() {
+            if let Some(parent) = context.1.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            fs::write(&context.1, html_output).map_err(|e| BuildError::WriteFailed {
+                path: context.1,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Builds context and output path for a single tag page.
+    /// Returns None if the tag should be skipped (empty sanitized path).
+    fn build_single_tag_page_context(
+        &self,
+        source: &str,
+        value: &str,
+    ) -> Option<(HashMap<String, serde_json::Value>, PathBuf)> {
         let tag_source = self
             .config
             .tag_sources
@@ -1260,24 +1411,17 @@ impl Builder {
             None => (source.to_string(), format!("{}s", source)),
         };
 
-        // Get display value for the tag
         let display_value = self
             .repo
             .tag_index
             .get_tag_display(source, value)
             .unwrap_or_else(|| value.to_string());
 
-        // Get pages with this tag
         let pages = self.repo.tag_index.get_pages(source, value);
-
-        // Calculate URL path and depth
         let url_path = format!("/{}/{}/", source, value);
         let depth = url_depth(&url_path);
 
-        // Build context
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-
-        // Tag information
         context.insert(
             "tag_source".to_string(),
             serde_json::Value::String(source.to_string()),
@@ -1299,7 +1443,6 @@ impl Builder {
             serde_json::Value::Number(pages.len().into()),
         );
 
-        // Pages array with relative URLs
         let pages_json: Vec<serde_json::Value> = pages
             .iter()
             .map(|p| {
@@ -1312,7 +1455,6 @@ impl Builder {
             .collect();
         context.insert("pages".to_string(), serde_json::Value::Array(pages_json));
 
-        // Static build settings
         context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
         context.insert(
             "relative_base".to_string(),
@@ -1323,7 +1465,6 @@ impl Builder {
             serde_json::Value::String(relative_root(depth)),
         );
 
-        // Breadcrumbs with relative URLs
         let breadcrumbs_json = vec![
             serde_json::json!({
                 "name": "Home",
@@ -1343,7 +1484,6 @@ impl Builder {
             serde_json::Value::String(display_value),
         );
 
-        // Pass sidebar navigation configuration
         context.insert(
             "sidebar_style".to_string(),
             serde_json::json!(self.config.sidebar_style),
@@ -1353,55 +1493,38 @@ impl Builder {
             serde_json::json!(self.config.sidebar_max_items),
         );
 
-        // Render template
-        let html_output = self.templates.render_tag(context)?;
-
-        // Sanitize source and value to prevent path traversal (defense-in-depth)
+        // Sanitize source and value to prevent path traversal
         let safe_source = crate::wikilink::sanitize_path_component(source);
         let safe_value = crate::wikilink::sanitize_path_component(value);
         if safe_source.is_empty() || safe_value.is_empty() {
             tracing::warn!(
                 "Skipping tag page with empty sanitized source={source:?} value={value:?}"
             );
-            return Ok(());
+            return None;
         }
 
-        // Determine output path
         let output_path = self
             .output_dir
             .join(&safe_source)
             .join(&safe_value)
             .join("index.html");
 
-        // Defense-in-depth: verify the output path stays within output_dir
         if !output_path.starts_with(&self.output_dir) {
             tracing::warn!(
                 "Tag page path escaped output directory: source={source:?} value={value:?}"
             );
-            return Ok(());
+            return None;
         }
 
-        // Create parent directories and write file (only if not exists - files take precedence)
-        if !output_path.exists() {
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
-                path: output_path,
-                source: e,
-            })?;
-        }
-
-        Ok(())
+        Some((context, output_path))
     }
 
-    /// Renders a tag source index page showing all tags from that source.
-    async fn render_tag_source_index(&self, source: &str) -> Result<(), BuildError> {
-        // Find the TagSource config for labels
+    /// Builds context and output path for a tag source index page.
+    /// Returns None if the source should be skipped (empty sanitized path).
+    fn build_tag_source_index_context(
+        &self,
+        source: &str,
+    ) -> Option<(HashMap<String, serde_json::Value>, PathBuf)> {
         let tag_source = self
             .config
             .tag_sources
@@ -1413,17 +1536,11 @@ impl Builder {
             None => (source.to_string(), format!("{}s", source)),
         };
 
-        // Get all tags for this source
         let tags = self.repo.tag_index.get_all_tags(source);
-
-        // Calculate URL path and depth
         let url_path = format!("/{}/", source);
         let depth = url_depth(&url_path);
 
-        // Build context
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-
-        // Tag source information
         context.insert(
             "tag_source".to_string(),
             serde_json::Value::String(source.to_string()),
@@ -1441,7 +1558,6 @@ impl Builder {
             serde_json::Value::Number(tags.len().into()),
         );
 
-        // Tags array with relative URLs
         let tags_json: Vec<serde_json::Value> = tags
             .iter()
             .map(|t| {
@@ -1454,7 +1570,6 @@ impl Builder {
             .collect();
         context.insert("tags".to_string(), serde_json::Value::Array(tags_json));
 
-        // Static build settings
         context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
         context.insert(
             "relative_base".to_string(),
@@ -1465,7 +1580,6 @@ impl Builder {
             serde_json::Value::String(relative_root(depth)),
         );
 
-        // Breadcrumbs with relative URLs
         let breadcrumbs_json = vec![serde_json::json!({
             "name": "Home",
             "url": make_relative_url("/", depth)
@@ -1479,7 +1593,6 @@ impl Builder {
             serde_json::Value::String(plural_label),
         );
 
-        // Pass sidebar navigation configuration
         context.insert(
             "sidebar_style".to_string(),
             serde_json::json!(self.config.sidebar_style),
@@ -1489,41 +1602,20 @@ impl Builder {
             serde_json::json!(self.config.sidebar_max_items),
         );
 
-        // Render template
-        let html_output = self.templates.render_tag_index(context)?;
-
-        // Sanitize source to prevent path traversal (defense-in-depth)
         let safe_source = crate::wikilink::sanitize_path_component(source);
         if safe_source.is_empty() {
             tracing::warn!("Skipping tag source index with empty sanitized source={source:?}");
-            return Ok(());
+            return None;
         }
 
-        // Determine output path
         let output_path = self.output_dir.join(&safe_source).join("index.html");
 
-        // Defense-in-depth: verify the output path stays within output_dir
         if !output_path.starts_with(&self.output_dir) {
             tracing::warn!("Tag source index path escaped output directory: source={source:?}");
-            return Ok(());
+            return None;
         }
 
-        // Create parent directories and write file (only if not exists - files take precedence)
-        if !output_path.exists() {
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
-                path: output_path,
-                source: e,
-            })?;
-        }
-
-        Ok(())
+        Some((context, output_path))
     }
 
     /// Creates symlinks for static assets.
