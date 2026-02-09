@@ -241,6 +241,14 @@ fn normalize_path(path: &Path) -> PathBuf {
     components.iter().collect()
 }
 
+/// Checks if a link target exists using a pre-built set of valid file paths.
+///
+/// Uses O(1) HashSet lookups instead of filesystem stat() calls.
+/// Handles both direct file matches and the directory/index.html convention.
+fn link_target_exists(path: &Path, valid_files: &HashSet<PathBuf>) -> bool {
+    valid_files.contains(path) || valid_files.contains(&path.join("index.html"))
+}
+
 /// Statistics from a build run.
 #[derive(Debug, Default)]
 pub struct BuildStats {
@@ -2128,74 +2136,79 @@ impl Builder {
     ///
     /// Returns a list of broken links found.
     fn validate_links(&self) -> Vec<BrokenLink> {
-        let mut broken_links = Vec::new();
+        use rayon::prelude::*;
 
         // Create selector for anchor tags
         let selector = match Selector::parse("a[href]") {
             Ok(s) => s,
-            Err(_) => return broken_links, // Should never fail with this simple selector
+            Err(_) => return Vec::new(), // Should never fail with this simple selector
         };
 
-        // Walk through all HTML files in output directory
+        // Single WalkDir pass: build a HashSet of all files (for O(1) link lookups)
+        // and collect HTML file paths (for parallel processing).
+        let mut valid_files: HashSet<PathBuf> = HashSet::new();
+        let mut html_files: Vec<PathBuf> = Vec::new();
+        let mbr_prefix = self.output_dir.join(".mbr");
+
         for entry in WalkDir::new(&self.output_dir)
             .follow_links(true)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
         {
-            let path = entry.path();
-
-            // Skip .mbr directory (Pagefind UI, etc.)
-            if path.starts_with(self.output_dir.join(".mbr")) {
-                continue;
-            }
-
-            // Read HTML content
-            let html_content = match fs::read_to_string(path) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-
-            // Calculate source page path for error reporting
-            let source_page = path
-                .strip_prefix(&self.output_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-
-            // Parse HTML and find all links
-            let document = Html::parse_document(&html_content);
-
-            for element in document.select(&selector) {
-                if let Some(href) = element.value().attr("href") {
-                    // Skip external links and special protocols
-                    if href.starts_with("http://")
-                        || href.starts_with("https://")
-                        || href.starts_with("//")
-                        || href.starts_with("mailto:")
-                        || href.starts_with("tel:")
-                        || href.starts_with("javascript:")
-                        || href.starts_with("data:")
-                        || href.starts_with("#")
-                    {
-                        continue;
-                    }
-
-                    // Resolve the link relative to the current file's directory
-                    if let Some(resolved) = self.resolve_link(path, href)
-                        && !self.link_target_exists(&resolved)
-                    {
-                        broken_links.push(BrokenLink {
-                            source_page: source_page.clone(),
-                            link_url: href.to_string(),
-                        });
-                    }
-                }
+            let path = entry.into_path();
+            valid_files.insert(path.clone());
+            if path.extension().is_some_and(|ext| ext == "html") && !path.starts_with(&mbr_prefix) {
+                html_files.push(path);
             }
         }
 
-        broken_links
+        // Process files in parallel: read, parse HTML, extract + validate links
+        html_files
+            .par_iter()
+            .flat_map(|path| {
+                let html_content = match fs::read_to_string(path) {
+                    Ok(content) => content,
+                    Err(_) => return Vec::new(),
+                };
+
+                let source_page = path
+                    .strip_prefix(&self.output_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+
+                let document = Html::parse_document(&html_content);
+                let mut broken = Vec::new();
+
+                for element in document.select(&selector) {
+                    if let Some(href) = element.value().attr("href") {
+                        if href.starts_with("http://")
+                            || href.starts_with("https://")
+                            || href.starts_with("//")
+                            || href.starts_with("mailto:")
+                            || href.starts_with("tel:")
+                            || href.starts_with("javascript:")
+                            || href.starts_with("data:")
+                            || href.starts_with("#")
+                        {
+                            continue;
+                        }
+
+                        if let Some(resolved) = self.resolve_link(path, href)
+                            && !link_target_exists(&resolved, &valid_files)
+                        {
+                            broken.push(BrokenLink {
+                                source_page: source_page.clone(),
+                                link_url: href.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                broken
+            })
+            .collect()
     }
 
     /// Resolves a link URL relative to the source file's directory.
@@ -2227,31 +2240,6 @@ impl Builder {
             // Normalize the path manually (handle ../ without requiring existence)
             Some(normalize_path(&resolved))
         }
-    }
-
-    /// Checks if a link target exists in the output directory.
-    ///
-    /// Handles both files and directories (checking for index.html in directories).
-    /// Important: A directory is only considered valid if it contains index.html,
-    /// since the link indexer creates directories with just links.json for non-existent pages.
-    fn link_target_exists(&self, path: &Path) -> bool {
-        // If it's a file that exists, it's valid
-        if path.is_file() {
-            return true;
-        }
-
-        // If it's a directory, check for index.html
-        // Note: We must explicitly check for index.html because the link indexer
-        // creates directories with just links.json for pages that are linked to
-        // but don't exist
-        if path.is_dir() {
-            return path.join("index.html").exists();
-        }
-
-        // Path doesn't exist - check if path/index.html exists
-        // (handles trailing slash URL convention)
-        let with_index = path.join("index.html");
-        with_index.exists()
     }
 
     /// Recursively copies a directory.
@@ -2703,93 +2691,91 @@ mod tests {
 
     // ---------------------- link_target_exists tests ----------------------
 
+    /// Helper to build a HashSet of valid files from a directory (mirrors validate_links logic).
+    fn build_valid_files(dir: &Path) -> HashSet<PathBuf> {
+        WalkDir::new(dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .collect()
+    }
+
     #[test]
     fn test_link_target_exists_file() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a file
         let file_path = temp_path.join("readme.html");
         std::fs::write(&file_path, "content").unwrap();
 
-        let builder = test_builder(temp_path, root);
-
-        assert!(builder.link_target_exists(&file_path));
+        let valid_files = build_valid_files(&temp_path);
+        assert!(link_target_exists(&file_path, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_directory_with_index() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a directory with index.html
         let dir_path = temp_path.join("docs");
         std::fs::create_dir_all(&dir_path).unwrap();
         std::fs::write(dir_path.join("index.html"), "content").unwrap();
 
-        let builder = test_builder(temp_path, root);
-
-        assert!(builder.link_target_exists(&dir_path));
+        let valid_files = build_valid_files(&temp_path);
+        assert!(link_target_exists(&dir_path, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_directory_without_index() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a directory without index.html
         let dir_path = temp_path.join("docs");
         std::fs::create_dir_all(&dir_path).unwrap();
 
-        let builder = test_builder(temp_path, root);
-
+        let valid_files = build_valid_files(&temp_path);
         // Directory exists but has no index.html, so returns false
         // This is important because the link indexer creates directories
         // with just links.json for pages that don't exist
-        assert!(!builder.link_target_exists(&dir_path));
+        assert!(!link_target_exists(&dir_path, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_missing() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
-        let builder = test_builder(temp_path.clone(), root);
+        let valid_files = build_valid_files(&temp_path);
 
         // Non-existent path
         let missing = temp_path.join("nonexistent");
-        assert!(!builder.link_target_exists(&missing));
+        assert!(!link_target_exists(&missing, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_path_with_trailing_slash() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a directory with index.html
         let dir_path = temp_path.join("docs");
         std::fs::create_dir_all(&dir_path).unwrap();
         std::fs::write(dir_path.join("index.html"), "content").unwrap();
 
-        let builder = test_builder(temp_path.clone(), root);
+        let valid_files = build_valid_files(&temp_path);
 
         // Path with trailing slash should check for index.html
         let path_with_slash = temp_path.join("docs/");
-        assert!(builder.link_target_exists(&path_with_slash));
+        assert!(link_target_exists(&path_with_slash, &valid_files));
 
         // Non-existent directory with trailing slash
         let missing_with_slash = temp_path.join("missing/");
-        assert!(!builder.link_target_exists(&missing_with_slash));
+        assert!(!link_target_exists(&missing_with_slash, &valid_files));
     }
 
     // ---------------------- validate_links tests ----------------------
