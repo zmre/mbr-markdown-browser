@@ -75,8 +75,30 @@ impl Templates {
         Ok(())
     }
 
+    /// Returns a clone of the Tera engine for lock-free rendering.
+    ///
+    /// Acquires the read lock once to clone the Tera instance (~KB of template AST).
+    /// Use this before entering a rayon thread pool to avoid per-file lock contention.
+    pub fn tera_clone(&self) -> Tera {
+        self.tera.read().clone()
+    }
+
     pub fn render_markdown(
         &self,
+        html: &str,
+        frontmatter: HashMap<String, serde_json::Value>,
+        extra_context: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let tera = self.tera.read();
+        Self::render_markdown_with_tera(&tera, html, frontmatter, extra_context)
+    }
+
+    /// Lock-free variant of `render_markdown` that takes a `&Tera` directly.
+    ///
+    /// Use with `tera_clone()` to avoid `Arc<RwLock<Tera>>` contention when
+    /// rendering many files in parallel (e.g., from a rayon thread pool).
+    pub fn render_markdown_with_tera(
+        tera: &Tera,
         html: &str,
         frontmatter: HashMap<String, serde_json::Value>,
         extra_context: HashMap<String, serde_json::Value>,
@@ -106,14 +128,12 @@ impl Templates {
         context.insert("markdown", html);
         context.insert("frontmatter_json", &frontmatter_json);
 
-        let html_output = self
-            .tera
-            .read()
-            .render("index.html", &context)
-            .map_err(|e| TemplateError::RenderFailed {
-                template_name: "index.html".to_string(),
-                source: e,
-            })?;
+        let html_output =
+            tera.render("index.html", &context)
+                .map_err(|e| TemplateError::RenderFailed {
+                    template_name: "index.html".to_string(),
+                    source: e,
+                })?;
         Ok(html_output)
     }
 

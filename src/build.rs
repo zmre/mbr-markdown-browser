@@ -487,23 +487,52 @@ impl Builder {
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Rendering markdown", 0, count);
 
-        let completed_clone = completed.clone();
-        stream::iter(markdown_files)
-            .map(|(path, info)| {
-                let completed = completed_clone.clone();
-                let sibling_index = sibling_index.clone();
-                async move {
-                    let result = self
-                        .render_single_markdown(&path, &info, &sibling_index)
-                        .await;
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Rendering markdown", done, count);
-                    result
+        // Use rayon for true CPU parallelism — render_single_markdown_sync does
+        // zero async work (all fs ops are sync, oembed is disabled in build mode).
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        // Clone Tera once before entering the rayon pool to avoid per-file
+        // RwLock contention. Tera is ~KB of template AST, so this is cheap
+        // compared to 44K+ lock acquisitions from competing rayon threads.
+        let tera_snapshot = self.templates.tera_clone();
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            markdown_files.par_iter().for_each(|(path, info)| {
+                // Skip remaining files once an error has been recorded
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                match self.render_single_markdown_sync(path, info, &sibling_index, &tera_snapshot) {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Batch progress: only flush stdout every 100 files or at completion
+                        // to avoid mutex contention from 44K+ competing rayon threads.
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Rendering markdown", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Rendering markdown", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -657,12 +686,20 @@ impl Builder {
         Ok(())
     }
 
-    /// Renders a single markdown file.
-    async fn render_single_markdown(
+    /// Synchronous version of `render_single_markdown` for use with rayon parallelism.
+    ///
+    /// All I/O in the render pipeline is already synchronous (std::fs, pulldown-cmark,
+    /// Tera templates, papaya concurrent HashMap). This avoids the overhead of an async
+    /// runtime when oembed fetching is disabled (the default in build mode).
+    ///
+    /// Takes a pre-cloned `&Tera` to avoid `Arc<RwLock<Tera>>` contention when
+    /// many rayon threads render in parallel.
+    fn render_single_markdown_sync(
         &self,
         path: &Path,
         info: &MarkdownInfo,
         sibling_index: &HashMap<PathBuf, Vec<serde_json::Value>>,
+        tera: &tera::Tera,
     ) -> Result<(), BuildError> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = path
@@ -678,10 +715,10 @@ impl Builder {
 
         tracing::debug!("build: rendering {}", path.display());
 
-        // Render markdown to HTML with shared oembed cache
+        // Render markdown to HTML synchronously
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
         let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
-        let render_result = markdown::render_with_cache(
+        let render_result = markdown::render_sync(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
@@ -691,7 +728,6 @@ impl Builder {
             false, // transcode is disabled in build mode
             valid_tag_sources,
         )
-        .await
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),
             source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
@@ -860,10 +896,9 @@ impl Builder {
             serde_json::json!(relative_root(depth)),
         );
 
-        // Render through template
-        let html_output = self
-            .templates
-            .render_markdown(&html, frontmatter, extra_context)?;
+        // Render through template (lock-free — uses pre-cloned Tera)
+        let html_output =
+            Templates::render_markdown_with_tera(tera, &html, frontmatter, extra_context)?;
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');
