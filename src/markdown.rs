@@ -102,7 +102,9 @@ pub type SimpleMetadata = HashMap<String, serde_json::Value>;
 /// This is used to provide a title fallback when no frontmatter title exists.
 /// Only extracts the first H1 found; subsequent H1s are ignored.
 pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
-    let parser = MDParser::new_ext(markdown_input, markdown_options());
+    // Use minimal parser options: only YAML metadata (to skip frontmatter blocks)
+    // ATX headings are parsed by default without any feature flags
+    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
 
     let mut in_h1 = false;
@@ -129,63 +131,6 @@ pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// First pass: extract headings and generate anchor IDs
-fn extract_headings(markdown_input: &str) -> (Vec<HeadingInfo>, HashMap<String, String>) {
-    let parser = MDParser::new_ext(markdown_input, markdown_options());
-    let parser = TextMergeStream::new(parser);
-
-    let mut headings = Vec::new();
-    let mut anchor_ids: HashMap<String, usize> = HashMap::new();
-    let mut heading_id_map: HashMap<String, String> = HashMap::new(); // Maps heading text to ID
-    let mut in_heading: Option<(HeadingLevel, String)> = None;
-    let mut heading_index = 0;
-
-    for event in parser {
-        match event {
-            Event::Start(Tag::Heading {
-                level,
-                id: _,
-                classes: _,
-                attrs: _,
-            }) => {
-                in_heading = Some((level, String::new()));
-            }
-            Event::Text(ref text) => {
-                if let Some((level, ref mut heading_text)) = in_heading {
-                    heading_text.push_str(text);
-                    in_heading = Some((level, heading_text.clone()));
-                }
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                if let Some((heading_level, text)) = in_heading.take() {
-                    let id = generate_anchor_id(&text, &mut anchor_ids);
-                    let level_num = match heading_level {
-                        HeadingLevel::H1 => 1,
-                        HeadingLevel::H2 => 2,
-                        HeadingLevel::H3 => 3,
-                        HeadingLevel::H4 => 4,
-                        HeadingLevel::H5 => 5,
-                        HeadingLevel::H6 => 6,
-                    };
-
-                    headings.push(HeadingInfo {
-                        level: level_num,
-                        text: text.clone(),
-                        id: id.clone(),
-                    });
-
-                    // Store mapping for second pass
-                    heading_id_map.insert(format!("{}:{}", heading_index, text), id);
-                    heading_index += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    (headings, heading_id_map)
 }
 
 /// Em dash character (U+2014) - what `---` becomes with smart punctuation
@@ -298,30 +243,19 @@ pub async fn render_with_cache(
         transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
     };
 
-    // First pass: extract headings and generate IDs
-    let (headings, _heading_id_map) = extract_headings(&markdown_input);
-
-    // Detect if the first heading is an H1 (used for conditional title rendering in templates)
-    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
-
-    // Second pass: collect and inject heading IDs into events
+    // Single pass: collect events, extract headings, and inject anchor IDs inline
     let parser = MDParser::new_ext(&markdown_input, markdown_options());
     let parser = TextMergeStream::new(parser);
 
     let mut events_with_ids = Vec::new();
-    let mut heading_index = 0;
-    let mut in_heading_text = None;
+    let mut headings = Vec::new();
+    let mut anchor_ids: HashMap<String, usize> = HashMap::new();
+    let mut in_heading_text: Option<String> = None;
 
     for event in parser {
         match &event {
-            Event::Start(Tag::Heading {
-                level: _,
-                id: _,
-                classes: _,
-                attrs: _,
-            }) => {
+            Event::Start(Tag::Heading { .. }) => {
                 in_heading_text = Some(String::new());
-                // We'll modify this event after we collect the text
                 events_with_ids.push(event);
             }
             Event::Text(text) if in_heading_text.is_some() => {
@@ -330,12 +264,25 @@ pub async fn render_with_cache(
                 }
                 events_with_ids.push(event);
             }
-            Event::End(TagEnd::Heading(_)) => {
-                // Now we have the full heading text, find the matching Start event and inject ID
-                if in_heading_text.take().is_some() && heading_index < headings.len() {
-                    let heading_info = &headings[heading_index];
-                    // Go back and modify the Start(Heading) event
-                    // Find the last Start(Heading) event
+            Event::End(TagEnd::Heading(heading_level)) => {
+                if let Some(text) = in_heading_text.take() {
+                    let id = generate_anchor_id(&text, &mut anchor_ids);
+                    let level_num = match heading_level {
+                        HeadingLevel::H1 => 1,
+                        HeadingLevel::H2 => 2,
+                        HeadingLevel::H3 => 3,
+                        HeadingLevel::H4 => 4,
+                        HeadingLevel::H5 => 5,
+                        HeadingLevel::H6 => 6,
+                    };
+
+                    headings.push(HeadingInfo {
+                        level: level_num,
+                        text: text.clone(),
+                        id: id.clone(),
+                    });
+
+                    // Walk backward to find the matching Start(Heading) and inject the ID
                     for i in (0..events_with_ids.len()).rev() {
                         if let Event::Start(Tag::Heading {
                             level,
@@ -344,17 +291,15 @@ pub async fn render_with_cache(
                             attrs,
                         }) = &events_with_ids[i]
                         {
-                            // Replace it with one that has the ID
                             events_with_ids[i] = Event::Start(Tag::Heading {
                                 level: *level,
-                                id: Some(CowStr::from(heading_info.id.clone())),
+                                id: Some(CowStr::from(id)),
                                 classes: classes.clone(),
                                 attrs: attrs.clone(),
                             });
                             break;
                         }
                     }
-                    heading_index += 1;
                 }
                 events_with_ids.push(event);
             }
@@ -363,6 +308,9 @@ pub async fn render_with_cache(
             }
         }
     }
+
+    // Detect if the first heading is an H1 (used for conditional title rendering in templates)
+    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
     // Transform rule attrs: detect `--- {attrs}` pattern and convert to Rule + attrs
     let (events_with_ids, section_attrs) = transform_rule_attrs(events_with_ids);
@@ -541,65 +489,63 @@ async fn prefetch_oembed_urls(
 }
 
 fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
-    // do i want to fail on yaml parse fail? or silently ignore?
-    // for now, i'm ignoring, though I should at least print a warning
-    match y.clone().unwrap_or(Yaml::Null).into_hash() {
-        Some(y) => {
-            let mut hm = HashMap::with_capacity(y.capacity());
-            for (k, v) in y.iter() {
-                match (k, v) {
-                    (Yaml::String(key), Yaml::String(value)) => {
-                        tracing::trace!("Frontmatter: {key} = {value}");
-                        hm.insert(
-                            key.to_string(),
-                            serde_json::Value::String(value.to_string()),
-                        );
-                    }
-                    (Yaml::String(key), Yaml::Array(vals)) => {
-                        // Preserve arrays as JSON arrays instead of joining them
-                        let arr: Vec<serde_json::Value> = vals
-                            .iter()
-                            .filter_map(|val| val.clone().into_string())
-                            .map(serde_json::Value::String)
-                            .collect();
-                        tracing::trace!("Frontmatter: {key} = {:?}", &arr);
-                        hm.insert(key.to_string(), serde_json::Value::Array(arr));
-                    }
-                    (Yaml::String(key), Yaml::Hash(hash)) => {
-                        tracing::trace!("Frontmatter: {key} = (nested hash)");
-                        // Recursively parse nested hashes and flatten with dot notation
-                        let nested = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
-                        for (k, v) in nested {
-                            hm.insert(key.to_string() + "." + k.as_str(), v);
-                        }
-                    }
-                    (Yaml::String(key), Yaml::Integer(val)) => {
-                        tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), serde_json::json!(val));
-                    }
-                    (Yaml::String(key), Yaml::Real(val)) => {
-                        tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), serde_json::Value::String(val.to_string()));
-                    }
-                    (Yaml::String(key), Yaml::Boolean(val)) => {
-                        tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), serde_json::json!(val));
-                    }
-                    (Yaml::String(key), other_val) => {
-                        tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
-                        if let Some(str_val) = other_val.clone().into_string() {
-                            hm.insert(key.to_string(), serde_json::Value::String(str_val));
-                        }
-                    }
-                    (k, v) => {
-                        tracing::warn!("Unexpected frontmatter key-value: {:?} = {:?}", k, v);
-                    }
-                }
-            }
-            hm
-        }
+    match y.as_ref().and_then(|yaml| yaml.as_hash()) {
+        Some(hash) => yaml_hash_to_metadata(hash),
         None => HashMap::new(),
     }
+}
+
+/// Converts a YAML hash to simplified metadata, borrowing instead of cloning.
+fn yaml_hash_to_metadata(hash: &yaml_rust2::yaml::Hash) -> SimpleMetadata {
+    let mut hm = HashMap::with_capacity(hash.len());
+    for (k, v) in hash.iter() {
+        match (k, v) {
+            (Yaml::String(key), Yaml::String(value)) => {
+                tracing::trace!("Frontmatter: {key} = {value}");
+                hm.insert(key.clone(), serde_json::Value::String(value.clone()));
+            }
+            (Yaml::String(key), Yaml::Array(vals)) => {
+                // Preserve arrays as JSON arrays instead of joining them
+                let arr: Vec<serde_json::Value> = vals
+                    .iter()
+                    .filter_map(|val| val.as_str())
+                    .map(|s| serde_json::Value::String(s.to_string()))
+                    .collect();
+                tracing::trace!("Frontmatter: {key} = {:?}", &arr);
+                hm.insert(key.clone(), serde_json::Value::Array(arr));
+            }
+            (Yaml::String(key), Yaml::Hash(nested_hash)) => {
+                tracing::trace!("Frontmatter: {key} = (nested hash)");
+                // Recursively parse nested hashes and flatten with dot notation
+                let nested = yaml_hash_to_metadata(nested_hash);
+                for (k, v) in nested {
+                    hm.insert(key.to_string() + "." + k.as_str(), v);
+                }
+            }
+            (Yaml::String(key), Yaml::Integer(val)) => {
+                tracing::trace!("Frontmatter: {key} = {val}");
+                hm.insert(key.clone(), serde_json::json!(val));
+            }
+            (Yaml::String(key), Yaml::Real(val)) => {
+                tracing::trace!("Frontmatter: {key} = {val}");
+                hm.insert(key.clone(), serde_json::Value::String(val.clone()));
+            }
+            (Yaml::String(key), Yaml::Boolean(val)) => {
+                tracing::trace!("Frontmatter: {key} = {val}");
+                hm.insert(key.clone(), serde_json::json!(val));
+            }
+            (Yaml::String(key), other_val) => {
+                tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
+                if let Some(str_val) = other_val.as_str() {
+                    hm.insert(key.clone(), serde_json::Value::String(str_val.to_string()));
+                }
+            }
+            (k, v) => {
+                tracing::warn!("Unexpected frontmatter key-value: {:?} = {:?}", k, v);
+            }
+        }
+    }
+    hm
 }
 
 /// Maximum bytes to read when extracting frontmatter metadata.
