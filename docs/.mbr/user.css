@@ -1,0 +1,107 @@
+.bench-toolbar {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.bench-toolbar label {
+  font-size: 0.85rem;
+}
+.bench-toolbar input {
+  background: var(--pico-form-element-background-color, #161b22);
+  color: var(--pico-form-element-color, #c9d1d9);
+  border: 1px solid var(--pico-form-element-border-color, #30363d);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+}
+.bench-toolbar button {
+  background: var(--pico-secondary-background, #21262d);
+  color: var(--pico-secondary-inverse, #c9d1d9);
+  border: 1px solid var(--pico-form-element-border-color, #30363d);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.bench-toolbar button:hover {
+  opacity: 0.85;
+}
+.bench-chart-group {
+  margin-bottom: 2.5rem;
+}
+.bench-chart-group .bench-suite-title {
+  font-size: 1.1rem;
+  margin-bottom: 0.25rem;
+  cursor: pointer;
+}
+.bench-chart-group .bench-suite-title:hover {
+  opacity: 0.8;
+}
+.bench-chart-group .bench-suite-title::before {
+  content: "\25B8  ";
+  font-size: 0.8em;
+  opacity: 0.6;
+}
+.bench-chart-group.expanded .bench-suite-title::before {
+  content: "\25BE  ";
+}
+.bench-chart-container {
+  border: 1px solid var(--pico-form-element-border-color, #30363d);
+  border-radius: 8px;
+  padding: 1rem;
+  display: none;
+}
+.bench-chart-group.expanded .bench-chart-container {
+  display: block;
+}
+.bench-chart-wrapper {
+  margin-bottom: 1rem;
+}
+.bench-chart-wrapper h4 {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  margin-bottom: 0.5rem;
+  font-weight: normal;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+.bench-chart-box {
+  position: relative;
+  max-width: 800px;
+  height: 200px;
+}
+.bench-summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 2rem;
+  font-size: 0.85rem;
+}
+.bench-summary-table th,
+.bench-summary-table td {
+  text-align: left;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--pico-form-element-border-color, #21262d);
+}
+.bench-summary-table th {
+  opacity: 0.7;
+  font-weight: 600;
+}
+.bench-summary-table td {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+.bench-improved {
+  color: #3fb950;
+}
+.bench-regressed {
+  color: #f85149;
+}
+.bench-neutral {
+  opacity: 0.6;
+}
+.bench-no-data {
+  text-align: center;
+  padding: 4rem;
+  opacity: 0.6;
+  font-size: 1.1rem;
+}

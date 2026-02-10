@@ -24,6 +24,14 @@ if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
     exit 1
 fi
 
+# Run benchmarks for this release
+if [[ "${SKIP_BENCHMARKS:-}" != "1" ]]; then
+    echo "Running benchmarks for v$NEW_VERSION..."
+    "$SCRIPT_DIR/save-benchmarks.sh" "$NEW_VERSION"
+else
+    echo "Skipping benchmarks (SKIP_BENCHMARKS=1)"
+fi
+
 # Get current version
 CURRENT_VERSION=$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
 echo "Current version: $CURRENT_VERSION"
