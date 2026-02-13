@@ -96,7 +96,7 @@ This slide has centered class
 
 ## Example
 
-Use a [live example](/examples/test-slides/).
+Use a [live example](test-slides/).
 
 Create a test presentation:
 

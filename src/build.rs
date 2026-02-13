@@ -14,7 +14,6 @@ use std::{
 use percent_encoding::percent_decode_str;
 use walkdir::WalkDir;
 
-use futures::stream::{self, StreamExt, TryStreamExt};
 use scraper::{Html, Selector};
 
 use std::sync::Arc;
@@ -242,6 +241,14 @@ fn normalize_path(path: &Path) -> PathBuf {
     components.iter().collect()
 }
 
+/// Checks if a link target exists using a pre-built set of valid file paths.
+///
+/// Uses O(1) HashSet lookups instead of filesystem stat() calls.
+/// Handles both direct file matches and the directory/index.html convention.
+fn link_target_exists(path: &Path, valid_files: &HashSet<PathBuf>) -> bool {
+    valid_files.contains(path) || valid_files.contains(&path.join("index.html"))
+}
+
 /// Statistics from a build run.
 #[derive(Debug, Default)]
 pub struct BuildStats {
@@ -419,12 +426,28 @@ impl Builder {
     }
 
     /// Creates or cleans the output directory.
+    ///
+    /// Uses an atomic rename to move the old directory aside, then deletes it in a background
+    /// thread. This lets the build start immediately instead of waiting for recursive removal,
+    /// which is O(n) on the number of filesystem entries.
     fn prepare_output_dir(&self) -> Result<(), BuildError> {
         if self.output_dir.exists() {
-            fs::remove_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
+            // Rename old dir aside (O(1) atomic operation), then delete in background.
+            let tmp_dir = self
+                .output_dir
+                .with_extension(format!("old.{}", std::process::id()));
+            // If a stale temp dir exists from a previous interrupted build, remove it first
+            if tmp_dir.exists() {
+                let _ = fs::remove_dir_all(&tmp_dir);
+            }
+            fs::rename(&self.output_dir, &tmp_dir).map_err(|e| BuildError::CreateDirFailed {
                 path: self.output_dir.clone(),
                 source: e,
             })?;
+            // Spawn background thread to delete the old directory
+            std::thread::spawn(move || {
+                let _ = fs::remove_dir_all(&tmp_dir);
+            });
         }
         fs::create_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
             path: self.output_dir.clone(),
@@ -487,23 +510,52 @@ impl Builder {
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Rendering markdown", 0, count);
 
-        let completed_clone = completed.clone();
-        stream::iter(markdown_files)
-            .map(|(path, info)| {
-                let completed = completed_clone.clone();
-                let sibling_index = sibling_index.clone();
-                async move {
-                    let result = self
-                        .render_single_markdown(&path, &info, &sibling_index)
-                        .await;
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Rendering markdown", done, count);
-                    result
+        // Use rayon for true CPU parallelism — render_single_markdown_sync does
+        // zero async work (all fs ops are sync, oembed is disabled in build mode).
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        // Clone Tera once before entering the rayon pool to avoid per-file
+        // RwLock contention. Tera is ~KB of template AST, so this is cheap
+        // compared to 44K+ lock acquisitions from competing rayon threads.
+        let tera_snapshot = self.templates.tera_clone();
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            markdown_files.par_iter().for_each(|(path, info)| {
+                // Skip remaining files once an error has been recorded
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                match self.render_single_markdown_sync(path, info, &sibling_index, &tera_snapshot) {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Batch progress: only flush stdout every 100 files or at completion
+                        // to avoid mutex contention from 44K+ competing rayon threads.
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Rendering markdown", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Rendering markdown", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -587,26 +639,43 @@ impl Builder {
         print_progress("Writing link files", 0, count);
 
         let page_urls: Vec<String> = all_page_urls.into_iter().collect();
-        let inbound_index = Arc::new(inbound_index);
-        let outbound_index = Arc::new(outbound_index);
-        let completed_clone = completed.clone();
 
-        stream::iter(page_urls)
-            .map(|url_path| {
-                let inbound_index = inbound_index.clone();
-                let outbound_index = outbound_index.clone();
-                let completed = completed_clone.clone();
-                async move {
-                    let result =
-                        self.write_single_link_file(&url_path, &outbound_index, &inbound_index);
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Writing link files", done, count);
-                    result
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            page_urls.par_iter().for_each(|url_path| {
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                match self.write_single_link_file(url_path, &outbound_index, &inbound_index) {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Writing link files", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Writing link files", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -657,12 +726,20 @@ impl Builder {
         Ok(())
     }
 
-    /// Renders a single markdown file.
-    async fn render_single_markdown(
+    /// Synchronous version of `render_single_markdown` for use with rayon parallelism.
+    ///
+    /// All I/O in the render pipeline is already synchronous (std::fs, pulldown-cmark,
+    /// Tera templates, papaya concurrent HashMap). This avoids the overhead of an async
+    /// runtime when oembed fetching is disabled (the default in build mode).
+    ///
+    /// Takes a pre-cloned `&Tera` to avoid `Arc<RwLock<Tera>>` contention when
+    /// many rayon threads render in parallel.
+    fn render_single_markdown_sync(
         &self,
         path: &Path,
         info: &MarkdownInfo,
         sibling_index: &HashMap<PathBuf, Vec<serde_json::Value>>,
+        tera: &tera::Tera,
     ) -> Result<(), BuildError> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
         let is_index_file = path
@@ -678,10 +755,10 @@ impl Builder {
 
         tracing::debug!("build: rendering {}", path.display());
 
-        // Render markdown to HTML with shared oembed cache
+        // Render markdown to HTML synchronously
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
         let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
-        let render_result = markdown::render_with_cache(
+        let render_result = markdown::render_sync(
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
@@ -691,7 +768,6 @@ impl Builder {
             false, // transcode is disabled in build mode
             valid_tag_sources,
         )
-        .await
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),
             source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
@@ -860,10 +936,9 @@ impl Builder {
             serde_json::json!(relative_root(depth)),
         );
 
-        // Render through template
-        let html_output = self
-            .templates
-            .render_markdown(&html, frontmatter, extra_context)?;
+        // Render through template (lock-free — uses pre-cloned Tera)
+        let html_output =
+            Templates::render_markdown_with_tera(tera, &html, frontmatter, extra_context)?;
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');
@@ -926,34 +1001,63 @@ impl Builder {
             concurrency
         );
 
+        // Clone Tera once before entering the rayon pool to avoid per-file lock contention
+        let tera_snapshot = self.templates.tera_clone();
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Generating sections", 0, count);
 
-        // Convert HashSet to Vec for stream iteration
+        // Convert HashSet to Vec for rayon iteration
         let directories: Vec<_> = directories.into_iter().collect();
 
-        let completed_clone = completed.clone();
-        stream::iter(directories)
-            .map(|dir| {
-                let completed = completed_clone.clone();
-                async move {
-                    let result = self.render_directory_page(&dir).await;
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Generating sections", done, count);
-                    result
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            directories.par_iter().for_each(|dir| {
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                match self.render_directory_page_sync(dir, &tera_snapshot) {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Generating sections", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Generating sections", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
-    /// Renders a single directory page.
-    async fn render_directory_page(&self, relative_dir: &Path) -> Result<(), BuildError> {
+    /// Renders a single directory page synchronously with a pre-cloned Tera.
+    fn render_directory_page_sync(
+        &self,
+        relative_dir: &Path,
+        tera: &tera::Tera,
+    ) -> Result<(), BuildError> {
         let is_root = relative_dir.as_os_str().is_empty();
 
         // Calculate page depth for relative path generation
@@ -1111,12 +1215,9 @@ impl Builder {
             serde_json::json!(self.config.sidebar_max_items),
         );
 
-        // Render template
-        let html_output = if is_root {
-            self.templates.render_home(context)?
-        } else {
-            self.templates.render_section(context)?
-        };
+        // Render template (lock-free — uses pre-cloned Tera)
+        let template_name = if is_root { "home.html" } else { "section.html" };
+        let html_output = Templates::render_template_with_tera(tera, template_name, context)?;
 
         // Determine output path
         let output_path = if is_root {
@@ -1184,36 +1285,129 @@ impl Builder {
             concurrency
         );
 
+        // Clone Tera once before entering the rayon pool to avoid per-file lock contention
+        let tera_snapshot = self.templates.tera_clone();
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Generating tag pages", 0, count);
 
-        let completed_clone = completed.clone();
-        stream::iter(tasks)
-            .map(|(source, value)| {
-                let completed = completed_clone.clone();
-                async move {
-                    let result = if let Some(ref tag_value) = value {
-                        self.render_single_tag_page(&source, tag_value).await
-                    } else {
-                        self.render_tag_source_index(&source).await
-                    };
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    print_progress("Generating tag pages", done, count);
-                    result
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .map_err(|e| BuildError::CreateDirFailed {
+                path: self.output_dir.clone(),
+                source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
+            })?;
+
+        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+
+        pool.install(|| {
+            use rayon::prelude::*;
+            tasks.par_iter().for_each(|(source, value)| {
+                if error.lock().unwrap().is_some() {
+                    return;
                 }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
+                let result = if let Some(tag_value) = value {
+                    self.render_single_tag_page_sync(source, tag_value, &tera_snapshot)
+                } else {
+                    self.render_tag_source_index_sync(source, &tera_snapshot)
+                };
+                match result {
+                    Ok(()) => {
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || done == count {
+                            print_progress("Generating tag pages", done, count);
+                        }
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e);
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
 
         print_stage_done("Generating tag pages", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
-    /// Renders a single tag page showing all pages with that tag.
-    async fn render_single_tag_page(&self, source: &str, value: &str) -> Result<(), BuildError> {
-        // Find the TagSource config for labels
+    /// Synchronous version of tag page rendering for use with rayon.
+    /// Takes a pre-cloned `&Tera` to avoid lock contention.
+    fn render_single_tag_page_sync(
+        &self,
+        source: &str,
+        value: &str,
+        tera: &tera::Tera,
+    ) -> Result<(), BuildError> {
+        let context = self.build_single_tag_page_context(source, value);
+        let context = match context {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let html_output = Templates::render_template_with_tera(tera, "tag.html", context.0)?;
+
+        // Write file (context.1 = output_path)
+        if !context.1.exists() {
+            if let Some(parent) = context.1.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            fs::write(&context.1, html_output).map_err(|e| BuildError::WriteFailed {
+                path: context.1,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Synchronous version of tag source index rendering for use with rayon.
+    fn render_tag_source_index_sync(
+        &self,
+        source: &str,
+        tera: &tera::Tera,
+    ) -> Result<(), BuildError> {
+        let context = self.build_tag_source_index_context(source);
+        let context = match context {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let html_output = Templates::render_template_with_tera(tera, "tag_index.html", context.0)?;
+
+        if !context.1.exists() {
+            if let Some(parent) = context.1.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            fs::write(&context.1, html_output).map_err(|e| BuildError::WriteFailed {
+                path: context.1,
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Builds context and output path for a single tag page.
+    /// Returns None if the tag should be skipped (empty sanitized path).
+    fn build_single_tag_page_context(
+        &self,
+        source: &str,
+        value: &str,
+    ) -> Option<(HashMap<String, serde_json::Value>, PathBuf)> {
         let tag_source = self
             .config
             .tag_sources
@@ -1225,24 +1419,17 @@ impl Builder {
             None => (source.to_string(), format!("{}s", source)),
         };
 
-        // Get display value for the tag
         let display_value = self
             .repo
             .tag_index
             .get_tag_display(source, value)
             .unwrap_or_else(|| value.to_string());
 
-        // Get pages with this tag
         let pages = self.repo.tag_index.get_pages(source, value);
-
-        // Calculate URL path and depth
         let url_path = format!("/{}/{}/", source, value);
         let depth = url_depth(&url_path);
 
-        // Build context
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-
-        // Tag information
         context.insert(
             "tag_source".to_string(),
             serde_json::Value::String(source.to_string()),
@@ -1264,7 +1451,6 @@ impl Builder {
             serde_json::Value::Number(pages.len().into()),
         );
 
-        // Pages array with relative URLs
         let pages_json: Vec<serde_json::Value> = pages
             .iter()
             .map(|p| {
@@ -1277,7 +1463,6 @@ impl Builder {
             .collect();
         context.insert("pages".to_string(), serde_json::Value::Array(pages_json));
 
-        // Static build settings
         context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
         context.insert(
             "relative_base".to_string(),
@@ -1288,7 +1473,6 @@ impl Builder {
             serde_json::Value::String(relative_root(depth)),
         );
 
-        // Breadcrumbs with relative URLs
         let breadcrumbs_json = vec![
             serde_json::json!({
                 "name": "Home",
@@ -1308,7 +1492,6 @@ impl Builder {
             serde_json::Value::String(display_value),
         );
 
-        // Pass sidebar navigation configuration
         context.insert(
             "sidebar_style".to_string(),
             serde_json::json!(self.config.sidebar_style),
@@ -1318,55 +1501,38 @@ impl Builder {
             serde_json::json!(self.config.sidebar_max_items),
         );
 
-        // Render template
-        let html_output = self.templates.render_tag(context)?;
-
-        // Sanitize source and value to prevent path traversal (defense-in-depth)
+        // Sanitize source and value to prevent path traversal
         let safe_source = crate::wikilink::sanitize_path_component(source);
         let safe_value = crate::wikilink::sanitize_path_component(value);
         if safe_source.is_empty() || safe_value.is_empty() {
             tracing::warn!(
                 "Skipping tag page with empty sanitized source={source:?} value={value:?}"
             );
-            return Ok(());
+            return None;
         }
 
-        // Determine output path
         let output_path = self
             .output_dir
             .join(&safe_source)
             .join(&safe_value)
             .join("index.html");
 
-        // Defense-in-depth: verify the output path stays within output_dir
         if !output_path.starts_with(&self.output_dir) {
             tracing::warn!(
                 "Tag page path escaped output directory: source={source:?} value={value:?}"
             );
-            return Ok(());
+            return None;
         }
 
-        // Create parent directories and write file (only if not exists - files take precedence)
-        if !output_path.exists() {
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
-                path: output_path,
-                source: e,
-            })?;
-        }
-
-        Ok(())
+        Some((context, output_path))
     }
 
-    /// Renders a tag source index page showing all tags from that source.
-    async fn render_tag_source_index(&self, source: &str) -> Result<(), BuildError> {
-        // Find the TagSource config for labels
+    /// Builds context and output path for a tag source index page.
+    /// Returns None if the source should be skipped (empty sanitized path).
+    fn build_tag_source_index_context(
+        &self,
+        source: &str,
+    ) -> Option<(HashMap<String, serde_json::Value>, PathBuf)> {
         let tag_source = self
             .config
             .tag_sources
@@ -1378,17 +1544,11 @@ impl Builder {
             None => (source.to_string(), format!("{}s", source)),
         };
 
-        // Get all tags for this source
         let tags = self.repo.tag_index.get_all_tags(source);
-
-        // Calculate URL path and depth
         let url_path = format!("/{}/", source);
         let depth = url_depth(&url_path);
 
-        // Build context
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-
-        // Tag source information
         context.insert(
             "tag_source".to_string(),
             serde_json::Value::String(source.to_string()),
@@ -1406,7 +1566,6 @@ impl Builder {
             serde_json::Value::Number(tags.len().into()),
         );
 
-        // Tags array with relative URLs
         let tags_json: Vec<serde_json::Value> = tags
             .iter()
             .map(|t| {
@@ -1419,7 +1578,6 @@ impl Builder {
             .collect();
         context.insert("tags".to_string(), serde_json::Value::Array(tags_json));
 
-        // Static build settings
         context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
         context.insert(
             "relative_base".to_string(),
@@ -1430,7 +1588,6 @@ impl Builder {
             serde_json::Value::String(relative_root(depth)),
         );
 
-        // Breadcrumbs with relative URLs
         let breadcrumbs_json = vec![serde_json::json!({
             "name": "Home",
             "url": make_relative_url("/", depth)
@@ -1444,7 +1601,6 @@ impl Builder {
             serde_json::Value::String(plural_label),
         );
 
-        // Pass sidebar navigation configuration
         context.insert(
             "sidebar_style".to_string(),
             serde_json::json!(self.config.sidebar_style),
@@ -1454,41 +1610,20 @@ impl Builder {
             serde_json::json!(self.config.sidebar_max_items),
         );
 
-        // Render template
-        let html_output = self.templates.render_tag_index(context)?;
-
-        // Sanitize source to prevent path traversal (defense-in-depth)
         let safe_source = crate::wikilink::sanitize_path_component(source);
         if safe_source.is_empty() {
             tracing::warn!("Skipping tag source index with empty sanitized source={source:?}");
-            return Ok(());
+            return None;
         }
 
-        // Determine output path
         let output_path = self.output_dir.join(&safe_source).join("index.html");
 
-        // Defense-in-depth: verify the output path stays within output_dir
         if !output_path.starts_with(&self.output_dir) {
             tracing::warn!("Tag source index path escaped output directory: source={source:?}");
-            return Ok(());
+            return None;
         }
 
-        // Create parent directories and write file (only if not exists - files take precedence)
-        if !output_path.exists() {
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            fs::write(&output_path, html_output).map_err(|e| BuildError::WriteFailed {
-                path: output_path,
-                source: e,
-            })?;
-        }
-
-        Ok(())
+        Some((context, output_path))
     }
 
     /// Creates symlinks for static assets.
@@ -2001,74 +2136,79 @@ impl Builder {
     ///
     /// Returns a list of broken links found.
     fn validate_links(&self) -> Vec<BrokenLink> {
-        let mut broken_links = Vec::new();
+        use rayon::prelude::*;
 
         // Create selector for anchor tags
         let selector = match Selector::parse("a[href]") {
             Ok(s) => s,
-            Err(_) => return broken_links, // Should never fail with this simple selector
+            Err(_) => return Vec::new(), // Should never fail with this simple selector
         };
 
-        // Walk through all HTML files in output directory
+        // Single WalkDir pass: build a HashSet of all files (for O(1) link lookups)
+        // and collect HTML file paths (for parallel processing).
+        let mut valid_files: HashSet<PathBuf> = HashSet::new();
+        let mut html_files: Vec<PathBuf> = Vec::new();
+        let mbr_prefix = self.output_dir.join(".mbr");
+
         for entry in WalkDir::new(&self.output_dir)
             .follow_links(true)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
         {
-            let path = entry.path();
-
-            // Skip .mbr directory (Pagefind UI, etc.)
-            if path.starts_with(self.output_dir.join(".mbr")) {
-                continue;
-            }
-
-            // Read HTML content
-            let html_content = match fs::read_to_string(path) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-
-            // Calculate source page path for error reporting
-            let source_page = path
-                .strip_prefix(&self.output_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-
-            // Parse HTML and find all links
-            let document = Html::parse_document(&html_content);
-
-            for element in document.select(&selector) {
-                if let Some(href) = element.value().attr("href") {
-                    // Skip external links and special protocols
-                    if href.starts_with("http://")
-                        || href.starts_with("https://")
-                        || href.starts_with("//")
-                        || href.starts_with("mailto:")
-                        || href.starts_with("tel:")
-                        || href.starts_with("javascript:")
-                        || href.starts_with("data:")
-                        || href.starts_with("#")
-                    {
-                        continue;
-                    }
-
-                    // Resolve the link relative to the current file's directory
-                    if let Some(resolved) = self.resolve_link(path, href)
-                        && !self.link_target_exists(&resolved)
-                    {
-                        broken_links.push(BrokenLink {
-                            source_page: source_page.clone(),
-                            link_url: href.to_string(),
-                        });
-                    }
-                }
+            let path = entry.into_path();
+            valid_files.insert(path.clone());
+            if path.extension().is_some_and(|ext| ext == "html") && !path.starts_with(&mbr_prefix) {
+                html_files.push(path);
             }
         }
 
-        broken_links
+        // Process files in parallel: read, parse HTML, extract + validate links
+        html_files
+            .par_iter()
+            .flat_map(|path| {
+                let html_content = match fs::read_to_string(path) {
+                    Ok(content) => content,
+                    Err(_) => return Vec::new(),
+                };
+
+                let source_page = path
+                    .strip_prefix(&self.output_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+
+                let document = Html::parse_document(&html_content);
+                let mut broken = Vec::new();
+
+                for element in document.select(&selector) {
+                    if let Some(href) = element.value().attr("href") {
+                        if href.starts_with("http://")
+                            || href.starts_with("https://")
+                            || href.starts_with("//")
+                            || href.starts_with("mailto:")
+                            || href.starts_with("tel:")
+                            || href.starts_with("javascript:")
+                            || href.starts_with("data:")
+                            || href.starts_with("#")
+                        {
+                            continue;
+                        }
+
+                        if let Some(resolved) = self.resolve_link(path, href)
+                            && !link_target_exists(&resolved, &valid_files)
+                        {
+                            broken.push(BrokenLink {
+                                source_page: source_page.clone(),
+                                link_url: href.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                broken
+            })
+            .collect()
     }
 
     /// Resolves a link URL relative to the source file's directory.
@@ -2100,31 +2240,6 @@ impl Builder {
             // Normalize the path manually (handle ../ without requiring existence)
             Some(normalize_path(&resolved))
         }
-    }
-
-    /// Checks if a link target exists in the output directory.
-    ///
-    /// Handles both files and directories (checking for index.html in directories).
-    /// Important: A directory is only considered valid if it contains index.html,
-    /// since the link indexer creates directories with just links.json for non-existent pages.
-    fn link_target_exists(&self, path: &Path) -> bool {
-        // If it's a file that exists, it's valid
-        if path.is_file() {
-            return true;
-        }
-
-        // If it's a directory, check for index.html
-        // Note: We must explicitly check for index.html because the link indexer
-        // creates directories with just links.json for pages that are linked to
-        // but don't exist
-        if path.is_dir() {
-            return path.join("index.html").exists();
-        }
-
-        // Path doesn't exist - check if path/index.html exists
-        // (handles trailing slash URL convention)
-        let with_index = path.join("index.html");
-        with_index.exists()
     }
 
     /// Recursively copies a directory.
@@ -2576,93 +2691,91 @@ mod tests {
 
     // ---------------------- link_target_exists tests ----------------------
 
+    /// Helper to build a HashSet of valid files from a directory (mirrors validate_links logic).
+    fn build_valid_files(dir: &Path) -> HashSet<PathBuf> {
+        WalkDir::new(dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .collect()
+    }
+
     #[test]
     fn test_link_target_exists_file() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a file
         let file_path = temp_path.join("readme.html");
         std::fs::write(&file_path, "content").unwrap();
 
-        let builder = test_builder(temp_path, root);
-
-        assert!(builder.link_target_exists(&file_path));
+        let valid_files = build_valid_files(&temp_path);
+        assert!(link_target_exists(&file_path, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_directory_with_index() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a directory with index.html
         let dir_path = temp_path.join("docs");
         std::fs::create_dir_all(&dir_path).unwrap();
         std::fs::write(dir_path.join("index.html"), "content").unwrap();
 
-        let builder = test_builder(temp_path, root);
-
-        assert!(builder.link_target_exists(&dir_path));
+        let valid_files = build_valid_files(&temp_path);
+        assert!(link_target_exists(&dir_path, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_directory_without_index() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a directory without index.html
         let dir_path = temp_path.join("docs");
         std::fs::create_dir_all(&dir_path).unwrap();
 
-        let builder = test_builder(temp_path, root);
-
+        let valid_files = build_valid_files(&temp_path);
         // Directory exists but has no index.html, so returns false
         // This is important because the link indexer creates directories
         // with just links.json for pages that don't exist
-        assert!(!builder.link_target_exists(&dir_path));
+        assert!(!link_target_exists(&dir_path, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_missing() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
-        let builder = test_builder(temp_path.clone(), root);
+        let valid_files = build_valid_files(&temp_path);
 
         // Non-existent path
         let missing = temp_path.join("nonexistent");
-        assert!(!builder.link_target_exists(&missing));
+        assert!(!link_target_exists(&missing, &valid_files));
     }
 
     #[test]
     fn test_link_target_exists_path_with_trailing_slash() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
-        let root = temp.path().join("root");
-        std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
         // Create a directory with index.html
         let dir_path = temp_path.join("docs");
         std::fs::create_dir_all(&dir_path).unwrap();
         std::fs::write(dir_path.join("index.html"), "content").unwrap();
 
-        let builder = test_builder(temp_path.clone(), root);
+        let valid_files = build_valid_files(&temp_path);
 
         // Path with trailing slash should check for index.html
         let path_with_slash = temp_path.join("docs/");
-        assert!(builder.link_target_exists(&path_with_slash));
+        assert!(link_target_exists(&path_with_slash, &valid_files));
 
         // Non-existent directory with trailing slash
         let missing_with_slash = temp_path.join("missing/");
-        assert!(!builder.link_target_exists(&missing_with_slash));
+        assert!(!link_target_exists(&missing_with_slash, &valid_files));
     }
 
     // ---------------------- validate_links tests ----------------------

@@ -278,7 +278,7 @@ tag_sources = [
 build_tag_pages = true
 ```
 
-See the [Tags feature documentation](/features/tags/) for complete details.
+See the [Tags feature documentation](tags/) for complete details.
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 

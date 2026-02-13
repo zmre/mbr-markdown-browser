@@ -110,6 +110,25 @@ GitHub Actions runs on every push to main and all PRs:
 
 All checks must pass before merge.
 
+## Performance Benchmarks
+
+See the [interactive benchmark dashboard](../benchmarks/) for performance trends across releases.
+
+Benchmarks are automatically captured during the release process (`scripts/bump-version.sh`). To run benchmarks manually:
+
+```bash
+# Run benchmarks and save results for a version
+./scripts/save-benchmarks.sh 0.5.0
+
+# Save from existing criterion results without re-running
+./scripts/save-benchmarks.sh 0.5.0 --no-run
+
+# Import a saved baseline
+./scripts/save-benchmarks.sh 0.4.2 --no-run --from-baseline v0.4.2
+```
+
+Skip benchmarks during a release with `SKIP_BENCHMARKS=1 ./scripts/bump-version.sh 0.5.0`.
+
 ## Build Commands
 
 ```bash

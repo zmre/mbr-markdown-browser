@@ -9,12 +9,14 @@ description = "A markdown viewer and browser"
 repository = "https://github.com/zmre/mbr"
 keywords = ["static", "site", "generator"]
 build = "build.rs"
+autobenches = false
 
 include = ["src/**/*", "LICENSE", "README.md"]
 
 [lib]
 crate-type = ["lib", "staticlib"]
 name = "mbr"
+bench = false
 
 [features]
 default = ["gui", "media-metadata"]
@@ -101,9 +103,15 @@ tempfile = "3.14"
 uniffi = { version = "0.31", features = ["build"] }
 
 [[bin]]
+name = "mbr"
+path = "src/main.rs"
+bench = false
+
+[[bin]]
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 required-features = ["ffi"]
+bench = false
 
 [profile.release]
 opt-level = 3
@@ -111,3 +119,39 @@ lto = true
 codegen-units = 16
 panic = 'abort'
 strip = 'debuginfo'
+
+[[bench]]
+name = "markdown_render"
+harness = false
+
+[[bench]]
+name = "html_output"
+harness = false
+
+[[bench]]
+name = "path_resolver"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "repo_scan"
+harness = false
+
+[[bench]]
+name = "template_render"
+harness = false
+
+[[bench]]
+name = "sorting"
+harness = false
+
+[[bench]]
+name = "link_processing"
+harness = false
+
+[[bench]]
+name = "cache_operations"
+harness = false

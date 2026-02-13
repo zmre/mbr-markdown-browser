@@ -362,6 +362,8 @@ impl From<&crate::config::Config> for ServerConfig {
 #[derive(Clone)]
 pub struct ServerState {
     pub base_dir: std::path::PathBuf,
+    /// Pre-computed canonical base directory for path resolution (avoids per-request canonicalize)
+    pub canonical_base_dir: Option<std::path::PathBuf>,
     pub static_folder: String,
     pub markdown_extensions: Vec<String>,
     pub ignore_dirs: Vec<String>,
@@ -700,8 +702,10 @@ impl Server {
             INBOUND_LINK_CACHE_TTL_SECS,
         ));
 
+        let canonical_base_dir = base_dir.canonicalize().ok();
         let state = ServerState {
             base_dir,
+            canonical_base_dir,
             static_folder,
             markdown_extensions,
             ignore_dirs,
@@ -1607,6 +1611,7 @@ impl Server {
         let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
+            canonical_base_dir: config.canonical_base_dir.as_deref(),
             static_folder: &config.static_folder,
             markdown_extensions: &config.markdown_extensions,
             index_file: &config.index_file,
@@ -2169,6 +2174,7 @@ impl Server {
             let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
             let resolver_config = PathResolverConfig {
                 base_dir: &config.base_dir,
+                canonical_base_dir: config.canonical_base_dir.as_deref(),
                 static_folder: &config.static_folder,
                 markdown_extensions: &config.markdown_extensions,
                 index_file: &config.index_file,
@@ -3216,6 +3222,7 @@ impl Server {
         let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
+            canonical_base_dir: config.canonical_base_dir.as_deref(),
             static_folder: &config.static_folder,
             markdown_extensions: &config.markdown_extensions,
             index_file: &config.index_file,

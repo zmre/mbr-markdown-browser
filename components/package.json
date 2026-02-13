@@ -9,7 +9,8 @@
     "watch": "tsc && vite build --watch",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "vitest bench"
   },
   "dependencies": {
     "lit": "^3.3.2"

@@ -158,6 +158,44 @@ Property tests use `proptest` to verify invariants like:
 - Breadcrumb generation consistency
 - URL path validity (no double slashes, proper prefixes/suffixes)
 
+## Benchmarks
+
+Criterion benchmarks measure performance of the critical rendering pipeline and supporting modules. Use `--no-default-features` to avoid requiring GUI/media-metadata system dependencies.
+
+```bash
+# Compile benchmarks (fast check, no execution)
+cargo bench --no-default-features --no-run
+
+# Run all Rust benchmarks
+cargo bench --no-default-features --benches
+
+# Run a single benchmark suite
+cargo bench --no-default-features --bench markdown_render
+
+# Save baseline for future comparison
+cargo bench --no-default-features --benches -- --save-baseline v0.4.2
+
+# Compare against a saved baseline
+cargo bench --no-default-features --benches -- --baseline v0.4.2
+
+# Run frontend benchmarks
+cd components && bun run bench
+```
+
+### Benchmark Suites
+
+| Suite | Module | What it measures |
+|-------|--------|-----------------|
+| `markdown_render` | `markdown.rs` | Full render pipeline, H1 extraction, metadata extraction |
+| `html_output` | `html.rs` | HTML generation from events, section wrapping overhead |
+| `path_resolver` | `path_resolver.rs` | Per-request URL path resolution |
+| `search` | `search.rs` | Query parsing, metadata search on 500-file repo |
+| `repo_scan` | `repo.rs` | Directory scanning, metadata population |
+| `template_render` | `templates.rs` | Tera template rendering at 3 sizes |
+| `sorting` | `sorting.rs` | Single/multi-field sorting at 100-2000 items |
+| `link_processing` | `wikilink.rs`, `link_transform.rs`, `link_index.rs` | Wikilinks, link transforms, outbound resolution |
+| `cache_operations` | `oembed_cache.rs` | LRU cache get/insert/eviction |
+
 ## Frontend Components
 
 The `components/` directory contains Lit web components (TypeScript) compiled to standalone JS modules embedded into the Rust binary:

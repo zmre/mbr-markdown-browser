@@ -107,7 +107,7 @@ build/
 
 ### GitHub Pages
 
-See [Integration](../integration/) for a complete GitHub Actions workflow.
+See [Integration](../reference/integration/) for a complete GitHub Actions workflow.
 
 Quick setup:
 
