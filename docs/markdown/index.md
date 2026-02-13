@@ -372,6 +372,9 @@ URLs in angle brackets become clickable:
 ## See Also
 
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
+- [Presentation Slides](slides/) - Create slide presentations from markdown
+- [Vid Shortcode](vid-shortcode/) - Advanced video embedding with timestamps
+- [Slides Example](test-slides/) - A live example presentation
 
 
 ## Footnotes
