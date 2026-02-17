@@ -102,7 +102,9 @@ pub type SimpleMetadata = HashMap<String, serde_json::Value>;
 /// This is used to provide a title fallback when no frontmatter title exists.
 /// Only extracts the first H1 found; subsequent H1s are ignored.
 pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
-    let parser = MDParser::new_ext(markdown_input, markdown_options());
+    // Use minimal parser options: only YAML metadata (to skip frontmatter blocks)
+    // ATX headings are parsed by default without any feature flags
+    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
 
     let mut in_h1 = false;
@@ -131,63 +133,6 @@ pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
     None
 }
 
-/// First pass: extract headings and generate anchor IDs
-fn extract_headings(markdown_input: &str) -> (Vec<HeadingInfo>, HashMap<String, String>) {
-    let parser = MDParser::new_ext(markdown_input, markdown_options());
-    let parser = TextMergeStream::new(parser);
-
-    let mut headings = Vec::new();
-    let mut anchor_ids: HashMap<String, usize> = HashMap::new();
-    let mut heading_id_map: HashMap<String, String> = HashMap::new(); // Maps heading text to ID
-    let mut in_heading: Option<(HeadingLevel, String)> = None;
-    let mut heading_index = 0;
-
-    for event in parser {
-        match event {
-            Event::Start(Tag::Heading {
-                level,
-                id: _,
-                classes: _,
-                attrs: _,
-            }) => {
-                in_heading = Some((level, String::new()));
-            }
-            Event::Text(ref text) => {
-                if let Some((level, ref mut heading_text)) = in_heading {
-                    heading_text.push_str(text);
-                    in_heading = Some((level, heading_text.clone()));
-                }
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                if let Some((heading_level, text)) = in_heading.take() {
-                    let id = generate_anchor_id(&text, &mut anchor_ids);
-                    let level_num = match heading_level {
-                        HeadingLevel::H1 => 1,
-                        HeadingLevel::H2 => 2,
-                        HeadingLevel::H3 => 3,
-                        HeadingLevel::H4 => 4,
-                        HeadingLevel::H5 => 5,
-                        HeadingLevel::H6 => 6,
-                    };
-
-                    headings.push(HeadingInfo {
-                        level: level_num,
-                        text: text.clone(),
-                        id: id.clone(),
-                    });
-
-                    // Store mapping for second pass
-                    heading_id_map.insert(format!("{}:{}", heading_index, text), id);
-                    heading_index += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    (headings, heading_id_map)
-}
-
 /// Em dash character (U+2014) - what `---` becomes with smart punctuation
 const EM_DASH: &str = "\u{2014}";
 
@@ -204,6 +149,10 @@ const EM_DASH: &str = "\u{2014}";
 ///
 /// Returns (transformed_events, section_attrs) where section_attrs maps section
 /// index to parsed attributes.
+///
+/// Note: This logic is now inlined into `collect_events_and_headings` for the main
+/// render path. This standalone function is kept for potential standalone use.
+#[allow(dead_code)]
 fn transform_rule_attrs(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, HashMap<usize, ParsedAttrs>) {
     let mut result = Vec::with_capacity(events.len());
     let mut section_attrs = HashMap::new();
@@ -241,6 +190,148 @@ fn transform_rule_attrs(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, HashMap<usiz
     }
 
     (result, section_attrs)
+}
+
+/// Merged pass 1: parse markdown, extract headings with anchor IDs, and detect
+/// `--- {attrs}` rule patterns -- all in a single iteration over the parser output.
+///
+/// Returns (events, headings, section_attrs).
+///
+/// This merges what was previously two separate passes (heading extraction loop +
+/// `transform_rule_attrs`) into one. The rule-attrs detection uses a 3-element
+/// look-back buffer: when we encounter `End(Paragraph)`, we check if the preceding
+/// two events form the `Start(Paragraph), Text("em-dash + attrs")` pattern.
+fn collect_events_and_headings(
+    markdown_input: &str,
+) -> (
+    Vec<Event<'_>>,
+    Vec<HeadingInfo>,
+    HashMap<usize, ParsedAttrs>,
+) {
+    let parser = MDParser::new_ext(markdown_input, markdown_options());
+    let parser = TextMergeStream::new(parser);
+
+    let mut events = Vec::new();
+    let mut headings = Vec::new();
+    let mut anchor_ids: HashMap<String, usize> = HashMap::new();
+    let mut in_heading_text: Option<String> = None;
+    let mut section_attrs = HashMap::new();
+    let mut section_index = 0;
+
+    for event in parser {
+        match &event {
+            // --- Heading extraction ---
+            Event::Start(Tag::Heading { .. }) => {
+                in_heading_text = Some(String::new());
+                events.push(event);
+            }
+            Event::Text(text) if in_heading_text.is_some() => {
+                if let Some(ref mut heading_text) = in_heading_text {
+                    heading_text.push_str(text);
+                }
+                events.push(event);
+            }
+            Event::End(TagEnd::Heading(heading_level)) => {
+                if let Some(text) = in_heading_text.take() {
+                    let id = generate_anchor_id(&text, &mut anchor_ids);
+                    let level_num = match heading_level {
+                        HeadingLevel::H1 => 1,
+                        HeadingLevel::H2 => 2,
+                        HeadingLevel::H3 => 3,
+                        HeadingLevel::H4 => 4,
+                        HeadingLevel::H5 => 5,
+                        HeadingLevel::H6 => 6,
+                    };
+
+                    headings.push(HeadingInfo {
+                        level: level_num,
+                        text: text.clone(),
+                        id: id.clone(),
+                    });
+
+                    // Walk backward to find the matching Start(Heading) and inject the ID
+                    for i in (0..events.len()).rev() {
+                        if let Event::Start(Tag::Heading {
+                            level,
+                            id: _,
+                            classes,
+                            attrs,
+                        }) = &events[i]
+                        {
+                            events[i] = Event::Start(Tag::Heading {
+                                level: *level,
+                                id: Some(CowStr::from(id)),
+                                classes: classes.clone(),
+                                attrs: attrs.clone(),
+                            });
+                            break;
+                        }
+                    }
+                }
+                events.push(event);
+            }
+
+            // --- Rule attrs detection (inline) ---
+            // Detect End(Paragraph) and look back for the 3-event pattern:
+            //   Start(Paragraph), Text("em-dash + {attrs}"), End(Paragraph)
+            Event::End(TagEnd::Paragraph) => {
+                let len = events.len();
+                // Need at least 2 prior events to form the pattern
+                if len >= 2 {
+                    let is_rule_attrs = matches!(
+                        (&events[len - 2], &events[len - 1]),
+                        (Event::Start(Tag::Paragraph), Event::Text(_))
+                    ) && {
+                        if let Event::Text(text) = &events[len - 1] {
+                            text.starts_with(EM_DASH)
+                                && text.strip_prefix(EM_DASH).is_some_and(|rest| {
+                                    rest.starts_with(" {") && rest.ends_with('}')
+                                })
+                        } else {
+                            false
+                        }
+                    };
+
+                    if is_rule_attrs {
+                        // Extract and parse attrs from the text event
+                        let parsed = if let Event::Text(text) = &events[len - 1] {
+                            text.strip_prefix(EM_DASH)
+                                .and_then(|rest| ParsedAttrs::parse(rest.trim()))
+                        } else {
+                            None
+                        };
+
+                        // Remove the Start(Paragraph) and Text events
+                        events.pop(); // Text
+                        events.pop(); // Start(Paragraph)
+
+                        // Emit a Rule event instead
+                        events.push(Event::Rule);
+                        section_index += 1;
+
+                        if let Some(attrs) = parsed {
+                            section_attrs.insert(section_index, attrs);
+                        }
+                        // Skip pushing the End(Paragraph) event
+                        continue;
+                    }
+                }
+                events.push(event);
+            }
+
+            // Track real Rule events for section counting
+            Event::Rule => {
+                section_index += 1;
+                events.push(event);
+            }
+
+            _ => {
+                events.push(event);
+            }
+        }
+    }
+
+    (events, headings, section_attrs)
 }
 
 pub async fn render(
@@ -298,80 +389,60 @@ pub async fn render_with_cache(
         transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
     };
 
-    // First pass: extract headings and generate IDs
-    let (headings, _heading_id_map) = extract_headings(&markdown_input);
+    // Single merged pass: collect events, extract headings with anchor IDs,
+    // and detect `--- {attrs}` rule patterns (merging what was previously
+    // the heading extraction loop + transform_rule_attrs into one iteration).
+    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(&markdown_input);
 
     // Detect if the first heading is an H1 (used for conditional title rendering in templates)
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
-    // Second pass: collect and inject heading IDs into events
-    let parser = MDParser::new_ext(&markdown_input, markdown_options());
-    let parser = TextMergeStream::new(parser);
+    // Collect bare URLs and fetch oembed data in parallel (only when oembed is enabled).
+    // When oembed_timeout_ms == 0 (default in build mode), skip entirely — process_event
+    // handles missing oembed data gracefully by rendering bare URLs as plain links.
+    let prefetched_oembed = if oembed_timeout_ms > 0 {
+        prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await
+    } else {
+        HashMap::new()
+    };
 
-    let mut events_with_ids = Vec::new();
-    let mut heading_index = 0;
-    let mut in_heading_text = None;
+    // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
+    let (processed_events, state) = process_all_events(
+        events_with_ids,
+        root_path,
+        link_transform_config,
+        prefetched_oembed,
+        server_mode,
+        transcode_enabled,
+        valid_tag_sources,
+    );
 
-    for event in parser {
-        match &event {
-            Event::Start(Tag::Heading {
-                level: _,
-                id: _,
-                classes: _,
-                attrs: _,
-            }) => {
-                in_heading_text = Some(String::new());
-                // We'll modify this event after we collect the text
-                events_with_ids.push(event);
-            }
-            Event::Text(text) if in_heading_text.is_some() => {
-                if let Some(ref mut heading_text) = in_heading_text {
-                    heading_text.push_str(text);
-                }
-                events_with_ids.push(event);
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                // Now we have the full heading text, find the matching Start event and inject ID
-                if in_heading_text.take().is_some() && heading_index < headings.len() {
-                    let heading_info = &headings[heading_index];
-                    // Go back and modify the Start(Heading) event
-                    // Find the last Start(Heading) event
-                    for i in (0..events_with_ids.len()).rev() {
-                        if let Event::Start(Tag::Heading {
-                            level,
-                            id: _,
-                            classes,
-                            attrs,
-                        }) = &events_with_ids[i]
-                        {
-                            // Replace it with one that has the ID
-                            events_with_ids[i] = Event::Start(Tag::Heading {
-                                level: *level,
-                                id: Some(CowStr::from(heading_info.id.clone())),
-                                classes: classes.clone(),
-                                attrs: attrs.clone(),
-                            });
-                            break;
-                        }
-                    }
-                    heading_index += 1;
-                }
-                events_with_ids.push(event);
-            }
-            _ => {
-                events_with_ids.push(event);
-            }
-        }
-    }
+    // Generate HTML output and extract frontmatter
+    finalize_render(
+        processed_events,
+        state,
+        section_attrs,
+        &markdown_input,
+        headings,
+        has_h1,
+    )
+}
 
-    // Transform rule attrs: detect `--- {attrs}` pattern and convert to Rule + attrs
-    let (events_with_ids, section_attrs) = transform_rule_attrs(events_with_ids);
-
-    // Collect bare URLs that need oembed fetching and fetch them in parallel
-    let prefetched_oembed =
-        prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await;
-
-    // Third pass: process events through our custom logic
+/// Runs process_event over all events, returning the processed events and final state.
+///
+/// This is the shared event processing pass used by both `render_with_cache` (async)
+/// and `render_sync`. It handles link transforms, media embeds, YAML frontmatter,
+/// vid shortcodes, bare URL oembed lookups, and word counting.
+#[allow(clippy::too_many_arguments)]
+fn process_all_events<'a>(
+    events: Vec<Event<'a>>,
+    root_path: &Path,
+    link_transform_config: LinkTransformConfig,
+    prefetched_oembed: HashMap<String, PageInfo>,
+    server_mode: bool,
+    transcode_enabled: bool,
+    valid_tag_sources: HashSet<String>,
+) -> (Vec<Event<'a>>, EventState) {
     let mut state = EventState {
         root_path: root_path.to_path_buf(),
         current_media: None,
@@ -390,16 +461,32 @@ pub async fn render_with_cache(
         word_count: 0,
         in_code_block: false,
     };
-    let mut processed_events = Vec::new();
+    let mut processed_events = Vec::with_capacity(events.len());
 
-    for event in events_with_ids {
+    for event in events {
         let (processed, new_state) = process_event(event, state);
         state = new_state;
         processed_events.push(processed);
     }
 
+    (processed_events, state)
+}
+
+/// Generates final HTML output and constructs the MarkdownRenderResult.
+///
+/// Shared finalization logic for both `render_with_cache` and `render_sync`:
+/// deduplicates outbound links, generates HTML via `push_html_mbr_with_attrs`,
+/// extracts frontmatter, and injects H1 title fallback.
+fn finalize_render(
+    processed_events: Vec<Event<'_>>,
+    state: EventState,
+    section_attrs: HashMap<usize, ParsedAttrs>,
+    markdown_input: &str,
+    headings: Vec<HeadingInfo>,
+    has_h1: bool,
+) -> Result<MarkdownRenderResult, MarkdownError> {
     // Write to a new String buffer with MBR extensions (sections, mermaid)
-    let mut html_output = String::with_capacity(markdown_input.capacity() * 2);
+    let mut html_output = String::with_capacity(markdown_input.len() * 2);
 
     // Deduplicate outbound links by target URL - if a page links to the same
     // target multiple times, we only keep the first occurrence
@@ -435,6 +522,97 @@ pub async fn render_with_cache(
         has_h1,
         word_count: state.word_count,
     })
+}
+
+/// Synchronous version of `render_with_cache()` for use from rayon threads.
+///
+/// Performs the same rendering pipeline but without async: file reading (already sync),
+/// wikilink transformation, merged heading + rule-attrs pass, process_event pass, and
+/// HTML generation. Oembed fetching is skipped entirely in the sync path since the
+/// primary use case is build mode where `oembed_timeout_ms` defaults to 0.
+///
+/// When `oembed_timeout_ms > 0`, bare URLs are still rendered gracefully as plain links
+/// (using the `PageInfo` default fallback in `process_event`).
+#[allow(clippy::too_many_arguments)]
+pub fn render_sync(
+    file: PathBuf,
+    root_path: &Path,
+    oembed_timeout_ms: u64,
+    link_transform_config: LinkTransformConfig,
+    oembed_cache: Option<Arc<OembedCache>>,
+    server_mode: bool,
+    transcode_enabled: bool,
+    valid_tag_sources: HashSet<String>,
+) -> Result<MarkdownRenderResult, MarkdownError> {
+    // Read markdown input
+    let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+        path: file.clone(),
+        source: e,
+    })?;
+
+    // Transform [[Source:value]] wikilinks to standard markdown links before parsing
+    let markdown_input = if valid_tag_sources.is_empty() {
+        raw_markdown_input
+    } else {
+        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
+    };
+
+    // Single merged pass: collect events, extract headings with anchor IDs,
+    // and detect `--- {attrs}` rule patterns.
+    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(&markdown_input);
+
+    // Detect if the first heading is an H1
+    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
+
+    // Sync path: skip oembed fetching entirely. Process_event handles missing
+    // oembed data gracefully by rendering bare URLs as plain links (PageInfo default).
+    // When oembed_timeout_ms > 0 AND we have a cache, try to use cached results
+    // for any bare URLs, but don't do network fetches.
+    let prefetched_oembed = if oembed_timeout_ms > 0 {
+        if let Some(ref cache) = oembed_cache {
+            // Use cached oembed results only (no network fetches in sync path)
+            collect_cached_oembed(&events_with_ids, cache)
+        } else {
+            HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
+
+    // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
+    let (processed_events, state) = process_all_events(
+        events_with_ids,
+        root_path,
+        link_transform_config,
+        prefetched_oembed,
+        server_mode,
+        transcode_enabled,
+        valid_tag_sources,
+    );
+
+    // Generate HTML output and extract frontmatter
+    finalize_render(
+        processed_events,
+        state,
+        section_attrs,
+        &markdown_input,
+        headings,
+        has_h1,
+    )
+}
+
+/// Collect oembed results from cache only (no network fetches).
+///
+/// Used by `render_sync` to leverage cached oembed data without blocking on I/O.
+fn collect_cached_oembed(events: &[Event<'_>], cache: &OembedCache) -> HashMap<String, PageInfo> {
+    let urls = collect_bare_urls(events);
+    let mut results = HashMap::new();
+    for url in urls {
+        if let Some(info) = cache.get(&url) {
+            results.insert(url, info);
+        }
+    }
+    results
 }
 
 /// Pre-pass to collect all bare URLs that need oembed fetching.
@@ -541,65 +719,63 @@ async fn prefetch_oembed_urls(
 }
 
 fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
-    // do i want to fail on yaml parse fail? or silently ignore?
-    // for now, i'm ignoring, though I should at least print a warning
-    match y.clone().unwrap_or(Yaml::Null).into_hash() {
-        Some(y) => {
-            let mut hm = HashMap::with_capacity(y.capacity());
-            for (k, v) in y.iter() {
-                match (k, v) {
-                    (Yaml::String(key), Yaml::String(value)) => {
-                        tracing::trace!("Frontmatter: {key} = {value}");
-                        hm.insert(
-                            key.to_string(),
-                            serde_json::Value::String(value.to_string()),
-                        );
-                    }
-                    (Yaml::String(key), Yaml::Array(vals)) => {
-                        // Preserve arrays as JSON arrays instead of joining them
-                        let arr: Vec<serde_json::Value> = vals
-                            .iter()
-                            .filter_map(|val| val.clone().into_string())
-                            .map(serde_json::Value::String)
-                            .collect();
-                        tracing::trace!("Frontmatter: {key} = {:?}", &arr);
-                        hm.insert(key.to_string(), serde_json::Value::Array(arr));
-                    }
-                    (Yaml::String(key), Yaml::Hash(hash)) => {
-                        tracing::trace!("Frontmatter: {key} = (nested hash)");
-                        // Recursively parse nested hashes and flatten with dot notation
-                        let nested = yaml_frontmatter_simplified(&Some(Yaml::Hash(hash.clone())));
-                        for (k, v) in nested {
-                            hm.insert(key.to_string() + "." + k.as_str(), v);
-                        }
-                    }
-                    (Yaml::String(key), Yaml::Integer(val)) => {
-                        tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), serde_json::json!(val));
-                    }
-                    (Yaml::String(key), Yaml::Real(val)) => {
-                        tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), serde_json::Value::String(val.to_string()));
-                    }
-                    (Yaml::String(key), Yaml::Boolean(val)) => {
-                        tracing::trace!("Frontmatter: {key} = {val}");
-                        hm.insert(key.to_string(), serde_json::json!(val));
-                    }
-                    (Yaml::String(key), other_val) => {
-                        tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
-                        if let Some(str_val) = other_val.clone().into_string() {
-                            hm.insert(key.to_string(), serde_json::Value::String(str_val));
-                        }
-                    }
-                    (k, v) => {
-                        tracing::warn!("Unexpected frontmatter key-value: {:?} = {:?}", k, v);
-                    }
-                }
-            }
-            hm
-        }
+    match y.as_ref().and_then(|yaml| yaml.as_hash()) {
+        Some(hash) => yaml_hash_to_metadata(hash),
         None => HashMap::new(),
     }
+}
+
+/// Converts a YAML hash to simplified metadata, borrowing instead of cloning.
+fn yaml_hash_to_metadata(hash: &yaml_rust2::yaml::Hash) -> SimpleMetadata {
+    let mut hm = HashMap::with_capacity(hash.len());
+    for (k, v) in hash.iter() {
+        match (k, v) {
+            (Yaml::String(key), Yaml::String(value)) => {
+                tracing::trace!("Frontmatter: {key} = {value}");
+                hm.insert(key.clone(), serde_json::Value::String(value.clone()));
+            }
+            (Yaml::String(key), Yaml::Array(vals)) => {
+                // Preserve arrays as JSON arrays instead of joining them
+                let arr: Vec<serde_json::Value> = vals
+                    .iter()
+                    .filter_map(|val| val.as_str())
+                    .map(|s| serde_json::Value::String(s.to_string()))
+                    .collect();
+                tracing::trace!("Frontmatter: {key} = {:?}", &arr);
+                hm.insert(key.clone(), serde_json::Value::Array(arr));
+            }
+            (Yaml::String(key), Yaml::Hash(nested_hash)) => {
+                tracing::trace!("Frontmatter: {key} = (nested hash)");
+                // Recursively parse nested hashes and flatten with dot notation
+                let nested = yaml_hash_to_metadata(nested_hash);
+                for (k, v) in nested {
+                    hm.insert(key.to_string() + "." + k.as_str(), v);
+                }
+            }
+            (Yaml::String(key), Yaml::Integer(val)) => {
+                tracing::trace!("Frontmatter: {key} = {val}");
+                hm.insert(key.clone(), serde_json::json!(val));
+            }
+            (Yaml::String(key), Yaml::Real(val)) => {
+                tracing::trace!("Frontmatter: {key} = {val}");
+                hm.insert(key.clone(), serde_json::Value::String(val.clone()));
+            }
+            (Yaml::String(key), Yaml::Boolean(val)) => {
+                tracing::trace!("Frontmatter: {key} = {val}");
+                hm.insert(key.clone(), serde_json::json!(val));
+            }
+            (Yaml::String(key), other_val) => {
+                tracing::trace!("Frontmatter: {key} = {:?}", &other_val);
+                if let Some(str_val) = other_val.as_str() {
+                    hm.insert(key.clone(), serde_json::Value::String(str_val.to_string()));
+                }
+            }
+            (k, v) => {
+                tracing::warn!("Unexpected frontmatter key-value: {:?} = {:?}", k, v);
+            }
+        }
+    }
+    hm
 }
 
 /// Maximum bytes to read when extracting frontmatter metadata.

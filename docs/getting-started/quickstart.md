@@ -157,4 +157,4 @@ mbr -b --output ./public ./docs
 - [Modes of Operation](../modes/) - Deep dive into each mode
 - [Customization](../customization/) - Themes, templates, and components
 - [Markdown Extensions](../markdown/) - Extended syntax reference
-- [Integrations](../integration) - See how to use mbr with Obsidian or other programs
+- [Integrations](../reference/integration/) - See how to use mbr with Obsidian or other programs

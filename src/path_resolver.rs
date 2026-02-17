@@ -16,9 +16,20 @@ use std::path::{Path, PathBuf};
 /// This function guards against path traversal attacks by:
 /// 1. Canonicalizing both the base directory and the joined path
 /// 2. Verifying the resolved path starts with the base directory
-fn safe_join(base_dir: &Path, request_path: &str) -> Option<PathBuf> {
-    // Canonicalize base_dir first to handle any symlinks in the base
-    let canonical_base = base_dir.canonicalize().ok()?;
+fn safe_join(
+    base_dir: &Path,
+    canonical_base_dir: Option<&Path>,
+    request_path: &str,
+) -> Option<PathBuf> {
+    // Use pre-computed canonical base if available, otherwise canonicalize per-call
+    let owned_canonical;
+    let canonical_base = match canonical_base_dir {
+        Some(cached) => cached,
+        None => {
+            owned_canonical = base_dir.canonicalize().ok()?;
+            &owned_canonical
+        }
+    };
 
     // Build candidate from canonical_base (not base_dir) to ensure all path
     // construction happens in canonical space. This prevents subtle issues
@@ -28,7 +39,7 @@ fn safe_join(base_dir: &Path, request_path: &str) -> Option<PathBuf> {
     // Try to canonicalize - this resolves ".." and symlinks
     // If canonicalize fails (path doesn't exist), try the parent
     if let Ok(canonical) = candidate.canonicalize()
-        && canonical.starts_with(&canonical_base)
+        && canonical.starts_with(canonical_base)
     {
         return Some(canonical);
     }
@@ -37,7 +48,7 @@ fn safe_join(base_dir: &Path, request_path: &str) -> Option<PathBuf> {
     // we need to verify the parent is safe and construct the full path
     if let Some(parent) = candidate.parent()
         && let Ok(canonical_parent) = parent.canonicalize()
-        && canonical_parent.starts_with(&canonical_base)
+        && canonical_parent.starts_with(canonical_base)
         && let Some(filename) = candidate.file_name()
     {
         return Some(canonical_parent.join(filename));
@@ -77,6 +88,9 @@ pub enum ResolvedPath {
 #[derive(Debug, Clone)]
 pub struct PathResolverConfig<'a> {
     pub base_dir: &'a Path,
+    /// Pre-computed canonical base directory. Avoids calling `canonicalize()` on every request.
+    /// If `None`, `safe_join` will canonicalize on each call (backward-compatible fallback).
+    pub canonical_base_dir: Option<&'a Path>,
     pub static_folder: &'a str,
     pub markdown_extensions: &'a [String],
     pub index_file: &'a str,
@@ -112,7 +126,9 @@ pub struct PathResolverConfig<'a> {
 pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> ResolvedPath {
     // Use safe_join to prevent path traversal attacks
     // If the path would escape base_dir, skip to tag resolution or NotFound
-    if let Some(candidate_path) = safe_join(config.base_dir, request_path) {
+    if let Some(candidate_path) =
+        safe_join(config.base_dir, config.canonical_base_dir, request_path)
+    {
         // 1. Direct file match
         if candidate_path.is_file() {
             return if is_markdown_file(&candidate_path, config.markdown_extensions) {
@@ -148,8 +164,15 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
                 let index_path = parent.join(config.index_file);
                 if index_path.is_file() {
                     // Build canonical URL: /x/index/ → /x/
-                    // Use canonicalized base_dir since parent is also canonicalized from safe_join
-                    let canonical_base = config.base_dir.canonicalize().ok();
+                    // Use pre-computed canonical base if available
+                    let owned_base;
+                    let canonical_base = match config.canonical_base_dir {
+                        Some(cached) => Some(cached),
+                        None => {
+                            owned_base = config.base_dir.canonicalize().ok();
+                            owned_base.as_deref()
+                        }
+                    };
                     let canonical = canonical_base
                         .and_then(|base| pathdiff::diff_paths(parent, base))
                         .map(|p| {
@@ -238,11 +261,19 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 /// This function guards against path traversal attacks by canonicalizing
 /// the resolved path and verifying it remains within the static directory.
 fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Option<PathBuf> {
-    let static_dir = config
-        .base_dir
-        .join(config.static_folder)
-        .canonicalize()
-        .ok()?;
+    // Build static_dir from canonical base if available, otherwise canonicalize
+    let static_dir = match config.canonical_base_dir {
+        Some(cached) => {
+            let dir = cached.join(config.static_folder);
+            // Still need to verify it exists (canonicalize checks this)
+            dir.canonicalize().ok()?
+        }
+        None => config
+            .base_dir
+            .join(config.static_folder)
+            .canonicalize()
+            .ok()?,
+    };
     let candidate = static_dir.join(request_path);
 
     // Canonicalize to resolve any ".." or symlinks, then verify containment
@@ -319,6 +350,7 @@ mod tests {
     /// Test fixture that owns the extensions and tag_sources vectors
     struct TestFixture {
         dir: TempDir,
+        canonical: PathBuf,
         extensions: Vec<String>,
         tag_sources: Vec<String>,
     }
@@ -327,8 +359,10 @@ mod tests {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
+            let canonical = dir.path().canonicalize().unwrap();
             Self {
                 dir,
+                canonical,
                 extensions: vec![String::from("md")],
                 tag_sources: vec![],
             }
@@ -337,8 +371,10 @@ mod tests {
         fn with_extensions(extensions: Vec<String>) -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
+            let canonical = dir.path().canonicalize().unwrap();
             Self {
                 dir,
+                canonical,
                 extensions,
                 tag_sources: vec![],
             }
@@ -347,8 +383,10 @@ mod tests {
         fn with_tag_sources(tag_sources: Vec<String>) -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
+            let canonical = dir.path().canonicalize().unwrap();
             Self {
                 dir,
+                canonical,
                 extensions: vec![String::from("md")],
                 tag_sources,
             }
@@ -357,6 +395,7 @@ mod tests {
         fn config(&self) -> PathResolverConfig<'_> {
             PathResolverConfig {
                 base_dir: self.dir.path(),
+                canonical_base_dir: Some(&self.canonical),
                 static_folder: "static",
                 markdown_extensions: &self.extensions,
                 index_file: "index.md",
@@ -899,16 +938,16 @@ mod tests {
         fs::write(base.join("inside.txt"), "inside").unwrap();
 
         // Valid path should work
-        let valid = safe_join(base, "inside.txt");
+        let valid = safe_join(base, None, "inside.txt");
         assert!(valid.is_some(), "Valid path should work");
         assert!(valid.unwrap().ends_with("inside.txt"));
 
         // Path traversal should be blocked
-        let attack = safe_join(base, "../../../etc/passwd");
+        let attack = safe_join(base, None, "../../../etc/passwd");
         assert!(attack.is_none(), "Path traversal should be blocked");
 
         // Complex traversal should be blocked
-        let attack2 = safe_join(base, "foo/../../../etc/passwd");
+        let attack2 = safe_join(base, None, "foo/../../../etc/passwd");
         assert!(
             attack2.is_none(),
             "Complex path traversal should be blocked"
@@ -925,7 +964,7 @@ mod tests {
         fs::write(base.join("foo/sibling.txt"), "sibling").unwrap();
 
         // Going up and back down within base_dir should work
-        let valid = safe_join(base, "foo/bar/../sibling.txt");
+        let valid = safe_join(base, None, "foo/bar/../sibling.txt");
         assert!(valid.is_some(), "Internal navigation should work");
         let resolved = valid.unwrap();
         assert!(
@@ -965,6 +1004,7 @@ mod tests {
                 let tag_sources: Vec<String> = vec![];
                 let config = PathResolverConfig {
                     base_dir: base,
+                    canonical_base_dir: None,
                     static_folder: "static",
                     markdown_extensions: &extensions,
                     index_file: "index.md",
@@ -1041,6 +1081,7 @@ mod tests {
         let tag_sources: Vec<String> = vec![];
         let config = PathResolverConfig {
             base_dir: dir.path(),
+            canonical_base_dir: None,
             static_folder: "", // Empty!
             markdown_extensions: &extensions,
             index_file: "index.md",
@@ -1211,6 +1252,7 @@ mod proptests {
             let tag_sources: Vec<String> = vec![];
             let config = PathResolverConfig {
                 base_dir: dir.path(),
+                canonical_base_dir: None,
                 static_folder: "static",
                 markdown_extensions: &extensions,
                 index_file: "index.md",
@@ -1240,6 +1282,7 @@ mod proptests {
             let tag_sources: Vec<String> = vec![];
             let config = PathResolverConfig {
                 base_dir,
+                canonical_base_dir: None,
                 static_folder: "static",
                 markdown_extensions: &extensions,
                 index_file: "index.md",

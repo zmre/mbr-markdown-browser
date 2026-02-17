@@ -2,15 +2,72 @@
 //!
 //! Provides multi-level sorting by any field (title, filename, date, frontmatter),
 //! with configurable order (ascending/descending) and comparison type (string/numeric).
+//!
+//! Uses a Schwartzian transform (decorate-sort-undecorate) to pre-extract sort keys,
+//! avoiding repeated field lookups and string allocations during comparisons.
 
 use crate::config::SortField;
 use serde_json::Value;
 use std::cmp::Ordering;
 
+/// A pre-extracted sort key for a single field of a single file.
+///
+/// Keys are extracted once before sorting begins, eliminating per-comparison allocations.
+#[derive(Debug, Clone, PartialEq)]
+enum SortKey {
+    /// Field value is missing — sorts AFTER all present values regardless of sort direction.
+    Missing,
+    /// Numeric value (parsed from string).
+    Numeric(f64),
+    /// String value (pre-lowercased for case-insensitive comparison).
+    Text(String),
+}
+
+impl SortKey {
+    /// Compares two sort keys for a single field.
+    ///
+    /// Missing values always sort after present values (regardless of sort order).
+    /// The `reverse` flag only applies to present-vs-present comparisons.
+    fn cmp_with_direction(&self, other: &SortKey, reverse: bool) -> Ordering {
+        match (self, other) {
+            (SortKey::Missing, SortKey::Missing) => Ordering::Equal,
+            (SortKey::Missing, _) => Ordering::Greater,
+            (_, SortKey::Missing) => Ordering::Less,
+            (SortKey::Numeric(a), SortKey::Numeric(b)) => {
+                let cmp = a.partial_cmp(b).unwrap_or(Ordering::Equal);
+                if reverse { cmp.reverse() } else { cmp }
+            }
+            (SortKey::Text(a), SortKey::Text(b)) => {
+                let cmp = a.cmp(b);
+                if reverse { cmp.reverse() } else { cmp }
+            }
+            // Should not happen in practice (mixed types for same field),
+            // but handle gracefully by treating as equal.
+            _ => Ordering::Equal,
+        }
+    }
+}
+
+/// Parsed sort direction to avoid repeated string comparisons.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortOrder {
+    Asc,
+    Desc,
+}
+
+/// Parsed comparison type to avoid repeated string comparisons.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortCompare {
+    String,
+    Numeric,
+}
+
 /// Sorts files in place according to the given sort configuration.
 ///
-/// Files are sorted by each field in order. When two files are equal
-/// on one sort field, the next field is used to break the tie.
+/// Uses a Schwartzian transform to minimize allocations:
+/// 1. **Decorate**: Extract all sort keys for all items (O(n * k) allocations, done once)
+/// 2. **Sort**: Sort an index array by comparing pre-computed keys (zero allocations)
+/// 3. **Undecorate**: Apply the permutation in-place
 ///
 /// # Special field names
 /// - `"title"` - Uses frontmatter title, falls back to filename without extension
@@ -24,55 +81,92 @@ use std::cmp::Ordering;
 /// This enables patterns like "pinned" (files with pinned:true first) or
 /// "order" (files with explicit order first, then others).
 pub fn sort_files(files: &mut [Value], sort_config: &[SortField]) {
-    if sort_config.is_empty() {
+    if sort_config.is_empty() || files.len() <= 1 {
         return;
     }
 
-    files.sort_by(|a, b| {
-        for sort_field in sort_config {
-            let cmp = compare_by_field(a, b, sort_field);
+    // Parse sort configuration once
+    let parsed_config: Vec<(SortOrder, SortCompare)> = sort_config
+        .iter()
+        .map(|sf| {
+            let order = if sf.order == "desc" {
+                SortOrder::Desc
+            } else {
+                SortOrder::Asc
+            };
+            let compare = if sf.compare == "numeric" {
+                SortCompare::Numeric
+            } else {
+                SortCompare::String
+            };
+            (order, compare)
+        })
+        .collect();
+
+    // Step 1: Decorate — extract all sort keys upfront
+    let keys: Vec<Vec<SortKey>> = files
+        .iter()
+        .map(|file| {
+            sort_config
+                .iter()
+                .zip(parsed_config.iter())
+                .map(|(sf, &(_, compare))| extract_sort_key(file, &sf.field, compare))
+                .collect()
+        })
+        .collect();
+
+    // Step 2: Sort — build index array and sort by pre-computed keys
+    let mut indices: Vec<usize> = (0..files.len()).collect();
+    indices.sort_by(|&a, &b| {
+        for (field_idx, &(order, _)) in parsed_config.iter().enumerate() {
+            let reverse = order == SortOrder::Desc;
+            let cmp = keys[a][field_idx].cmp_with_direction(&keys[b][field_idx], reverse);
             if cmp != Ordering::Equal {
                 return cmp;
             }
         }
         Ordering::Equal
     });
+
+    // Step 3: Undecorate — apply permutation in-place using cycle-chase
+    apply_permutation(files, &mut indices);
 }
 
-/// Compares two file objects by a single sort field configuration.
-fn compare_by_field(a: &Value, b: &Value, config: &SortField) -> Ordering {
-    let val_a = get_field_value(a, &config.field);
-    let val_b = get_field_value(b, &config.field);
-
-    // Handle missing values: files without field sort AFTER files with it
-    // Note: Missing value handling is NOT affected by sort direction
-    match (&val_a, &val_b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater, // a missing → a comes after
-        (Some(_), None) => Ordering::Less,    // b missing → a comes before
-        (Some(a_str), Some(b_str)) => {
-            // Only the value comparison is affected by sort direction
-            let cmp = if config.compare == "numeric" {
-                compare_numeric(a_str, b_str)
-            } else {
-                a_str.to_lowercase().cmp(&b_str.to_lowercase())
-            };
-
-            if config.order == "desc" {
-                cmp.reverse()
-            } else {
-                cmp
+/// Applies a permutation to a slice in-place using cycle-chase algorithm.
+///
+/// After this function, `data[i]` will contain the element that was originally
+/// at position `perm[i]`. The `perm` array is consumed (modified) during the process.
+fn apply_permutation(data: &mut [Value], perm: &mut [usize]) {
+    for i in 0..data.len() {
+        // Follow the cycle starting at position i
+        if perm[i] == i {
+            continue;
+        }
+        let mut current = i;
+        loop {
+            let target = perm[current];
+            perm[current] = current; // Mark as placed
+            if target == i {
+                break;
             }
+            data.swap(current, target);
+            current = target;
         }
     }
 }
 
-/// Compares two strings as numbers.
-/// Non-numeric strings are treated as 0.
-fn compare_numeric(a: &str, b: &str) -> Ordering {
-    let num_a: f64 = a.parse().unwrap_or(0.0);
-    let num_b: f64 = b.parse().unwrap_or(0.0);
-    num_a.partial_cmp(&num_b).unwrap_or(Ordering::Equal)
+/// Extracts a sort key from a file JSON object for a given field.
+fn extract_sort_key(file: &Value, field: &str, compare: SortCompare) -> SortKey {
+    match get_field_value(file, field) {
+        None => SortKey::Missing,
+        Some(s) => match compare {
+            SortCompare::Numeric => {
+                let num: f64 = s.parse().unwrap_or(0.0);
+                SortKey::Numeric(num)
+            }
+            SortCompare::String => SortKey::Text(s.to_lowercase()),
+        },
+    }
 }
 
 /// Extracts a field value from a file JSON object.
@@ -423,5 +517,37 @@ mod tests {
         assert_eq!(files[0]["title"], "New");
         assert_eq!(files[1]["title"], "Middle");
         assert_eq!(files[2]["title"], "Old");
+    }
+
+    #[test]
+    fn test_single_element_preserves() {
+        let mut files = vec![make_file("a.md", Some("A"), None)];
+        let config = vec![SortField::default()];
+        sort_files(&mut files, &config);
+        assert_eq!(files[0]["title"], "A");
+    }
+
+    #[test]
+    fn test_apply_permutation_identity() {
+        let mut data = vec![json!("a"), json!("b"), json!("c")];
+        let mut perm = vec![0, 1, 2];
+        apply_permutation(&mut data, &mut perm);
+        assert_eq!(data, vec![json!("a"), json!("b"), json!("c")]);
+    }
+
+    #[test]
+    fn test_apply_permutation_reverse() {
+        let mut data = vec![json!("a"), json!("b"), json!("c")];
+        let mut perm = vec![2, 1, 0];
+        apply_permutation(&mut data, &mut perm);
+        assert_eq!(data, vec![json!("c"), json!("b"), json!("a")]);
+    }
+
+    #[test]
+    fn test_apply_permutation_cycle() {
+        let mut data = vec![json!("a"), json!("b"), json!("c"), json!("d")];
+        let mut perm = vec![1, 2, 3, 0]; // rotate left
+        apply_permutation(&mut data, &mut perm);
+        assert_eq!(data, vec![json!("b"), json!("c"), json!("d"), json!("a")]);
     }
 }
