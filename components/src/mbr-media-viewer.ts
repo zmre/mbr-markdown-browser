@@ -59,6 +59,35 @@ export class MbrMediaViewerElement extends LitElement {
       color: var(--pico-muted-color, #666);
     }
 
+    .directlink {
+      margin-top: var(--pico-block-spacing-vertical);
+      text-align: center;
+    }
+
+    [role=button], button {
+      --pico-background-color: var(--pico-primary-background);
+      --pico-border-color: var(--pico-primary-border);
+      --pico-color: var(--pico-primary-inverse);
+      --pico-box-shadow: var(--pico-button-box-shadow, 0 0 0 rgba(0, 0, 0, 0));
+      padding: var(--pico-form-element-spacing-vertical) var(--pico-form-element-spacing-horizontal);
+      border: var(--pico-border-width) solid var(--pico-border-color);
+      border-radius: var(--pico-border-radius);
+      outline: 0;
+      background-color: var(--pico-background-color);
+      box-shadow: var(--pico-box-shadow);
+      color: var(--pico-color);
+      font-weight: var(--pico-font-weight);
+      font-size: 1rem;
+      line-height: var(--pico-line-height);
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      user-select: none;
+      transition:background-color var(--pico-transition), border-color var(--pico-transition), color var(--pico-transition), box-shadow var(--pico-transition)
+    }
+
     /* Video styles */
     video {
       width: 100%;
@@ -362,8 +391,8 @@ export class MbrMediaViewerElement extends LitElement {
     return html`
       <div class="media-wrapper audio-wrapper">
         ${this._hasCoverArt === false
-          ? this._renderAudioPlaceholder()
-          : html`
+        ? this._renderAudioPlaceholder()
+        : html`
             <img
               class="audio-cover"
               src="${coverArtUrl}"
@@ -453,8 +482,8 @@ export class MbrMediaViewerElement extends LitElement {
       `;
     }
 
-    // Render the appropriate media content
-    return this._renderContent();
+    // Render the appropriate media content and a download link
+    return html`${this._renderContent()} <div class="directlink"><a href="${this._path}"><button>Direct link</button></a></div>`;
   }
 }
 
