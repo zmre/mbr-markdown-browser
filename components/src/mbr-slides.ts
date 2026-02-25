@@ -35,7 +35,7 @@ interface WindowWithReveal extends Window {
   Reveal?: RevealApi
   RevealNotes?: RevealPlugin
 }
-type RevealSlide = Element;
+
 export interface RevealReadyEvent {
   currentSlide: HTMLElement;
   indexh: number;
@@ -80,12 +80,6 @@ export type RevealOn = {
 };
 
 export type RevealOff = RevealOn;
-
-// Event shape Reveal emits for slidechanged/ready
-interface RevealSlideEvent {
-  currentSlide: RevealSlide;
-  previousSlide?: RevealSlide | null;
-}
 
 @customElement('mbr-slides')
 export class MbrSlidesElement extends LitElement {

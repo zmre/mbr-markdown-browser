@@ -192,10 +192,6 @@ body > footer {
   body.mbr-has-sidebar {
     display: block;
   }
-
-  body.mbr-has-sidebar > mbr-browse-single {
-    /* Component handles overlay positioning itself */
-  }
 }
 
 figure > video {

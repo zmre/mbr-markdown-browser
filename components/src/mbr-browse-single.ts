@@ -266,7 +266,7 @@ export class MbrBrowseSingleElement extends LitElement {
     this._keyboardHandler = (e: KeyboardEvent) => {
       // Handle - and F2 for toggle (in overlay mode)
       if (this._isOverlayMode && !this._isInputTarget(e.target)) {
-        if (e.key === '-' || e.key === 'F2') {
+        if ((e.key === '-' && !e.ctrlKey && !e.metaKey) || e.key === 'F2') {
           e.preventDefault();
           this.toggle();
           return;

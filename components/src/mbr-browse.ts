@@ -152,7 +152,7 @@ export class MbrBrowseElement extends LitElement {
     // Setup keyboard event listener
     this._keyboardHandler = (e: KeyboardEvent) => {
       // Open with '-' key (when not in input field)
-      if (e.key === '-' && !this._isInputTarget(e.target)) {
+      if (e.key === '-' && !e.ctrlKey && !e.metaKey && !this._isInputTarget(e.target)) {
         e.preventDefault();
         this.toggle();
         return;
