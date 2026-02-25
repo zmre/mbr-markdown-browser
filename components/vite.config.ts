@@ -53,7 +53,7 @@ export default {
     minify: 'terser', // Use terser for more aggressive minification than esbuild
     terserOptions: {
       compress: {
-        drop_console: true,  // Remove console.* statements
+        drop_console: ["log", "info", "debug"],  // Remove console.log statements (leave warn and error)
         drop_debugger: true, // Remove debugger statements
         passes: 2,           // Run compression twice for better results
       },
