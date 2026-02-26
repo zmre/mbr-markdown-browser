@@ -531,7 +531,15 @@ export class MbrFuzzyNavElement extends LitElement {
     if (e.key === 'Enter') {
       e.preventDefault();
       if (items[this._selectedIndex]) {
-        this._navigateToItem(items[this._selectedIndex]);
+        const selectedEl = this.shadowRoot?.querySelector('.result-item.selected');
+        if (selectedEl instanceof HTMLAnchorElement) {
+          // Link items: use native <a> click for proper navigation
+          this.close();
+          selectedEl.click();
+        } else {
+          // Heading items: use scrollIntoView handler
+          this._navigateToItem(items[this._selectedIndex]);
+        }
       }
       return;
     }
@@ -603,12 +611,6 @@ export class MbrFuzzyNavElement extends LitElement {
       if (element) {
         element.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
-    } else if (item.type === 'link-in' || (item.type === 'link-out' && item.isInternal)) {
-      // Internal navigation
-      window.location.href = resolveUrl(item.url);
-    } else {
-      // External link
-      window.open(item.url, '_blank', 'noopener');
     }
   }
 
@@ -735,27 +737,57 @@ export class MbrFuzzyNavElement extends LitElement {
     const isHeading = item.type === 'heading';
     const isExternal = item.type === 'link-out' && !item.isInternal;
 
+    const content = html`
+      ${isHeading ? html`
+        <span class="heading-level" style="margin-left: ${((item.level || 1) - 1) * 0.75}rem">
+          H${item.level}
+        </span>
+      ` : html`
+        <span class="link-icon">
+          ${item.type === 'link-in' ? html`<span class="icon-arrow">&#8592;</span>` : html`<span class="icon-arrow">&#8594;</span>`}
+        </span>
+      `}
+      <span class="item-text">${item.text}</span>
+      ${isExternal ? html`<span class="external-badge" title="External link">&#8599;</span>` : nothing}
+      ${item.isVisible ? html`<span class="visible-badge" title="Currently visible">&#9679;</span>` : nothing}
+    `;
+
+    // Headings use div with click handler (scrollIntoView, not navigation)
+    if (isHeading) {
+      return html`
+        <div
+          class="result-item ${isSelected ? 'selected' : ''} ${item.isVisible ? 'visible' : ''}"
+          role="option"
+          aria-selected=${isSelected}
+          @click=${() => this._navigateToItem(item)}
+          @mouseenter=${() => { this._selectedIndex = index; }}
+        >${content}</div>
+      `;
+    }
+
+    // Link items use native <a> for Cmd+Click / middle-click / right-click support
+    const href = isExternal ? item.url : resolveUrl(item.url);
+    if (isExternal) {
+      return html`
+        <a
+          href=${href}
+          class="result-item ${isSelected ? 'selected' : ''} ${item.isVisible ? 'visible' : ''}"
+          role="option"
+          aria-selected=${isSelected}
+          @mouseenter=${() => { this._selectedIndex = index; }}
+          target="_blank"
+          rel="noopener"
+        >${content}</a>
+      `;
+    }
     return html`
-      <div
+      <a
+        href=${href}
         class="result-item ${isSelected ? 'selected' : ''} ${item.isVisible ? 'visible' : ''}"
         role="option"
         aria-selected=${isSelected}
-        @click=${() => this._navigateToItem(item)}
         @mouseenter=${() => { this._selectedIndex = index; }}
-      >
-        ${isHeading ? html`
-          <span class="heading-level" style="margin-left: ${((item.level || 1) - 1) * 0.75}rem">
-            H${item.level}
-          </span>
-        ` : html`
-          <span class="link-icon">
-            ${item.type === 'link-in' ? html`<span class="icon-arrow">&#8592;</span>` : html`<span class="icon-arrow">&#8594;</span>`}
-          </span>
-        `}
-        <span class="item-text">${item.text}</span>
-        ${isExternal ? html`<span class="external-badge" title="External link">&#8599;</span>` : nothing}
-        ${item.isVisible ? html`<span class="visible-badge" title="Currently visible">&#9679;</span>` : nothing}
-      </div>
+      >${content}</a>
     `;
   }
 
@@ -942,6 +974,8 @@ export class MbrFuzzyNavElement extends LitElement {
       border-radius: 6px;
       cursor: pointer;
       transition: background 0.1s ease;
+      text-decoration: none;
+      color: inherit;
     }
 
     .result-item:hover,

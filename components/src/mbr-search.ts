@@ -370,7 +370,10 @@ export class MbrSearchElement extends LitElement {
       case 'Enter':
         e.preventDefault();
         if (this._selectedIndex >= 0 && this._results[this._selectedIndex]) {
-          this._navigateToResult(this._results[this._selectedIndex]);
+          const selectedLink = this.shadowRoot?.querySelector('a.result.selected') as HTMLAnchorElement | null;
+          if (selectedLink) {
+            selectedLink.click();
+          }
         }
         break;
       case 'Escape':
@@ -539,19 +542,14 @@ export class MbrSearchElement extends LitElement {
     }
   }
 
-  private _navigateToResult(result: SearchResult) {
-    // Use resolveUrl to handle relative paths in static mode
-    window.location.href = resolveUrl(result.url_path);
-  }
-
   private _renderResult(result: SearchResult, index: number) {
     const isSelected = index === this._selectedIndex;
     const title = result.title || result.url_path;
 
     return html`
-      <div
+      <a
+        href=${resolveUrl(result.url_path)}
         class="result ${isSelected ? 'selected' : ''} ${result.is_content_match ? 'content-match' : 'metadata-match'}"
-        @click=${() => this._navigateToResult(result)}
         @mouseenter=${() => this._selectedIndex = index}
       >
         <div class="result-header">
@@ -571,7 +569,7 @@ export class MbrSearchElement extends LitElement {
             `)}
           </div>
         ` : nothing}
-      </div>
+      </a>
     `;
   }
 
@@ -919,6 +917,9 @@ export class MbrSearchElement extends LitElement {
 
     /* Result item */
     .result {
+      display: block;
+      text-decoration: none;
+      color: inherit;
       padding: 0.75rem;
       border-radius: 8px;
       cursor: pointer;
