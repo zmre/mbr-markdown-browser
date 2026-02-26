@@ -2,11 +2,6 @@
 
 ## What's Next
 
-* [ ] Fix video enhancement bar under the video -- needs to be flex and stuff to avoid weird vertical stuff -- maybe a human here
-
-* **Static build**
-  * [ ] Setup some benchmarking and profiling
-
 * **Big repo (goodwiki) issues**
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.) or some sort of pagination
     * [ ] The home page currently shows all pages on the site, which means processing all files before loading the index, which in dynamic mode sucks.
@@ -14,9 +9,6 @@
     * Need to look into the spaces vs. underscores stuff a bit here too
     * Answer: only if we submit PRs to pagefind or switch to something else
 
-* **Theming**
-  * Need a new browser widget
-    * [ ] Add search/filter abilities to the note browser.  Allows for fast filtering of navigation with a separate search that prunes empty folders and tags that don't apply and only searches metadata (filename, title, description) using similar syntax to our main search but not allowing for full text search and using this different interface of hierarchical navigation showing just what's relevant.
 
 * [ ] Editing of metadata (tags and other yaml frontmatter) maybe including description recommendations using in-browser local AI for a given note.
 

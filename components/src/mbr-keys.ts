@@ -9,6 +9,13 @@ const SCROLL_HALF_PAGE = () => window.innerHeight / 2;
 const SCROLL_FULL_PAGE = () => window.innerHeight - 100; // Leave some context
 
 /**
+ * Font size adjustment constants (percentage-based, matching Pico CSS breakpoint increments).
+ */
+const FONT_SIZE_STEP = 6.25;   // % step (matches Pico breakpoint increments)
+const FONT_SIZE_MIN = 62.5;    // minimum %
+const FONT_SIZE_MAX = 250;     // maximum %
+
+/**
  * Check if the event target is an input element where we shouldn't intercept keys.
  * Uses composedPath to correctly identify inputs inside shadow DOMs.
  */
@@ -66,6 +73,28 @@ function scrollBy(target: Element | Window, amount: number) {
   } else {
     target.scrollBy({ top: amount, behavior: 'smooth' });
   }
+}
+
+/**
+ * Get the current --pico-font-size as a percentage number, defaulting to 100.
+ */
+function getCurrentFontSizePercent(): number {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue('--pico-font-size')
+    .trim();
+  if (raw.endsWith('%')) {
+    const parsed = parseFloat(raw);
+    if (!isNaN(parsed)) return parsed;
+  }
+  return 100;
+}
+
+/**
+ * Set --pico-font-size on :root, clamped to [FONT_SIZE_MIN, FONT_SIZE_MAX].
+ */
+function setFontSizePercent(percent: number): void {
+  const clamped = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, percent));
+  document.documentElement.style.setProperty('--pico-font-size', `${clamped}%`);
 }
 
 /**
@@ -136,6 +165,14 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'l or Enter', description: 'Expand / open' },
       { keys: 'o', description: 'Open in new tab' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll panel' },
+    ],
+  },
+  {
+    title: 'Display',
+    shortcuts: [
+      { keys: 'Ctrl++ / Cmd++', description: 'Increase font size' },
+      { keys: 'Ctrl+- / Cmd+-', description: 'Decrease font size' },
+      { keys: 'Ctrl+0 / Cmd+0', description: 'Reset font size' },
     ],
   },
   {
@@ -234,6 +271,25 @@ export class MbrKeysElement extends LitElement {
           e.preventDefault();
           toggleInfoPanel();
           return;
+      }
+    }
+
+    // Handle Ctrl/Cmd +/-/0 for font size adjustment (works regardless of modal state)
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        setFontSizePercent(getCurrentFontSizePercent() + FONT_SIZE_STEP);
+        return;
+      }
+      if (e.key === '-') {
+        e.preventDefault();
+        setFontSizePercent(getCurrentFontSizePercent() - FONT_SIZE_STEP);
+        return;
+      }
+      if (e.key === '0') {
+        e.preventDefault();
+        document.documentElement.style.removeProperty('--pico-font-size');
+        return;
       }
     }
 

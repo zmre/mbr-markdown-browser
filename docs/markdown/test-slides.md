@@ -158,7 +158,7 @@ Content the audience sees.
 
 >>> Like these notes you're reading right now! Press 'S' to see them in a separate window.
 
----
+--- {data-transition="zoom"}
 
 ## Slide Attributes
 
@@ -170,7 +170,7 @@ Add custom attributes to any slide:
 This slide has custom ID, class, and transition.
 ```
 
-Useful for styling and Reveal.js transitions.
+Useful for styling and Reveal.js transitions (though it dirties up your nice markdown).
 
 >>> Section attributes work for both slides and regular documents.
 
@@ -199,5 +199,8 @@ mbr -b ~/docs --output ./site
 
 - GitHub: `github.com/user/mbr`
 - Docs: Built with mbr, of course!
+* Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+* one more
+* Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
 
 >>> Thank you for your attention! Questions?

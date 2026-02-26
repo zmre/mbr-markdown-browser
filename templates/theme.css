@@ -49,7 +49,7 @@
   --mbr-icon-warning: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'%3E%3C/path%3E%3Cline x1='12' y1='9' x2='12' y2='13'%3E%3C/line%3E%3Cline x1='12' y1='17' x2='12.01' y2='17'%3E%3C/line%3E%3C/svg%3E");
   --mbr-icon-caution: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2'%3E%3C/polygon%3E%3Cline x1='12' y1='8' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'%3E%3C/line%3E%3C/svg%3E");
 
-  /* tie reveal.js styles to our pico styles and theme */
+  /* tie reveal.js slides styles to our pico styles and theme */
   --r-background-color: var(--pico-background-color);
   --r-main-font: var(--pico-font-family);
   --r-main-font-size: calc(var(--pico-font-size) * 1.25);
@@ -191,10 +191,6 @@ body > footer {
 @media (max-width: 1023px) {
   body.mbr-has-sidebar {
     display: block;
-  }
-
-  body.mbr-has-sidebar > mbr-browse-single {
-    /* Component handles overlay positioning itself */
   }
 }
 
@@ -885,3 +881,88 @@ sup.footnote-reference {
  * 1. Use light mode (not dark mode)
  * 2. Enable "Print backgrounds" in your browser's print dialog
  */
+
+/* ============================= Kanban Display ========================= */
+
+/*
+ * just use `--- {.kanban}` or put style: kanban in the frontmatter as appropriate
+ */
+
+.kanban {
+  columns: 18rem; /* needs to be fixed since we don't know how many columns */
+  column-gap: 2rem;
+  column-fill: auto; /* should avoid balancing and just fill left first */
+  /* column-rule: 1px solid var(--pico-muted-border-color); */
+  overflow-x: auto; /* allow horizontal scroll */
+  overflow-y: visible;
+  max-width: 100%;
+  height: 85vh;
+}
+
+.kanban h1,
+.kanban h2,
+.kanban h3,
+.kanban h4,
+.kanban h5,
+.kanban h6 {
+  margin-top: 0;
+  break-after: avoid;
+  -webkit-column-break-after: avoid;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+}
+
+.kanban h1:has(+ ul),
+.kanban h1:has(+ ol),
+.kanban h2:has(+ ul),
+.kanban h2:has(+ ol),
+.kanban h3:has(+ ul),
+.kanban h3:has(+ ol),
+.kanban h4:has(+ ul),
+.kanban h4:has(+ ol),
+.kanban h5:has(+ ul),
+.kanban h5:has(+ ol),
+.kanban h6:has(+ ul),
+.kanban h6:has(+ ol) {
+  break-after: avoid;
+  -webkit-column-break-after: avoid;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+}
+
+.kanban > ul,
+.kanban > ol {
+  margin-left: 0;
+  padding-left: 0;
+  break-after: column;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  -webkit-column-break-before: avoid;
+  break-before: avoid;
+}
+
+.kanban > ul > li,
+.kanban > ol > li {
+  margin-bottom: var(--pico-block-spacing-vertical);
+  padding: var(--pico-block-spacing-vertical)
+    var(--pico-block-spacing-horizontal);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
+  box-shadow: var(--pico-card-box-shadow);
+  display: block;
+  /* background-color: var(--pico-card-sectioning-background-color); */
+  font-weight: bold;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+}
+
+.kanban ul > li ul,
+.kanban ol > li ol {
+  font-weight: normal;
+  margin-top: 1em;
+}
+
+.kanban ul:last-child,
+.kanban ol:last-child {
+  break-after: always;
+}

@@ -47,7 +47,7 @@ Final slide
 
 ## Speaker Notes
 
-Use triple blockquotes (`>>>`) for speaker notes visible only to the presenter:
+Use triple blockquotes (`>>>`) for speaker notes visible only to the presenter (press `s` for speaker view):
 
 ```markdown
 ## Slide Title

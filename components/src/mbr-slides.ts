@@ -23,12 +23,63 @@ interface RevealPlugin {
   id: string
 }
 
+interface RevealApi {
+  initialize: (config: Record<string, unknown>) => Promise<RevealApi>
+  on: RevealOn;
+  off: RevealOff;
+  getCurrentSlide(): Element;
+  isReady?(): boolean;
+}
+
 interface WindowWithReveal extends Window {
-  Reveal?: {
-    initialize: (config: Record<string, unknown>) => Promise<void>
-  }
+  Reveal?: RevealApi
   RevealNotes?: RevealPlugin
 }
+
+export interface RevealReadyEvent {
+  currentSlide: HTMLElement;
+  indexh: number;
+  indexv: number;
+}
+
+export interface RevealSlideChangedEvent {
+  previousSlide: HTMLElement | null;
+  currentSlide: HTMLElement;
+  indexh: number;
+  indexv: number;
+}
+
+export interface RevealResizeEvent {
+  scale: number;
+  oldScale: number;
+  size: { width: number; height: number };
+}
+
+export interface RevealEventMap {
+  ready: RevealReadyEvent;
+  slidechanged: RevealSlideChangedEvent;
+  slidetransitionend: RevealSlideChangedEvent;
+  resize: RevealResizeEvent;
+
+  // If you use more events (fragments, overview, autoslide, etc),
+  // add them here as you need them.
+  [eventName: string]: any;
+}
+
+// ---- Reveal.on / Reveal.off signatures ----
+
+export type RevealOn = {
+  <K extends keyof RevealEventMap>(
+    type: K,
+    listener: (event: RevealEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions
+  ): void;
+
+  // Fallback for any custom/untyped events
+  (type: string, listener: (event: any) => void, options?: boolean | AddEventListenerOptions): void;
+};
+
+export type RevealOff = RevealOn;
 
 @customElement('mbr-slides')
 export class MbrSlidesElement extends LitElement {
@@ -40,6 +91,10 @@ export class MbrSlidesElement extends LitElement {
 
   @state()
   private _isLoading = false
+
+  private _deck: RevealApi | null = null
+
+  private _slidecontainer: HTMLElement | null = null
 
   static override styles = css`
     :host {
@@ -147,6 +202,19 @@ export class MbrSlidesElement extends LitElement {
     }
   }
 
+  private _updateScrolling() {
+    const slide = this._deck?.getCurrentSlide();
+    if (slide) {
+      this._slidecontainer?.classList.remove('scrollable-slide')
+
+      // If content is taller than the slide, enable scrolling
+      // This is a backup since text should shrink, but in some cases that doesn't work right
+      if (slide.scrollHeight > (this._slidecontainer?.clientHeight ?? 0)) {
+        this._slidecontainer?.classList.add('scrollable-slide')
+      }
+    }
+  }
+
   private async _startPresentation() {
     if (this._isPlaying || this._isLoading) return
 
@@ -201,6 +269,12 @@ export class MbrSlidesElement extends LitElement {
             transition: 'slide',
             plugins,
           })
+          this._deck = win.Reveal!
+          this._deck.on('ready', (_e) => this._updateScrolling());
+          this._deck.on('slidetransitionend', (_e) => this._updateScrolling());
+          this._deck.on('slidechanged', (_e) => this._updateScrolling());
+          this._deck.on('resize', () => this._updateScrolling());
+          this._updateScrolling();
         } catch (initError) {
           console.error('[mbr-slides] Reveal.js initialization failed:', initError)
         }
@@ -273,6 +347,8 @@ export class MbrSlidesElement extends LitElement {
     main.classList.remove('container')
     main.innerHTML = ''
     main.appendChild(revealDiv)
+    this._slidecontainer = slidesDiv
+
     document.body.classList.add('reveal-viewport')
   }
 

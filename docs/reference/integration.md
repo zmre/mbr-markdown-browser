@@ -210,7 +210,6 @@ jobs:
 
 **From Zola/Hugo:**
 - Remove frontmatter `template` fields (mbr auto-detects)
-- Convert shortcodes to mbr syntax or standard markdown
 - Move assets to `static/` folder
 
 **From mdBook:**
