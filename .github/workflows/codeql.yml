@@ -94,8 +94,8 @@ jobs:
       shell: bash
       run: |
         cd components
-        bun install
-        bun run build
+        npm install
+        npm build
         cd quicklook
         ./build.sh
 
