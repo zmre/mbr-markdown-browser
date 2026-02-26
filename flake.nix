@@ -261,7 +261,7 @@
             --enable-avdevice --enable-swscale --enable-swresample \
             --enable-libx264 \
             ${pkgs.lib.optionalString pkgs.stdenv.isDarwin
-              "--enable-videotoolbox --enable-audiotoolbox"} \
+            "--enable-videotoolbox --enable-audiotoolbox"} \
             --extra-cflags="-w -O3"
         '';
         buildPhase = "make -j$NIX_BUILD_CORES";
@@ -285,13 +285,19 @@
         # Use -weak_framework so dyld doesn't fail if they're absent at runtime.
         # RUSTDOCFLAGS is needed too: doc-tests are compiled by rustdoc (not rustc),
         # so RUSTFLAGS alone doesn't cover them.
-        RUSTFLAGS = pkgs.lib.optionalString pkgs.stdenv.isDarwin
+        RUSTFLAGS =
+          pkgs.lib.optionalString pkgs.stdenv.isDarwin
           (builtins.concatStringsSep " " (map (f: "-C link-arg=-Wl,-weak_framework,${f}") [
-            "QTKit" "OpenGL" "VideoDecodeAcceleration"
+            "QTKit"
+            "OpenGL"
+            "VideoDecodeAcceleration"
           ]));
-        RUSTDOCFLAGS = pkgs.lib.optionalString pkgs.stdenv.isDarwin
+        RUSTDOCFLAGS =
+          pkgs.lib.optionalString pkgs.stdenv.isDarwin
           (builtins.concatStringsSep " " (map (f: "-C link-arg=-Wl,-weak_framework,${f}") [
-            "QTKit" "OpenGL" "VideoDecodeAcceleration"
+            "QTKit"
+            "OpenGL"
+            "VideoDecodeAcceleration"
           ]));
       };
 
@@ -327,7 +333,7 @@
         inherit version;
         src = ./components;
         #npmDepsHash = pkgs.lib.fakeHash;
-        npmDepsHash = "sha256-WChKrgGeZocoN/jNIy/F702J7sxPVoypBjSpsAvNmQc=";
+        npmDepsHash = "sha256-QgTHc3tFhpAEQiR/uD+ry2HS/qLyVp4pc8vFpjdkQqY=";
         buildPhase = ''
           npm run build
         '';
