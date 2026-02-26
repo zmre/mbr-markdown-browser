@@ -93,6 +93,9 @@ jobs:
       if: matrix.build-mode == 'manual'
       shell: bash
       run: |
+        cd components
+        bun install
+        bun run build
         cd quicklook
         ./build.sh
 
