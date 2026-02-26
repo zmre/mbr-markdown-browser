@@ -55,7 +55,7 @@ jobs:
           test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
 
       - name: Upload components
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: components
           path: templates/components-js/
@@ -183,7 +183,7 @@ jobs:
         run: ls -la staging/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.arch }}
           path: staging/*
