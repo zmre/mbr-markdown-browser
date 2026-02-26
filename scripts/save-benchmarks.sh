@@ -70,6 +70,9 @@ fi
 # Run benchmarks unless --no-run
 if [[ "$NO_RUN" == "false" ]]; then
     echo "Running benchmarks (saving baseline as v${VERSION})..."
+    cd "$PROJECT_DIR/components"
+    bun install
+    bun run build
     cd "$PROJECT_DIR"
     cargo bench --no-default-features --benches -- --save-baseline "v${VERSION}"
     echo "Benchmarks complete."
