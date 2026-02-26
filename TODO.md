@@ -2,8 +2,6 @@
 
 ## What's Next
 
-* [ ] Fix video enhancement bar under the video -- needs to be flex and stuff to avoid weird vertical stuff -- maybe a human here
-
 * **Big repo (goodwiki) issues**
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.) or some sort of pagination
     * [ ] The home page currently shows all pages on the site, which means processing all files before loading the index, which in dynamic mode sucks.
