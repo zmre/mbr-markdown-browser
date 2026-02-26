@@ -96,7 +96,7 @@ jobs:
         cd components
         npm install
         npm run build
-        cd quicklook
+        cd ../quicklook
         ./build.sh
 
     - name: Perform CodeQL Analysis
