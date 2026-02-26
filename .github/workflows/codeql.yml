@@ -95,7 +95,7 @@ jobs:
       run: |
         cd components
         npm install
-        npm build
+        npm run build
         cd quicklook
         ./build.sh
 
