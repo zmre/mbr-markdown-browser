@@ -63,11 +63,25 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # Add any setup steps before running the `github/codeql-action/init` action.
-    # This includes steps like installing compilers or runtimes (`actions/setup-node`
-    # or others). This is typically only required for manual builds.
-    # - name: Setup runtime (example)
-    #   uses: actions/setup-example@v1
+    # Nix + Cachix setup for Swift builds (runs on macos-latest)
+    # Builds the Rust static library via Nix so swiftc can link against it.
+    - name: Install Nix
+      if: matrix.language == 'swift'
+      uses: DeterminateSystems/determinate-nix-action@main
+
+    - name: Setup Cachix
+      if: matrix.language == 'swift'
+      uses: cachix/cachix-action@v16
+      with:
+        name: zmre
+        authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        extraPullNames: nix-community
+
+    # Build the Rust static library BEFORE CodeQL init so Nix's sandboxed
+    # compilation doesn't interfere with CodeQL's compiler tracing.
+    - name: Build Rust static library for Swift linking
+      if: matrix.language == 'swift'
+      run: nix build -L .#mbr-quicklook-staticlib
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
@@ -83,21 +97,44 @@ jobs:
         # For more details on CodeQL's query packs, refer to: https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
         # queries: security-extended,security-and-quality
 
-    # If the analyze step fails for one of the languages you are analyzing with
-    # "We were unable to automatically build your code", modify the matrix above
-    # to set the build mode to "manual" for that language. Then modify this step
-    # to build your code.
-    # ℹ️ Command-line programs to run using the OS shell.
-    # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
-    - name: Run manual build steps
+    # Swift manual build: invoke swiftc directly on the runner so CodeQL can
+    # trace compiler invocations (it cannot trace inside Nix's build sandbox).
+    # The Rust static library was already built by Nix above.
+    # NOTE: This swiftc invocation mirrors flake.nix's mbr-quicklook derivation
+    # (lines ~384-407). Keep both in sync when Swift sources change.
+    - name: Build Swift extension (CodeQL-traced)
       if: matrix.build-mode == 'manual'
       shell: bash
       run: |
-        cd components
-        npm install
-        npm run build
-        cd ../quicklook
-        ./build.sh
+        set -euo pipefail
+        SDK_PATH="$(xcrun --show-sdk-path)"
+        STATICLIB_PATH="$(pwd)/result/lib"
+        mkdir -p build/MBRPreview.appex/Contents/MacOS
+
+        swiftc \
+          -O \
+          -parse-as-library \
+          -application-extension \
+          -target arm64-apple-macos14.0 \
+          -sdk "$SDK_PATH" \
+          -L "$STATICLIB_PATH" \
+          -lmbr \
+          -framework Foundation \
+          -framework CoreFoundation \
+          -framework Security \
+          -framework SystemConfiguration \
+          -framework Cocoa \
+          -framework QuickLookUI \
+          -framework Quartz \
+          -framework WebKit \
+          -framework ExtensionKit \
+          -module-name MBRPreview \
+          -Xlinker -e -Xlinker _NSExtensionMain \
+          -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
+          -I quicklook/Generated \
+          -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
+          quicklook/Generated/mbr.swift \
+          quicklook/MBRPreview/PreviewViewController.swift
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
