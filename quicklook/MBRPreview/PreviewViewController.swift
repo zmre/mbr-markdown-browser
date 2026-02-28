@@ -190,9 +190,10 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         // Get the file path
         let filePath = url.path
 
-        // Find config root by looking for .mbr/ directory
-        let configRoot = self.findConfigRoot(for: url)
-        os_log(.info, log: logger, "configRoot = %{public}@", configRoot ?? "nil")
+        // Find config root by searching upward for repository markers
+        // Uses the Rust implementation via FFI for consistent behavior with server mode
+        let configRoot = findConfigRoot(filePath: filePath)
+        os_log(.info, log: logger, "configRoot = %{public}@", configRoot)
 
         do {
             os_log(.info, log: logger, "calling renderPreview...")
@@ -253,39 +254,6 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
     }
 
     // MARK: - Private Helpers
-
-    /// Searches upward from the file location to find an `.mbr/` configuration directory.
-    ///
-    /// This method walks up the directory tree from the markdown file's location,
-    /// checking each parent directory for an `.mbr/` subdirectory. The search is
-    /// limited to 10 levels to prevent excessive filesystem traversal.
-    ///
-    /// - Parameter fileURL: The URL of the markdown file being previewed.
-    /// - Returns: The path to the directory containing `.mbr/`, or `nil` if not found.
-    func findConfigRoot(for fileURL: URL) -> String? {
-        var currentDir = fileURL.deletingLastPathComponent()
-        let fileManager = FileManager.default
-
-        // Search up to 10 levels deep
-        for _ in 0 ..< 10 {
-            let mbrDir = currentDir.appendingPathComponent(".mbr")
-            var isDirectory: ObjCBool = false
-
-            if fileManager.fileExists(atPath: mbrDir.path, isDirectory: &isDirectory),
-               isDirectory.boolValue {
-                return currentDir.path
-            }
-
-            let parent = currentDir.deletingLastPathComponent()
-            if parent == currentDir {
-                // Reached filesystem root
-                break
-            }
-            currentDir = parent
-        }
-
-        return nil
-    }
 
     /// Loads a formatted error page in the WebView when markdown rendering fails.
     ///

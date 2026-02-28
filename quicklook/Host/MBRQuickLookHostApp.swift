@@ -2,6 +2,7 @@
 // Minimal host app for the QuickLook extension.
 // This app is required by Apple for embedding app extensions but doesn't
 // need any functionality - users interact with the extension through Finder.
+// The extension will be embedded into a different rust app bundle with the MBR app.
 
 import SwiftUI
 
