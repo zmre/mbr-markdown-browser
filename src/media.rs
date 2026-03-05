@@ -148,7 +148,7 @@ impl MediaEmbed {
                 <iframe
                     width="{yt_width}"
                     height="{yt_height}"
-                    src="https://www.youtube.com/embed/{video_id}"
+                    src="https://www.youtube-nocookie.com/embed/{video_id}"
                     title="YouTube video player"
                     frameborder="0"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
