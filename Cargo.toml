@@ -97,7 +97,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 filetime = "0.2"
 flate2 = "1.0"
 proptest = "1.5"
-tempfile = "3.14"
+tempfile = "3.26"
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
