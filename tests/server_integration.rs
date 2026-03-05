@@ -2964,3 +2964,32 @@ async fn test_mbr_assets_nested_path_works() {
         "Nested .mbr asset path should return 200 OK"
     );
 }
+
+#[tokio::test]
+async fn test_code_blocks_with_unsupported_language_render_correctly() {
+    let repo = TestRepo::new();
+    let markdown = concat!(
+        "# Code Examples\n\n",
+        "```rust\nfn hello() { println!(\"hi\"); }\n```\n\n",
+        "```totally_bogus_lang\nsome code here\n```\n\n",
+        "```python\ndef hello(): pass\n```",
+    );
+    repo.create_markdown("code.md", markdown);
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/code/").await;
+
+    // Page renders successfully with all code blocks
+    assert_html_contains(&html, "Code Examples");
+    assert_html_contains(&html, "language-rust");
+    assert_html_contains(&html, "language-totally_bogus_lang");
+    assert_html_contains(&html, "language-python");
+
+    // Code content is preserved
+    assert_html_contains(&html, "fn hello");
+    assert_html_contains(&html, "some code here");
+    assert_html_contains(&html, "def hello");
+
+    // hljs component is present so client-side highlighting can proceed
+    assert_html_contains(&html, "mbr-hljs");
+}

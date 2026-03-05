@@ -51,7 +51,7 @@ export class MbrHljsElement extends LitElement {
 
   override connectedCallback() {
     super.connectedCallback()
-    waitForDom().then(() => this._enhance())
+    waitForDom().then(() => this._enhance()).catch((e) => console.warn('hljs failed to load:', e))
   }
 
   private async _enhance() {
@@ -82,7 +82,13 @@ export class MbrHljsElement extends LitElement {
         ? loadScript(`${assetBase}hljs.lang.${lang}.js`)
         : loadScript(`${CDN_BASE}/languages/${lang}.min.js`)
     )
-    await Promise.all(langLoads)
+    const results = await Promise.allSettled(langLoads)
+    for (const [i, result] of results.entries()) {
+      if (result.status === 'rejected') {
+        const lang = [...languages][i]
+        console.warn(`hljs: failed to load language "${lang}"`, result.reason)
+      }
+    }
 
     // Step 3: Initialize HLJS during idle time to avoid blocking main thread
     scheduleIdleTask(() => {
