@@ -2000,4 +2000,48 @@ mod tests {
             html
         );
     }
+
+    #[tokio::test]
+    async fn test_code_blocks_with_unsupported_language() {
+        // Code blocks with unknown languages must still render valid HTML
+        // so that hljs can gracefully skip them at runtime
+        let md = "```unknownlang\nsome code\n```";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains("<pre><code class=\"language-unknownlang\">"),
+            "Unsupported language should still get a language class. Got: {}",
+            html
+        );
+        assert!(html.contains("some code"));
+    }
+
+    #[tokio::test]
+    async fn test_code_blocks_mixed_supported_and_unsupported_languages() {
+        // When valid and invalid languages coexist, all blocks must render
+        // with proper language classes so hljs can highlight what it can
+        let md = concat!(
+            "```rust\nfn main() {}\n```\n\n",
+            "```garbage_lang_404\nfoo bar\n```\n\n",
+            "```python\nprint(1)\n```",
+        );
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains("language-rust"),
+            "Rust block missing. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("language-garbage_lang_404"),
+            "Unsupported block missing. Got: {}",
+            html
+        );
+        assert!(
+            html.contains("language-python"),
+            "Python block missing. Got: {}",
+            html
+        );
+        assert!(html.contains("fn main"));
+        assert!(html.contains("foo bar"));
+        assert!(html.contains("print(1)"));
+    }
 }
