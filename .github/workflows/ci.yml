@@ -60,7 +60,7 @@ jobs:
           test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
 
       - name: Upload components
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: components
           path: templates/components-js/
