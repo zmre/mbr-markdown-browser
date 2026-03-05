@@ -229,8 +229,10 @@ mod tests {
 
     #[test]
     fn test_youtube_with_extra_params() {
-        let embed =
-            MediaEmbed::from_url_and_title("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s", "");
+        let embed = MediaEmbed::from_url_and_title(
+            "https://www.youtube-nocookie.com/watch?v=dQw4w9WgXcQ&t=30s",
+            "",
+        );
         assert!(matches!(
             embed,
             Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"
@@ -317,7 +319,7 @@ mod tests {
         };
         let html = embed.to_html(false, false, false);
         assert!(html.contains("youtube-embed"));
-        assert!(html.contains("https://www.youtube.com/embed/abc123xyz"));
+        assert!(html.contains("https://www.youtube-nocookie.com/embed/abc123xyz"));
         assert!(html.contains("<figcaption>Test Video</figcaption>"));
     }
 

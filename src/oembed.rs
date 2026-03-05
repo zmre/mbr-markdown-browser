@@ -90,7 +90,7 @@ static GIST_RE: LazyLock<Regex> =
 
 // YouTube regex pattern - compiled once for efficiency
 static YOUTUBE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})").unwrap()
+    Regex::new(r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com|youtube-nocookie\.com/v/)([a-zA-Z0-9_-]{11})").unwrap()
 });
 
 #[derive(Default, Clone)]
@@ -138,7 +138,7 @@ impl PageInfo {
                     <iframe
                         width="{}"
                         height="{}"
-                        src="https://www.youtube.com/embed/{}"
+                        src="https://www.youtube-nocookie.com/embed/{}"
                         title="YouTube video player"
                         frameborder="0"
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"

@@ -1314,10 +1314,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_youtube_embed_from_image_syntax() {
-        let md = "![Watch this](https://www.youtube.com/watch?v=dQw4w9WgXcQ)";
+        let md = "![Watch this](https://www.youtube-nocookie.com/watch?v=dQw4w9WgXcQ)";
         let html = render_markdown(md).await;
         assert!(html.contains("youtube-embed"));
-        assert!(html.contains("youtube.com/embed/dQw4w9WgXcQ"));
+        assert!(html.contains("youtube-nocookie.com/embed/dQw4w9WgXcQ"));
         assert!(html.contains("<figcaption>"));
         assert!(html.contains("Watch this"));
         assert!(html.contains("</figcaption></figure>"));
@@ -1328,7 +1328,7 @@ mod tests {
         let md = "![](https://youtu.be/dQw4w9WgXcQ)";
         let html = render_markdown(md).await;
         assert!(html.contains("youtube-embed"));
-        assert!(html.contains("youtube.com/embed/dQw4w9WgXcQ"));
+        assert!(html.contains("youtube-nocookie.com/embed/dQw4w9WgXcQ"));
     }
 
     #[tokio::test]
