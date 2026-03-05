@@ -82,7 +82,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download components
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: components
           path: templates/components-js/
@@ -115,7 +115,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download components
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: components
           path: templates/components-js/
@@ -148,7 +148,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download components
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: components
           path: templates/components-js/
