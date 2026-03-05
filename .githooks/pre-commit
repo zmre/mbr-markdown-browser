@@ -116,7 +116,7 @@ main() {
 
     # Build components (needed before rust checks)
     cd components 
-    bun install && bun build || exit 1
+    bun install && bun run build || exit 1
     cd ..
 
     # Format Rust files first
