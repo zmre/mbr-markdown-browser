@@ -88,11 +88,6 @@ static GIPHY_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 static GIST_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"https?://gist\.github\.com/").unwrap());
 
-// YouTube regex pattern - compiled once for efficiency
-static YOUTUBE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})").unwrap()
-});
-
 #[derive(Default, Clone)]
 pub struct PageInfo {
     pub url: String,
@@ -114,43 +109,6 @@ impl PageInfo {
             + self.description.as_ref().map_or(0, |s| s.len())
             + self.image.as_ref().map_or(0, |s| s.len())
             + self.embed_html.as_ref().map_or(0, |s| s.len())
-    }
-
-    /// Extract YouTube video ID from various YouTube URL formats
-    fn extract_youtube_id(url: &str) -> Option<String> {
-        // Matches:
-        // - https://www.youtube.com/watch?v=VIDEO_ID
-        // - https://youtube.com/watch?v=VIDEO_ID
-        // - https://youtu.be/VIDEO_ID
-        // - https://www.youtube.com/embed/VIDEO_ID
-        // - https://www.youtube.com/v/VIDEO_ID
-        YOUTUBE_RE
-            .captures(url)
-            .and_then(|caps| caps.get(1))
-            .map(|id| id.as_str().to_string())
-    }
-
-    /// Check if URL is a YouTube URL and create embed HTML
-    fn youtube_embed(url: &str) -> Option<String> {
-        Self::extract_youtube_id(url).map(|video_id| {
-            format!(
-                r#"<figure class="video-embed youtube-embed">
-                    <iframe
-                        width="{}"
-                        height="{}"
-                        src="https://www.youtube.com/embed/{}"
-                        title="YouTube video player"
-                        frameborder="0"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                        referrerpolicy="strict-origin-when-cross-origin"
-                        allowfullscreen>
-                    </iframe>
-                </figure>"#,
-                crate::constants::YOUTUBE_EMBED_WIDTH,
-                crate::constants::YOUTUBE_EMBED_HEIGHT,
-                video_id
-            )
-        })
     }
 
     /// Check if URL is a Giphy URL and create embed HTML
@@ -215,15 +173,6 @@ impl PageInfo {
             // tracing::debug!("Oembed disabled, ignoring url {}", &url);
             return Ok(PageInfo {
                 url: url.to_string(),
-                ..Default::default()
-            });
-        }
-
-        // Check for YouTube first - no need to fetch the page
-        if let Some(embed_html) = Self::youtube_embed(url) {
-            return Ok(PageInfo {
-                url: url.to_string(),
-                embed_html: Some(embed_html),
                 ..Default::default()
             });
         }
@@ -443,25 +392,6 @@ mod tests {
         let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
         let embed = PageInfo::giphy_embed(url);
         assert!(embed.is_none());
-    }
-
-    #[test]
-    fn test_youtube_embed() {
-        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-        let embed = PageInfo::youtube_embed(url);
-        assert!(embed.is_some());
-        let html = embed.unwrap();
-        assert!(html.contains("youtube-embed"));
-        assert!(html.contains("dQw4w9WgXcQ"));
-    }
-
-    #[test]
-    fn test_youtube_short_url() {
-        let url = "https://youtu.be/dQw4w9WgXcQ";
-        let embed = PageInfo::youtube_embed(url);
-        assert!(embed.is_some());
-        let html = embed.unwrap();
-        assert!(html.contains("dQw4w9WgXcQ"));
     }
 
     #[tokio::test]
@@ -727,50 +657,6 @@ mod tests {
     fn test_unsupported_favicon_type() {
         assert!(!is_supported_favicon_type(Some("image/webp")));
         assert!(!is_supported_favicon_type(Some("text/html")));
-    }
-
-    // Tests for extract_youtube_id - additional patterns
-    #[test]
-    fn test_youtube_embed_url() {
-        let url = "https://www.youtube.com/embed/dQw4w9WgXcQ";
-        let id = PageInfo::extract_youtube_id(url);
-        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
-    }
-
-    #[test]
-    fn test_youtube_v_url() {
-        let url = "https://www.youtube.com/v/dQw4w9WgXcQ";
-        let id = PageInfo::extract_youtube_id(url);
-        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
-    }
-
-    #[test]
-    fn test_youtube_watch_with_extra_params() {
-        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&list=PLtest";
-        let id = PageInfo::extract_youtube_id(url);
-        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
-    }
-
-    #[test]
-    fn test_youtube_without_www() {
-        let url = "https://youtube.com/watch?v=dQw4w9WgXcQ";
-        let id = PageInfo::extract_youtube_id(url);
-        assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
-    }
-
-    #[test]
-    fn test_youtube_invalid_id_length() {
-        // YouTube IDs are exactly 11 characters
-        let url = "https://www.youtube.com/watch?v=short";
-        let id = PageInfo::extract_youtube_id(url);
-        assert!(id.is_none());
-    }
-
-    #[test]
-    fn test_youtube_not_youtube() {
-        let url = "https://example.com/watch?v=dQw4w9WgXcQ";
-        let id = PageInfo::extract_youtube_id(url);
-        assert!(id.is_none());
     }
 
     // Tests for PageInfo::text()

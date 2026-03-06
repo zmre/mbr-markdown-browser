@@ -114,6 +114,11 @@ main() {
     # Sync npm deps if package.json changed
     check_npm_deps || exit 1
 
+    # Build components (needed before rust checks)
+    cd components 
+    bun install && bun run build || exit 1
+    cd ..
+
     # Format Rust files first
     format_rust_files || exit 1
 

@@ -16,7 +16,7 @@ static EXTENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static YOUTUBE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})",
+        r"(?:youtube(?:-nocookie)?\.com/watch\?.*v=|youtu\.be/|youtube(?:-nocookie)?\.com/embed/|youtube(?:-nocookie)?\.com/v/)([a-zA-Z0-9_-]{11})",
     )
     .expect("Invalid YOUTUBE_RE regex pattern")
 });
@@ -148,7 +148,7 @@ impl MediaEmbed {
                 <iframe
                     width="{yt_width}"
                     height="{yt_height}"
-                    src="https://www.youtube.com/embed/{video_id}"
+                    src="https://www.youtube-nocookie.com/embed/{video_id}"
                     title="YouTube video player"
                     frameborder="0"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
@@ -229,8 +229,10 @@ mod tests {
 
     #[test]
     fn test_youtube_with_extra_params() {
-        let embed =
-            MediaEmbed::from_url_and_title("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s", "");
+        let embed = MediaEmbed::from_url_and_title(
+            "https://www.youtube-nocookie.com/watch?v=dQw4w9WgXcQ&t=30s",
+            "",
+        );
         assert!(matches!(
             embed,
             Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"
@@ -317,7 +319,7 @@ mod tests {
         };
         let html = embed.to_html(false, false, false);
         assert!(html.contains("youtube-embed"));
-        assert!(html.contains("https://www.youtube.com/embed/abc123xyz"));
+        assert!(html.contains("https://www.youtube-nocookie.com/embed/abc123xyz"));
         assert!(html.contains("<figcaption>Test Video</figcaption>"));
     }
 
@@ -344,6 +346,58 @@ mod tests {
         let html = embed.to_html(true, false, false);
         assert!(html.contains("<object"));
         assert!(!html.contains("</figcaption></figure>"));
+    }
+
+    #[test]
+    fn test_youtube_v_url() {
+        let embed = MediaEmbed::from_url_and_title("https://www.youtube.com/v/dQw4w9WgXcQ", "");
+        assert!(matches!(
+            embed,
+            Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"
+        ));
+    }
+
+    #[test]
+    fn test_youtube_without_www() {
+        let embed = MediaEmbed::from_url_and_title("https://youtube.com/watch?v=dQw4w9WgXcQ", "");
+        assert!(matches!(
+            embed,
+            Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"
+        ));
+    }
+
+    #[test]
+    fn test_youtube_invalid_id_length() {
+        let embed = MediaEmbed::from_url_and_title("https://www.youtube.com/watch?v=short", "");
+        assert!(embed.is_none());
+    }
+
+    #[test]
+    fn test_youtube_not_youtube() {
+        let embed = MediaEmbed::from_url_and_title("https://example.com/watch?v=dQw4w9WgXcQ", "");
+        assert!(embed.is_none());
+    }
+
+    #[test]
+    fn test_youtube_nocookie_embed_url() {
+        let embed = MediaEmbed::from_url_and_title(
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+            "Caption",
+        );
+        assert!(matches!(
+            embed,
+            Some(MediaEmbed::YouTube { video_id, caption }) if video_id == "dQw4w9WgXcQ" && caption == Some("Caption".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_youtube_nocookie_v_url() {
+        let embed =
+            MediaEmbed::from_url_and_title("https://www.youtube-nocookie.com/v/dQw4w9WgXcQ", "");
+        assert!(matches!(
+            embed,
+            Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"
+        ));
     }
 
     #[test]
