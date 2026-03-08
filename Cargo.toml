@@ -85,7 +85,7 @@ aho-corasick = "1.1"
 # Image processing with minimal features (only needed formats)
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # GUI dependencies (optional, enabled by default "gui" feature)
-tao = { version = "0.34.0", optional = true }
+tao = { version = "0.34.6", optional = true }
 muda = { version = "0.17", optional = true }
 rfd = { version = "0.17", optional = true }
 
