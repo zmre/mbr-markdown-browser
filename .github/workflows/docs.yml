@@ -40,15 +40,26 @@ jobs:
       - name: Build documentation site
         run: |
           ./result/bin/mbr -b --oembed-timeout-ms 1000 --output ./docs-build ./docs
-          touch ./docs-build/.nojekyll
           echo "Documentation built successfully"
           ls -la ./docs-build
 
+      - name: Create Pages artifact
+        run: |
+          tar \
+            --dereference --hard-dereference \
+            --directory ./docs-build \
+            -cvf "$RUNNER_TEMP/artifact.tar" \
+            --exclude=.git \
+            --exclude=.github \
+            .
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
-          path: ./docs-build
-          include-hidden-files: true
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
 
   deploy:
     name: Deploy to GitHub Pages
