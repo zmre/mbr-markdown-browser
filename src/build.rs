@@ -1761,6 +1761,13 @@ impl Builder {
             source: e,
         })?;
 
+        // Write .nojekyll so GitHub Pages serves dotfolders (like .mbr/)
+        let nojekyll_path = self.output_dir.join(".nojekyll");
+        fs::write(&nojekyll_path, "").map_err(|e| BuildError::WriteFailed {
+            path: nojekyll_path,
+            source: e,
+        })?;
+
         // Step 2: Copy repo's .mbr folder if it exists
         let mbr_source = self.config.root_dir.join(".mbr");
         if mbr_source.exists() && mbr_source.is_dir() {
