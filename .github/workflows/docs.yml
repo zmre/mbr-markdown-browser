@@ -40,6 +40,7 @@ jobs:
       - name: Build documentation site
         run: |
           ./result/bin/mbr -b --oembed-timeout-ms 1000 --output ./docs-build ./docs
+          touch ./docs-build/.nojekyll
           echo "Documentation built successfully"
           ls -la ./docs-build
 
