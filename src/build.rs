@@ -25,7 +25,7 @@ use crate::{
     embedded_pico,
     errors::BuildError,
     link_index::{InboundLink, OutboundLink, PageLinks},
-    link_transform::LinkTransformConfig,
+    link_transform::{LinkTransformConfig, make_relative_url},
     markdown,
     oembed_cache::OembedCache,
     repo::{MarkdownInfo, Repo},
@@ -191,31 +191,6 @@ fn print_done(stage: &str, duration: Option<Duration>) {
         println!("\r\x1b[K{} ... done ({})", stage, format_duration(d));
     } else {
         println!("\r\x1b[K{} ... done", stage);
-    }
-}
-
-/// Convert an absolute URL path to a relative URL from the given depth.
-///
-/// Examples (from depth 2):
-/// - "/" → "../../"
-/// - "/docs/" → "../../docs/"
-/// - "/docs/guide/" → "../../docs/guide/"
-fn make_relative_url(absolute_url: &str, depth: usize) -> String {
-    let target = absolute_url.trim_start_matches('/');
-    if target.is_empty() {
-        // Link to root
-        if depth == 0 {
-            "./".to_string()
-        } else {
-            "../".repeat(depth)
-        }
-    } else {
-        // Go up to root, then down to target
-        if depth == 0 {
-            target.to_string()
-        } else {
-            format!("{}{}", "../".repeat(depth), target)
-        }
     }
 }
 
@@ -751,6 +726,7 @@ impl Builder {
             markdown_extensions: self.config.markdown_extensions.clone(),
             index_file: self.config.index_file.clone(),
             is_index_file,
+            url_depth: Some(url_depth(&info.url_path)),
         };
 
         tracing::debug!("build: rendering {}", path.display());
@@ -2487,31 +2463,6 @@ mod tests {
     fn test_relative_root_multiple_levels() {
         assert_eq!(relative_root(2), "../../");
         assert_eq!(relative_root(3), "../../../");
-    }
-
-    #[test]
-    fn test_make_relative_url_to_root() {
-        // From depth 0
-        assert_eq!(make_relative_url("/", 0), "./");
-        // From depth 1
-        assert_eq!(make_relative_url("/", 1), "../");
-        // From depth 2
-        assert_eq!(make_relative_url("/", 2), "../../");
-    }
-
-    #[test]
-    fn test_make_relative_url_to_path() {
-        // From root
-        assert_eq!(make_relative_url("/docs/", 0), "docs/");
-        assert_eq!(make_relative_url("/docs/guide/", 0), "docs/guide/");
-
-        // From depth 1
-        assert_eq!(make_relative_url("/docs/", 1), "../docs/");
-        assert_eq!(make_relative_url("/other/", 1), "../other/");
-
-        // From depth 2
-        assert_eq!(make_relative_url("/docs/", 2), "../../docs/");
-        assert_eq!(make_relative_url("/docs/guide/", 2), "../../docs/guide/");
     }
 
     #[test]

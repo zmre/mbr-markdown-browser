@@ -334,6 +334,7 @@ async fn main() -> Result<(), MbrError> {
             markdown_extensions: config.markdown_extensions.clone(),
             index_file: config.index_file.clone(),
             is_index_file,
+            url_depth: None,
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only)

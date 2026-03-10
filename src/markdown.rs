@@ -947,7 +947,7 @@ fn process_event(
             // If so, transform to the tag URL path (/tags/rust/, /performers/joshua_jay/)
             let transformed_url =
                 if let Some(wikilink) = parse_tag_link(dest_url, &state.valid_tag_sources) {
-                    wikilink.url_path()
+                    transform_link(&wikilink.url_path(), &state.link_transform_config)
                 } else {
                     // Not a tag link, use regular link transformation
                     transform_link(dest_url, &state.link_transform_config)
@@ -1024,7 +1024,8 @@ fn process_event(
                     });
                 (Event::Html(info.html().into()), state)
             } else if text.trim_start().starts_with("{{") {
-                if let Some(vid) = Vid::from_vid(text) {
+                if let Some(mut vid) = Vid::from_vid(text) {
+                    vid.url = transform_link(&vid.url, &state.link_transform_config);
                     (
                         Event::Html(
                             vid.to_html(false, state.server_mode, state.transcode_enabled)
@@ -1070,6 +1071,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file,
+            url_depth: None,
         };
         // Tests run with server_mode=false, transcode_enabled=false
         let result = render(path, &root, 100, config, false, false, tag_sources)
@@ -1140,6 +1142,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         };
         let result = render(path, &root, 100, config, false, false, HashSet::new())
             .await
@@ -1197,6 +1200,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         };
         let result = render(path, &root, 100, config, false, false, HashSet::new())
             .await
@@ -1215,6 +1219,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         };
         let result = render(path, &root, 100, config, false, false, HashSet::new())
             .await
@@ -1234,6 +1239,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         };
         let result = render(path, &root, 100, config, false, false, HashSet::new())
             .await
@@ -1257,6 +1263,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         };
         let result = render(path, &root, 100, config, false, false, HashSet::new())
             .await
@@ -1280,6 +1287,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         };
         let result = render(path, &root, 100, config, false, false, HashSet::new())
             .await
