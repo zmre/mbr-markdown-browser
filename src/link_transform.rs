@@ -27,6 +27,9 @@ pub struct LinkTransformConfig {
     pub index_file: String,
     /// Whether the current file is an index file (affects ../ prefix)
     pub is_index_file: bool,
+    /// Page depth for converting root-relative URLs to relative (build mode).
+    /// None = leave root-relative URLs unchanged (server mode).
+    pub url_depth: Option<usize>,
 }
 
 impl Default for LinkTransformConfig {
@@ -35,6 +38,7 @@ impl Default for LinkTransformConfig {
             markdown_extensions: vec!["md".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         }
     }
 }
@@ -59,6 +63,7 @@ impl Default for LinkTransformConfig {
 ///     markdown_extensions: vec!["md".to_string()],
 ///     index_file: "index.md".to_string(),
 ///     is_index_file: false,
+///     url_depth: None,
 /// };
 ///
 /// // Regular markdown file: add ../ and trailing slash
@@ -87,9 +92,12 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
         return url.to_string();
     }
 
-    // Root-relative URLs
+    // Root-relative URLs — convert to relative in build mode
     if url.starts_with('/') {
-        return url.to_string();
+        return match config.url_depth {
+            Some(depth) => make_relative_url(url, depth),
+            None => url.to_string(),
+        };
     }
 
     // Data URLs and javascript URLs
@@ -233,6 +241,31 @@ fn strip_markdown_extension<'a>(path: &'a str, extensions: &[String]) -> Option<
     None
 }
 
+/// Convert an absolute URL path to a relative URL from the given depth.
+///
+/// Examples (from depth 2):
+/// - "/" → "../../"
+/// - "/docs/" → "../../docs/"
+/// - "/docs/guide/" → "../../docs/guide/"
+pub fn make_relative_url(absolute_url: &str, depth: usize) -> String {
+    let target = absolute_url.trim_start_matches('/');
+    if target.is_empty() {
+        // Link to root
+        if depth == 0 {
+            "./".to_string()
+        } else {
+            "../".repeat(depth)
+        }
+    } else {
+        // Go up to root, then down to target
+        if depth == 0 {
+            target.to_string()
+        } else {
+            format!("{}{}", "../".repeat(depth), target)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +275,7 @@ mod tests {
             markdown_extensions: vec!["md".to_string(), "markdown".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         }
     }
 
@@ -541,6 +575,90 @@ mod tests {
             "../../sibling/doc/"
         );
     }
+
+    // =========================================================================
+    // Root-relative URL transformation with url_depth (build mode)
+    // =========================================================================
+
+    fn build_config(depth: usize) -> LinkTransformConfig {
+        LinkTransformConfig {
+            url_depth: Some(depth),
+            ..regular_config()
+        }
+    }
+
+    #[test]
+    fn test_root_relative_with_depth_0() {
+        assert_eq!(
+            transform_link("/videos/demo.mp4", &build_config(0)),
+            "videos/demo.mp4"
+        );
+    }
+
+    #[test]
+    fn test_root_relative_with_depth_1() {
+        assert_eq!(
+            transform_link("/videos/demo.mp4", &build_config(1)),
+            "../videos/demo.mp4"
+        );
+    }
+
+    #[test]
+    fn test_root_relative_with_depth_2() {
+        assert_eq!(
+            transform_link("/videos/demo.mp4", &build_config(2)),
+            "../../videos/demo.mp4"
+        );
+    }
+
+    #[test]
+    fn test_root_relative_to_root_with_depth() {
+        assert_eq!(transform_link("/", &build_config(0)), "./");
+        assert_eq!(transform_link("/", &build_config(1)), "../");
+        assert_eq!(transform_link("/", &build_config(2)), "../../");
+    }
+
+    #[test]
+    fn test_root_relative_tag_link_with_depth() {
+        assert_eq!(
+            transform_link("/tags/rust/", &build_config(2)),
+            "../../tags/rust/"
+        );
+    }
+
+    #[test]
+    fn test_root_relative_unchanged_without_depth() {
+        // Server mode (url_depth: None) leaves root-relative unchanged
+        assert_eq!(
+            transform_link("/videos/demo.mp4", &regular_config()),
+            "/videos/demo.mp4"
+        );
+        assert_eq!(
+            transform_link("/tags/rust/", &regular_config()),
+            "/tags/rust/"
+        );
+    }
+
+    // =========================================================================
+    // make_relative_url
+    // =========================================================================
+
+    #[test]
+    fn test_make_relative_url_to_root() {
+        assert_eq!(make_relative_url("/", 0), "./");
+        assert_eq!(make_relative_url("/", 1), "../");
+        assert_eq!(make_relative_url("/", 2), "../../");
+    }
+
+    #[test]
+    fn test_make_relative_url_to_path() {
+        assert_eq!(make_relative_url("/docs/", 0), "docs/");
+        assert_eq!(make_relative_url("/docs/guide/", 0), "docs/guide/");
+        assert_eq!(make_relative_url("/docs/", 1), "../docs/");
+        assert_eq!(make_relative_url("/other/", 1), "../other/");
+        assert_eq!(make_relative_url("/docs/", 2), "../../docs/");
+        assert_eq!(make_relative_url("/docs/guide/", 2), "../../docs/guide/");
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +671,7 @@ mod proptests {
             markdown_extensions: vec!["md".to_string(), "markdown".to_string()],
             index_file: "index.md".to_string(),
             is_index_file: false,
+            url_depth: None,
         }
     }
 
@@ -597,11 +716,27 @@ mod proptests {
             prop_assert_eq!(transform_link(&url, &config), url);
         }
 
-        /// Root-relative URLs are never modified
+        /// Root-relative URLs are unchanged when url_depth is None (server mode)
         #[test]
         fn prop_root_relative_unchanged(path in "/[a-zA-Z0-9./_-]*") {
             let config = regular_config();
             prop_assert_eq!(transform_link(&path, &config), path);
+        }
+
+        /// Root-relative URLs are relativized when url_depth is Some (build mode)
+        #[test]
+        fn prop_root_relative_relativized(
+            path in "[a-zA-Z][a-zA-Z0-9/_-]{0,20}",
+            depth in 0usize..5
+        ) {
+            let url = format!("/{}", path);
+            let mut config = regular_config();
+            config.url_depth = Some(depth);
+            let result = transform_link(&url, &config);
+            // Result should NOT start with /
+            prop_assert!(!result.starts_with('/'), "Should be relative: {}", result);
+            // Result should contain the original path (without leading /)
+            prop_assert!(result.ends_with(&path), "Should end with path {}: {}", path, result);
         }
 
         /// Anchor-only links are never modified

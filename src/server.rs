@@ -2202,6 +2202,7 @@ impl Server {
                         markdown_extensions: config.markdown_extensions.clone(),
                         index_file: config.index_file.clone(),
                         is_index_file,
+                        url_depth: None,
                     };
 
                     let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
@@ -2677,6 +2678,7 @@ impl Server {
             markdown_extensions: config.markdown_extensions.clone(),
             index_file: config.index_file.clone(),
             is_index_file,
+            url_depth: None,
         };
 
         // Transcoding is only available with media-metadata feature

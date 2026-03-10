@@ -128,6 +128,7 @@ pub fn render_preview_with_config(
         markdown_extensions: config.markdown_extensions.clone(),
         index_file: config.index_file.clone(),
         is_index_file,
+        url_depth: None,
     };
 
     // Create a minimal tokio runtime for async markdown rendering
