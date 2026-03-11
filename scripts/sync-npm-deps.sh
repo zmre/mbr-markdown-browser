@@ -104,11 +104,11 @@ update_flake() {
     info "  Old: $current_hash"
     info "  New: $new_hash"
 
-    # Use sed to replace the hash (works on both macOS and Linux)
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' "s|npmDepsHash = \"sha256-[^\"]*\"|npmDepsHash = \"$new_hash\"|" "$FLAKE_FILE"
-    else
+    # Use sed to replace the hash (detect GNU vs BSD sed)
+    if sed --version 2>/dev/null | grep -q GNU; then
         sed -i "s|npmDepsHash = \"sha256-[^\"]*\"|npmDepsHash = \"$new_hash\"|" "$FLAKE_FILE"
+    else
+        sed -i '' "s|npmDepsHash = \"sha256-[^\"]*\"|npmDepsHash = \"$new_hash\"|" "$FLAKE_FILE"
     fi
 
     info "flake.nix updated"
