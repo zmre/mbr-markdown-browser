@@ -9,7 +9,7 @@
       },
       "devDependencies": {
         "@vitest/browser": "^4.0.18",
-        "happy-dom": "^20.8.3",
+        "happy-dom": "^20.8.4",
         "terser": "^5.46.0",
         "typescript": "~5.9.3",
         "vite": "^7.3.1",
@@ -184,7 +184,7 @@
 
     "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
 
-    "happy-dom": ["happy-dom@20.8.3", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.18.3" } }, "sha512-lMHQRRwIPyJ70HV0kkFT7jH/gXzSI7yDkQFe07E2flwmNDFoWUTRMKpW2sglsnpeA7b6S2TJPp98EbQxai8eaQ=="],
+    "happy-dom": ["happy-dom@20.8.4", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.18.3" } }, "sha512-GKhjq4OQCYB4VLFBzv8mmccUadwlAusOZOI7hC1D9xDIT5HhzkJK17c4el2f6R6C715P9xB4uiMxeKUa2nHMwQ=="],
 
     "lit": ["lit@3.3.2", "", { "dependencies": { "@lit/reactive-element": "^2.1.0", "lit-element": "^4.2.0", "lit-html": "^3.3.0" } }, "sha512-NF9zbsP79l4ao2SNrH3NkfmFgN/hBYSQo90saIVI1o5GpjAdCPVstVzO1MrLOakHoEhYkrtRjPK6Ob521aoYWQ=="],
 
