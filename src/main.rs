@@ -419,13 +419,33 @@ async fn main() -> Result<(), MbrError> {
                 }
             };
 
-            let url = url::Url::parse(format!("http://{}:{}/", config.host, actual_port).as_str())?;
-            let url_path = build_url_path(
-                &path_relative_to_root,
-                is_directory,
-                &config.markdown_extensions,
-            );
-            let url = url.join(&url_path)?;
+            let base_url =
+                url::Url::parse(format!("http://{}:{}/", config.host, actual_port).as_str())?;
+
+            // For media files, redirect to the appropriate viewer URL
+            let url = if !is_directory {
+                if let Some(media_type) = server::MediaViewerType::from_path(&path_relative_to_root)
+                {
+                    let file_url_path =
+                        build_url_path(&path_relative_to_root, false, &config.markdown_extensions);
+                    let viewer_url = build_media_viewer_url(media_type, &file_url_path);
+                    base_url.join(&viewer_url)?
+                } else {
+                    let url_path = build_url_path(
+                        &path_relative_to_root,
+                        is_directory,
+                        &config.markdown_extensions,
+                    );
+                    base_url.join(&url_path)?
+                }
+            } else {
+                let url_path = build_url_path(
+                    &path_relative_to_root,
+                    is_directory,
+                    &config.markdown_extensions,
+                );
+                base_url.join(&url_path)?
+            };
 
             // Launch browser with full context for server management
             let ctx = BrowserContext {
@@ -487,6 +507,39 @@ fn replace_markdown_extension_with_slash(s: &str, extensions: &[String]) -> Stri
     } else {
         s.to_string() // no extension, so return input as provided
     }
+}
+
+/// Builds a media viewer URL for the given media type and file path.
+///
+/// The returned path is relative to the server root, e.g.,
+/// `/.mbr/videos/?path=%2Fvideos%2Fexample.mp4`.
+///
+/// The `file_url_path` should be the URL path to the file (as returned by `build_url_path`),
+/// without a leading slash (e.g., `videos/example.mp4`).
+fn build_media_viewer_url(media_type: server::MediaViewerType, file_url_path: &str) -> String {
+    use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+
+    // Encode the path for use as a query parameter value.
+    // We need to encode everything except unreserved characters.
+    const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'&')
+        .add(b'+')
+        .add(b'=')
+        .add(b'?');
+
+    // Ensure the file path has a leading slash for the query param
+    let full_path = if file_url_path.starts_with('/') {
+        file_url_path.to_string()
+    } else {
+        format!("/{file_url_path}")
+    };
+
+    let encoded_path = utf8_percent_encode(&full_path, QUERY_ENCODE_SET).to_string();
+    format!("{}?path={}", media_type.route_path(), encoded_path)
 }
 
 #[cfg(test)]
@@ -551,6 +604,49 @@ mod tests {
             replace_markdown_extension_with_slash("noext", &extensions),
             "noext"
         );
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_video() {
+        let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/example.mp4");
+        assert_eq!(url, "/.mbr/videos/?path=/videos/example.mp4");
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_audio() {
+        let url = build_media_viewer_url(server::MediaViewerType::Audio, "music/song.mp3");
+        assert_eq!(url, "/.mbr/audio/?path=/music/song.mp3");
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_image() {
+        let url = build_media_viewer_url(server::MediaViewerType::Image, "images/photo.jpg");
+        assert_eq!(url, "/.mbr/images/?path=/images/photo.jpg");
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_pdf() {
+        let url = build_media_viewer_url(server::MediaViewerType::Pdf, "docs/paper.pdf");
+        assert_eq!(url, "/.mbr/pdfs/?path=/docs/paper.pdf");
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_with_leading_slash() {
+        let url = build_media_viewer_url(server::MediaViewerType::Video, "/videos/example.mp4");
+        assert_eq!(url, "/.mbr/videos/?path=/videos/example.mp4");
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_encodes_spaces() {
+        let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/my video.mp4");
+        assert!(url.contains("path=/videos/my%20video.mp4"));
+    }
+
+    #[test]
+    fn test_build_media_viewer_url_encodes_special_chars() {
+        let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/file#1&2=3.mp4");
+        // Hash, ampersand, and equals should be encoded
+        assert!(url.contains("path=/videos/file%231%262%3D3.mp4"));
     }
 
     #[test]

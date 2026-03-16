@@ -108,6 +108,50 @@ impl MediaViewerType {
             Self::Image => "image",
         }
     }
+
+    /// Determine media type from a file extension (case-insensitive).
+    ///
+    /// Returns `None` for unrecognized extensions.
+    #[must_use]
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            // Video
+            "mp4" | "m4v" | "mov" | "webm" | "flv" | "mpg" | "mpeg" | "avi" | "3gp" | "wmv"
+            | "mkv" | "ts" | "mts" | "m2ts" | "vob" | "divx" | "xvid" | "asf" | "rm" | "rmvb"
+            | "f4v" | "ogv" => Some(Self::Video),
+            // Audio
+            "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "aiff" | "aif" | "oga" | "opus"
+            | "wma" => Some(Self::Audio),
+            // Image
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "svg" => {
+                Some(Self::Image)
+            }
+            // PDF
+            "pdf" => Some(Self::Pdf),
+            _ => None,
+        }
+    }
+
+    /// Determine media type from a file path by inspecting its extension.
+    ///
+    /// Returns `None` if the path has no extension or the extension is unrecognized.
+    #[must_use]
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(Self::from_extension)
+    }
+
+    /// Returns the server route path for this media viewer type.
+    #[must_use]
+    pub const fn route_path(&self) -> &'static str {
+        match self {
+            Self::Video => "/.mbr/videos/",
+            Self::Pdf => "/.mbr/pdfs/",
+            Self::Audio => "/.mbr/audio/",
+            Self::Image => "/.mbr/images/",
+        }
+    }
 }
 
 /// Query parameters for media viewer routes.
@@ -3936,6 +3980,124 @@ mod tests {
         assert_eq!(MediaViewerType::Video.as_str(), "video");
         assert_eq!(MediaViewerType::Pdf.as_str(), "pdf");
         assert_eq!(MediaViewerType::Audio.as_str(), "audio");
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_video() {
+        for ext in &[
+            "mp4", "m4v", "mov", "webm", "flv", "mpg", "mpeg", "avi", "3gp", "wmv", "mkv", "ts",
+            "mts", "m2ts", "vob", "divx", "xvid", "asf", "rm", "rmvb", "f4v", "ogv",
+        ] {
+            assert_eq!(
+                MediaViewerType::from_extension(ext),
+                Some(MediaViewerType::Video),
+                "Expected Video for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_audio() {
+        for ext in &[
+            "mp3", "wav", "ogg", "flac", "aac", "m4a", "aiff", "aif", "oga", "opus", "wma",
+        ] {
+            assert_eq!(
+                MediaViewerType::from_extension(ext),
+                Some(MediaViewerType::Audio),
+                "Expected Audio for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_image() {
+        for ext in &[
+            "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "svg",
+        ] {
+            assert_eq!(
+                MediaViewerType::from_extension(ext),
+                Some(MediaViewerType::Image),
+                "Expected Image for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_pdf() {
+        assert_eq!(
+            MediaViewerType::from_extension("pdf"),
+            Some(MediaViewerType::Pdf)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_case_insensitive() {
+        assert_eq!(
+            MediaViewerType::from_extension("MP4"),
+            Some(MediaViewerType::Video)
+        );
+        assert_eq!(
+            MediaViewerType::from_extension("Pdf"),
+            Some(MediaViewerType::Pdf)
+        );
+        assert_eq!(
+            MediaViewerType::from_extension("JPG"),
+            Some(MediaViewerType::Image)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_unknown() {
+        assert_eq!(MediaViewerType::from_extension("md"), None);
+        assert_eq!(MediaViewerType::from_extension("html"), None);
+        assert_eq!(MediaViewerType::from_extension("rs"), None);
+        assert_eq!(MediaViewerType::from_extension(""), None);
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_path() {
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("videos/demo.mp4")),
+            Some(MediaViewerType::Video)
+        );
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("music/song.mp3")),
+            Some(MediaViewerType::Audio)
+        );
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("images/photo.jpg")),
+            Some(MediaViewerType::Image)
+        );
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("docs/paper.pdf")),
+            Some(MediaViewerType::Pdf)
+        );
+        assert_eq!(MediaViewerType::from_path(Path::new("readme.md")), None);
+        assert_eq!(MediaViewerType::from_path(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn test_media_viewer_type_route_path() {
+        assert_eq!(MediaViewerType::Video.route_path(), "/.mbr/videos/");
+        assert_eq!(MediaViewerType::Pdf.route_path(), "/.mbr/pdfs/");
+        assert_eq!(MediaViewerType::Audio.route_path(), "/.mbr/audio/");
+        assert_eq!(MediaViewerType::Image.route_path(), "/.mbr/images/");
+    }
+
+    #[test]
+    fn test_media_viewer_type_route_path_roundtrips_with_from_route() {
+        for media_type in &[
+            MediaViewerType::Video,
+            MediaViewerType::Pdf,
+            MediaViewerType::Audio,
+            MediaViewerType::Image,
+        ] {
+            assert_eq!(
+                MediaViewerType::from_route(media_type.route_path()),
+                Some(*media_type),
+                "route_path -> from_route roundtrip failed for {media_type:?}"
+            );
+        }
     }
 
     // ==================== validate_media_path Tests ====================
