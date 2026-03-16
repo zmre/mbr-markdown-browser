@@ -3,7 +3,7 @@
 <html lang="en">
   <head>
 {% include "_head.html" %}
-    <title>{{ title | default(value="Media Viewer") | escape }}</title>
+    <title>{{title_prefix | default(value="")}}{{ title | default(value="Media Viewer") | escape }}{{title_suffix | default(value="")}}</title>
     <script>
       // Media viewer configuration
       window.__MBR_MEDIA_VIEWER__ = {

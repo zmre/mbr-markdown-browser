@@ -9,9 +9,6 @@
     * Need to look into the spaces vs. underscores stuff a bit here too
     * Answer: only if we submit PRs to pagefind or switch to something else
 
-
-* [ ] Editing of metadata (tags and other yaml frontmatter) maybe including description recommendations using in-browser local AI for a given note.
-
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
 
 * **Publish**

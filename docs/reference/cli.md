@@ -28,6 +28,19 @@ These flags are mutually exclusive:
 | `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
 | `--extract-pdf-cover` | Extract cover images from PDF files (requires `media-metadata` feature) |
 
+### Media File Arguments in GUI Mode
+
+When a media file (video, audio, image, or PDF) is passed as the `PATH` argument in GUI mode, mbr automatically opens the appropriate media viewer instead of displaying the raw file. For example, `mbr -g videos/demo.mp4` opens the video viewer at `/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4`.
+
+Supported media types are detected by file extension:
+
+| Type | Extensions |
+|------|------------|
+| Video | mp4, m4v, mov, webm, flv, mpg, mpeg, avi, 3gp, wmv, mkv, ts, mts, m2ts, vob, divx, xvid, asf, rm, rmvb, f4v, ogv |
+| Audio | mp3, wav, ogg, flac, aac, m4a, aiff, aif, oga, opus, wma |
+| Image | jpg, jpeg, png, webp, gif, bmp, tif, tiff, svg |
+| PDF | pdf |
+
 ## Options
 
 | Option | Description | Default |
@@ -39,6 +52,8 @@ These flags are mutually exclusive:
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
+| `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
+| `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
@@ -82,6 +97,12 @@ mbr -s -vv ~/notes
 
 # Launch GUI window (explicit)
 mbr -g ~/notes
+
+# Open a media file in the GUI media viewer
+mbr -g videos/example.mp4    # Opens video viewer
+mbr -g music/song.mp3        # Opens audio player
+mbr -g images/photo.jpg      # Opens image viewer
+mbr -g docs/paper.pdf        # Opens PDF viewer
 
 # Build static site
 mbr -b ~/notes
@@ -220,6 +241,8 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 |--------|------|---------|-------------|
 | `sidebar_style` | string | `"panel"` | Sidebar navigation style: `"panel"` (modal 3-pane) or `"single"` (persistent sidebar) |
 | `sidebar_max_items` | number | `100` | Maximum items per section in sidebar navigation |
+| `title_prefix` | string | `""` | Text to prepend to all page titles |
+| `title_suffix` | string | `""` | Text to append to all page titles |
 
 **Sidebar styles:**
 
@@ -252,6 +275,31 @@ sidebar_style = "single"
 
 # Show more items in large repositories
 sidebar_max_items = 200
+```
+
+### Title Settings
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `title_prefix` | string | `""` | Text prepended to all page `<title>` tags |
+| `title_suffix` | string | `""` | Text appended to all page `<title>` tags |
+
+These options let you brand page titles across the site without modifying individual pages. They apply to markdown pages, directory listings, tag pages, and media viewer pages (not error pages).
+
+Example configuration:
+```toml
+# .mbr/config.toml
+
+# Brand all page titles
+title_prefix = "My Notes: "
+title_suffix = " | Paul's Wiki"
+```
+
+This turns a page titled "Getting Started" into `<title>My Notes: Getting Started | Paul's Wiki</title>`.
+
+CLI usage:
+```bash
+mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 ```
 
 ### Tag Settings

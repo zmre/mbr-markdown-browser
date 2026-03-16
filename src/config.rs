@@ -270,6 +270,14 @@ pub struct Config {
     /// Default: 100. Only applies when sidebar_style = "single".
     #[serde(default = "default_sidebar_max_items")]
     pub sidebar_max_items: usize,
+    /// Text to prepend to all page titles (e.g., "My Site: ").
+    /// Default: empty string (no prefix).
+    #[serde(default)]
+    pub title_prefix: String,
+    /// Text to append to all page titles (e.g., " | My Site").
+    /// Default: empty string (no suffix).
+    #[serde(default)]
+    pub title_suffix: String,
 }
 
 impl std::fmt::Display for IpArray {
@@ -352,6 +360,8 @@ impl Default for Config {
             build_tag_pages: true, // Tag pages enabled by default
             sidebar_style: default_sidebar_style(),
             sidebar_max_items: default_sidebar_max_items(),
+            title_prefix: String::new(),
+            title_suffix: String::new(),
         }
     }
 }
@@ -720,6 +730,18 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_default_title_prefix_empty() {
+        let config = Config::default();
+        assert_eq!(config.title_prefix, "");
+    }
+
+    #[test]
+    fn test_default_title_suffix_empty() {
+        let config = Config::default();
+        assert_eq!(config.title_suffix, "");
     }
 
     #[test]
