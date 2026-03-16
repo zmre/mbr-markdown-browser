@@ -105,6 +105,14 @@ pub struct Args {
     #[arg(long)]
     pub no_link_tracking: bool,
 
+    /// Text to prepend to all page titles (e.g., "My Site: ").
+    #[arg(long, value_name = "TEXT")]
+    pub title_prefix: Option<String>,
+
+    /// Text to append to all page titles (e.g., " | My Site").
+    #[arg(long, value_name = "TEXT")]
+    pub title_suffix: Option<String>,
+
     /// [EXPERIMENTAL] Enable dynamic video transcoding to serve lower-resolution
     /// HLS variants (720p, 480p) for bandwidth savings. Only active in server/GUI mode.
     /// Videos are transcoded on-demand as segments and cached in memory.
@@ -168,6 +176,8 @@ mod tests {
             build_concurrency: None,
             skip_link_checks: false,
             no_link_tracking: false,
+            title_prefix: None,
+            title_suffix: None,
             #[cfg(feature = "media-metadata")]
             transcode: false,
         }
@@ -367,5 +377,17 @@ mod tests {
             args.template_folder,
             Some(PathBuf::from("/custom/templates"))
         );
+    }
+
+    #[test]
+    fn test_parse_title_prefix() {
+        let args = Args::parse_from(["mbr", "--title-prefix", "My Site: "]);
+        assert_eq!(args.title_prefix, Some("My Site: ".to_string()));
+    }
+
+    #[test]
+    fn test_parse_title_suffix() {
+        let args = Args::parse_from(["mbr", "--title-suffix", " | My Site"]);
+        assert_eq!(args.title_suffix, Some(" | My Site".to_string()));
     }
 }

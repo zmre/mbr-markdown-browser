@@ -119,6 +119,8 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--transcode` | Enable HLS video transcoding for 720p/480p variants (server/GUI only) | `false` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
+| `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
+| `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `-v, --verbose` | Increase log verbosity | warn level |
 
 **Boolean flag naming convention:**

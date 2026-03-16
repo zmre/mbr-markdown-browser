@@ -835,6 +835,14 @@ impl Builder {
             "sidebar_max_items".to_string(),
             serde_json::json!(self.config.sidebar_max_items),
         );
+        extra_context.insert(
+            "title_prefix".to_string(),
+            serde_json::json!(self.config.title_prefix),
+        );
+        extra_context.insert(
+            "title_suffix".to_string(),
+            serde_json::json!(self.config.title_suffix),
+        );
 
         // Pass word count and reading time (200 words per minute)
         let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
@@ -1190,6 +1198,14 @@ impl Builder {
             "sidebar_max_items".to_string(),
             serde_json::json!(self.config.sidebar_max_items),
         );
+        context.insert(
+            "title_prefix".to_string(),
+            serde_json::json!(self.config.title_prefix),
+        );
+        context.insert(
+            "title_suffix".to_string(),
+            serde_json::json!(self.config.title_suffix),
+        );
 
         // Render template (lock-free — uses pre-cloned Tera)
         let template_name = if is_root { "home.html" } else { "section.html" };
@@ -1476,6 +1492,14 @@ impl Builder {
             "sidebar_max_items".to_string(),
             serde_json::json!(self.config.sidebar_max_items),
         );
+        context.insert(
+            "title_prefix".to_string(),
+            serde_json::json!(self.config.title_prefix),
+        );
+        context.insert(
+            "title_suffix".to_string(),
+            serde_json::json!(self.config.title_suffix),
+        );
 
         // Sanitize source and value to prevent path traversal
         let safe_source = crate::wikilink::sanitize_path_component(source);
@@ -1584,6 +1608,14 @@ impl Builder {
         context.insert(
             "sidebar_max_items".to_string(),
             serde_json::json!(self.config.sidebar_max_items),
+        );
+        context.insert(
+            "title_prefix".to_string(),
+            serde_json::json!(self.config.title_prefix),
+        );
+        context.insert(
+            "title_suffix".to_string(),
+            serde_json::json!(self.config.title_suffix),
         );
 
         let safe_source = crate::wikilink::sanitize_path_component(source);
@@ -2019,6 +2051,14 @@ impl Builder {
             context.insert(
                 "sidebar_max_items".to_string(),
                 serde_json::json!(self.config.sidebar_max_items),
+            );
+            context.insert(
+                "title_prefix".to_string(),
+                serde_json::json!(self.config.title_prefix),
+            );
+            context.insert(
+                "title_suffix".to_string(),
+                serde_json::json!(self.config.title_suffix),
             );
 
             let html = self.templates.render_media_viewer(context)?;

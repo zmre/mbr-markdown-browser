@@ -3,7 +3,7 @@
 <html lang="en">
   <head>
 {% include "_head.html" %}
-    <title>{{ tag_label }}: {{ tag_display_value }}</title>
+    <title>{{title_prefix | default(value="")}}{{ tag_label }}: {{ tag_display_value }}{{title_suffix | default(value="")}}</title>
   </head>
   <body>
 {% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}

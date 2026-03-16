@@ -310,6 +310,8 @@ pub struct ServerConfig {
     pub tag_sources: Vec<TagSource>,
     pub sidebar_style: String,
     pub sidebar_max_items: usize,
+    pub title_prefix: String,
+    pub title_suffix: String,
     #[cfg(feature = "media-metadata")]
     pub transcode_enabled: bool,
 }
@@ -353,6 +355,8 @@ impl From<&crate::config::Config> for ServerConfig {
             tag_sources: config.tag_sources.clone(),
             sidebar_style: config.sidebar_style.clone(),
             sidebar_max_items: config.sidebar_max_items,
+            title_prefix: config.title_prefix.clone(),
+            title_suffix: config.title_suffix.clone(),
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
         }
@@ -404,6 +408,10 @@ pub struct ServerState {
     pub sidebar_style: String,
     /// Maximum items per section in sidebar navigation
     pub sidebar_max_items: usize,
+    /// Text to prepend to all page titles
+    pub title_prefix: String,
+    /// Text to append to all page titles
+    pub title_suffix: String,
 }
 
 impl Server {
@@ -430,6 +438,8 @@ impl Server {
             tag_sources,
             sidebar_style,
             sidebar_max_items,
+            title_prefix,
+            title_suffix,
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
         } = config;
@@ -732,6 +742,8 @@ impl Server {
             tag_sources,
             sidebar_style,
             sidebar_max_items,
+            title_prefix,
+            title_suffix,
         };
 
         let router = Router::new()
@@ -1317,6 +1329,8 @@ impl Server {
             "sidebar_max_items".to_string(),
             json!(config.sidebar_max_items),
         );
+        context.insert("title_prefix".to_string(), json!(config.title_prefix));
+        context.insert("title_suffix".to_string(), json!(config.title_suffix));
 
         // Render the media viewer template
         match config.templates.render_media_viewer(context) {
@@ -2813,6 +2827,14 @@ impl Server {
             "sidebar_max_items".to_string(),
             serde_json::json!(config.sidebar_max_items),
         );
+        extra_context.insert(
+            "title_prefix".to_string(),
+            serde_json::json!(config.title_prefix),
+        );
+        extra_context.insert(
+            "title_suffix".to_string(),
+            serde_json::json!(config.title_suffix),
+        );
 
         // Pass modified date from file metadata
         let modified_info = tokio::fs::metadata(md_path)
@@ -3040,6 +3062,8 @@ impl Server {
             "sidebar_max_items".to_string(),
             json!(config.sidebar_max_items),
         );
+        context.insert("title_prefix".to_string(), json!(config.title_prefix));
+        context.insert("title_suffix".to_string(), json!(config.title_suffix));
 
         // Detect if we're at the root directory
         let is_root =
@@ -3135,6 +3159,8 @@ impl Server {
             "sidebar_max_items".to_string(),
             json!(config.sidebar_max_items),
         );
+        context.insert("title_prefix".to_string(), json!(config.title_prefix));
+        context.insert("title_suffix".to_string(), json!(config.title_suffix));
 
         let html_output = config.templates.render_tag(context)?;
 
@@ -3202,6 +3228,8 @@ impl Server {
             "sidebar_max_items".to_string(),
             json!(config.sidebar_max_items),
         );
+        context.insert("title_prefix".to_string(), json!(config.title_prefix));
+        context.insert("title_suffix".to_string(), json!(config.title_suffix));
 
         let html_output = config.templates.render_tag_index(context)?;
 

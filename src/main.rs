@@ -163,6 +163,13 @@ async fn main() -> Result<(), MbrError> {
     if args.no_link_tracking {
         config.link_tracking = false;
     }
+    // Apply title_prefix and title_suffix from CLI
+    if let Some(ref prefix) = args.title_prefix {
+        config.title_prefix = prefix.clone();
+    }
+    if let Some(ref suffix) = args.title_suffix {
+        config.title_suffix = suffix.clone();
+    }
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {

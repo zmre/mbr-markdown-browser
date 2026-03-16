@@ -36,6 +36,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         tag_sources: mbr::config::default_tag_sources(),
         sidebar_style: "panel".to_string(),
         sidebar_max_items: 100,
+        title_prefix: String::new(),
+        title_suffix: String::new(),
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
     }
@@ -62,6 +64,31 @@ impl TestServer {
         });
 
         // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+
+        Self {
+            port,
+            client,
+            _handle: handle,
+        }
+    }
+
+    async fn start_with_config_fn(
+        repo: &TestRepo,
+        config_fn: impl FnOnce(&mut mbr::server::ServerConfig) + Send + 'static,
+    ) -> Self {
+        let port = find_available_port();
+        let root_dir = repo.path().to_path_buf();
+
+        let handle = tokio::spawn(async move {
+            let mut config = test_server_config(port, root_dir);
+            config_fn(&mut config);
+            let server = mbr::server::Server::init(config).expect("Failed to initialize server");
+            let _ = server.start().await;
+        });
+
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let client = reqwest::Client::new();
@@ -2992,4 +3019,76 @@ async fn test_code_blocks_with_unsupported_language_render_correctly() {
 
     // hljs component is present so client-side highlighting can proceed
     assert_html_contains(&html, "mbr-hljs");
+}
+
+// ==================== Title Prefix/Suffix Tests ====================
+
+#[tokio::test]
+async fn test_title_prefix_in_markdown_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "readme.md",
+        "---\ntitle: My Page\n---\n\n# My Page\n\nContent.",
+    );
+
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.title_prefix = "My Site: ".to_string();
+    })
+    .await;
+
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, "<title>My Site: My Page</title>");
+}
+
+#[tokio::test]
+async fn test_title_suffix_in_markdown_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "readme.md",
+        "---\ntitle: My Page\n---\n\n# My Page\n\nContent.",
+    );
+
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.title_suffix = " | My Site".to_string();
+    })
+    .await;
+
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, "<title>My Page | My Site</title>");
+}
+
+#[tokio::test]
+async fn test_title_prefix_and_suffix_combined() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "readme.md",
+        "---\ntitle: My Page\n---\n\n# My Page\n\nContent.",
+    );
+
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.title_prefix = "PREFIX ".to_string();
+        config.title_suffix = " SUFFIX".to_string();
+    })
+    .await;
+
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, "<title>PREFIX My Page SUFFIX</title>");
+}
+
+#[tokio::test]
+async fn test_title_prefix_in_directory_listing() {
+    let repo = TestRepo::new();
+    repo.create_dir("docs");
+    repo.create_markdown("docs/guide.md", "# Guide");
+
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.title_prefix = "MySite: ".to_string();
+    })
+    .await;
+
+    // Wait for scan so directory listing has files
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/docs/").await;
+    assert_html_contains(&html, "<title>MySite: ");
 }
