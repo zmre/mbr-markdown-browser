@@ -578,12 +578,14 @@ impl Builder {
             }
         }
 
-        // Step 2: Collect all page URLs (both those with outbound links and those with inbound)
+        // Step 2: Collect all known page URLs that can actually render backlinks.
+        // We intentionally exclude inbound_index keys here — those may contain URLs
+        // to static files (PDFs, images) which can't display backlinks. Creating
+        // directories for them would shadow the actual file symlinks during asset linking.
         let all_page_urls: HashSet<String> = {
             let mut urls: HashSet<String> = outbound_index.keys().cloned().collect();
-            urls.extend(inbound_index.keys().cloned());
 
-            // Also include pages that might not have any links
+            // Include all markdown pages (even those without links)
             for (_, info) in self.repo.markdown_files.pin().iter() {
                 urls.insert(info.url_path.clone());
             }

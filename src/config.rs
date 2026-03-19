@@ -420,17 +420,26 @@ impl Config {
 
         for marker in DIR_MARKERS {
             if let Some(root) = Self::search_folder_in_ancestors(start_dir, marker) {
+                // Guard: don't use the user's home directory as root.
+                // This can happen when ~/.git exists (dotfiles repo), and would
+                // cause the watcher to recursively watch all of ~.
+                if Self::is_home_dir(&root) {
+                    break;
+                }
                 return root;
             }
         }
 
         for marker in FILE_MARKERS {
             if let Some(root) = Self::search_file_in_ancestors(start_dir, marker) {
+                if Self::is_home_dir(&root) {
+                    break;
+                }
                 return root;
             }
         }
 
-        Self::cwd_if_ancestor(start_dir).unwrap_or_else(|| start_dir.clone())
+        Self::cwd_if_ancestor(start_dir).unwrap_or_else(|| Self::as_directory(start_dir))
     }
 
     fn cwd_if_ancestor(start_path: &PathBuf) -> Option<PathBuf> {
@@ -477,6 +486,30 @@ impl Config {
             .map(|ancestor| ancestor.join(search_file))
             .find(|candidate| candidate.as_path().is_file())
             .and_then(|file_path| file_path.parent().map(|p| p.to_path_buf()))
+    }
+
+    /// Returns `start_path` if it is a directory, otherwise its parent.
+    /// Falls back to `start_path.clone()` for root-level paths with no parent.
+    fn as_directory(start_path: &Path) -> PathBuf {
+        if start_path.is_dir() {
+            start_path.to_path_buf()
+        } else {
+            start_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| start_path.to_path_buf())
+        }
+    }
+
+    /// Returns the user's home directory via `$HOME` (Unix).
+    /// Returns `None` on non-Unix or if `$HOME` is unset.
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+
+    /// Checks whether the given path is the user's home directory.
+    fn is_home_dir(path: &Path) -> bool {
+        Self::home_dir().is_some_and(|home| path == home)
     }
 }
 
@@ -752,5 +785,85 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    // ==================== find_root_dir Edge Case Tests ====================
+
+    #[test]
+    fn test_find_root_dir_file_without_markers_returns_parent() {
+        // Create a temp dir with no markers and a file inside it
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("test.md");
+        std::fs::write(&file_path, "# Hello").unwrap();
+
+        let root = Config::find_root_dir(&file_path);
+
+        // Should return the parent directory, not the file itself
+        assert!(
+            root.is_dir(),
+            "root_dir should be a directory, got: {root:?}"
+        );
+        assert_eq!(root, tmp.path());
+    }
+
+    #[test]
+    fn test_find_root_dir_directory_without_markers_returns_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let root = Config::find_root_dir(&tmp.path().to_path_buf());
+
+        assert!(root.is_dir());
+        // Should return the directory itself (or CWD if it's an ancestor)
+        // Either way, it should be a directory
+        assert!(
+            root.is_dir(),
+            "root_dir should be a directory, got: {root:?}"
+        );
+    }
+
+    #[test]
+    fn test_find_root_dir_with_git_marker_returns_marker_parent() {
+        // When .git exists in a non-home ancestor, find_root_dir should use it
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("sub").join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        let file_path = nested.join("test.md");
+        std::fs::write(&file_path, "# Hello").unwrap();
+
+        let root = Config::find_root_dir(&file_path);
+
+        // Should find .git and return its parent (tmp root)
+        assert_eq!(root, tmp.path().to_path_buf());
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn test_is_home_dir() {
+        if let Some(home) = Config::home_dir() {
+            assert!(Config::is_home_dir(&home));
+            assert!(!Config::is_home_dir(Path::new("/tmp")));
+        }
+    }
+
+    #[test]
+    fn test_as_directory_with_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("test.md");
+        std::fs::write(&file_path, "# Hello").unwrap();
+
+        let result = Config::as_directory(&file_path);
+        assert_eq!(result, tmp.path());
+        assert!(result.is_dir());
+    }
+
+    #[test]
+    fn test_as_directory_with_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_path = tmp.path().to_path_buf();
+
+        let result = Config::as_directory(&dir_path);
+        assert_eq!(result, dir_path);
     }
 }
