@@ -3549,6 +3549,11 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "text/css",
     ),
     (
+        "/hljs.atom-one-dark.css",
+        include_bytes!("../templates/hljs.atom-one-dark.11.11.1.css"),
+        "text/css",
+    ),
+    (
         "/hljs.js",
         include_bytes!("../templates/hljs.11.11.1.js"),
         "application/javascript",

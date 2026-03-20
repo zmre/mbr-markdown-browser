@@ -5,6 +5,9 @@
 
 /// highlight.js dark theme CSS
 pub const HLJS_DARK_CSS: &[u8] = include_bytes!("../templates/hljs.dark.11.11.1.css");
+/// highlight.js atom-one-dark theme CSS
+pub const HLJS_ATOM_ONE_DARK_CSS: &[u8] =
+    include_bytes!("../templates/hljs.atom-one-dark.11.11.1.css");
 
 /// highlight.js core library
 pub const HLJS_JS: &[u8] = include_bytes!("../templates/hljs.11.11.1.js");
@@ -35,7 +38,11 @@ pub const HLJS_LANG_YAML: &[u8] = include_bytes!("../templates/hljs.lang.yaml.11
 ///
 /// The url_path is the path without version numbers for cleaner URLs.
 pub const HLJS_FILES: &[(&str, &[u8], &str)] = &[
-    ("/hljs.dark.css", HLJS_DARK_CSS, "text/css"),
+    (
+        "/hljs.atom-one-dark.css",
+        HLJS_ATOM_ONE_DARK_CSS,
+        "text/css",
+    ),
     ("/hljs.js", HLJS_JS, "application/javascript"),
     (
         "/hljs.lang.bash.js",
@@ -167,7 +174,7 @@ mod tests {
         assert!(
             HLJS_FILES
                 .iter()
-                .any(|(path, _, _)| *path == "/hljs.dark.css"),
+                .any(|(path, _, _)| *path == "/hljs.atom-one-dark.css"),
             "Dark theme CSS should be present"
         );
     }

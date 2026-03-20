@@ -71,7 +71,7 @@ export class MbrHljsElement extends LitElement {
 
     // Step 1: Load CSS and core HLJS in parallel (CSS doesn't depend on JS)
     await Promise.all([
-      loadCss(`${assetBase}hljs.dark.css`),
+      loadCss(`${assetBase}hljs.atom-one-dark.css`),
       loadScript(`${assetBase}hljs.js`),
     ])
 
