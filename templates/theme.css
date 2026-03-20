@@ -203,6 +203,23 @@ figure > video {
   /* display: inline-flex; */
   user-select: none;
 }
+figure > figcaption {
+  display: flex;
+  justify-content: space-between;
+  flex-direction: row-reverse;
+  flex-wrap: wrap-reverse;
+}
+figure > figcaption > * {
+  flex-grow: 1;
+}
+figure > figcaption > mbr-video-extras {
+  flex-grow: 2;
+}
+
+figure {
+  margin-bottom: var(--pico-block-spacing-vertical);
+}
+
 /* figure > video::cue { */
 /*   font-size: 0.875em; */
 /*   margin: 1em; */
