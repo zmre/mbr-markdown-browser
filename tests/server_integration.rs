@@ -66,7 +66,7 @@ impl TestServer {
         // Give server time to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client = reqwest::Client::new();
+        let client = mbr::http_client(Duration::from_secs(5));
 
         Self {
             port,
@@ -91,7 +91,7 @@ impl TestServer {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client = reqwest::Client::new();
+        let client = mbr::http_client(Duration::from_secs(5));
 
         Self {
             port,
@@ -380,7 +380,7 @@ async fn test_non_canonical_index_url_redirects() {
     let server = TestServer::start(&repo).await;
 
     // Use a client that doesn't follow redirects
-    let client = reqwest::Client::builder()
+    let client = mbr::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
@@ -400,7 +400,7 @@ async fn test_root_index_url_redirects() {
     let server = TestServer::start(&repo).await;
 
     // Use a client that doesn't follow redirects
-    let client = reqwest::Client::builder()
+    let client = mbr::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
@@ -922,7 +922,7 @@ impl TestServerWithTemplates {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client = reqwest::Client::new();
+        let client = mbr::http_client(Duration::from_secs(5));
 
         Self {
             port,
@@ -1804,7 +1804,7 @@ impl TestServerWithTheme {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client = reqwest::Client::new();
+        let client = mbr::http_client(Duration::from_secs(5));
 
         Self {
             port,
@@ -2134,7 +2134,7 @@ impl TestServerNoLinkTracking {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client = reqwest::Client::new();
+        let client = mbr::http_client(Duration::from_secs(5));
 
         Self {
             port,

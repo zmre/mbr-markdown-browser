@@ -3,7 +3,7 @@ use regex::Regex;
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
 use std::error::Error;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Formats an error with its full source chain for detailed logging.
@@ -206,21 +206,7 @@ impl PageInfo {
             });
         }
 
-        // Build a client with bundled root certs (works on all platforms without
-        // relying on system certificate store) and the configured timeout
-        let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("safe default protocol versions")
-        .with_root_certificates(Arc::new(rustls::RootCertStore::from_iter(
-            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-        )))
-        .with_no_client_auth();
-        let client = Client::builder()
-            .use_preconfigured_tls(tls_config)
-            .timeout(Duration::from_millis(timeout_ms))
-            .build()?;
+        let client = crate::http_client(Duration::from_millis(timeout_ms));
 
         // For other URLs, fetch and parse OpenGraph metadata
         match Self::fetch_page_info(&client, url).await {
