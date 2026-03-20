@@ -1,4 +1,4 @@
-import { LitElement, html, css, nothing, type CSSResultGroup } from 'lit';
+import { LitElement, html, svg, css, nothing, type CSSResultGroup } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 /**
@@ -366,6 +366,26 @@ export class MbrVideoExtrasElement extends LitElement {
     .chapter-item.active .chapter-time {
       color: inherit;
     }
+
+    .theater-button {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      cursor: pointer;
+      color: var(--pico-muted-color, #666);
+      display: inline-flex;
+      align-items: center;
+      vertical-align: middle;
+    }
+    .theater-button:hover,
+    .theater-button.active {
+      color: var(--pico-primary, #1976d2);
+    }
+    .theater-button svg {
+      width: 1.2em;
+      height: 1.2em;
+    }
   `;
 
   /**
@@ -397,6 +417,12 @@ export class MbrVideoExtrasElement extends LitElement {
    */
   @state()
   private _showChaptersModal = false;
+
+  /**
+   * Whether theater mode is active.
+   */
+  @state()
+  private _theaterMode = false;
 
   /**
    * Whether transcript is visible.
@@ -434,6 +460,7 @@ export class MbrVideoExtrasElement extends LitElement {
   private _boundCueChange = this._onCueChange.bind(this);
   private _boundPlay = this._onPlay.bind(this);
   private _boundPause = this._onPause.bind(this);
+  private _boundEscapeHandler = this._onEscapeKey.bind(this);
   private _lastSaveTime = 0;
   private _hasPlayed = false;
 
@@ -449,6 +476,9 @@ export class MbrVideoExtrasElement extends LitElement {
   }
 
   private _cleanup() {
+    if (this._theaterMode) {
+      this._exitTheater();
+    }
     if (this._videoElement) {
       this._videoElement.removeEventListener('timeupdate', this._boundTimeUpdate);
       this._videoElement.removeEventListener('play', this._boundPlay);
@@ -819,6 +849,49 @@ export class MbrVideoExtrasElement extends LitElement {
     }
   }
 
+  private _getFigureElement(): HTMLElement | null {
+    const figcaption = this.parentElement;
+    return figcaption?.parentElement ?? null;
+  }
+
+  private _toggleTheater() {
+    if (this._theaterMode) {
+      this._exitTheater();
+    } else {
+      this._enterTheater();
+    }
+  }
+
+  private _enterTheater() {
+    const figure = this._getFigureElement();
+    if (!figure) return;
+
+    figure.classList.add('theater');
+    document.documentElement.style.overflowX = 'hidden';
+    document.addEventListener('keydown', this._boundEscapeHandler);
+    this._theaterMode = true;
+
+    requestAnimationFrame(() => {
+      figure.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
+  private _exitTheater() {
+    const figure = this._getFigureElement();
+    if (!figure) return;
+
+    figure.classList.remove('theater');
+    document.documentElement.style.overflowX = '';
+    document.removeEventListener('keydown', this._boundEscapeHandler);
+    this._theaterMode = false;
+  }
+
+  private _onEscapeKey(e: KeyboardEvent) {
+    if (e.key === 'Escape' && this._theaterMode) {
+      this._exitTheater();
+    }
+  }
+
   private _isCurrentChapter(chapter: VttCue): boolean {
     return chapter.text === this._currentChapter;
   }
@@ -853,8 +926,8 @@ export class MbrVideoExtrasElement extends LitElement {
     const hasCurrentChapter = this._currentChapter.length > 0;
     const hasCaptions = this._captionsLoaded && this._captions.length > 0;
 
-    // If nothing to show, render nothing
-    if (!hasTimeRange && !hasCurrentChapter && !hasCaptions) {
+    // If nothing to show, render nothing (always show if video exists for theater button)
+    if (!hasTimeRange && !hasCurrentChapter && !hasCaptions && !this._videoElement) {
       return nothing;
     }
 
@@ -885,6 +958,24 @@ export class MbrVideoExtrasElement extends LitElement {
             `
         : nothing
       }
+        ${this._videoElement
+        ? html`
+              <span class="separator">&middot;</span>
+              <button
+                class="theater-button ${this._theaterMode ? 'active' : ''}"
+                @click=${this._toggleTheater}
+                title="${this._theaterMode ? 'Exit theater mode' : 'Theater mode'}"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  ${this._theaterMode
+            ? svg`<polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline>`
+            : svg`<polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line>`
+          }
+                </svg>
+              </button>
+            `
+        : nothing
+      }
         ${hasCaptions
         ? html`
               <div class="transcript-toggle">
@@ -907,8 +998,8 @@ export class MbrVideoExtrasElement extends LitElement {
         ? html`
             <div class="transcript-box">
               ${this._transcriptItems.map(item =>
-                item.type === 'chapter'
-                  ? html`
+          item.type === 'chapter'
+            ? html`
                       <div
                         class="transcript-chapter"
                         @click=${() => this._jumpToChapterInTranscript(item.cue)}
@@ -916,7 +1007,7 @@ export class MbrVideoExtrasElement extends LitElement {
                         ${item.cue.text}
                       </div>
                     `
-                  : html`
+            : html`
                       <div
                         class="caption ${item.index === this._currentCaptionIndex ? 'active' : ''} ${item.index < this._currentCaptionIndex ? 'past' : ''}"
                         @click=${() => this._jumpToCaption(item.cue)}
@@ -924,7 +1015,7 @@ export class MbrVideoExtrasElement extends LitElement {
                         ${item.cue.text}
                       </div>
                     `
-              )}
+        )}
             </div>
           `
         : nothing

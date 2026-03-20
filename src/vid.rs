@@ -284,11 +284,18 @@ mod tests {
         let html = vid.to_html(false, false, false);
         assert!(html.contains("<video"));
         assert!(html.contains("src='/videos/foo.mp4#t=10,20'"));
-        assert!(html.contains("<figcaption>Caption"));
+        assert!(html.contains("Caption"));
         assert!(html.contains(
             "<mbr-video-extras src='/videos/foo.mp4' start='10' end='20'></mbr-video-extras>"
         ));
         assert!(html.contains("</figcaption></figure>"));
+        // mbr-video-extras comes before caption text inside figcaption
+        let extras_pos = html.find("<mbr-video-extras").unwrap();
+        let caption_pos = html.find("Caption").unwrap();
+        assert!(
+            extras_pos < caption_pos,
+            "extras should appear before caption text"
+        );
     }
 
     #[test]
@@ -317,7 +324,7 @@ mod tests {
             2,
             "Original MP4 should appear twice: once for wide screens, once as fallback"
         );
-        assert!(html.contains("<figcaption>Caption"));
+        assert!(html.contains("Caption"));
     }
 
     #[test]
