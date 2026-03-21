@@ -48,14 +48,16 @@ ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log 
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_7350"] } # PDF cover; pdfium_7350 compatible with nixpkgs-25.11-darwin pdfium-binaries 7363
 papaya = "0.2.3"
 pathdiff = "0.2.3"
-lopdf = { version = "0.39", default-features = false, features = ["rayon"] }
+lopdf = { version = "0.40", default-features = false, features = ["rayon"] }
 percent-encoding = "2.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
 rayon = "1.11"
 regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-scraper = "0.25"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "1"
+scraper = "0.26"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tera = { version = "1.20", features = ["preserve_order", "date-locale"] }
@@ -97,7 +99,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 filetime = "0.2"
 flate2 = "1.0"
 proptest = "1.5"
-tempfile = "3.26"
+tempfile = "3.27"
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }

@@ -206,10 +206,7 @@ impl PageInfo {
             });
         }
 
-        // Build a client with the configured timeout
-        let client = Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
-            .build()?;
+        let client = crate::http_client(Duration::from_millis(timeout_ms));
 
         // For other URLs, fetch and parse OpenGraph metadata
         match Self::fetch_page_info(&client, url).await {

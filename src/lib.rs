@@ -7,6 +7,31 @@
 #[cfg(feature = "ffi")]
 uniffi::include_scaffolding!("mbr");
 
+/// Returns a reqwest `ClientBuilder` pre-configured with bundled Mozilla root
+/// certificates. This avoids reliance on the system certificate store, which
+/// may be absent in sandboxed or minimal Linux environments (e.g. Nix builds).
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    use std::sync::Arc;
+    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("safe default protocol versions")
+    .with_root_certificates(Arc::new(rustls::RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+    )))
+    .with_no_client_auth();
+    reqwest::Client::builder().use_preconfigured_tls(tls_config)
+}
+
+/// Build a reqwest HTTP client with bundled Mozilla root certificates.
+pub fn http_client(timeout: std::time::Duration) -> reqwest::Client {
+    http_client_builder()
+        .timeout(timeout)
+        .build()
+        .expect("failed to build HTTP client")
+}
+
 pub mod attrs;
 pub mod audio;
 #[cfg(feature = "gui")]

@@ -83,6 +83,10 @@ download_hljs() {
     info "  Theme: dark.min.css"
     curl -sL "${base_url}/styles/dark.min.css" -o "$TEMPLATES_DIR/hljs.dark.${version}.css" || error "Failed to download dark.min.css"
 
+    # Download atom-one-dark theme CSS
+    info "  Theme: dark.min.css"
+    curl -sL "${base_url}/styles/atom-one-dark.css" -o "$TEMPLATES_DIR/hljs.atom-one-dark.${version}.css" || error "Failed to download dark.atom-one-dark.css"
+
     # Download language modules
     for lang in "${HLJS_LANGUAGES[@]}"; do
         info "  Language: ${lang}"

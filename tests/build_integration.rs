@@ -1137,3 +1137,73 @@ async fn test_normal_tags_still_generate_pages() {
     let tags_index = output.join("tags").join("index.html");
     assert!(tags_index.exists(), "Tags index page should exist");
 }
+
+// ============================================================================
+// Link tracking + static file symlink tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_static_file_not_shadowed_by_link_tracking() {
+    let repo = TestRepo::new();
+
+    // Create a PDF file in pdfs/ directory
+    repo.create_static_file("pdfs/example.pdf", b"%PDF-1.4 fake pdf content");
+
+    // Create a markdown file that links to the PDF
+    repo.create_markdown(
+        "page.md",
+        "# My Page\n\nCheck out [this PDF](/pdfs/example.pdf).",
+    );
+
+    // Build with link tracking enabled (default)
+    let output = build_site(&repo).await;
+
+    // The PDF should be symlinked, not turned into a directory
+    let pdf_path = output.join("pdfs").join("example.pdf");
+    assert!(pdf_path.exists(), "PDF file should exist in build output");
+    assert!(
+        !pdf_path.is_dir(),
+        "PDF path should be a file (symlink), not a directory created by link tracking"
+    );
+
+    // No links.json should exist for the static file
+    let links_json = output.join("pdfs").join("example.pdf").join("links.json");
+    assert!(
+        !links_json.exists(),
+        "links.json should not be created for static files"
+    );
+}
+
+// ============================================================================
+// Tag page generation + manual link tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_tag_page_exists_when_linked_manually() {
+    let repo = TestRepo::new();
+
+    // Page A has a tag in frontmatter
+    repo.create_markdown(
+        "article.md",
+        "---\ntitle: Article\ntags:\n  - mytag\n---\n\nSome content.",
+    );
+
+    // Page B manually links to the tag page
+    repo.create_markdown(
+        "index.md",
+        "# Home\n\nSee articles tagged [mytag](/tags/mytag/).",
+    );
+
+    let output = build_site_with_tags(&repo).await;
+
+    // The tag page should exist
+    let tag_page = output.join("tags").join("mytag").join("index.html");
+    assert!(
+        tag_page.exists(),
+        "Tag page for 'mytag' should be generated"
+    );
+
+    // The tag index page should exist
+    let tag_index = output.join("tags").join("index.html");
+    assert!(tag_index.exists(), "Tags index page should exist");
+}

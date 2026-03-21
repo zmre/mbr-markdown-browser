@@ -155,30 +155,27 @@ impl Vid {
         format!(
             r#"
             <figure>
-                <video controls preload="none" playsinline loop="false" poster="{}.cover.jpg">
-                    {}
-                    <track kind="captions" label="English captions" src="{}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
-                    <track kind="chapters" language="en-US" label="Chapters" src="{}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />
+                <video controls preload="none" playsinline poster="{url}.cover.jpg">
+                    {sources}
+                    <track kind="captions" label="English captions" src="{url}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
+                    <track kind="chapters" language="en-US" label="Chapters" src="{url}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />
                 </video>
-                <figcaption>{}
-                <mbr-video-extras src='{}' start='{}' end='{}'></mbr-video-extras>
+                <figcaption>
+                <mbr-video-extras src='{url}' start='{vidstart}' end='{vidend}'></mbr-video-extras>
+                {caption}
                 {}
             "#,
-            self.url,
-            sources,
-            self.url,
-            self.url,
-            self.caption.as_deref().unwrap_or(""),
-            self.url,
-            self.start.as_ref().unwrap_or(&"".to_string()),
-            self.end.as_ref().unwrap_or(&"".to_string()),
             {
                 if open_only {
                     "".to_string()
                 } else {
                     Self::html_close()
                 }
-            }
+            },
+            caption = self.caption.as_deref().unwrap_or(""), // note: caption sometimes comes as next text node
+            url = self.url,
+            vidstart = self.start.as_ref().unwrap_or(&"".to_string()),
+            vidend = self.end.as_ref().unwrap_or(&"".to_string())
         )
     }
 
@@ -287,11 +284,18 @@ mod tests {
         let html = vid.to_html(false, false, false);
         assert!(html.contains("<video"));
         assert!(html.contains("src='/videos/foo.mp4#t=10,20'"));
-        assert!(html.contains("<figcaption>Caption"));
+        assert!(html.contains("Caption"));
         assert!(html.contains(
             "<mbr-video-extras src='/videos/foo.mp4' start='10' end='20'></mbr-video-extras>"
         ));
         assert!(html.contains("</figcaption></figure>"));
+        // mbr-video-extras comes before caption text inside figcaption
+        let extras_pos = html.find("<mbr-video-extras").unwrap();
+        let caption_pos = html.find("Caption").unwrap();
+        assert!(
+            extras_pos < caption_pos,
+            "extras should appear before caption text"
+        );
     }
 
     #[test]
@@ -320,7 +324,7 @@ mod tests {
             2,
             "Original MP4 should appear twice: once for wide screens, once as fallback"
         );
-        assert!(html.contains("<figcaption>Caption"));
+        assert!(html.contains("Caption"));
     }
 
     #[test]
