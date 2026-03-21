@@ -1,4 +1,4 @@
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -152,6 +152,11 @@ impl Vid {
             )
         };
 
+        let caption = self
+            .caption
+            .clone()
+            .unwrap_or_else(|| Self::fallback_caption(&self.url));
+
         format!(
             r#"
             <figure>
@@ -172,7 +177,7 @@ impl Vid {
                     Self::html_close()
                 }
             },
-            caption = self.caption.as_deref().unwrap_or(""), // note: caption sometimes comes as next text node
+            caption = caption,
             url = self.url,
             vidstart = self.start.as_ref().unwrap_or(&"".to_string()),
             vidend = self.end.as_ref().unwrap_or(&"".to_string())
@@ -181,6 +186,19 @@ impl Vid {
 
     pub fn html_close() -> String {
         "</figcaption></figure>".to_string()
+    }
+
+    /// Derive a human-readable caption from the video URL when no explicit caption is provided.
+    /// Extracts the filename, strips the extension, URL-decodes, and replaces hyphens/underscores
+    /// with spaces.
+    fn fallback_caption(url: &str) -> String {
+        let filename = url.rsplit('/').next().unwrap_or(url);
+        let stem = match filename.rsplit_once('.') {
+            Some((base, _)) => base,
+            None => filename,
+        };
+        let decoded = percent_decode_str(stem).decode_utf8_lossy();
+        decoded.replace(['-', '_'], " ")
     }
 
     fn extension_from_url(url: &str) -> Option<String> {
@@ -342,6 +360,53 @@ mod tests {
         assert!(!html.contains("-720p.m3u8"));
         assert!(!html.contains("-480p.m3u8"));
         assert!(html.contains("src='/videos/foo.mp4'"));
+        // No caption provided, so fallback to filename
+        assert!(html.contains("foo"));
+    }
+
+    #[test]
+    fn test_to_html_no_caption_uses_fallback() {
+        let vid = Vid {
+            url: "/videos/my-cool-video.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: None,
+        };
+        let html = vid.to_html(false, false, false);
+        assert!(
+            html.contains("my cool video"),
+            "fallback caption should replace hyphens with spaces"
+        );
+    }
+
+    #[test]
+    fn test_fallback_caption_simple() {
+        assert_eq!(Vid::fallback_caption("/videos/foo.mp4"), "foo");
+    }
+
+    #[test]
+    fn test_fallback_caption_hyphens_and_underscores() {
+        assert_eq!(
+            Vid::fallback_caption("/videos/my-cool_video.mp4"),
+            "my cool video"
+        );
+    }
+
+    #[test]
+    fn test_fallback_caption_url_encoded() {
+        assert_eq!(
+            Vid::fallback_caption("/videos/Rubik%27s%20Cube.mp4"),
+            "Rubik's Cube"
+        );
+    }
+
+    #[test]
+    fn test_fallback_caption_subdirectory() {
+        assert_eq!(
+            Vid::fallback_caption("/videos/Eric%20Jones/Eric%20Jones%20-%20Metal%203.mp4"),
+            "Eric Jones   Metal 3"
+        );
     }
 
     #[test]
