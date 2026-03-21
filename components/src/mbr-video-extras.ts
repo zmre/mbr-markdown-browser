@@ -33,6 +33,18 @@ function parseVttTime(timeStr: string): number {
 }
 
 /**
+ * Format a timecode string for display. If the value is a plain number
+ * greater than 59, convert it to human-readable MM:SS or HH:MM:SS.
+ * Already-formatted strings (containing ':') are returned as-is.
+ */
+function formatTimecode(value: string): string {
+  if (value.includes(':')) return value;
+  const num = parseFloat(value);
+  if (!isNaN(num) && num > 59) return formatTime(num);
+  return value;
+}
+
+/**
  * Format seconds as MM:SS or HH:MM:SS.
  */
 function formatTime(seconds: number): string {
@@ -937,10 +949,10 @@ export class MbrVideoExtrasElement extends LitElement {
         ? html`
               <span class="time-range">
                 ${hasStart && hasEnd
-            ? html`<span class="separator">&middot;</span>${this.start} &ndash; ${this.end}`
+            ? html`<span class="separator">&middot;</span>${formatTimecode(this.start)} &ndash; ${formatTimecode(this.end)}`
             : hasStart
-              ? html`<span class="separator">&middot;</span>from ${this.start}`
-              : html`<span class="separator">&middot;</span>to ${this.end}`
+              ? html`<span class="separator">&middot;</span>from ${formatTimecode(this.start)}`
+              : html`<span class="separator">&middot;</span>to ${formatTimecode(this.end)}`
           }
               </span>
             `
