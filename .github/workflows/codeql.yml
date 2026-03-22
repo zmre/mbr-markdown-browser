@@ -71,7 +71,7 @@ jobs:
 
     - name: Setup Cachix
       if: matrix.language == 'swift'
-      uses: cachix/cachix-action@v16
+      uses: cachix/cachix-action@v17
       with:
         name: zmre
         authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
