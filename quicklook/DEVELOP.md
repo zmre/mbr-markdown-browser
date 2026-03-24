@@ -13,6 +13,20 @@ The QuickLook extension consists of:
 
 The extension uses a custom URL scheme (`mbrfile://`) to serve local assets (images, etc.) through a `WKURLSchemeHandler` in the WebView.
 
+
+## Useful Tips
+
+* Watch logs for mbr: `/usr/bin/log stream --style compact --predicate 'eventMessage CONTAINS "mbr"' --color=auto`
+* xattr -cr Path/to/app
+* xattr -r -d com.apple.quarantine "path/to/app"
+* qlmanage -r
+* qlmanage -r cache
+* restart finder?
+*
+* binary distribution for macos on nix?
+  * See https://github.com/NixOS/nixpkgs/blob/nixos-unstable/pkgs/by-name/ap/apparency/package.nix
+* Should the plugin be under MyApp.app/Contents/Library/QuickLook instead?
+
 ## Building
 
 ### Prerequisites
@@ -38,6 +52,9 @@ cd quicklook
 If you need more control:
 
 ```bash
+# 0. Build js artifacts needed by rust build
+cd components ; bun install && bun run build
+
 # 1. Build Rust library with FFI feature (minimal features for sandbox)
 cargo build --release --no-default-features --features ffi
 
