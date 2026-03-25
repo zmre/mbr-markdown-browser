@@ -672,6 +672,13 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         }
     }
 }
+public func findConfigRoot(filePath: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_mbr_fn_func_find_config_root(
+        FfiConverterString.lower(filePath),$0
+    )
+})
+}
 public func renderPreview(filePath: String, configRoot: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
     uniffi_mbr_fn_func_render_preview(
@@ -704,6 +711,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_mbr_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_mbr_checksum_func_find_config_root() != 14695) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_checksum_func_render_preview() != 35244) {
         return InitializationResult.apiChecksumMismatch

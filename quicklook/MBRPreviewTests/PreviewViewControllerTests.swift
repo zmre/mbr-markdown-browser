@@ -61,11 +61,10 @@ class PreviewViewControllerTests: XCTestCase {
         let testFile = subDir.appendingPathComponent("test.md")
         try "# Test".write(to: testFile, atomically: true, encoding: .utf8)
 
-        // When
-        let result = self.viewController.findConfigRoot(for: testFile)
+        // When - use FFI function (free function, not a method on the controller)
+        let result = findConfigRoot(filePath: testFile.path)
 
         // Then
-        XCTAssertNotNil(result, "Should find config root")
         XCTAssertEqual(result, tempDir.path, "Should return the directory containing .mbr")
     }
 
@@ -79,11 +78,11 @@ class PreviewViewControllerTests: XCTestCase {
         let testFile = tempDir.appendingPathComponent("test.md")
         try "# Test".write(to: testFile, atomically: true, encoding: .utf8)
 
-        // When
-        let result = self.viewController.findConfigRoot(for: testFile)
+        // When - use FFI function; falls back to file's parent dir when no markers found
+        let result = findConfigRoot(filePath: testFile.path)
 
-        // Then
-        XCTAssertNil(result, "Should return nil when no .mbr directory found")
+        // Then - should fall back to the file's parent directory
+        XCTAssertEqual(result, tempDir.path, "Should fall back to file's parent directory when no markers found")
     }
 
     func testFindConfigRoot_nestedDirectories() throws {
@@ -106,11 +105,10 @@ class PreviewViewControllerTests: XCTestCase {
         let testFile = deepPath.appendingPathComponent("deep.md")
         try "# Deep test".write(to: testFile, atomically: true, encoding: .utf8)
 
-        // When
-        let result = self.viewController.findConfigRoot(for: testFile)
+        // When - use FFI function
+        let result = findConfigRoot(filePath: testFile.path)
 
         // Then
-        XCTAssertNotNil(result, "Should find config root in parent directories")
         XCTAssertEqual(result, tempDir.path, "Should return the root directory containing .mbr")
     }
 

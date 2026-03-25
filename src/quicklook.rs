@@ -6,7 +6,7 @@
 //!
 //! This module is exposed via UniFFI for Swift interop in macOS QuickLook extensions.
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::embedded_hljs;
 use crate::embedded_pico;
 use crate::link_transform::LinkTransformConfig;
@@ -108,11 +108,7 @@ pub fn render_preview_with_config(
     let root_path = if let Some(root) = config_root {
         PathBuf::from(root)
     } else {
-        find_config_root(&path).unwrap_or_else(|| {
-            path.parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."))
-        })
+        config::find_root_dir(&path)
     };
 
     // Load config for markdown extensions
@@ -183,47 +179,13 @@ pub fn render_preview_with_config(
     )
 }
 
-/// Search upward from the given path to find a repository root.
+/// Find the repository/config root directory by searching upward for markers.
 ///
-/// Searches for the same markers as Config::find_root_dir() to ensure
-/// consistent root detection between QuickLook and server modes.
-fn find_config_root(path: &Path) -> Option<PathBuf> {
-    // Directory markers (same as Config::find_root_dir)
-    const DIR_MARKERS: &[&str] = &[".mbr", ".git", ".zk", ".obsidian"];
-    // File markers (same as Config::find_root_dir)
-    const FILE_MARKERS: &[&str] = &["book.toml", "mkdocs.yml", "docusaurus.config.js"];
-
-    let start_dir = if path.is_file() { path.parent()? } else { path };
-
-    // Search for directory markers
-    for marker in DIR_MARKERS {
-        if let Some(root) = search_folder_in_ancestors(start_dir, marker) {
-            return Some(root);
-        }
-    }
-
-    // Search for file markers
-    for marker in FILE_MARKERS {
-        if let Some(root) = search_file_in_ancestors(start_dir, marker) {
-            return Some(root);
-        }
-    }
-
-    None
-}
-
-fn search_folder_in_ancestors(start_dir: &Path, folder_name: &str) -> Option<PathBuf> {
-    start_dir
-        .ancestors()
-        .find(|ancestor| ancestor.join(folder_name).is_dir())
-        .map(|p| p.to_path_buf())
-}
-
-fn search_file_in_ancestors(start_dir: &Path, file_name: &str) -> Option<PathBuf> {
-    start_dir
-        .ancestors()
-        .find(|ancestor| ancestor.join(file_name).is_file())
-        .map(|p| p.to_path_buf())
+/// This is the UniFFI-exported wrapper around `config::find_root_dir()`.
+/// It accepts and returns `String` for FFI compatibility with Swift.
+pub fn find_config_root(file_path: String) -> String {
+    let path = PathBuf::from(&file_path);
+    config::find_root_dir(&path).to_string_lossy().into_owned()
 }
 
 /// Resolve an asset path, checking the direct path first, then falling back to static folder.
@@ -664,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_config_root() {
+    fn test_find_root_dir_with_mbr() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mbr_dir = temp_dir.path().join(".mbr");
         std::fs::create_dir(&mbr_dir).unwrap();
@@ -675,8 +637,24 @@ mod tests {
         let file_path = subdir.join("test.md");
         std::fs::write(&file_path, "# Test").unwrap();
 
-        let found_root = find_config_root(&file_path);
-        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+        let found_root = config::find_root_dir(&file_path);
+        assert_eq!(found_root, temp_dir.path().to_path_buf());
+    }
+
+    #[test]
+    fn test_find_config_root_ffi_wrapper() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mbr_dir = temp_dir.path().join(".mbr");
+        std::fs::create_dir(&mbr_dir).unwrap();
+
+        let subdir = temp_dir.path().join("docs");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let file_path = subdir.join("test.md");
+        std::fs::write(&file_path, "# Test").unwrap();
+
+        let result = find_config_root(file_path.to_str().unwrap().to_string());
+        assert_eq!(result, temp_dir.path().to_str().unwrap());
     }
 
     #[test]
@@ -1021,8 +999,8 @@ mod tests {
     }
 
     #[test]
-    fn test_find_config_root_with_git_only() {
-        // Test that find_config_root finds .git folders too
+    fn test_find_root_dir_with_git_only() {
+        // Test that find_root_dir finds .git folders too
         let temp_dir = tempfile::tempdir().unwrap();
         let git_dir = temp_dir.path().join(".git");
         std::fs::create_dir(&git_dir).unwrap();
@@ -1033,12 +1011,12 @@ mod tests {
         let file_path = subdir.join("test.md");
         std::fs::write(&file_path, "# Test").unwrap();
 
-        let found_root = find_config_root(&file_path);
-        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+        let found_root = config::find_root_dir(&file_path);
+        assert_eq!(found_root, temp_dir.path().to_path_buf());
     }
 
     #[test]
-    fn test_find_config_root_mbr_takes_precedence() {
+    fn test_find_root_dir_mbr_takes_precedence() {
         // When both .mbr and .git exist, .mbr should take precedence
         let temp_dir = tempfile::tempdir().unwrap();
         let mbr_dir = temp_dir.path().join(".mbr");
@@ -1049,12 +1027,12 @@ mod tests {
         let file_path = temp_dir.path().join("test.md");
         std::fs::write(&file_path, "# Test").unwrap();
 
-        let found_root = find_config_root(&file_path);
-        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+        let found_root = config::find_root_dir(&file_path);
+        assert_eq!(found_root, temp_dir.path().to_path_buf());
     }
 
     #[test]
-    fn test_find_config_root_with_book_toml() {
+    fn test_find_root_dir_with_book_toml() {
         // Test file marker (book.toml for mdbook)
         let temp_dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1068,8 +1046,8 @@ mod tests {
         let file_path = subdir.join("SUMMARY.md");
         std::fs::write(&file_path, "# Summary").unwrap();
 
-        let found_root = find_config_root(&file_path);
-        assert_eq!(found_root, Some(temp_dir.path().to_path_buf()));
+        let found_root = config::find_root_dir(&file_path);
+        assert_eq!(found_root, temp_dir.path().to_path_buf());
     }
 
     #[test]
@@ -1084,22 +1062,20 @@ mod tests {
 
         // Check what root is found
         let path = std::path::PathBuf::from(file_path);
-        let root = find_config_root(&path);
+        let root = config::find_root_dir(&path);
         eprintln!("\n=== Root found: {:?} ===", root);
 
         // Check config
-        if let Some(ref root_path) = root {
-            let config = crate::config::Config::read(root_path).unwrap_or_default();
-            eprintln!("=== Config static_folder: {:?} ===", config.static_folder);
+        let config = crate::config::Config::read(&root).unwrap_or_default();
+        eprintln!("=== Config static_folder: {:?} ===", config.static_folder);
 
-            // Check if static folder exists
-            let static_path = root_path.join(&config.static_folder);
-            eprintln!(
-                "=== Static folder exists: {} at {:?} ===",
-                static_path.exists(),
-                static_path
-            );
-        }
+        // Check if static folder exists
+        let static_path = root.join(&config.static_folder);
+        eprintln!(
+            "=== Static folder exists: {} at {:?} ===",
+            static_path.exists(),
+            static_path
+        );
 
         // Render and check output
         let html = render_preview(file_path.to_string(), None).unwrap();

@@ -76,7 +76,7 @@ pub mod watcher;
 pub mod wikilink;
 
 pub use build::{BuildStats, Builder};
-pub use config::{Config, SortField, TagSource};
+pub use config::{Config, SortField, TagSource, find_root_dir};
 #[cfg(feature = "media-metadata")]
 pub use errors::MetadataError;
 #[cfg(feature = "media-metadata")]
@@ -84,7 +84,9 @@ pub use errors::PdfMetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
 pub use markdown::MarkdownRenderResult;
 #[cfg(feature = "ffi")]
-pub use quicklook::{QuickLookConfig, QuickLookError, render_preview, render_preview_with_config};
+pub use quicklook::{
+    QuickLookConfig, QuickLookError, find_config_root, render_preview, render_preview_with_config,
+};
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
 pub use sorting::sort_files;
 #[cfg(feature = "media-metadata")]

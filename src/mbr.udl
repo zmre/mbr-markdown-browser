@@ -10,6 +10,11 @@ namespace mbr {
     // Render with custom configuration options
     [Throws=QuickLookError]
     string render_preview_with_config(string file_path, string? config_root, QuickLookConfig config);
+
+    // Find the repository/config root directory by searching upward for markers
+    // (.mbr, .git, .zk, .obsidian, book.toml, mkdocs.yml, docusaurus.config.js)
+    // Falls back to the file's parent directory if no markers found
+    string find_config_root(string file_path);
 };
 
 // Error types that can be returned from the API

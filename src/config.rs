@@ -366,10 +366,64 @@ impl Default for Config {
     }
 }
 
+/// Returns true if the given path is the user's home directory.
+fn is_home_dir(path: &Path) -> bool {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .is_some_and(|home| path == home)
+}
+
+/// Search upward from the given path to find a repository root directory.
+///
+/// Searches for directory markers (`.mbr`, `.git`, `.zk`, `.obsidian`) then
+/// file markers (`book.toml`, `mkdocs.yml`, `docusaurus.config.js`) in ancestor
+/// directories. Falls back to the start path's directory if no markers found.
+///
+/// Skips matches at `$HOME` to avoid using the entire home directory as root
+/// (e.g., when `~/.git` exists for a dotfiles repo).
+pub fn find_root_dir(start_path: &Path) -> PathBuf {
+    const DIR_MARKERS: &[&str] = &[".mbr", ".git", ".zk", ".obsidian"];
+    const FILE_MARKERS: &[&str] = &["book.toml", "mkdocs.yml", "docusaurus.config.js"];
+
+    let dir = if start_path.is_dir() {
+        start_path
+    } else {
+        start_path.parent().unwrap_or(start_path)
+    };
+
+    for marker in DIR_MARKERS {
+        if let Some(root) = dir
+            .ancestors()
+            .find(|a| a.join(marker).is_dir())
+            .map(|p| p.to_path_buf())
+        {
+            if is_home_dir(&root) {
+                break;
+            }
+            return root;
+        }
+    }
+
+    for marker in FILE_MARKERS {
+        if let Some(root) = dir
+            .ancestors()
+            .find(|a| a.join(marker).is_file())
+            .map(|p| p.to_path_buf())
+        {
+            if is_home_dir(&root) {
+                break;
+            }
+            return root;
+        }
+    }
+
+    dir.to_path_buf()
+}
+
 impl Config {
-    pub fn read(search_config_from: &PathBuf) -> Result<Self, crate::MbrError> {
+    pub fn read(search_config_from: &Path) -> Result<Self, crate::MbrError> {
         let default_config = Config::default();
-        let root_dir = Self::find_root_dir(search_config_from);
+        let root_dir = find_root_dir(search_config_from);
         let mut config: Config = Figment::new()
             .merge(Serialized::defaults(default_config))
             .merge(Env::prefixed("MBR_"))
@@ -409,107 +463,6 @@ impl Config {
         }
 
         Ok(())
-    }
-
-    fn find_root_dir(start_dir: &PathBuf) -> PathBuf {
-        // Search for common repository markers in priority order
-        // Directories
-        const DIR_MARKERS: &[&str] = &[".mbr", ".git", ".zk", ".obsidian"];
-        // Config files for documentation tools
-        const FILE_MARKERS: &[&str] = &["book.toml", "mkdocs.yml", "docusaurus.config.js"];
-
-        for marker in DIR_MARKERS {
-            if let Some(root) = Self::search_folder_in_ancestors(start_dir, marker) {
-                // Guard: don't use the user's home directory as root.
-                // This can happen when ~/.git exists (dotfiles repo), and would
-                // cause the watcher to recursively watch all of ~.
-                if Self::is_home_dir(&root) {
-                    break;
-                }
-                return root;
-            }
-        }
-
-        for marker in FILE_MARKERS {
-            if let Some(root) = Self::search_file_in_ancestors(start_dir, marker) {
-                if Self::is_home_dir(&root) {
-                    break;
-                }
-                return root;
-            }
-        }
-
-        Self::cwd_if_ancestor(start_dir).unwrap_or_else(|| Self::as_directory(start_dir))
-    }
-
-    fn cwd_if_ancestor(start_path: &PathBuf) -> Option<PathBuf> {
-        let cwd = std::env::current_dir().ok()?;
-        let dir = if start_path.is_dir() {
-            start_path
-        } else {
-            start_path.parent()?
-        };
-        dir.ancestors()
-            .find(|candidate| *candidate == cwd)
-            .map(|x| x.to_path_buf())
-    }
-
-    fn search_folder_in_ancestors<P: AsRef<Path>>(
-        start_path: &PathBuf,
-        search_folder: P, // the folder I'm looking for (usually .mbr)
-    ) -> Option<PathBuf> {
-        let search_folder = search_folder.as_ref();
-        let dir = if start_path.is_dir() {
-            start_path
-        } else {
-            start_path.parent()?
-        };
-        // ancestors() yields `dir`, then its parent, then its parent, … until root.
-        dir.ancestors()
-            .map(|ancestor| ancestor.join(search_folder))
-            .find(|candidate| candidate.as_path().is_dir())
-            .and_then(|mbr_dir| mbr_dir.parent().map(|p| p.to_path_buf()))
-    }
-
-    fn search_file_in_ancestors<P: AsRef<Path>>(
-        start_path: &PathBuf,
-        search_file: P, // the file I'm looking for (e.g., book.toml)
-    ) -> Option<PathBuf> {
-        let search_file = search_file.as_ref();
-        let dir = if start_path.is_dir() {
-            start_path
-        } else {
-            start_path.parent()?
-        };
-        // ancestors() yields `dir`, then its parent, then its parent, … until root.
-        dir.ancestors()
-            .map(|ancestor| ancestor.join(search_file))
-            .find(|candidate| candidate.as_path().is_file())
-            .and_then(|file_path| file_path.parent().map(|p| p.to_path_buf()))
-    }
-
-    /// Returns `start_path` if it is a directory, otherwise its parent.
-    /// Falls back to `start_path.clone()` for root-level paths with no parent.
-    fn as_directory(start_path: &Path) -> PathBuf {
-        if start_path.is_dir() {
-            start_path.to_path_buf()
-        } else {
-            start_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| start_path.to_path_buf())
-        }
-    }
-
-    /// Returns the user's home directory via `$HOME` (Unix).
-    /// Returns `None` on non-Unix or if `$HOME` is unset.
-    fn home_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-
-    /// Checks whether the given path is the user's home directory.
-    fn is_home_dir(path: &Path) -> bool {
-        Self::home_dir().is_some_and(|home| path == home)
     }
 }
 
@@ -796,7 +749,7 @@ mod tests {
         let file_path = tmp.path().join("test.md");
         std::fs::write(&file_path, "# Hello").unwrap();
 
-        let root = Config::find_root_dir(&file_path);
+        let root = find_root_dir(&file_path);
 
         // Should return the parent directory, not the file itself
         assert!(
@@ -810,7 +763,7 @@ mod tests {
     fn test_find_root_dir_directory_without_markers_returns_itself() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let root = Config::find_root_dir(&tmp.path().to_path_buf());
+        let root = find_root_dir(tmp.path());
 
         assert!(root.is_dir());
         // Should return the directory itself (or CWD if it's an ancestor)
@@ -832,7 +785,7 @@ mod tests {
         let file_path = nested.join("test.md");
         std::fs::write(&file_path, "# Hello").unwrap();
 
-        let root = Config::find_root_dir(&file_path);
+        let root = find_root_dir(&file_path);
 
         // Should find .git and return its parent (tmp root)
         assert_eq!(root, tmp.path().to_path_buf());
@@ -841,29 +794,9 @@ mod tests {
 
     #[test]
     fn test_is_home_dir() {
-        if let Some(home) = Config::home_dir() {
-            assert!(Config::is_home_dir(&home));
-            assert!(!Config::is_home_dir(Path::new("/tmp")));
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            assert!(is_home_dir(&home));
+            assert!(!is_home_dir(Path::new("/tmp")));
         }
-    }
-
-    #[test]
-    fn test_as_directory_with_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file_path = tmp.path().join("test.md");
-        std::fs::write(&file_path, "# Hello").unwrap();
-
-        let result = Config::as_directory(&file_path);
-        assert_eq!(result, tmp.path());
-        assert!(result.is_dir());
-    }
-
-    #[test]
-    fn test_as_directory_with_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir_path = tmp.path().to_path_buf();
-
-        let result = Config::as_directory(&dir_path);
-        assert_eq!(result, dir_path);
     }
 }
