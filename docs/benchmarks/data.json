@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1772131272000,
+  "lastUpdate": 1774500524000,
   "repoUrl": "https://github.com/zmre/mbr-markdown-browser",
   "entries": {
     "mbr": [
@@ -1043,6 +1043,700 @@
           }
         ],
         "version": "0.4.3"
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "dependabot[bot]",
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "username": ""
+          },
+          "committer": {
+            "name": "dependabot[bot]",
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "username": ""
+          },
+          "id": "75d4fc874591985acc475f14a7cce157e69b8819",
+          "message": "Bump cachix/cachix-action from 16 to 17 in /.github/workflows (#86)",
+          "timestamp": "2026-03-25T17:53:16-07:00",
+          "url": "https://github.com/zmre/mbr-markdown-browser/commit/75d4fc874591985acc475f14a7cce157e69b8819"
+        },
+        "date": 1774498986000,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "cache_get_hit",
+            "value": 0.1,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "cache_get_miss",
+            "value": 0.04,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "cache_insert",
+            "value": 0.17,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "cache_insert_eviction",
+            "value": 0.15,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "extract_first_h1/extract/large",
+            "value": 48.33,
+            "unit": "us",
+            "range": "+/- 0.12"
+          },
+          {
+            "name": "extract_first_h1/extract/medium",
+            "value": 6.69,
+            "unit": "us",
+            "range": "+/- 0.01"
+          },
+          {
+            "name": "extract_first_h1/extract/small",
+            "value": 0.84,
+            "unit": "us",
+            "range": "+/- 0.01"
+          },
+          {
+            "name": "extract_metadata/extract/large",
+            "value": 18.63,
+            "unit": "us",
+            "range": "+/- 0.19"
+          },
+          {
+            "name": "extract_metadata/extract/medium",
+            "value": 19.45,
+            "unit": "us",
+            "range": "+/- 0.25"
+          },
+          {
+            "name": "extract_metadata/extract/small",
+            "value": 10.03,
+            "unit": "us",
+            "range": "+/- 0.16"
+          },
+          {
+            "name": "markdown_render/render/large",
+            "value": 324.88,
+            "unit": "us",
+            "range": "+/- 8.91"
+          },
+          {
+            "name": "markdown_render/render/medium",
+            "value": 63.35,
+            "unit": "us",
+            "range": "+/- 0.34"
+          },
+          {
+            "name": "markdown_render/render/small",
+            "value": 16.47,
+            "unit": "us",
+            "range": "+/- 0.3"
+          },
+          {
+            "name": "parse_query/faceted",
+            "value": 0.11,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "parse_query/simple_terms",
+            "value": 0.06,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "parse_query/url_containing",
+            "value": 0.08,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "path_resolver/directory_trailing_slash",
+            "value": 21.1,
+            "unit": "us",
+            "range": "+/- 0.65"
+          },
+          {
+            "name": "path_resolver/markdown_file",
+            "value": 6.84,
+            "unit": "us",
+            "range": "+/- 0.05"
+          },
+          {
+            "name": "path_resolver/not_found",
+            "value": 20.95,
+            "unit": "us",
+            "range": "+/- 0.1"
+          },
+          {
+            "name": "path_resolver/path_traversal",
+            "value": 21.1,
+            "unit": "us",
+            "range": "+/- 0.25"
+          },
+          {
+            "name": "path_resolver/static_file",
+            "value": 6.96,
+            "unit": "us",
+            "range": "+/- 0.14"
+          },
+          {
+            "name": "path_resolver/tag_page",
+            "value": 20.78,
+            "unit": "us",
+            "range": "+/- 0.06"
+          },
+          {
+            "name": "path_resolver/tag_source_index",
+            "value": 33.69,
+            "unit": "us",
+            "range": "+/- 0.23"
+          },
+          {
+            "name": "populate_basic_metadata/500_files",
+            "value": 0.02,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "push_html_mbr/mbr_defaults/large",
+            "value": 75.15,
+            "unit": "us",
+            "range": "+/- 0.42"
+          },
+          {
+            "name": "push_html_mbr/mbr_defaults/medium",
+            "value": 8.63,
+            "unit": "us",
+            "range": "+/- 0.04"
+          },
+          {
+            "name": "push_html_mbr/mbr_defaults/small",
+            "value": 0.84,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "push_html_no_sections/no_sections/large",
+            "value": 76.52,
+            "unit": "us",
+            "range": "+/- 0.35"
+          },
+          {
+            "name": "push_html_no_sections/no_sections/medium",
+            "value": 8.82,
+            "unit": "us",
+            "range": "+/- 0.04"
+          },
+          {
+            "name": "push_html_no_sections/no_sections/small",
+            "value": 0.84,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "repo_scan_all/50",
+            "value": 258.15,
+            "unit": "us",
+            "range": "+/- 8.2"
+          },
+          {
+            "name": "repo_scan_all/500",
+            "value": 885.08,
+            "unit": "us",
+            "range": "+/- 22.41"
+          },
+          {
+            "name": "resolve_outbound_links/50_links",
+            "value": 8.61,
+            "unit": "us",
+            "range": "+/- 0.06"
+          },
+          {
+            "name": "search/faceted_500_files",
+            "value": 1.45,
+            "unit": "us",
+            "range": "+/- 0.04"
+          },
+          {
+            "name": "search/metadata_500_files",
+            "value": 1.5,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "sort_multi_field/100",
+            "value": 43.28,
+            "unit": "us",
+            "range": "+/- 0.48"
+          },
+          {
+            "name": "sort_multi_field/2000",
+            "value": 1025.11,
+            "unit": "us",
+            "range": "+/- 15.61"
+          },
+          {
+            "name": "sort_multi_field/500",
+            "value": 233.94,
+            "unit": "us",
+            "range": "+/- 1.59"
+          },
+          {
+            "name": "sort_single_field/100",
+            "value": 29.17,
+            "unit": "us",
+            "range": "+/- 0.28"
+          },
+          {
+            "name": "sort_single_field/2000",
+            "value": 600.73,
+            "unit": "us",
+            "range": "+/- 5.12"
+          },
+          {
+            "name": "sort_single_field/500",
+            "value": 147.43,
+            "unit": "us",
+            "range": "+/- 1.4"
+          },
+          {
+            "name": "template_render_markdown/render/large",
+            "value": 13.62,
+            "unit": "us",
+            "range": "+/- 0.12"
+          },
+          {
+            "name": "template_render_markdown/render/medium",
+            "value": 11.66,
+            "unit": "us",
+            "range": "+/- 0.09"
+          },
+          {
+            "name": "template_render_markdown/render/small",
+            "value": 11.84,
+            "unit": "us",
+            "range": "+/- 0.13"
+          },
+          {
+            "name": "template_render_section",
+            "value": 8.73,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "transform_link/link/absolute",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/anchor",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/external",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/index_collapse",
+            "value": 0.1,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/parent_traversal",
+            "value": 0.15,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/relative_md",
+            "value": 0.11,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/relative_md_path",
+            "value": 0.15,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_wikilinks/wikilinks/2_links",
+            "value": 0.75,
+            "unit": "us",
+            "range": "+/- 0.06"
+          },
+          {
+            "name": "transform_wikilinks/wikilinks/50_links",
+            "value": 14.77,
+            "unit": "us",
+            "range": "+/- 0.36"
+          }
+        ],
+        "version": "0.4.4"
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "dependabot[bot]",
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "username": ""
+          },
+          "committer": {
+            "name": "dependabot[bot]",
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "username": ""
+          },
+          "id": "75d4fc874591985acc475f14a7cce157e69b8819",
+          "message": "Bump cachix/cachix-action from 16 to 17 in /.github/workflows (#86)",
+          "timestamp": "2026-03-25T17:53:16-07:00",
+          "url": "https://github.com/zmre/mbr-markdown-browser/commit/75d4fc874591985acc475f14a7cce157e69b8819"
+        },
+        "date": 1774500524000,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "cache_get_hit",
+            "value": 0.07,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "cache_get_miss",
+            "value": 0.02,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "cache_insert",
+            "value": 0.12,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "cache_insert_eviction",
+            "value": 0.1,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "extract_first_h1/extract/large",
+            "value": 49.21,
+            "unit": "us",
+            "range": "+/- 0.08"
+          },
+          {
+            "name": "extract_first_h1/extract/medium",
+            "value": 6.81,
+            "unit": "us",
+            "range": "+/- 0.04"
+          },
+          {
+            "name": "extract_first_h1/extract/small",
+            "value": 0.81,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "extract_metadata/extract/large",
+            "value": 18.02,
+            "unit": "us",
+            "range": "+/- 0.14"
+          },
+          {
+            "name": "extract_metadata/extract/medium",
+            "value": 19.15,
+            "unit": "us",
+            "range": "+/- 0.15"
+          },
+          {
+            "name": "extract_metadata/extract/small",
+            "value": 10.27,
+            "unit": "us",
+            "range": "+/- 0.1"
+          },
+          {
+            "name": "markdown_render/render/large",
+            "value": 297.27,
+            "unit": "us",
+            "range": "+/- 1.53"
+          },
+          {
+            "name": "markdown_render/render/medium",
+            "value": 55.71,
+            "unit": "us",
+            "range": "+/- 0.28"
+          },
+          {
+            "name": "markdown_render/render/small",
+            "value": 12.88,
+            "unit": "us",
+            "range": "+/- 0.12"
+          },
+          {
+            "name": "parse_query/faceted",
+            "value": 0.11,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "parse_query/simple_terms",
+            "value": 0.06,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "parse_query/url_containing",
+            "value": 0.08,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "path_resolver/directory_trailing_slash",
+            "value": 20.39,
+            "unit": "us",
+            "range": "+/- 0.19"
+          },
+          {
+            "name": "path_resolver/markdown_file",
+            "value": 6.64,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "path_resolver/not_found",
+            "value": 21.58,
+            "unit": "us",
+            "range": "+/- 0.1"
+          },
+          {
+            "name": "path_resolver/path_traversal",
+            "value": 21.74,
+            "unit": "us",
+            "range": "+/- 0.15"
+          },
+          {
+            "name": "path_resolver/static_file",
+            "value": 6.99,
+            "unit": "us",
+            "range": "+/- 0.04"
+          },
+          {
+            "name": "path_resolver/tag_page",
+            "value": 21.63,
+            "unit": "us",
+            "range": "+/- 0.05"
+          },
+          {
+            "name": "path_resolver/tag_source_index",
+            "value": 34.77,
+            "unit": "us",
+            "range": "+/- 0.16"
+          },
+          {
+            "name": "populate_basic_metadata/500_files",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "push_html_mbr/mbr_defaults/large",
+            "value": 47.99,
+            "unit": "us",
+            "range": "+/- 0.17"
+          },
+          {
+            "name": "push_html_mbr/mbr_defaults/medium",
+            "value": 5.57,
+            "unit": "us",
+            "range": "+/- 0.02"
+          },
+          {
+            "name": "push_html_mbr/mbr_defaults/small",
+            "value": 0.55,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "push_html_no_sections/no_sections/large",
+            "value": 47.65,
+            "unit": "us",
+            "range": "+/- 0.19"
+          },
+          {
+            "name": "push_html_no_sections/no_sections/medium",
+            "value": 5.53,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "push_html_no_sections/no_sections/small",
+            "value": 0.55,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "repo_scan_all/50",
+            "value": 251.31,
+            "unit": "us",
+            "range": "+/- 2.1"
+          },
+          {
+            "name": "repo_scan_all/500",
+            "value": 914.22,
+            "unit": "us",
+            "range": "+/- 2.38"
+          },
+          {
+            "name": "resolve_outbound_links/50_links",
+            "value": 8.16,
+            "unit": "us",
+            "range": "+/- 0.05"
+          },
+          {
+            "name": "search/faceted_500_files",
+            "value": 1.9,
+            "unit": "us",
+            "range": "+/- 0.11"
+          },
+          {
+            "name": "search/metadata_500_files",
+            "value": 2.02,
+            "unit": "us",
+            "range": "+/- 0.13"
+          },
+          {
+            "name": "sort_multi_field/100",
+            "value": 43.67,
+            "unit": "us",
+            "range": "+/- 0.55"
+          },
+          {
+            "name": "sort_multi_field/2000",
+            "value": 1061.56,
+            "unit": "us",
+            "range": "+/- 17.63"
+          },
+          {
+            "name": "sort_multi_field/500",
+            "value": 241.84,
+            "unit": "us",
+            "range": "+/- 3.05"
+          },
+          {
+            "name": "sort_single_field/100",
+            "value": 28.17,
+            "unit": "us",
+            "range": "+/- 0.47"
+          },
+          {
+            "name": "sort_single_field/2000",
+            "value": 644.54,
+            "unit": "us",
+            "range": "+/- 12.63"
+          },
+          {
+            "name": "sort_single_field/500",
+            "value": 158.73,
+            "unit": "us",
+            "range": "+/- 2.31"
+          },
+          {
+            "name": "template_render_markdown/render/large",
+            "value": 12.93,
+            "unit": "us",
+            "range": "+/- 0.04"
+          },
+          {
+            "name": "template_render_markdown/render/medium",
+            "value": 11.23,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "template_render_markdown/render/small",
+            "value": 11.04,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "template_render_section",
+            "value": 8.41,
+            "unit": "us",
+            "range": "+/- 0.03"
+          },
+          {
+            "name": "transform_link/link/absolute",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/anchor",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/external",
+            "value": 0.01,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/index_collapse",
+            "value": 0.1,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/parent_traversal",
+            "value": 0.14,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/relative_md",
+            "value": 0.11,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_link/link/relative_md_path",
+            "value": 0.14,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_wikilinks/wikilinks/2_links",
+            "value": 0.6,
+            "unit": "us",
+            "range": "+/- 0"
+          },
+          {
+            "name": "transform_wikilinks/wikilinks/50_links",
+            "value": 15.21,
+            "unit": "us",
+            "range": "+/- 0.08"
+          }
+        ],
+        "version": "0.4.4"
       }
     ]
   }
