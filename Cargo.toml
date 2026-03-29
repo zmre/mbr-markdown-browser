@@ -75,7 +75,7 @@ parking_lot = "0.12"
 uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 yaml-rust2 = "0.11"
 # GUI dependencies (optional, enabled by default "gui" feature)
-wry = { version = "0.54", default-features = true, features = ["devtools", "fullscreen"], optional = true }
+wry = { version = "0.55", default-features = true, features = ["devtools", "fullscreen"], optional = true }
 
 # Search functionality
 nucleo-matcher = "0.3"
