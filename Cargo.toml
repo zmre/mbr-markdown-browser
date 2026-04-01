@@ -98,7 +98,7 @@ muda = { version = "0.17", features = ["gtk", "libxdo"], optional = true }
 criterion = { version = "0.8", features = ["async_tokio"] }
 filetime = "0.2"
 flate2 = "1.0"
-proptest = "1.5"
+proptest = "1.11"
 tempfile = "3.27"
 
 [build-dependencies]
