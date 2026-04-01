@@ -99,6 +99,38 @@ export class MbrMediaViewerElement extends LitElement {
       margin: 0;
     }
 
+    /* Video theater mode - mirrors theme.css rules for shadow DOM */
+    figure.theater {
+      width: 100vw;
+      max-width: none;
+      margin-left: calc(-50vw + 50%);
+      margin-right: calc(-50vw + 50%);
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      max-height: 95vh;
+      position: relative;
+      z-index: 100;
+      padding: 0;
+    }
+
+    figure.theater > video {
+      flex: 1 1 auto;
+      min-height: 0;
+      width: 100%;
+      max-height: 80vh;
+      object-fit: contain;
+    }
+
+    figure.theater > figcaption {
+      flex: 0 0 auto;
+      width: 100%;
+      max-width: 1200px;
+      padding: 0.5rem 1rem;
+      color: var(--pico-muted-color);
+    }
+
     figcaption {
       margin-top: 0.5rem;
       padding: 0.5rem;
