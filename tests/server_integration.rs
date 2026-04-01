@@ -3092,3 +3092,141 @@ async fn test_title_prefix_in_directory_listing() {
     let html = server.get_text("/docs/").await;
     assert_html_contains(&html, "<title>MySite: ");
 }
+
+// ==================== Tag Page Search Tests ====================
+
+#[tokio::test]
+async fn test_search_finds_tag_pages() {
+    let repo = TestRepo::new();
+    // Create files with tags
+    repo.create_markdown(
+        "guide.md",
+        "---\ntitle: Rust Guide\ntags:\n  - rust\n  - programming\n---\n\nContent.",
+    );
+    repo.create_markdown(
+        "tutorial.md",
+        "---\ntitle: Rust Tutorial\ntags:\n  - rust\n---\n\nMore content.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Search for "rust" in metadata scope — should find the tag page too
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "rust", "scope": "metadata"}"#)
+        .await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+
+    // Should find the tag page /tags/rust/
+    let tag_result = results
+        .iter()
+        .find(|r| r["filetype"].as_str().unwrap() == "tag");
+    assert!(
+        tag_result.is_some(),
+        "Expected to find a tag page result: {:?}",
+        results
+    );
+
+    let tag_result = tag_result.unwrap();
+    assert_eq!(tag_result["url_path"].as_str().unwrap(), "/tags/rust/");
+    assert!(
+        tag_result["title"].as_str().unwrap().contains("rust"),
+        "Tag page title should contain the tag name"
+    );
+    assert!(
+        tag_result["description"]
+            .as_str()
+            .unwrap()
+            .contains("2 pages"),
+        "Tag page should show page count"
+    );
+}
+
+#[tokio::test]
+async fn test_search_tag_pages_with_custom_source() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "show1.md",
+        "---\ntitle: Magic Show\nperformer: Joshua Jay\n---\n\nContent.",
+    );
+    repo.create_markdown(
+        "show2.md",
+        "---\ntitle: Card Tricks\nperformer: Joshua Jay\n---\n\nContent.",
+    );
+
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.tag_sources = vec![mbr::config::TagSource {
+            field: "performer".to_string(),
+            label: Some("Performer".to_string()),
+            label_plural: Some("Performers".to_string()),
+        }];
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let response = server
+        .post_json("/.mbr/search", r#"{"q": "Joshua", "scope": "metadata"}"#)
+        .await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+
+    let tag_result = results
+        .iter()
+        .find(|r| r["filetype"].as_str().unwrap() == "tag");
+    assert!(
+        tag_result.is_some(),
+        "Expected to find a performer tag page result: {:?}",
+        results
+    );
+
+    let tag_result = tag_result.unwrap();
+    assert!(
+        tag_result["url_path"]
+            .as_str()
+            .unwrap()
+            .contains("/performer/joshua_jay/"),
+        "Tag page URL should use normalized value"
+    );
+    assert!(
+        tag_result["title"].as_str().unwrap().contains("Performer"),
+        "Tag page title should contain the source label"
+    );
+}
+
+#[tokio::test]
+async fn test_search_tag_pages_skipped_for_folder_scope() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "---\ntitle: Guide\ntags:\n  - rust\n---\n\nContent.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Search with folder scope — tag pages should not appear
+    let response = server
+        .post_json(
+            "/.mbr/search",
+            r#"{"q": "rust", "scope": "metadata", "folder": "/docs/", "folder_scope": "current"}"#,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+
+    let tag_result = results
+        .iter()
+        .find(|r| r["filetype"].as_str().unwrap() == "tag");
+    assert!(
+        tag_result.is_none(),
+        "Tag pages should not appear when folder scope is current: {:?}",
+        results
+    );
+}
