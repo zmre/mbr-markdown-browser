@@ -1030,6 +1030,11 @@ impl Repo {
     ///
     /// Call this after surgical file invalidation when tags may have changed
     /// (e.g., after deleting or modifying markdown files).
+    /// Returns the configured tag sources.
+    pub fn tag_sources(&self) -> &[TagSource] {
+        &self.tag_sources
+    }
+
     pub fn rebuild_tag_index(&self) {
         self.tag_index.clear();
         let pin = self.markdown_files.pin();

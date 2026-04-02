@@ -136,15 +136,23 @@ impl TagIndex {
             display_guard.insert(key.clone(), value.to_string());
         }
 
-        // Add page to the index
+        // Add page to the index atomically to avoid TOCTOU race under parallel insertion.
         let guard = self.index.pin();
-        let mut pages = guard.get(&key).cloned().unwrap_or_default();
-
-        // Avoid duplicate pages (same url_path)
-        if !pages.iter().any(|p| p.url_path == page.url_path) {
-            pages.push(page);
-            guard.insert(key, pages);
-        }
+        let page_for_insert = page.clone();
+        guard.update_or_insert_with(
+            key,
+            move |existing| {
+                // Avoid duplicate pages (same url_path)
+                if existing.iter().any(|p| p.url_path == page.url_path) {
+                    existing.clone()
+                } else {
+                    let mut pages = existing.clone();
+                    pages.push(page.clone());
+                    pages
+                }
+            },
+            || vec![page_for_insert],
+        );
     }
 
     /// Gets all pages tagged with the given source and value.

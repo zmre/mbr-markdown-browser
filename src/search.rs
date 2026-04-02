@@ -21,6 +21,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
+use crate::config::TagSource;
 use crate::errors::SearchError;
 use crate::repo::{MarkdownInfo, OtherFileInfo, Repo};
 
@@ -286,6 +287,7 @@ impl SearchEngine {
         // Metadata search (always fast, data in memory)
         if query.scope != SearchScope::Content {
             all_results.extend(self.search_metadata(query, &parsed)?);
+            all_results.extend(self.search_tag_pages(query, &parsed));
         }
 
         // Content search (requires file I/O) - only if we have search terms
@@ -365,6 +367,107 @@ impl SearchEngine {
             .collect();
 
         Ok(results)
+    }
+
+    /// Search tag pages (virtual pages generated from the tag index).
+    ///
+    /// For each configured tag source, fuzzy-matches tag display values against
+    /// the search pattern. Matching tags produce results pointing to their tag page URL.
+    fn search_tag_pages(&self, query: &SearchQuery, parsed: &ParsedQuery) -> Vec<SearchResult> {
+        // Tag pages are global — skip when scoped to a folder
+        if query.folder_scope == FolderScope::Current && query.folder.is_some() {
+            return Vec::new();
+        }
+
+        let pattern = if parsed.terms.is_empty() {
+            None
+        } else {
+            Some(Pattern::parse(
+                &parsed.terms.join(" "),
+                CaseMatching::Ignore,
+                Normalization::Smart,
+            ))
+        };
+
+        let tag_sources = self.repo.tag_sources();
+        let tag_index = &self.repo.tag_index;
+
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut results = Vec::new();
+
+        for source in tag_sources {
+            let url_source = source.url_source();
+            let label = source.singular_label();
+            let all_tags = tag_index.get_all_tags(&source.field);
+
+            for tag_info in &all_tags {
+                let score = self.score_tag_page(
+                    pattern.as_ref(),
+                    parsed,
+                    source,
+                    &label,
+                    tag_info,
+                    &mut matcher,
+                );
+
+                if let Some(score) = score {
+                    let page_word = if tag_info.count == 1 { "page" } else { "pages" };
+                    results.push(SearchResult {
+                        url_path: format!("/{}/{}/", url_source, tag_info.normalized),
+                        title: Some(format!("{}: {}", label, tag_info.display)),
+                        description: Some(format!("{} {}", tag_info.count, page_word)),
+                        tags: None,
+                        score,
+                        snippet: None,
+                        is_content_match: false,
+                        filetype: "tag".to_string(),
+                    });
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Score a single tag page against the search query.
+    ///
+    /// Returns Some(score) if the tag matches, None otherwise.
+    fn score_tag_page(
+        &self,
+        pattern: Option<&Pattern>,
+        parsed: &ParsedQuery,
+        source: &TagSource,
+        label: &str,
+        tag_info: &crate::tag_index::TagInfo,
+        matcher: &mut Matcher,
+    ) -> Option<u32> {
+        // For facet-only queries, check if any facet matches this tag source+value
+        if pattern.is_none() {
+            let matches_facet = parsed.facets.iter().any(|(field, value)| {
+                field.to_lowercase() == source.field.to_lowercase()
+                    && tag_info
+                        .display
+                        .to_lowercase()
+                        .contains(&value.to_lowercase())
+            });
+            return matches_facet.then_some(FACET_MATCH_BASE_SCORE);
+        }
+
+        let pattern = pattern?;
+        let mut best_score: u32 = 0;
+
+        // Match against tag display value (high priority — 2x boost)
+        if let Some(score) = self.fuzzy_match(pattern, &tag_info.display, matcher) {
+            best_score = best_score.max(score.saturating_mul(2));
+        }
+
+        // Match against "Label: Value" (e.g., "Performer: Joshua Jay")
+        let labeled = format!("{}: {}", label, tag_info.display);
+        if let Some(score) = self.fuzzy_match(pattern, &labeled, matcher) {
+            best_score = best_score.max(score.saturating_mul(2));
+        }
+
+        (best_score > 0).then_some(best_score)
     }
 
     /// Match a single file's metadata against the pattern.

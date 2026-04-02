@@ -113,10 +113,9 @@ impl Vid {
     pub fn to_html(&self, open_only: bool, server_mode: bool, transcode_enabled: bool) -> String {
         let mut time = "".to_string();
         if let Some(start) = self.start.as_ref() {
-            time = format!("#t={start}");
+            time = format!("#t={}", Self::time_str_to_seconds(start));
             if let Some(end) = self.end.as_ref() {
-                time += ",";
-                time += end.as_str();
+                time = format!("{},{}", time, Self::time_str_to_seconds(end));
             }
         }
 
@@ -203,6 +202,38 @@ impl Vid {
 
     fn extension_from_url(url: &str) -> Option<String> {
         EXTENSION_RE.captures(url).map(|cap| cap[1].to_string())
+    }
+
+    /// Convert a time string like "0:30", "1:02:30", or "200" to total seconds as a string.
+    /// Plain numeric values pass through unchanged. Colon-separated values (MM:SS or HH:MM:SS)
+    /// are converted to total seconds for maximum browser compatibility with media fragments.
+    fn time_str_to_seconds(time: &str) -> String {
+        let parts: Vec<&str> = time.split(':').collect();
+        match parts.len() {
+            1 => time.to_string(),
+            2 => {
+                let minutes: f64 = parts[0].parse().unwrap_or(0.0);
+                let seconds: f64 = parts[1].parse().unwrap_or(0.0);
+                let total = minutes * 60.0 + seconds;
+                if total.fract() == 0.0 {
+                    format!("{}", total as u64)
+                } else {
+                    format!("{total}")
+                }
+            }
+            3 => {
+                let hours: f64 = parts[0].parse().unwrap_or(0.0);
+                let minutes: f64 = parts[1].parse().unwrap_or(0.0);
+                let seconds: f64 = parts[2].parse().unwrap_or(0.0);
+                let total = hours * 3600.0 + minutes * 60.0 + seconds;
+                if total.fract() == 0.0 {
+                    format!("{}", total as u64)
+                } else {
+                    format!("{total}")
+                }
+            }
+            _ => time.to_string(),
+        }
     }
 
     fn start_stop_from_url(url: &str) -> (Option<String>, Option<String>, &str) {
@@ -455,6 +486,51 @@ mod tests {
         assert!(start.is_none());
         assert!(end.is_none());
         assert_eq!(url, "foo.mp4");
+    }
+
+    #[test]
+    fn test_time_str_to_seconds_plain() {
+        assert_eq!(Vid::time_str_to_seconds("30"), "30");
+        assert_eq!(Vid::time_str_to_seconds("200"), "200");
+        assert_eq!(Vid::time_str_to_seconds("0"), "0");
+    }
+
+    #[test]
+    fn test_time_str_to_seconds_mmss() {
+        assert_eq!(Vid::time_str_to_seconds("0:30"), "30");
+        assert_eq!(Vid::time_str_to_seconds("3:20"), "200");
+        assert_eq!(Vid::time_str_to_seconds("1:00"), "60");
+        assert_eq!(Vid::time_str_to_seconds("10:05"), "605");
+    }
+
+    #[test]
+    fn test_time_str_to_seconds_hhmmss() {
+        assert_eq!(Vid::time_str_to_seconds("1:02:30"), "3750");
+        assert_eq!(Vid::time_str_to_seconds("0:00:30"), "30");
+        assert_eq!(Vid::time_str_to_seconds("2:00:00"), "7200");
+    }
+
+    #[test]
+    fn test_time_str_to_seconds_fractional() {
+        assert_eq!(Vid::time_str_to_seconds("1:30.5"), "90.5");
+        assert_eq!(Vid::time_str_to_seconds("0:0:30.5"), "30.5");
+    }
+
+    #[test]
+    fn test_to_html_normalizes_colon_times_to_seconds() {
+        let vid = Vid {
+            url: "/videos/foo.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: Some("0:30".to_string()),
+            end: Some("3:20".to_string()),
+            caption: Some("Caption".to_string()),
+        };
+        let html = vid.to_html(false, false, false);
+        // Source tag should have seconds
+        assert!(html.contains("src='/videos/foo.mp4#t=30,200'"));
+        // mbr-video-extras should preserve original human-readable format
+        assert!(html.contains("start='0:30'"));
+        assert!(html.contains("end='3:20'"));
     }
 }
 
