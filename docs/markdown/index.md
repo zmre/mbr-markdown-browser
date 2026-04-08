@@ -69,7 +69,7 @@ Use callout boxes for important information:
 > Helpful information that users should know.
 ```
 
-Available box types: `[!NOTE]`, [!TIP], `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`.
+Available box types: `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`.
 `
 
 ### Live Examples
