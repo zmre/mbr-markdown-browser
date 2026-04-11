@@ -723,6 +723,7 @@
           packages = with pkgs;
             [
               cargo-watch
+              cargo-sort
               imagemagick
             ]
             ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [

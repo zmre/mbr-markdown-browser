@@ -31,6 +31,7 @@ rust_files_staged() {
 # Format Rust files and re-stage them
 format_rust_files() {
     if ! rust_files_staged; then
+        echo "Skipping rust format as no rust is staged"
         return 0
     fi
 
@@ -45,8 +46,14 @@ format_rust_files() {
     fi
 
     # Run cargo fmt
-    if ! cargo fmt 2>&1; then
+    if ! cargo fmt --all 2>&1; then
         error "cargo fmt failed"
+        return 1
+    fi
+
+    # Run cargo sort
+    if ! cargo sort 2>&1; then
+        error "cargo sort failed"
         return 1
     fi
 
@@ -63,6 +70,7 @@ format_rust_files() {
 # Run cargo clippy on staged Rust changes
 check_rust_quality() {
     if ! rust_files_staged; then
+        echo "Skipping rust clippy as no rust is staged"
         return 0
     fi
 

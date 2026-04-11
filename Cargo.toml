@@ -18,6 +18,17 @@ crate-type = ["lib", "staticlib"]
 name = "mbr"
 bench = false
 
+[[bin]]
+name = "mbr"
+path = "src/main.rs"
+bench = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["ffi"]
+bench = false
+
 [features]
 default = ["gui", "media-metadata"]
 # GUI feature enables native window/browser functionality (wry, tao, muda, rfd)
@@ -31,68 +42,71 @@ ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
 ffi = ["dep:uniffi"]
 
 [dependencies]
+aho-corasick = "1.1"
 # winit = "0.30.11"
 axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.5", features = ["derive"] }
+ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
 figment = { version = "0.10", features = ["toml", "env"] }
 futures = "0.3.32"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 glob = "0.3.3"
-notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+grep-regex = "0.1"
+grep-searcher = "0.1"
 html-escape = "0.2.13"
+
+# Image processing with minimal features (only needed formats)
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 itertools = "0.14.0"
+lopdf = { version = "0.40", default-features = false, features = ["rayon"] }
 lru = "0.16"
 metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/audio metadata extraction
-ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
-pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_7350"] } # PDF cover; pdfium_7350 compatible with nixpkgs-25.11-darwin pdfium-binaries 7363
+muda = { version = "0.17", optional = true }
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+
+# Search functionality
+nucleo-matcher = "0.3"
+pagefind = "1.5"
 papaya = "0.2.4"
+parking_lot = "0.12"
 pathdiff = "0.2.3"
-lopdf = { version = "0.40", default-features = false, features = ["rayon"] }
+pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_7350"] } # PDF cover; pdfium_7350 compatible with nixpkgs-25.11-darwin pdfium-binaries 7363
 percent-encoding = "2.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
 rayon = "1.11"
 regex = "1.11"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rfd = { version = "0.17", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-webpki-roots = "1"
 scraper = "0.26"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# GUI dependencies (optional, enabled by default "gui" feature)
+tao = { version = "0.35.0", optional = true }
 tera = { version = "1.20", features = ["preserve_order", "date-locale"] }
+thiserror = "2.0"
 time = "0.3"
-tokio = {version="1.51", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"]}
+tokio = { version = "1.51", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 url = "2.5"
 walkdir = "2.5"
-thiserror = "2.0"
-parking_lot = "0.12"
-uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
-yaml-rust2 = "0.11"
+webpki-roots = "1"
 # GUI dependencies (optional, enabled by default "gui" feature)
 wry = { version = "0.55", default-features = true, features = ["devtools", "fullscreen"], optional = true }
-
-# Search functionality
-nucleo-matcher = "0.3"
-grep-regex = "0.1"
-grep-searcher = "0.1"
-pagefind = "1.5"
-aho-corasick = "1.1"
-
-# Image processing with minimal features (only needed formats)
-image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# GUI dependencies (optional, enabled by default "gui" feature)
-tao = { version = "0.35.0", optional = true }
-muda = { version = "0.17", optional = true }
-rfd = { version = "0.17", optional = true }
+yaml-rust2 = "0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 muda = { version = "0.17", features = ["gtk", "libxdo"], optional = true }
+
+[build-dependencies]
+uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
@@ -100,20 +114,6 @@ filetime = "0.2"
 flate2 = "1.0"
 proptest = "1.11"
 tempfile = "3.27"
-
-[build-dependencies]
-uniffi = { version = "0.31", features = ["build"] }
-
-[[bin]]
-name = "mbr"
-path = "src/main.rs"
-bench = false
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "uniffi-bindgen.rs"
-required-features = ["ffi"]
-bench = false
 
 [profile.release]
 opt-level = 3
