@@ -256,7 +256,7 @@ jobs:
           EOF
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: v${{ needs.validate-version.outputs.version }}
           tag_name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', needs.validate-version.outputs.version) }}
