@@ -50,6 +50,21 @@ export function getBasePath(): string {
  * Resolve a root-relative URL path using the current base path.
  * E.g., resolveUrl("/docs/guide/") from depth 2 returns "../../docs/guide/"
  */
+/**
+ * Check if a keyboard event indicates "open in new tab" intent.
+ * Returns true for Cmd+Enter (macOS) or Ctrl+Enter (all platforms).
+ */
+export function isNewTabModifier(e: KeyboardEvent): boolean {
+  return e.metaKey || e.ctrlKey;
+}
+
+/**
+ * Open a URL in a new tab.
+ */
+export function openInNewTab(url: string): void {
+  window.open(url, '_blank');
+}
+
 export function resolveUrl(path: string): string {
   if (window.__MBR_CONFIG__?.serverMode) {
     return path; // Server mode - use absolute paths as-is

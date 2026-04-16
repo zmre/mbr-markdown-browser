@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
-import { resolveUrl, subscribeSiteNav } from './shared.js';
+import { resolveUrl, subscribeSiteNav, isNewTabModifier, openInNewTab } from './shared.js';
 
 /**
  * Markdown file from site.json.
@@ -535,7 +535,11 @@ export class MbrFuzzyNavElement extends LitElement {
         if (selectedEl instanceof HTMLAnchorElement) {
           // Link items: use native <a> click for proper navigation
           this.close();
-          selectedEl.click();
+          if (isNewTabModifier(e)) {
+            openInNewTab(selectedEl.href);
+          } else {
+            selectedEl.click();
+          }
         } else {
           // Heading items: use scrollIntoView handler
           this._navigateToItem(items[this._selectedIndex]);

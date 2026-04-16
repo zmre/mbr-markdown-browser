@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
-import { subscribeMediaNav } from './shared.js';
+import { subscribeMediaNav, isNewTabModifier, openInNewTab } from './shared.js';
 import {
   type OtherFileInfo,
   type MediaType,
@@ -83,6 +83,10 @@ export class MbrMediaBrowserElement extends LitElement {
   // === Pagination State ===
   @state()
   private _displayLimit = 200;
+
+  // === Selection State ===
+  @state()
+  private _selectedIndex = -1;
 
   // === Cover Image State ===
   @state()
@@ -269,12 +273,14 @@ export class MbrMediaBrowserElement extends LitElement {
 
   private _handleTypeSelect(type: MediaType): void {
     this._selectedType = type;
+    this._selectedIndex = -1;
     this._displayLimit = 200; // Reset pagination on type change
   }
 
   private _handleTextFilterInput(e: Event): void {
     const target = e.target as HTMLInputElement;
     this._textFilter = target.value;
+    this._selectedIndex = -1;
     this._displayLimit = 200; // Reset pagination on text filter change
   }
 
@@ -289,6 +295,7 @@ export class MbrMediaBrowserElement extends LitElement {
     ];
     this._sortField = field;
     this._sortDirection = direction;
+    this._selectedIndex = -1;
     this._displayLimit = 200; // Reset pagination on sort change
   }
 
@@ -296,7 +303,7 @@ export class MbrMediaBrowserElement extends LitElement {
     this._displayLimit += 200;
   }
 
-  private _handleCardClick(file: OtherFileInfo): void {
+  private _handleCardClick(file: OtherFileInfo, newTab = false): void {
     const viewerUrl = getViewerUrl(file);
 
     // Dispatch selection event before navigation
@@ -308,14 +315,18 @@ export class MbrMediaBrowserElement extends LitElement {
     this.dispatchEvent(event);
 
     // Navigate to the viewer
-    window.location.href = viewerUrl;
+    if (newTab) {
+      openInNewTab(viewerUrl);
+    } else {
+      window.location.href = viewerUrl;
+    }
   }
 
   private _handleCardKeydown(e: KeyboardEvent, file: OtherFileInfo): void {
     // Enter or Space activates the card
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      this._handleCardClick(file);
+      this._handleCardClick(file, isNewTabModifier(e));
     }
   }
 
@@ -325,22 +336,77 @@ export class MbrMediaBrowserElement extends LitElement {
   }
 
   private _handleKeydown(e: KeyboardEvent): void {
-    // Handle Escape key
-    if (e.key === 'Escape') {
-      if (this.inline) {
-        // In inline mode, dispatch close event
-        e.preventDefault();
-        e.stopPropagation();
-        this.dispatchEvent(
-          new CustomEvent('mbr-media-close', {
-            bubbles: true,
-            composed: true,
-          })
-        );
+    const displayedFiles = this._getDisplayedFiles();
+
+    // Handle Ctrl key combinations for scrolling and navigation
+    if (e.ctrlKey) {
+      const container = this.shadowRoot?.querySelector('.browser-content');
+
+      switch (e.key.toLowerCase()) {
+        case 'n': // Ctrl+n - next card
+          e.preventDefault();
+          this._selectedIndex = Math.min(this._selectedIndex + 1, displayedFiles.length - 1);
+          this._scrollSelectedIntoView();
+          return;
+        case 'p': // Ctrl+p - previous card
+          e.preventDefault();
+          this._selectedIndex = Math.max(this._selectedIndex - 1, -1);
+          this._scrollSelectedIntoView();
+          return;
+        case 'd': // Ctrl+d - half page down
+          if (container) {
+            e.preventDefault();
+            container.scrollBy({ top: container.clientHeight / 2, behavior: 'smooth' });
+          }
+          return;
+        case 'u': // Ctrl+u - half page up
+          if (container) {
+            e.preventDefault();
+            container.scrollBy({ top: -container.clientHeight / 2, behavior: 'smooth' });
+          }
+          return;
       }
-      // In popup mode (inline=false), let Escape propagate to close popup
-      return;
     }
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        this._selectedIndex = Math.min(this._selectedIndex + 1, displayedFiles.length - 1);
+        this._scrollSelectedIntoView();
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        this._selectedIndex = Math.max(this._selectedIndex - 1, -1);
+        this._scrollSelectedIntoView();
+        break;
+      case 'Enter':
+        if (this._selectedIndex >= 0 && displayedFiles[this._selectedIndex]) {
+          e.preventDefault();
+          this._handleCardClick(displayedFiles[this._selectedIndex], isNewTabModifier(e));
+        }
+        break;
+      case 'Escape':
+        if (this.inline) {
+          // In inline mode, dispatch close event
+          e.preventDefault();
+          e.stopPropagation();
+          this.dispatchEvent(
+            new CustomEvent('mbr-media-close', {
+              bubbles: true,
+              composed: true,
+            })
+          );
+        }
+        // In popup mode (inline=false), let Escape propagate to close popup
+        return;
+    }
+  }
+
+  private _scrollSelectedIntoView(): void {
+    this.updateComplete.then(() => {
+      const selected = this.shadowRoot?.querySelector('.media-card.selected');
+      selected?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
   }
 
   private _handleRetry(): void {
@@ -505,7 +571,7 @@ export class MbrMediaBrowserElement extends LitElement {
     `;
   }
 
-  private _renderCard(file: OtherFileInfo): TemplateResult {
+  private _renderCard(file: OtherFileInfo, index: number): TemplateResult {
     const mediaType = getMediaType(file);
     if (!mediaType) return html``;
 
@@ -521,11 +587,12 @@ export class MbrMediaBrowserElement extends LitElement {
 
     return html`
       <article
-        class="media-card"
+        class="media-card ${index === this._selectedIndex ? 'selected' : ''}"
         part="card"
         data-type="${mediaType}"
         @click=${() => this._handleCardClick(file)}
         @keydown=${(e: KeyboardEvent) => this._handleCardKeydown(e, file)}
+        @mouseenter=${() => { this._selectedIndex = index; }}
         tabindex="0"
         role="button"
         aria-label="Open ${title}"
@@ -578,7 +645,7 @@ export class MbrMediaBrowserElement extends LitElement {
         role="tabpanel"
         aria-label="Media files"
       >
-        ${displayedFiles.map((file) => this._renderCard(file))}
+        ${displayedFiles.map((file, i) => this._renderCard(file, i))}
       </div>
       ${hasMore
         ? html`
@@ -881,7 +948,8 @@ export class MbrMediaBrowserElement extends LitElement {
     }
 
     .media-card:hover,
-    .media-card:focus {
+    .media-card:focus,
+    .media-card.selected {
       border-color: var(--pico-primary, #0d6efd);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
       transform: translateY(-2px);

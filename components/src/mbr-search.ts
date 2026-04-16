@@ -1,7 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state, query } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import { getBasePath, resolveUrl } from './shared.js'
+import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab } from './shared.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
 
 // Dynamically import the media browser component when needed
@@ -372,7 +372,11 @@ export class MbrSearchElement extends LitElement {
         if (this._selectedIndex >= 0 && this._results[this._selectedIndex]) {
           const selectedLink = this.shadowRoot?.querySelector('a.result.selected') as HTMLAnchorElement | null;
           if (selectedLink) {
-            selectedLink.click();
+            if (isNewTabModifier(e)) {
+              openInNewTab(selectedLink.href);
+            } else {
+              selectedLink.click();
+            }
           }
         }
         break;

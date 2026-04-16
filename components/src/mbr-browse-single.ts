@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, type TagSourceConfig } from './shared.js'
+import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -339,7 +339,16 @@ export class MbrBrowseSingleElement extends LitElement {
 
       case 'Enter':
         e.preventDefault();
-        this._activateFocused();
+        if (isNewTabModifier(e)) {
+          this._openFocusedInNewTab();
+        } else {
+          this._activateFocused();
+        }
+        break;
+
+      case 'o':
+        e.preventDefault();
+        this._openFocusedInNewTab();
         break;
 
       case 'Home':
@@ -523,6 +532,17 @@ export class MbrBrowseSingleElement extends LitElement {
       window.location.href = resolveUrl(item.path);
     } else if (item.type === 'tag') {
       window.location.href = resolveUrl(`/${item.path}/`);
+    }
+  }
+
+  private _openFocusedInNewTab() {
+    if (this._focusedIndex < 0) return;
+    const item = this._flatItems[this._focusedIndex];
+
+    if (item.type === 'folder' || item.type === 'file') {
+      openInNewTab(resolveUrl(item.path));
+    } else if (item.type === 'tag') {
+      openInNewTab(resolveUrl(`/${item.path}/`));
     }
   }
 

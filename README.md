@@ -18,9 +18,11 @@
 
 > **No crazy syntax. No required directory structures. Just markdown.**
 
-Most static site generators force you into their world: custom folder layouts, proprietary frontmatter, bespoke shortcodes. mbr takes a different approach. Point it at any collection of markdown files and it just works for previewing a single file, browsing thousands of notes, or building a deployable website.
+Most markdown viewers don't browse and are riddled with broken links because they don't understand the current project. And most static site generators force you into their world: custom folder layouts, proprietary frontmatter, bespoke shortcodes, and more. `mbr` takes a different approach. Point it at any collection of markdown files and it just works for previewing a single file, browsing thousands of notes, searching, navigating, or building a deployable website.
 
-And unlike other markdown previewers, this one allows quick navigation between markdown files.
+It's fast, keyboard-first, multi-purpose, customizable, and beautiful.  And it makes media embeds (images, videos, PDFs, etc.) first-class citizens.
+
+Oh and on mac, it includes a quicklook plugin that's head and shoulders above any I've seen before.
 
 ## Features
 
@@ -28,7 +30,7 @@ And unlike other markdown previewers, this one allows quick navigation between m
 |---------|-------------|
 | **Instant Preview** | Sub-second markdown rendering with live reload |
 | **Native GUI** | macOS/Linux app with native menus and shortcuts (Windows should work, but is untested) |
-| **Static Sites** | Generate deployable websites with full-text search |
+| **Static Sites** | Optionally generate deployable websites with full-text search |
 | **Smart Navigation** | Browse by folders, tags, recents, and full-text search |
 | **Keyboard Friendly** | Vim-like shortcuts are available for everything in the UI |
 | **Rich Media** | Embed videos, audio, PDFs, and YouTube with simple markdown standard syntax |
@@ -40,10 +42,10 @@ And unlike other markdown previewers, this one allows quick navigation between m
 
 ```bash
 # Using Nix to quick run without installing
-nix run github:zmre/mbr -- -g /path/to/notes
+nix run github:zmre/mbr-markdown-browser -- /path/to/notes
 
 # Using Cargo
-cargo install --git https://github.com/zmre/mbr
+cargo install --git https://github.com/zmre/mbr-markdown-browser
 ```
 
 _File an issue if you want it packaged in a particular way._
@@ -51,15 +53,14 @@ _File an issue if you want it packaged in a particular way._
 ### Run
 
 ```bash
-mbr README.md         # Render to stdout
-mbr -s ~/notes        # Start web server at http://127.0.0.1:5200/
-mbr -g ~/notes        # Launch native GUI window
+mbr README.md         # Launch native GUI window
+mbr -s ~/notes        # Start live web server at http://127.0.0.1:5200/
 mbr -b ~/notes        # Build static site to ./build/
 ```
 
 ## Documentation
 
-See the [full documentation](https://zmre.github.io/mbr-markdown-browser/) for detailed guides. The documentation site itself is built with mbr, serving as a live example of its capabilities.
+See the [full documentation](https://zmre.github.io/mbr-markdown-browser/) for detailed guides. **The documentation site itself is built with mbr, serving as a live example of its capabilities.**
 
 - [Getting Started](https://zmre.github.io/mbr-markdown-browser/getting-started/) - Installation and first steps
 - [Modes of Operation](https://zmre.github.io/mbr-markdown-browser/modes/) - GUI, Server, Build, and QuickLook
