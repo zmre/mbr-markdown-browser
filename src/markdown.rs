@@ -33,8 +33,112 @@ use yaml_rust2::{Yaml, YamlLoader};
 /// This hybrid approach allows us to:
 /// - Support custom tag-source links (`[[Source:value]]`)
 /// - Preserve standard wikilink behavior for plain `[[page]]` links
-fn markdown_options() -> Options {
+pub(crate) fn markdown_options() -> Options {
     Options::all()
+}
+
+/// Result of parsing a markdown file without rendering to HTML.
+///
+/// Owns the source string so consumers can iterate over events
+/// without lifetime concerns. Use [`events()`](Self::events) to
+/// get the pulldown-cmark event stream.
+#[derive(Debug, Clone)]
+pub struct ParsedDocument {
+    /// The (possibly wikilink-transformed) markdown source.
+    pub source: String,
+    /// Frontmatter metadata extracted from the document.
+    pub frontmatter: SimpleMetadata,
+    /// Table of contents (headings with anchor IDs).
+    pub headings: Vec<HeadingInfo>,
+    /// Whether the document starts with an H1 heading.
+    pub has_h1: bool,
+    /// Word count (excluding code blocks and metadata).
+    pub word_count: usize,
+}
+
+impl ParsedDocument {
+    /// Returns an iterator over pulldown-cmark events for this document.
+    ///
+    /// The events use the same parser options as mbr's HTML renderer,
+    /// ensuring consistent parsing behavior.
+    pub fn events(&self) -> TextMergeStream<'_, MDParser<'_>> {
+        let parser = MDParser::new_ext(&self.source, markdown_options());
+        TextMergeStream::new(parser)
+    }
+}
+
+/// Parse a markdown file into a [`ParsedDocument`] without rendering to HTML.
+///
+/// This reads the file, applies wikilink transforms, extracts frontmatter
+/// and headings, and returns the parsed document. Consumers can then
+/// iterate over the event stream via [`ParsedDocument::events()`] to
+/// render in any format (terminal, HTML, etc.).
+pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
+    let file = file.as_ref();
+    let raw_markdown_input = fs::read_to_string(file).map_err(|e| MarkdownError::ReadFailed {
+        path: file.to_path_buf(),
+        source: e,
+    })?;
+
+    // No wikilink transform for the simple parse path (no tag sources configured)
+    let markdown_input = raw_markdown_input;
+
+    // Extract headings and word count using the same pass as render
+    let (events, headings, _section_attrs) = collect_events_and_headings(&markdown_input);
+
+    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
+
+    // Extract frontmatter from the events
+    let mut frontmatter = SimpleMetadata::new();
+    let mut in_metadata = false;
+    for event in &events {
+        match event {
+            Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
+                in_metadata = true;
+            }
+            Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
+                break;
+            }
+            Event::Text(text) if in_metadata => {
+                let metadata_parsed = YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
+                frontmatter = yaml_frontmatter_simplified(&metadata_parsed);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // If no frontmatter title, try to extract the first H1
+    if !frontmatter.contains_key("title")
+        && let Some(h1_text) = extract_first_h1(&markdown_input)
+    {
+        frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
+    }
+
+    // Count words (excluding code blocks and metadata)
+    let mut word_count = 0;
+    let mut in_code_block = false;
+    let mut in_meta = false;
+    for event in &events {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
+            Event::Start(Tag::MetadataBlock(_)) => in_meta = true,
+            Event::End(TagEnd::MetadataBlock(_)) => in_meta = false,
+            Event::Text(text) if !in_code_block && !in_meta => {
+                word_count += text.split_whitespace().count();
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ParsedDocument {
+        source: markdown_input,
+        frontmatter,
+        headings,
+        has_h1,
+        word_count,
+    })
 }
 
 /// Represents a heading in the document for table of contents generation.

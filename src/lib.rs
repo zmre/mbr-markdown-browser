@@ -82,7 +82,10 @@ pub use errors::MetadataError;
 #[cfg(feature = "media-metadata")]
 pub use errors::PdfMetadataError;
 pub use errors::{BuildError, ConfigError, MbrError, SearchError};
-pub use markdown::MarkdownRenderResult;
+pub use markdown::{MarkdownRenderResult, ParsedDocument};
+pub use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd,
+};
 #[cfg(feature = "ffi")]
 pub use quicklook::{
     QuickLookConfig, QuickLookError, find_config_root, render_preview, render_preview_with_config,
