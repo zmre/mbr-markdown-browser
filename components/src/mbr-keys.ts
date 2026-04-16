@@ -145,6 +145,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'f', description: 'Open links out' },
       { keys: 'F', description: 'Open links in (backlinks)' },
       { keys: 'T', description: 'Open table of contents' },
+      { keys: '⌘+Enter / Ctrl+Enter', description: 'Open link in new tab' },
     ],
   },
   {
@@ -153,6 +154,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate results' },
       { keys: '↑ / ↓', description: 'Navigate results' },
       { keys: 'Enter', description: 'Open selected result' },
+      { keys: '⌘+Enter / Ctrl+Enter', description: 'Open in new tab' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll results' },
     ],
   },
@@ -163,8 +165,18 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate tree' },
       { keys: 'h', description: 'Collapse / go to parent' },
       { keys: 'l or Enter', description: 'Expand / open' },
-      { keys: 'o', description: 'Open in new tab' },
+      { keys: 'o or ⌘+Enter / Ctrl+Enter', description: 'Open in new tab' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll panel' },
+    ],
+  },
+  {
+    title: 'Media Browser (when open)',
+    shortcuts: [
+      { keys: '↑ / ↓', description: 'Navigate cards' },
+      { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate cards' },
+      { keys: 'Enter', description: 'Open selected' },
+      { keys: '⌘+Enter / Ctrl+Enter', description: 'Open in new tab' },
+      { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll grid' },
     ],
   },
   {
