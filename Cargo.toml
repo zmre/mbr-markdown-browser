@@ -1,17 +1,28 @@
 [package]
-name = "mbr"
+name = "mbr-markdown-browser"
 version = "0.4.5"
 edition = "2024"
-authors = ["zmre"]
+rust-version = "1.91"
+authors = ["Patrick Walsh <pwalsh@well.com>"]
 license = "GPL-3.0-or-later"
 readme = "README.md"
-description = "A markdown viewer and browser"
-repository = "https://github.com/zmre/mbr"
-keywords = ["static", "site", "generator"]
+description = "A fast, featureful markdown viewer, browser, and (optional) static site generator"
+homepage = "https://github.com/zmre/mbr-markdown-browser/"
+repository = "https://github.com/zmre/mbr-markdown-browser/"
+documentation = "https://zmre.github.io/mbr-markdown-browser/"
+keywords = ["markdown", "gui", "cli", "productivity", "static"]
+categories = ["command-line-utilities", "gui", "template-engine"]
 build = "build.rs"
 autobenches = false
 
-include = ["src/**/*", "LICENSE", "README.md"]
+include = [
+    "src/**/*",
+    "build.rs",
+    "templates/**/*",
+    "mbr-icon.png",
+    "/LICENSE",
+    "/README.md",
+]
 
 [lib]
 crate-type = ["lib", "staticlib"]
