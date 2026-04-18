@@ -69,67 +69,58 @@ impl ParsedDocument {
 
 /// Parse a markdown file into a [`ParsedDocument`] without rendering to HTML.
 ///
-/// This reads the file, applies wikilink transforms, extracts frontmatter
-/// and headings, and returns the parsed document. Consumers can then
-/// iterate over the event stream via [`ParsedDocument::events()`] to
-/// render in any format (terminal, HTML, etc.).
+/// Reads the file, extracts frontmatter and headings, and returns the parsed
+/// document. Consumers can iterate over the event stream via
+/// [`ParsedDocument::events()`] to render in any format (terminal, HTML, etc.).
+///
+/// Wikilink transforms are not applied (no tag sources configured in this path).
 pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
     let file = file.as_ref();
-    let raw_markdown_input = fs::read_to_string(file).map_err(|e| MarkdownError::ReadFailed {
+    let markdown_input = fs::read_to_string(file).map_err(|e| MarkdownError::ReadFailed {
         path: file.to_path_buf(),
         source: e,
     })?;
 
-    // No wikilink transform for the simple parse path (no tag sources configured)
-    let markdown_input = raw_markdown_input;
-
-    // Extract headings and word count using the same pass as render
     let (events, headings, _section_attrs) = collect_events_and_headings(&markdown_input);
-
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
-    // Extract frontmatter from the events
+    // Single pass: extract frontmatter and count words
     let mut frontmatter = SimpleMetadata::new();
-    let mut in_metadata = false;
+    let mut word_count: usize = 0;
+    let mut in_yaml = false;
+    let mut in_code_block = false;
+    let mut in_metadata_block = false;
     for event in &events {
         match event {
             Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                in_metadata = true;
+                in_yaml = true;
+                in_metadata_block = true;
             }
             Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                break;
+                in_yaml = false;
+                in_metadata_block = false;
             }
-            Event::Text(text) if in_metadata => {
+            Event::Text(text) if in_yaml => {
                 let metadata_parsed = YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
                 frontmatter = yaml_frontmatter_simplified(&metadata_parsed);
-                break;
+                in_yaml = false;
             }
-            _ => {}
-        }
-    }
-
-    // If no frontmatter title, try to extract the first H1
-    if !frontmatter.contains_key("title")
-        && let Some(h1_text) = extract_first_h1(&markdown_input)
-    {
-        frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
-    }
-
-    // Count words (excluding code blocks and metadata)
-    let mut word_count = 0;
-    let mut in_code_block = false;
-    let mut in_meta = false;
-    for event in &events {
-        match event {
+            Event::Start(Tag::MetadataBlock(_)) => in_metadata_block = true,
+            Event::End(TagEnd::MetadataBlock(_)) => in_metadata_block = false,
             Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
             Event::End(TagEnd::CodeBlock) => in_code_block = false,
-            Event::Start(Tag::MetadataBlock(_)) => in_meta = true,
-            Event::End(TagEnd::MetadataBlock(_)) => in_meta = false,
-            Event::Text(text) if !in_code_block && !in_meta => {
+            Event::Text(text) if !in_code_block && !in_metadata_block => {
                 word_count += text.split_whitespace().count();
             }
             _ => {}
         }
+    }
+
+    if !frontmatter.contains_key("title") && has_h1 {
+        frontmatter.insert(
+            "title".to_string(),
+            serde_json::Value::String(headings[0].text.clone()),
+        );
     }
 
     Ok(ParsedDocument {
