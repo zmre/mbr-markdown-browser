@@ -267,3 +267,29 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to crates.io after the GitHub Release succeeds.
+  # --allow-dirty: templates/components-js/ is gitignored but must be present
+  #   in the tree so include_bytes! picks up the built component.
+  # --no-verify: the `test` and `build` jobs above have already compiled the
+  #   crate with all features; skipping the verify recompile avoids needing
+  #   ffmpeg/pdfium system libs here.
+  publish-crate:
+    name: Publish to crates.io
+    needs: [validate-version, test, release]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download components
+        uses: actions/download-artifact@v8
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Publish to crates.io
+        run: cargo publish --allow-dirty --no-verify --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
