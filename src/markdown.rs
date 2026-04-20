@@ -631,15 +631,14 @@ fn collect_bare_urls(events: &[Event<'_>]) -> HashSet<String> {
             Event::End(TagEnd::Link) => in_link = false,
             Event::Start(Tag::MetadataBlock(_)) => in_metadata = true,
             Event::End(TagEnd::MetadataBlock(_)) => in_metadata = false,
-            Event::Text(text) => {
+            Event::Text(text)
                 if !in_link
                     && !in_metadata
                     && text.starts_with("http")
                     && !text.contains(' ')
-                    && !text.trim_start().starts_with("{{")
-                {
-                    urls.insert(text.to_string());
-                }
+                    && !text.trim_start().starts_with("{{") =>
+            {
+                urls.insert(text.to_string());
             }
             _ => {}
         }
@@ -812,14 +811,11 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
             Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
                 break;
             }
-            Event::Text(text) => {
-                if in_metadata {
-                    let metadata_parsed =
-                        YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
+            Event::Text(text) if in_metadata => {
+                let metadata_parsed = YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
 
-                    hm = yaml_frontmatter_simplified(&metadata_parsed);
-                    break;
-                }
+                hm = yaml_frontmatter_simplified(&metadata_parsed);
+                break;
             }
             _ => {}
         }
