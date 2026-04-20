@@ -427,20 +427,18 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                         event: key_event, ..
                     },
                 ..
-            } => {
+            } if key_event.state == ElementState::Pressed && modifiers.alt_key() => {
                 // Handle Alt+Left/Right for history navigation
-                if key_event.state == ElementState::Pressed && modifiers.alt_key() {
-                    match key_event.physical_key {
-                        KeyCode::ArrowLeft => {
-                            tracing::debug!("History back via Alt+Left");
-                            let _ = webview.evaluate_script("history.back()");
-                        }
-                        KeyCode::ArrowRight => {
-                            tracing::debug!("History forward via Alt+Right");
-                            let _ = webview.evaluate_script("history.forward()");
-                        }
-                        _ => {}
+                match key_event.physical_key {
+                    KeyCode::ArrowLeft => {
+                        tracing::debug!("History back via Alt+Left");
+                        let _ = webview.evaluate_script("history.back()");
                     }
+                    KeyCode::ArrowRight => {
+                        tracing::debug!("History forward via Alt+Right");
+                        let _ = webview.evaluate_script("history.forward()");
+                    }
+                    _ => {}
                 }
             }
             _ => (),
@@ -553,20 +551,18 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                         event: key_event, ..
                     },
                 ..
-            } => {
+            } if key_event.state == ElementState::Pressed && modifiers.alt_key() => {
                 // Handle Alt+Left/Right for history navigation
-                if key_event.state == ElementState::Pressed && modifiers.alt_key() {
-                    match key_event.physical_key {
-                        KeyCode::ArrowLeft => {
-                            tracing::debug!("History back via Alt+Left");
-                            let _ = webview.evaluate_script("history.back()");
-                        }
-                        KeyCode::ArrowRight => {
-                            tracing::debug!("History forward via Alt+Right");
-                            let _ = webview.evaluate_script("history.forward()");
-                        }
-                        _ => {}
+                match key_event.physical_key {
+                    KeyCode::ArrowLeft => {
+                        tracing::debug!("History back via Alt+Left");
+                        let _ = webview.evaluate_script("history.back()");
                     }
+                    KeyCode::ArrowRight => {
+                        tracing::debug!("History forward via Alt+Right");
+                        let _ = webview.evaluate_script("history.forward()");
+                    }
+                    _ => {}
                 }
             }
             _ => (),

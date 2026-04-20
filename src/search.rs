@@ -304,7 +304,7 @@ impl SearchEngine {
         all_results = Self::deduplicate_results(all_results);
 
         // Sort by score descending
-        all_results.sort_by(|a, b| b.score.cmp(&a.score));
+        all_results.sort_by_key(|r| std::cmp::Reverse(r.score));
 
         let total_matches = all_results.len();
 
@@ -1057,7 +1057,7 @@ pub fn search_other_files(
         .collect();
 
     // Sort by score and limit
-    results.sort_by(|a, b| b.score.cmp(&a.score));
+    results.sort_by_key(|r| std::cmp::Reverse(r.score));
     results.truncate(limit);
 
     results

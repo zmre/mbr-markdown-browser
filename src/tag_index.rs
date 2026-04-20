@@ -194,7 +194,7 @@ impl TagIndex {
             .collect();
 
         // Sort by display name (case-insensitive)
-        tags.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
+        tags.sort_by_key(|a| a.display.to_lowercase());
 
         tags
     }

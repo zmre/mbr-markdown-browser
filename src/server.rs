@@ -991,6 +991,7 @@ impl Server {
                             tracing::info!("WebSocket client closed connection");
                             break;
                         }
+                        #[allow(clippy::collapsible_match)]
                         Some(Ok(axum::extract::ws::Message::Ping(data))) => {
                             if sender
                                 .send(axum::extract::ws::Message::Pong(data))
@@ -1176,7 +1177,7 @@ impl Server {
 
                 // Merge and re-sort
                 response.results.extend(other_results);
-                response.results.sort_by(|a, b| b.score.cmp(&a.score));
+                response.results.sort_by_key(|r| std::cmp::Reverse(r.score));
                 response.results.truncate(query.limit);
                 response.total_matches = response.results.len();
             }
