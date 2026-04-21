@@ -9,11 +9,13 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+components/node_modules
 dist
 dist-ssr
 templates/components-js
 *.local
 result
+.direnv
 
 # Editor directories and files
 .vscode/*

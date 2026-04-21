@@ -3297,7 +3297,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
-name = "mbr"
+name = "mbr-markdown-browser"
 version = "0.4.5"
 dependencies = [
  "aho-corasick",

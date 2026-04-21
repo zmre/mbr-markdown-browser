@@ -10,6 +10,7 @@
   ![Last Commit](https://img.shields.io/github/last-commit/zmre/mbr-markdown-browser)
   [![CI status](https://github.com/zmre/mbr-markdown-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/zmre/mbr-markdown-browser/actions)
   [![License](https://img.shields.io/github/license/zmre/mbr-markdown-browser?style=flat&color=22C55E)](LICENSE)
+  [![Crates.io Version](https://img.shields.io/crates/v/mbr-markdown-browser)](https://crates.io/crates/mbr-markdown-browser)
 </div>
 
 ---
