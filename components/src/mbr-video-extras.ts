@@ -466,6 +466,7 @@ export class MbrVideoExtrasElement extends LitElement {
   @state()
   private _chapters: VttCue[] = [];
 
+  @state()
   private _videoElement: HTMLVideoElement | null = null;
   private _chaptersTrack: TextTrack | null = null;
   private _boundTimeUpdate = this._onTimeUpdate.bind(this);

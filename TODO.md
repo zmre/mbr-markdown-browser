@@ -2,6 +2,24 @@
 
 ## What's Next
 
+* [ ] We do link validation on static site build, but don't currently let the user know if the page they're viewing has broken links on it. Triggering a component that shows when there are page errors would be very useful. It should be next to the "i" icon and should be some sort of error icon that only shows if there are detected problems. We could use this for other issues as well if we think of any.  I think an endpoint for errors, per page, that only works in server/gui modes would allow for async fetching of error info without blocking on initial render.
+* [ ] Client-side generation to add to our info popup: word count (ignoring frontmatter, of course), Fog Index, and Flesch-Kincaid scores
+* [ ] CriticMarkup support?
+* [ ] Export to PDF
+  * Print stylesheet support and light background default (though I guess we could make a dark background PDF).
+  * Start with the current page as an option.
+  * Also allow a print to PDF for the whole site (essentially taking a doc site and compiling everything into chapters in a single PDF).
+  * All of this to live only in the GUI app via menu bar items with cmd-<key> shortcuts.
+  * Allow printing while we're at it
+  * And printing of the compiled book, too
+  * On MacOS, printing would probably be enough because the user could export to PDF, but because this is cross-platform, it would be nice if we can find a good way to do this anywhere.
+  * CLI tool should support direct markdown to PDF options, too, including for the "book" mode compiling all markdown listed in a sidebar into a single document.
+  * When building a book, start with a full page title page then a page with the table of contents, then the converted markdown in any specified order or default order. Align with the GUI for ordering and labeling.
+  * Make sure to handle edge cases like extra long titles.
+* [ ] Copy rendered to clipboard
+  * Again GUI mode only and via menu bar items. Export the rendered HTML as whatever rich text format is native so it can be pasted into emails.  In this case, make background and text foreground (aside from links and colored items) neutral so it can be pasted into different environments so we don't get white text pasted into a white background email.
+  * Copy should assume whole document unless there's a selection
+
 * **Big repo (goodwiki) issues**
   * [ ] In mbr-browser and index pages, we need some limit on the number of things shown (tags, files, etc.) or some sort of pagination
     * [ ] The home page currently shows all pages on the site, which means processing all files before loading the index, which in dynamic mode sucks.
@@ -12,7 +30,6 @@
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
 
 * **Publish**
-  * [ ] Publish to crates.io?
   * [ ] Publish to a homebrew cask?
   * [ ] Publish to determinate's flake hub?
 
