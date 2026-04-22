@@ -820,6 +820,16 @@ sup.footnote-reference {
     page-break-inside: avoid;
   }
 
+  /* style inline katex the same as inline code by default */
+  .math-inline {
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-code-background-color);
+    color: var(--pico-code-color);
+    font-weight: var(--pico-font-weight);
+    line-height: initial;
+    font-size: 0.875em;
+  }
+
   /* Marginalia: display inline for print (not absolute positioned) */
   blockquote blockquote:has(blockquote) {
     position: static;
