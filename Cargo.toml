@@ -1,6 +1,6 @@
 [package]
 name = "mbr-markdown-browser"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Patrick Walsh <pwalsh@well.com>"]
