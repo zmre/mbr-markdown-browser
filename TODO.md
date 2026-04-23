@@ -2,8 +2,18 @@
 
 ## What's Next
 
+* [x] .math-inline needs same coloring as code inline @done(2026-04-22 5:10 PM)
+* [x] Update lru to 0.17 @done(2026-04-23 11:49 AM)
+* [ ] Move Configuration reference docs out of CLI doc into their own doc
+* [ ] mbr bug with `f` links. in website blog, clicking the link works, but clicking the link from f popup doesn't. it adds an extra .. that makes it invalid
+* [ ] Allow collapse/expand (hide) of sections
+* [ ] Allow links directly to headings of sections (and copy of the urls)
 * [ ] We do link validation on static site build, but don't currently let the user know if the page they're viewing has broken links on it. Triggering a component that shows when there are page errors would be very useful. It should be next to the "i" icon and should be some sort of error icon that only shows if there are detected problems. We could use this for other issues as well if we think of any.  I think an endpoint for errors, per page, that only works in server/gui modes would allow for async fetching of error info without blocking on initial render.
-* [ ] Client-side generation to add to our info popup: word count (ignoring frontmatter, of course), Fog Index, and Flesch-Kincaid scores
+* [ ] Add to our info popup: word count (ignoring frontmatter, of course), Readability scores (eg, Flesch-Kincaid scores)
+  * Do on rust side? https://crates.io/crates/rust_readability
+  * Client side could use https://www.npmjs.com/package/@power-seo/readability
+  * Or figure out some easy calculations to make and just implement ourselves in lightweight lit components without the dependencies
+
 * [ ] CriticMarkup support?
 * [ ] Export to PDF
   * Print stylesheet support and light background default (though I guess we could make a dark background PDF).

@@ -10,7 +10,8 @@ Technical reference documentation for mbr's CLI, architecture, and development.
 
 | Document | Description |
 |----------|-------------|
-| [CLI Reference](cli/) | Command line options, flags, and configuration settings |
+| [CLI Reference](cli/) | Command line options and flags |
+| [Configuration Reference](configuration/) | Configuration file format, environment variables, and feature settings |
 | [Tags](tags/) | Tag navigation, tag sources, wikilink syntax, and template customization |
 | [Keyboard Shortcuts](keyboard-shortcuts/) | Quick reference for all keyboard shortcuts |
 | [Integration](integration/) | Using mbr with Obsidian, VS Code, Git, CI/CD, and other tools |
