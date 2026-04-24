@@ -114,6 +114,13 @@ body > header {
   z-index: 999;
 }
 
+/* Offset anchor jumps (including `:target` and permalink clicks) so the
+ * linked heading isn't hidden under the sticky header above (nav ul is
+ * 2.4em + 2px border). */
+html {
+  scroll-padding-top: 3em;
+}
+
 body > header > nav {
   padding-block: 0;
   margin-block: 0;
@@ -676,6 +683,46 @@ a.mbr-link-enhanced[data-tooltip]::before {
 }
 a.mbr-link-enhanced[data-tooltip]::after {
   color: rgb(from var(--pico-tooltip-background-color) r g b / 0.75);
+}
+
+/* ==================== Collapsible Headings + Permalinks ==================== */
+
+/* Hidden sibling content when a heading is collapsed */
+.sectionhidden {
+  display: none;
+}
+
+/* Collapsible heading affordance */
+.mbr-collapsible {
+  cursor: pointer;
+  user-select: none;
+}
+.mbr-collapsible:focus-visible {
+  outline: 2px solid var(--pico-primary-focus, var(--pico-primary));
+  outline-offset: 2px;
+}
+
+/* "+" prefix when collapsed */
+.mbr-section-collapsed::before {
+  content: "+ ";
+  color: var(--pico-muted-color);
+  font-weight: normal;
+}
+
+/* Permalink anchor — muted pico color, visible but subdued */
+.mbr-heading-anchor {
+  margin-left: 0.4em;
+  color: var(--pico-muted-color);
+  text-decoration: none;
+  font-weight: normal;
+  opacity: 0.5;
+  font-size: 0.85em;
+}
+.mbr-heading-anchor:hover,
+.mbr-heading-anchor:focus {
+  opacity: 1;
+  color: var(--pico-primary);
+  text-decoration: underline;
 }
 
 /* ==================== Screen Reader Only (Accessibility) ==================== */
