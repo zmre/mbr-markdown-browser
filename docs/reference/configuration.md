@@ -297,6 +297,52 @@ link_tracking = false
 
 When disabled, the `links.json` endpoint returns 404 and no link files are generated during builds.
 
+### Per-Page Error Indicator (Server / GUI Only)
+
+When running with `-s` (server) or `-g` (GUI), mbr exposes a lightweight
+per-page diagnostics endpoint at `/{page}/errors.json` and a matching
+`<mbr-page-errors>` navbar indicator that lights up with a ⚠ icon when the
+current page has problems.
+
+The endpoint detects three issue types in v1:
+
+| Type | Trigger |
+|------|---------|
+| `broken_internal_link` | An outbound internal link whose target does not resolve (via `path_resolver`). Mirrors the existing build-time link validation, but runs live and non-fatally. |
+| `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
+| `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
+
+The response is JSON with a stable, tagged shape:
+
+```json
+{
+  "page_url": "/docs/guide/",
+  "errors": [
+    { "type": "broken_internal_link", "target": "/nonexistent/", "text": "bad" },
+    { "type": "broken_media_reference", "src": "./missing.png", "kind": "image" },
+    { "type": "unresolved_wikilink", "raw": "[[never-a-real-page]]" }
+  ]
+}
+```
+
+Status codes:
+
+- `200` — page exists and was scanned (even when `errors` is empty; the
+  client uses the array length to decide whether to show the ⚠ icon).
+- `404` — the path is not a markdown page, or `link_tracking` is disabled.
+
+**No new flags.** This feature reuses the existing `--no-link-tracking` /
+`link_tracking` switch: disable link tracking to suppress the endpoint and
+hide the indicator.
+
+**Zero leakage into static builds.** The endpoint is registered only in
+`server.rs`, the `<mbr-page-errors>` element is gated on
+`{% if server_mode %}` in `templates/_nav.html`, and the Lit component
+self-guards on `window.__MBR_CONFIG__.serverMode`. `cargo run -- -b <repo>`
+continues to validate links at build time via the existing
+`--skip-link-checks` flow, without emitting `errors.json` files or
+`<mbr-page-errors>` elements into the output.
+
 ### Video Metadata Extraction
 
 > **Note:** This feature requires the `media-metadata` Cargo feature to be enabled at compile time.

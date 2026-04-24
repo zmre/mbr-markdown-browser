@@ -52,6 +52,7 @@ pub mod markdown;
 pub mod media;
 pub mod oembed;
 pub mod oembed_cache;
+pub mod page_errors;
 pub mod path_resolver;
 #[cfg(feature = "media-metadata")]
 pub mod pdf_metadata;

@@ -1267,3 +1267,90 @@ async fn test_build_readability_scores_null_for_code_only() {
         "FKGL should render as null for a code-only document"
     );
 }
+
+// ============================================================================
+// Static build guarantee: per-page error surface must never leak into output
+// ============================================================================
+
+/// Recursively collect every regular file under `root`.
+fn walk_all_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Follow into directories only (don't chase symlinks to foreign trees).
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_dir() {
+                stack.push(path);
+            } else if meta.file_type().is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn test_build_output_contains_no_errors_json_files() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "readme.md",
+        "# Hello\n\n[link](./other/)\n\n![img](./img.png)",
+    );
+    repo.create_markdown("other.md", "# Other");
+
+    let output = build_site(&repo).await;
+
+    let all_files = walk_all_files(&output);
+    let errors_json_files: Vec<_> = all_files
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f == "errors.json")
+        })
+        .collect();
+
+    assert!(
+        errors_json_files.is_empty(),
+        "static build must not emit errors.json files (found {:?})",
+        errors_json_files
+    );
+}
+
+#[tokio::test]
+async fn test_build_output_does_not_reference_mbr_page_errors() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+    repo.create_markdown("docs/page.md", "# Doc page");
+
+    let output = build_site(&repo).await;
+
+    for file in walk_all_files(&output) {
+        // Only inspect HTML files; .mbr/ built assets contain the compiled JS
+        // which legitimately defines the custom element class.
+        let Some(ext) = file.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if ext != "html" {
+            continue;
+        }
+
+        let content = fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            !content.contains("<mbr-page-errors"),
+            "built HTML at {:?} must not contain <mbr-page-errors>, found: {}",
+            file,
+            content
+                .lines()
+                .find(|l| l.contains("<mbr-page-errors"))
+                .unwrap_or("")
+        );
+    }
+}

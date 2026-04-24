@@ -9,6 +9,7 @@
           <li><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>
         </ul>
         <ul>
+          {% if server_mode %}<li><mbr-page-errors></mbr-page-errors></li>{% endif %}
           <li><mbr-info></mbr-info></li>
           <li><mbr-search></mbr-search></li>
         </ul>

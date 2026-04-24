@@ -1759,6 +1759,12 @@ impl Server {
                     return Ok(response);
                 }
 
+                // Try to serve errors.json for per-page problem reporting
+                // (server/GUI only — static builds never register this)
+                if let Some(response) = Self::try_serve_errors_json(&path, &config).await {
+                    return Ok(response);
+                }
+
                 // Try to serve links.json for bidirectional link tracking
                 if let Some(response) = Self::try_serve_links_json(&path, &config).await {
                     return Ok(response);
@@ -2282,6 +2288,7 @@ impl Server {
                             let resolved_links = resolve_outbound_links(
                                 &page_url_path,
                                 render_result.outbound_links,
+                                is_index_file,
                             );
                             // Cache the outbound links
                             config
@@ -2345,6 +2352,182 @@ impl Server {
             Ok(j) => j,
             Err(e) => {
                 tracing::error!("Failed to serialize links.json: {}", e);
+                return None;
+            }
+        };
+
+        Some(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(json))
+                .unwrap(),
+        )
+    }
+
+    /// Try to serve `errors.json` for per-page problem reporting.
+    ///
+    /// This endpoint is server/GUI only — static builds never register it and
+    /// the template guards the corresponding `<mbr-page-errors>` element with
+    /// `{% if server_mode %}`. Triple-gated to guarantee zero leakage into
+    /// static output.
+    ///
+    /// Returns:
+    /// - `Some(200 JSON)` with an `errors: []` array (possibly empty) when the
+    ///   request targets a valid page.
+    /// - `None` (→ 404) when the path is not `errors.json`, when link tracking
+    ///   is disabled, or when the underlying page does not exist.
+    async fn try_serve_errors_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::page_errors::{
+            PageErrors, detect_unresolved_wikilinks, validate_internal_links,
+            validate_media_references,
+        };
+
+        // Only handle exact `errors.json` tails. This keeps the endpoint
+        // tightly scoped and avoids colliding with a user-authored file that
+        // happens to have "errors" in its stem.
+        if !path.ends_with("errors.json") {
+            return None;
+        }
+
+        // Respect the `--no-link-tracking` flag: the whole feature is gated on
+        // link tracking being on, so reuse that switch rather than introducing
+        // a new toggle. When disabled, the component stays silent (see
+        // `mbr-page-errors.ts`'s 404 handling).
+        if !config.link_tracking {
+            tracing::debug!("errors.json requested but link tracking is disabled");
+            return None;
+        }
+
+        // Reconstruct the canonical page URL for the resolver.
+        // e.g. "docs/guide/errors.json" -> "/docs/guide/". The axum catch-all
+        // delivers `path` without a leading slash, so we add one explicitly
+        // to yield a canonical site-absolute URL in the JSON payload.
+        let page_path = path.strip_suffix("errors.json")?;
+        let page_url_path = if page_path.is_empty() || page_path == "/" {
+            "/".to_string()
+        } else {
+            let normalized = page_path.trim_end_matches('/').trim_start_matches('/');
+            format!("/{}/", normalized)
+        };
+
+        tracing::debug!("errors.json request for page: {}", page_url_path);
+
+        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+        let resolver_config = PathResolverConfig {
+            base_dir: &config.base_dir,
+            canonical_base_dir: config.canonical_base_dir.as_deref(),
+            static_folder: &config.static_folder,
+            markdown_extensions: &config.markdown_extensions,
+            index_file: &config.index_file,
+            tag_sources: &tag_url_sources,
+        };
+
+        let request_path = page_url_path.trim_matches('/');
+
+        // Resolve the page and render if it is a markdown file. We need the
+        // rendered HTML for media / wikilink scans (the `LinkCache` only holds
+        // outbound links), so unlike `try_serve_links_json` we cannot short-
+        // circuit through the cache when the HTML is missing.
+        let (outbound_links, html_for_scan, markdown_dir): (
+            Vec<crate::link_index::OutboundLink>,
+            String,
+            PathBuf,
+        ) = match resolve_request_path(&resolver_config, request_path) {
+            ResolvedPath::MarkdownFile(md_path) => {
+                let is_index_file = md_path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|f| f == config.index_file);
+
+                let link_transform_config = LinkTransformConfig {
+                    markdown_extensions: config.markdown_extensions.clone(),
+                    index_file: config.index_file.clone(),
+                    is_index_file,
+                    url_depth: None,
+                };
+
+                let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
+
+                let md_dir = md_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| config.base_dir.clone());
+
+                match markdown::render_with_cache(
+                    md_path,
+                    &config.base_dir,
+                    config.oembed_timeout_ms,
+                    link_transform_config,
+                    Some(config.oembed_cache.clone()),
+                    true,  // server_mode
+                    false, // transcode_enabled (not needed for error scan)
+                    valid_tag_sources,
+                )
+                .await
+                {
+                    Ok(render_result) => {
+                        let resolved_links = resolve_outbound_links(
+                            &page_url_path,
+                            render_result.outbound_links,
+                            is_index_file,
+                        );
+                        // Back-fill the link cache so a subsequent links.json
+                        // call is a hit (mirrors `try_serve_links_json`).
+                        config
+                            .link_cache
+                            .insert(page_url_path.clone(), resolved_links.clone());
+                        (resolved_links, render_result.html, md_dir)
+                    }
+                    Err(e) => {
+                        tracing::error!("errors.json: failed to render page: {}", e);
+                        return None;
+                    }
+                }
+            }
+            ResolvedPath::TagPage { source, value } => {
+                // Tag pages have no authored HTML and no media; there is
+                // nothing for the validators to flag. Return an empty
+                // payload so the UI can stay silent.
+                let outbound = build_tag_page_outbound_links(
+                    &source,
+                    &value,
+                    &config.repo.tag_index,
+                    &config.tag_sources,
+                );
+                (outbound, String::new(), config.base_dir.clone())
+            }
+            ResolvedPath::TagSourceIndex { source } => {
+                let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
+                (outbound, String::new(), config.base_dir.clone())
+            }
+            _ => {
+                tracing::debug!("errors.json: page not found: {}", page_url_path);
+                return None;
+            }
+        };
+
+        let mut errors = Vec::new();
+        errors.extend(validate_internal_links(&outbound_links, &resolver_config));
+        if !html_for_scan.is_empty() {
+            errors.extend(validate_media_references(
+                &html_for_scan,
+                &resolver_config,
+                &markdown_dir,
+            ));
+            errors.extend(detect_unresolved_wikilinks(&html_for_scan));
+        }
+
+        let payload = PageErrors {
+            page_url: page_url_path,
+            errors,
+        };
+
+        let json = match serde_json::to_string(&payload) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("Failed to serialize errors.json: {}", e);
                 return None;
             }
         };
@@ -2810,7 +2993,8 @@ impl Server {
         if config.link_tracking && !outbound_links.is_empty() {
             let url_path_str = format!("/{}/", url_path_buf.display()).replace("//", "/");
             // Resolve relative URLs to absolute before caching
-            let resolved_links = resolve_outbound_links(&url_path_str, outbound_links);
+            let resolved_links =
+                resolve_outbound_links(&url_path_str, outbound_links, is_index_file);
             config.link_cache.insert(url_path_str, resolved_links);
         }
 

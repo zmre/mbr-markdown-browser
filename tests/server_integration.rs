@@ -3292,3 +3292,128 @@ async fn test_readability_scores_null_for_code_only_document() {
         "FKGL should be null for a code-only document"
     );
 }
+
+// ============================================================================
+// Per-page errors.json endpoint
+// ============================================================================
+
+#[tokio::test]
+async fn test_errors_json_clean_page_returns_empty() {
+    let repo = TestRepo::new();
+    repo.create_markdown("clean.md", "# Clean\n\nNo problems here.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/clean/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["page_url"], "/clean/");
+    assert!(json["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_broken_internal_link() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page\n\n[bad](/nonexistent/) link here.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/page/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_internal_link"
+            && e["target"].as_str().unwrap().contains("/nonexistent")),
+        "expected broken_internal_link in {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_broken_media_reference() {
+    let repo = TestRepo::new();
+    repo.create_markdown("media.md", "# Media\n\n![alt](./missing.png)");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/media/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_media_reference"
+            && e["kind"] == "image"
+            && e["src"].as_str().unwrap().contains("missing.png")),
+        "expected broken_media_reference image in {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_unresolved_wikilink() {
+    let repo = TestRepo::new();
+    // pulldown-cmark has native wikilink support when `ENABLE_WIKILINKS` is
+    // on (we use `Options::all()` in `markdown.rs`), so simple `[[foo]]`
+    // becomes `<a href="foo">foo</a>` and gets caught by the broken-internal-
+    // link check instead. A literal `[[...]]` survives into HTML when it
+    // appears inside a raw HTML block — this is the only pragmatic case
+    // where the wikilink detector fires independently.
+    repo.create_markdown(
+        "wiki.md",
+        "# Wiki\n\n<div class=\"raw\">See [[never-a-real-page]] here.</div>",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/wiki/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "unresolved_wikilink"),
+        "expected unresolved_wikilink in {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_returns_404_when_link_tracking_disabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page");
+
+    let server = TestServer::start_with_config_fn(&repo, |cfg| {
+        cfg.link_tracking = false;
+    })
+    .await;
+
+    let response = server.get("/page/errors.json").await;
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn test_errors_json_multiple_problem_types_on_one_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "mixed.md",
+        concat!(
+            "# Mixed\n\n",
+            "[bad](./nonexistent/)\n\n",
+            "![m](./missing.png)\n\n",
+            // Inside a raw-HTML block, pulldown-cmark leaves `[[...]]`
+            // untouched, exercising the unresolved-wikilink detector.
+            "<div class=\"raw\">[[never-a-real-page]]</div>\n",
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/mixed/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    assert!(errors.iter().any(|e| e["type"] == "broken_internal_link"));
+    assert!(errors.iter().any(|e| e["type"] == "broken_media_reference"));
+    assert!(errors.iter().any(|e| e["type"] == "unresolved_wikilink"));
+}
