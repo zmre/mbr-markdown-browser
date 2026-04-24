@@ -57,6 +57,7 @@ pub mod path_resolver;
 pub mod pdf_metadata;
 #[cfg(feature = "ffi")]
 pub mod quicklook;
+pub mod readability;
 pub mod repo;
 pub mod search;
 pub mod server;

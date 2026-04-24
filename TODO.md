@@ -4,15 +4,13 @@
 
 * [x] .math-inline needs same coloring as code inline @done(2026-04-22 5:10 PM)
 * [x] Update lru to 0.17 @done(2026-04-23 11:49 AM)
-* [ ] Move Configuration reference docs out of CLI doc into their own doc
+* [x] Move Configuration reference docs out of CLI doc into their own doc @done(2026-04-23 12:00 PM)
 * [ ] mbr bug with `f` links. in website blog, clicking the link works, but clicking the link from f popup doesn't. it adds an extra .. that makes it invalid
-* [ ] Allow collapse/expand (hide) of sections
+* [ ] Allow collapse/expand (hide) of sections by clicking on the heading if it isn't already a link. If not a link, then it should have a cursor icon and on click collapse. When in collapsed mode, it should put a `+` icon as a prefix via css to make clear that clicking again will toggle back. We are not changing the HTML by adding div wrappers here. Instead, on click of a heading we will walk over each subsequent element at that same level and add a "sectionhidden" class to each one until we get to another heading of the same level or higher. so if an h3 is clicked on, it will hide all paragraphs, tables, blockquotes, etc., by adding the marker class and any h4's and h5's, too, until it gets to a h3 or h2 or the end of the content.  When toggling back, use the same logic, but remove the sectionhidden classes.
+* [ ] Watch for "TK" at the start of text blocks and do some kind of styling on the whole block when found. Probably a span with `class="todo"` or something.
 * [ ] Allow links directly to headings of sections (and copy of the urls)
 * [ ] We do link validation on static site build, but don't currently let the user know if the page they're viewing has broken links on it. Triggering a component that shows when there are page errors would be very useful. It should be next to the "i" icon and should be some sort of error icon that only shows if there are detected problems. We could use this for other issues as well if we think of any.  I think an endpoint for errors, per page, that only works in server/gui modes would allow for async fetching of error info without blocking on initial render.
-* [ ] Add to our info popup: word count (ignoring frontmatter, of course), Readability scores (eg, Flesch-Kincaid scores)
-  * Do on rust side? https://crates.io/crates/rust_readability
-  * Client side could use https://www.npmjs.com/package/@power-seo/readability
-  * Or figure out some easy calculations to make and just implement ourselves in lightweight lit components without the dependencies
+* [x] Add to our info popup: word count (ignoring frontmatter, of course), Readability scores (eg, Flesch-Kincaid scores) @done(2026-04-23 6:06 PM)
 
 * [ ] CriticMarkup support?
 * [ ] Export to PDF

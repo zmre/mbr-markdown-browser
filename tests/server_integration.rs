@@ -3230,3 +3230,65 @@ async fn test_search_tag_pages_skipped_for_folder_scope() {
         results
     );
 }
+
+// ============================================================================
+// Readability Scores (window.extendedMeta)
+// ============================================================================
+
+#[tokio::test]
+async fn test_readability_scores_injected_into_extended_meta() {
+    let repo = TestRepo::new();
+    // A document with enough sentences/words to produce plausible scores.
+    repo.create_markdown(
+        "article.md",
+        "# Article\n\nThis is a simple test. It has several short sentences. \
+         The quick brown fox jumps over the lazy dog. Another sentence follows.\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/article/").await;
+
+    // The extendedMeta literal should include both new fields as JS numbers
+    // (not the string "null") because the document has words and sentences.
+    assert!(
+        html.contains("fleschReadingEase:"),
+        "expected fleschReadingEase field in extendedMeta; html snippet: {}",
+        &html[..html.len().min(2000)]
+    );
+    assert!(
+        html.contains("fleschKincaidGrade:"),
+        "expected fleschKincaidGrade field in extendedMeta"
+    );
+    // Sanity: we should NOT be rendering these as null for a non-trivial doc.
+    assert!(
+        !html.contains("fleschReadingEase: null"),
+        "FRE should be a number for a document with prose"
+    );
+    assert!(
+        !html.contains("fleschKincaidGrade: null"),
+        "FKGL should be a number for a document with prose"
+    );
+}
+
+#[tokio::test]
+async fn test_readability_scores_null_for_code_only_document() {
+    let repo = TestRepo::new();
+    // A document with only a code block has zero words counted, so scores
+    // should serialize as `null` and the template must render them literally.
+    repo.create_markdown(
+        "code-only.md",
+        "```rust\nfn main() { println!(\"hello\"); }\n```\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/code-only/").await;
+
+    assert!(
+        html.contains("fleschReadingEase: null"),
+        "FRE should be null for a code-only document"
+    );
+    assert!(
+        html.contains("fleschKincaidGrade: null"),
+        "FKGL should be null for a code-only document"
+    );
+}

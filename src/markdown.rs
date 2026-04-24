@@ -157,6 +157,17 @@ pub struct MarkdownRenderResult {
     pub has_h1: bool,
     /// Word count of the document (excluding code blocks and metadata)
     pub word_count: usize,
+    /// Sentence count of the document (excluding code blocks and metadata).
+    ///
+    /// Approximated by scanning for terminal punctuation (`.!?`) in text
+    /// events, plus one-per-block for paragraphs, headings, and list items
+    /// whose final text did not end in terminal punctuation.
+    pub sentence_count: usize,
+    /// Syllable count of the document (excluding code blocks and metadata).
+    ///
+    /// Computed via [`crate::readability::count_syllables`] for each
+    /// whitespace-delimited word during rendering.
+    pub syllable_count: usize,
 }
 
 struct EventState {
@@ -188,9 +199,61 @@ struct EventState {
     word_count: usize,
     /// Track if we're inside a code block (to exclude from word count)
     in_code_block: bool,
+    /// Sentence count accumulator (via terminal punctuation + block-end bumps)
+    sentence_count: usize,
+    /// Syllable count accumulator (summed per counted word)
+    syllable_count: usize,
+    /// Whether the last observed non-metadata/non-code text ended with
+    /// terminal punctuation. Used to bump `sentence_count` at the end of
+    /// paragraphs, headings, and list items whose final text lacked a `.!?`.
+    block_needs_sentence_bump: bool,
 }
 
 pub type SimpleMetadata = HashMap<String, serde_json::Value>;
+
+/// Scan a slice of text for sentence-terminating punctuation (`.!?`).
+///
+/// Returns `(count, ends_with_terminator)` where:
+///
+/// * `count` — the number of in-text sentence terminators, defined as a `.!?`
+///   that is followed by either whitespace or the end of the slice, and which
+///   is not part of a run of terminators (so `...` and `?!` count once).
+/// * `ends_with_terminator` — whether the last non-whitespace character is one
+///   of `.!?`. This is used by the render loop to decide whether to credit
+///   the enclosing block (paragraph/heading/item) with one extra sentence.
+///
+/// The heuristic is intentionally simple: it does not attempt to detect
+/// abbreviations like "Dr." or "e.g." — these false positives are unlikely to
+/// materially shift the FRE/FKGL band for a document of any meaningful length.
+fn count_sentence_terminators(text: &str) -> (usize, bool) {
+    let bytes = text.as_bytes();
+    let mut count: usize = 0;
+    let mut prev_was_terminator = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        let is_terminator = matches!(b, b'.' | b'!' | b'?');
+        if is_terminator && !prev_was_terminator {
+            // Count only when the terminator is followed by whitespace or is
+            // the last non-whitespace character. This avoids counting every
+            // `.` in URLs and numeric contexts.
+            let next_is_boundary = bytes[i + 1..]
+                .iter()
+                .find(|&&c| !matches!(c, b'.' | b'!' | b'?'))
+                .is_none_or(|&c| c.is_ascii_whitespace());
+            if next_is_boundary {
+                count += 1;
+            }
+        }
+        prev_was_terminator = is_terminator;
+    }
+
+    let ends_with_terminator = text
+        .trim_end()
+        .chars()
+        .next_back()
+        .is_some_and(|c| matches!(c, '.' | '!' | '?'));
+
+    (count, ends_with_terminator)
+}
 
 /// Extracts the first H1 heading text from markdown content.
 ///
@@ -555,6 +618,9 @@ fn process_all_events<'a>(
         valid_tag_sources,
         word_count: 0,
         in_code_block: false,
+        sentence_count: 0,
+        syllable_count: 0,
+        block_needs_sentence_bump: false,
     };
     let mut processed_events = Vec::with_capacity(events.len());
 
@@ -616,6 +682,8 @@ fn finalize_render(
         outbound_links: deduplicated_links,
         has_h1,
         word_count: state.word_count,
+        sentence_count: state.sentence_count,
+        syllable_count: state.syllable_count,
     })
 }
 
@@ -1077,14 +1145,38 @@ fn process_event(
             state.in_code_block = false;
             (event, state)
         }
+        // Block boundaries for readability's sentence count: paragraphs,
+        // headings, and list items whose last text did not end in `.!?` get
+        // one implicit sentence credit. This avoids undercounting headings
+        // ("Introduction") and terse bullet items ("Install Rust").
+        Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
+            if state.block_needs_sentence_bump {
+                state.sentence_count += 1;
+                state.block_needs_sentence_bump = false;
+            }
+            (event, state)
+        }
         Event::Text(text) => {
             // Accumulate link text when inside a link
             if state.in_link {
                 state.current_link_text.push_str(text);
             }
-            // Count words in text content (excluding metadata and code blocks)
+            // Count words, sentences, and syllables in text content
+            // (excluding metadata and code blocks).
             if !state.in_metadata && !state.in_code_block {
-                state.word_count += text.split_whitespace().count();
+                for word in text.split_whitespace() {
+                    state.word_count += 1;
+                    state.syllable_count += crate::readability::count_syllables(word);
+                }
+                let (sentences_in_text, ends_with_terminator) = count_sentence_terminators(text);
+                state.sentence_count += sentences_in_text;
+                // Track whether the enclosing block still needs a sentence
+                // bump at its End tag. Trailing whitespace is ignored: we
+                // care whether the last non-space character is `.!?`.
+                let trimmed = text.trim_end();
+                if !trimmed.is_empty() {
+                    state.block_needs_sentence_bump = !ends_with_terminator;
+                }
             }
             if state.in_metadata {
                 state.metadata_parsed = YamlLoader::load_from_str(text)
@@ -1169,6 +1261,70 @@ mod tests {
             .await
             .unwrap();
         result.html
+    }
+
+    async fn render_result(content: &str) -> MarkdownRenderResult {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+        };
+        render(path, &root, 0, config, false, false, HashSet::new())
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn sentence_terminator_basic_cases() {
+        assert_eq!(count_sentence_terminators(""), (0, false));
+        assert_eq!(count_sentence_terminators("Hello."), (1, true));
+        assert_eq!(count_sentence_terminators("Hi! How are you?"), (2, true));
+        // Ellipsis counts once.
+        assert_eq!(count_sentence_terminators("Wait..."), (1, true));
+        // Mid-sentence period not followed by whitespace shouldn't count.
+        assert_eq!(count_sentence_terminators("v1.2.3 is out."), (1, true));
+        // Missing trailing terminator.
+        assert_eq!(count_sentence_terminators("No ending here"), (0, false));
+    }
+
+    #[tokio::test]
+    async fn readability_counts_simple_paragraph() {
+        let md = "The cat sat on the mat. The dog ran away.";
+        let result = render_result(md).await;
+        assert_eq!(result.word_count, 10);
+        assert_eq!(result.sentence_count, 2);
+        // Nine one-syllable words plus "away" (a-way, 2 syllables).
+        assert_eq!(result.syllable_count, 11);
+    }
+
+    #[tokio::test]
+    async fn readability_heading_without_terminator_bumps_sentence() {
+        let md = "# Introduction\n\nHello world.";
+        let result = render_result(md).await;
+        assert_eq!(result.word_count, 3);
+        // Heading ("Introduction") + "Hello world." = 2 sentences.
+        assert_eq!(result.sentence_count, 2);
+    }
+
+    #[tokio::test]
+    async fn readability_excludes_code_blocks() {
+        let md = "Some prose here.\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n";
+        let result = render_result(md).await;
+        assert_eq!(result.word_count, 3);
+        assert_eq!(result.sentence_count, 1);
+    }
+
+    #[tokio::test]
+    async fn readability_empty_document_has_zero_counts() {
+        let result = render_result("").await;
+        assert_eq!(result.word_count, 0);
+        assert_eq!(result.sentence_count, 0);
+        assert_eq!(result.syllable_count, 0);
     }
 
     #[tokio::test]

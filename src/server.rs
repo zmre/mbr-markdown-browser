@@ -2765,6 +2765,12 @@ impl Server {
         let outbound_links = render_result.outbound_links;
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
+        let readability_counts = crate::readability::ReadabilityCounts {
+            words: render_result.word_count,
+            sentences: render_result.sentence_count,
+            syllables: render_result.syllable_count,
+        };
+        let readability_scores = crate::readability::scores(&readability_counts);
         // Use relative path for markdown_source so live reload can match it
         let relative_md_path =
             pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
@@ -2856,6 +2862,17 @@ impl Server {
         extra_context.insert(
             "reading_time_minutes".to_string(),
             serde_json::json!(reading_time_minutes),
+        );
+        // Readability scores (Flesch Reading Ease + Flesch-Kincaid Grade Level).
+        // `None` values serialize as JSON `null`, which the template outputs
+        // literally so the frontend can guard on `!= null`.
+        extra_context.insert(
+            "flesch_reading_ease".to_string(),
+            serde_json::json!(readability_scores.flesch_reading_ease),
+        );
+        extra_context.insert(
+            "flesch_kincaid_grade".to_string(),
+            serde_json::json!(readability_scores.flesch_kincaid_grade),
         );
 
         // Pass file path (relative to root) for reference

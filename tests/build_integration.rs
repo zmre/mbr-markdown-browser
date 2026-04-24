@@ -1207,3 +1207,63 @@ async fn test_tag_page_exists_when_linked_manually() {
     let tag_index = output.join("tags").join("index.html");
     assert!(tag_index.exists(), "Tags index page should exist");
 }
+
+// ============================================================================
+// Readability Scores (window.extendedMeta)
+// ============================================================================
+
+#[tokio::test]
+async fn test_build_injects_readability_scores() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "article.md",
+        "# Article\n\nThis is a simple test. It has several short sentences. \
+         The quick brown fox jumps over the lazy dog. Another sentence follows.\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("article").join("index.html");
+    assert!(html_path.exists(), "Expected {:?} to exist", html_path);
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    assert!(
+        html.contains("fleschReadingEase:"),
+        "Static build should include fleschReadingEase in extendedMeta"
+    );
+    assert!(
+        html.contains("fleschKincaidGrade:"),
+        "Static build should include fleschKincaidGrade in extendedMeta"
+    );
+    assert!(
+        !html.contains("fleschReadingEase: null"),
+        "FRE should be a number for a document with prose"
+    );
+    assert!(
+        !html.contains("fleschKincaidGrade: null"),
+        "FKGL should be a number for a document with prose"
+    );
+}
+
+#[tokio::test]
+async fn test_build_readability_scores_null_for_code_only() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "code-only.md",
+        "```rust\nfn main() { println!(\"hello\"); }\n```\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("code-only").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    assert!(
+        html.contains("fleschReadingEase: null"),
+        "FRE should render as null for a code-only document"
+    );
+    assert!(
+        html.contains("fleschKincaidGrade: null"),
+        "FKGL should render as null for a code-only document"
+    );
+}
