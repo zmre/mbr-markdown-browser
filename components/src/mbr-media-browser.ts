@@ -327,6 +327,22 @@ export class MbrMediaBrowserElement extends LitElement {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       this._handleCardClick(file, isNewTabModifier(e));
+      return;
+    }
+
+    // Ctrl+N / Ctrl+P navigate forward/back, matching Tab / Shift+Tab on cards
+    if (e.ctrlKey && (e.key === 'n' || e.key === 'N' || e.key === 'p' || e.key === 'P')) {
+      const cards = Array.from(
+        this.shadowRoot?.querySelectorAll<HTMLElement>('.media-card') ?? []
+      );
+      const currentIndex = cards.indexOf(e.currentTarget as HTMLElement);
+      if (currentIndex === -1) return;
+      const direction = e.key === 'n' || e.key === 'N' ? 1 : -1;
+      const nextIndex = currentIndex + direction;
+      if (nextIndex < 0 || nextIndex >= cards.length) return;
+      e.preventDefault();
+      this._selectedIndex = nextIndex;
+      cards[nextIndex].focus();
     }
   }
 
