@@ -136,8 +136,11 @@ pub fn render_preview_with_config(
             message: e.to_string(),
         })?;
 
-    // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only)
-    // Use empty tag sources for QuickLook (no wikilink transformation)
+    // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only).
+    // Use empty tag sources for QuickLook (no wikilink transformation) and
+    // honor the user's mark_incomplete config (defaults to off in this preview).
+    let mark_incomplete = config.mark_incomplete.unwrap_or(false);
+    let incomplete_markers = config.incomplete_markers.clone();
     let render_result = rt
         .block_on(async {
             markdown::render(
@@ -148,6 +151,8 @@ pub fn render_preview_with_config(
                 false,                            // server_mode is false in QuickLook
                 false,                            // transcode is disabled in QuickLook
                 std::collections::HashSet::new(), // No tag sources in QuickLook
+                mark_incomplete,
+                &incomplete_markers,
             )
             .await
         })

@@ -116,6 +116,8 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
+| `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight blocks starting with TK/TODO/FIXME/XXX |
+| `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag a block as incomplete |
 
 ### Navigation Settings
 
@@ -296,6 +298,55 @@ link_tracking = false
 ```
 
 When disabled, the `links.json` endpoint returns 404 and no link files are generated during builds.
+
+### Incomplete-Block Highlighting
+
+mbr can highlight blocks (paragraphs, headings, list items, table cells) whose
+first text starts with an incomplete-marker like `TK`, `TODO`, `FIXME`, or
+`XXX`. Highlighted blocks are wrapped in `<span class="mbr-incomplete">…</span>`
+and styled with a yellow background and dotted orange underline.
+
+Match rule: uppercase only, word-boundary at the end of the marker. So `TK`,
+`TK:`, `TODO foo`, and `FIXME(name)` match; `Tk`, `todo`, `Tomato`, `TKTK`,
+and `TODOs` do not.
+
+| Mode | Default | Reason |
+|------|---------|--------|
+| Server / GUI | on | Helps writers spot drafts at a glance |
+| Static build | off | Avoids leaking unfinished markers into published sites |
+
+CLI overrides:
+
+```bash
+# Force highlighting on (e.g., during a build to preview drafts)
+mbr -b --mark-incomplete ~/notes
+
+# Force highlighting off in server mode
+mbr -s --no-mark-incomplete ~/notes
+```
+
+Configuration file:
+
+```toml
+# .mbr/config.toml
+
+# Force a value (overrides the per-mode default; CLI flag still wins)
+mark_incomplete = true
+
+# Customize the marker list. Markers are matched uppercase only at the
+# start of a block, with a word boundary on the right edge.
+incomplete_markers = ["TK", "TODO", "FIXME", "XXX"]
+```
+
+Environment variables:
+
+```bash
+MBR_MARK_INCOMPLETE=true
+MBR_INCOMPLETE_MARKERS='["NOTE","DRAFT"]'
+```
+
+Setting `incomplete_markers = []` disables the feature entirely (the pass
+becomes a no-op even when `mark_incomplete = true`).
 
 ### Per-Page Error Indicator (Server / GUI Only)
 
@@ -528,6 +579,10 @@ MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
 
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true
+
+# Incomplete-block highlighting (TK / TODO / FIXME / XXX)
+MBR_MARK_INCOMPLETE=true
+MBR_INCOMPLETE_MARKERS='["NOTE","DRAFT"]'
 ```
 
 Environment variables override config file settings.

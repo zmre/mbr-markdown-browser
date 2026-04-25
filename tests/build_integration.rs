@@ -128,6 +128,54 @@ async fn test_build_sets_static_mode() {
     );
 }
 
+#[tokio::test]
+async fn test_build_no_incomplete_spans_by_default() {
+    // Static builds default mark_incomplete=false; published sites must not
+    // contain mbr-incomplete spans unless the user explicitly opts in.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "drafts.md",
+        "# Drafts\n\nTK rewrite this paragraph.\n\n- TODO finish item\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("drafts").join("index.html");
+    let html = fs::read_to_string(&html_path).expect("rendered html");
+    assert!(
+        !html.contains("mbr-incomplete"),
+        "Default build should not include mbr-incomplete spans: {html}"
+    );
+}
+
+#[tokio::test]
+async fn test_build_incomplete_spans_when_opted_in() {
+    // When mark_incomplete is forced on (e.g., via CLI/config), the build
+    // should emit the spans.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "drafts.md",
+        "# Drafts\n\nTK rewrite this paragraph.\n\nNormal paragraph.",
+    );
+
+    let mut config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.mark_incomplete = Some(true);
+
+    let output_dir = repo.path().join("build");
+    let builder = mbr::build::Builder::new(config, output_dir.clone()).expect("builder");
+    builder.build().await.expect("build");
+
+    let html_path = output_dir.join("drafts").join("index.html");
+    let html = fs::read_to_string(&html_path).expect("rendered html");
+    assert!(
+        html.contains(r#"<span class="mbr-incomplete">"#),
+        "Opted-in build should include mbr-incomplete spans: {html}"
+    );
+}
+
 // ============================================================================
 // Pagefind indexing tests
 // ============================================================================

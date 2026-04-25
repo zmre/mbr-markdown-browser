@@ -356,6 +356,10 @@ pub struct ServerConfig {
     pub sidebar_max_items: usize,
     pub title_prefix: String,
     pub title_suffix: String,
+    /// Highlight blocks beginning with an incomplete marker (TK/TODO/FIXME/XXX).
+    pub mark_incomplete: bool,
+    /// Marker strings used by the incomplete-block highlighter.
+    pub incomplete_markers: Vec<String>,
     #[cfg(feature = "media-metadata")]
     pub transcode_enabled: bool,
 }
@@ -401,6 +405,9 @@ impl From<&crate::config::Config> for ServerConfig {
             sidebar_max_items: config.sidebar_max_items,
             title_prefix: config.title_prefix.clone(),
             title_suffix: config.title_suffix.clone(),
+            // Server/GUI default: on unless config overrides.
+            mark_incomplete: config.mark_incomplete.unwrap_or(true),
+            incomplete_markers: config.incomplete_markers.clone(),
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
         }
@@ -456,6 +463,10 @@ pub struct ServerState {
     pub title_prefix: String,
     /// Text to append to all page titles
     pub title_suffix: String,
+    /// Highlight blocks beginning with TK/TODO/FIXME/XXX (default on in server/GUI).
+    pub mark_incomplete: bool,
+    /// Marker strings used by the incomplete-block highlighter.
+    pub incomplete_markers: Vec<String>,
 }
 
 impl Server {
@@ -484,6 +495,8 @@ impl Server {
             sidebar_max_items,
             title_prefix,
             title_suffix,
+            mark_incomplete,
+            incomplete_markers,
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
         } = config;
@@ -788,6 +801,8 @@ impl Server {
             sidebar_max_items,
             title_prefix,
             title_suffix,
+            mark_incomplete,
+            incomplete_markers,
         };
 
         let router = Router::new()
@@ -2280,6 +2295,8 @@ impl Server {
                         true,  // server_mode
                         false, // transcode_enabled (not needed for link extraction)
                         valid_tag_sources,
+                        false, // mark_incomplete: not needed for link extraction
+                        &config.incomplete_markers,
                     )
                     .await
                     {
@@ -2464,6 +2481,8 @@ impl Server {
                     true,  // server_mode
                     false, // transcode_enabled (not needed for error scan)
                     valid_tag_sources,
+                    false, // mark_incomplete: not needed for error scan
+                    &config.incomplete_markers,
                 )
                 .await
                 {
@@ -2939,6 +2958,8 @@ impl Server {
             true, // server_mode is always true in server
             transcode_enabled,
             valid_tag_sources,
+            config.mark_incomplete,
+            &config.incomplete_markers,
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;

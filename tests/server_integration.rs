@@ -38,6 +38,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         sidebar_max_items: 100,
         title_prefix: String::new(),
         title_suffix: String::new(),
+        mark_incomplete: true,
+        incomplete_markers: mbr::config::default_incomplete_markers(),
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
     }
@@ -152,6 +154,35 @@ async fn test_serve_markdown_file() {
     let html = response.text().await.unwrap();
     assert_html_contains(&html, "<h1 id=\"hello-world\">Hello World</h1>");
     assert_html_contains(&html, "This is a test.");
+}
+
+#[tokio::test]
+async fn test_server_marks_incomplete_blocks_by_default() {
+    // Server/GUI default for mark_incomplete is true; rendered HTML should
+    // wrap blocks starting with TK/TODO/FIXME/XXX in an mbr-incomplete span.
+    let repo = TestRepo::new();
+    repo.create_markdown("drafts.md", "# Drafts\n\nTK rewrite this paragraph.");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/drafts/").await;
+    assert!(
+        html.contains(r#"<span class="mbr-incomplete">"#),
+        "Server should highlight TK paragraph by default: {html}"
+    );
+}
+
+#[tokio::test]
+async fn test_server_no_incomplete_spans_when_disabled() {
+    // When the user disables mark_incomplete, the spans must not appear.
+    let repo = TestRepo::new();
+    repo.create_markdown("drafts.md", "# Drafts\n\nTK rewrite this paragraph.");
+
+    let server = TestServer::start_with_config_fn(&repo, |c| c.mark_incomplete = false).await;
+    let html = server.get_text("/drafts/").await;
+    assert!(
+        !html.contains("mbr-incomplete"),
+        "Server should not emit spans when mark_incomplete=false: {html}"
+    );
 }
 
 // NOTE: Root path "/" is handled by a placeholder home_page() function.

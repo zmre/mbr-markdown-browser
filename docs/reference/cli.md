@@ -55,6 +55,8 @@ Supported media types are detected by file extension:
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
+| `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
+| `--no-mark-incomplete` | Disable incomplete-block highlighting | server/GUI: off, build: on (no effect) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
 | `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |

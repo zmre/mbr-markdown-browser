@@ -736,8 +736,10 @@ impl Builder {
         tracing::debug!("build: rendering {}", path.display());
 
         // Render markdown to HTML synchronously
-        // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
+        // In build mode, server_mode=false and transcode is disabled (transcode is server-only).
+        // Build mode defaults `mark_incomplete=false` (off unless config/CLI override).
         let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
+        let mark_incomplete = self.config.mark_incomplete.unwrap_or(false);
         let render_result = markdown::render_sync(
             path.to_path_buf(),
             &self.config.root_dir,
@@ -747,6 +749,8 @@ impl Builder {
             false, // server_mode is false in build mode
             false, // transcode is disabled in build mode
             valid_tag_sources,
+            mark_incomplete,
+            &self.config.incomplete_markers,
         )
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),

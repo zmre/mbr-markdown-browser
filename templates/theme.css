@@ -42,6 +42,10 @@
   --mbr-alert-caution-border: #c62828;
   --mbr-alert-caution-icon-color: #c62828;
 
+  /* Incomplete-block marker (TK/TODO/FIXME/XXX) */
+  --mbr-incomplete-bg: rgba(255, 235, 59, 0.18);
+  --mbr-incomplete-border: #f57c00;
+
   /* Alert Icons (SVG Data URIs) */
   --mbr-icon-note: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cline x1='12' y1='16' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'%3E%3C/line%3E%3C/svg%3E");
   --mbr-icon-tip: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z'%3E%3C/path%3E%3Cpath d='M9 21h6'%3E%3C/path%3E%3C/svg%3E");
@@ -515,6 +519,16 @@ blockquote.markdown-alert-caution::before {
 blockquote.markdown-alert-caution > p:first-of-type::before {
   content: "Caution";
   color: var(--mbr-alert-caution-icon-color);
+}
+
+/* Incomplete-block marker — wraps blocks starting with TK/TODO/FIXME/XXX
+ * (or whatever incomplete_markers configures). Highlights drafts in
+ * server/GUI mode; off by default in static builds. */
+.mbr-incomplete {
+  background: var(--mbr-incomplete-bg);
+  border-bottom: 2px dotted var(--mbr-incomplete-border);
+  padding: 0 0.15rem;
+  border-radius: 2px;
 }
 
 /* ==================== Marginalia (>>> - Level 3+ Nesting) ==================== */
