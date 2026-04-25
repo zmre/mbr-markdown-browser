@@ -163,6 +163,12 @@ async fn main() -> Result<(), MbrError> {
     if args.no_link_tracking {
         config.link_tracking = false;
     }
+    // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
+    if args.mark_incomplete {
+        config.mark_incomplete = Some(true);
+    } else if args.no_mark_incomplete {
+        config.mark_incomplete = Some(false);
+    }
     // Apply title_prefix and title_suffix from CLI
     if let Some(ref prefix) = args.title_prefix {
         config.title_prefix = prefix.clone();
@@ -344,8 +350,10 @@ async fn main() -> Result<(), MbrError> {
             url_depth: None,
         };
 
-        // CLI mode: server_mode=false, transcode disabled (transcode is server-only)
+        // CLI mode: server_mode=false, transcode disabled (transcode is server-only).
+        // Stdout/CLI mode mirrors build defaults (off unless explicitly enabled).
         let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
+        let mark_incomplete = config.mark_incomplete.unwrap_or(false);
         let render_result = markdown::render(
             input_path,
             config.root_dir.as_path(),
@@ -354,6 +362,8 @@ async fn main() -> Result<(), MbrError> {
             false, // server_mode is false in CLI mode
             false, // transcode is disabled in CLI mode
             valid_tag_sources,
+            mark_incomplete,
+            &config.incomplete_markers,
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;

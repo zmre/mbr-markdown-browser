@@ -87,17 +87,19 @@ fn relative_root(depth: usize) -> String {
 
 /// Resolves a relative URL against a base URL path.
 ///
-/// Given a source page URL (e.g., "/docs/page/") and a relative link (e.g., "../other/"),
-/// returns the absolute target URL (e.g., "/other/").
+/// Stored `OutboundLink.to` values are the original pre-transform markdown
+/// URLs. Their meaning depends on whether the source page is an index file:
 ///
-/// In mbr, URLs like "/docs/page/" correspond to files like "docs/page.md".
-/// Relative links are resolved against the file's parent directory (e.g., "docs/").
+/// - **Non-index** (`docs/guide.md` → `/docs/guide/`): the last URL segment
+///   is the file stem; siblings live in the parent directory. Strip it.
+/// - **Index** (`docs/modes/index.md` → `/modes/`): the URL is already a
+///   directory; siblings live inside. Keep all segments.
 ///
 /// Examples:
-/// - resolve_relative_url("/source/", "target/") → "/target/" (sibling in root)
-/// - resolve_relative_url("/docs/guide/", "intro/") → "/docs/intro/" (sibling in docs/)
-/// - resolve_relative_url("/docs/guide/", "../other/") → "/other/" (up from docs/ to root)
-fn resolve_relative_url(base_url: &str, relative_url: &str) -> String {
+/// - resolve_relative_url("/modes/", "gui/", true) → "/modes/gui/"
+/// - resolve_relative_url("/docs/guide/", "intro/", false) → "/docs/intro/"
+/// - resolve_relative_url("/docs/guide/", "../other/", false) → "/other/"
+fn resolve_relative_url(base_url: &str, relative_url: &str, is_index_file: bool) -> String {
     // If the relative URL is already absolute, just normalize it
     if relative_url.starts_with('/') {
         let trimmed = relative_url.trim_end_matches('/');
@@ -108,31 +110,29 @@ fn resolve_relative_url(base_url: &str, relative_url: &str) -> String {
         };
     }
 
-    // Split base URL into path segments
-    // The base URL like "/docs/guide/" represents a FILE in directory "/docs/"
-    // So we treat the last segment as the filename and start from its parent directory
     let base_segments: Vec<&str> = base_url
         .trim_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Remove the last segment (the "filename" part) to get the parent directory
-    let mut segments: Vec<&str> = if !base_segments.is_empty() {
-        base_segments[..base_segments.len() - 1].to_vec()
+    // For non-index pages, drop the last URL segment (the file stem) before
+    // applying the relative URL; for index pages, every segment is a real
+    // directory component.
+    let mut segments: Vec<&str> = if is_index_file || base_segments.is_empty() {
+        base_segments
     } else {
-        vec![]
+        base_segments[..base_segments.len() - 1].to_vec()
     };
 
-    // Process each segment of the relative URL
     for part in relative_url.split('/') {
         match part {
             "" | "." => {} // Skip empty or current directory
             ".." => {
-                segments.pop(); // Go up one directory
+                segments.pop();
             }
             segment => {
-                segments.push(segment); // Add the segment
+                segments.push(segment);
             }
         }
     }
@@ -257,9 +257,11 @@ pub struct Builder {
     repo: Repo,
     /// Cache for OEmbed page metadata shared across all file renders
     oembed_cache: Arc<OembedCache>,
-    /// Index of outbound links per page (url_path -> links)
-    /// Used for building bidirectional link tracking during static builds
-    build_link_index: Arc<ConcurrentHashMap<String, Vec<OutboundLink>>>,
+    /// Index of outbound links per page (url_path -> (is_index_file, links)).
+    /// Used for building bidirectional link tracking during static builds.
+    /// `is_index_file` is needed to correctly resolve relative URLs: non-index
+    /// pages drop the trailing URL segment (file stem), index pages don't.
+    build_link_index: Arc<ConcurrentHashMap<String, (bool, Vec<OutboundLink>)>>,
 }
 
 impl Builder {
@@ -552,7 +554,7 @@ impl Builder {
         let mut inbound_index: HashMap<String, Vec<InboundLink>> = HashMap::new();
         let mut outbound_index: HashMap<String, Vec<OutboundLink>> = HashMap::new();
 
-        for (source_url, outbound_links) in outbound_guard.iter() {
+        for (source_url, (is_index_file, outbound_links)) in outbound_guard.iter() {
             // Copy outbound links to our local HashMap
             outbound_index.insert(source_url.clone(), outbound_links.clone());
 
@@ -563,7 +565,7 @@ impl Builder {
                 }
 
                 // Resolve the relative URL to an absolute URL based on the source page
-                let target_url = resolve_relative_url(source_url, &link.to);
+                let target_url = resolve_relative_url(source_url, &link.to, *is_index_file);
 
                 let inbound_link = InboundLink {
                     from: source_url.clone(),
@@ -734,8 +736,10 @@ impl Builder {
         tracing::debug!("build: rendering {}", path.display());
 
         // Render markdown to HTML synchronously
-        // In build mode, server_mode=false and transcode is disabled (transcode is server-only)
+        // In build mode, server_mode=false and transcode is disabled (transcode is server-only).
+        // Build mode defaults `mark_incomplete=false` (off unless config/CLI override).
         let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
+        let mark_incomplete = self.config.mark_incomplete.unwrap_or(false);
         let render_result = markdown::render_sync(
             path.to_path_buf(),
             &self.config.root_dir,
@@ -745,6 +749,8 @@ impl Builder {
             false, // server_mode is false in build mode
             false, // transcode is disabled in build mode
             valid_tag_sources,
+            mark_incomplete,
+            &self.config.incomplete_markers,
         )
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),
@@ -756,12 +762,18 @@ impl Builder {
         let outbound_links = render_result.outbound_links;
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
+        let readability_counts = crate::readability::ReadabilityCounts {
+            words: render_result.word_count,
+            sentences: render_result.sentence_count,
+            syllables: render_result.syllable_count,
+        };
+        let readability_scores = crate::readability::scores(&readability_counts);
 
         // Store outbound links in the build link index for generating links.json files
         if self.config.link_tracking && !outbound_links.is_empty() {
             self.build_link_index
                 .pin()
-                .insert(info.url_path.clone(), outbound_links);
+                .insert(info.url_path.clone(), (is_index_file, outbound_links));
         }
 
         tracing::debug!("build: rendered {}", path.display());
@@ -852,6 +864,17 @@ impl Builder {
         extra_context.insert(
             "reading_time_minutes".to_string(),
             serde_json::json!(reading_time_minutes),
+        );
+        // Readability scores (Flesch Reading Ease + Flesch-Kincaid Grade Level).
+        // `None` values serialize as JSON `null`, which the template outputs
+        // literally so the frontend can guard on `!= null`.
+        extra_context.insert(
+            "flesch_reading_ease".to_string(),
+            serde_json::json!(readability_scores.flesch_reading_ease),
+        );
+        extra_context.insert(
+            "flesch_kincaid_grade".to_string(),
+            serde_json::json!(readability_scores.flesch_kincaid_grade),
         );
 
         // Pass file path (relative to root) for reference
@@ -2508,45 +2531,69 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_relative_url_parent() {
-        // Non-index pages use ../ prefix, so /source/ linking to target/ becomes ../target/
-        assert_eq!(resolve_relative_url("/source/", "../target/"), "/target/");
+    fn test_resolve_relative_url_nonindex_parent() {
+        // From non-index /source/ (= source.md), "../target/" goes up from /
+        // and into target/.
+        assert_eq!(
+            resolve_relative_url("/source/", "../target/", false),
+            "/target/"
+        );
     }
 
     #[test]
-    fn test_resolve_relative_url_nested() {
-        // From /docs/guide/ (file docs/guide.md), ../reference/ goes up from docs/ to root
+    fn test_resolve_relative_url_nonindex_nested() {
+        // From /docs/guide/ (non-index docs/guide.md), strip guide → /docs/,
+        // then ../reference/ → /reference/
         assert_eq!(
-            resolve_relative_url("/docs/guide/", "../reference/"),
+            resolve_relative_url("/docs/guide/", "../reference/", false),
             "/reference/"
         );
         assert_eq!(
-            resolve_relative_url("/docs/guide/", "../../other/"),
+            resolve_relative_url("/docs/guide/", "../../other/", false),
             "/other/"
         );
     }
 
     #[test]
-    fn test_resolve_relative_url_sibling() {
-        // From /docs/guide/ (file docs/guide.md), a sibling link reference/ goes to docs/reference/
+    fn test_resolve_relative_url_nonindex_sibling() {
+        // From /docs/guide/ (non-index), sibling markdown link reference/ lives
+        // at /docs/reference/ (strip guide, add reference).
         assert_eq!(
-            resolve_relative_url("/docs/guide/", "reference/"),
+            resolve_relative_url("/docs/guide/", "reference/", false),
             "/docs/reference/"
         );
-        // From /source/, sibling link target/ goes to /target/
-        assert_eq!(resolve_relative_url("/source/", "target/"), "/target/");
+        assert_eq!(
+            resolve_relative_url("/source/", "target/", false),
+            "/target/"
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_url_index_sibling() {
+        // From /modes/ (index docs/modes/index.md), relative gui/ is a child
+        // inside /modes/ → /modes/gui/.
+        assert_eq!(resolve_relative_url("/modes/", "gui/", true), "/modes/gui/");
+        assert_eq!(
+            resolve_relative_url("/reference/", "cli/", true),
+            "/reference/cli/"
+        );
     }
 
     #[test]
     fn test_resolve_relative_url_absolute() {
-        assert_eq!(resolve_relative_url("/source/", "/target/"), "/target/");
-        assert_eq!(resolve_relative_url("/source/", "/"), "/");
+        assert_eq!(
+            resolve_relative_url("/source/", "/target/", false),
+            "/target/"
+        );
+        assert_eq!(resolve_relative_url("/source/", "/", false), "/");
+        assert_eq!(resolve_relative_url("/modes/", "/", true), "/");
     }
 
     #[test]
     fn test_resolve_relative_url_to_root() {
-        assert_eq!(resolve_relative_url("/source/", "../"), "/");
-        assert_eq!(resolve_relative_url("/docs/guide/", "../../"), "/");
+        assert_eq!(resolve_relative_url("/source/", "../", false), "/");
+        assert_eq!(resolve_relative_url("/docs/guide/", "../../", false), "/");
+        assert_eq!(resolve_relative_url("/modes/", "../", true), "/");
     }
 
     // ============================================================================

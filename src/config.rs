@@ -40,6 +40,19 @@ fn default_link_tracking() -> bool {
     true
 }
 
+/// Default markers that flag a block as incomplete.
+///
+/// A block whose first text matches `^(MARKER)\b` (uppercase, word boundary)
+/// gets wrapped in `<span class="mbr-incomplete">…</span>`.
+pub fn default_incomplete_markers() -> Vec<String> {
+    vec![
+        "TK".to_string(),
+        "TODO".to_string(),
+        "FIXME".to_string(),
+        "XXX".to_string(),
+    ]
+}
+
 fn default_build_tag_pages() -> bool {
     true
 }
@@ -278,6 +291,17 @@ pub struct Config {
     /// Default: empty string (no suffix).
     #[serde(default)]
     pub title_suffix: String,
+    /// Markers that flag a block as incomplete. A paragraph, heading, list
+    /// item, or table cell whose first text matches `^(MARKER)\b` gets
+    /// wrapped in `<span class="mbr-incomplete">…</span>`.
+    /// Default: `["TK", "TODO", "FIXME", "XXX"]`.
+    #[serde(default = "default_incomplete_markers")]
+    pub incomplete_markers: Vec<String>,
+    /// Enable incomplete-block marking. `None` = mode default (on for
+    /// server/GUI, off for static build). CLI flags
+    /// `--mark-incomplete` / `--no-mark-incomplete` force a value.
+    #[serde(default)]
+    pub mark_incomplete: Option<bool>,
 }
 
 impl std::fmt::Display for IpArray {
@@ -362,6 +386,8 @@ impl Default for Config {
             sidebar_max_items: default_sidebar_max_items(),
             title_prefix: String::new(),
             title_suffix: String::new(),
+            incomplete_markers: default_incomplete_markers(),
+            mark_incomplete: None,
         }
     }
 }

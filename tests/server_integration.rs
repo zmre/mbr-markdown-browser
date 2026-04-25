@@ -38,6 +38,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         sidebar_max_items: 100,
         title_prefix: String::new(),
         title_suffix: String::new(),
+        mark_incomplete: true,
+        incomplete_markers: mbr::config::default_incomplete_markers(),
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
     }
@@ -152,6 +154,35 @@ async fn test_serve_markdown_file() {
     let html = response.text().await.unwrap();
     assert_html_contains(&html, "<h1 id=\"hello-world\">Hello World</h1>");
     assert_html_contains(&html, "This is a test.");
+}
+
+#[tokio::test]
+async fn test_server_marks_incomplete_blocks_by_default() {
+    // Server/GUI default for mark_incomplete is true; rendered HTML should
+    // wrap blocks starting with TK/TODO/FIXME/XXX in an mbr-incomplete span.
+    let repo = TestRepo::new();
+    repo.create_markdown("drafts.md", "# Drafts\n\nTK rewrite this paragraph.");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/drafts/").await;
+    assert!(
+        html.contains(r#"<span class="mbr-incomplete">"#),
+        "Server should highlight TK paragraph by default: {html}"
+    );
+}
+
+#[tokio::test]
+async fn test_server_no_incomplete_spans_when_disabled() {
+    // When the user disables mark_incomplete, the spans must not appear.
+    let repo = TestRepo::new();
+    repo.create_markdown("drafts.md", "# Drafts\n\nTK rewrite this paragraph.");
+
+    let server = TestServer::start_with_config_fn(&repo, |c| c.mark_incomplete = false).await;
+    let html = server.get_text("/drafts/").await;
+    assert!(
+        !html.contains("mbr-incomplete"),
+        "Server should not emit spans when mark_incomplete=false: {html}"
+    );
 }
 
 // NOTE: Root path "/" is handled by a placeholder home_page() function.
@@ -3229,4 +3260,191 @@ async fn test_search_tag_pages_skipped_for_folder_scope() {
         "Tag pages should not appear when folder scope is current: {:?}",
         results
     );
+}
+
+// ============================================================================
+// Readability Scores (window.extendedMeta)
+// ============================================================================
+
+#[tokio::test]
+async fn test_readability_scores_injected_into_extended_meta() {
+    let repo = TestRepo::new();
+    // A document with enough sentences/words to produce plausible scores.
+    repo.create_markdown(
+        "article.md",
+        "# Article\n\nThis is a simple test. It has several short sentences. \
+         The quick brown fox jumps over the lazy dog. Another sentence follows.\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/article/").await;
+
+    // The extendedMeta literal should include both new fields as JS numbers
+    // (not the string "null") because the document has words and sentences.
+    assert!(
+        html.contains("fleschReadingEase:"),
+        "expected fleschReadingEase field in extendedMeta; html snippet: {}",
+        &html[..html.len().min(2000)]
+    );
+    assert!(
+        html.contains("fleschKincaidGrade:"),
+        "expected fleschKincaidGrade field in extendedMeta"
+    );
+    // Sanity: we should NOT be rendering these as null for a non-trivial doc.
+    assert!(
+        !html.contains("fleschReadingEase: null"),
+        "FRE should be a number for a document with prose"
+    );
+    assert!(
+        !html.contains("fleschKincaidGrade: null"),
+        "FKGL should be a number for a document with prose"
+    );
+}
+
+#[tokio::test]
+async fn test_readability_scores_null_for_code_only_document() {
+    let repo = TestRepo::new();
+    // A document with only a code block has zero words counted, so scores
+    // should serialize as `null` and the template must render them literally.
+    repo.create_markdown(
+        "code-only.md",
+        "```rust\nfn main() { println!(\"hello\"); }\n```\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/code-only/").await;
+
+    assert!(
+        html.contains("fleschReadingEase: null"),
+        "FRE should be null for a code-only document"
+    );
+    assert!(
+        html.contains("fleschKincaidGrade: null"),
+        "FKGL should be null for a code-only document"
+    );
+}
+
+// ============================================================================
+// Per-page errors.json endpoint
+// ============================================================================
+
+#[tokio::test]
+async fn test_errors_json_clean_page_returns_empty() {
+    let repo = TestRepo::new();
+    repo.create_markdown("clean.md", "# Clean\n\nNo problems here.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/clean/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["page_url"], "/clean/");
+    assert!(json["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_broken_internal_link() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page\n\n[bad](/nonexistent/) link here.");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/page/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_internal_link"
+            && e["target"].as_str().unwrap().contains("/nonexistent")),
+        "expected broken_internal_link in {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_broken_media_reference() {
+    let repo = TestRepo::new();
+    repo.create_markdown("media.md", "# Media\n\n![alt](./missing.png)");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/media/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_media_reference"
+            && e["kind"] == "image"
+            && e["src"].as_str().unwrap().contains("missing.png")),
+        "expected broken_media_reference image in {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_unresolved_wikilink() {
+    let repo = TestRepo::new();
+    // pulldown-cmark has native wikilink support when `ENABLE_WIKILINKS` is
+    // on (we use `Options::all()` in `markdown.rs`), so simple `[[foo]]`
+    // becomes `<a href="foo">foo</a>` and gets caught by the broken-internal-
+    // link check instead. A literal `[[...]]` survives into HTML when it
+    // appears inside a raw HTML block — this is the only pragmatic case
+    // where the wikilink detector fires independently.
+    repo.create_markdown(
+        "wiki.md",
+        "# Wiki\n\n<div class=\"raw\">See [[never-a-real-page]] here.</div>",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/wiki/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "unresolved_wikilink"),
+        "expected unresolved_wikilink in {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_returns_404_when_link_tracking_disabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("page.md", "# Page");
+
+    let server = TestServer::start_with_config_fn(&repo, |cfg| {
+        cfg.link_tracking = false;
+    })
+    .await;
+
+    let response = server.get("/page/errors.json").await;
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn test_errors_json_multiple_problem_types_on_one_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "mixed.md",
+        concat!(
+            "# Mixed\n\n",
+            "[bad](./nonexistent/)\n\n",
+            "![m](./missing.png)\n\n",
+            // Inside a raw-HTML block, pulldown-cmark leaves `[[...]]`
+            // untouched, exercising the unresolved-wikilink detector.
+            "<div class=\"raw\">[[never-a-real-page]]</div>\n",
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/mixed/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    assert!(errors.iter().any(|e| e["type"] == "broken_internal_link"));
+    assert!(errors.iter().any(|e| e["type"] == "broken_media_reference"));
+    assert!(errors.iter().any(|e| e["type"] == "unresolved_wikilink"));
 }

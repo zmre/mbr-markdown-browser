@@ -42,6 +42,10 @@
   --mbr-alert-caution-border: #c62828;
   --mbr-alert-caution-icon-color: #c62828;
 
+  /* Incomplete-block marker (TK/TODO/FIXME/XXX) */
+  --mbr-incomplete-bg: rgba(255, 235, 59, 0.18);
+  --mbr-incomplete-border: #f57c00;
+
   /* Alert Icons (SVG Data URIs) */
   --mbr-icon-note: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cline x1='12' y1='16' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'%3E%3C/line%3E%3C/svg%3E");
   --mbr-icon-tip: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z'%3E%3C/path%3E%3Cpath d='M9 21h6'%3E%3C/path%3E%3C/svg%3E");
@@ -112,6 +116,13 @@ body > header {
   top: 0;
   padding-block: 0;
   z-index: 999;
+}
+
+/* Offset anchor jumps (including `:target` and permalink clicks) so the
+ * linked heading isn't hidden under the sticky header above (nav ul is
+ * 2.4em + 2px border). */
+html {
+  scroll-padding-top: 3em;
 }
 
 body > header > nav {
@@ -510,6 +521,16 @@ blockquote.markdown-alert-caution > p:first-of-type::before {
   color: var(--mbr-alert-caution-icon-color);
 }
 
+/* Incomplete-block marker — wraps blocks starting with TK/TODO/FIXME/XXX
+ * (or whatever incomplete_markers configures). Highlights drafts in
+ * server/GUI mode; off by default in static builds. */
+.mbr-incomplete {
+  background: var(--mbr-incomplete-bg);
+  border-bottom: 2px dotted var(--mbr-incomplete-border);
+  padding: 0 0.15rem;
+  border-radius: 2px;
+}
+
 /* ==================== Marginalia (>>> - Level 3+ Nesting) ==================== */
 
 /*
@@ -678,6 +699,46 @@ a.mbr-link-enhanced[data-tooltip]::after {
   color: rgb(from var(--pico-tooltip-background-color) r g b / 0.75);
 }
 
+/* ==================== Collapsible Headings + Permalinks ==================== */
+
+/* Hidden sibling content when a heading is collapsed */
+.sectionhidden {
+  display: none;
+}
+
+/* Collapsible heading affordance */
+.mbr-collapsible {
+  cursor: pointer;
+  user-select: none;
+}
+.mbr-collapsible:focus-visible {
+  outline: 2px solid var(--pico-primary-focus, var(--pico-primary));
+  outline-offset: 2px;
+}
+
+/* "+" prefix when collapsed */
+.mbr-section-collapsed::before {
+  content: "+ ";
+  color: var(--pico-muted-color);
+  font-weight: normal;
+}
+
+/* Permalink anchor — muted pico color, visible but subdued */
+.mbr-heading-anchor {
+  margin-left: 0.4em;
+  color: var(--pico-muted-color);
+  text-decoration: none;
+  font-weight: normal;
+  opacity: 0.5;
+  font-size: 0.85em;
+}
+.mbr-heading-anchor:hover,
+.mbr-heading-anchor:focus {
+  opacity: 1;
+  color: var(--pico-primary);
+  text-decoration: underline;
+}
+
 /* ==================== Screen Reader Only (Accessibility) ==================== */
 
 /*
@@ -818,6 +879,16 @@ sup.footnote-reference {
   ul,
   ol {
     page-break-inside: avoid;
+  }
+
+  /* style inline katex the same as inline code by default */
+  .math-inline {
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-code-background-color);
+    color: var(--pico-code-color);
+    font-weight: var(--pico-font-weight);
+    line-height: initial;
+    font-size: 0.875em;
   }
 
   /* Marginalia: display inline for print (not absolute positioned) */

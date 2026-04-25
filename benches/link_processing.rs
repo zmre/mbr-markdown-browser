@@ -91,7 +91,7 @@ fn bench_resolve_outbound_links(c: &mut Criterion) {
         .collect();
 
     group.bench_function("50_links", |b| {
-        b.iter(|| resolve_outbound_links("/docs/current/", links.clone()));
+        b.iter(|| resolve_outbound_links("/docs/current/", links.clone(), false));
     });
 
     group.finish();

@@ -42,6 +42,8 @@ fn bench_render(c: &mut Criterion) {
                         false, // server_mode
                         false, // transcode_enabled
                         tag_sources,
+                        false, // mark_incomplete
+                        &[],
                     )
                     .await
                     .unwrap()

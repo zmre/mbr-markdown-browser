@@ -222,7 +222,7 @@ This creates sidecar files named `{pdf}.cover.jpg` next to each PDF. These files
 | [Plan](plan.pdf) | ![](plan.pdf.cover.jpg) |
 ```
 
-> **Note:** PDF cover extraction requires the `media-metadata` Cargo feature. See [CLI Reference](/reference/cli/) for details on the `--extract-pdf-cover` option.
+> **Note:** PDF cover extraction requires the `media-metadata` Cargo feature. See [Configuration Reference](/reference/configuration/#pdf-cover-extraction) for details on the `--extract-pdf-cover` option.
 
 ## OpenGraph Link Enrichment
 

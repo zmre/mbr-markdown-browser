@@ -105,6 +105,15 @@ pub struct Args {
     #[arg(long)]
     pub no_link_tracking: bool,
 
+    /// Highlight blocks that start with an incomplete-marker (TK/TODO/FIXME/XXX).
+    /// Default: on for server/GUI mode, off for static builds.
+    #[arg(long, conflicts_with = "no_mark_incomplete")]
+    pub mark_incomplete: bool,
+
+    /// Disable highlighting of incomplete-marker blocks (TK/TODO/FIXME/XXX).
+    #[arg(long, conflicts_with = "mark_incomplete")]
+    pub no_mark_incomplete: bool,
+
     /// Text to prepend to all page titles (e.g., "My Site: ").
     #[arg(long, value_name = "TEXT")]
     pub title_prefix: Option<String>,
@@ -176,6 +185,8 @@ mod tests {
             build_concurrency: None,
             skip_link_checks: false,
             no_link_tracking: false,
+            mark_incomplete: false,
+            no_mark_incomplete: false,
             title_prefix: None,
             title_suffix: None,
             #[cfg(feature = "media-metadata")]
@@ -360,6 +371,26 @@ mod tests {
     fn test_parse_no_link_tracking() {
         let args = Args::parse_from(["mbr", "--no-link-tracking"]);
         assert!(args.no_link_tracking);
+    }
+
+    #[test]
+    fn test_parse_mark_incomplete() {
+        let args = Args::parse_from(["mbr", "--mark-incomplete"]);
+        assert!(args.mark_incomplete);
+        assert!(!args.no_mark_incomplete);
+    }
+
+    #[test]
+    fn test_parse_no_mark_incomplete() {
+        let args = Args::parse_from(["mbr", "--no-mark-incomplete"]);
+        assert!(args.no_mark_incomplete);
+        assert!(!args.mark_incomplete);
+    }
+
+    #[test]
+    fn test_parse_mark_incomplete_conflicts_with_no_mark_incomplete() {
+        let result = Args::try_parse_from(["mbr", "--mark-incomplete", "--no-mark-incomplete"]);
+        assert!(result.is_err(), "Mutually exclusive flags should error");
     }
 
     #[cfg(feature = "media-metadata")]

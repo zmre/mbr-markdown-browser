@@ -116,17 +116,27 @@ pub fn normalize_url_path(url: &str) -> String {
 
 /// Resolves a relative URL against a base URL path.
 ///
-/// Given a source page URL (e.g., "/docs/page/") and a relative link (e.g., "../other/"),
-/// returns the absolute target URL (e.g., "/other/").
+/// The `OutboundLink.to` values stored by the markdown renderer hold the
+/// **original** (pre-transform) link text from the markdown source, expressed
+/// relative to the source file in the markdown tree. This function converts
+/// that to an absolute site URL.
 ///
-/// In mbr, URLs like "/docs/page/" correspond to files like "docs/page.md".
-/// Relative links are resolved against the file's parent directory (e.g., "docs/").
+/// Markdown-level semantics: a link like `foo.md` in `X.md` means "sibling
+/// file of X.md". The base URL interpretation therefore depends on whether
+/// the source page is an index file:
+///
+/// - **Non-index** (`docs/guide.md` → `/docs/guide/`): the last URL segment
+///   is the file stem (`guide`), and siblings live in the parent directory
+///   (`/docs/`). Strip the last segment before applying the relative URL.
+/// - **Index** (`docs/modes/index.md` → `/modes/`): the URL already
+///   represents the directory; siblings live inside it. Keep all segments.
 ///
 /// # Examples
-/// - resolve_relative_url("/source/", "target/") → "/target/" (sibling in root)
-/// - resolve_relative_url("/docs/guide/", "intro/") → "/docs/intro/" (sibling in docs/)
-/// - resolve_relative_url("/docs/guide/", "../other/") → "/other/" (up from docs/ to root)
-pub fn resolve_relative_url(base_url: &str, relative_url: &str) -> String {
+/// - `resolve_relative_url("/modes/", "gui/", true)` → `"/modes/gui/"`
+/// - `resolve_relative_url("/docs/guide/", "intro/", false)` → `"/docs/intro/"`
+/// - `resolve_relative_url("/docs/guide/", "../other/", false)` → `"/other/"`
+/// - `resolve_relative_url("/source/", "../", false)` → `"/"`
+pub fn resolve_relative_url(base_url: &str, relative_url: &str, is_index_file: bool) -> String {
     // If the relative URL is already absolute, just normalize it
     if relative_url.starts_with('/') {
         let trimmed = relative_url.trim_end_matches('/');
@@ -142,36 +152,33 @@ pub fn resolve_relative_url(base_url: &str, relative_url: &str) -> String {
         return relative_url.to_string();
     }
 
-    // Split base URL into path segments
-    // The base URL like "/docs/guide/" represents a FILE in directory "/docs/"
-    // So we treat the last segment as the filename and start from its parent directory
     let base_segments: Vec<&str> = base_url
         .trim_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Remove the last segment (the "filename" part) to get the parent directory
-    let mut segments: Vec<&str> = if !base_segments.is_empty() {
-        base_segments[..base_segments.len() - 1].to_vec()
+    // For non-index pages, the last URL segment is the file stem — drop it
+    // so relative links resolve against the parent directory. For index
+    // pages, every segment is a real directory component.
+    let mut segments: Vec<&str> = if is_index_file || base_segments.is_empty() {
+        base_segments
     } else {
-        vec![]
+        base_segments[..base_segments.len() - 1].to_vec()
     };
 
-    // Process each segment of the relative URL
     for part in relative_url.split('/') {
         match part {
             "" | "." => {} // Skip empty or current directory
             ".." => {
-                segments.pop(); // Go up one directory
+                segments.pop();
             }
             segment => {
-                segments.push(segment); // Add the segment
+                segments.push(segment);
             }
         }
     }
 
-    // Reconstruct the absolute URL
     if segments.is_empty() {
         "/".to_string()
     } else {
@@ -181,13 +188,19 @@ pub fn resolve_relative_url(base_url: &str, relative_url: &str) -> String {
 
 /// Resolves all relative URLs in outbound links to absolute URLs.
 ///
-/// This is used before caching outbound links so the frontend can use them directly.
-pub fn resolve_outbound_links(base_url: &str, links: Vec<OutboundLink>) -> Vec<OutboundLink> {
+/// This is used before caching outbound links so the frontend can use them
+/// directly. `is_index_file` indicates whether `base_url` corresponds to an
+/// index markdown file; see [`resolve_relative_url`] for why this matters.
+pub fn resolve_outbound_links(
+    base_url: &str,
+    links: Vec<OutboundLink>,
+    is_index_file: bool,
+) -> Vec<OutboundLink> {
     links
         .into_iter()
         .map(|mut link| {
             if link.internal && !link.to.starts_with('/') && !link.to.starts_with('#') {
-                link.to = resolve_relative_url(base_url, &link.to);
+                link.to = resolve_relative_url(base_url, &link.to, is_index_file);
             }
             link
         })
@@ -475,5 +488,68 @@ mod tests {
         let links = PageLinks::default();
         assert!(links.inbound.is_empty());
         assert!(links.outbound.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_relative_url_index_page_sibling() {
+        // docs/modes/index.md → URL /modes/ → [GUI Mode](gui/) lands at /modes/gui/
+        assert_eq!(resolve_relative_url("/modes/", "gui/", true), "/modes/gui/");
+        assert_eq!(
+            resolve_relative_url("/reference/", "cli/", true),
+            "/reference/cli/"
+        );
+        assert_eq!(
+            resolve_relative_url("/getting-started/", "quickstart/", true),
+            "/getting-started/quickstart/"
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_url_nonindex_sibling() {
+        // docs/guide.md → URL /docs/guide/ with link [intro](intro.md) means
+        // sibling file docs/intro.md, which lives at URL /docs/intro/.
+        assert_eq!(
+            resolve_relative_url("/docs/guide/", "intro/", false),
+            "/docs/intro/"
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_url_nonindex_parent_traversal() {
+        // docs/sub/guide.md → URL /docs/sub/guide/ with link ../other/ means
+        // go up from docs/sub/ to docs/, then into other/.
+        assert_eq!(
+            resolve_relative_url("/docs/sub/guide/", "../other/", false),
+            "/docs/other/"
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_url_index_parent_traversal() {
+        // docs/modes/index.md with link ../other/ goes up from /modes/ to /,
+        // then into other/.
+        assert_eq!(
+            resolve_relative_url("/modes/", "../other/", true),
+            "/other/"
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_url_absolute_unchanged() {
+        // is_index_file value doesn't matter for absolute URLs
+        assert_eq!(resolve_relative_url("/modes/", "/other/", true), "/other/");
+        assert_eq!(
+            resolve_relative_url("/docs/guide/", "/other/", false),
+            "/other/"
+        );
+        assert_eq!(resolve_relative_url("/modes/", "/", true), "/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_anchor_only() {
+        assert_eq!(
+            resolve_relative_url("/modes/", "#section", true),
+            "#section"
+        );
     }
 }

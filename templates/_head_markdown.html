@@ -37,6 +37,8 @@
       window.extendedMeta = {
         wordCount: {{ word_count | default(value=0) }},
         readingTimeMinutes: {{ reading_time_minutes | default(value=0) }},
+        fleschReadingEase: {{ flesch_reading_ease | default(value="null") }},
+        fleschKincaidGrade: {{ flesch_kincaid_grade | default(value="null") }},
         filePath: "{{ file_path | default(value='') | safe }}",
         modifiedTimestamp: {{ modified_timestamp | default(value=0) }},
         {% if prev_page %}prevPage: { url: "{{ prev_page.url | safe }}", title: "{{ prev_page.title | escape }}" },{% endif %}

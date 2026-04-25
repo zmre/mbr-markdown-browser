@@ -38,6 +38,8 @@ interface PageNavLink {
 interface ExtendedMeta {
   wordCount: number;
   readingTimeMinutes: number;
+  fleschReadingEase: number | null;
+  fleschKincaidGrade: number | null;
   filePath: string;
   modifiedTimestamp: number;
   prevPage?: PageNavLink;
@@ -339,6 +341,22 @@ export class MbrInfoElement extends LitElement {
     `;
   }
 
+  /**
+   * Human-readable band label for a Flesch Reading Ease score.
+   * Thresholds follow the widely-cited Flesch interpretation table:
+   * 90+ Very Easy, 80+ Easy, 70+ Fairly Easy, 60+ Standard,
+   * 50+ Fairly Difficult, 30+ Difficult, otherwise Very Difficult.
+   */
+  private _fleschBand(score: number): string {
+    if (score >= 90) return 'Very Easy';
+    if (score >= 80) return 'Easy';
+    if (score >= 70) return 'Fairly Easy';
+    if (score >= 60) return 'Standard';
+    if (score >= 50) return 'Fairly Difficult';
+    if (score >= 30) return 'Difficult';
+    return 'Very Difficult';
+  }
+
   private _renderDocumentInfoSection(): TemplateResult | typeof nothing {
     const meta = this._extendedMeta;
     if (!meta || (!meta.wordCount && !meta.modifiedTimestamp && !meta.filePath)) {
@@ -351,14 +369,35 @@ export class MbrInfoElement extends LitElement {
         <div class="info-content">
           <table class="metadata-table striped">
             <tbody>
+              ${meta.wordCount > 0 ? html`
+                <tr>
+                  <th scope="row">Words</th>
+                  <td>${meta.wordCount.toLocaleString()}</td>
+                </tr>
+              ` : nothing}
               ${meta.readingTimeMinutes > 0 ? html`
                 <tr>
                   <th scope="row">Reading Time</th>
+                  <td>${this._formatReadingTime(meta.readingTimeMinutes)}</td>
+                </tr>
+              ` : nothing}
+              ${meta.fleschReadingEase != null ? html`
+                <tr>
+                  <th scope="row" title="Flesch Reading Ease (0–100, higher = easier)">
+                    Reading Ease
+                  </th>
                   <td>
-                    <span class="reading-time" title="${meta.wordCount.toLocaleString()} words">
-                      ${this._formatReadingTime(meta.readingTimeMinutes)}
-                    </span>
+                    ${Math.round(meta.fleschReadingEase)} —
+                    ${this._fleschBand(meta.fleschReadingEase)}
                   </td>
+                </tr>
+              ` : nothing}
+              ${meta.fleschKincaidGrade != null ? html`
+                <tr>
+                  <th scope="row" title="Flesch-Kincaid Grade Level (US school grade)">
+                    Grade Level
+                  </th>
+                  <td>Grade ${meta.fleschKincaidGrade.toFixed(1)}</td>
                 </tr>
               ` : nothing}
               ${meta.modifiedTimestamp > 0 ? html`
@@ -746,10 +785,6 @@ export class MbrInfoElement extends LitElement {
     }
 
     /* Extended metadata styling */
-    .reading-time {
-      cursor: help;
-    }
-
     .file-path {
       font-size: 0.85em;
       background-color: var(--pico-code-background-color, #f4f4f4);

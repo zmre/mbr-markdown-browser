@@ -128,6 +128,54 @@ async fn test_build_sets_static_mode() {
     );
 }
 
+#[tokio::test]
+async fn test_build_no_incomplete_spans_by_default() {
+    // Static builds default mark_incomplete=false; published sites must not
+    // contain mbr-incomplete spans unless the user explicitly opts in.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "drafts.md",
+        "# Drafts\n\nTK rewrite this paragraph.\n\n- TODO finish item\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("drafts").join("index.html");
+    let html = fs::read_to_string(&html_path).expect("rendered html");
+    assert!(
+        !html.contains("mbr-incomplete"),
+        "Default build should not include mbr-incomplete spans: {html}"
+    );
+}
+
+#[tokio::test]
+async fn test_build_incomplete_spans_when_opted_in() {
+    // When mark_incomplete is forced on (e.g., via CLI/config), the build
+    // should emit the spans.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "drafts.md",
+        "# Drafts\n\nTK rewrite this paragraph.\n\nNormal paragraph.",
+    );
+
+    let mut config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.mark_incomplete = Some(true);
+
+    let output_dir = repo.path().join("build");
+    let builder = mbr::build::Builder::new(config, output_dir.clone()).expect("builder");
+    builder.build().await.expect("build");
+
+    let html_path = output_dir.join("drafts").join("index.html");
+    let html = fs::read_to_string(&html_path).expect("rendered html");
+    assert!(
+        html.contains(r#"<span class="mbr-incomplete">"#),
+        "Opted-in build should include mbr-incomplete spans: {html}"
+    );
+}
+
 // ============================================================================
 // Pagefind indexing tests
 // ============================================================================
@@ -1206,4 +1254,151 @@ async fn test_tag_page_exists_when_linked_manually() {
     // The tag index page should exist
     let tag_index = output.join("tags").join("index.html");
     assert!(tag_index.exists(), "Tags index page should exist");
+}
+
+// ============================================================================
+// Readability Scores (window.extendedMeta)
+// ============================================================================
+
+#[tokio::test]
+async fn test_build_injects_readability_scores() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "article.md",
+        "# Article\n\nThis is a simple test. It has several short sentences. \
+         The quick brown fox jumps over the lazy dog. Another sentence follows.\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("article").join("index.html");
+    assert!(html_path.exists(), "Expected {:?} to exist", html_path);
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    assert!(
+        html.contains("fleschReadingEase:"),
+        "Static build should include fleschReadingEase in extendedMeta"
+    );
+    assert!(
+        html.contains("fleschKincaidGrade:"),
+        "Static build should include fleschKincaidGrade in extendedMeta"
+    );
+    assert!(
+        !html.contains("fleschReadingEase: null"),
+        "FRE should be a number for a document with prose"
+    );
+    assert!(
+        !html.contains("fleschKincaidGrade: null"),
+        "FKGL should be a number for a document with prose"
+    );
+}
+
+#[tokio::test]
+async fn test_build_readability_scores_null_for_code_only() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "code-only.md",
+        "```rust\nfn main() { println!(\"hello\"); }\n```\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("code-only").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    assert!(
+        html.contains("fleschReadingEase: null"),
+        "FRE should render as null for a code-only document"
+    );
+    assert!(
+        html.contains("fleschKincaidGrade: null"),
+        "FKGL should render as null for a code-only document"
+    );
+}
+
+// ============================================================================
+// Static build guarantee: per-page error surface must never leak into output
+// ============================================================================
+
+/// Recursively collect every regular file under `root`.
+fn walk_all_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Follow into directories only (don't chase symlinks to foreign trees).
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_dir() {
+                stack.push(path);
+            } else if meta.file_type().is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn test_build_output_contains_no_errors_json_files() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "readme.md",
+        "# Hello\n\n[link](./other/)\n\n![img](./img.png)",
+    );
+    repo.create_markdown("other.md", "# Other");
+
+    let output = build_site(&repo).await;
+
+    let all_files = walk_all_files(&output);
+    let errors_json_files: Vec<_> = all_files
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f == "errors.json")
+        })
+        .collect();
+
+    assert!(
+        errors_json_files.is_empty(),
+        "static build must not emit errors.json files (found {:?})",
+        errors_json_files
+    );
+}
+
+#[tokio::test]
+async fn test_build_output_does_not_reference_mbr_page_errors() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello");
+    repo.create_markdown("docs/page.md", "# Doc page");
+
+    let output = build_site(&repo).await;
+
+    for file in walk_all_files(&output) {
+        // Only inspect HTML files; .mbr/ built assets contain the compiled JS
+        // which legitimately defines the custom element class.
+        let Some(ext) = file.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if ext != "html" {
+            continue;
+        }
+
+        let content = fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            !content.contains("<mbr-page-errors"),
+            "built HTML at {:?} must not contain <mbr-page-errors>, found: {}",
+            file,
+            content
+                .lines()
+                .find(|l| l.contains("<mbr-page-errors"))
+                .unwrap_or("")
+        );
+    }
 }

@@ -11,6 +11,7 @@ use pulldown_cmark::{
     CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd,
     TextMergeStream,
 };
+use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -157,6 +158,17 @@ pub struct MarkdownRenderResult {
     pub has_h1: bool,
     /// Word count of the document (excluding code blocks and metadata)
     pub word_count: usize,
+    /// Sentence count of the document (excluding code blocks and metadata).
+    ///
+    /// Approximated by scanning for terminal punctuation (`.!?`) in text
+    /// events, plus one-per-block for paragraphs, headings, and list items
+    /// whose final text did not end in terminal punctuation.
+    pub sentence_count: usize,
+    /// Syllable count of the document (excluding code blocks and metadata).
+    ///
+    /// Computed via [`crate::readability::count_syllables`] for each
+    /// whitespace-delimited word during rendering.
+    pub syllable_count: usize,
 }
 
 struct EventState {
@@ -188,9 +200,61 @@ struct EventState {
     word_count: usize,
     /// Track if we're inside a code block (to exclude from word count)
     in_code_block: bool,
+    /// Sentence count accumulator (via terminal punctuation + block-end bumps)
+    sentence_count: usize,
+    /// Syllable count accumulator (summed per counted word)
+    syllable_count: usize,
+    /// Whether the last observed non-metadata/non-code text ended with
+    /// terminal punctuation. Used to bump `sentence_count` at the end of
+    /// paragraphs, headings, and list items whose final text lacked a `.!?`.
+    block_needs_sentence_bump: bool,
 }
 
 pub type SimpleMetadata = HashMap<String, serde_json::Value>;
+
+/// Scan a slice of text for sentence-terminating punctuation (`.!?`).
+///
+/// Returns `(count, ends_with_terminator)` where:
+///
+/// * `count` — the number of in-text sentence terminators, defined as a `.!?`
+///   that is followed by either whitespace or the end of the slice, and which
+///   is not part of a run of terminators (so `...` and `?!` count once).
+/// * `ends_with_terminator` — whether the last non-whitespace character is one
+///   of `.!?`. This is used by the render loop to decide whether to credit
+///   the enclosing block (paragraph/heading/item) with one extra sentence.
+///
+/// The heuristic is intentionally simple: it does not attempt to detect
+/// abbreviations like "Dr." or "e.g." — these false positives are unlikely to
+/// materially shift the FRE/FKGL band for a document of any meaningful length.
+fn count_sentence_terminators(text: &str) -> (usize, bool) {
+    let bytes = text.as_bytes();
+    let mut count: usize = 0;
+    let mut prev_was_terminator = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        let is_terminator = matches!(b, b'.' | b'!' | b'?');
+        if is_terminator && !prev_was_terminator {
+            // Count only when the terminator is followed by whitespace or is
+            // the last non-whitespace character. This avoids counting every
+            // `.` in URLs and numeric contexts.
+            let next_is_boundary = bytes[i + 1..]
+                .iter()
+                .find(|&&c| !matches!(c, b'.' | b'!' | b'?'))
+                .is_none_or(|&c| c.is_ascii_whitespace());
+            if next_is_boundary {
+                count += 1;
+            }
+        }
+        prev_was_terminator = is_terminator;
+    }
+
+    let ends_with_terminator = text
+        .trim_end()
+        .chars()
+        .next_back()
+        .is_some_and(|c| matches!(c, '.' | '!' | '?'));
+
+    (count, ends_with_terminator)
+}
 
 /// Extracts the first H1 heading text from markdown content.
 ///
@@ -429,6 +493,7 @@ fn collect_events_and_headings(
     (events, headings, section_attrs)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn render(
     file: PathBuf,
     root_path: &Path,
@@ -437,6 +502,8 @@ pub async fn render(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    mark_incomplete: bool,
+    incomplete_markers: &[String],
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     render_with_cache(
         file,
@@ -447,6 +514,8 @@ pub async fn render(
         server_mode,
         transcode_enabled,
         valid_tag_sources,
+        mark_incomplete,
+        incomplete_markers,
     )
     .await
 }
@@ -470,6 +539,8 @@ pub async fn render_with_cache(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    mark_incomplete: bool,
+    incomplete_markers: &[String],
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input
     let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
@@ -511,6 +582,17 @@ pub async fn render_with_cache(
         transcode_enabled,
         valid_tag_sources,
     );
+
+    // Pass 3 (optional): wrap blocks starting with TK/TODO/FIXME/XXX in
+    // <span class="mbr-incomplete">…</span>. Off by default in build mode.
+    let processed_events = if mark_incomplete {
+        match build_incomplete_marker_regex(incomplete_markers) {
+            Some(re) => mark_incomplete_blocks(processed_events, &re),
+            None => processed_events,
+        }
+    } else {
+        processed_events
+    };
 
     // Generate HTML output and extract frontmatter
     finalize_render(
@@ -555,6 +637,9 @@ fn process_all_events<'a>(
         valid_tag_sources,
         word_count: 0,
         in_code_block: false,
+        sentence_count: 0,
+        syllable_count: 0,
+        block_needs_sentence_bump: false,
     };
     let mut processed_events = Vec::with_capacity(events.len());
 
@@ -565,6 +650,90 @@ fn process_all_events<'a>(
     }
 
     (processed_events, state)
+}
+
+const INCOMPLETE_SPAN_OPEN: &str = "<span class=\"mbr-incomplete\">";
+const INCOMPLETE_SPAN_CLOSE: &str = "</span>";
+
+/// Build a `^(?:M1|M2|...)\b` regex from `markers`. Empty markers → None
+/// (caller should skip the pass). Markers are escaped via `regex::escape`.
+pub(crate) fn build_incomplete_marker_regex(markers: &[String]) -> Option<Regex> {
+    let parts: Vec<String> = markers
+        .iter()
+        .filter(|m| !m.is_empty())
+        .map(|m| regex::escape(m))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let pattern = format!("^(?:{})\\b", parts.join("|"));
+    Regex::new(&pattern).ok()
+}
+
+/// Wrap inline content of blocks whose first text matches `marker_re` in
+/// `<span class="mbr-incomplete">…</span>`.
+///
+/// Eligible (innermost) blocks: `Paragraph`, `Heading{..}`, `Item`, `TableCell`.
+/// Other container tags (`BlockQuote`, `List`, `Table`, code blocks, etc.) are
+/// skipped — their inner Paragraph (or absence thereof) is what we evaluate.
+fn mark_incomplete_blocks<'a>(events: Vec<Event<'a>>, marker_re: &Regex) -> Vec<Event<'a>> {
+    struct Frame {
+        start_idx: usize,
+        has_seen_text: bool,
+        marker_open: bool,
+    }
+
+    let mut output: Vec<Event<'a>> = Vec::with_capacity(events.len());
+    let mut stack: Vec<Frame> = Vec::new();
+
+    for event in events {
+        match &event {
+            Event::Start(Tag::Paragraph)
+            | Event::Start(Tag::Heading { .. })
+            | Event::Start(Tag::Item)
+            | Event::Start(Tag::TableCell) => {
+                let start_idx = output.len();
+                output.push(event);
+                stack.push(Frame {
+                    start_idx,
+                    has_seen_text: false,
+                    marker_open: false,
+                });
+            }
+            Event::End(TagEnd::Paragraph)
+            | Event::End(TagEnd::Heading(_))
+            | Event::End(TagEnd::Item)
+            | Event::End(TagEnd::TableCell) => {
+                if let Some(frame) = stack.pop()
+                    && frame.marker_open
+                {
+                    output.push(Event::Html(CowStr::from(INCOMPLETE_SPAN_CLOSE)));
+                }
+                output.push(event);
+            }
+            Event::Text(text) => {
+                if let Some(top) = stack.last_mut()
+                    && !top.has_seen_text
+                {
+                    top.has_seen_text = true;
+                    if marker_re.is_match(text.trim_start()) {
+                        // Insert span open immediately after this frame's Start event.
+                        output.insert(
+                            top.start_idx + 1,
+                            Event::Html(CowStr::from(INCOMPLETE_SPAN_OPEN)),
+                        );
+                        top.marker_open = true;
+                    }
+                }
+                output.push(event);
+            }
+            _ => {
+                output.push(event);
+            }
+        }
+    }
+
+    output
 }
 
 /// Generates final HTML output and constructs the MarkdownRenderResult.
@@ -616,6 +785,8 @@ fn finalize_render(
         outbound_links: deduplicated_links,
         has_h1,
         word_count: state.word_count,
+        sentence_count: state.sentence_count,
+        syllable_count: state.syllable_count,
     })
 }
 
@@ -638,6 +809,8 @@ pub fn render_sync(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    mark_incomplete: bool,
+    incomplete_markers: &[String],
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input
     let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
@@ -684,6 +857,17 @@ pub fn render_sync(
         transcode_enabled,
         valid_tag_sources,
     );
+
+    // Pass 3 (optional): wrap blocks starting with TK/TODO/FIXME/XXX in
+    // <span class="mbr-incomplete">…</span>. Off by default in build mode.
+    let processed_events = if mark_incomplete {
+        match build_incomplete_marker_regex(incomplete_markers) {
+            Some(re) => mark_incomplete_blocks(processed_events, &re),
+            None => processed_events,
+        }
+    } else {
+        processed_events
+    };
 
     // Generate HTML output and extract frontmatter
     finalize_render(
@@ -1077,14 +1261,38 @@ fn process_event(
             state.in_code_block = false;
             (event, state)
         }
+        // Block boundaries for readability's sentence count: paragraphs,
+        // headings, and list items whose last text did not end in `.!?` get
+        // one implicit sentence credit. This avoids undercounting headings
+        // ("Introduction") and terse bullet items ("Install Rust").
+        Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
+            if state.block_needs_sentence_bump {
+                state.sentence_count += 1;
+                state.block_needs_sentence_bump = false;
+            }
+            (event, state)
+        }
         Event::Text(text) => {
             // Accumulate link text when inside a link
             if state.in_link {
                 state.current_link_text.push_str(text);
             }
-            // Count words in text content (excluding metadata and code blocks)
+            // Count words, sentences, and syllables in text content
+            // (excluding metadata and code blocks).
             if !state.in_metadata && !state.in_code_block {
-                state.word_count += text.split_whitespace().count();
+                for word in text.split_whitespace() {
+                    state.word_count += 1;
+                    state.syllable_count += crate::readability::count_syllables(word);
+                }
+                let (sentences_in_text, ends_with_terminator) = count_sentence_terminators(text);
+                state.sentence_count += sentences_in_text;
+                // Track whether the enclosing block still needs a sentence
+                // bump at its End tag. Trailing whitespace is ignored: we
+                // care whether the last non-space character is `.!?`.
+                let trimmed = text.trim_end();
+                if !trimmed.is_empty() {
+                    state.block_needs_sentence_bump = !ends_with_terminator;
+                }
             }
             if state.in_metadata {
                 state.metadata_parsed = YamlLoader::load_from_str(text)
@@ -1164,11 +1372,124 @@ mod tests {
             is_index_file,
             url_depth: None,
         };
-        // Tests run with server_mode=false, transcode_enabled=false
-        let result = render(path, &root, 100, config, false, false, tag_sources)
-            .await
-            .unwrap();
+        // Tests run with server_mode=false, transcode_enabled=false, mark_incomplete=false
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            tag_sources,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         result.html
+    }
+
+    /// Render with `mark_incomplete = true` and the given marker list.
+    async fn render_markdown_marked(content: &str, markers: &[&str]) -> String {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+        };
+        let owned: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
+        let result = render(
+            path,
+            &root,
+            0,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            true,
+            &owned,
+        )
+        .await
+        .unwrap();
+        result.html
+    }
+
+    async fn render_result(content: &str) -> MarkdownRenderResult {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+        };
+        render(
+            path,
+            &root,
+            0,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn sentence_terminator_basic_cases() {
+        assert_eq!(count_sentence_terminators(""), (0, false));
+        assert_eq!(count_sentence_terminators("Hello."), (1, true));
+        assert_eq!(count_sentence_terminators("Hi! How are you?"), (2, true));
+        // Ellipsis counts once.
+        assert_eq!(count_sentence_terminators("Wait..."), (1, true));
+        // Mid-sentence period not followed by whitespace shouldn't count.
+        assert_eq!(count_sentence_terminators("v1.2.3 is out."), (1, true));
+        // Missing trailing terminator.
+        assert_eq!(count_sentence_terminators("No ending here"), (0, false));
+    }
+
+    #[tokio::test]
+    async fn readability_counts_simple_paragraph() {
+        let md = "The cat sat on the mat. The dog ran away.";
+        let result = render_result(md).await;
+        assert_eq!(result.word_count, 10);
+        assert_eq!(result.sentence_count, 2);
+        // Nine one-syllable words plus "away" (a-way, 2 syllables).
+        assert_eq!(result.syllable_count, 11);
+    }
+
+    #[tokio::test]
+    async fn readability_heading_without_terminator_bumps_sentence() {
+        let md = "# Introduction\n\nHello world.";
+        let result = render_result(md).await;
+        assert_eq!(result.word_count, 3);
+        // Heading ("Introduction") + "Hello world." = 2 sentences.
+        assert_eq!(result.sentence_count, 2);
+    }
+
+    #[tokio::test]
+    async fn readability_excludes_code_blocks() {
+        let md = "Some prose here.\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n";
+        let result = render_result(md).await;
+        assert_eq!(result.word_count, 3);
+        assert_eq!(result.sentence_count, 1);
+    }
+
+    #[tokio::test]
+    async fn readability_empty_document_has_zero_counts() {
+        let result = render_result("").await;
+        assert_eq!(result.word_count, 0);
+        assert_eq!(result.sentence_count, 0);
+        assert_eq!(result.syllable_count, 0);
     }
 
     #[tokio::test]
@@ -1235,9 +1556,19 @@ mod tests {
             is_index_file: false,
             url_depth: None,
         };
-        let result = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             result.frontmatter.get("title"),
             Some(&serde_json::Value::String("Test Title".to_string()))
@@ -1293,9 +1624,19 @@ mod tests {
             is_index_file: false,
             url_depth: None,
         };
-        let result = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(result.has_h1);
     }
 
@@ -1312,9 +1653,19 @@ mod tests {
             is_index_file: false,
             url_depth: None,
         };
-        let result = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(!result.has_h1);
     }
 
@@ -1332,9 +1683,19 @@ mod tests {
             is_index_file: false,
             url_depth: None,
         };
-        let result = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(result.has_h1);
         assert_eq!(
             result.frontmatter.get("title"),
@@ -1356,9 +1717,19 @@ mod tests {
             is_index_file: false,
             url_depth: None,
         };
-        let result = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(result.has_h1);
         assert_eq!(
             result.frontmatter.get("title"),
@@ -1380,9 +1751,19 @@ mod tests {
             is_index_file: false,
             url_depth: None,
         };
-        let result = render(path, &root, 100, config, false, false, HashSet::new())
-            .await
-            .unwrap();
+        let result = render(
+            path,
+            &root,
+            100,
+            config,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(!result.has_h1);
         assert_eq!(result.frontmatter.get("title"), None);
     }
@@ -1871,6 +2252,261 @@ mod tests {
             html.contains(r#"data-val="a &amp; b""#),
             "Value should have escaped &. Got: {}",
             html
+        );
+    }
+
+    // ==================== Incomplete-block marker tests ====================
+
+    const DEFAULT_MARKERS: &[&str] = &["TK", "TODO", "FIXME", "XXX"];
+
+    #[test]
+    fn test_build_incomplete_marker_regex_defaults() {
+        let markers = default_incomplete_markers_for_test();
+        let re = build_incomplete_marker_regex(&markers).expect("regex");
+        assert!(re.is_match("TK"));
+        assert!(re.is_match("TK rewrite this"));
+        assert!(re.is_match("TODO foo"));
+        assert!(re.is_match("FIXME(name)"));
+        assert!(re.is_match("XXX:"));
+        // Word boundary blocks TKTK / TODOs / Tk / lowercase.
+        assert!(!re.is_match("TKTK"));
+        assert!(!re.is_match("TODOs"));
+        assert!(!re.is_match("Tk"));
+        assert!(!re.is_match("todo"));
+        assert!(!re.is_match("Tomato"));
+    }
+
+    #[test]
+    fn test_build_incomplete_marker_regex_empty() {
+        // Empty list → no regex (caller short-circuits).
+        let markers: Vec<String> = Vec::new();
+        assert!(build_incomplete_marker_regex(&markers).is_none());
+        // Empty strings filtered out too.
+        let markers = vec!["".to_string()];
+        assert!(build_incomplete_marker_regex(&markers).is_none());
+    }
+
+    #[test]
+    fn test_build_incomplete_marker_regex_escapes_metachars() {
+        // Markers containing regex metacharacters must not crash regex
+        // compilation. Without `regex::escape`, an unbalanced `(` would
+        // produce an invalid pattern and `Regex::new` would return None.
+        let markers = vec!["FOO(".to_string(), "BAR".to_string()];
+        let re = build_incomplete_marker_regex(&markers).expect("regex compiles");
+        // BAR still matches normally (word-boundary check applies).
+        assert!(re.is_match("BAR foo"));
+        // And the metachar marker doesn't break sibling markers.
+        assert!(!re.is_match("Tomato"));
+    }
+
+    fn default_incomplete_markers_for_test() -> Vec<String> {
+        DEFAULT_MARKERS.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_paragraph() {
+        let html = render_markdown_marked("TK rewrite this paragraph.", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            "Paragraph should have span as first child. Got: {html}"
+        );
+        assert!(html.contains("TK rewrite"), "TK text preserved: {html}");
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_heading() {
+        let html = render_markdown_marked("## TODO finish this", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<span class="mbr-incomplete">"#),
+            "Span should be present in heading. Got: {html}"
+        );
+        // Span must be inside the <h2>, not wrapping it.
+        assert!(html.contains("<h2"), "h2 element present: {html}");
+        let h2_start = html.find("<h2").unwrap();
+        let span_start = html.find(r#"<span class="mbr-incomplete">"#).unwrap();
+        assert!(span_start > h2_start, "span should be inside h2: {html}");
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_tight_list_item() {
+        let html = render_markdown_marked("- TK item one\n- normal item", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<li><span class="mbr-incomplete">"#),
+            "Span should follow <li> for tight list: {html}"
+        );
+        // Only the TK item is wrapped.
+        assert_eq!(
+            html.matches(r#"<span class="mbr-incomplete">"#).count(),
+            1,
+            "Only one span expected: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_loose_list_item() {
+        // Blank line between items forces loose list — items wrap their content
+        // in <p>. The inner <p> is the innermost block, so the span goes there.
+        let md = "- TK draft this\n\n- finished item\n";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            "Span should wrap inner <p> in loose list: {html}"
+        );
+        // The <li> itself should not have the span as a direct child.
+        assert!(
+            !html.contains(r#"<li><span class="mbr-incomplete">"#),
+            "Loose-list <li> should not have direct span child: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_table_cell() {
+        let md = "| H |\n|---|\n| TK cell |\n";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<td><span class="mbr-incomplete">"#),
+            "Span should follow <td> for incomplete cell: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_blockquote_paragraph() {
+        // Blockquote itself is not eligible; its inner Paragraph is.
+        let html = render_markdown_marked("> TK quote me", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            "Inner <p> should carry the span, not <blockquote>: {html}"
+        );
+        assert!(
+            !html.contains(r#"<blockquote><span"#),
+            "Blockquote should not be span-wrapped: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_with_strong_emphasis() {
+        // Span goes immediately after <p>, so it wraps the <strong>.
+        let html = render_markdown_marked("**TK** finish later", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<p><span class="mbr-incomplete"><strong>TK</strong>"#),
+            "Span should wrap <strong>TK</strong>: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_with_link() {
+        // A link starting the paragraph: span should wrap the <a>.
+        let html =
+            render_markdown_marked("[TK](https://example.com) check this", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"<p><span class="mbr-incomplete"><a "#),
+            "Span should wrap the link: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_negative_tomato() {
+        // Word starting with "T" but not a marker.
+        let html = render_markdown_marked("Tomato is red.", DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "'Tomato' should not match: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_negative_lowercase() {
+        let html = render_markdown_marked("Tk lowercase ignored.", DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "Mixed case 'Tk' should not match: {html}"
+        );
+        let html2 = render_markdown_marked("todo lowercase.", DEFAULT_MARKERS).await;
+        assert!(
+            !html2.contains("mbr-incomplete"),
+            "lowercase 'todo' should not match: {html2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_negative_word_boundary() {
+        // TKTK and TODOs must not match (no word boundary at marker end).
+        let html = render_markdown_marked("TKTK shouldn't match.", DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "TKTK should not match: {html}"
+        );
+        let html2 = render_markdown_marked("TODOs are plural.", DEFAULT_MARKERS).await;
+        assert!(
+            !html2.contains("mbr-incomplete"),
+            "'TODOs' should not match: {html2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_negative_mid_paragraph() {
+        let html =
+            render_markdown_marked("This paragraph mentions TK in the middle.", DEFAULT_MARKERS)
+                .await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "Mid-paragraph TK should not match: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_negative_code_block() {
+        // Code blocks never push a frame, so the TK inside is ignored.
+        let md = "```\nTK code lines\n```\n";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "TK in code block should not match: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_negative_frontmatter() {
+        let md = "---\ntitle: TK rename later\n---\n\nNormal paragraph.";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "TK in frontmatter should not match: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_disabled_no_span() {
+        // mark_incomplete=false → never injects spans, even with markers present.
+        let html = render_markdown("TK should not be highlighted.").await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "Disabled flag suppresses span: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_custom_markers() {
+        let html = render_markdown_marked("NOTE this draft.", &["NOTE"]).await;
+        assert!(
+            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            "Custom marker NOTE should match: {html}"
+        );
+        // TK is not in the custom marker list now.
+        let html2 = render_markdown_marked("TK ignored under custom list.", &["NOTE"]).await;
+        assert!(
+            !html2.contains("mbr-incomplete"),
+            "TK should not match when only NOTE configured: {html2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_empty_markers_no_op() {
+        // Empty marker list short-circuits the pass: no spans injected.
+        let html = render_markdown_marked("TK still here.", &[]).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "Empty marker list should not inject spans: {html}"
         );
     }
 

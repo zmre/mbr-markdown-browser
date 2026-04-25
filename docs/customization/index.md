@@ -51,7 +51,7 @@ flowchart TD
 
 | File | Purpose | Guide |
 |------|---------|-------|
-| `config.toml` | Settings and behavior | [CLI Reference](../reference/cli/), [Sorting](sorting/) |
+| `config.toml` | Settings and behavior | [Configuration Reference](../reference/configuration/), [Sorting](sorting/) |
 | `theme.css` | Color theme override | [Themes](themes/) |
 | `user.css` | Additional styles | [Themes](themes/) |
 | `index.html` | Main page template | [Templates](templates/) |

@@ -43,9 +43,14 @@ When making code changes, you MUST also update:
 
 Update `docs/reference/cli.md` when:
 - Adding or removing CLI flags/options
-- Changing default values for any configuration
+- Changing default values for CLI flags
+- Changing behavior of existing CLI flags
+
+Update `docs/reference/configuration.md` when:
 - Adding new configuration options to `config.rs`
-- Changing behavior of existing options
+- Changing default values for configuration options
+- Changing behavior of existing configuration options or environment variables
+- Adding or changing feature-specific settings (oembed, link tracking, video metadata, transcoding, PDF cover extraction)
 
 Update other docs in `docs/` when:
 - Adding new features that users need to know about
@@ -119,6 +124,8 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--transcode` | Enable HLS video transcoding for 720p/480p variants (server/GUI only) | `false` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
+| `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
+| `--no-mark-incomplete` | Disable incomplete-block highlighting | (unset) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
 | `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `-v, --verbose` | Increase log verbosity | warn level |
@@ -127,7 +134,7 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 - `--skip-X` — Skips a build-time operation (e.g., `--skip-link-checks` skips validation during build)
 - `--no-X` — Disables a runtime feature (e.g., `--no-link-tracking` disables backlink tracking)
 
-See `docs/reference/cli.md` for complete documentation.
+See `docs/reference/cli.md` for CLI flag documentation and `docs/reference/configuration.md` for configuration file, environment variable, and feature-specific settings.
 
 ## Testing
 
