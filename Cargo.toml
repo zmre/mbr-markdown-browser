@@ -103,7 +103,7 @@ muda = { version = "0.18", optional = true }
 rfd = { version = "0.17", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-muda = { version = "0.17", features = ["gtk", "libxdo"], optional = true }
+muda = { version = "0.18", features = ["gtk", "libxdo"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
