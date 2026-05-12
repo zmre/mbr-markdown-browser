@@ -333,7 +333,7 @@
         inherit version;
         src = ./components;
         #npmDepsHash = pkgs.lib.fakeHash;
-        npmDepsHash = "sha256-YAYjTxuF084gXa5/Ifr79QgtGa5IQQv4PmZoxjvexlA=";
+        npmDepsHash = "sha256-GKFNZA0qTT68WKS3Vw2TIdCrO43iejnU5KyVDbmt5Ks=";
         buildPhase = ''
           npm run build
         '';
