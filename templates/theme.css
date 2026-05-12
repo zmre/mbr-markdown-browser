@@ -723,14 +723,19 @@ a.mbr-link-enhanced[data-tooltip]::after {
   font-weight: normal;
 }
 
-/* Permalink anchor — muted pico color, visible but subdued */
+/* Permalink anchor — hidden by default, revealed on heading hover/focus */
 .mbr-heading-anchor {
   margin-left: 0.4em;
   color: var(--pico-muted-color);
   text-decoration: none;
   font-weight: normal;
-  opacity: 0.5;
+  opacity: 0;
   font-size: 0.85em;
+  transition: opacity 0.15s ease-in-out;
+}
+:is(h1, h2, h3, h4, h5, h6):hover .mbr-heading-anchor,
+:is(h1, h2, h3, h4, h5, h6):focus-within .mbr-heading-anchor {
+  opacity: 0.5;
 }
 .mbr-heading-anchor:hover,
 .mbr-heading-anchor:focus {
