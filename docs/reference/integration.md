@@ -23,7 +23,7 @@ mbr -s ~/Documents/ObsidianVault
 | YAML frontmatter | Full | Tags, aliases, etc. |
 | Wikilinks | Partial | Standard `[[link]]` renders as-is |
 | Embedded files | Partial | Images work, transclusion doesn't |
-| Callouts | Full | GitHub-style alerts are similar |
+| Callouts | Full | GitHub-style alerts; remark-hint `!>`/`?>`/`x>` shorthand also accepted |
 | Mermaid | Full | Same syntax |
 
 ### Configuration for Obsidian
