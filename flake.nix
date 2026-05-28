@@ -15,7 +15,11 @@
   description = "mbr markdown browser";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-25.11-darwin";
+    # Use the darwin-specific channel on macOS (better cached for darwin builds)
+    # and the standard nixos channel on Linux. Flake inputs can't be selected
+    # conditionally, so both are declared and the right one is picked in outputs.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
@@ -24,6 +28,7 @@
   outputs = {
     self,
     nixpkgs,
+    nixpkgs-darwin,
     rust-overlay,
     crane,
     flake-utils,
@@ -31,7 +36,11 @@
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       overlays = [(import rust-overlay)];
-      pkgs = import nixpkgs {
+      nixpkgsForSystem =
+        if (system == "aarch64-darwin" || system == "x86_64-darwin")
+        then nixpkgs-darwin
+        else nixpkgs;
+      pkgs = import nixpkgsForSystem {
         inherit system overlays;
         config.allowUnfree = true;
       };
