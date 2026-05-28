@@ -13,14 +13,17 @@
     "bench": "vitest bench"
   },
   "dependencies": {
-    "lit": "^3.3.2"
+    "lit": "^3.3.3"
   },
   "devDependencies": {
-    "@vitest/browser": "^4.1.6",
+    "@vitest/browser": "^4.1.7",
     "happy-dom": "^20.9.0",
-    "terser": "^5.47.1",
+    "terser": "^5.48.0",
     "typescript": "~6.0.3",
-    "vite": "^8.0.12",
-    "vitest": "^4.1.6"
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7"
+  },
+  "overrides": {
+    "ws": "^8.20.1"
   }
 }

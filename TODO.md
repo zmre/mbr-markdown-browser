@@ -2,19 +2,9 @@
 
 ## What's Next
 
-* [x] .math-inline needs same coloring as code inline @done(2026-04-22 5:10 PM)
-* [x] Update lru to 0.17 @done(2026-04-23 11:49 AM)
-* [x] Move Configuration reference docs out of CLI doc into their own doc @done(2026-04-23 12:00 PM)
-* [x] Add to our info popup: word count (ignoring frontmatter, of course), Readability scores (eg, Flesch-Kincaid scores) @done(2026-04-23 6:06 PM)
-* [x] Allow collapse/expand (hide) of sections by clicking on the heading if it isn't already a link. If not a link, then it should have a cursor icon and on click collapse. When in collapsed mode, it should put a `+` icon as a prefix via css to make clear that clicking again will toggle back. We are not changing the HTML by adding div wrappers here. Instead, on click of a heading we will walk over each subsequent element at that same level and add a "sectionhidden" class to each one until we get to another heading of the same level or higher. so if an h3 is clicked on, it will hide all paragraphs, tables, blockquotes, etc., by adding the marker class and any h4's and h5's, too, until it gets to a h3 or h2 or the end of the content.  When toggling back, use the same logic, but remove the sectionhidden classes. This should be implemented as a new component that, when loaded, upgrades the UI, but does it async and without blocking rendering. This new component should also add a link target at the end of each heading, separate from the hide/show, that is a link to that specific header. It should be a muted pico color and look like a link and be a href to the current page with the current anchor based on the ID of the current heading. this way someone can jump straight to a specific section easily. @done(2026-04-23 10:46 PM)
-* [x] mbr bug with `f` links. in website blog, clicking the link works, but clicking the link from f popup doesn't. it adds an extra .. that makes it invalid @done(2026-04-24 3:22 PM)
-* [x] Watch for "TK" at the start of text blocks and do some kind of styling on the whole block when found. Probably a span with `class="todo"` or something. @done(2026-04-24 8:12 PM)
-* [x] Allow links directly to headings of sections (and copy of the urls) @done(2026-04-23 11:17 PM)
-* [x] We do link validation on static site build, but don't currently let the user know if the page they're viewing has broken links on it. Triggering a component that shows when there are page errors would be very useful. It should be next to the "i" icon and should be some sort of error icon that only shows if there are detected problems. We could use this for other issues as well if we think of any.  I think an endpoint for errors, per page, that only works in server/gui modes would allow for async fetching of error info without blocking on initial render. @done(2026-04-23 11:19 PM)
-* [ ] Media browser allows tab and shift-tab to select forward and back. Needs to also support ctrl-n, ctrl-p
-
 * [ ] CriticMarkup support?
 * [ ] Export to PDF
+  * _After research, my options here are pretty ugly. I don't want to compile in chromium or anything and don't want to rely on it being installed in a common place, either. Current browser widget I use doesn't give me a print to pdf option. Need to look for a reasonable way to make this happen cross platform with reliable output._
   * Print stylesheet support and light background default (though I guess we could make a dark background PDF).
   * Start with the current page as an option.
   * Also allow a print to PDF for the whole site (essentially taking a doc site and compiling everything into chapters in a single PDF).
@@ -35,6 +25,7 @@
   * [ ] wikilinks and the link checker: underscore-prefixed files (e.g., _...Baby One More Time Tour.md) - files with special chars were renamed with underscores but internal links weren't updated -- none of those work yet. not sure what to do
     * Need to look into the spaces vs. underscores stuff a bit here too
     * Answer: only if we submit PRs to pagefind or switch to something else
+  * [ ] Media scanning / populating media metadata is slow on large repos. Images take 2 to 10ms. PDFs can take a whole minute. Video files 30 to 50ms.  In practice, on the Magic repo, it takes many minutes (10?) to complete a first pass.  I want to research ways to speed this up. I want to make sure we are doing what we can in parallel and I want to see if the libraries we're using have competitors that are faster. I also want to understand what information we're gathering that's slow. Most metadata should be at the front of the file so we shouldn't have to read entire PDFs or video files when processing, but I suspect that's not the case.
 
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
 

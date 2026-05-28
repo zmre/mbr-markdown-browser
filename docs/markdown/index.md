@@ -89,6 +89,24 @@ Available box types: `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTI
 > [!CAUTION]
 > Advises about risks or negative outcomes. Running with `--template-folder` overrides local `.mbr/` settings.
 
+### remark-hint Shorthand
+
+mbr also recognizes the [remark-hint](https://github.com/sergioramos/remark-hint) shorthand. A paragraph that begins with one of these markers is rendered as the matching GitHub-style alert, with the marker stripped from the displayed text:
+
+| Marker | Renders as |
+|--------|-----------|
+| `!> ` | Tip |
+| `?> ` | Warning |
+| `x> ` | Caution |
+
+```markdown
+!> A helpful tip.
+?> Something to watch out for.
+x> A risky operation.
+```
+
+This shorthand is always on (no configuration required). The marker must appear at the very start of a paragraph and be followed by a space; otherwise the text is left untouched.
+
 ## Canceled Task Items
 
 In addition to standard checkboxes, mbr supports canceled items:

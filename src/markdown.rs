@@ -8,8 +8,8 @@ use crate::oembed_cache::OembedCache;
 use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use pulldown_cmark::{
-    CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser, Tag, TagEnd,
-    TextMergeStream,
+    BlockQuoteKind, CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser,
+    Tag, TagEnd, TextMergeStream,
 };
 use regex::Regex;
 use std::{
@@ -295,6 +295,23 @@ pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
 /// Em dash character (U+2014) - what `---` becomes with smart punctuation
 const EM_DASH: &str = "\u{2014}";
 
+/// Maps a non-standard [remark-hint](https://github.com/sergioramos/remark-hint)
+/// paragraph prefix to its GitHub-alert equivalent.
+///
+/// Returns the [`BlockQuoteKind`] and the text with the marker stripped, or
+/// `None` when the text does not begin with a recognized hint marker.
+fn detect_hint_prefix(text: &str) -> Option<(BlockQuoteKind, &str)> {
+    // Dispatch on the first byte so the common (non-hint) paragraph bails out after
+    // a single comparison instead of attempting every prefix.
+    let (prefix, kind) = match text.as_bytes().first()? {
+        b'!' => ("!> ", BlockQuoteKind::Tip),
+        b'?' => ("?> ", BlockQuoteKind::Warning),
+        b'x' => ("x> ", BlockQuoteKind::Caution),
+        _ => return None,
+    };
+    text.strip_prefix(prefix).map(|rest| (kind, rest))
+}
+
 /// Transform events: detect `--- {attrs}` pattern and convert to Rule + attrs.
 ///
 /// When pulldown-cmark (with TextMergeStream) sees `--- {#id .class}` on a single line,
@@ -376,6 +393,7 @@ fn collect_events_and_headings(
     let mut in_heading_text: Option<String> = None;
     let mut section_attrs = HashMap::new();
     let mut section_index = 0;
+    let mut hint_open = false;
 
     for event in parser {
         match &event {
@@ -387,6 +405,21 @@ fn collect_events_and_headings(
             Event::Text(text) if in_heading_text.is_some() => {
                 if let Some(ref mut heading_text) = in_heading_text {
                     heading_text.push_str(text);
+                }
+                events.push(event);
+            }
+
+            // --- remark-hint syntax detection (inline) ---
+            // A paragraph whose first text run starts with `!> `/`?> `/`x> ` becomes the
+            // matching GitHub-style alert blockquote (Tip/Warning/Caution).
+            Event::Text(text) if matches!(events.last(), Some(Event::Start(Tag::Paragraph))) => {
+                if let Some((kind, rest)) = detect_hint_prefix(text) {
+                    events.pop(); // remove the Start(Paragraph)
+                    events.push(Event::Start(Tag::BlockQuote(Some(kind))));
+                    events.push(Event::Start(Tag::Paragraph));
+                    events.push(Event::Text(CowStr::from(rest.to_owned())));
+                    hint_open = true;
+                    continue;
                 }
                 events.push(event);
             }
@@ -434,6 +467,16 @@ fn collect_events_and_headings(
             // Detect End(Paragraph) and look back for the 3-event pattern:
             //   Start(Paragraph), Text("em-dash + {attrs}"), End(Paragraph)
             Event::End(TagEnd::Paragraph) => {
+                // Close an open remark-hint alert: emit the paragraph end followed by
+                // the blockquote end. A hint paragraph never matches the em-dash rule
+                // pattern, so handling it first is safe.
+                if hint_open {
+                    events.push(event);
+                    events.push(Event::End(TagEnd::BlockQuote(None)));
+                    hint_open = false;
+                    continue;
+                }
+
                 let len = events.len();
                 // Need at least 2 prior events to form the pattern
                 if len >= 2 {
@@ -2367,6 +2410,107 @@ mod tests {
             html.contains(r#"<td><span class="mbr-incomplete">"#),
             "Span should follow <td> for incomplete cell: {html}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_tip() {
+        let html = render_markdown("!> tip").await;
+        assert!(
+            html.contains(r#"<blockquote class="markdown-alert-tip">"#),
+            "Expected tip alert blockquote: {html}"
+        );
+        assert!(
+            html.contains("<p>tip</p>"),
+            "Marker should be stripped: {html}"
+        );
+        assert!(!html.contains("!&gt;"), "Escaped marker leaked: {html}");
+        assert!(!html.contains("!>"), "Raw marker leaked: {html}");
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_warning() {
+        let html = render_markdown("?> warn").await;
+        assert!(
+            html.contains(r#"<blockquote class="markdown-alert-warning">"#),
+            "Expected warning alert blockquote: {html}"
+        );
+        assert!(
+            html.contains("<p>warn</p>"),
+            "Marker should be stripped: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_caution() {
+        let html = render_markdown("x> caution").await;
+        assert!(
+            html.contains(r#"<blockquote class="markdown-alert-caution">"#),
+            "Expected caution alert blockquote: {html}"
+        );
+        assert!(
+            html.contains("<p>caution</p>"),
+            "Marker should be stripped: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_multiline() {
+        // A soft-wrapped paragraph: marker stripped from the first line, the rest
+        // of the paragraph stays inside the same alert.
+        let html = render_markdown("!> line one\nline two").await;
+        assert!(
+            html.contains(r#"<blockquote class="markdown-alert-tip">"#),
+            "Expected tip alert blockquote: {html}"
+        );
+        assert!(html.contains("line one"), "First line retained: {html}");
+        assert!(html.contains("line two"), "Second line retained: {html}");
+        assert!(!html.contains("!&gt;"), "Escaped marker leaked: {html}");
+        assert!(!html.contains("!>"), "Raw marker leaked: {html}");
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_requires_trailing_space() {
+        // No space after the marker -> not a hint.
+        let html = render_markdown("!>no-space").await;
+        assert!(
+            !html.contains("markdown-alert"),
+            "Should not be converted without trailing space: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_only_at_paragraph_start() {
+        // Mid-paragraph occurrence is not a hint.
+        let html = render_markdown("text !> more").await;
+        assert!(
+            !html.contains("markdown-alert"),
+            "Mid-paragraph marker should not be converted: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remark_hint_ignored_in_code_block() {
+        // A fenced code block containing a hint-like line must render verbatim.
+        let html = render_markdown("```\n!> foo\n```").await;
+        assert!(
+            !html.contains("markdown-alert"),
+            "Code block content should not be converted: {html}"
+        );
+        assert!(
+            html.contains("!&gt; foo") || html.contains("!> foo"),
+            "Code content should render verbatim: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_native_github_alert_still_works() {
+        // Regression: native pulldown-cmark GitHub alerts continue to render.
+        let html = render_markdown("> [!TIP]\n> hello").await;
+        assert!(
+            html.contains(r#"<blockquote class="markdown-alert-tip">"#),
+            "Native GitHub alert should still render: {html}"
+        );
+        assert!(html.contains("hello"), "Alert content retained: {html}");
     }
 
     #[tokio::test]
