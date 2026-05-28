@@ -2,10 +2,9 @@
 
 ## What's Next
 
-* [ ] Media browser allows tab and shift-tab to select forward and back. Needs to also support ctrl-n, ctrl-p
-
 * [ ] CriticMarkup support?
 * [ ] Export to PDF
+  * _After research, my options here are pretty ugly. I don't want to compile in chromium or anything and don't want to rely on it being installed in a common place, either. Current browser widget I use doesn't give me a print to pdf option. Need to look for a reasonable way to make this happen cross platform with reliable output._
   * Print stylesheet support and light background default (though I guess we could make a dark background PDF).
   * Start with the current page as an option.
   * Also allow a print to PDF for the whole site (essentially taking a doc site and compiling everything into chapters in a single PDF).
@@ -26,6 +25,7 @@
   * [ ] wikilinks and the link checker: underscore-prefixed files (e.g., _...Baby One More Time Tour.md) - files with special chars were renamed with underscores but internal links weren't updated -- none of those work yet. not sure what to do
     * Need to look into the spaces vs. underscores stuff a bit here too
     * Answer: only if we submit PRs to pagefind or switch to something else
+  * [ ] Media scanning / populating media metadata is slow on large repos. Images take 2 to 10ms. PDFs can take a whole minute. Video files 30 to 50ms.  In practice, on the Magic repo, it takes many minutes (10?) to complete a first pass.  I want to research ways to speed this up. I want to make sure we are doing what we can in parallel and I want to see if the libraries we're using have competitors that are faster. I also want to understand what information we're gathering that's slow. Most metadata should be at the front of the file so we shouldn't have to read entire PDFs or video files when processing, but I suspect that's not the case.
 
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app.
 
