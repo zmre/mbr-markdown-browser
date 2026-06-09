@@ -1824,6 +1824,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_vid_shortcode_apostrophe_path_not_curly_encoded() {
+        // Smart punctuation curls the apostrophe; the path must be normalized back
+        // to ASCII so the percent-encoded URL matches the real filename on disk.
+        let html = render_markdown("{{ vid(path=\"World's Best.mp4\") }}").await;
+        assert!(html.contains("World%27s%20Best.mp4"), "got: {html}");
+        assert!(
+            !html.contains("%E2%80%99"),
+            "curly apostrophe leaked into URL: {html}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_audio_embed_from_image_syntax() {
         let md = "![Episode 1](podcast.mp3)";
         let html = render_markdown(md).await;
