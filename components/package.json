@@ -16,7 +16,7 @@
     "lit": "^3.3.3"
   },
   "devDependencies": {
-    "@vitest/browser": "^4.1.7",
+    "@vitest/browser": "^4.1.8",
     "happy-dom": "^20.9.0",
     "terser": "^5.48.0",
     "typescript": "~6.0.3",
