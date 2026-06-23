@@ -2,6 +2,8 @@
 
 ## What's Next
 
+* [ ] Right now if we're in slides mode in a browser, I can launch the speaker window fine. But if we're in gui mode, the speaker window doesn't pop up. There's only one window.  What would it take to allow a speaker window to pop up?
+* [ ] Should we allow tabs for viewing multiple markdown files in one session?
 * [ ] CriticMarkup support?
 * [ ] Export to PDF
   * _After research, my options here are pretty ugly. I don't want to compile in chromium or anything and don't want to rely on it being installed in a common place, either. Current browser widget I use doesn't give me a print to pdf option. Need to look for a reasonable way to make this happen cross platform with reliable output._

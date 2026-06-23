@@ -236,6 +236,8 @@ pub struct BuildStats {
     pub pagefind_indexed: Option<bool>,
     /// Number of broken links detected
     pub broken_links: usize,
+    /// Number of pages whose YAML frontmatter failed to parse
+    pub frontmatter_errors: usize,
     /// Number of links.json files written (for link tracking)
     pub link_files: usize,
 }
@@ -262,6 +264,10 @@ pub struct Builder {
     /// `is_index_file` is needed to correctly resolve relative URLs: non-index
     /// pages drop the trailing URL segment (file stem), index pages don't.
     build_link_index: Arc<ConcurrentHashMap<String, (bool, Vec<OutboundLink>)>>,
+    /// Frontmatter (YAML) parse errors collected during the parallel render
+    /// pass (url_path -> error message). Summarized to stderr after the build,
+    /// mirroring broken-link reporting.
+    frontmatter_errors: Arc<ConcurrentHashMap<String, String>>,
 }
 
 impl Builder {
@@ -271,6 +277,7 @@ impl Builder {
         let repo = Repo::init_from_config(&config);
         let oembed_cache = Arc::new(OembedCache::new(config.oembed_cache_size));
         let build_link_index = Arc::new(ConcurrentHashMap::new());
+        let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
 
         tracing::debug!(
             "build: initialized oembed cache with {} bytes max",
@@ -284,6 +291,7 @@ impl Builder {
             repo,
             oembed_cache,
             build_link_index,
+            frontmatter_errors,
         })
     }
 
@@ -383,6 +391,24 @@ impl Builder {
                 );
                 for link in &broken_links {
                     eprintln!("   {} → {}", link.source_page, link.link_url);
+                }
+                eprintln!();
+            }
+        }
+
+        // Report any YAML frontmatter parse errors collected during rendering.
+        // A failed parse discards the entire frontmatter (title, style, etc.),
+        // so surface it the same way broken links are surfaced.
+        {
+            let guard = self.frontmatter_errors.pin();
+            stats.frontmatter_errors = guard.len();
+            if stats.frontmatter_errors > 0 {
+                eprintln!(
+                    "\n⚠️  Frontmatter parse errors ({} total):",
+                    stats.frontmatter_errors
+                );
+                for (page, message) in guard.iter() {
+                    eprintln!("   {page} → {message}");
                 }
                 eprintln!();
             }
@@ -756,6 +782,14 @@ impl Builder {
             path: path.to_path_buf(),
             source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
         })?;
+        // Record any frontmatter parse error so it can be summarized after the
+        // parallel render pass completes (mirrors broken-link reporting).
+        if let Some(err) = render_result.frontmatter_error {
+            self.frontmatter_errors
+                .pin()
+                .insert(info.url_path.clone(), err);
+        }
+
         let mut frontmatter = render_result.frontmatter;
         let headings = render_result.headings;
         let html = render_result.html;
@@ -2618,6 +2652,7 @@ mod tests {
         let repo = Repo::init_from_config(&config);
         let oembed_cache = Arc::new(OembedCache::new(1024));
         let build_link_index = Arc::new(ConcurrentHashMap::new());
+        let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
 
         Builder {
             config,
@@ -2626,6 +2661,7 @@ mod tests {
             repo,
             oembed_cache,
             build_link_index,
+            frontmatter_errors,
         }
     }
 

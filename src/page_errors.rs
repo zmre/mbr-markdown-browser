@@ -50,6 +50,9 @@ pub enum PageError {
     BrokenMediaReference { src: String, kind: MediaKind },
     /// A literal `[[...]]` that was not transformed into a link.
     UnresolvedWikilink { raw: String },
+    /// The YAML frontmatter block failed to parse, so the entire frontmatter
+    /// (including otherwise-valid fields) was discarded.
+    FrontmatterParseError { message: String },
 }
 
 /// Response payload for `GET /{page}/errors.json`.
@@ -279,6 +282,17 @@ pub fn detect_unresolved_wikilinks(html: &str) -> Vec<PageError> {
     }
 
     errors
+}
+
+/// Wraps a captured YAML frontmatter parse error (from
+/// [`crate::markdown::MarkdownRenderResult::frontmatter_error`]) into the
+/// page-error list. Returns an empty vec when there was no error.
+pub fn frontmatter_parse_errors(err: &Option<String>) -> Vec<PageError> {
+    err.iter()
+        .map(|message| PageError::FrontmatterParseError {
+            message: message.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -593,6 +607,35 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"type\":\"unresolved_wikilink\""));
         assert!(json.contains("\"raw\":\"[[foo]]\""));
+    }
+
+    #[test]
+    fn frontmatter_parse_error_serializes() {
+        let err = PageError::FrontmatterParseError {
+            message: "mapping values are not allowed".to_string(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(
+            json.contains("\"type\":\"frontmatter_parse_error\""),
+            "{}",
+            json
+        );
+        assert!(json.contains("mapping values are not allowed"), "{}", json);
+    }
+
+    #[test]
+    fn frontmatter_parse_errors_none_is_empty() {
+        assert!(frontmatter_parse_errors(&None).is_empty());
+    }
+
+    #[test]
+    fn frontmatter_parse_errors_some_yields_one() {
+        let errs = frontmatter_parse_errors(&Some("bad yaml".to_string()));
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            PageError::FrontmatterParseError { message } if message == "bad yaml"
+        ));
     }
 
     #[test]

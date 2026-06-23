@@ -2397,8 +2397,8 @@ impl Server {
     ///   is disabled, or when the underlying page does not exist.
     async fn try_serve_errors_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
         use crate::page_errors::{
-            PageErrors, detect_unresolved_wikilinks, validate_internal_links,
-            validate_media_references,
+            PageErrors, detect_unresolved_wikilinks, frontmatter_parse_errors,
+            validate_internal_links, validate_media_references,
         };
 
         // Only handle exact `errors.json` tails. This keeps the endpoint
@@ -2447,10 +2447,11 @@ impl Server {
         // rendered HTML for media / wikilink scans (the `LinkCache` only holds
         // outbound links), so unlike `try_serve_links_json` we cannot short-
         // circuit through the cache when the HTML is missing.
-        let (outbound_links, html_for_scan, markdown_dir): (
+        let (outbound_links, html_for_scan, markdown_dir, frontmatter_error): (
             Vec<crate::link_index::OutboundLink>,
             String,
             PathBuf,
+            Option<String>,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
                 let is_index_file = md_path
@@ -2497,7 +2498,12 @@ impl Server {
                         config
                             .link_cache
                             .insert(page_url_path.clone(), resolved_links.clone());
-                        (resolved_links, render_result.html, md_dir)
+                        (
+                            resolved_links,
+                            render_result.html,
+                            md_dir,
+                            render_result.frontmatter_error,
+                        )
                     }
                     Err(e) => {
                         tracing::error!("errors.json: failed to render page: {}", e);
@@ -2515,11 +2521,11 @@ impl Server {
                     &config.repo.tag_index,
                     &config.tag_sources,
                 );
-                (outbound, String::new(), config.base_dir.clone())
+                (outbound, String::new(), config.base_dir.clone(), None)
             }
             ResolvedPath::TagSourceIndex { source } => {
                 let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
-                (outbound, String::new(), config.base_dir.clone())
+                (outbound, String::new(), config.base_dir.clone(), None)
             }
             _ => {
                 tracing::debug!("errors.json: page not found: {}", page_url_path);
@@ -2528,6 +2534,7 @@ impl Server {
         };
 
         let mut errors = Vec::new();
+        errors.extend(frontmatter_parse_errors(&frontmatter_error));
         errors.extend(validate_internal_links(&outbound_links, &resolver_config));
         if !html_for_scan.is_empty() {
             errors.extend(validate_media_references(
