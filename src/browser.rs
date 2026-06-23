@@ -54,10 +54,20 @@ struct HistoryMenuItems {
     forward: MenuItem,
 }
 
+/// Handles to menu items needed for event matching after the menu bar is built
+struct MenuHandles {
+    menu_bar: Menu,
+    open_item: MenuItem,
+    reload_item: MenuItem,
+    print_item: MenuItem,
+    history_items: HistoryMenuItems,
+    window_menu: Submenu,
+}
+
 /// Build the application menu bar with standard menus
 /// On macOS, creates proper app menu with About, Services, Hide, Quit
 /// On Windows/Linux, puts About in Help menu and Quit in File menu
-fn build_menu_bar() -> (Menu, MenuItem, MenuItem, HistoryMenuItems, Submenu) {
+fn build_menu_bar() -> MenuHandles {
     let menu_bar = Menu::new();
 
     // macOS: First menu is the app menu (named after the app)
@@ -98,12 +108,27 @@ fn build_menu_bar() -> (Menu, MenuItem, MenuItem, HistoryMenuItems, Submenu) {
         Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyR)),
     );
 
+    // Print uses Cmd+P on macOS, Ctrl+P elsewhere
+    #[cfg(target_os = "macos")]
+    let print_modifier = Modifiers::SUPER;
+    #[cfg(not(target_os = "macos"))]
+    let print_modifier = Modifiers::CONTROL;
+
+    let print_item = MenuItem::with_id(
+        "print",
+        "&Print…",
+        true,
+        Some(Accelerator::new(Some(print_modifier), Code::KeyP)),
+    );
+
     #[cfg(target_os = "macos")]
     file_menu
         .append_items(&[
             &open_item,
             &PredefinedMenuItem::separator(),
             &reload_item,
+            &PredefinedMenuItem::separator(),
+            &print_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
         ])
@@ -115,6 +140,8 @@ fn build_menu_bar() -> (Menu, MenuItem, MenuItem, HistoryMenuItems, Submenu) {
             &open_item,
             &PredefinedMenuItem::separator(),
             &reload_item,
+            &PredefinedMenuItem::separator(),
+            &print_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
             &PredefinedMenuItem::separator(),
@@ -228,7 +255,14 @@ fn build_menu_bar() -> (Menu, MenuItem, MenuItem, HistoryMenuItems, Submenu) {
     #[cfg(target_os = "macos")]
     window_menu.set_as_windows_menu_for_nsapp();
 
-    (menu_bar, open_item, reload_item, history_items, window_menu)
+    MenuHandles {
+        menu_bar,
+        open_item,
+        reload_item,
+        print_item,
+        history_items,
+        window_menu,
+    }
 }
 
 /// Spawn a thread to show folder picker dialog and send result via event loop proxy
@@ -298,7 +332,14 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     }));
 
     // Build the menu bar
-    let (menu_bar, open_item, reload_item, history_items, _window_menu) = build_menu_bar();
+    let MenuHandles {
+        menu_bar,
+        open_item,
+        reload_item,
+        print_item,
+        history_items,
+        window_menu: _window_menu,
+    } = build_menu_bar();
 
     // Initialize menu for macOS (global app menu)
     #[cfg(target_os = "macos")]
@@ -347,6 +388,7 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     // Store menu item IDs for event matching
     let open_id = open_item.id().clone();
     let reload_id = reload_item.id().clone();
+    let print_id = print_item.id().clone();
     let back_id = history_items.back.id().clone();
     let forward_id = history_items.forward.id().clone();
 
@@ -373,6 +415,11 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                 } else if menu_event.id == reload_id {
                     tracing::debug!("Reload requested via menu");
                     let _ = webview.load_url(&current_url);
+                } else if menu_event.id == print_id {
+                    tracing::debug!("Print requested via menu");
+                    if let Err(e) = webview.print() {
+                        tracing::error!("Print failed: {e}");
+                    }
                 } else if menu_event.id == back_id {
                     tracing::debug!("History back via menu");
                     let _ = webview.evaluate_script("history.back()");
@@ -464,7 +511,14 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     }));
 
     // Build the menu bar
-    let (menu_bar, _open_item, reload_item, history_items, _window_menu) = build_menu_bar();
+    let MenuHandles {
+        menu_bar,
+        open_item: _open_item,
+        reload_item,
+        print_item,
+        history_items,
+        window_menu: _window_menu,
+    } = build_menu_bar();
 
     // Initialize menu for macOS (global app menu)
     #[cfg(target_os = "macos")]
@@ -513,6 +567,7 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
 
     // Store menu item IDs for event matching
     let reload_id = reload_item.id().clone();
+    let print_id = print_item.id().clone();
     let back_id = history_items.back.id().clone();
     let forward_id = history_items.forward.id().clone();
 
@@ -528,6 +583,11 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
                 if menu_event.id == reload_id {
                     tracing::debug!("Reload requested via menu");
                     let _ = webview.load_url(&url_owned);
+                } else if menu_event.id == print_id {
+                    tracing::debug!("Print requested via menu");
+                    if let Err(e) = webview.print() {
+                        tracing::error!("Print failed: {e}");
+                    }
                 } else if menu_event.id == back_id {
                     tracing::debug!("History back via menu");
                     let _ = webview.evaluate_script("history.back()");
