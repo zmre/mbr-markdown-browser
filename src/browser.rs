@@ -14,9 +14,9 @@ use tao::{
     window::{Icon, WindowBuilder},
 };
 use tokio::task::JoinHandle;
-use wry::WebViewBuilder;
 #[cfg(target_os = "linux")]
 use wry::WebViewBuilderExtUnix;
+use wry::{NewWindowResponse, WebViewBuilder};
 
 /// Custom user events for the event loop
 enum UserEvent {
@@ -325,7 +325,12 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
         let _ = menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
     }
 
-    let builder = WebViewBuilder::new().with_devtools(true).with_url(&ctx.url);
+    let builder = WebViewBuilder::new()
+        .with_devtools(true)
+        .with_url(&ctx.url)
+        // Allow JS window.open() (e.g. Reveal.js speaker-notes view) to spawn a
+        // linked webview so the popup stays in sync with the opener.
+        .with_new_window_req_handler(|_url, _features| NewWindowResponse::Allow);
 
     #[cfg(not(target_os = "linux"))]
     let webview = builder
@@ -489,7 +494,10 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     let url_owned = url.to_string();
     let builder = WebViewBuilder::new()
         .with_devtools(true)
-        .with_url(&url_owned);
+        .with_url(&url_owned)
+        // Allow JS window.open() (e.g. Reveal.js speaker-notes view) to spawn a
+        // linked webview so the popup stays in sync with the opener.
+        .with_new_window_req_handler(|_url, _features| NewWindowResponse::Allow);
 
     #[cfg(not(target_os = "linux"))]
     let webview = builder
