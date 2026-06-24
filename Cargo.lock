@@ -3394,7 +3394,7 @@ dependencies = [
  "grep-searcher",
  "html-escape",
  "image",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "lopdf",
  "lru",
  "metadata",
