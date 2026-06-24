@@ -1402,3 +1402,29 @@ async fn test_build_output_does_not_reference_mbr_page_errors() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_build_counts_frontmatter_parse_errors() {
+    let repo = TestRepo::new();
+    // Valid page (no error) plus a page with invalid YAML frontmatter
+    // (`*` list markers with TAB indentation).
+    repo.create_markdown("good.md", "# Good\n\nFine.");
+    repo.create_markdown(
+        "bad.md",
+        "---\ntitle: Bad\nstyle: slides\ntags:\n\t* presentation\n\t* ai\n---\n# Bad\n",
+    );
+
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+    let builder = mbr::build::Builder::new(config, output_dir).expect("Failed to create builder");
+    let stats = builder.build().await.expect("Build failed");
+
+    assert!(
+        stats.frontmatter_errors >= 1,
+        "expected at least one frontmatter parse error, got {}",
+        stats.frontmatter_errors
+    );
+}

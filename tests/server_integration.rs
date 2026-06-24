@@ -3448,3 +3448,28 @@ async fn test_errors_json_multiple_problem_types_on_one_page() {
     assert!(errors.iter().any(|e| e["type"] == "broken_media_reference"));
     assert!(errors.iter().any(|e| e["type"] == "unresolved_wikilink"));
 }
+
+#[tokio::test]
+async fn test_errors_json_reports_frontmatter_parse_error() {
+    let repo = TestRepo::new();
+    // Invalid YAML frontmatter: `*` list markers with TAB indentation. This is
+    // the real-world case (an Obsidian-style note) where the whole frontmatter
+    // — including a valid `style: slides` — is silently discarded.
+    repo.create_markdown(
+        "broken.md",
+        "---\ntitle: Broken\nstyle: slides\ntags:\n\t* presentation\n\t* ai\n---\n# Broken\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/broken/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "frontmatter_parse_error"
+            && e["message"].as_str().is_some_and(|m| !m.is_empty())),
+        "expected frontmatter_parse_error in {:?}",
+        errors
+    );
+}

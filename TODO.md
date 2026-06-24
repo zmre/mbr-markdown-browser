@@ -2,6 +2,7 @@
 
 ## What's Next
 
+* [ ] Should we allow tabs for viewing multiple markdown files in one session?
 * [ ] CriticMarkup support?
 * [ ] Export to PDF
   * _After research, my options here are pretty ugly. I don't want to compile in chromium or anything and don't want to rely on it being installed in a common place, either. Current browser widget I use doesn't give me a print to pdf option. Need to look for a reasonable way to make this happen cross platform with reliable output._

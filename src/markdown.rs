@@ -148,6 +148,13 @@ pub struct HeadingInfo {
 pub struct MarkdownRenderResult {
     /// Frontmatter metadata (from YAML block at top of file)
     pub frontmatter: SimpleMetadata,
+    /// YAML frontmatter parse error, if the metadata block failed to parse.
+    ///
+    /// When `Some`, the whole frontmatter map was discarded (yaml-rust2 aborts
+    /// the document on the first error), so valid fields are silently lost.
+    /// Surfaced to the reader via the per-page errors endpoint and to the
+    /// builder via a stderr summary.
+    pub frontmatter_error: Option<String>,
     /// Table of contents (headings extracted from document)
     pub headings: Vec<HeadingInfo>,
     /// Rendered HTML content
@@ -208,6 +215,11 @@ struct EventState {
     /// terminal punctuation. Used to bump `sentence_count` at the end of
     /// paragraphs, headings, and list items whose final text lacked a `.!?`.
     block_needs_sentence_bump: bool,
+    /// Captured YAML frontmatter parse error, if the metadata block failed to
+    /// parse. When set, the entire frontmatter was discarded (so otherwise
+    /// valid fields like `style` are lost); surfaced to the user via the
+    /// per-page error reporting and a build-mode summary.
+    frontmatter_error: Option<String>,
 }
 
 pub type SimpleMetadata = HashMap<String, serde_json::Value>;
@@ -683,6 +695,7 @@ fn process_all_events<'a>(
         sentence_count: 0,
         syllable_count: 0,
         block_needs_sentence_bump: false,
+        frontmatter_error: None,
     };
     let mut processed_events = Vec::with_capacity(events.len());
 
@@ -823,6 +836,7 @@ fn finalize_render(
 
     Ok(MarkdownRenderResult {
         frontmatter,
+        frontmatter_error: state.frontmatter_error,
         headings,
         html: html_output,
         outbound_links: deduplicated_links,
@@ -1338,9 +1352,17 @@ fn process_event(
                 }
             }
             if state.in_metadata {
-                state.metadata_parsed = YamlLoader::load_from_str(text)
-                    .ok()
-                    .and_then(|ys| ys.into_iter().next());
+                match YamlLoader::load_from_str(text) {
+                    Ok(docs) => state.metadata_parsed = docs.into_iter().next(),
+                    Err(e) => {
+                        // Invalid YAML aborts the whole frontmatter block, so
+                        // otherwise-valid fields (e.g. `style: slides`) are
+                        // silently lost. Capture the error so it can be
+                        // surfaced to the user instead of disappearing.
+                        tracing::warn!("Failed to parse YAML frontmatter: {e}");
+                        state.frontmatter_error = Some(e.to_string());
+                    }
+                }
                 (event, state)
             } else if let Some(remaining_text) = text.strip_prefix("[-] ") {
                 // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`
@@ -1485,6 +1507,36 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_yaml_frontmatter_is_captured_not_swallowed() {
+        // Regression: this frontmatter uses `*` list markers with TAB
+        // indentation (invalid YAML). yaml-rust2 aborts the whole document, so
+        // the otherwise-valid `style: slides` field is silently discarded.
+        // We must capture the parse error rather than swallow it.
+        let content =
+            "---\ntitle: \"Hi\"\nstyle: slides\ntags:\n\t* presentation\n\t* ai\n---\n# Heading\n";
+        let result = render_result(content).await;
+
+        assert!(
+            result.frontmatter_error.is_some(),
+            "expected a captured frontmatter parse error, got None"
+        );
+        // The valid `style` field is lost because the whole block failed to
+        // parse — documents the failure mode the error report explains.
+        assert!(
+            !result.frontmatter.contains_key("style"),
+            "expected style to be discarded when frontmatter fails to parse"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_yaml_frontmatter_has_no_error() {
+        let content = "---\ntitle: \"Hi\"\nstyle: slides\n---\n# Heading\n";
+        let result = render_result(content).await;
+        assert!(result.frontmatter_error.is_none());
+        assert!(result.frontmatter.contains_key("style"));
     }
 
     #[test]
