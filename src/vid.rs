@@ -76,6 +76,7 @@ impl Vid {
 
         match path {
             Some(p) => {
+                let p = Self::normalize_smart_quotes(&p);
                 vid.url = utf8_percent_encode(format!("/videos/{p}").as_str(), CUSTOM_ENCODE_SET)
                     .to_string();
                 vid.ext = Self::extension_from_url(&vid.url);
@@ -204,6 +205,21 @@ impl Vid {
         EXTENSION_RE.captures(url).map(|cap| cap[1].to_string())
     }
 
+    /// Reverse pulldown-cmark's smart-punctuation quote substitutions on a path.
+    ///
+    /// With ENABLE_SMART_PUNCTUATION active, straight quotes typed in a
+    /// `{{ vid(path="...") }}` shortcode are rewritten to Unicode curly quotes
+    /// before the shortcode is parsed. Filenames on disk use straight ASCII
+    /// quotes, so map curly quotes back before percent-encoding the URL.
+    ///
+    /// Only quotes are reversed: dashes (`--`/`---`) and ellipsis (`...`) are
+    /// left alone because a filename may legitimately contain a literal en/em-dash,
+    /// and reversing those would corrupt the path.
+    fn normalize_smart_quotes(path: &str) -> String {
+        path.replace(['\u{2018}', '\u{2019}'], "'")
+            .replace(['\u{201C}', '\u{201D}'], "\"")
+    }
+
     /// Convert a time string like "0:30", "1:02:30", or "200" to total seconds as a string.
     /// Plain numeric values pass through unchanged. Colon-separated values (MM:SS or HH:MM:SS)
     /// are converted to total seconds for maximum browser compatibility with media fragments.
@@ -307,6 +323,15 @@ mod tests {
         assert_eq!(vid.start.as_deref(), Some("10"));
         assert_eq!(vid.end.as_deref(), Some("20"));
         assert_eq!(vid.caption.as_deref(), Some("Test"));
+    }
+
+    #[test]
+    fn test_from_vid_normalizes_curly_apostrophe() {
+        // Simulates text after pulldown-cmark smart punctuation has curled the quote.
+        let input = "{{ vid(path=\"World\u{2019}s Best.mp4\") }}";
+        let vid = Vid::from_vid(input).unwrap();
+        assert!(vid.url.contains("World%27s%20Best.mp4"));
+        assert!(!vid.url.contains("%E2%80%99"));
     }
 
     #[test]
