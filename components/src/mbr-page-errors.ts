@@ -23,10 +23,16 @@ interface UnresolvedWikilinkError {
   raw: string;
 }
 
+interface FrontmatterParseError {
+  type: 'frontmatter_parse_error';
+  message: string;
+}
+
 type PageErrorEntry =
   | BrokenInternalLinkError
   | BrokenMediaReferenceError
-  | UnresolvedWikilinkError;
+  | UnresolvedWikilinkError
+  | FrontmatterParseError;
 
 interface PageErrorsResponse {
   page_url: string;
@@ -194,6 +200,24 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
+  private _renderFrontmatterGroup(): TemplateResult | typeof nothing {
+    const items = this._errors.filter(
+      (e): e is FrontmatterParseError => e.type === 'frontmatter_parse_error'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Frontmatter parse errors (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`<li><code class="target">${e.message}</code></li>`
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
   private _renderTrigger(): TemplateResult {
     const count = this._errors.length;
     const label = `This page has ${count} problem${count === 1 ? '' : 's'}`;
@@ -235,13 +259,18 @@ export class MbrPageErrorsElement extends LitElement {
             reference${this._countByType('broken_media_reference') === 1
               ? ''
               : 's'},
-            and
             ${this._countByType('unresolved_wikilink')} unresolved
-            wikilink${this._countByType('unresolved_wikilink') === 1 ? '' : 's'}.
+            wikilink${this._countByType('unresolved_wikilink') === 1 ? '' : 's'},
+            and
+            ${this._countByType('frontmatter_parse_error')} frontmatter parse
+            error${this._countByType('frontmatter_parse_error') === 1
+              ? ''
+              : 's'}.
           </p>
           ${this._renderLinkGroup()}
           ${this._renderMediaGroup()}
           ${this._renderWikilinkGroup()}
+          ${this._renderFrontmatterGroup()}
         </div>
       </aside>
     `;

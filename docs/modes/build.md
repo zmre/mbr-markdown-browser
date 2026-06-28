@@ -84,6 +84,22 @@ Warning: Broken link found
   Target: /docs/missing-page/
 ```
 
+### Frontmatter Parse Errors
+
+While rendering, mbr also reports any pages whose YAML frontmatter fails to
+parse. A parse failure discards the **entire** frontmatter block (so otherwise
+valid fields like `title:` or `style: slides` are silently lost), which is why
+it is surfaced explicitly:
+
+```
+⚠️  Frontmatter parse errors (1 total):
+   /presentations/talk/ → while parsing a block mapping, did not find expected key
+```
+
+A common cause is using tabs or `*` list markers instead of spaces and `-` in a
+YAML list. In server/GUI mode these same errors appear in the per-page problems
+panel (the ⚠ indicator in the navigation bar).
+
 ## Output Structure
 
 ```
