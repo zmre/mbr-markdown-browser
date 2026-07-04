@@ -189,19 +189,8 @@ impl Templates {
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
-        let mut context = Context::new();
-        context_data.iter().for_each(|(k, v)| {
-            context.insert(k, v);
-        });
-        let html_output = self
-            .tera
-            .read()
-            .render("error.html", &context)
-            .map_err(|e| TemplateError::RenderFailed {
-                template_name: "error.html".to_string(),
-                source: e,
-            })?;
-        Ok(html_output)
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "error.html", context_data)
     }
 
     /// Renders a tag page showing all pages with a specific tag.
@@ -257,19 +246,8 @@ impl Templates {
         &self,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
-        let mut context = Context::new();
-        context_data.iter().for_each(|(k, v)| {
-            context.insert(k, v);
-        });
-        let html_output = self
-            .tera
-            .read()
-            .render("media_viewer.html", &context)
-            .map_err(|e| TemplateError::RenderFailed {
-                template_name: "media_viewer.html".to_string(),
-                source: e,
-            })?;
-        Ok(html_output)
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "media_viewer.html", context_data)
     }
 }
 

@@ -3473,3 +3473,48 @@ async fn test_errors_json_reports_frontmatter_parse_error() {
         errors
     );
 }
+
+// ==================== HLS Transcoding Security Tests ====================
+
+/// HLS requests must not be able to reach files outside the served root via
+/// path traversal (regression test for unvalidated path resolution in
+/// `try_serve_hls_content`).
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_hls_traversal_blocked() {
+    // The served root is a subdirectory of the temp dir; secret.mp4 lives
+    // OUTSIDE it, as a sibling of the root.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let outer = temp_dir.path().canonicalize().unwrap();
+    let repo_root = outer.join("repo");
+    std::fs::create_dir_all(repo_root.join(".mbr")).unwrap();
+    std::fs::write(repo_root.join("readme.md"), "# Hello").unwrap();
+    std::fs::write(outer.join("secret.mp4"), b"fake video outside served root").unwrap();
+
+    let port = find_available_port();
+    let server_root = repo_root.clone();
+    let _handle = tokio::spawn(async move {
+        let mut config = test_server_config(port, server_root);
+        config.transcode_enabled = true;
+        let server = mbr::server::Server::init(config).expect("Failed to initialize server");
+        let _ = server.start().await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = mbr::http_client(Duration::from_secs(5));
+
+    // Use a percent-encoded slash so the client doesn't normalize away the
+    // ".." segment; the server decodes it back to "../secret-720p.m3u8".
+    for path in ["/..%2Fsecret-720p.m3u8", "/..%2Fsecret-480p.m3u8"] {
+        let response = client
+            .get(format!("http://127.0.0.1:{port}{path}"))
+            .send()
+            .await
+            .expect("Request failed");
+        assert_eq!(
+            response.status(),
+            404,
+            "HLS path traversal must be blocked with 404 for {path}"
+        );
+    }
+}

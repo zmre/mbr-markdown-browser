@@ -28,6 +28,7 @@ use crate::{
     link_transform::{LinkTransformConfig, make_relative_url},
     markdown,
     oembed_cache::OembedCache,
+    page_context::{self, ModeFlags, PageChrome, UrlMode},
     repo::{MarkdownInfo, Repo},
     server::{
         DEFAULT_FILES, MediaViewerType, generate_breadcrumbs, get_current_dir_name,
@@ -36,6 +37,48 @@ use crate::{
     sorting::sort_files,
     templates::Templates,
 };
+
+/// Maps each directory (relative path) to its direct child markdown files (as
+/// template JSON with absolute `url_path`) and the set of immediate
+/// subdirectory names. Built once per build so section pages resolve their
+/// children in O(children) instead of rescanning all markdown files.
+type DirChildrenIndex = HashMap<PathBuf, (Vec<serde_json::Value>, HashSet<String>)>;
+
+/// Groups markdown files into a directory→children index in a single pass.
+///
+/// Each file is registered as a direct child of its containing directory and
+/// contributes its first-level subdirectory name to each ancestor directory.
+/// The stored file JSON keeps its absolute `url_path`; callers relativize and
+/// sort their own slice. Root is keyed by the empty path.
+fn build_dir_children_index<'a>(files: impl Iterator<Item = &'a MarkdownInfo>) -> DirChildrenIndex {
+    let mut index: DirChildrenIndex = HashMap::new();
+    index.entry(PathBuf::new()).or_default();
+    for info in files {
+        let trimmed = info.url_path.trim_start_matches('/').trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let components: Vec<&str> = trimmed.split('/').collect();
+        let n = components.len();
+        // Register the file as a direct child of its containing directory.
+        let containing: PathBuf = components[..n - 1].iter().collect();
+        index
+            .entry(containing)
+            .or_default()
+            .0
+            .push(markdown_file_to_json(info));
+        // Register the immediate subdirectory name for each ancestor.
+        for i in 0..n - 1 {
+            let dir: PathBuf = components[..i].iter().collect();
+            index
+                .entry(dir)
+                .or_default()
+                .1
+                .insert(components[i].to_string());
+        }
+    }
+    index
+}
 
 /// Maximum build concurrency (parallel file processing limit).
 const MAX_BUILD_CONCURRENCY: usize = 32;
@@ -63,7 +106,7 @@ fn url_depth(url_path: &str) -> usize {
 /// - depth 0 → ".mbr/"
 /// - depth 1 → "../.mbr/"
 /// - depth 2 → "../../.mbr/"
-fn relative_base(depth: usize) -> String {
+pub(crate) fn relative_base(depth: usize) -> String {
     if depth == 0 {
         ".mbr/".to_string()
     } else {
@@ -77,7 +120,7 @@ fn relative_base(depth: usize) -> String {
 /// - depth 0 → "" (empty string, already at root)
 /// - depth 1 → "../"
 /// - depth 2 → "../../"
-fn relative_root(depth: usize) -> String {
+pub(crate) fn relative_root(depth: usize) -> String {
     if depth == 0 {
         String::new()
     } else {
@@ -224,6 +267,50 @@ fn link_target_exists(path: &Path, valid_files: &HashSet<PathBuf>) -> bool {
     valid_files.contains(path) || valid_files.contains(&path.join("index.html"))
 }
 
+/// Records the first error observed across parallel (rayon) workers.
+///
+/// Wraps a `Mutex<Option<E>>`. The guarded data is plain (no invariants a
+/// panicking holder could break), so a poisoned lock is recovered with
+/// `PoisonError::into_inner` rather than propagating the panic.
+struct FirstError<E>(std::sync::Mutex<Option<E>>);
+
+impl<E> FirstError<E> {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<E>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Returns true if an error has already been recorded.
+    fn is_set(&self) -> bool {
+        self.lock().is_some()
+    }
+
+    /// Records `err` unless an earlier error was already recorded.
+    fn record(&self, err: E) {
+        let mut guard = self.lock();
+        if guard.is_none() {
+            *guard = Some(err);
+        }
+    }
+
+    /// Consumes the tracker, yielding `Err(first_error)` if any was recorded.
+    fn into_result(self) -> Result<(), E> {
+        match self
+            .0
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Statistics from a build run.
 #[derive(Debug, Default)]
 pub struct BuildStats {
@@ -303,18 +390,8 @@ impl Builder {
         // Scan repository for all files
         let stage_start = Instant::now();
         print_stage("Scanning repository...");
-        self.repo
-            .scan_all()
-            .map_err(|e| crate::errors::RepoError::ScanFailed {
-                path: self.config.root_dir.clone(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
-        self.repo
-            .scan_static_folder()
-            .map_err(|e| crate::errors::RepoError::ScanFailed {
-                path: self.config.root_dir.clone(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
+        self.repo.scan_all()?;
+        self.repo.scan_static_folder()?;
         let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
         print_stage_done(
             "Scanning repository",
@@ -528,13 +605,13 @@ impl Builder {
         // compared to 44K+ lock acquisitions from competing rayon threads.
         let tera_snapshot = self.templates.tera_clone();
 
-        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+        let error: FirstError<BuildError> = FirstError::new();
 
         pool.install(|| {
             use rayon::prelude::*;
             markdown_files.par_iter().for_each(|(path, info)| {
                 // Skip remaining files once an error has been recorded
-                if error.lock().unwrap().is_some() {
+                if error.is_set() {
                     return;
                 }
                 match self.render_single_markdown_sync(path, info, &sibling_index, &tera_snapshot) {
@@ -546,19 +623,12 @@ impl Builder {
                             print_progress("Rendering markdown", done, count);
                         }
                     }
-                    Err(e) => {
-                        let mut err = error.lock().unwrap();
-                        if err.is_none() {
-                            *err = Some(e);
-                        }
-                    }
+                    Err(e) => error.record(e),
                 }
             });
         });
 
-        if let Some(e) = error.into_inner().unwrap() {
-            return Err(e);
-        }
+        error.into_result()?;
 
         print_stage_done("Rendering markdown", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -653,12 +723,12 @@ impl Builder {
                 source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
             })?;
 
-        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+        let error: FirstError<BuildError> = FirstError::new();
 
         pool.install(|| {
             use rayon::prelude::*;
             page_urls.par_iter().for_each(|url_path| {
-                if error.lock().unwrap().is_some() {
+                if error.is_set() {
                     return;
                 }
                 match self.write_single_link_file(url_path, &outbound_index, &inbound_index) {
@@ -668,19 +738,12 @@ impl Builder {
                             print_progress("Writing link files", done, count);
                         }
                     }
-                    Err(e) => {
-                        let mut err = error.lock().unwrap();
-                        if err.is_none() {
-                            *err = Some(e);
-                        }
-                    }
+                    Err(e) => error.record(e),
                 }
             });
         });
 
-        if let Some(e) = error.into_inner().unwrap() {
-            return Err(e);
-        }
+        error.into_result()?;
 
         print_stage_done("Writing link files", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -825,158 +888,50 @@ impl Builder {
         // Calculate page depth for relative path generation
         let depth = url_depth(&info.url_path);
 
-        // Compute breadcrumbs for the markdown file with relative URLs
-        let url_path_for_breadcrumbs = std::path::Path::new(&info.url_path);
-        let breadcrumbs = crate::server::generate_breadcrumbs(url_path_for_breadcrumbs);
-        let breadcrumbs_json: Vec<_> = breadcrumbs
-            .iter()
-            .map(|b| {
-                serde_json::json!({
-                    "name": b.name,
-                    "url": make_relative_url(&b.url, depth)
-                })
-            })
-            .collect();
-        let current_dir_name = crate::server::get_current_dir_name(url_path_for_breadcrumbs);
-
-        let mut extra_context = std::collections::HashMap::new();
-        extra_context.insert(
-            "breadcrumbs".to_string(),
-            serde_json::json!(breadcrumbs_json),
-        );
-        extra_context.insert(
-            "current_dir_name".to_string(),
-            serde_json::json!(current_dir_name),
-        );
-        extra_context.insert("headings".to_string(), serde_json::json!(headings));
-        extra_context.insert("has_h1".to_string(), serde_json::json!(has_h1));
-
-        // Pass tag sources configuration for frontend tag linking
-        // Pre-serialize as JSON string for safe template rendering in JavaScript context
-        let tag_sources_json = serde_json::to_string(
-            &self
-                .config
-                .tag_sources
-                .iter()
-                .map(|ts| {
-                    serde_json::json!({
-                        "field": ts.field,
-                        "urlSource": ts.url_source(),
-                        "label": ts.singular_label(),
-                        "labelPlural": ts.plural_label()
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
-        extra_context.insert(
-            "tag_sources".to_string(),
-            serde_json::json!(tag_sources_json),
-        );
-
-        // Pass sidebar navigation configuration
-        extra_context.insert(
-            "sidebar_style".to_string(),
-            serde_json::json!(self.config.sidebar_style),
-        );
-        extra_context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::json!(self.config.sidebar_max_items),
-        );
-        extra_context.insert(
-            "title_prefix".to_string(),
-            serde_json::json!(self.config.title_prefix),
-        );
-        extra_context.insert(
-            "title_suffix".to_string(),
-            serde_json::json!(self.config.title_suffix),
-        );
-
-        // Pass word count and reading time (200 words per minute)
-        let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
-        extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
-        extra_context.insert(
-            "reading_time_minutes".to_string(),
-            serde_json::json!(reading_time_minutes),
-        );
-        // Readability scores (Flesch Reading Ease + Flesch-Kincaid Grade Level).
-        // `None` values serialize as JSON `null`, which the template outputs
-        // literally so the frontend can guard on `!= null`.
-        extra_context.insert(
-            "flesch_reading_ease".to_string(),
-            serde_json::json!(readability_scores.flesch_reading_ease),
-        );
-        extra_context.insert(
-            "flesch_kincaid_grade".to_string(),
-            serde_json::json!(readability_scores.flesch_kincaid_grade),
-        );
-
-        // Pass file path (relative to root) for reference
+        // File path (relative to root) for reference
         let relative_path = path
             .strip_prefix(&self.config.root_dir)
             .unwrap_or(path)
             .to_string_lossy();
-        extra_context.insert("file_path".to_string(), serde_json::json!(relative_path));
 
-        // Pass modified date from file metadata
-        if let Ok(metadata) = std::fs::metadata(path)
-            && let Ok(modified) = metadata.modified()
-            && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            extra_context.insert(
-                "modified_timestamp".to_string(),
-                serde_json::json!(duration.as_secs()),
-            );
-        }
+        // Modified date from file metadata
+        let modified_secs = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
 
-        // Compute prev/next sibling pages for navigation using the pre-built index
+        // Prev/next sibling pages come from the pre-built index
         let parent_dir = info
             .raw_path
             .parent()
             .unwrap_or(Path::new(""))
             .to_path_buf();
-
         let empty_siblings = Vec::new();
         let siblings = sibling_index.get(&parent_dir).unwrap_or(&empty_siblings);
 
-        // Find current position and get prev/next
-        if let Some(current_idx) = siblings.iter().position(|f| {
-            f.get("url_path")
-                .and_then(|v| v.as_str())
-                .is_some_and(|p| p == info.url_path)
-        }) {
-            if current_idx > 0
-                && let Some(prev) = siblings.get(current_idx - 1)
-            {
-                let prev_url = prev.get("url_path").and_then(|v| v.as_str()).unwrap_or("/");
-                extra_context.insert(
-                    "prev_page".to_string(),
-                    serde_json::json!({
-                        "url": make_relative_url(prev_url, depth),
-                        "title": prev.get("title").and_then(|v| v.as_str()).unwrap_or("Previous")
-                    }),
-                );
-            }
-            if let Some(next) = siblings.get(current_idx + 1) {
-                let next_url = next.get("url_path").and_then(|v| v.as_str()).unwrap_or("/");
-                extra_context.insert(
-                    "next_page".to_string(),
-                    serde_json::json!({
-                        "url": make_relative_url(next_url, depth),
-                        "title": next.get("title").and_then(|v| v.as_str()).unwrap_or("Next")
-                    }),
-                );
-            }
-        }
-
-        // Add relative path variables for static builds
-        extra_context.insert(
-            "relative_base".to_string(),
-            serde_json::json!(relative_base(depth)),
-        );
-        extra_context.insert(
-            "relative_root".to_string(),
-            serde_json::json!(relative_root(depth)),
+        // Build the extra context (navigation, TOC, readability, chrome) via
+        // the shared builder; static builds relativize URLs to the page depth.
+        let extra_context = page_context::markdown_extra_context(
+            &page_context::MarkdownPageParams {
+                breadcrumb_path: std::path::Path::new(&info.url_path),
+                headings: &headings,
+                has_h1,
+                word_count,
+                readability: &readability_scores,
+                file_path: &relative_path,
+                modified_secs,
+                current_url: &info.url_path,
+                siblings,
+            },
+            &page_context::MarkdownContextOptions {
+                tag_sources: &self.config.tag_sources,
+                sidebar_style: &self.config.sidebar_style,
+                sidebar_max_items: self.config.sidebar_max_items,
+                title_prefix: &self.config.title_prefix,
+                title_suffix: &self.config.title_suffix,
+            },
+            &page_context::UrlMode::RelativeToDepth(depth),
         );
 
         // Render through template (lock-free — uses pre-cloned Tera)
@@ -1044,6 +999,16 @@ impl Builder {
             concurrency
         );
 
+        // Pre-build a directory→children index so each section page looks up its
+        // direct child files and immediate subdirectories in O(children) instead
+        // of rescanning every markdown file (was O(dirs × files)). Mirrors the
+        // `sibling_index` in `render_markdown_files`. File JSON keeps its
+        // absolute `url_path`; each page relativizes + sorts its own slice, so
+        // output ordering/behavior is preserved.
+        let dir_index = Arc::new(build_dir_children_index(
+            self.repo.markdown_files.pin().iter().map(|(_, info)| info),
+        ));
+
         // Clone Tera once before entering the rayon pool to avoid per-file lock contention
         let tera_snapshot = self.templates.tera_clone();
 
@@ -1062,43 +1027,41 @@ impl Builder {
                 source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
             })?;
 
-        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+        let error: FirstError<BuildError> = FirstError::new();
 
         pool.install(|| {
             use rayon::prelude::*;
             directories.par_iter().for_each(|dir| {
-                if error.lock().unwrap().is_some() {
+                if error.is_set() {
                     return;
                 }
-                match self.render_directory_page_sync(dir, &tera_snapshot) {
+                match self.render_directory_page_sync(dir, &dir_index, &tera_snapshot) {
                     Ok(()) => {
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         if done.is_multiple_of(100) || done == count {
                             print_progress("Generating sections", done, count);
                         }
                     }
-                    Err(e) => {
-                        let mut err = error.lock().unwrap();
-                        if err.is_none() {
-                            *err = Some(e);
-                        }
-                    }
+                    Err(e) => error.record(e),
                 }
             });
         });
 
-        if let Some(e) = error.into_inner().unwrap() {
-            return Err(e);
-        }
+        error.into_result()?;
 
         print_stage_done("Generating sections", count, Some(stage_start.elapsed()));
         Ok(count)
     }
 
     /// Renders a single directory page synchronously with a pre-cloned Tera.
+    ///
+    /// `dir_index` maps each directory to its direct child files (as JSON with
+    /// absolute `url_path`) and immediate subdirectory names, so this avoids a
+    /// full rescan of the repository per directory.
     fn render_directory_page_sync(
         &self,
         relative_dir: &Path,
+        dir_index: &DirChildrenIndex,
         tera: &tera::Tera,
     ) -> Result<(), BuildError> {
         let is_root = relative_dir.as_os_str().is_empty();
@@ -1115,15 +1078,8 @@ impl Builder {
 
         // Breadcrumbs with relative URLs
         let breadcrumbs = generate_breadcrumbs(relative_dir);
-        let breadcrumbs_json: Vec<serde_json::Value> = breadcrumbs
-            .iter()
-            .map(|b| {
-                serde_json::json!({
-                    "name": b.name,
-                    "url": make_relative_url(&b.url, depth)
-                })
-            })
-            .collect();
+        let breadcrumbs_json =
+            page_context::breadcrumbs_to_json(&breadcrumbs, &UrlMode::RelativeToDepth(depth));
         context.insert(
             "breadcrumbs".to_string(),
             serde_json::Value::Array(breadcrumbs_json),
@@ -1149,16 +1105,6 @@ impl Builder {
             );
         }
 
-        // Add relative path variables for static builds
-        context.insert(
-            "relative_base".to_string(),
-            serde_json::Value::String(relative_base(depth)),
-        );
-        context.insert(
-            "relative_root".to_string(),
-            serde_json::Value::String(relative_root(depth)),
-        );
-
         // Collect files in this directory
         let dir_prefix = if is_root {
             "/".to_string()
@@ -1166,36 +1112,27 @@ impl Builder {
             format!("/{}/", relative_dir.to_string_lossy())
         };
 
-        let mut files: Vec<serde_json::Value> = Vec::new();
-        let mut subdirs: HashSet<String> = HashSet::new();
+        // Look up this directory's direct child files and immediate subdirs from
+        // the pre-built index (O(children) rather than a full repo rescan).
+        let empty_children: (Vec<serde_json::Value>, HashSet<String>) = Default::default();
+        let (dir_files, dir_subdirs) = dir_index.get(relative_dir).unwrap_or(&empty_children);
 
-        for (_, info) in self.repo.markdown_files.pin().iter() {
-            let url_path = &info.url_path;
-
-            // Check if this file is in the current directory
-            if url_path.starts_with(&dir_prefix) {
-                let remainder = url_path.strip_prefix(&dir_prefix).unwrap_or(url_path);
-
-                // If there's no / in remainder, it's a direct child
-                if !remainder.trim_end_matches('/').contains('/') {
-                    // Convert file JSON to use relative url_path
-                    let mut file_json = markdown_file_to_json(info);
-                    if let Some(obj) = file_json.as_object_mut()
-                        && let Some(abs_url) = obj.get("url_path").and_then(|v| v.as_str())
-                    {
-                        obj.insert(
-                            "url_path".to_string(),
-                            serde_json::Value::String(make_relative_url(abs_url, depth)),
-                        );
-                    }
-                    files.push(file_json);
-                } else if let Some(subdir) = remainder.split('/').next()
-                    && !subdir.is_empty()
+        // Relativize each file's url_path for this page's depth.
+        let mut files: Vec<serde_json::Value> = dir_files
+            .iter()
+            .map(|file_json| {
+                let mut file_json = file_json.clone();
+                if let Some(obj) = file_json.as_object_mut()
+                    && let Some(abs_url) = obj.get("url_path").and_then(|v| v.as_str())
                 {
-                    subdirs.insert(subdir.to_string());
+                    obj.insert(
+                        "url_path".to_string(),
+                        serde_json::Value::String(make_relative_url(abs_url, depth)),
+                    );
                 }
-            }
-        }
+                file_json
+            })
+            .collect();
 
         // Sort files using configurable sort order
         sort_files(&mut files, &self.config.sort);
@@ -1203,8 +1140,8 @@ impl Builder {
         context.insert("files".to_string(), serde_json::Value::Array(files));
 
         // Convert subdirs to JSON array with name and relative url_path
-        let subdirs_json: Vec<serde_json::Value> = subdirs
-            .into_iter()
+        let subdirs_json: Vec<serde_json::Value> = dir_subdirs
+            .iter()
             .map(|name| {
                 let abs_url_path = if is_root {
                     format!("/{}/", name)
@@ -1222,48 +1159,21 @@ impl Builder {
             serde_json::Value::Array(subdirs_json),
         );
 
-        // Indicate static mode (no dynamic search endpoint)
-        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
-
         // Pass tag_sources configuration for frontend (consistent with markdown pages)
-        // Pre-serialize as JSON string for safe template rendering in JavaScript context
-        let tag_sources_json = serde_json::to_string(
-            &self
-                .config
-                .tag_sources
-                .iter()
-                .map(|ts| {
-                    serde_json::json!({
-                        "field": ts.field,
-                        "urlSource": ts.url_source(),
-                        "label": ts.singular_label(),
-                        "labelPlural": ts.plural_label()
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
         context.insert(
             "tag_sources".to_string(),
-            serde_json::json!(tag_sources_json),
+            serde_json::json!(page_context::tag_sources_json(&self.config.tag_sources)),
         );
 
-        // Pass sidebar navigation configuration
-        context.insert(
-            "sidebar_style".to_string(),
-            serde_json::json!(self.config.sidebar_style),
-        );
-        context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::json!(self.config.sidebar_max_items),
-        );
-        context.insert(
-            "title_prefix".to_string(),
-            serde_json::json!(self.config.title_prefix),
-        );
-        context.insert(
-            "title_suffix".to_string(),
-            serde_json::json!(self.config.title_suffix),
+        // Mode flags, sidebar navigation configuration, and title affixes
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Static { depth },
+                sidebar_style: &self.config.sidebar_style,
+                sidebar_max_items: self.config.sidebar_max_items,
+                title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+            },
         );
 
         // Render template (lock-free — uses pre-cloned Tera)
@@ -1351,12 +1261,12 @@ impl Builder {
                 source: std::io::Error::other(format!("Failed to create rayon thread pool: {}", e)),
             })?;
 
-        let error: std::sync::Mutex<Option<BuildError>> = std::sync::Mutex::new(None);
+        let error: FirstError<BuildError> = FirstError::new();
 
         pool.install(|| {
             use rayon::prelude::*;
             tasks.par_iter().for_each(|(source, value)| {
-                if error.lock().unwrap().is_some() {
+                if error.is_set() {
                     return;
                 }
                 let result = if let Some(tag_value) = value {
@@ -1371,19 +1281,12 @@ impl Builder {
                             print_progress("Generating tag pages", done, count);
                         }
                     }
-                    Err(e) => {
-                        let mut err = error.lock().unwrap();
-                        if err.is_none() {
-                            *err = Some(e);
-                        }
-                    }
+                    Err(e) => error.record(e),
                 }
             });
         });
 
-        if let Some(e) = error.into_inner().unwrap() {
-            return Err(e);
-        }
+        error.into_result()?;
 
         print_stage_done("Generating tag pages", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -1459,16 +1362,9 @@ impl Builder {
         source: &str,
         value: &str,
     ) -> Option<(HashMap<String, serde_json::Value>, PathBuf)> {
-        let tag_source = self
-            .config
-            .tag_sources
-            .iter()
-            .find(|ts| ts.url_source() == source);
-
-        let (singular_label, plural_label) = match tag_source {
-            Some(ts) => (ts.singular_label(), ts.plural_label()),
-            None => (source.to_string(), format!("{}s", source)),
-        };
+        // Labels (fallback: raw source name)
+        let (singular_label, plural_label) =
+            page_context::tag_labels(&self.config.tag_sources, source, source);
 
         let display_value = self
             .repo
@@ -1481,56 +1377,33 @@ impl Builder {
         let depth = url_depth(&url_path);
 
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-        context.insert(
-            "tag_source".to_string(),
-            serde_json::Value::String(source.to_string()),
+        page_context::insert_tag_page_keys(
+            &mut context,
+            source,
+            &display_value,
+            &singular_label,
+            &plural_label,
+            &pages,
+            &UrlMode::RelativeToDepth(depth),
         );
-        context.insert(
-            "tag_display_value".to_string(),
-            serde_json::Value::String(display_value.clone()),
-        );
-        context.insert(
-            "tag_label".to_string(),
-            serde_json::Value::String(singular_label),
-        );
-        context.insert(
-            "tag_label_plural".to_string(),
-            serde_json::Value::String(plural_label),
-        );
-        context.insert(
-            "page_count".to_string(),
-            serde_json::Value::Number(pages.len().into()),
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Static { depth },
+                sidebar_style: &self.config.sidebar_style,
+                sidebar_max_items: self.config.sidebar_max_items,
+                title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+            },
         );
 
-        let pages_json: Vec<serde_json::Value> = pages
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "url_path": make_relative_url(&p.url_path, depth),
-                    "title": p.title,
-                    "description": p.description
-                })
-            })
-            .collect();
-        context.insert("pages".to_string(), serde_json::Value::Array(pages_json));
-
-        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
-        context.insert(
-            "relative_base".to_string(),
-            serde_json::Value::String(relative_base(depth)),
-        );
-        context.insert(
-            "relative_root".to_string(),
-            serde_json::Value::String(relative_root(depth)),
-        );
-
+        // Tag pages have synthetic breadcrumbs (Home > plural label)
         let breadcrumbs_json = vec![
             serde_json::json!({
                 "name": "Home",
                 "url": make_relative_url("/", depth)
             }),
             serde_json::json!({
-                "name": context.get("tag_label_plural").and_then(|v| v.as_str()).unwrap_or(source),
+                "name": plural_label,
                 "url": make_relative_url(&format!("/{}/", source), depth)
             }),
         ];
@@ -1541,23 +1414,6 @@ impl Builder {
         context.insert(
             "current_dir_name".to_string(),
             serde_json::Value::String(display_value),
-        );
-
-        context.insert(
-            "sidebar_style".to_string(),
-            serde_json::json!(self.config.sidebar_style),
-        );
-        context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::json!(self.config.sidebar_max_items),
-        );
-        context.insert(
-            "title_prefix".to_string(),
-            serde_json::json!(self.config.title_prefix),
-        );
-        context.insert(
-            "title_suffix".to_string(),
-            serde_json::json!(self.config.title_suffix),
         );
 
         // Sanitize source and value to prevent path traversal
@@ -1592,61 +1448,33 @@ impl Builder {
         &self,
         source: &str,
     ) -> Option<(HashMap<String, serde_json::Value>, PathBuf)> {
-        let tag_source = self
-            .config
-            .tag_sources
-            .iter()
-            .find(|ts| ts.url_source() == source);
-
-        let (singular_label, plural_label) = match tag_source {
-            Some(ts) => (ts.singular_label(), ts.plural_label()),
-            None => (source.to_string(), format!("{}s", source)),
-        };
+        // Labels (fallback: raw source name)
+        let (singular_label, plural_label) =
+            page_context::tag_labels(&self.config.tag_sources, source, source);
 
         let tags = self.repo.tag_index.get_all_tags(source);
         let url_path = format!("/{}/", source);
         let depth = url_depth(&url_path);
 
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-        context.insert(
-            "tag_source".to_string(),
-            serde_json::Value::String(source.to_string()),
+        page_context::insert_tag_index_keys(
+            &mut context,
+            source,
+            &singular_label,
+            &plural_label,
+            &tags,
         );
-        context.insert(
-            "tag_label".to_string(),
-            serde_json::Value::String(singular_label),
-        );
-        context.insert(
-            "tag_label_plural".to_string(),
-            serde_json::Value::String(plural_label.clone()),
-        );
-        context.insert(
-            "tag_count".to_string(),
-            serde_json::Value::Number(tags.len().into()),
-        );
-
-        let tags_json: Vec<serde_json::Value> = tags
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "url_value": t.normalized.clone(),
-                    "display_value": t.display.clone(),
-                    "page_count": t.count
-                })
-            })
-            .collect();
-        context.insert("tags".to_string(), serde_json::Value::Array(tags_json));
-
-        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
-        context.insert(
-            "relative_base".to_string(),
-            serde_json::Value::String(relative_base(depth)),
-        );
-        context.insert(
-            "relative_root".to_string(),
-            serde_json::Value::String(relative_root(depth)),
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Static { depth },
+                sidebar_style: &self.config.sidebar_style,
+                sidebar_max_items: self.config.sidebar_max_items,
+                title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+            },
         );
 
+        // Tag source index pages have synthetic breadcrumbs (Home only)
         let breadcrumbs_json = vec![serde_json::json!({
             "name": "Home",
             "url": make_relative_url("/", depth)
@@ -1658,23 +1486,6 @@ impl Builder {
         context.insert(
             "current_dir_name".to_string(),
             serde_json::Value::String(plural_label),
-        );
-
-        context.insert(
-            "sidebar_style".to_string(),
-            serde_json::json!(self.config.sidebar_style),
-        );
-        context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::json!(self.config.sidebar_max_items),
-        );
-        context.insert(
-            "title_prefix".to_string(),
-            serde_json::json!(self.config.title_prefix),
-        );
-        context.insert(
-            "title_suffix".to_string(),
-            serde_json::json!(self.config.title_suffix),
         );
 
         let safe_source = crate::wikilink::sanitize_path_component(source);
@@ -1877,15 +1688,17 @@ impl Builder {
         // Step 3b: Write themed pico.min.css (only if not already present from repo's .mbr/)
         let pico_output_path = mbr_output.join("pico.min.css");
         if !pico_output_path.exists() {
-            let pico_content =
-                embedded_pico::get_pico_css(&self.config.theme).unwrap_or_else(|| {
+            let pico_content = match embedded_pico::get_pico_css(&self.config.theme) {
+                Some(content) => content,
+                None => {
                     eprintln!(
                         "Warning: Invalid theme '{}'. Using default. Valid themes: {}",
                         self.config.theme,
                         embedded_pico::valid_themes_display()
                     );
-                    embedded_pico::get_pico_css("default").expect("default theme must exist")
-                });
+                    embedded_pico::get_pico_css("default").ok_or(BuildError::MissingDefaultTheme)?
+                }
+            };
             fs::write(&pico_output_path, pico_content).map_err(|e| BuildError::WriteFailed {
                 path: pico_output_path,
                 source: e,
@@ -1971,28 +1784,23 @@ impl Builder {
 
         // Build context for error template
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-        context.insert(
-            "error_code".to_string(),
-            serde_json::Value::Number(404.into()),
-        );
-        context.insert(
-            "error_title".to_string(),
-            serde_json::Value::String("Not Found".to_string()),
-        );
-        context.insert(
-            "error_message".to_string(),
-            serde_json::Value::String("The requested page could not be found.".to_string()),
+        page_context::insert_error_keys(
+            &mut context,
+            404,
+            "Not Found",
+            Some("The requested page could not be found."),
         );
 
-        // Static mode settings - 404.html is at root level (depth 0)
-        context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
-        context.insert(
-            "relative_base".to_string(),
-            serde_json::Value::String(relative_base(0)),
-        );
-        context.insert(
-            "relative_root".to_string(),
-            serde_json::Value::String(relative_root(0)),
+        // Static mode settings - 404.html is at root level (depth 0); error
+        // pages omit title affixes
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Static { depth: 0 },
+                sidebar_style: &self.config.sidebar_style,
+                sidebar_max_items: self.config.sidebar_max_items,
+                title_affixes: None,
+            },
         );
 
         // Empty breadcrumbs for error page
@@ -2002,16 +1810,6 @@ impl Builder {
                 "name": "Home",
                 "url": "./"
             })]),
-        );
-
-        // Pass sidebar navigation configuration
-        context.insert(
-            "sidebar_style".to_string(),
-            serde_json::json!(self.config.sidebar_style),
-        );
-        context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::json!(self.config.sidebar_max_items),
         );
 
         let html = self.templates.render_error(context)?;
@@ -2076,15 +1874,15 @@ impl Builder {
                 serde_json::Value::String(format!("{} Viewer", media_type.label())),
             );
 
-            // Static mode settings
-            context.insert("server_mode".to_string(), serde_json::Value::Bool(false));
-            context.insert(
-                "relative_base".to_string(),
-                serde_json::Value::String(relative_base(depth)),
-            );
-            context.insert(
-                "relative_root".to_string(),
-                serde_json::Value::String(relative_root(depth)),
+            // Static mode settings, sidebar configuration, and title affixes
+            page_context::insert_page_chrome(
+                &mut context,
+                &PageChrome {
+                    mode: ModeFlags::Static { depth },
+                    sidebar_style: &self.config.sidebar_style,
+                    sidebar_max_items: self.config.sidebar_max_items,
+                    title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+                },
             );
 
             // Breadcrumbs: Home link only (relative from depth 2)
@@ -2100,24 +1898,6 @@ impl Builder {
             context.insert(
                 "parent_path".to_string(),
                 serde_json::Value::String("../../".to_string()),
-            );
-
-            // Pass sidebar navigation configuration
-            context.insert(
-                "sidebar_style".to_string(),
-                serde_json::json!(self.config.sidebar_style),
-            );
-            context.insert(
-                "sidebar_max_items".to_string(),
-                serde_json::json!(self.config.sidebar_max_items),
-            );
-            context.insert(
-                "title_prefix".to_string(),
-                serde_json::json!(self.config.title_prefix),
-            );
-            context.insert(
-                "title_suffix".to_string(),
-                serde_json::json!(self.config.title_suffix),
             );
 
             let html = self.templates.render_media_viewer(context)?;
@@ -2460,6 +2240,116 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== FirstError Tests ====================
+
+    #[test]
+    fn test_first_error_starts_unset() {
+        let error: FirstError<String> = FirstError::new();
+        assert!(!error.is_set());
+        assert!(error.into_result().is_ok());
+    }
+
+    #[test]
+    fn test_first_error_records_only_first() {
+        let error: FirstError<String> = FirstError::new();
+        error.record("first".to_string());
+        assert!(error.is_set());
+        error.record("second".to_string());
+        assert_eq!(error.into_result().unwrap_err(), "first");
+    }
+
+    #[test]
+    fn test_first_error_records_across_threads() {
+        let error: FirstError<usize> = FirstError::new();
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let error = &error;
+                s.spawn(move || error.record(i));
+            }
+        });
+        // Exactly one of the recorded values must win and be reported.
+        let value = error.into_result().unwrap_err();
+        assert!(value < 8);
+    }
+
+    fn mk_info(url: &str) -> MarkdownInfo {
+        MarkdownInfo {
+            raw_path: PathBuf::from(url.trim_matches('/')),
+            url_path: url.to_string(),
+            frontmatter: None,
+            created: 0,
+            modified: 0,
+        }
+    }
+
+    /// Finding #18: the pre-built directory children index must produce the same
+    /// direct-child files and immediate subdirectories, for every directory, as
+    /// the previous per-directory full scan over all markdown files.
+    #[test]
+    fn test_build_dir_children_index_matches_full_scan() {
+        let infos = vec![
+            mk_info("/readme/"),
+            mk_info("/docs/guide/"),
+            mk_info("/docs/intro/"),
+            mk_info("/docs/api/reference/"),
+            mk_info("/blog/2024/post/"),
+        ];
+
+        let index = build_dir_children_index(infos.iter());
+
+        // Every directory that appears in the index (plus root) must match the
+        // old scan for both its direct child files and immediate subdirs.
+        for dir in index.keys() {
+            let is_root = dir.as_os_str().is_empty();
+            let dir_prefix = if is_root {
+                "/".to_string()
+            } else {
+                format!("/{}/", dir.to_string_lossy())
+            };
+
+            // Reference (old) full-scan logic.
+            let mut expected_files: Vec<serde_json::Value> = Vec::new();
+            let mut expected_subdirs: HashSet<String> = HashSet::new();
+            for info in &infos {
+                let url_path = &info.url_path;
+                if url_path.starts_with(&dir_prefix) {
+                    let remainder = url_path.strip_prefix(&dir_prefix).unwrap_or(url_path);
+                    if !remainder.trim_end_matches('/').contains('/') {
+                        expected_files.push(markdown_file_to_json(info));
+                    } else if let Some(subdir) = remainder.split('/').next()
+                        && !subdir.is_empty()
+                    {
+                        expected_subdirs.insert(subdir.to_string());
+                    }
+                }
+            }
+
+            let (got_files, got_subdirs) = index.get(dir).unwrap();
+            // Files are order-independent here (each page sorts its own slice).
+            let got_urls: HashSet<String> = got_files
+                .iter()
+                .map(|f| f["url_path"].as_str().unwrap().to_string())
+                .collect();
+            let expected_urls: HashSet<String> = expected_files
+                .iter()
+                .map(|f| f["url_path"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(got_urls, expected_urls, "files mismatch for dir {:?}", dir);
+            assert_eq!(
+                got_subdirs, &expected_subdirs,
+                "subdirs mismatch for dir {:?}",
+                dir
+            );
+        }
+
+        // Spot-check specific directories.
+        assert_eq!(index[&PathBuf::from("docs")].0.len(), 2); // guide, intro
+        assert!(index[&PathBuf::from("docs")].1.contains("api"));
+        assert!(index[&PathBuf::new()].1.contains("docs"));
+        assert!(index[&PathBuf::new()].1.contains("blog"));
+        assert_eq!(index[&PathBuf::new()].0.len(), 1); // readme
+    }
 
     #[test]
     fn test_build_stats_default() {

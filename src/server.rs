@@ -19,6 +19,7 @@ use crate::link_grep::InboundLinkCache;
 use crate::link_index::{LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
 use crate::oembed_cache::OembedCache;
+use crate::page_context::{self, ModeFlags, PageChrome, UrlMode};
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
@@ -36,6 +37,43 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 /// Default HLS cache size: 200 MB.
 #[cfg(feature = "media-metadata")]
 const DEFAULT_HLS_CACHE_SIZE: usize = 200 * 1024 * 1024;
+
+/// Maximum time a request waits for an in-progress video-metadata extraction
+/// before giving up (degrades a lost wakeup into a retryable `None`).
+#[cfg(feature = "media-metadata")]
+const METADATA_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Outcome of trying to claim an in-flight single-flight slot for a cache key.
+#[cfg(feature = "media-metadata")]
+enum InflightClaim {
+    /// This caller won the slot and must produce the result, then release it.
+    Produce(Arc<tokio::sync::Notify>),
+    /// Another caller is already producing; await this notify then re-read the
+    /// result cache.
+    Wait(Arc<tokio::sync::Notify>),
+}
+
+/// Claims (or joins) the single-flight slot for `key`.
+///
+/// Returns [`InflightClaim::Produce`] to exactly one caller (which inserts a
+/// fresh `Notify`) and [`InflightClaim::Wait`] to any caller that finds an
+/// existing in-progress entry. Modeled on `HlsCache::start_generation`, so N
+/// concurrent requests for the same media only trigger one decode.
+#[cfg(feature = "media-metadata")]
+fn claim_inflight(
+    inflight: &papaya::HashMap<String, Arc<tokio::sync::Notify>>,
+    key: &str,
+) -> InflightClaim {
+    let guard = inflight.pin();
+    match guard.get(key) {
+        Some(notify) => InflightClaim::Wait(notify.clone()),
+        None => {
+            let notify = Arc::new(tokio::sync::Notify::new());
+            guard.insert(key.to_string(), notify.clone());
+            InflightClaim::Produce(notify)
+        }
+    }
+}
 
 /// Default outbound link cache size: 2 MB.
 const DEFAULT_LINK_CACHE_SIZE: usize = 2 * 1024 * 1024;
@@ -306,6 +344,30 @@ fn validate_path_containment(file_path: &Path, base_dir: &Path) -> Option<PathBu
     }
 }
 
+/// Resolve a media source file from a URL path with path traversal protection.
+///
+/// Tries `base_dir/url_path` first, then falls back to
+/// `base_dir/static_folder/url_path`. Each candidate is validated with
+/// [`validate_path_containment`], so paths that escape their containing
+/// directory (e.g. via `..`) return `None`.
+///
+/// Returns the canonical path of the resolved file, or `None` if the file
+/// doesn't exist in either location or the path escapes containment.
+#[cfg(feature = "media-metadata")]
+fn resolve_media_source_file(
+    url_path: &str,
+    base_dir: &Path,
+    static_folder: &str,
+) -> Option<PathBuf> {
+    let direct = base_dir.join(url_path);
+    // Validate path stays within base_dir (defense in depth)
+    validate_path_containment(&direct, base_dir).or_else(|| {
+        // Validate path stays within static folder
+        let static_dir = base_dir.join(static_folder);
+        validate_path_containment(&static_dir.join(url_path), &static_dir)
+    })
+}
+
 pub struct Server {
     pub router: Router,
     pub port: u16,
@@ -447,6 +509,19 @@ pub struct ServerState {
     /// Cache for HLS playlists and transcoded segments
     #[cfg(feature = "media-metadata")]
     pub hls_cache: Arc<HlsCache>,
+    /// Single-flight guard for video metadata extraction: maps a metadata cache
+    /// key to a `Notify` while an extraction is in progress, so a gallery with N
+    /// references to the same clip only spawns one ffmpeg decode (others await).
+    #[cfg(feature = "media-metadata")]
+    pub metadata_inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// Cache of probed video resolutions keyed by path+mtime, so repeated HLS
+    /// requests for an unchanged file never re-run a blocking ffmpeg demux.
+    #[cfg(feature = "media-metadata")]
+    pub video_resolution_cache:
+        Arc<papaya::HashMap<String, crate::video_transcode::VideoResolution>>,
+    /// Per-directory memoized sibling navigation lists (prev/next). Avoids an
+    /// O(repo) scan on every markdown render; invalidated when files change.
+    pub sibling_nav_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>>,
     /// Whether bidirectional link tracking is enabled
     pub link_tracking: bool,
     /// Cache for outbound links extracted during page renders
@@ -509,6 +584,20 @@ impl Server {
 
         #[cfg(feature = "media-metadata")]
         let hls_cache = Arc::new(HlsCache::new(DEFAULT_HLS_CACHE_SIZE));
+
+        // Single-flight guard + probed-resolution cache for media metadata/HLS.
+        #[cfg(feature = "media-metadata")]
+        let metadata_inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
+            Arc::new(papaya::HashMap::new());
+        #[cfg(feature = "media-metadata")]
+        let video_resolution_cache: Arc<
+            papaya::HashMap<String, crate::video_transcode::VideoResolution>,
+        > = Arc::new(papaya::HashMap::new());
+
+        // Per-directory sibling navigation cache. Created before the file-change
+        // invalidation task so that task can clear it when files change.
+        let sibling_nav_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>> =
+            Arc::new(papaya::HashMap::new());
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -637,6 +726,7 @@ impl Server {
         let repo_for_invalidation = Arc::clone(&repo);
         let base_dir_for_invalidation = base_dir.clone();
         let markdown_extensions_for_invalidation = markdown_extensions.clone();
+        let sibling_cache_for_invalidation = Arc::clone(&sibling_nav_cache);
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
@@ -760,6 +850,11 @@ impl Server {
                     .await
                     .ok();
                 }
+
+                // The repository changed, so any memoized sibling navigation
+                // lists may be stale. Drop them all; they are rebuilt lazily on
+                // the next render from the freshly invalidated repo.
+                sibling_cache_for_invalidation.pin().clear();
             }
         });
 
@@ -793,6 +888,11 @@ impl Server {
             transcode_enabled,
             #[cfg(feature = "media-metadata")]
             hls_cache,
+            #[cfg(feature = "media-metadata")]
+            metadata_inflight,
+            #[cfg(feature = "media-metadata")]
+            video_resolution_cache,
+            sibling_nav_cache,
             link_tracking,
             link_cache,
             inbound_link_cache,
@@ -1239,10 +1339,22 @@ impl Server {
             response.duration_ms
         );
 
-        (
-            StatusCode::OK,
-            Json(serde_json::to_value(response).unwrap()),
-        )
+        match serde_json::to_value(&response) {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(e) => {
+                tracing::error!("Failed to serialize search response: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Failed to serialize search response",
+                        "query": query_str,
+                        "total_matches": 0,
+                        "results": [],
+                        "duration_ms": 0
+                    })),
+                )
+            }
+        }
     }
 
     /// Media viewer endpoint for video, PDF, audio, and image content.
@@ -1356,10 +1468,7 @@ impl Server {
         let url_path = std::path::Path::new(media_path);
         let breadcrumbs =
             generate_breadcrumbs(url_path.parent().unwrap_or(std::path::Path::new("")));
-        let breadcrumbs_json: Vec<_> = breadcrumbs
-            .iter()
-            .map(|b| json!({"name": b.name, "url": b.url}))
-            .collect();
+        let breadcrumbs_json = page_context::breadcrumbs_to_json(&breadcrumbs, &UrlMode::Absolute);
 
         // Get parent path for back navigation (from URL path)
         let parent_path = url_path.parent().and_then(|p| p.to_str()).map(|p| {
@@ -1381,33 +1490,31 @@ impl Server {
         if let Some(parent) = parent_path {
             context.insert("parent_path".to_string(), json!(parent));
         }
-        context.insert("server_mode".to_string(), json!(true));
-        context.insert("gui_mode".to_string(), json!(config.gui_mode));
-        context.insert("relative_base".to_string(), json!("/.mbr/"));
-        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
-        context.insert(
-            "sidebar_max_items".to_string(),
-            json!(config.sidebar_max_items),
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Server {
+                    gui_mode: Some(config.gui_mode),
+                    mbr_base: true,
+                },
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+            },
         );
-        context.insert("title_prefix".to_string(), json!(config.title_prefix));
-        context.insert("title_suffix".to_string(), json!(config.title_suffix));
 
         // Render the media viewer template
         match config.templates.render_media_viewer(context) {
             Ok(html) => {
                 let etag = generate_etag(html.as_bytes());
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
-                    .header(header::ETAG, etag)
-                    .body(Body::from(html))
-                    .unwrap_or_else(|_| {
-                        Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from("Internal Server Error"))
-                            .unwrap()
-                    })
+                build_response_or_500(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                        .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+                        .header(header::ETAG, etag)
+                        .body(Body::from(html)),
+                )
             }
             Err(e) => {
                 tracing::error!("Failed to render media viewer template: {}", e);
@@ -1585,59 +1692,49 @@ impl Server {
         use std::collections::HashMap;
 
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-        context.insert(
-            "error_code".to_string(),
-            serde_json::Value::Number(status_code.as_u16().into()),
+        page_context::insert_error_keys(
+            &mut context,
+            status_code.as_u16(),
+            error_title,
+            error_message,
         );
-        context.insert(
-            "error_title".to_string(),
-            serde_json::Value::String(error_title.to_string()),
-        );
-        if let Some(msg) = error_message {
-            context.insert(
-                "error_message".to_string(),
-                serde_json::Value::String(msg.to_string()),
-            );
-        }
         context.insert(
             "requested_url".to_string(),
             serde_json::Value::String(requested_url.to_string()),
         );
-        // Server mode uses absolute paths
-        context.insert("server_mode".to_string(), serde_json::Value::Bool(true));
-        context.insert("gui_mode".to_string(), serde_json::Value::Bool(gui_mode));
-        // Sidebar navigation configuration
-        context.insert(
-            "sidebar_style".to_string(),
-            serde_json::Value::String(sidebar_style.to_string()),
-        );
-        context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::Value::Number(sidebar_max_items.into()),
+        // Server mode uses absolute paths; error pages omit title affixes
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Server {
+                    gui_mode: Some(gui_mode),
+                    mbr_base: false,
+                },
+                sidebar_style,
+                sidebar_max_items,
+                title_affixes: None,
+            },
         );
 
         match templates.render_error(context) {
-            Ok(html) => Response::builder()
-                .status(status_code)
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .body(Body::from(html))
-                .unwrap_or_else(|_| {
-                    Response::builder()
-                        .status(status_code)
-                        .body(Body::from(error_title.to_string()))
-                        .unwrap()
-                }),
-            Err(e) => {
-                tracing::error!("Failed to render error page: {}", e);
+            Ok(html) => build_response_or_500(
                 Response::builder()
                     .status(status_code)
-                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .body(Body::from(format!(
-                        "{} {}",
-                        status_code.as_u16(),
-                        error_title
-                    )))
-                    .unwrap()
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .body(Body::from(html)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to render error page: {}", e);
+                build_response_or_500(
+                    Response::builder()
+                        .status(status_code)
+                        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(Body::from(format!(
+                            "{} {}",
+                            status_code.as_u16(),
+                            error_title
+                        ))),
+                )
             }
         }
     }
@@ -1747,11 +1844,12 @@ impl Server {
             }
             ResolvedPath::Redirect(canonical_url) => {
                 tracing::debug!("redirecting to canonical URL: {}", &canonical_url);
-                Ok(Response::builder()
-                    .status(StatusCode::MOVED_PERMANENTLY)
-                    .header(header::LOCATION, &canonical_url)
-                    .body(Body::empty())
-                    .unwrap())
+                Ok(build_response_or_500(
+                    Response::builder()
+                        .status(StatusCode::MOVED_PERMANENTLY)
+                        .header(header::LOCATION, &canonical_url)
+                        .body(Body::empty()),
+                ))
             }
             ResolvedPath::NotFound => {
                 // Try to serve HLS content (playlist or segment) for transcoded variants
@@ -1826,16 +1924,74 @@ impl Server {
         Ok(response)
     }
 
+    /// Builds a response from a cached video-metadata entry, or `None` for a
+    /// negative (`NotAvailable`) marker so the caller falls through to a 404.
+    #[cfg(feature = "media-metadata")]
+    fn metadata_response_from_cache(
+        cached: crate::video_metadata_cache::CachedMetadata,
+    ) -> Option<Response<Body>> {
+        use crate::video_metadata_cache::CachedMetadata;
+        match cached {
+            CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
+            CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
+                Some(Self::build_vtt_response(vtt))
+            }
+            CachedMetadata::NotAvailable => None,
+        }
+    }
+
+    /// Runs the (blocking) ffmpeg extraction for a single metadata type off the
+    /// async worker, stores the result (positive or negative) in the cache, and
+    /// returns the response. This is only ever called by the single producer for
+    /// a given cache key (see `try_serve_video_metadata`).
+    #[cfg(feature = "media-metadata")]
+    async fn extract_video_metadata_and_cache(
+        video_file: std::path::PathBuf,
+        metadata_type: crate::video_metadata::MetadataType,
+        key: String,
+        config: &ServerState,
+    ) -> Option<Response<Body>> {
+        use crate::video_metadata::{
+            MetadataType, extract_captions, extract_chapters, extract_cover,
+        };
+        use crate::video_metadata_cache::CachedMetadata;
+
+        // ffmpeg decoding is blocking CPU/IO work; keep it off the tokio worker
+        // threads (finding #16). Owned `video_file`/`metadata_type` are `Send`.
+        let extracted = tokio::task::spawn_blocking(move || match metadata_type {
+            MetadataType::Cover => extract_cover(&video_file).map(CachedMetadata::Cover),
+            MetadataType::Chapters => extract_chapters(&video_file).map(CachedMetadata::Chapters),
+            MetadataType::Captions => extract_captions(&video_file).map(CachedMetadata::Captions),
+        })
+        .await;
+
+        match extracted {
+            Ok(Ok(cached)) => {
+                config.video_metadata_cache.insert(key, cached.clone());
+                Self::metadata_response_from_cache(cached)
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("Failed to extract video metadata: {}", e);
+                config
+                    .video_metadata_cache
+                    .insert(key, CachedMetadata::NotAvailable);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Video metadata extraction task panicked: {}", e);
+                None
+            }
+        }
+    }
+
     /// Try to serve dynamically generated video metadata (cover, chapters, captions).
     ///
     /// Returns Some(Response) if the request was for video metadata and we successfully
     /// generated it, None otherwise (fall through to 404).
     #[cfg(feature = "media-metadata")]
     async fn try_serve_video_metadata(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::video_metadata::{
-            MetadataType, extract_captions, extract_chapters, extract_cover, parse_metadata_request,
-        };
-        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+        use crate::video_metadata::{MetadataType, parse_metadata_request};
+        use crate::video_metadata_cache::cache_key_with_mtime;
 
         // Check if this is a video metadata request
         let (video_url_path, metadata_type) = parse_metadata_request(path)?;
@@ -1846,94 +2002,75 @@ impl Server {
             MetadataType::Captions => "captions",
         };
 
-        // Check cache first
-        let key = cache_key(video_url_path, cache_type_str);
-        if let Some(cached) = config.video_metadata_cache.get(&key) {
-            return match cached {
-                CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
-                CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
-                    Some(Self::build_vtt_response(vtt))
-                }
-                CachedMetadata::NotAvailable => None, // Cached negative result
-            };
-        }
-
-        // Try to resolve the video file path with path traversal protection
-        // First, try the direct path, then try with static_folder prefix
-        let video_file = {
-            let direct = config.base_dir.join(video_url_path);
-            // Validate path stays within base_dir (defense in depth)
-            if let Some(validated) = validate_path_containment(&direct, &config.base_dir) {
-                validated
-            } else {
-                let static_dir = config.base_dir.join(&config.static_folder);
-                let with_static = static_dir.join(video_url_path);
-                // Validate path stays within static folder
-                if let Some(validated) = validate_path_containment(&with_static, &static_dir) {
-                    validated
-                } else {
-                    tracing::debug!(
-                        "Video file not found for metadata generation: {}",
-                        video_url_path
-                    );
-                    return None;
-                }
-            }
+        // Resolve the video file path (with path-traversal protection) *before*
+        // computing the cache key so the key can be scoped to the file's mtime
+        // (finding #13). If the file no longer exists, fall through to 404.
+        let Some(video_file) =
+            resolve_media_source_file(video_url_path, &config.base_dir, &config.static_folder)
+        else {
+            tracing::debug!(
+                "Video file not found for metadata generation: {}",
+                video_url_path
+            );
+            return None;
         };
 
-        tracing::debug!(
-            "Generating {} for: {}",
-            cache_type_str,
-            video_file.display()
-        );
+        // mtime-scoped key: editing the source file yields a new key so stale
+        // positive/negative entries are naturally missed and re-extracted.
+        let key = cache_key_with_mtime(&video_file, cache_type_str);
 
-        // Generate the metadata
-        match metadata_type {
-            MetadataType::Cover => match extract_cover(&video_file) {
-                Ok(bytes) => {
-                    config
-                        .video_metadata_cache
-                        .insert(key, CachedMetadata::Cover(bytes.clone()));
-                    Some(Self::build_jpg_response(bytes))
+        // Fast path: serve a cached result (may be a negative marker).
+        if let Some(cached) = config.video_metadata_cache.get(&key) {
+            return Self::metadata_response_from_cache(cached);
+        }
+
+        // Single-flight (finding #20): ensure only one ffmpeg decode runs per
+        // (path, type). Either we claim the slot and produce, or another request
+        // is already producing and we await its result. Mirrors the race-free
+        // HlsCache pattern (register interest before re-checking).
+        match claim_inflight(&config.metadata_inflight, &key) {
+            InflightClaim::Produce(notify) => {
+                tracing::debug!(
+                    "Generating {} for: {}",
+                    cache_type_str,
+                    video_file.display()
+                );
+                let response = Self::extract_video_metadata_and_cache(
+                    video_file,
+                    metadata_type,
+                    key.clone(),
+                    config,
+                )
+                .await;
+                // Release the in-flight slot and wake any waiters, who then read
+                // the freshly-populated cache entry.
+                config.metadata_inflight.pin().remove(&key);
+                notify.notify_waiters();
+                response
+            }
+            InflightClaim::Wait(notify) => {
+                // Register interest before re-checking so a completion that lands
+                // between claim and here is not missed.
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if let Some(cached) = config.video_metadata_cache.get(&key) {
+                    return Self::metadata_response_from_cache(cached);
                 }
-                Err(e) => {
-                    tracing::debug!("Failed to extract cover: {}", e);
-                    config
+                match tokio::time::timeout(METADATA_WAIT_TIMEOUT, notified).await {
+                    Ok(()) => config
                         .video_metadata_cache
-                        .insert(key, CachedMetadata::NotAvailable);
-                    None
+                        .get(&key)
+                        .and_then(Self::metadata_response_from_cache),
+                    Err(_) => {
+                        tracing::warn!(
+                            "Timed out waiting for in-progress metadata decode: {}",
+                            key
+                        );
+                        None
+                    }
                 }
-            },
-            MetadataType::Chapters => match extract_chapters(&video_file) {
-                Ok(vtt) => {
-                    config
-                        .video_metadata_cache
-                        .insert(key, CachedMetadata::Chapters(vtt.clone()));
-                    Some(Self::build_vtt_response(vtt))
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to extract chapters: {}", e);
-                    config
-                        .video_metadata_cache
-                        .insert(key, CachedMetadata::NotAvailable);
-                    None
-                }
-            },
-            MetadataType::Captions => match extract_captions(&video_file) {
-                Ok(vtt) => {
-                    config
-                        .video_metadata_cache
-                        .insert(key, CachedMetadata::Captions(vtt.clone()));
-                    Some(Self::build_vtt_response(vtt))
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to extract captions: {}", e);
-                    config
-                        .video_metadata_cache
-                        .insert(key, CachedMetadata::NotAvailable);
-                    None
-                }
-            },
+            }
         }
     }
 
@@ -1953,13 +2090,22 @@ impl Server {
         config: &ServerState,
     ) -> Option<Response<Body>> {
         use crate::pdf_metadata::parse_pdf_cover_request;
-        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+        use crate::video_metadata_cache::{CachedMetadata, cache_key_with_mtime};
 
         // Check if this is a PDF cover request
-        let pdf_url_path = parse_pdf_cover_request(url_path)?;
+        let _pdf_url_path = parse_pdf_cover_request(url_path)?;
 
-        // Build cache key
-        let key = cache_key(pdf_url_path, "pdf_cover");
+        // Find the PDF file path (corresponding to this sidecar)
+        // The sidecar is at {pdf_path}.cover.jpg, so remove .cover.jpg to get pdf_path
+        let pdf_file = {
+            let sidecar_str = sidecar_file_path.to_str()?;
+            let pdf_path_str = sidecar_str.strip_suffix(".cover.jpg")?;
+            std::path::PathBuf::from(pdf_path_str)
+        };
+
+        // Build an mtime-scoped cache key from the resolved source file so an
+        // edited PDF invalidates a stale cached cover at runtime (finding #13).
+        let key = cache_key_with_mtime(&pdf_file, "pdf_cover");
 
         // Check memory cache first
         if let Some(cached) = config.video_metadata_cache.get(&key) {
@@ -1969,14 +2115,6 @@ impl Server {
                 _ => None,                            // Other types not relevant for PDF covers
             };
         }
-
-        // Find the PDF file path (corresponding to this sidecar)
-        // The sidecar is at {pdf_path}.cover.jpg, so remove .cover.jpg to get pdf_path
-        let pdf_file = {
-            let sidecar_str = sidecar_file_path.to_str()?;
-            let pdf_path_str = sidecar_str.strip_suffix(".cover.jpg")?;
-            std::path::PathBuf::from(pdf_path_str)
-        };
 
         // If PDF doesn't exist, let static file serving handle it
         if !pdf_file.is_file() {
@@ -2053,13 +2191,24 @@ impl Server {
     #[cfg(feature = "media-metadata")]
     async fn try_serve_pdf_cover(path: &str, config: &ServerState) -> Option<Response<Body>> {
         use crate::pdf_metadata::parse_pdf_cover_request;
-        use crate::video_metadata_cache::{CachedMetadata, cache_key};
+        use crate::video_metadata_cache::{CachedMetadata, cache_key_with_mtime};
 
         // Check if this is a PDF cover request
         let pdf_url_path = parse_pdf_cover_request(path)?;
 
-        // Build cache key
-        let key = cache_key(pdf_url_path, "pdf_cover");
+        // Resolve the PDF file path (with path-traversal protection) *before*
+        // computing the cache key so the key can be scoped to the file's mtime
+        // (finding #13). First try the direct path, then the static_folder prefix.
+        let Some(pdf_file) =
+            resolve_media_source_file(pdf_url_path, &config.base_dir, &config.static_folder)
+        else {
+            tracing::debug!("PDF file not found for cover generation: {}", pdf_url_path);
+            return None;
+        };
+
+        // Build an mtime-scoped cache key so an edited PDF invalidates a stale
+        // cached cover at runtime (finding #13).
+        let key = cache_key_with_mtime(&pdf_file, "pdf_cover");
 
         // Check memory cache first
         if let Some(cached) = config.video_metadata_cache.get(&key) {
@@ -2069,26 +2218,6 @@ impl Server {
                 _ => None,                            // Other types not relevant for PDF covers
             };
         }
-
-        // Try to resolve the PDF file path with path traversal protection
-        // First, try the direct path, then try with static_folder prefix
-        let pdf_file = {
-            let direct = config.base_dir.join(pdf_url_path);
-            // Validate path stays within base_dir (defense in depth)
-            if let Some(validated) = validate_path_containment(&direct, &config.base_dir) {
-                validated
-            } else {
-                let static_dir = config.base_dir.join(&config.static_folder);
-                let with_static = static_dir.join(pdf_url_path);
-                // Validate path stays within static folder
-                if let Some(validated) = validate_path_containment(&with_static, &static_dir) {
-                    validated
-                } else {
-                    tracing::debug!("PDF file not found for cover generation: {}", pdf_url_path);
-                    return None;
-                }
-            }
-        };
 
         // Build sidecar path: {pdf_path}.cover.jpg
         let sidecar_path = {
@@ -2348,14 +2477,26 @@ impl Server {
         let inbound = if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
             cached
         } else {
-            // Grep for inbound links
-            let links = find_inbound_links(
-                &page_url_path,
-                &config.base_dir,
-                &config.markdown_extensions,
-                &config.ignore_dirs,
-                &config.ignore_globs,
-            );
+            // Grep for inbound links. This walks the whole repository (blocking
+            // filesystem + CPU work), so run it on a blocking thread to avoid
+            // stalling the async worker. All captured data is owned/`Send`.
+            let target = page_url_path.clone();
+            let base_dir = config.base_dir.clone();
+            let markdown_extensions = config.markdown_extensions.clone();
+            let ignore_dirs = config.ignore_dirs.clone();
+            let ignore_globs = config.ignore_globs.clone();
+            let links = tokio::task::spawn_blocking(move || {
+                find_inbound_links(
+                    &target,
+                    &base_dir,
+                    &markdown_extensions,
+                    &ignore_dirs,
+                    &ignore_globs,
+                )
+            })
+            .await
+            .inspect_err(|e| tracing::error!("inbound link grep task failed: {e}"))
+            .ok()?;
             // Cache the result
             config
                 .inbound_link_cache
@@ -2373,14 +2514,13 @@ impl Server {
             }
         };
 
-        Some(
+        Some(build_response_or_500(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
-                .body(Body::from(json))
-                .unwrap(),
-        )
+                .body(Body::from(json)),
+        ))
     }
 
     /// Try to serve `errors.json` for per-page problem reporting.
@@ -2558,60 +2698,95 @@ impl Server {
             }
         };
 
-        Some(
+        Some(build_response_or_500(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
-                .body(Body::from(json))
-                .unwrap(),
-        )
+                .body(Body::from(json)),
+        ))
     }
 
     /// Build a JPEG image response.
     #[cfg(feature = "media-metadata")]
     fn build_jpg_response(bytes: Vec<u8>) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/jpeg")
-            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
-            .body(Body::from(bytes))
-            .unwrap()
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(bytes)),
+        )
     }
 
     /// Build a WebVTT response.
     #[cfg(feature = "media-metadata")]
     fn build_vtt_response(vtt: String) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
-            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
-            .body(Body::from(vtt))
-            .unwrap()
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(vtt)),
+        )
     }
 
     /// Build an HLS playlist response.
     #[cfg(feature = "media-metadata")]
     fn build_hls_playlist_response(playlist: Arc<Vec<u8>>) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-            .header(header::CONTENT_LENGTH, playlist.len())
-            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
-            .body(Body::from(playlist.as_ref().clone()))
-            .unwrap()
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                .header(header::CONTENT_LENGTH, playlist.len())
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(playlist.as_ref().clone())),
+        )
     }
 
     /// Build an HLS segment response.
     #[cfg(feature = "media-metadata")]
     fn build_hls_segment_response(segment: Arc<Vec<u8>>) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "video/mp2t")
-            .header(header::CONTENT_LENGTH, segment.len())
-            .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
-            .body(Body::from(segment.as_ref().clone()))
-            .unwrap()
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "video/mp2t")
+                .header(header::CONTENT_LENGTH, segment.len())
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(segment.as_ref().clone())),
+        )
+    }
+
+    /// Probes a video's resolution, memoized by path+mtime.
+    ///
+    /// The underlying `probe_video_resolution` demuxes the file, which is
+    /// blocking work, so on a cache miss it runs on a blocking thread. The
+    /// result is cached keyed by the file's mtime, so an unchanged file is never
+    /// re-demuxed and an edited file is transparently re-probed (finding #17).
+    #[cfg(feature = "media-metadata")]
+    async fn probe_resolution_cached(
+        video_file: &std::path::Path,
+        config: &ServerState,
+    ) -> Option<crate::video_transcode::VideoResolution> {
+        use crate::video_metadata_cache::cache_key_with_mtime;
+        use crate::video_transcode::probe_video_resolution;
+
+        let key = cache_key_with_mtime(video_file, "resolution");
+        if let Some(res) = config.video_resolution_cache.pin().get(&key).cloned() {
+            return Some(res);
+        }
+
+        let path = video_file.to_path_buf();
+        let probed = tokio::task::spawn_blocking(move || probe_video_resolution(&path))
+            .await
+            .inspect_err(|e| tracing::warn!("resolution probe task failed: {e}"))
+            .ok()?
+            .ok()?;
+        config
+            .video_resolution_cache
+            .pin()
+            .insert(key, probed.clone());
+        Some(probed)
     }
 
     /// Try to serve HLS content (playlist or segment) for transcoded video variants.
@@ -2621,10 +2796,12 @@ impl Server {
     #[cfg(feature = "media-metadata")]
     async fn try_serve_hls_content(path: &str, config: &ServerState) -> Option<Response<Body>> {
         use crate::video_transcode::{
-            HlsRequest, TranscodeError, generate_hls_playlist, parse_hls_request,
-            probe_video_resolution, should_transcode, transcode_segment,
+            HlsRequest, TranscodeError, generate_hls_playlist, parse_hls_request, should_transcode,
+            transcode_segment,
         };
-        use crate::video_transcode_cache::{HlsCacheKey, HlsCacheStartResult, HlsCacheState};
+        use crate::video_transcode_cache::{
+            HLS_WAIT_TIMEOUT, HlsCacheKey, HlsCacheStartResult, HlsCacheState,
+        };
 
         // Helper to build error response for transcode errors
         fn build_transcode_error_response(error: &TranscodeError) -> Option<Response<Body>> {
@@ -2632,29 +2809,27 @@ impl Server {
                 TranscodeError::SourceTooSmall {
                     source_height,
                     target_height,
-                } => Some(
+                } => Some(build_response_or_500(
                     Response::builder()
                         .status(StatusCode::UNPROCESSABLE_ENTITY)
                         .header(header::CONTENT_TYPE, "text/plain")
                         .body(Body::from(format!(
                             "Cannot transcode: source ({}p) not larger than target ({}p)",
                             source_height, target_height
-                        )))
-                        .unwrap(),
-                ),
+                        ))),
+                )),
                 TranscodeError::SegmentOutOfRange {
                     segment_index,
                     video_duration,
-                } => Some(
+                } => Some(build_response_or_500(
                     Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .header(header::CONTENT_TYPE, "text/plain")
                         .body(Body::from(format!(
                             "Segment {} is out of range (video duration: {:.1}s)",
                             segment_index, video_duration
-                        )))
-                        .unwrap(),
-                ),
+                        ))),
+                )),
                 // For other errors, fall through to 404 (return None)
                 _ => None,
             }
@@ -2673,27 +2848,36 @@ impl Server {
 
         tracing::debug!("HLS request: {:?}", hls_request);
 
-        // Resolve the original video file path
-        let video_file = {
-            let direct = config.base_dir.join(&video_path);
-            if direct.is_file() {
-                direct
-            } else {
-                let with_static = config
-                    .base_dir
-                    .join(&config.static_folder)
-                    .join(&video_path);
-                if with_static.is_file() {
-                    with_static
-                } else {
-                    tracing::debug!("Original video file not found for HLS: {}", video_path);
-                    return None;
-                }
-            }
+        // Resolve the original video file path with path traversal protection
+        let Some(video_file) =
+            resolve_media_source_file(&video_path, &config.base_dir, &config.static_folder)
+        else {
+            tracing::debug!("Original video file not found for HLS: {}", video_path);
+            return None;
         };
 
-        // Check if we should transcode (only downscale, never upscale)
-        let resolution = probe_video_resolution(&video_file).ok()?;
+        // Fast path (finding #17): if the requested playlist/segment is already
+        // cached, serve it without probing the source. The blocking ffmpeg
+        // demux in `probe_video_resolution` must not run on cache hits.
+        let content_key = match &hls_request {
+            HlsRequest::Playlist { .. } => HlsCacheKey::playlist(video_file.clone(), target),
+            HlsRequest::Segment { segment_index, .. } => {
+                HlsCacheKey::segment(video_file.clone(), target, *segment_index)
+            }
+        };
+        if let Some(HlsCacheState::Complete(data)) = config.hls_cache.get_state(&content_key) {
+            tracing::debug!("Serving cached HLS content (pre-probe fast path)");
+            return Some(match hls_request {
+                HlsRequest::Playlist { .. } => Self::build_hls_playlist_response(data),
+                HlsRequest::Segment { .. } => Self::build_hls_segment_response(data),
+            });
+        }
+
+        // Cache miss: probe the source to decide whether transcoding applies.
+        // The probe demuxes the file (blocking), so it runs off the async worker
+        // and its result is cached by path+mtime so repeated misses for an
+        // unchanged file never re-demux (finding #17 + #16).
+        let resolution = Self::probe_resolution_cached(&video_file, config).await?;
         if !should_transcode(resolution.height, target) {
             tracing::debug!(
                 "Video already at or below target resolution: {}x{} <= {}",
@@ -2702,7 +2886,7 @@ impl Server {
                 target.height()
             );
             // Return 422 instead of None (404) with helpful message
-            return Some(
+            return Some(build_response_or_500(
                 Response::builder()
                     .status(StatusCode::UNPROCESSABLE_ENTITY)
                     .header(header::CONTENT_TYPE, "text/plain")
@@ -2710,9 +2894,8 @@ impl Server {
                         "Cannot transcode: source ({}p) not larger than target ({}p)",
                         resolution.height,
                         target.height()
-                    )))
-                    .unwrap(),
-            );
+                    ))),
+            ));
         }
 
         match hls_request {
@@ -2768,13 +2951,13 @@ impl Server {
                     }
                     HlsCacheStartResult::AlreadyInProgress(notify) => {
                         tracing::debug!("Waiting for in-progress playlist generation");
-                        notify.notified().await;
-
-                        match config.hls_cache.get_state(&cache_key) {
-                            Some(HlsCacheState::Complete(data)) => {
-                                return Some(Self::build_hls_playlist_response(data));
-                            }
-                            _ => return None,
+                        match config
+                            .hls_cache
+                            .wait_for_completion(&cache_key, notify, HLS_WAIT_TIMEOUT)
+                            .await
+                        {
+                            Some(data) => return Some(Self::build_hls_playlist_response(data)),
+                            None => return None,
                         }
                     }
                     HlsCacheStartResult::AlreadyComplete(data) => {
@@ -2784,13 +2967,12 @@ impl Server {
                     HlsCacheStartResult::PreviouslyFailed(msg) => {
                         tracing::debug!("Previous playlist generation failed: {}", msg);
                         // Return 422 with cached error message instead of None (404)
-                        return Some(
+                        return Some(build_response_or_500(
                             Response::builder()
                                 .status(StatusCode::UNPROCESSABLE_ENTITY)
                                 .header(header::CONTENT_TYPE, "text/plain")
-                                .body(Body::from(format!("Transcode failed: {}", msg)))
-                                .unwrap(),
-                        );
+                                .body(Body::from(format!("Transcode failed: {}", msg))),
+                        ));
                     }
                     HlsCacheStartResult::CacheDisabled => {
                         // Generate without caching
@@ -2873,13 +3055,13 @@ impl Server {
                     }
                     HlsCacheStartResult::AlreadyInProgress(notify) => {
                         tracing::debug!("Waiting for in-progress segment transcode");
-                        notify.notified().await;
-
-                        match config.hls_cache.get_state(&cache_key) {
-                            Some(HlsCacheState::Complete(data)) => {
-                                return Some(Self::build_hls_segment_response(data));
-                            }
-                            _ => return None,
+                        match config
+                            .hls_cache
+                            .wait_for_completion(&cache_key, notify, HLS_WAIT_TIMEOUT)
+                            .await
+                        {
+                            Some(data) => return Some(Self::build_hls_segment_response(data)),
+                            None => return None,
                         }
                     }
                     HlsCacheStartResult::AlreadyComplete(data) => {
@@ -2889,13 +3071,12 @@ impl Server {
                     HlsCacheStartResult::PreviouslyFailed(msg) => {
                         tracing::debug!("Previous segment transcode failed: {}", msg);
                         // Return 422 with cached error message instead of None (404)
-                        return Some(
+                        return Some(build_response_or_500(
                             Response::builder()
                                 .status(StatusCode::UNPROCESSABLE_ENTITY)
                                 .header(header::CONTENT_TYPE, "text/plain")
-                                .body(Body::from(format!("Transcode failed: {}", msg)))
-                                .unwrap(),
-                        );
+                                .body(Body::from(format!("Transcode failed: {}", msg))),
+                        ));
                     }
                     HlsCacheStartResult::CacheDisabled => {
                         // Transcode without caching (not recommended for segments)
@@ -2933,7 +3114,7 @@ impl Server {
     async fn markdown_to_html(
         md_path: &Path,
         config: &ServerState,
-    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+    ) -> Result<Response<Body>, MbrError> {
         let root_path = config.base_dir.as_path();
 
         // Determine if this is an index file (which doesn't need ../ prefix for links)
@@ -3026,153 +3207,72 @@ impl Server {
             config.link_cache.insert(url_path_str, resolved_links);
         }
 
-        let breadcrumbs = generate_breadcrumbs(&url_path_buf);
-        let breadcrumbs_json: Vec<_> = breadcrumbs
-            .iter()
-            .map(|b| serde_json::json!({"name": b.name, "url": b.url}))
-            .collect();
-        let current_dir_name = get_current_dir_name(&url_path_buf);
-
-        // Build extra context for navigation elements, heading TOC, and config
-        let mut extra_context = std::collections::HashMap::new();
-        extra_context.insert(
-            "breadcrumbs".to_string(),
-            serde_json::json!(breadcrumbs_json),
-        );
-        extra_context.insert(
-            "current_dir_name".to_string(),
-            serde_json::json!(current_dir_name),
-        );
-        extra_context.insert("headings".to_string(), serde_json::json!(headings));
-        extra_context.insert("has_h1".to_string(), serde_json::json!(has_h1));
-
-        // Pass tag sources configuration for frontend tag linking
-        // Pre-serialize as JSON string for safe template rendering in JavaScript context
-        let tag_sources_json = serde_json::to_string(
-            &config
-                .tag_sources
-                .iter()
-                .map(|ts| {
-                    serde_json::json!({
-                        "field": ts.field,
-                        "urlSource": ts.url_source(),
-                        "label": ts.singular_label(),
-                        "labelPlural": ts.plural_label()
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
-        extra_context.insert(
-            "tag_sources".to_string(),
-            serde_json::json!(tag_sources_json),
-        );
-
-        // Pass word count and reading time (200 words per minute)
-        let reading_time_minutes = word_count.div_ceil(crate::constants::WORDS_PER_MINUTE);
-        extra_context.insert("word_count".to_string(), serde_json::json!(word_count));
-        extra_context.insert(
-            "reading_time_minutes".to_string(),
-            serde_json::json!(reading_time_minutes),
-        );
-        // Readability scores (Flesch Reading Ease + Flesch-Kincaid Grade Level).
-        // `None` values serialize as JSON `null`, which the template outputs
-        // literally so the frontend can guard on `!= null`.
-        extra_context.insert(
-            "flesch_reading_ease".to_string(),
-            serde_json::json!(readability_scores.flesch_reading_ease),
-        );
-        extra_context.insert(
-            "flesch_kincaid_grade".to_string(),
-            serde_json::json!(readability_scores.flesch_kincaid_grade),
-        );
-
-        // Pass file path (relative to root) for reference
-        extra_context.insert(
-            "file_path".to_string(),
-            serde_json::json!(relative_md_path.to_string_lossy()),
-        );
-        // Pass sidebar navigation configuration
-        extra_context.insert(
-            "sidebar_style".to_string(),
-            serde_json::json!(config.sidebar_style),
-        );
-        extra_context.insert(
-            "sidebar_max_items".to_string(),
-            serde_json::json!(config.sidebar_max_items),
-        );
-        extra_context.insert(
-            "title_prefix".to_string(),
-            serde_json::json!(config.title_prefix),
-        );
-        extra_context.insert(
-            "title_suffix".to_string(),
-            serde_json::json!(config.title_suffix),
-        );
-
-        // Pass modified date from file metadata
-        let modified_info = tokio::fs::metadata(md_path)
+        // Get modified date from file metadata (blocking fs work stays async here)
+        let modified_secs = tokio::fs::metadata(md_path)
             .await
             .ok()
             .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-        if let Some(duration) = modified_info {
-            extra_context.insert(
-                "modified_timestamp".to_string(),
-                serde_json::json!(duration.as_secs()),
-            );
-        }
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
 
         // Compute prev/next sibling pages for navigation
         let current_url = format!("/{}/", url_path_buf.display()).replace("//", "/");
         let parent_dir = relative_md_path.parent().unwrap_or(Path::new(""));
 
-        // Get sibling markdown files in the same directory
-        let mut siblings: Vec<_> = config
-            .repo
-            .markdown_files
-            .pin()
-            .iter()
-            .filter_map(|(_, info)| {
-                let file_parent = info.raw_path.parent()?;
-                if file_parent == parent_dir {
-                    Some(markdown_file_to_json(info))
-                } else {
-                    None
+        // Get sibling markdown files in the same directory. The sorted list is
+        // memoized per parent directory so we avoid an O(repo) scan on every
+        // render; the cache is cleared whenever files change. We only populate
+        // the cache once the initial scan is complete, so a partially-populated
+        // early result is never frozen (it falls back to a live scan instead).
+        let parent_key = parent_dir.to_path_buf();
+        let siblings: Arc<Vec<serde_json::Value>> = {
+            let cached = config.sibling_nav_cache.pin().get(&parent_key).cloned();
+            if let Some(cached) = cached {
+                cached
+            } else {
+                let computed = Arc::new(compute_sibling_files(
+                    config
+                        .repo
+                        .markdown_files
+                        .pin()
+                        .iter()
+                        .map(|(_, info)| info),
+                    parent_dir,
+                    &config.sort,
+                ));
+                if config.repo.is_scan_complete() {
+                    config
+                        .sibling_nav_cache
+                        .pin()
+                        .insert(parent_key, Arc::clone(&computed));
                 }
-            })
-            .collect();
-
-        // Sort siblings using configured sort order
-        sort_files(&mut siblings, &config.sort);
-
-        // Find current position and get prev/next
-        if let Some(current_idx) = siblings.iter().position(|f| {
-            f.get("url_path")
-                .and_then(|v| v.as_str())
-                .is_some_and(|p| p == current_url)
-        }) {
-            if current_idx > 0
-                && let Some(prev) = siblings.get(current_idx - 1)
-            {
-                extra_context.insert(
-                    "prev_page".to_string(),
-                    serde_json::json!({
-                        "url": prev.get("url_path"),
-                        "title": prev.get("title").and_then(|v| v.as_str()).unwrap_or("Previous")
-                    }),
-                );
+                computed
             }
-            if let Some(next) = siblings.get(current_idx + 1) {
-                extra_context.insert(
-                    "next_page".to_string(),
-                    serde_json::json!({
-                        "url": next.get("url_path"),
-                        "title": next.get("title").and_then(|v| v.as_str()).unwrap_or("Next")
-                    }),
-                );
-            }
-        }
+        };
+
+        // Build the extra context (navigation, TOC, readability, chrome) via
+        // the shared builder; server mode uses absolute URLs.
+        let extra_context = page_context::markdown_extra_context(
+            &page_context::MarkdownPageParams {
+                breadcrumb_path: &url_path_buf,
+                headings: &headings,
+                has_h1,
+                word_count,
+                readability: &readability_scores,
+                file_path: &relative_md_path.to_string_lossy(),
+                modified_secs,
+                current_url: &current_url,
+                siblings: &siblings,
+            },
+            &page_context::MarkdownContextOptions {
+                tag_sources: &config.tag_sources,
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                title_prefix: &config.title_prefix,
+                title_suffix: &config.title_suffix,
+            },
+            &page_context::UrlMode::Absolute,
+        );
 
         let full_html_output = config
             .templates
@@ -3203,7 +3303,7 @@ impl Server {
 
         builder
             .body(Body::from(full_html_output))
-            .map_err(|e| e.into())
+            .map_err(MbrError::from)
     }
 
     async fn directory_to_html(
@@ -3211,73 +3311,100 @@ impl Server {
         templates: &crate::templates::Templates,
         root_path: &Path,
         config: &ServerState,
-    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+    ) -> Result<Response<Body>, MbrError> {
         use serde_json::json;
-
-        // Create a temporary repo instance to scan this directory
-        let temp_repo = Repo::init(
-            root_path,
-            &config.static_folder,
-            &config.markdown_extensions,
-            &config.ignore_dirs,
-            &config.ignore_globs,
-            &config.index_file,
-            &config.tag_sources,
-        );
 
         // Calculate relative path from root
         let relative_path = pathdiff::diff_paths(dir_path, root_path)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Scan this directory only (non-recursive)
-        temp_repo
-            .scan_folder(&relative_path)
-            .inspect_err(|e| tracing::error!("Error scanning directory: {e}"))?;
+        // Scanning a directory from disk is blocking filesystem work. Run the
+        // scan and JSON extraction on a blocking thread so the async worker is
+        // not stalled. All captured data is owned/`Send`.
+        let (files, subdirs) = {
+            let root_path = root_path.to_path_buf();
+            let dir_path = dir_path.to_path_buf();
+            let relative_path = relative_path.clone();
+            let static_folder = config.static_folder.clone();
+            let markdown_extensions = config.markdown_extensions.clone();
+            let ignore_dirs = config.ignore_dirs.clone();
+            let ignore_globs = config.ignore_globs.clone();
+            let index_file = config.index_file.clone();
+            let tag_sources = config.tag_sources.clone();
+            let sort = config.sort.clone();
 
-        // Extract markdown files and transform to JSON using helper
-        let mut files: Vec<_> = temp_repo
-            .markdown_files
-            .pin()
-            .iter()
-            .map(|(_, file_info)| markdown_file_to_json(file_info))
-            .collect();
+            let scan_result = tokio::task::spawn_blocking(move || {
+                // Create a temporary repo instance to scan this directory
+                let temp_repo = Repo::init(
+                    &root_path,
+                    &static_folder,
+                    &markdown_extensions,
+                    &ignore_dirs,
+                    &ignore_globs,
+                    &index_file,
+                    &tag_sources,
+                );
 
-        // Sort files using configurable sort order
-        sort_files(&mut files, &config.sort);
+                // Scan this directory only (non-recursive)
+                temp_repo.scan_folder(&relative_path).inspect_err(|e| {
+                    tracing::error!("Error scanning directory: {e}");
+                })?;
 
-        // Extract subdirectories
-        let subdirs: Vec<_> = temp_repo
-            .queued_folders
-            .pin()
-            .iter()
-            .filter_map(|(abs_path, rel_path)| {
-                // Only include immediate children
-                let parent = abs_path.parent()?;
-                if parent == dir_path {
-                    let name = abs_path.file_name()?.to_str()?.to_string();
-                    let mut url_path = rel_path.to_str()?.to_string();
-                    if !url_path.starts_with('/') {
-                        url_path = "/".to_string() + &url_path;
-                    }
-                    if !url_path.ends_with('/') {
-                        url_path.push('/');
-                    }
-                    Some(json!({
-                        "name": name,
-                        "url_path": url_path,
-                    }))
-                } else {
-                    None
-                }
+                // Extract markdown files and transform to JSON using helper
+                let mut files: Vec<serde_json::Value> = temp_repo
+                    .markdown_files
+                    .pin()
+                    .iter()
+                    .map(|(_, file_info)| markdown_file_to_json(file_info))
+                    .collect();
+
+                // Sort files using configurable sort order
+                sort_files(&mut files, &sort);
+
+                // Extract subdirectories
+                let subdirs: Vec<serde_json::Value> = temp_repo
+                    .queued_folders
+                    .pin()
+                    .iter()
+                    .filter_map(|(abs_path, rel_path)| {
+                        // Only include immediate children
+                        let parent = abs_path.parent()?;
+                        if parent == dir_path.as_path() {
+                            let name = abs_path.file_name()?.to_str()?.to_string();
+                            let mut url_path = rel_path.to_str()?.to_string();
+                            if !url_path.starts_with('/') {
+                                url_path = "/".to_string() + &url_path;
+                            }
+                            if !url_path.ends_with('/') {
+                                url_path.push('/');
+                            }
+                            Some(json!({
+                                "name": name,
+                                "url_path": url_path,
+                            }))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                Ok::<_, crate::errors::RepoError>((files, subdirs))
             })
-            .collect();
+            .await;
+
+            match scan_result {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => return Err(e.into()),
+                Err(e) => {
+                    tracing::error!("directory scan task failed: {e}");
+                    return Err(e.into());
+                }
+            }
+        };
 
         // Use helper functions for navigation elements
         let breadcrumbs = generate_breadcrumbs(&relative_path);
-        let breadcrumbs_json: Vec<_> = breadcrumbs
-            .iter()
-            .map(|b| json!({"name": b.name, "url": b.url}))
-            .collect();
+        let breadcrumbs_json = page_context::breadcrumbs_to_json(&breadcrumbs, &UrlMode::Absolute);
 
         let current_dir_name = get_current_dir_name(&relative_path);
         let parent_path = get_parent_path(&relative_path);
@@ -3295,10 +3422,6 @@ impl Server {
         if let Some(parent) = parent_path {
             context.insert("parent_path".to_string(), json!(parent));
         }
-        // Indicate server mode for frontend search functionality
-        context.insert("server_mode".to_string(), json!(true));
-        // Indicate GUI mode for native window detection
-        context.insert("gui_mode".to_string(), json!(config.gui_mode));
 
         // Add full config to template context
         context.insert(
@@ -3312,32 +3435,24 @@ impl Server {
         );
 
         // Pass tag_sources configuration for frontend (consistent with markdown pages)
-        // Pre-serialize as JSON string for safe template rendering in JavaScript context
-        let tag_sources_json = serde_json::to_string(
-            &config
-                .tag_sources
-                .iter()
-                .map(|ts| {
-                    json!({
-                        "field": ts.field,
-                        "urlSource": ts.url_source(),
-                        "label": ts.singular_label(),
-                        "labelPlural": ts.plural_label()
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
-        context.insert("tag_sources".to_string(), json!(tag_sources_json));
-
-        // Pass sidebar navigation configuration
-        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
         context.insert(
-            "sidebar_max_items".to_string(),
-            json!(config.sidebar_max_items),
+            "tag_sources".to_string(),
+            json!(page_context::tag_sources_json(&config.tag_sources)),
         );
-        context.insert("title_prefix".to_string(), json!(config.title_prefix));
-        context.insert("title_suffix".to_string(), json!(config.title_suffix));
+
+        // Mode flags, sidebar navigation configuration, and title affixes
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Server {
+                    gui_mode: Some(config.gui_mode),
+                    mbr_base: false,
+                },
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+            },
+        );
 
         // Detect if we're at the root directory
         let is_root =
@@ -3368,7 +3483,7 @@ impl Server {
             .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
             .header(header::ETAG, etag)
             .body(Body::from(full_html_output))
-            .map_err(|e| e.into())
+            .map_err(MbrError::from)
     }
 
     /// Renders a tag page showing all pages with a specific tag value.
@@ -3376,24 +3491,10 @@ impl Server {
         source: &str,
         value: &str,
         config: &ServerState,
-    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
-        use serde_json::json;
-
-        // Find the TagSource config to get labels
-        let tag_source = config.tag_sources.iter().find(|s| s.url_source() == source);
-
-        let (label, label_plural) = if let Some(ts) = tag_source {
-            (ts.singular_label(), ts.plural_label())
-        } else {
-            // Fallback to capitalized source name
-            let capitalized = source
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_default()
-                + &source[1..];
-            (capitalized.clone(), format!("{}s", capitalized))
-        };
+    ) -> Result<Response<Body>, MbrError> {
+        // Find the TagSource config to get labels (fallback: capitalized source name)
+        let (label, label_plural) =
+            page_context::tag_labels(&config.tag_sources, source, &capitalize_first(source));
 
         // Get pages with this tag from the index
         let pages = config.repo.tag_index.get_pages(source, value);
@@ -3405,36 +3506,29 @@ impl Server {
             .get_tag_display(source, value)
             .unwrap_or_else(|| value.to_string());
 
-        // Convert pages to JSON objects
-        let pages_json: Vec<serde_json::Value> = pages
-            .iter()
-            .map(|page| {
-                json!({
-                    "url_path": page.url_path,
-                    "title": page.title,
-                    "description": page.description,
-                })
-            })
-            .collect();
-
         // Build template context
         let mut context = std::collections::HashMap::new();
-        context.insert("tag_source".to_string(), json!(source));
-        context.insert("tag_display_value".to_string(), json!(display_value));
-        context.insert("tag_label".to_string(), json!(label));
-        context.insert("tag_label_plural".to_string(), json!(label_plural));
-        context.insert("pages".to_string(), json!(pages_json));
-        context.insert("page_count".to_string(), json!(pages.len()));
-        context.insert("server_mode".to_string(), json!(true));
-        context.insert("relative_base".to_string(), json!("/.mbr/"));
-        // Pass sidebar navigation configuration
-        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
-        context.insert(
-            "sidebar_max_items".to_string(),
-            json!(config.sidebar_max_items),
+        page_context::insert_tag_page_keys(
+            &mut context,
+            source,
+            &display_value,
+            &label,
+            &label_plural,
+            &pages,
+            &UrlMode::Absolute,
         );
-        context.insert("title_prefix".to_string(), json!(config.title_prefix));
-        context.insert("title_suffix".to_string(), json!(config.title_suffix));
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Server {
+                    gui_mode: None,
+                    mbr_base: true,
+                },
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+            },
+        );
 
         let html_output = config.templates.render_tag(context)?;
 
@@ -3446,64 +3540,36 @@ impl Server {
             .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
             .header(header::ETAG, etag)
             .body(Body::from(html_output))
-            .map_err(|e| e.into())
+            .map_err(MbrError::from)
     }
 
     /// Renders a tag source index showing all tags from a source.
     async fn tag_source_index_to_html(
         source: &str,
         config: &ServerState,
-    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
-        use serde_json::json;
-
-        // Find the TagSource config to get labels
-        let tag_source = config.tag_sources.iter().find(|s| s.url_source() == source);
-
-        let (label, label_plural) = if let Some(ts) = tag_source {
-            (ts.singular_label(), ts.plural_label())
-        } else {
-            // Fallback to capitalized source name
-            let capitalized = source
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_default()
-                + &source[1..];
-            (capitalized.clone(), format!("{}s", capitalized))
-        };
+    ) -> Result<Response<Body>, MbrError> {
+        // Find the TagSource config to get labels (fallback: capitalized source name)
+        let (label, label_plural) =
+            page_context::tag_labels(&config.tag_sources, source, &capitalize_first(source));
 
         // Get all tags for this source
         let tags = config.repo.tag_index.get_all_tags(source);
 
-        // Convert tags to JSON objects
-        let tags_json: Vec<serde_json::Value> = tags
-            .iter()
-            .map(|tag| {
-                json!({
-                    "url_value": tag.normalized,
-                    "display_value": tag.display,
-                    "page_count": tag.count,
-                })
-            })
-            .collect();
-
         // Build template context
         let mut context = std::collections::HashMap::new();
-        context.insert("tag_source".to_string(), json!(source));
-        context.insert("tag_label".to_string(), json!(label));
-        context.insert("tag_label_plural".to_string(), json!(label_plural));
-        context.insert("tags".to_string(), json!(tags_json));
-        context.insert("tag_count".to_string(), json!(tags.len()));
-        context.insert("server_mode".to_string(), json!(true));
-        context.insert("relative_base".to_string(), json!("/.mbr/"));
-        // Pass sidebar navigation configuration
-        context.insert("sidebar_style".to_string(), json!(config.sidebar_style));
-        context.insert(
-            "sidebar_max_items".to_string(),
-            json!(config.sidebar_max_items),
+        page_context::insert_tag_index_keys(&mut context, source, &label, &label_plural, &tags);
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Server {
+                    gui_mode: None,
+                    mbr_base: true,
+                },
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+            },
         );
-        context.insert("title_prefix".to_string(), json!(config.title_prefix));
-        context.insert("title_suffix".to_string(), json!(config.title_suffix));
 
         let html_output = config.templates.render_tag_index(context)?;
 
@@ -3515,7 +3581,7 @@ impl Server {
             .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
             .header(header::ETAG, etag)
             .body(Body::from(html_output))
-            .map_err(|e| e.into())
+            .map_err(MbrError::from)
     }
 
     /// Handler for the root path "/" - renders the home page using the same
@@ -3671,6 +3737,28 @@ pub fn get_parent_path(relative_path: &Path) -> Option<String> {
     }
 }
 
+/// Builds the sorted list of sibling markdown files that share `parent_dir`.
+///
+/// This is the pure core of prev/next navigation: it filters the provided
+/// markdown-file infos to those whose parent directory equals `parent_dir`,
+/// converts each to its template JSON form, and sorts using `sort`. Extracted
+/// so it can be memoized per directory (see `sibling_nav_cache`) and unit
+/// tested independently of the live repository.
+fn compute_sibling_files<'a>(
+    files: impl Iterator<Item = &'a MarkdownInfo>,
+    parent_dir: &Path,
+    sort: &[SortField],
+) -> Vec<serde_json::Value> {
+    let mut siblings: Vec<serde_json::Value> = files
+        .filter_map(|info| {
+            let file_parent = info.raw_path.parent()?;
+            (file_parent == parent_dir).then(|| markdown_file_to_json(info))
+        })
+        .collect();
+    sort_files(&mut siblings, sort);
+    siblings
+}
+
 /// Transforms markdown file info into a JSON value for template rendering.
 pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
     use serde_json::json;
@@ -3721,6 +3809,33 @@ pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
 // ============================================================================
 // Cache header helpers (extracted for testability and reuse)
 // ============================================================================
+
+/// Capitalizes the first character of a string, leaving the remainder intact.
+///
+/// UTF-8 safe: uses character boundaries rather than byte indexing, so a
+/// leading multi-byte character (e.g. "étiquettes") does not panic.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Finalizes an HTTP response builder, falling back to a plain 500 response
+/// if the builder was misconfigured (e.g. an invalid header value).
+///
+/// Our builders use fixed, known-valid headers, so the fallback is effectively
+/// unreachable — but a malformed value must degrade to a 500, never panic the
+/// request handler.
+fn build_response_or_500(result: Result<Response<Body>, axum::http::Error>) -> Response<Body> {
+    result.unwrap_or_else(|e| {
+        tracing::error!("Failed to build HTTP response: {e}");
+        let mut response = Response::new(Body::from("Internal Server Error"));
+        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+        response
+    })
+}
 
 /// Generates a weak ETag from content bytes using a simple hash.
 /// Weak ETags (W/"...") indicate semantic equivalence, not byte-for-byte identity.
@@ -3986,6 +4101,27 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_capitalize_first_ascii() {
+        assert_eq!(capitalize_first("tags"), "Tags");
+        assert_eq!(capitalize_first("t"), "T");
+    }
+
+    #[test]
+    fn test_capitalize_first_multibyte() {
+        // A leading multi-byte character must not panic (regression for
+        // byte-slicing `&source[1..]`).
+        assert_eq!(capitalize_first("étiquettes"), "Étiquettes");
+        assert_eq!(capitalize_first("über"), "Über");
+        // Non-Latin scripts have no uppercase form; content is preserved.
+        assert_eq!(capitalize_first("日本語"), "日本語");
+    }
+
+    #[test]
+    fn test_capitalize_first_empty() {
+        assert_eq!(capitalize_first(""), "");
+    }
 
     #[test]
     fn test_generate_breadcrumbs_root() {
@@ -4514,6 +4650,48 @@ mod tests {
         assert!(matches!(result, Err(MbrError::InvalidMediaPath(_))));
     }
 
+    // ==================== resolve_media_source_file Tests ====================
+
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_resolve_media_source_file_rejects_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        // Secret file OUTSIDE base - unvalidated join + is_file() would have found it
+        std::fs::write(temp_dir.path().join("secret.mp4"), b"secret").unwrap();
+
+        let result = resolve_media_source_file("../secret.mp4", &base, "static");
+        assert!(
+            result.is_none(),
+            "path traversal outside base_dir must be rejected"
+        );
+    }
+
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_resolve_media_source_file_accepts_file_in_base() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let video_file = temp_dir.path().join("demo.mp4");
+        std::fs::write(&video_file, b"video content").unwrap();
+
+        let result = resolve_media_source_file("demo.mp4", temp_dir.path(), "static");
+        assert_eq!(result, Some(video_file.canonicalize().unwrap()));
+    }
+
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_resolve_media_source_file_accepts_file_in_static_folder() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let static_dir = temp_dir.path().join("static");
+        std::fs::create_dir_all(&static_dir).unwrap();
+        let video_file = static_dir.join("demo.mp4");
+        std::fs::write(&video_file, b"video content").unwrap();
+
+        let result = resolve_media_source_file("demo.mp4", temp_dir.path(), "static");
+        assert_eq!(result, Some(video_file.canonicalize().unwrap()));
+    }
+
     // ==================== safe_join_asset Tests ====================
 
     #[test]
@@ -4605,6 +4783,160 @@ mod tests {
             let result = safe_join_asset(temp_dir.path(), "escape/some_file");
             assert!(result.is_none(), "Symlink escape should be blocked");
         }
+    }
+
+    fn mk_markdown_info(raw: &str, url: &str, title: &str) -> MarkdownInfo {
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert(
+            "title".to_string(),
+            serde_json::Value::String(title.to_string()),
+        );
+        MarkdownInfo {
+            raw_path: PathBuf::from(raw),
+            url_path: url.to_string(),
+            frontmatter: Some(frontmatter),
+            created: 0,
+            modified: 0,
+        }
+    }
+
+    fn title_sort() -> Vec<SortField> {
+        vec![SortField {
+            field: "title".to_string(),
+            order: "asc".to_string(),
+            compare: "string".to_string(),
+        }]
+    }
+
+    /// The memoizable sibling helper (finding #18) must return exactly what the
+    /// previous inline full-scan produced for the same directory and sort.
+    #[test]
+    fn test_compute_sibling_files_matches_full_scan() {
+        let files = [
+            mk_markdown_info("docs/b.md", "/docs/b/", "Beta"),
+            mk_markdown_info("docs/a.md", "/docs/a/", "Alpha"),
+            mk_markdown_info("other/c.md", "/other/c/", "Gamma"),
+            mk_markdown_info("root.md", "/root/", "Root"),
+        ];
+        let sort = title_sort();
+        let parent = Path::new("docs");
+
+        let got = compute_sibling_files(files.iter(), parent, &sort);
+
+        // Reference implementation of the prior full-scan behavior.
+        let mut expected: Vec<serde_json::Value> = files
+            .iter()
+            .filter_map(|info| {
+                let file_parent = info.raw_path.parent()?;
+                (file_parent == parent).then(|| markdown_file_to_json(info))
+            })
+            .collect();
+        sort_files(&mut expected, &sort);
+
+        assert_eq!(got, expected);
+        assert_eq!(got.len(), 2);
+        // Sorted by title ascending regardless of input order.
+        assert_eq!(got[0]["title"], "Alpha");
+        assert_eq!(got[1]["title"], "Beta");
+    }
+
+    /// A directory with no markdown children yields an empty sibling list.
+    #[test]
+    fn test_compute_sibling_files_no_children() {
+        let files = [mk_markdown_info("docs/a.md", "/docs/a/", "Alpha")];
+        let got = compute_sibling_files(files.iter(), Path::new("empty"), &title_sort());
+        assert!(got.is_empty());
+    }
+
+    /// Finding #20: N concurrent requests for the same (path, type) must trigger
+    /// exactly one decode; every other request awaits and reads the cached
+    /// result rather than starting its own decode.
+    #[cfg(feature = "media-metadata")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_metadata_single_flight_one_decode() {
+        use crate::video_metadata_cache::{CachedMetadata, VideoMetadataCache};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
+            Arc::new(papaya::HashMap::new());
+        let cache = Arc::new(VideoMetadataCache::new(1024 * 1024));
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let key = "videos/clip.mp4::cover::mtime=1".to_string();
+
+        // The producer claims the slot first (as the request handler would).
+        let producer_notify = match claim_inflight(&inflight, &key) {
+            InflightClaim::Produce(notify) => notify,
+            InflightClaim::Wait(_) => panic!("first claim must produce"),
+        };
+
+        // Spawn several concurrent "requests" that all find the slot occupied.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let inflight = Arc::clone(&inflight);
+            let cache = Arc::clone(&cache);
+            let decodes = Arc::clone(&decodes);
+            let key = key.clone();
+            handles.push(tokio::spawn(async move {
+                match claim_inflight(&inflight, &key) {
+                    InflightClaim::Produce(_) => {
+                        // A waiter must never become a second producer.
+                        decodes.fetch_add(1, Ordering::SeqCst);
+                        panic!("concurrent request unexpectedly started a decode");
+                    }
+                    InflightClaim::Wait(notify) => {
+                        let notified = notify.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        if cache.get(&key).is_none() {
+                            tokio::time::timeout(Duration::from_secs(5), notified)
+                                .await
+                                .expect("waiter timed out");
+                        }
+                        cache.get(&key).is_some()
+                    }
+                }
+            }));
+        }
+
+        // Give the waiters a moment to register interest.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The single producer performs exactly one decode and publishes it.
+        decodes.fetch_add(1, Ordering::SeqCst);
+        cache.insert(key.clone(), CachedMetadata::Cover(vec![1, 2, 3, 4]));
+        inflight.pin().remove(&key);
+        producer_notify.notify_waiters();
+
+        for handle in handles {
+            assert!(handle.await.unwrap(), "waiter did not observe the result");
+        }
+        assert_eq!(
+            decodes.load(Ordering::SeqCst),
+            1,
+            "only the producer should have decoded"
+        );
+    }
+
+    /// Call-site smoke test for the metadata cache path: a cached cover produces
+    /// a JPEG response, and a negative marker falls through to `None` (404).
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_metadata_response_from_cache_variants() {
+        use crate::video_metadata_cache::CachedMetadata;
+
+        let jpg = Server::metadata_response_from_cache(CachedMetadata::Cover(vec![0xFF, 0xD8]));
+        assert!(jpg.is_some());
+        assert_eq!(
+            jpg.unwrap().headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
+
+        let vtt =
+            Server::metadata_response_from_cache(CachedMetadata::Captions("WEBVTT".to_string()));
+        assert!(vtt.is_some());
+
+        assert!(Server::metadata_response_from_cache(CachedMetadata::NotAvailable).is_none());
     }
 }
 
