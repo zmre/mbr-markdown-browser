@@ -336,8 +336,14 @@
           '';
         });
     in rec {
-      # Build frontend components first
-      packages.mbr-components = pkgs.buildNpmPackage {
+      # Package set is assembled as a base set merged with darwin-only sets via
+      # `// lib.optionalAttrs isDarwin { ... }`. On Linux those merges contribute
+      # nothing, so the darwin-only outputs are ABSENT (not empty-attrset-valued),
+      # which keeps `nix flake check` happy on Linux.
+      packages =
+        {
+          # Build frontend components first
+          mbr-components = pkgs.buildNpmPackage {
         pname = "mbr-components";
         inherit version;
         src = ./components;
@@ -350,11 +356,12 @@
           mkdir -p $out
           cp -r ../templates/components-js/* $out/
         '';
-      };
-
-      # QuickLook staticlib: builds libmbr.a without GUI/ffmpeg for sandbox compatibility
-      packages.mbr-quicklook-staticlib = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
-        craneLib.buildPackage (commonArgs
+          };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          # QuickLook staticlib: builds libmbr.a without GUI/ffmpeg for sandbox compatibility
+          mbr-quicklook-staticlib =
+            craneLib.buildPackage (commonArgs
           // {
             inherit cargoArtifacts;
             pname = "mbr-quicklook-staticlib";
@@ -373,12 +380,11 @@
               mkdir -p $out/lib
               cp target/release/libmbr.a $out/lib/
             '';
-          })
-      );
+          });
 
-      # QuickLook extension: builds the .appex using swiftc directly
-      packages.mbr-quicklook = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
-        pkgs.stdenv.mkDerivation {
+          # QuickLook extension: builds the .appex using swiftc directly
+          mbr-quicklook =
+            pkgs.stdenv.mkDerivation {
           pname = "mbr-quicklook";
           inherit version;
           inherit src;
@@ -425,16 +431,16 @@
             cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
           '';
 
-          installPhase = ''
-            mkdir -p $out
-            cp -R build/MBRPreview.appex $out/
-          '';
+              installPhase = ''
+                mkdir -p $out
+                cp -R build/MBRPreview.appex $out/
+              '';
+            };
         }
-      );
-
-      # Core CLI binary (all platforms) - no app bundle, no QuickLook
-      # Statically links ffmpeg — no runtime ffmpeg dependency
-      packages.mbr-cli = craneLib.buildPackage (commonArgs
+        // {
+          # Core CLI binary (all platforms) - no app bundle, no QuickLook
+          # Statically links ffmpeg — no runtime ffmpeg dependency
+          mbr-cli = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
           pname = "mbr-cli";
@@ -455,9 +461,9 @@
           };
         });
 
-      # Main package: CLI on Linux, CLI + app bundle + QuickLook on macOS
-      packages.mbr =
-        if pkgs.stdenv.isDarwin
+          # Main package: CLI on Linux, CLI + app bundle + QuickLook on macOS
+          mbr =
+            if pkgs.stdenv.isDarwin
         then
           pkgs.stdenv.mkDerivation {
             pname = "mbr";
@@ -531,8 +537,8 @@
             meta = packages.mbr-cli.meta;
           };
 
-      # Clippy check - runs lints without full build
-      packages.clippy = craneLib.cargoClippy (commonArgs
+          # Clippy check - runs lints without full build
+          clippy = craneLib.cargoClippy (commonArgs
         // {
           inherit cargoArtifacts;
           cargoClippyExtraArgs = "--all-targets -- -D warnings";
@@ -543,8 +549,8 @@
           '';
         });
 
-      # Test - runs all tests
-      packages.tests = craneLib.cargoTest (commonArgs
+          # Test - runs all tests
+          tests = craneLib.cargoTest (commonArgs
         // {
           inherit cargoArtifacts;
           cargoTestExtraArgs = "--features gui,media-metadata,ffmpeg-static,ffi";
@@ -555,28 +561,28 @@
           '';
         });
 
-      # Format check
-      packages.fmt = craneLib.cargoFmt {
-        inherit src;
-      };
-
-      # Swift format check (Darwin only)
-      # Excludes Generated/ directory (UniFFI auto-generated code)
-      packages.swiftfmt = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
-        pkgs.runCommand "mbr-swiftfmt-check" {
+          # Format check
+          fmt = craneLib.cargoFmt {
+            inherit src;
+          };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          # Swift format check (Darwin only)
+          # Excludes Generated/ directory (UniFFI auto-generated code)
+          swiftfmt =
+            pkgs.runCommand "mbr-swiftfmt-check" {
           nativeBuildInputs = [pkgs.swiftformat];
         } ''
           cd ${src}/quicklook
           # Use explicit exclusion since config file may not be accessible in sandbox
           swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed" && exit 1)
           touch $out
-        ''
-      );
+        '';
 
-      # Swift lint check (Darwin only)
-      # Excludes Generated/ directory (UniFFI auto-generated code)
-      packages.swiftlint-check = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
-        pkgs.runCommand "mbr-swiftlint-check" {
+          # Swift lint check (Darwin only)
+          # Excludes Generated/ directory (UniFFI auto-generated code)
+          swiftlint-check =
+            pkgs.runCommand "mbr-swiftlint-check" {
           nativeBuildInputs = [pkgs.swiftlint];
           # SwiftLint needs HOME for cache directory
           HOME = "/tmp";
@@ -591,27 +597,18 @@
             exit 1
           fi
           touch $out
-        ''
-      );
-
-      # Expose the minimal static ffmpeg for independent build/verification
-      packages.ffmpegMinimalStatic = ffmpegMinimalStatic;
-
-      packages.default = packages.mbr;
-
-      # Checks run by `nix flake check`
-      checks =
-        {
-          inherit (packages) mbr-cli clippy fmt tests;
+        '';
         }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          inherit (packages) swiftfmt swiftlint-check mbr;
-        };
+        // {
+          # Expose the minimal static ffmpeg for independent build/verification
+          ffmpegMinimalStatic = ffmpegMinimalStatic;
 
-      # Release package: creates distributable archives from the built package
-      # Bundles pdfium library for PDF cover image generation
-      packages.release =
-        pkgs.runCommand "mbr-release-${version}" {
+          default = packages.mbr;
+
+          # Release package: creates distributable archives from the built package
+          # Bundles pdfium library for PDF cover image generation
+          release =
+            pkgs.runCommand "mbr-release-${version}" {
           nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
         } (
           if pkgs.stdenv.isDarwin
@@ -697,6 +694,16 @@
             ls -lh $out/
           ''
         );
+        };
+
+      # Checks run by `nix flake check`
+      checks =
+        {
+          inherit (packages) mbr-cli clippy fmt tests;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          inherit (packages) swiftfmt swiftlint-check mbr;
+        };
 
       # Apps
       apps.default = flake-utils.lib.mkApp {drv = packages.mbr;};
