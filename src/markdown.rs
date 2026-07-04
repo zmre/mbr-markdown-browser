@@ -597,11 +597,15 @@ pub async fn render_with_cache(
     mark_incomplete: bool,
     incomplete_markers: &[String],
 ) -> Result<MarkdownRenderResult, MarkdownError> {
-    // Read markdown input
-    let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
-        path: file.clone(),
-        source: e,
-    })?;
+    // Read markdown input. Use tokio's async filesystem API so this (potentially
+    // slow) read does not block a tokio worker thread in the async render path.
+    let raw_markdown_input =
+        tokio::fs::read_to_string(&file)
+            .await
+            .map_err(|e| MarkdownError::ReadFailed {
+                path: file.clone(),
+                source: e,
+            })?;
 
     // Transform [[Source:value]] wikilinks to standard markdown links before parsing
     let markdown_input = if valid_tag_sources.is_empty() {

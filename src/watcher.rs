@@ -7,6 +7,7 @@
 //! no per-file stat polling, handles large directories without CPU overhead.
 
 use crate::errors::WatcherError;
+use crate::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -85,7 +86,7 @@ impl FileWatcher {
         base_dir: &Path,
         template_folder: Option<&Path>,
         ignore_dirs: &[String],
-        _ignore_globs: &[String],
+        ignore_globs: &[String],
         sender: broadcast::Sender<FileChangeEvent>,
     ) -> Result<Self, WatcherError> {
         let tx = sender;
@@ -93,6 +94,8 @@ impl FileWatcher {
 
         // Use configured ignore directories (defaults are set in Config)
         let ignore_set: HashSet<String> = ignore_dirs.iter().cloned().collect();
+        // Own the ignore globs so they can move into the watcher callback.
+        let ignore_globs: Vec<String> = ignore_globs.to_vec();
 
         let tx_clone = tx.clone();
         let base_dir_clone = base_dir.clone();
@@ -101,6 +104,21 @@ impl FileWatcher {
         // Kernel-level: no polling, no CPU overhead for large directories
         let mut watcher = notify::RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
+                // A path is ignored when it lives under a configured ignore
+                // directory or when its repo-relative form matches an ignore
+                // glob. Reuses `repo::should_ignore` for glob matching so the
+                // watcher and the repo scanner stay consistent.
+                let is_ignored = |path: &Path| -> bool {
+                    let under_ignored_dir = path.components().any(|comp| {
+                        ignore_set.contains(comp.as_os_str().to_string_lossy().as_ref())
+                    });
+                    under_ignored_dir || {
+                        let relative = pathdiff::diff_paths(path, &base_dir_clone)
+                            .unwrap_or_else(|| path.to_path_buf());
+                        should_ignore(&relative, &[], &ignore_globs)
+                    }
+                };
+
                 match res {
                     Ok(event) => {
                         debug!("File watcher event: {:?}", event);
@@ -118,16 +136,9 @@ impl FileWatcher {
 
                         // Process each path in the event
                         for path in event.paths {
-                            // Skip if path contains any ignored directory
-                            let path_str = path.to_string_lossy();
-                            let should_ignore = ignore_set.iter().any(|ignored| {
-                                path.components().any(|comp| {
-                                    comp.as_os_str().to_string_lossy() == ignored.as_str()
-                                })
-                            });
-
-                            if should_ignore {
-                                debug!("Ignoring change in: {}", path_str);
+                            // Skip ignored directories and ignore-glob matches
+                            if is_ignored(&path) {
+                                debug!("Ignoring change in: {}", path.to_string_lossy());
                                 continue;
                             }
 
@@ -150,16 +161,9 @@ impl FileWatcher {
                     Err(e) => {
                         // Process each path in the event
                         for path in &e.paths {
-                            // Skip if path contains any ignored directory
-                            let path_str = path.to_string_lossy();
-                            let should_ignore = ignore_set.iter().any(|ignored| {
-                                path.components().any(|comp| {
-                                    comp.as_os_str().to_string_lossy() == ignored.as_str()
-                                })
-                            });
-
-                            if should_ignore {
-                                trace!("Ignoring error in: {}", path_str);
+                            // Skip ignored directories and ignore-glob matches
+                            if is_ignored(path) {
+                                trace!("Ignoring error in: {}", path.to_string_lossy());
                             } else {
                                 error!("File watcher error: {}", e);
                             }
@@ -305,6 +309,47 @@ mod tests {
         assert!(
             !saw_ignored_file,
             "Should NOT see ignored.txt from target/ directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watcher_ignores_glob_patterns() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Ignore any *.log file via ignore_globs (matched against repo-relative path)
+        let ignore_globs = vec!["*.log".to_string()];
+        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &[], &ignore_globs).unwrap();
+
+        // A normal markdown file must still fire an event...
+        let note_file = base_path.join("note.md");
+        fs::write(&note_file, "# Note").unwrap();
+        // ...while a file matching the ignore glob must not.
+        let log_file = base_path.join("debug.log");
+        fs::write(&log_file, "log line").unwrap();
+
+        // The normal path invokes the reload callback (broadcasts an event).
+        let change = recv_matching(&mut rx, |e| e.relative_path.contains("note.md")).await;
+        assert!(change.is_some(), "Should receive event for note.md");
+
+        // The ignored glob path must never invoke the reload callback.
+        let mut saw_log = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Ok(change)) => {
+                    if change.relative_path.contains("debug.log") {
+                        saw_log = true;
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => continue,
+            }
+        }
+
+        assert!(
+            !saw_log,
+            "Should NOT see debug.log (matches *.log ignore glob)"
         );
     }
 
