@@ -4,13 +4,25 @@
 //! video segments to avoid redundant transcoding operations. Handles concurrent
 //! requests by ensuring only one transcode runs per segment.
 
+use crate::cache::SizeBoundedMap;
 use crate::video_transcode::{TranscodeError, TranscodeTarget};
-use papaya::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+#[cfg(test)]
 use std::time::Instant;
 use tokio::sync::Notify;
+
+/// Maximum time a request will wait for an in-progress generation to complete
+/// before giving up. Guards against a lost wakeup degrading into a permanent
+/// hang: on timeout the caller gets `None` (retryable) rather than blocking
+/// forever.
+pub const HLS_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a `Failed` cache entry is honored before it is treated as expired
+/// and a retry is allowed. Prevents a single transient error from poisoning a
+/// playlist until the process restarts.
+const FAILED_ENTRY_TTL: Duration = Duration::from_secs(60);
 
 /// Cache key for HLS content (playlists and segments).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -55,27 +67,14 @@ pub enum HlsCacheState {
     Failed(String),
 }
 
-/// A cached entry with metadata for eviction.
-struct CacheEntry {
-    /// The cache state
-    state: HlsCacheState,
-    /// When this entry was created
-    created_at: Instant,
-    /// Memory size in bytes (only for Complete state)
-    size_bytes: usize,
-}
-
 /// Thread-safe cache for HLS playlists and segments.
 ///
-/// Uses a papaya concurrent HashMap for lock-free reads and a size-based
-/// eviction strategy to bound memory usage.
+/// A state machine (in-progress / complete / failed with TTL) layered on the
+/// shared [`SizeBoundedMap`] core, which provides lock-free reads, overwrite
+/// accounting, and size-based eviction. Only `Complete` entries carry weight.
 pub struct HlsCache {
-    /// The underlying concurrent cache
-    cache: HashMap<HlsCacheKey, CacheEntry>,
-    /// Current total size in bytes (only counts Complete entries)
-    current_size: AtomicUsize,
-    /// Maximum allowed size in bytes
-    max_size: usize,
+    /// The shared size-bounded concurrent cache core
+    cache: SizeBoundedMap<HlsCacheKey, HlsCacheState>,
 }
 
 impl HlsCache {
@@ -87,9 +86,7 @@ impl HlsCache {
     ///   Set to 0 to disable caching entirely.
     pub fn new(max_size_bytes: usize) -> Self {
         Self {
-            cache: HashMap::new(),
-            current_size: AtomicUsize::new(0),
-            max_size: max_size_bytes,
+            cache: SizeBoundedMap::new(max_size_bytes),
         }
     }
 
@@ -97,12 +94,7 @@ impl HlsCache {
     ///
     /// Returns `None` if no entry exists for this key.
     pub fn get_state(&self, key: &HlsCacheKey) -> Option<HlsCacheState> {
-        if self.max_size == 0 {
-            return None;
-        }
-
-        let guard = self.cache.pin();
-        guard.get(key).map(|entry| entry.state.clone())
+        self.cache.with_entry(key, |entry| entry.value.clone())
     }
 
     /// Marks content generation as in-progress and returns the Notify to signal on completion.
@@ -110,32 +102,41 @@ impl HlsCache {
     /// If generation is already in progress or complete, returns the existing state.
     /// This ensures only one generation runs per key.
     pub fn start_generation(&self, key: HlsCacheKey) -> HlsCacheStartResult {
-        if self.max_size == 0 {
+        if self.cache.is_disabled() {
             return HlsCacheStartResult::CacheDisabled;
         }
 
-        let guard = self.cache.pin();
-
         // Check if already exists
-        if let Some(entry) = guard.get(&key) {
-            return match &entry.state {
+        let existing = self
+            .cache
+            .with_entry(&key, |entry| match &entry.value {
                 HlsCacheState::InProgress(notify) => {
-                    HlsCacheStartResult::AlreadyInProgress(notify.clone())
+                    Some(HlsCacheStartResult::AlreadyInProgress(notify.clone()))
                 }
-                HlsCacheState::Complete(data) => HlsCacheStartResult::AlreadyComplete(data.clone()),
-                HlsCacheState::Failed(msg) => HlsCacheStartResult::PreviouslyFailed(msg.clone()),
-            };
+                HlsCacheState::Complete(data) => {
+                    Some(HlsCacheStartResult::AlreadyComplete(data.clone()))
+                }
+                HlsCacheState::Failed(msg) => {
+                    // Only honor the failure while it is still fresh. Once the
+                    // TTL elapses, fall through to start a new generation so a
+                    // transient error can be retried.
+                    if entry.inserted_at.elapsed() < FAILED_ENTRY_TTL {
+                        Some(HlsCacheStartResult::PreviouslyFailed(msg.clone()))
+                    } else {
+                        tracing::debug!("Failed entry for {:?} expired; allowing retry", key);
+                        None
+                    }
+                }
+            })
+            .flatten();
+        if let Some(result) = existing {
+            return result;
         }
 
-        // Start new generation
+        // Start new generation (weightless: only Complete entries are counted)
         let notify = Arc::new(Notify::new());
-        let entry = CacheEntry {
-            state: HlsCacheState::InProgress(notify.clone()),
-            created_at: Instant::now(),
-            size_bytes: 0,
-        };
-
-        guard.insert(key.clone(), entry);
+        self.cache
+            .insert_weighted(key.clone(), HlsCacheState::InProgress(notify.clone()), 0);
         tracing::debug!("Started generation for {:?}", key);
 
         HlsCacheStartResult::Started(notify)
@@ -145,34 +146,21 @@ impl HlsCache {
     ///
     /// Notifies any waiters and may trigger eviction if cache is over limit.
     pub fn complete_generation(&self, key: HlsCacheKey, data: Vec<u8>) {
-        if self.max_size == 0 {
+        if self.cache.is_disabled() {
             return;
         }
 
-        let guard = self.cache.pin();
         let size_bytes = data.len();
 
-        // Get the existing notify to signal completion
-        let notify = if let Some(entry) = guard.get(&key) {
-            if let HlsCacheState::InProgress(n) = &entry.state {
-                Some(n.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Store the completed content
-        let data = Arc::new(data);
-        let entry = CacheEntry {
-            state: HlsCacheState::Complete(data),
-            created_at: Instant::now(),
+        // Store the completed content. The core subtracts any replaced
+        // entry's accounted size so `current_size` does not ratchet up on
+        // rewrite, and hands back the replaced state so waiters registered on
+        // an in-progress generation can be notified.
+        let (replaced, new_size) = self.cache.insert_weighted(
+            key.clone(),
+            HlsCacheState::Complete(Arc::new(data)),
             size_bytes,
-        };
-
-        guard.insert(key.clone(), entry);
-        let new_size = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
+        );
 
         tracing::debug!(
             "Generation complete for {:?} ({} bytes, cache size: {} bytes)",
@@ -182,108 +170,89 @@ impl HlsCache {
         );
 
         // Notify waiters
-        if let Some(n) = notify {
+        if let Some(HlsCacheState::InProgress(n)) = replaced {
             n.notify_waiters();
         }
 
         // Evict if over limit
-        if new_size > self.max_size {
-            self.evict_oldest(new_size - self.max_size);
+        if new_size > self.cache.max_size() {
+            self.evict_oldest(new_size - self.cache.max_size());
         }
     }
 
     /// Marks content generation as failed with an error message.
     pub fn fail_generation(&self, key: HlsCacheKey, error: &TranscodeError) {
-        if self.max_size == 0 {
+        if self.cache.is_disabled() {
             return;
         }
 
-        let guard = self.cache.pin();
-
-        // Get the existing notify to signal completion (even on failure)
-        let notify = if let Some(entry) = guard.get(&key) {
-            if let HlsCacheState::InProgress(n) = &entry.state {
-                Some(n.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let entry = CacheEntry {
-            state: HlsCacheState::Failed(error.to_string()),
-            created_at: Instant::now(),
-            size_bytes: 0,
-        };
-
-        guard.insert(key.clone(), entry);
+        let (replaced, _) =
+            self.cache
+                .insert_weighted(key.clone(), HlsCacheState::Failed(error.to_string()), 0);
         tracing::warn!("Generation failed for {:?}: {}", key, error);
 
         // Notify waiters (so they know to check the state)
-        if let Some(n) = notify {
+        if let Some(HlsCacheState::InProgress(n)) = replaced {
             n.notify_waiters();
         }
     }
 
-    /// Clears a failed entry so it can be retried.
-    #[allow(dead_code)]
-    pub fn clear_failed(&self, key: &HlsCacheKey) {
-        let guard = self.cache.pin();
-        if let Some(entry) = guard.get(key)
-            && matches!(entry.state, HlsCacheState::Failed(_))
-        {
-            guard.remove(key);
-            tracing::debug!("Cleared failed entry for {:?}", key);
+    /// Waits for an in-progress generation (identified by `notify`) to complete,
+    /// returning the completed data if it becomes available within `timeout`.
+    ///
+    /// This uses the race-free tokio `Notify` pattern: interest is registered
+    /// (`enable`) *before* re-checking cache state, so a completion that lands
+    /// between `start_generation` and this call is never missed. A bounded
+    /// timeout guards against a genuinely lost signal, degrading a hang into a
+    /// retryable `None`.
+    pub async fn wait_for_completion(
+        &self,
+        key: &HlsCacheKey,
+        notify: Arc<Notify>,
+        timeout: Duration,
+    ) -> Option<Arc<Vec<u8>>> {
+        // Register interest before re-checking so no wakeup can be lost.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        // The generation may have finished before we registered above.
+        if let Some(HlsCacheState::Complete(data)) = self.get_state(key) {
+            return Some(data);
+        }
+
+        match tokio::time::timeout(timeout, notified).await {
+            Ok(()) => match self.get_state(key) {
+                Some(HlsCacheState::Complete(data)) => Some(data),
+                _ => None,
+            },
+            Err(_) => {
+                tracing::warn!("Timed out waiting for in-progress generation of {:?}", key);
+                None
+            }
         }
     }
 
     /// Evicts oldest completed entries until at least `target_bytes` have been freed.
+    ///
+    /// Only `Complete` entries are evictable; segments are preferred over
+    /// playlists (segments are larger), oldest first within each group.
     fn evict_oldest(&self, target_bytes: usize) {
-        let guard = self.cache.pin();
-
-        // Collect only Complete entries with their timestamps
-        // Prefer evicting segments over playlists (segments are larger)
-        let mut entries: Vec<(HlsCacheKey, Instant, usize, bool)> = guard
-            .iter()
-            .filter_map(|(k, v)| {
-                if matches!(v.state, HlsCacheState::Complete(_)) && v.size_bytes > 0 {
-                    let is_playlist = matches!(k, HlsCacheKey::Playlist { .. });
-                    Some((k.clone(), v.created_at, v.size_bytes, is_playlist))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Sort: segments first (is_playlist=false), then by creation time (oldest first)
-        entries.sort_by(
-            |(_, time_a, _, is_playlist_a), (_, time_b, _, is_playlist_b)| {
-                is_playlist_a
-                    .cmp(is_playlist_b)
-                    .then_with(|| time_a.cmp(time_b))
-            },
-        );
-
-        let mut freed = 0usize;
-        let mut evict_count = 0usize;
-
-        for (key, _, size, _) in entries {
-            if freed >= target_bytes {
-                break;
+        let stats = self.cache.evict_until_freed(target_bytes, |key, entry| {
+            if matches!(entry.value, HlsCacheState::Complete(_)) && entry.size_bytes > 0 {
+                // Sort key: segments first (is_playlist=false), then oldest first
+                let is_playlist = matches!(key, HlsCacheKey::Playlist { .. });
+                Some((is_playlist, entry.inserted_at))
+            } else {
+                None
             }
-            if guard.remove(&key).is_some() {
-                freed += size;
-                evict_count += 1;
-                self.current_size.fetch_sub(size, Ordering::Relaxed);
-            }
-        }
+        });
 
-        if evict_count > 0 {
+        if stats.evicted > 0 {
             tracing::info!(
                 "HLS cache evicted {} entries ({} bytes freed)",
-                evict_count,
-                freed
+                stats.evicted,
+                stats.freed
             );
         }
     }
@@ -291,19 +260,33 @@ impl HlsCache {
     /// Returns the current approximate size of the cache in bytes.
     #[cfg(test)]
     pub fn current_size(&self) -> usize {
-        self.current_size.load(Ordering::Relaxed)
+        self.cache.current_size()
     }
 
     /// Returns the number of entries in the cache.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.cache.pin().len()
+        self.cache.len()
     }
 
     /// Returns true if the cache is empty.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.cache.pin().is_empty()
+        self.cache.is_empty()
+    }
+
+    /// Inserts a `Failed` entry with an explicit `created_at` timestamp.
+    ///
+    /// Test-only helper used to exercise TTL expiry without waiting in real
+    /// time (std `Instant` cannot be paused like tokio's clock).
+    #[cfg(test)]
+    pub fn insert_failed_for_test(&self, key: HlsCacheKey, message: &str, created_at: Instant) {
+        self.cache.insert_weighted_at(
+            key,
+            HlsCacheState::Failed(message.to_string()),
+            0,
+            created_at,
+        );
     }
 }
 
@@ -427,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_failed_allows_retry() {
+    fn test_failed_entry_within_ttl_blocks_retry() {
         let cache = HlsCache::new(1024 * 1024);
 
         let key = make_segment_key("/videos/test.mp4", TranscodeTarget::Resolution720p, 0);
@@ -438,10 +421,30 @@ mod tests {
             &TranscodeError::TranscodeFailed("Test failure".to_string()),
         );
 
-        // Clear the failure
-        cache.clear_failed(&key);
+        // A fresh failure should still be honored (not retried).
+        let result = cache.start_generation(key.clone());
+        assert!(matches!(result, HlsCacheStartResult::PreviouslyFailed(_)));
+    }
 
-        // Should be able to start again
+    #[test]
+    fn test_failed_entry_expires_and_allows_retry() {
+        let cache = HlsCache::new(1024 * 1024);
+
+        let key = make_segment_key("/videos/test.mp4", TranscodeTarget::Resolution720p, 0);
+
+        // Simulate a failure that happened longer ago than the TTL.
+        let stale = Instant::now()
+            .checked_sub(FAILED_ENTRY_TTL + Duration::from_secs(1))
+            .expect("clock far enough from epoch");
+        cache.insert_failed_for_test(key.clone(), "stale failure", stale);
+
+        // Sanity: it is stored as Failed.
+        assert!(matches!(
+            cache.get_state(&key),
+            Some(HlsCacheState::Failed(_))
+        ));
+
+        // Expired failure should allow a fresh generation.
         let result = cache.start_generation(key.clone());
         assert!(matches!(result, HlsCacheStartResult::Started(_)));
     }
@@ -558,5 +561,110 @@ mod tests {
 
         // Cache should have evicted some entries to stay within bounds
         assert!(cache.current_size() <= 1200); // Allow some slack
+    }
+
+    #[test]
+    fn test_size_accounting_on_overwrite() {
+        let cache = HlsCache::new(1024 * 1024);
+
+        let key = make_segment_key("/videos/test.mp4", TranscodeTarget::Resolution720p, 0);
+
+        cache.start_generation(key.clone());
+        cache.complete_generation(key.clone(), vec![0u8; 500]);
+        assert_eq!(cache.current_size(), 500);
+
+        // Overwriting the same key must not ratchet the size up; it should
+        // reflect only the latest entry, not 500 + 200.
+        cache.complete_generation(key.clone(), vec![0u8; 200]);
+        assert_eq!(cache.current_size(), 200);
+
+        // Overwriting with a larger payload updates accounting upward correctly.
+        cache.complete_generation(key.clone(), vec![0u8; 900]);
+        assert_eq!(cache.current_size(), 900);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_completion_already_done_no_lost_wakeup() {
+        // Reproduces the lost-wakeup race: the generation completes (and the
+        // notify fires with no registered waiters) *before* the waiter calls
+        // wait_for_completion. The state re-check must return the data rather
+        // than blocking forever.
+        let cache = HlsCache::new(1024 * 1024);
+
+        let key = make_segment_key("/videos/test.mp4", TranscodeTarget::Resolution720p, 0);
+
+        let notify = match cache.start_generation(key.clone()) {
+            HlsCacheStartResult::Started(n) => n,
+            _ => panic!("expected Started"),
+        };
+
+        // Complete BEFORE anyone waits — notify_waiters here reaches no one.
+        cache.complete_generation(key.clone(), vec![7u8; 128]);
+
+        // Even so, waiting must resolve immediately from the re-checked state.
+        let data = cache
+            .wait_for_completion(&key, notify, Duration::from_secs(5))
+            .await;
+        assert_eq!(data.map(|d| d.len()), Some(128));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_completion_concurrent_waiters() {
+        use std::sync::Arc as StdArc;
+
+        let cache = StdArc::new(HlsCache::new(1024 * 1024));
+
+        let key = make_segment_key("/videos/test.mp4", TranscodeTarget::Resolution720p, 0);
+
+        // The generating task holds the primary notify.
+        let gen_notify = match cache.start_generation(key.clone()) {
+            HlsCacheStartResult::Started(n) => n,
+            _ => panic!("expected Started"),
+        };
+
+        // Spawn several concurrent waiters that arrive while in progress.
+        let waiters: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = cache.clone();
+                let key = key.clone();
+                let notify = match cache.start_generation(key.clone()) {
+                    HlsCacheStartResult::AlreadyInProgress(n) => n,
+                    _ => panic!("expected AlreadyInProgress"),
+                };
+                tokio::spawn(async move {
+                    cache
+                        .wait_for_completion(&key, notify, Duration::from_secs(5))
+                        .await
+                })
+            })
+            .collect();
+
+        // Let the waiters register, then complete the generation.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cache.complete_generation(key.clone(), vec![3u8; 256]);
+        gen_notify.notify_waiters();
+
+        for w in waiters {
+            let data = w.await.expect("waiter task panicked");
+            assert_eq!(data.map(|d| d.len()), Some(256));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_completion_times_out() {
+        let cache = HlsCache::new(1024 * 1024);
+
+        let key = make_segment_key("/videos/test.mp4", TranscodeTarget::Resolution720p, 0);
+
+        let notify = match cache.start_generation(key.clone()) {
+            HlsCacheStartResult::Started(n) => n,
+            _ => panic!("expected Started"),
+        };
+
+        // Never complete — the bounded wait must degrade to None, not hang.
+        let data = cache
+            .wait_for_completion(&key, notify, Duration::from_millis(50))
+            .await;
+        assert!(data.is_none());
     }
 }
