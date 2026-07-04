@@ -232,7 +232,11 @@ pub fn extract_cover(video_path: &Path) -> Result<Vec<u8>, MetadataError> {
         })?
         .index();
 
-    let stream = input.stream(video_stream_index).unwrap();
+    let stream = input
+        .stream(video_stream_index)
+        .ok_or_else(|| MetadataError::NoVideoStream {
+            path: video_path.to_path_buf(),
+        })?;
     let time_base = stream.time_base();
     let codec_params = stream.parameters();
 

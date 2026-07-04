@@ -15,6 +15,7 @@ use walkdir::WalkDir;
 
 use crate::Config;
 use crate::config::TagSource;
+use crate::errors::RepoError;
 use crate::tag_index::{TagIndex, TaggedPage};
 
 #[derive(Clone, Serialize)]
@@ -516,15 +517,16 @@ impl Repo {
         }
     }
 
-    pub fn scan_folder<P: AsRef<Path>>(
-        &self,
-        relative_folder_path: &P,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn scan_folder<P: AsRef<Path>>(&self, relative_folder_path: &P) -> Result<(), RepoError> {
         let relative_folder_path_ref = relative_folder_path.as_ref();
-        let start_folder = self
-            .root_dir
-            .join(relative_folder_path_ref)
-            .canonicalize()?;
+        let joined = self.root_dir.join(relative_folder_path_ref);
+        let start_folder =
+            joined
+                .canonicalize()
+                .map_err(|source| RepoError::CanonicalizeFailed {
+                    path: joined.clone(),
+                    source,
+                })?;
 
         // Skip if already scanned
         if self.scanned_folders.pin().contains(&start_folder) {
@@ -657,7 +659,7 @@ impl Repo {
         Ok(())
     }
 
-    pub fn scan_all(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn scan_all(&self) -> Result<(), RepoError> {
         let scan_all_start = Instant::now();
 
         // Pre-mark static folder as scanned to skip it during content scan.
@@ -683,7 +685,6 @@ impl Repo {
                 .map(|(_, relative)| relative.clone())
                 .collect();
             self.queued_folders.pin().clear();
-            assert!(self.queued_folders.is_empty());
             tracing::debug!("Parallel batch: {:?}", &vec_folders);
             vec_folders.into_par_iter().for_each(|rel_path| {
                 self.scan_folder(&rel_path).unwrap_or_else(|e| {
@@ -736,7 +737,7 @@ impl Repo {
 
     /// Scan the static folder and its subdirectories.
     /// Deferred from scan_all() so mark_scan_complete() fires faster.
-    pub fn scan_static_folder(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn scan_static_folder(&self) -> Result<(), RepoError> {
         let start = Instant::now();
         let static_path = self.root_dir.join(&self.static_folder);
         if !static_path.is_dir() {
@@ -1068,21 +1069,33 @@ impl Repo {
 }
 
 /// Returns file_size, created_secs, modified_secs
-pub fn file_details_from_path<P: AsRef<Path>>(
-    path: P,
-) -> Result<(u64, u64, u64), Box<dyn std::error::Error>> {
+pub fn file_details_from_path<P: AsRef<Path>>(path: P) -> Result<(u64, u64, u64), RepoError> {
     let path = path.as_ref();
-    let metadata = std::fs::metadata(path)?;
+    let metadata = std::fs::metadata(path).map_err(|source| RepoError::MetadataFailed {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
     let file_size = metadata.len();
 
     // Modified time
-    let modified = metadata.modified()?;
+    let modified = metadata
+        .modified()
+        .map_err(|source| RepoError::MetadataFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let modified_secs = modified.duration_since(UNIX_EPOCH)?.as_secs();
 
-    // Created time (might not be supported on all platforms)
-    let created = metadata.created()?;
-    let created_secs = created.duration_since(UNIX_EPOCH)?.as_secs();
+    // Created time (birth time) is not available on all filesystems (e.g. older Linux
+    // kernels, some NFS mounts). Fall back to the modified time rather than failing, so
+    // the file is never silently dropped from listings/search when btime is unavailable.
+    let created_secs = metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(modified_secs);
 
     Ok((file_size, created_secs, modified_secs))
 }
@@ -1157,8 +1170,10 @@ pub fn build_markdown_url_path(path: &Path, root_dir: &Path, index_file: &str) -
         url.insert(0, '/');
     }
 
-    // Remove index file from path
-    if url.ends_with(index_file) {
+    // Remove index file from path — only when the final path component (file name)
+    // exactly equals the index file, not merely when it's a suffix substring.
+    // Otherwise "docs/myindex.md" would be wrongly truncated for index_file "index.md".
+    if url.rsplit('/').next() == Some(index_file) {
         url.truncate(url.len() - index_file.len());
     }
 
@@ -1179,10 +1194,13 @@ pub fn build_markdown_url_path(path: &Path, root_dir: &Path, index_file: &str) -
 /// - Removes static folder prefix
 /// - Ensures leading slash
 pub fn build_static_url_path(path: &Path, root_dir: &Path, static_folder: &str) -> String {
-    let mut url = pathdiff::diff_paths(path, root_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default()
-        .replacen(static_folder, "", 1);
+    let relative = pathdiff::diff_paths(path, root_dir).unwrap_or_default();
+
+    // Strip only a *leading* `{static_folder}/` path component, not any substring
+    // occurrence of the folder name. A plain `.replacen` would corrupt paths like
+    // "notes/static-analysis/img.png" (with static_folder="static").
+    let stripped = relative.strip_prefix(static_folder).unwrap_or(&relative);
+    let mut url = stripped.to_string_lossy().to_string();
 
     // Ensure leading slash
     if !url.starts_with('/') {
@@ -1342,6 +1360,78 @@ mod tests {
         assert_eq!(
             build_static_url_path(path, root, "static"),
             "/assets/image.png"
+        );
+    }
+
+    // Regression (Bug #8): the static folder name appearing as a substring of a
+    // path component must NOT be stripped. Only a leading `{static_folder}/`
+    // component is removed. Previously `.replacen` corrupted these paths.
+    #[test]
+    fn test_build_static_url_path_preserves_static_substring() {
+        let root = Path::new("/root");
+
+        // "static" appears inside a directory name, not as a leading component.
+        let path = Path::new("/root/notes/static-analysis/img.png");
+        assert_eq!(
+            build_static_url_path(path, root, "static"),
+            "/notes/static-analysis/img.png"
+        );
+
+        // "static" appears inside a nested (non-leading) directory name.
+        let nested = Path::new("/root/my-static/image.png");
+        assert_eq!(
+            build_static_url_path(nested, root, "static"),
+            "/my-static/image.png"
+        );
+
+        // Correctly-prefixed paths still have the leading component stripped.
+        let prefixed = Path::new("/root/static/static-report.png");
+        assert_eq!(
+            build_static_url_path(prefixed, root, "static"),
+            "/static-report.png"
+        );
+    }
+
+    // Regression (Bug #9): a file whose name merely ends with the index file
+    // name (e.g. "myindex.md" for index_file "index.md") must NOT be treated as
+    // an index file. Previously `ends_with` truncated it to "/docs/my/".
+    #[test]
+    fn test_build_markdown_url_path_myindex_not_treated_as_index() {
+        let root = Path::new("/root");
+
+        let path = Path::new("/root/docs/myindex.md");
+        assert_eq!(
+            build_markdown_url_path(path, root, "index.md"),
+            "/docs/myindex/"
+        );
+
+        // A genuine index file is still collapsed to a trailing slash.
+        let real_index = Path::new("/root/docs/index.md");
+        assert_eq!(
+            build_markdown_url_path(real_index, root, "index.md"),
+            "/docs/"
+        );
+    }
+
+    // Regression (Bug #10): file_details_from_path must not fail (which would drop
+    // the file from listings/search) when birth time is unavailable. It falls back
+    // to the modified time. On platforms that do support btime this still succeeds.
+    #[test]
+    fn test_created_falls_back_to_modified() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let file_path = dir.path().join("note.md");
+        std::fs::write(&file_path, b"# hello").expect("write temp file");
+
+        let (size, created, modified) =
+            file_details_from_path(&file_path).expect("file details must not fail");
+
+        assert_eq!(size, 7);
+        // Both timestamps must be populated; created is either the real btime or,
+        // when unavailable, the modified time (never causing an error/drop).
+        assert!(modified > 0, "modified time should be populated");
+        assert!(
+            created > 0,
+            "created time should be populated (btime or fallback)"
         );
     }
 
