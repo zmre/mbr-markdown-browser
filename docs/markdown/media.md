@@ -312,6 +312,20 @@ Use leading slash for root-relative paths:
 ![Logo](/images/logo.png)    <!-- Always from repository root -->
 ```
 
+### Paths with Spaces
+
+The CommonMark spec doesn't allow unescaped spaces in a `![caption](path)` destination — a path with bare spaces won't be recognized as media at all and renders as plain text. Use either of these spec-native forms:
+
+```markdown
+<!-- Wrap the path in angle brackets (recommended) -->
+![Great performance](</videos/Eric Jones - Metal 3.mp4>)
+
+<!-- Or percent-encode the spaces -->
+![Great performance](/videos/Eric%20Jones%20-%20Metal%203.mp4)
+```
+
+Both work for all media types (images, video, audio, PDFs).
+
 ## Performance Tips
 
 ### Video
@@ -339,6 +353,10 @@ Use leading slash for root-relative paths:
 2. Verify file extension is recognized
 3. Check browser console for codec errors
 4. Try a different format (MP4/H.264 is safest)
+
+### Media Renders as Plain Text
+
+If `![caption](path)` shows up as literal text instead of media, the path likely contains spaces. Wrap it in angle brackets or percent-encode it — see [Paths with Spaces](#paths-with-spaces).
 
 ### YouTube Not Embedding
 
