@@ -3409,6 +3409,31 @@ async fn test_errors_json_reports_unresolved_wikilink() {
 }
 
 #[tokio::test]
+async fn test_errors_json_percent_encoded_link_to_existing_file_is_clean() {
+    // Regression: axum percent-decodes live request paths before resolution,
+    // so an authored href like /Target%20With%20Spaces/ must not be reported
+    // as a broken internal link when "Target With Spaces.md" exists.
+    let repo = TestRepo::new();
+    repo.create_markdown("Target With Spaces.md", "# Target");
+    repo.create_markdown(
+        "page.md",
+        "# Page\n\n[spaced](/Target%20With%20Spaces/) link here.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/page/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.is_empty(),
+        "percent-encoded link to existing file should produce no errors, got: {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
 async fn test_errors_json_returns_404_when_link_tracking_disabled() {
     let repo = TestRepo::new();
     repo.create_markdown("page.md", "# Page");
