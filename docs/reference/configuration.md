@@ -79,7 +79,7 @@ oembed_timeout_ms = 500
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `host` | string | `"127.0.0.1"` | IP address to bind |
+| `host` | string | `"127.0.0.1"` | IP address to bind. **Warning:** binding to a non-loopback address (e.g. `0.0.0.0`) makes the entire repository readable to the network with no authentication; mbr logs a warning at startup. |
 | `port` | number | `5200` | Port number |
 
 ### Content Settings
@@ -215,6 +215,8 @@ See the [Tags feature documentation](tags/) for complete details.
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
 > **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.
+
+> **Security:** Oembed fetching refuses private, loopback, and link-local addresses (including hostnames that resolve to them), follows at most 5 redirects with every hop re-checked against the same rules, and caps response bodies at 512KB.
 
 ### Build Mode Performance
 

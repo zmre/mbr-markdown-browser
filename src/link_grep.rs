@@ -110,7 +110,16 @@ impl InboundLinkCache {
             size_bytes,
         };
 
-        self.cache.pin().insert(url_path.clone(), entry);
+        // If an entry already existed for this key, subtract its accounted size
+        // first so `current_size` reflects the replacement rather than
+        // ratcheting upward on every overwrite.
+        let replaced_size = self
+            .cache
+            .pin()
+            .insert(url_path.clone(), entry)
+            .map_or(0, |old| old.size_bytes);
+        self.current_size
+            .fetch_sub(replaced_size, Ordering::Relaxed);
         let new_size = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
 
         tracing::debug!("inbound links cached: {} ({} bytes)", url_path, size_bytes);
@@ -164,6 +173,24 @@ impl InboundLinkCache {
         }
         self.current_size.store(0, Ordering::Relaxed);
         tracing::debug!("inbound link cache invalidated");
+    }
+
+    /// Returns the current approximate size of the cache in bytes.
+    #[cfg(test)]
+    pub fn current_size(&self) -> usize {
+        self.current_size.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of entries in the cache.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.cache.pin().len()
+    }
+
+    /// Returns true if the cache is empty.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.cache.pin().is_empty()
     }
 }
 
@@ -864,6 +891,61 @@ mod tests {
         let retrieved = cache.get("/docs/");
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_inbound_link_cache_size_stable_on_overwrite() {
+        // Regression for #12: overwriting an existing key must not ratchet
+        // `current_size` upward.
+        let cache = InboundLinkCache::new(1024 * 1024, 60);
+        let links = vec![InboundLink {
+            from: "/other/".to_string(),
+            text: "Link text".to_string(),
+            anchor: None,
+        }];
+
+        cache.insert("/docs/".to_string(), links.clone());
+        let size_after_first = cache.current_size();
+        assert_eq!(cache.len(), 1);
+
+        for _ in 0..10 {
+            cache.insert("/docs/".to_string(), links.clone());
+        }
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_size(), size_after_first);
+    }
+
+    #[test]
+    fn test_inbound_link_cache_size_tracks_replacement_delta() {
+        // Overwriting with a larger payload adjusts size by the delta only.
+        let cache = InboundLinkCache::new(1024 * 1024, 60);
+        let one = vec![InboundLink {
+            from: "/a/".to_string(),
+            text: "A".to_string(),
+            anchor: None,
+        }];
+        let two = vec![
+            InboundLink {
+                from: "/a/".to_string(),
+                text: "A".to_string(),
+                anchor: None,
+            },
+            InboundLink {
+                from: "/b/".to_string(),
+                text: "B".to_string(),
+                anchor: None,
+            },
+        ];
+
+        cache.insert("/docs/".to_string(), one.clone());
+        let small = cache.current_size();
+        cache.insert("/docs/".to_string(), two.clone());
+        let large = cache.current_size();
+
+        assert_eq!(cache.len(), 1);
+        let expected_delta = "/b/".len() + "B".len() + 32;
+        assert_eq!(large - small, expected_delta);
     }
 
     #[test]

@@ -4,9 +4,9 @@
 //! video metadata (cover images, chapters, captions) to avoid redundant
 //! ffmpeg operations when serving the same content multiple times.
 
-use papaya::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use crate::cache::{Entry, SizeBoundedMap};
+use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 /// Cached video metadata content.
 #[derive(Clone)]
@@ -34,28 +34,13 @@ impl CachedMetadata {
     }
 }
 
-/// A cached entry with metadata for eviction.
-#[derive(Clone)]
-struct CacheEntry {
-    /// The cached metadata
-    data: CachedMetadata,
-    /// When this entry was inserted (for LRU eviction)
-    inserted_at: Instant,
-    /// Estimated memory size in bytes
-    size_bytes: usize,
-}
-
 /// Thread-safe cache for video metadata.
 ///
-/// Uses a papaya concurrent HashMap for lock-free reads and a size-based
-/// eviction strategy to bound memory usage.
+/// A thin wrapper around the shared [`SizeBoundedMap`]: lock-free reads via
+/// papaya with size-based, oldest-first eviction at insert time.
 pub struct VideoMetadataCache {
-    /// The underlying concurrent cache
-    cache: HashMap<String, CacheEntry>,
-    /// Current total size in bytes (approximate)
-    current_size: AtomicUsize,
-    /// Maximum allowed size in bytes
-    max_size: usize,
+    /// The shared size-bounded concurrent cache core
+    cache: SizeBoundedMap<String, CachedMetadata>,
 }
 
 impl VideoMetadataCache {
@@ -67,9 +52,7 @@ impl VideoMetadataCache {
     ///   Set to 0 to disable caching entirely.
     pub fn new(max_size_bytes: usize) -> Self {
         Self {
-            cache: HashMap::new(),
-            current_size: AtomicUsize::new(0),
-            max_size: max_size_bytes,
+            cache: SizeBoundedMap::new(max_size_bytes),
         }
     }
 
@@ -77,15 +60,14 @@ impl VideoMetadataCache {
     ///
     /// Returns `None` if the entry is not in the cache.
     pub fn get(&self, key: &str) -> Option<CachedMetadata> {
-        if self.max_size == 0 {
+        if self.cache.is_disabled() {
             return None;
         }
 
-        let guard = self.cache.pin();
-        match guard.get(key) {
-            Some(entry) => {
+        match self.cache.with_entry(key, |entry| entry.value.clone()) {
+            Some(data) => {
                 tracing::debug!("video metadata cache hit: {}", key);
-                Some(entry.data.clone())
+                Some(data)
             }
             None => {
                 tracing::debug!("video metadata cache miss: {}", key);
@@ -99,83 +81,48 @@ impl VideoMetadataCache {
     /// If the cache exceeds its size limit after insertion, oldest entries
     /// are evicted until the cache is within bounds.
     pub fn insert(&self, key: String, data: CachedMetadata) {
-        if self.max_size == 0 {
+        if self.cache.is_disabled() {
             return;
         }
 
-        let size_bytes = data.estimated_size() + key.len() + std::mem::size_of::<CacheEntry>();
-
-        let entry = CacheEntry {
-            data,
-            inserted_at: Instant::now(),
-            size_bytes,
-        };
-
-        // Insert the entry
-        self.cache.pin().insert(key.clone(), entry);
-        let new_size = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
+        let size_bytes = Entry::<CachedMetadata>::weigh(data.estimated_size(), key.len());
+        let (_, new_size) = self.cache.insert_weighted(key.clone(), data, size_bytes);
 
         tracing::debug!("video metadata cached: {} ({} bytes)", key, size_bytes);
 
-        // Evict if over limit
-        if new_size > self.max_size {
-            self.evict_oldest(new_size - self.max_size);
-        }
-    }
-
-    /// Evicts oldest entries until at least `target_bytes` have been freed.
-    ///
-    /// Uses a simple LRU-like strategy based on insertion time.
-    fn evict_oldest(&self, target_bytes: usize) {
-        // Collect entries with their timestamps
-        let guard = self.cache.pin();
-        let mut entries: Vec<(String, Instant, usize)> = guard
-            .iter()
-            .map(|(k, v)| (k.clone(), v.inserted_at, v.size_bytes))
-            .collect();
-
-        // Sort by insertion time (oldest first)
-        entries.sort_by_key(|(_, inserted_at, _)| *inserted_at);
-
-        let mut freed = 0usize;
-        let mut evict_count = 0usize;
-
-        for (key, _, size) in entries {
-            if freed >= target_bytes {
-                break;
+        // Evict oldest-first if over limit
+        if new_size > self.cache.max_size() {
+            let stats = self
+                .cache
+                .evict_until_freed(new_size - self.cache.max_size(), |_, entry| {
+                    Some(entry.inserted_at)
+                });
+            if stats.evicted > 0 {
+                tracing::debug!(
+                    "video metadata cache evicted {} entries ({} bytes freed)",
+                    stats.evicted,
+                    stats.freed
+                );
             }
-            if guard.remove(&key).is_some() {
-                freed += size;
-                evict_count += 1;
-                self.current_size.fetch_sub(size, Ordering::Relaxed);
-            }
-        }
-
-        if evict_count > 0 {
-            tracing::debug!(
-                "video metadata cache evicted {} entries ({} bytes freed)",
-                evict_count,
-                freed
-            );
         }
     }
 
     /// Returns the current approximate size of the cache in bytes.
     #[cfg(test)]
     pub fn current_size(&self) -> usize {
-        self.current_size.load(Ordering::Relaxed)
+        self.cache.current_size()
     }
 
     /// Returns the number of entries in the cache.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.cache.pin().len()
+        self.cache.len()
     }
 
     /// Returns true if the cache is empty.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.cache.pin().is_empty()
+        self.cache.is_empty()
     }
 }
 
@@ -184,6 +131,38 @@ impl VideoMetadataCache {
 /// Combines the video path with the metadata type to create a unique key.
 pub fn cache_key(video_path: &str, metadata_type: &str) -> String {
     format!("{}::{}", video_path, metadata_type)
+}
+
+/// Build a cache key for video/PDF metadata scoped to the source file's
+/// modification time.
+///
+/// The plain [`cache_key`] keys only on the request path and metadata type, so
+/// an edited source file keeps serving stale covers/chapters/captions until the
+/// process restarts, and negative (`NotAvailable`) results are cached forever.
+/// Folding the source file's mtime into the key means that editing the
+/// underlying file produces a different key, so the stale entry (positive or
+/// negative) is naturally missed and the metadata is re-extracted.
+///
+/// When the mtime cannot be read (missing file, unsupported platform, or a
+/// pre-epoch timestamp) a stable `0` token is used so the key stays
+/// deterministic.
+pub fn cache_key_with_mtime(source_file: &Path, metadata_type: &str) -> String {
+    format!(
+        "{}::{}::mtime={}",
+        source_file.display(),
+        metadata_type,
+        source_file_mtime_nanos(source_file)
+    )
+}
+
+/// Reads the modification time of `path` as nanoseconds since the Unix epoch,
+/// returning `0` when it is unavailable.
+fn source_file_mtime_nanos(path: &Path) -> u128 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_nanos())
 }
 
 #[cfg(test)]
@@ -294,5 +273,112 @@ mod tests {
 
         let key = cache_key("videos/Eric Jones/Metal.mp4", "chapters");
         assert_eq!(key, "videos/Eric Jones/Metal.mp4::chapters");
+    }
+
+    #[test]
+    fn test_size_accounting_stable_on_overwrite() {
+        // Regression for #12: overwriting an existing key must not ratchet
+        // `current_size` upward. Repeatedly inserting the same key with the
+        // same payload should leave the accounted size unchanged.
+        let cache = VideoMetadataCache::new(1024 * 1024);
+
+        let key = "videos/test.mp4::cover";
+        cache.insert(key.to_string(), CachedMetadata::Cover(vec![0; 100]));
+
+        let size_after_first = cache.current_size();
+        assert_eq!(cache.len(), 1);
+
+        for _ in 0..10 {
+            cache.insert(key.to_string(), CachedMetadata::Cover(vec![0; 100]));
+        }
+
+        // Still a single entry, and size did not grow with each overwrite.
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_size(), size_after_first);
+    }
+
+    #[test]
+    fn test_size_accounting_tracks_replacement_delta() {
+        // Overwriting with a larger payload should adjust `current_size` by the
+        // delta, not by the full new size on top of the old.
+        let cache = VideoMetadataCache::new(1024 * 1024);
+
+        let key = "videos/test.mp4::cover";
+        cache.insert(key.to_string(), CachedMetadata::Cover(vec![0; 100]));
+        let small = cache.current_size();
+
+        cache.insert(key.to_string(), CachedMetadata::Cover(vec![0; 200]));
+        let large = cache.current_size();
+
+        assert_eq!(cache.len(), 1);
+        // Growth should be exactly the payload delta (100 bytes), not ~300.
+        assert_eq!(large - small, 100);
+    }
+
+    #[test]
+    fn test_cache_key_with_mtime_changes_on_edit() {
+        // Regression for #13: editing the source file must change the key so a
+        // stale entry is missed and metadata is re-extracted.
+        use filetime::{FileTime, set_file_mtime};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("clip.mp4");
+        std::fs::write(&file, b"first").unwrap();
+
+        set_file_mtime(&file, FileTime::from_unix_time(1_000_000, 0)).unwrap();
+        let key_before = cache_key_with_mtime(&file, "cover");
+
+        // Simulate an edit with a newer modification time.
+        std::fs::write(&file, b"second-edit").unwrap();
+        set_file_mtime(&file, FileTime::from_unix_time(2_000_000, 0)).unwrap();
+        let key_after = cache_key_with_mtime(&file, "cover");
+
+        assert_ne!(
+            key_before, key_after,
+            "changed mtime must produce a different cache key"
+        );
+    }
+
+    #[test]
+    fn test_mtime_scoped_negative_entry_misses_after_edit() {
+        // A cached `NotAvailable` result stored under an mtime-scoped key must
+        // not persist across edits: after the file changes, the new key misses.
+        use filetime::{FileTime, set_file_mtime};
+
+        let cache = VideoMetadataCache::new(1024 * 1024);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("clip.mp4");
+        std::fs::write(&file, b"first").unwrap();
+        set_file_mtime(&file, FileTime::from_unix_time(1_000_000, 0)).unwrap();
+
+        let key_before = cache_key_with_mtime(&file, "cover");
+        cache.insert(key_before.clone(), CachedMetadata::NotAvailable);
+        assert!(matches!(
+            cache.get(&key_before),
+            Some(CachedMetadata::NotAvailable)
+        ));
+
+        // Editing the file yields a fresh key that misses the stale negative.
+        std::fs::write(&file, b"second-edit").unwrap();
+        set_file_mtime(&file, FileTime::from_unix_time(2_000_000, 0)).unwrap();
+        let key_after = cache_key_with_mtime(&file, "cover");
+        assert!(cache.get(&key_after).is_none());
+    }
+
+    #[test]
+    fn test_cache_key_with_mtime_deterministic_and_stable() {
+        // Same file with unchanged mtime yields the same key on repeated calls.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("clip.mp4");
+        std::fs::write(&file, b"data").unwrap();
+
+        let a = cache_key_with_mtime(&file, "chapters");
+        let b = cache_key_with_mtime(&file, "chapters");
+        assert_eq!(a, b);
+
+        // Missing files fall back to the stable `0` token rather than panicking.
+        let missing = dir.path().join("nope.mp4");
+        let key = cache_key_with_mtime(&missing, "cover");
+        assert!(key.ends_with("::cover::mtime=0"));
     }
 }

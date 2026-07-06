@@ -280,7 +280,16 @@ impl LinkCache {
             size_bytes,
         };
 
-        self.cache.pin().insert(url_path.clone(), entry);
+        // If an entry already existed for this key, subtract its accounted size
+        // first so `current_size` reflects the replacement rather than
+        // ratcheting upward on every overwrite.
+        let replaced_size = self
+            .cache
+            .pin()
+            .insert(url_path.clone(), entry)
+            .map_or(0, |old| old.size_bytes);
+        self.current_size
+            .fetch_sub(replaced_size, Ordering::Relaxed);
         let new_size = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
 
         tracing::debug!("link cached: {} ({} bytes)", url_path, size_bytes);
@@ -437,6 +446,67 @@ mod tests {
     fn test_link_cache_miss() {
         let cache = LinkCache::new(1024 * 1024);
         assert!(cache.get("/nonexistent/").is_none());
+    }
+
+    #[test]
+    fn test_link_cache_size_stable_on_overwrite() {
+        // Regression for #12: overwriting an existing key must not ratchet
+        // `current_size` upward.
+        let cache = LinkCache::new(1024 * 1024);
+        let links = vec![OutboundLink {
+            to: "/other/".to_string(),
+            text: "Other Page".to_string(),
+            anchor: None,
+            internal: true,
+        }];
+
+        cache.insert("/docs/".to_string(), links.clone());
+        let size_after_first = cache.current_size();
+        assert_eq!(cache.len(), 1);
+
+        for _ in 0..10 {
+            cache.insert("/docs/".to_string(), links.clone());
+        }
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_size(), size_after_first);
+    }
+
+    #[test]
+    fn test_link_cache_size_tracks_replacement_delta() {
+        // Overwriting with a larger payload adjusts size by the delta only.
+        let cache = LinkCache::new(1024 * 1024);
+        let one = vec![OutboundLink {
+            to: "/a/".to_string(),
+            text: "A".to_string(),
+            anchor: None,
+            internal: true,
+        }];
+        let two = vec![
+            OutboundLink {
+                to: "/a/".to_string(),
+                text: "A".to_string(),
+                anchor: None,
+                internal: true,
+            },
+            OutboundLink {
+                to: "/b/".to_string(),
+                text: "B".to_string(),
+                anchor: None,
+                internal: true,
+            },
+        ];
+
+        cache.insert("/docs/".to_string(), one.clone());
+        let small = cache.current_size();
+        cache.insert("/docs/".to_string(), two.clone());
+        let large = cache.current_size();
+
+        assert_eq!(cache.len(), 1);
+        // Growth equals a single extra link's accounted size, not the full
+        // two-link entry stacked on top of the one-link entry.
+        let expected_delta = "/b/".len() + "B".len() + 32;
+        assert_eq!(large - small, expected_delta);
     }
 
     #[test]

@@ -93,12 +93,15 @@ pub fn get_pico_css(theme: &str) -> Option<&'static [u8]> {
     match theme.trim() {
         "" | "default" => Some(PICO_DEFAULT),
         "fluid" => Some(PICO_FLUID_DEFAULT),
-        theme if theme.starts_with("fluid.") => {
-            let color = theme.strip_prefix("fluid.").unwrap();
-            get_fluid_color_css(color)
+        theme => {
+            if let Some(color) = theme.strip_prefix("fluid.") {
+                get_fluid_color_css(color)
+            } else if VALID_COLORS.contains(&theme) {
+                get_color_css(theme)
+            } else {
+                None
+            }
         }
-        color if VALID_COLORS.contains(&color) => get_color_css(color),
-        _ => None,
     }
 }
 

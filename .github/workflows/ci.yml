@@ -190,6 +190,57 @@ jobs:
       - name: SwiftLint check
         run: nix build -L .#swiftlint-check
 
+  # Guard against Dependabot (or manual) bumps of components/ dependencies that
+  # forget to regenerate components/package-lock.json and the flake's npmDepsHash.
+  # The Nix component build (`nix build .#mbr-components`) reads package-lock.json
+  # and pins its contents via npmDepsHash, so a bump of components/package.json (or
+  # the bun lockfile) that leaves those untouched will break the build on merge.
+  # This job regenerates both from package.json and FAILS if they drift.
+  components-lock-sync:
+    name: Components Lockfile & npmDepsHash Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect components/ changes
+        id: changes
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          # Only relevant on pull_request events; skip on pushes to main.
+          if [ -z "$base" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$base" HEAD | grep -qE '^components/'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Nix
+        if: steps.changes.outputs.changed == 'true'
+        uses: DeterminateSystems/determinate-nix-action@main
+
+      - name: Verify package-lock.json and npmDepsHash are in sync
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # Regenerate components/package-lock.json and flake.nix's npmDepsHash
+          # from components/package.json. `npm` comes from the pinned nodejs;
+          # sync-npm-deps.sh internally uses `nix run nixpkgs#prefetch-npm-deps`.
+          nix shell nixpkgs#nodejs --command scripts/sync-npm-deps.sh --force
+          if ! git diff --quiet -- components/package-lock.json flake.nix; then
+            echo "::error::components/package-lock.json and/or flake.nix npmDepsHash are out of sync with components/package.json."
+            echo "Run 'scripts/sync-npm-deps.sh --force' locally, then commit the updated components/package-lock.json and flake.nix."
+            git --no-pager diff -- components/package-lock.json flake.nix
+            exit 1
+          fi
+          echo "Components package-lock.json and npmDepsHash are in sync."
+
   # Frontend component tests (TypeScript)
   test-components:
     name: Test Frontend Components

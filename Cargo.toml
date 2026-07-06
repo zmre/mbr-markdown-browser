@@ -35,7 +35,7 @@ default = ["gui", "media-metadata"]
 # Disable for QuickLook builds: cargo build --release --no-default-features
 gui = ["dep:wry", "dep:tao", "dep:muda", "dep:rfd"]
 # Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
-media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render"]
+media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile"]
 # Static ffmpeg linking for (remove runtime ffmpeg dependency)
 ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
 # FFI for QuickLook extension - only needed when building the staticlib
@@ -57,6 +57,7 @@ lru = "0.18"
 metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/audio metadata extraction
 ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["image", "pdfium_7350"] } # PDF cover; pdfium_7350 compatible with nixpkgs-25.11-darwin pdfium-binaries 7363
+tempfile = { version = "3.27", optional = true } # Collision-free temp files for HLS segment transcoding (media-metadata)
 papaya = "0.2.4"
 pathdiff = "0.2.3"
 lopdf = { version = "0.42", default-features = false, features = ["rayon"] }
@@ -65,7 +66,7 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 pulldown-cmark-escape = { version = "0.11", default-features = false }
 rayon = "1.11"
 regex = "1.11"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 webpki-roots = "1"
 scraper = "0.27"

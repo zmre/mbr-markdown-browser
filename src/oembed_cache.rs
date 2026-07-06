@@ -3,6 +3,7 @@
 //! Provides a thread-safe, size-bounded cache for OEmbed/OpenGraph page info
 //! to avoid redundant network requests when rendering multiple markdown files.
 
+use crate::cache::Entry;
 use crate::oembed::PageInfo;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -11,22 +12,17 @@ use std::sync::Mutex;
 /// Maximum number of entries in the oembed LRU cache.
 const OEMBED_CACHE_MAX_ENTRIES: usize = 10_000;
 
-/// A cached page info entry with size tracking.
-struct CacheEntry {
-    /// The cached page information
-    info: PageInfo,
-    /// Estimated memory size in bytes
-    size_bytes: usize,
-}
-
 /// Thread-safe cache for OEmbed page information.
 ///
 /// Uses an LRU cache with size-based eviction for O(1) get/insert
-/// and bounded memory usage.
+/// and bounded memory usage. Unlike the papaya-backed caches built on
+/// [`crate::cache::SizeBoundedMap`], this cache promotes entries to
+/// most-recently-used on access, so it keeps its own LRU storage while
+/// sharing the [`Entry`] weighing/accounting conventions.
 pub struct OembedCache {
     /// The underlying LRU cache, protected by a mutex.
     /// Mutex is appropriate here because operations are fast (no I/O inside the lock).
-    cache: Mutex<LruCache<String, CacheEntry>>,
+    cache: Mutex<LruCache<String, Entry<PageInfo>>>,
     /// Current total size in bytes
     current_size: Mutex<usize>,
     /// Maximum allowed size in bytes
@@ -42,7 +38,13 @@ impl OembedCache {
     ///   Set to 0 to disable caching entirely.
     pub fn new(max_size_bytes: usize) -> Self {
         // Use a generous count-based capacity since we manage eviction by size.
-        let cap = NonZeroUsize::new(OEMBED_CACHE_MAX_ENTRIES).unwrap();
+        // The const block makes a zero capacity a compile-time error.
+        let cap = const {
+            match NonZeroUsize::new(OEMBED_CACHE_MAX_ENTRIES) {
+                Some(cap) => cap,
+                None => panic!("OEMBED_CACHE_MAX_ENTRIES must be non-zero"),
+            }
+        };
         Self {
             cache: Mutex::new(LruCache::new(cap)),
             current_size: Mutex::new(0),
@@ -59,11 +61,16 @@ impl OembedCache {
             return None;
         }
 
-        let mut cache = self.cache.lock().unwrap();
+        // Poisoning recovery: the cache holds plain data, so a panicked holder
+        // cannot leave it in an invalid state.
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match cache.get(url) {
             Some(entry) => {
                 tracing::debug!("oembed cache hit: {}", url);
-                Some(entry.info.clone())
+                Some(entry.value.clone())
             }
             None => {
                 tracing::debug!("oembed cache miss: {}", url);
@@ -81,12 +88,19 @@ impl OembedCache {
             return;
         }
 
-        let size_bytes = info.estimated_size() + url.len() + std::mem::size_of::<CacheEntry>();
+        let size_bytes = Entry::<PageInfo>::weigh(info.estimated_size(), url.len());
 
-        let entry = CacheEntry { info, size_bytes };
+        let entry = Entry::new(info, size_bytes);
 
-        let mut cache = self.cache.lock().unwrap();
-        let mut current_size = self.current_size.lock().unwrap();
+        // Poisoning recovery: both mutexes guard plain data (see get()).
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current_size = self
+            .current_size
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // If overwriting an existing entry, subtract its old size
         if let Some(old) = cache.push(url.clone(), entry) {

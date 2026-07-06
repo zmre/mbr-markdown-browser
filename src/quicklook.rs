@@ -12,10 +12,25 @@ use crate::embedded_pico;
 use crate::link_transform::LinkTransformConfig;
 use crate::markdown;
 use crate::server::DEFAULT_FILES;
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tera::{Context, Tera};
 use thiserror::Error;
+
+// Match src="/.../", href="/.../", poster="/.../..." attributes. Two separate
+// patterns (double- and single-quoted) since Rust's regex crate doesn't
+// support backreferences. Compiled once: these are literal patterns that
+// cannot fail to compile.
+static ROOT_RELATIVE_DOUBLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(src|href|poster)="(/[^"]*)""#)
+        .expect("literal attribute regex is valid and cannot fail to compile")
+});
+static ROOT_RELATIVE_SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(src|href|poster)='(/[^']*)'"#)
+        .expect("literal attribute regex is valid and cannot fail to compile")
+});
 
 /// Pre-allocation size for inline CSS string (64 KB).
 const CSS_PREALLOC_BYTES: usize = 64 * 1024;
@@ -227,15 +242,8 @@ fn resolve_asset_path(root_path: &Path, static_folder: &str, url_path: &str) -> 
 /// Uses the same fallback logic as the server: checks the direct path first,
 /// then falls back to the static folder if configured.
 fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str) -> String {
-    use regex::Regex;
-
-    // Match src="/.../", href="/.../", poster="/.../..." with double quotes
-    // We use two separate patterns since Rust's regex crate doesn't support backreferences
-    let re_double = Regex::new(r#"(src|href|poster)="(/[^"]*)""#).unwrap();
-    let re_single = Regex::new(r#"(src|href|poster)='(/[^']*)'"#).unwrap();
-
     // First pass: handle double-quoted attributes
-    let result = re_double.replace_all(html, |caps: &regex::Captures| {
+    let result = ROOT_RELATIVE_DOUBLE_QUOTED.replace_all(html, |caps: &regex::Captures| {
         let attr = &caps[1];
         let url_path = &caps[2];
 
@@ -247,7 +255,7 @@ fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str)
     });
 
     // Second pass: handle single-quoted attributes
-    re_single
+    ROOT_RELATIVE_SINGLE_QUOTED
         .replace_all(&result, |caps: &regex::Captures| {
             let attr = &caps[1];
             let url_path = &caps[2];

@@ -48,6 +48,16 @@ fn about_metadata() -> AboutMetadata {
     }
 }
 
+/// Log (rather than panic on) a menu construction failure.
+///
+/// A failed append leaves that menu degraded or empty, which is a cosmetic
+/// problem; crashing the GUI at startup would be far worse.
+fn log_menu_result(what: &str, result: Result<(), muda::Error>) {
+    if let Err(e) = result {
+        tracing::error!("Failed to append {what}: {e}");
+    }
+}
+
 /// Menu items for history navigation
 struct HistoryMenuItems {
     back: MenuItem,
@@ -75,8 +85,9 @@ fn build_menu_bar() -> MenuHandles {
     #[cfg(target_os = "macos")]
     let app_menu = {
         let app_menu = Submenu::new("mbr", true);
-        app_menu
-            .append_items(&[
+        log_menu_result(
+            "app menu items",
+            app_menu.append_items(&[
                 &PredefinedMenuItem::about(None, Some(about_metadata())),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::services(None),
@@ -86,8 +97,8 @@ fn build_menu_bar() -> MenuHandles {
                 &PredefinedMenuItem::show_all(None),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::quit(None),
-            ])
-            .expect("Failed to append app menu items");
+            ]),
+        );
         app_menu
     };
 
@@ -122,8 +133,9 @@ fn build_menu_bar() -> MenuHandles {
     );
 
     #[cfg(target_os = "macos")]
-    file_menu
-        .append_items(&[
+    log_menu_result(
+        "file menu items",
+        file_menu.append_items(&[
             &open_item,
             &PredefinedMenuItem::separator(),
             &reload_item,
@@ -131,12 +143,13 @@ fn build_menu_bar() -> MenuHandles {
             &print_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
-        ])
-        .expect("Failed to append file menu items");
+        ]),
+    );
 
     #[cfg(not(target_os = "macos"))]
-    file_menu
-        .append_items(&[
+    log_menu_result(
+        "file menu items",
+        file_menu.append_items(&[
             &open_item,
             &PredefinedMenuItem::separator(),
             &reload_item,
@@ -146,13 +159,14 @@ fn build_menu_bar() -> MenuHandles {
             &PredefinedMenuItem::close_window(Some("Close Window")),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::quit(None),
-        ])
-        .expect("Failed to append file menu items");
+        ]),
+    );
 
     // Edit menu with standard clipboard operations
     let edit_menu = Submenu::new("&Edit", true);
-    edit_menu
-        .append_items(&[
+    log_menu_result(
+        "edit menu items",
+        edit_menu.append_items(&[
             &PredefinedMenuItem::undo(None),
             &PredefinedMenuItem::redo(None),
             &PredefinedMenuItem::separator(),
@@ -160,8 +174,8 @@ fn build_menu_bar() -> MenuHandles {
             &PredefinedMenuItem::copy(None),
             &PredefinedMenuItem::paste(None),
             &PredefinedMenuItem::select_all(None),
-        ])
-        .expect("Failed to append edit menu items");
+        ]),
+    );
 
     // View menu
     let view_menu = Submenu::new("&View", true);
@@ -174,13 +188,14 @@ fn build_menu_bar() -> MenuHandles {
             Code::KeyI,
         )),
     );
-    view_menu
-        .append_items(&[
+    log_menu_result(
+        "view menu items",
+        view_menu.append_items(&[
             &PredefinedMenuItem::fullscreen(None),
             &PredefinedMenuItem::separator(),
             &devtools_item,
-        ])
-        .expect("Failed to append view menu items");
+        ]),
+    );
 
     // History menu with Back/Forward navigation
     let history_menu = Submenu::new("&History", true);
@@ -196,9 +211,10 @@ fn build_menu_bar() -> MenuHandles {
         true,
         Some(Accelerator::new(Some(Modifiers::SUPER), Code::BracketRight)),
     );
-    history_menu
-        .append_items(&[&back_item, &forward_item])
-        .expect("Failed to append history menu items");
+    log_menu_result(
+        "history menu items",
+        history_menu.append_items(&[&back_item, &forward_item]),
+    );
 
     let history_items = HistoryMenuItems {
         back: back_item,
@@ -207,49 +223,53 @@ fn build_menu_bar() -> MenuHandles {
 
     // Window menu
     let window_menu = Submenu::new("&Window", true);
-    window_menu
-        .append_items(&[
+    log_menu_result(
+        "window menu items",
+        window_menu.append_items(&[
             &PredefinedMenuItem::minimize(None),
             &PredefinedMenuItem::maximize(None),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::bring_all_to_front(None),
-        ])
-        .expect("Failed to append window menu items");
+        ]),
+    );
 
     // Help menu - only needed on non-macOS for About
     #[cfg(not(target_os = "macos"))]
     let help_menu = {
         let help_menu = Submenu::new("&Help", true);
-        help_menu
-            .append_items(&[&PredefinedMenuItem::about(None, Some(about_metadata()))])
-            .expect("Failed to append help menu items");
+        log_menu_result(
+            "help menu items",
+            help_menu.append_items(&[&PredefinedMenuItem::about(None, Some(about_metadata()))]),
+        );
         help_menu
     };
 
     // Build menu bar - order matters, especially on macOS
     #[cfg(target_os = "macos")]
-    menu_bar
-        .append_items(&[
+    log_menu_result(
+        "menus to menu bar",
+        menu_bar.append_items(&[
             &app_menu,
             &file_menu,
             &edit_menu,
             &view_menu,
             &history_menu,
             &window_menu,
-        ])
-        .expect("Failed to append menus to menu bar");
+        ]),
+    );
 
     #[cfg(not(target_os = "macos"))]
-    menu_bar
-        .append_items(&[
+    log_menu_result(
+        "menus to menu bar",
+        menu_bar.append_items(&[
             &file_menu,
             &edit_menu,
             &view_menu,
             &history_menu,
             &window_menu,
             &help_menu,
-        ])
-        .expect("Failed to append menus to menu bar");
+        ]),
+    );
 
     // On macOS, set the Window menu as the windows menu for proper window management
     #[cfg(target_os = "macos")]

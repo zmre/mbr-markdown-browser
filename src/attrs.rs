@@ -20,15 +20,20 @@ use std::sync::LazyLock;
 
 /// Regex patterns for attribute parsing
 /// ID pattern: match #id at start or after whitespace (avoid matching #fff in "color=#fff")
-static ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|\s)#([\w-]+)").unwrap());
+static ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|\s)#([\w-]+)").expect("literal ID regex is valid and cannot fail to compile")
+});
 /// Class pattern: match .class at start or after whitespace (avoid matching .5 in "opacity=0.5")
-static CLASS_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|\s)\.([\w-]+)").unwrap());
+static CLASS_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|\s)\.([\w-]+)")
+        .expect("literal class regex is valid and cannot fail to compile")
+});
 /// Attr pattern: match key=value or key="value" (supports both straight " and curly "" quotes)
 static ATTR_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Match: key="value" or key="value" (curly quotes U+201C/U+201D) or key=unquoted
     // Using explicit Unicode escape sequences for curly quotes
-    Regex::new(r#"([\w-]+)=(?:"([^"]*)"|[\u{201C}]([^\u{201D}]*)[\u{201D}]|(\S+))"#).unwrap()
+    Regex::new(r#"([\w-]+)=(?:"([^"]*)"|[\u{201C}]([^\u{201D}]*)[\u{201D}]|(\S+))"#)
+        .expect("literal attr regex is valid and cannot fail to compile")
 });
 
 /// Parsed attributes from `{#id .class key=value}` syntax.

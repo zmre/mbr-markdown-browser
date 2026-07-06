@@ -51,6 +51,12 @@ pub enum MbrError {
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 
+    #[error("Failed to build HTTP response: {0}")]
+    Http(#[from] axum::http::Error),
+
+    #[error("Background task failed: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
+
     #[error("Invalid media path: {0}")]
     InvalidMediaPath(String),
 
@@ -322,6 +328,56 @@ pub enum PdfMetadataError {
     Io(#[from] std::io::Error),
 }
 
+/// Errors related to oembed URL validation and page metadata fetching.
+///
+/// These are logged (and degraded to a plain link) rather than surfaced to
+/// users, but a typed error keeps the SSRF-check failure modes explicit.
+#[derive(Debug, Error)]
+pub enum OembedError {
+    #[error("URL has no host: {url}")]
+    NoHost { url: String },
+
+    #[error("refusing to fetch non-public address {detail}")]
+    DisallowedAddress { detail: String },
+
+    #[error("no known port for URL {url}")]
+    NoKnownPort { url: String },
+
+    #[error("failed to resolve host {domain}")]
+    DnsResolveFailed {
+        domain: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("no addresses resolved for host {domain}")]
+    NoAddressesResolved { domain: String },
+
+    #[error("refusing to fetch non-http(s) URL {url}")]
+    NonHttpScheme { url: String },
+
+    #[error("too many redirects (more than {max}) fetching {url}")]
+    TooManyRedirects { max: usize, url: String },
+
+    #[error("redirect from {url} without Location header")]
+    RedirectWithoutLocation { url: String },
+
+    #[error("invalid Location header in redirect from {url}")]
+    InvalidLocationHeader { url: String },
+
+    #[error("Blocked by Cloudflare challenge")]
+    CloudflareChallenge,
+
+    #[error("refusing to parse non-HTML content type '{content_type}' from {url}")]
+    NonHtmlContentType { content_type: String, url: String },
+
+    #[error("URL parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
+
+    #[error("HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+}
+
 /// Errors related to static site building.
 #[derive(Debug, Error)]
 pub enum BuildError {
@@ -376,25 +432,13 @@ pub enum BuildError {
 
     #[error("Configuration error")]
     Config(Box<ConfigError>),
+
+    #[error("Default Pico theme is missing from embedded assets")]
+    MissingDefaultTheme,
 }
 
 // Convenience type alias for Results using MbrError
 pub type Result<T> = std::result::Result<T, MbrError>;
-
-// Conversion from Box<dyn std::error::Error> for gradual migration
-impl From<Box<dyn std::error::Error>> for MbrError {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        // This is a fallback for gradual migration
-        // In practice, we should use specific error types
-        MbrError::Io(std::io::Error::other(err.to_string()))
-    }
-}
-
-impl From<Box<dyn std::error::Error + Send + Sync>> for MbrError {
-    fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        MbrError::Io(std::io::Error::other(err.to_string()))
-    }
-}
 
 // Auto-box BuildError when converting to MbrError
 impl From<BuildError> for MbrError {
@@ -516,34 +560,6 @@ mod tests {
     }
 
     // ==================== Error Conversion Tests ====================
-
-    #[test]
-    fn test_box_dyn_error_to_mbr_error() {
-        let original: Box<dyn std::error::Error> = Box::new(IoError::other("test error"));
-        let converted: MbrError = original.into();
-
-        // Should convert to Io variant with message preserved
-        match converted {
-            MbrError::Io(io_err) => {
-                assert!(io_err.to_string().contains("test error"));
-            }
-            _ => panic!("Expected MbrError::Io, got {:?}", converted),
-        }
-    }
-
-    #[test]
-    fn test_box_dyn_error_send_sync_to_mbr_error() {
-        let original: Box<dyn std::error::Error + Send + Sync> =
-            Box::new(IoError::other("sync error"));
-        let converted: MbrError = original.into();
-
-        match converted {
-            MbrError::Io(io_err) => {
-                assert!(io_err.to_string().contains("sync error"));
-            }
-            _ => panic!("Expected MbrError::Io, got {:?}", converted),
-        }
-    }
 
     #[test]
     fn test_build_error_to_mbr_error() {
@@ -740,8 +756,7 @@ mod tests {
 
     #[test]
     fn test_empty_error_message() {
-        let err: Box<dyn std::error::Error> = Box::new(IoError::other(""));
-        let converted: MbrError = err.into();
+        let converted: MbrError = IoError::other("").into();
 
         // Should not panic on empty message
         let _ = converted.to_string();
@@ -749,27 +764,12 @@ mod tests {
 
     #[test]
     fn test_unicode_in_error_message() {
-        let err: Box<dyn std::error::Error> = Box::new(IoError::other("文件未找到 🔍"));
-        let converted: MbrError = err.into();
+        let converted: MbrError = IoError::other("文件未找到 🔍").into();
 
         match converted {
             MbrError::Io(io_err) => {
                 assert!(io_err.to_string().contains("文件未找到"));
                 assert!(io_err.to_string().contains("🔍"));
-            }
-            _ => panic!("Expected MbrError::Io"),
-        }
-    }
-
-    #[test]
-    fn test_long_error_message() {
-        let long_msg = "x".repeat(10000);
-        let err: Box<dyn std::error::Error> = Box::new(IoError::other(long_msg.clone()));
-        let converted: MbrError = err.into();
-
-        match converted {
-            MbrError::Io(io_err) => {
-                assert_eq!(io_err.to_string().len(), 10000);
             }
             _ => panic!("Expected MbrError::Io"),
         }

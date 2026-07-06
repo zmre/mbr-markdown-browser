@@ -37,6 +37,7 @@ pub mod audio;
 #[cfg(feature = "gui")]
 pub mod browser;
 pub mod build;
+pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod constants;
@@ -52,6 +53,7 @@ pub mod markdown;
 pub mod media;
 pub mod oembed;
 pub mod oembed_cache;
+pub mod page_context;
 pub mod page_errors;
 pub mod path_resolver;
 #[cfg(feature = "media-metadata")]

@@ -48,6 +48,7 @@ Supported media types are detected by file extension:
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `--host <HOST>` | Server IP address to bind. **Warning:** binding to a non-loopback address (e.g. `0.0.0.0`) makes the entire repository readable to the network with no authentication; mbr logs a warning at startup. | `127.0.0.1` |
 | `--output <PATH>` | Output directory for static build | `build` |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |

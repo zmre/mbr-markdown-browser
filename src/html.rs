@@ -703,7 +703,7 @@ pub fn push_html<'a, I>(s: &mut String, iter: I)
 where
     I: Iterator<Item = Event<'a>>,
 {
-    write_html_fmt(s, iter).unwrap()
+    write_html_fmt(s, iter).expect("writing to a String cannot fail")
 }
 
 /// Iterate over an `Iterator` of `Event`s, generate HTML for each `Event`, and
@@ -816,7 +816,8 @@ pub fn push_html_mbr<'a, I>(s: &mut String, iter: I)
 where
     I: Iterator<Item = Event<'a>>,
 {
-    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_defaults()).unwrap()
+    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_defaults())
+        .expect("writing to a String cannot fail")
 }
 
 /// Push HTML with MBR extensions and section attributes.
@@ -850,7 +851,8 @@ pub fn push_html_mbr_with_attrs<'a, I>(
 ) where
     I: Iterator<Item = Event<'a>>,
 {
-    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_with_section_attrs(section_attrs)).unwrap()
+    write_html_fmt_with_config(s, iter, HtmlConfig::mbr_with_section_attrs(section_attrs))
+        .expect("writing to a String cannot fail")
 }
 
 /// Push HTML with explicit configuration.
@@ -877,7 +879,7 @@ pub fn push_html_with_config<'a, I>(s: &mut String, iter: I, config: HtmlConfig)
 where
     I: Iterator<Item = Event<'a>>,
 {
-    write_html_fmt_with_config(s, iter, config).unwrap()
+    write_html_fmt_with_config(s, iter, config).expect("writing to a String cannot fail")
 }
 
 /// Internal: write HTML with explicit configuration.

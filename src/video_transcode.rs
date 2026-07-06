@@ -402,6 +402,20 @@ pub fn generate_hls_playlist(
     Ok(playlist)
 }
 
+/// Create a uniquely-named temporary file for a transcoded MPEG-TS segment.
+///
+/// Uses [`tempfile::NamedTempFile`] so concurrent transcodes of the same
+/// segment index for different videos or resolutions never collide on a shared
+/// path, and the file is removed automatically when the returned handle is
+/// dropped (including on an early error return).
+fn create_segment_temp_file() -> Result<tempfile::NamedTempFile, TranscodeError> {
+    tempfile::Builder::new()
+        .prefix("mbr_segment_")
+        .suffix(".ts")
+        .tempfile()
+        .map_err(TranscodeError::Io)
+}
+
 /// Transcode a single HLS segment (.ts) for the given video.
 ///
 /// Seeks to the segment start position and transcodes approximately
@@ -454,13 +468,11 @@ pub fn transcode_segment(
         output_height
     );
 
-    // Create a temp file for MPEG-TS output
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(format!(
-        "mbr_segment_{}_{}.ts",
-        std::process::id(),
-        segment_index
-    ));
+    // Create a uniquely-named temp file for MPEG-TS output. The handle owns the
+    // file and removes it on drop, so concurrent transcodes never collide and a
+    // failed transcode does not leak the temp file.
+    let temp_file = create_segment_temp_file()?;
+    let temp_path = temp_file.path();
 
     // Open input
     let mut input_ctx =
@@ -485,7 +497,12 @@ pub fn transcode_segment(
         .map(|s| s.index());
 
     // Get input stream parameters
-    let video_stream = input_ctx.stream(video_stream_index).unwrap();
+    let video_stream =
+        input_ctx
+            .stream(video_stream_index)
+            .ok_or_else(|| TranscodeError::NoVideoStream {
+                path: source_path.to_path_buf(),
+            })?;
     let video_codec_params = video_stream.parameters();
     let video_time_base = video_stream.time_base();
 
@@ -509,7 +526,12 @@ pub fn transcode_segment(
 
     // Create audio decoder if audio stream exists
     let mut audio_decoder = if let Some(audio_idx) = audio_stream_index {
-        let audio_stream = input_ctx.stream(audio_idx).unwrap();
+        let audio_stream =
+            input_ctx
+                .stream(audio_idx)
+                .ok_or_else(|| TranscodeError::NoAudioStream {
+                    path: source_path.to_path_buf(),
+                })?;
         let audio_codec_params = audio_stream.parameters();
         let audio_decoder_ctx =
             ffmpeg::codec::context::Context::from_parameters(audio_codec_params).map_err(|e| {
@@ -525,7 +547,7 @@ pub fn transcode_segment(
     };
 
     // Create output context for MPEG-TS
-    let mut output_ctx = ffmpeg::format::output_as(&temp_file, "mpegts").map_err(|e| {
+    let mut output_ctx = ffmpeg::format::output_as(temp_path, "mpegts").map_err(|e| {
         TranscodeError::TranscodeFailed(format!("Failed to create MPEG-TS output: {e}"))
     })?;
 
@@ -571,7 +593,12 @@ pub fn transcode_segment(
     // Add audio stream if present
     let mut audio_encoder_opt: Option<(usize, ffmpeg::encoder::Audio)> =
         if let Some(audio_idx) = audio_stream_index {
-            let audio_stream = input_ctx.stream(audio_idx).unwrap();
+            let audio_stream =
+                input_ctx
+                    .stream(audio_idx)
+                    .ok_or_else(|| TranscodeError::NoAudioStream {
+                        path: source_path.to_path_buf(),
+                    })?;
             let audio_time_base = audio_stream.time_base();
 
             let aac_encoder = ffmpeg::encoder::find_by_name("aac")
@@ -582,7 +609,11 @@ pub fn transcode_segment(
                 TranscodeError::TranscodeFailed(format!("Failed to create audio encoder: {e}"))
             })?;
 
-            let audio_dec = audio_decoder.as_ref().unwrap();
+            let audio_dec = audio_decoder.as_ref().ok_or_else(|| {
+                TranscodeError::TranscodeFailed(
+                    "audio decoder missing for detected audio stream".to_string(),
+                )
+            })?;
             audio_enc_setup.set_rate(audio_dec.rate() as i32);
             audio_enc_setup.set_channel_layout(audio_dec.channel_layout());
             audio_enc_setup.set_format(encoder_audio_format);
@@ -651,14 +682,14 @@ pub fn transcode_segment(
         / f64::from(video_time_base.numerator())) as i64;
 
     // Calculate audio segment start PTS if audio stream exists
-    let audio_segment_start_pts = if let Some(audio_idx) = audio_stream_index {
-        let audio_stream = input_ctx.stream(audio_idx).unwrap();
-        let audio_time_base = audio_stream.time_base();
-        (start_time * f64::from(audio_time_base.denominator())
-            / f64::from(audio_time_base.numerator())) as i64
-    } else {
-        0
-    };
+    let audio_segment_start_pts = audio_stream_index
+        .and_then(|audio_idx| input_ctx.stream(audio_idx))
+        .map(|audio_stream| {
+            let audio_time_base = audio_stream.time_base();
+            (start_time * f64::from(audio_time_base.denominator())
+                / f64::from(audio_time_base.numerator())) as i64
+        })
+        .unwrap_or(0);
 
     // Process packets
     let mut decoded_frame = ffmpeg::frame::Video::empty();
@@ -829,11 +860,10 @@ pub fn transcode_segment(
         &mut audio_resampler,
     ) {
         // Get audio time base for PTS calculation
-        let audio_time_base = if let Some(audio_idx) = audio_stream_index {
-            input_ctx.stream(audio_idx).unwrap().time_base()
-        } else {
-            ffmpeg::Rational::new(1, MPEG_TS_TIME_BASE as i32)
-        };
+        let audio_time_base = audio_stream_index
+            .and_then(|audio_idx| input_ctx.stream(audio_idx))
+            .map(|s| s.time_base())
+            .unwrap_or_else(|| ffmpeg::Rational::new(1, MPEG_TS_TIME_BASE as i32));
 
         // Flush decoder
         audio_dec.send_eof().ok();
@@ -889,11 +919,9 @@ pub fn transcode_segment(
         .write_trailer()
         .map_err(|e| TranscodeError::TranscodeFailed(format!("Failed to write trailer: {e}")))?;
 
-    // Read the temp file into memory
-    let segment_data = std::fs::read(&temp_file)?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&temp_file);
+    // Read the temp file into memory. The file is removed automatically when
+    // `temp_file` is dropped at the end of this function.
+    let segment_data = std::fs::read(temp_path)?;
 
     tracing::info!(
         "Transcoded segment {}: {} bytes, {} frames",
@@ -1061,6 +1089,31 @@ mod tests {
         assert_eq!(TranscodeTarget::Resolution480p.height(), 480);
         assert_eq!(TranscodeTarget::Resolution480p.width(), 854);
         assert_eq!(TranscodeTarget::Resolution480p.url_suffix(), "-480p");
+    }
+
+    #[test]
+    fn test_segment_temp_files_are_unique_and_cleaned_up() {
+        // Two temp files created for the "same" segment must not collide, and
+        // each must be removed when its handle is dropped.
+        let a = create_segment_temp_file().expect("temp file a");
+        let b = create_segment_temp_file().expect("temp file b");
+
+        let path_a = a.path().to_path_buf();
+        let path_b = b.path().to_path_buf();
+
+        assert_ne!(
+            path_a, path_b,
+            "concurrent temp files must have unique paths"
+        );
+        assert!(path_a.exists());
+        assert!(path_b.exists());
+
+        // Dropping (as on an early error return) removes the file automatically.
+        drop(a);
+        assert!(!path_a.exists(), "temp file must be cleaned up on drop");
+
+        drop(b);
+        assert!(!path_b.exists());
     }
 
     #[test]

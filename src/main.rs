@@ -386,6 +386,7 @@ async fn main() -> Result<(), MbrError> {
             is_directory,
             &config.markdown_extensions,
         );
+        warn_if_non_loopback_bind(&config.host);
         tracing::info!(
             "Server running at http://{}:{}/{}",
             config.host,
@@ -398,6 +399,7 @@ async fn main() -> Result<(), MbrError> {
         // GUI mode - default when no flags specified (or explicit -g)
         #[cfg(feature = "gui")]
         {
+            warn_if_non_loopback_bind(&config.host);
             let config_copy = config.clone();
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
             let handle = tokio::spawn(async move {
@@ -482,6 +484,21 @@ async fn main() -> Result<(), MbrError> {
     Ok(())
 }
 
+/// Returns true if the given IPv4 octets represent a loopback address (127.0.0.0/8).
+fn is_loopback_host(octets: [u8; 4]) -> bool {
+    std::net::Ipv4Addr::from(octets).is_loopback()
+}
+
+/// Logs a security warning when the server is configured to bind to a
+/// non-loopback address, since mbr has no authentication.
+fn warn_if_non_loopback_bind(host: &mbr::config::IpArray) {
+    if !is_loopback_host(host.0) {
+        tracing::warn!(
+            "Binding to {host} exposes this server beyond localhost: the entire markdown repository is readable by anyone who can reach this address, with no authentication, and expensive operations (search, video transcoding, PDF extraction) can be triggered remotely. Use --host 127.0.0.1 unless this is intended."
+        );
+    }
+}
+
 /// Builds a URL path from a relative filesystem path.
 ///
 /// - For directories: returns the path with a trailing slash
@@ -526,6 +543,10 @@ fn replace_markdown_extension_with_slash(s: &str, extensions: &[String]) -> Stri
 ///
 /// The `file_url_path` should be the URL path to the file (as returned by `build_url_path`),
 /// without a leading slash (e.g., `videos/example.mp4`).
+///
+/// Only called from the GUI launch path (and tests), so it is compiled out of
+/// non-test builds without the `gui` feature to avoid dead-code warnings.
+#[cfg(any(test, feature = "gui"))]
 fn build_media_viewer_url(media_type: server::MediaViewerType, file_url_path: &str) -> String {
     use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
@@ -657,6 +678,19 @@ mod tests {
         let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/file#1&2=3.mp4");
         // Hash, ampersand, and equals should be encoded
         assert!(url.contains("path=/videos/file%231%262%3D3.mp4"));
+    }
+
+    #[test]
+    fn test_is_loopback_host_loopback_addresses() {
+        assert!(is_loopback_host([127, 0, 0, 1]));
+        assert!(is_loopback_host([127, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_is_loopback_host_non_loopback_addresses() {
+        assert!(!is_loopback_host([0, 0, 0, 0]));
+        assert!(!is_loopback_host([192, 168, 1, 10]));
+        assert!(!is_loopback_host([10, 0, 0, 1]));
     }
 
     #[test]
