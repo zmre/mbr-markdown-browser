@@ -62,7 +62,7 @@ impl TestServer {
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
             // Start server (will run until task is dropped)
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         // Give server time to start
@@ -88,7 +88,7 @@ impl TestServer {
             let mut config = test_server_config(port, root_dir);
             config_fn(&mut config);
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -948,7 +948,7 @@ impl TestServerWithTemplates {
             config.template_folder = template_folder;
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1830,7 +1830,7 @@ impl TestServerWithTheme {
             config.theme = theme;
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2160,7 +2160,7 @@ impl TestServerNoLinkTracking {
             config.link_tracking = false; // DISABLED
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3409,6 +3409,31 @@ async fn test_errors_json_reports_unresolved_wikilink() {
 }
 
 #[tokio::test]
+async fn test_errors_json_percent_encoded_link_to_existing_file_is_clean() {
+    // Regression: axum percent-decodes live request paths before resolution,
+    // so an authored href like /Target%20With%20Spaces/ must not be reported
+    // as a broken internal link when "Target With Spaces.md" exists.
+    let repo = TestRepo::new();
+    repo.create_markdown("Target With Spaces.md", "# Target");
+    repo.create_markdown(
+        "page.md",
+        "# Page\n\n[spaced](/Target%20With%20Spaces/) link here.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/page/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.is_empty(),
+        "percent-encoded link to existing file should produce no errors, got: {:?}",
+        errors
+    );
+}
+
+#[tokio::test]
 async fn test_errors_json_returns_404_when_link_tracking_disabled() {
     let repo = TestRepo::new();
     repo.create_markdown("page.md", "# Page");
@@ -3497,7 +3522,7 @@ async fn test_hls_traversal_blocked() {
         let mut config = test_server_config(port, server_root);
         config.transcode_enabled = true;
         let server = mbr::server::Server::init(config).expect("Failed to initialize server");
-        let _ = server.start().await;
+        server.start().await.expect("test server failed to start");
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 

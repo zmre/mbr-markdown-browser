@@ -22,7 +22,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::link_index::OutboundLink;
-use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
+use crate::path_resolver::{
+    PathResolverConfig, ResolvedPath, normalize_link_target, resolve_request_path,
+};
 
 /// Type of media element whose `src` attribute is broken.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,22 +103,15 @@ pub fn validate_internal_links(
             continue;
         }
 
-        // Strip anchor / query for the resolver.
-        let base = link
-            .to
-            .split('#')
-            .next()
-            .unwrap_or(&link.to)
-            .split('?')
-            .next()
-            .unwrap_or(&link.to);
-
-        // Resolver expects paths without the leading slash.
-        let request_path = base.trim_matches('/');
+        // Normalize the authored href (strip anchor/query, percent-decode,
+        // trim slashes) exactly as a live HTTP request would be before it
+        // reaches the resolver. See `normalize_link_target` for why this must
+        // match axum's decoding.
+        let request_path = normalize_link_target(&link.to);
 
         // "" means root, which always resolves when `index_file` exists. We
         // still run it through the resolver to keep behaviour consistent.
-        let resolved = resolve_request_path(resolver_config, request_path);
+        let resolved = resolve_request_path(resolver_config, &request_path);
 
         if matches!(resolved, ResolvedPath::NotFound) {
             errors.push(PageError::BrokenInternalLink {
@@ -193,10 +188,9 @@ fn media_reference_resolves(
     resolver_config: &PathResolverConfig,
     markdown_dir: &Path,
 ) -> bool {
-    let cleaned = src.split('#').next().unwrap_or(src);
-    let cleaned = cleaned.split('?').next().unwrap_or(cleaned);
-    let cleaned = percent_encoding::percent_decode_str(cleaned).decode_utf8_lossy();
-    let cleaned = cleaned.as_ref();
+    // Normalize (strip anchor/query, percent-decode, trim slashes) exactly as
+    // a live HTTP request would be. See `normalize_link_target`.
+    let cleaned = normalize_link_target(src);
 
     if cleaned.is_empty() {
         return true;
@@ -204,8 +198,7 @@ fn media_reference_resolves(
 
     // Strategy 1: path resolver (this handles static folder overlays, index
     // files, etc.). `resolve_request_path` expects no leading slash.
-    let request_path = cleaned.trim_start_matches('/');
-    match resolve_request_path(resolver_config, request_path) {
+    match resolve_request_path(resolver_config, &cleaned) {
         ResolvedPath::StaticFile(_)
         | ResolvedPath::MarkdownFile(_)
         | ResolvedPath::TagPage { .. }
@@ -216,22 +209,16 @@ fn media_reference_resolves(
     }
 
     // Strategy 2 / 3: explicit filesystem probes. These guard against edge
-    // cases in the resolver (e.g. hidden / dotfiles not served).
-    if cleaned.starts_with('/') {
-        let candidate = resolver_config
-            .base_dir
-            .join(cleaned.trim_start_matches('/'));
-        if candidate.exists() {
-            return true;
-        }
+    // cases in the resolver (e.g. hidden / dotfiles not served). The leading
+    // slash on the authored src (checked before normalization trims it)
+    // decides whether the path is site-root-absolute or relative to the
+    // markdown file.
+    let candidate = if src.starts_with('/') {
+        resolver_config.base_dir.join(&cleaned)
     } else {
-        let candidate = markdown_dir.join(cleaned);
-        if candidate.exists() {
-            return true;
-        }
-    }
-
-    false
+        markdown_dir.join(&cleaned)
+    };
+    candidate.exists()
 }
 
 /// Matches a literal `[[...]]` that survived `transform_wikilinks`. We exclude
@@ -400,6 +387,121 @@ mod tests {
         assert!(errs.is_empty());
     }
 
+    #[test]
+    fn percent_encoded_link_to_existing_file_is_not_reported() {
+        // Regression: axum percent-decodes live request paths, so an authored
+        // href like /IronCore%20Swag%20T-shirts%20Gifts must be decoded before
+        // resolution or the checker reports a bogus 404.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("IronCore Swag T-shirts Gifts.md"), "# x").unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let outbound = vec![
+            OutboundLink {
+                to: "/IronCore%20Swag%20T-shirts%20Gifts".to_string(),
+                text: "no trailing slash".to_string(),
+                anchor: None,
+                internal: true,
+            },
+            OutboundLink {
+                to: "/IronCore%20Swag%20T-shirts%20Gifts/".to_string(),
+                text: "trailing slash".to_string(),
+                anchor: None,
+                internal: true,
+            },
+        ];
+
+        let errs = validate_internal_links(&outbound, &cfg);
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn percent_encoded_apostrophe_link_is_not_reported() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("World's Best.md"), "# x").unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let outbound = vec![OutboundLink {
+            to: "/World%27s%20Best/".to_string(),
+            text: "apostrophe".to_string(),
+            anchor: None,
+            internal: true,
+        }];
+
+        let errs = validate_internal_links(&outbound, &cfg);
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn percent_encoded_unicode_link_is_not_reported() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("café.md"), "# x").unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let outbound = vec![OutboundLink {
+            to: "/caf%C3%A9/".to_string(),
+            text: "unicode".to_string(),
+            anchor: None,
+            internal: true,
+        }];
+
+        let errs = validate_internal_links(&outbound, &cfg);
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn percent_encoded_link_with_anchor_and_query_is_not_reported() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("IronCore Swag T-shirts Gifts.md"), "# x").unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let outbound = vec![OutboundLink {
+            to: "/IronCore%20Swag%20T-shirts%20Gifts/?x=1#top".to_string(),
+            text: "anchor and query".to_string(),
+            anchor: Some("#top".to_string()),
+            internal: true,
+        }];
+
+        let errs = validate_internal_links(&outbound, &cfg);
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn missing_percent_encoded_target_is_still_reported() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let outbound = vec![OutboundLink {
+            to: "/Nope%20Missing/".to_string(),
+            text: "gone".to_string(),
+            anchor: None,
+            internal: true,
+        }];
+
+        let errs = validate_internal_links(&outbound, &cfg);
+        assert_eq!(errs.len(), 1);
+        // The error payload preserves the authored (still-encoded) target.
+        assert!(matches!(
+            &errs[0],
+            PageError::BrokenInternalLink { target, .. } if target == "/Nope%20Missing/"
+        ));
+    }
+
     // --- validate_media_references -----------------------------------------
 
     fn media_setup() -> (TempDir, PathBuf) {
@@ -504,6 +606,22 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn percent_encoded_relative_img_next_to_markdown_is_ignored() {
+        // Guards the media_reference_resolves refactor: encoded relative srcs
+        // must decode and probe the markdown file's directory.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::write(base.join("my photo.png"), b"\x89PNG").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<p><img src="./my%20photo.png" alt="x"></p>"#;
+        let errs = validate_media_references(html, &cfg, &base);
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
     }
 
     // --- detect_unresolved_wikilinks --------------------------------------

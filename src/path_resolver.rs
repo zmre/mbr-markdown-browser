@@ -99,6 +99,33 @@ pub struct PathResolverConfig<'a> {
     pub tag_sources: &'a [String],
 }
 
+/// Normalizes an authored link target (href) into the request-path form that
+/// [`resolve_request_path`] expects.
+///
+/// Live requests reach the server through axum's `extract::Path`, which
+/// percent-decodes the URL path before `resolve_request_path` ever sees it.
+/// Any code that feeds *authored* hrefs (still percent-encoded, possibly
+/// carrying fragments or query strings) into the resolver must apply this
+/// identical normalization, or its results diverge from what the server
+/// actually serves. That divergence previously caused bogus "broken internal
+/// link" 404 reports in the GUI error panel for links like
+/// `/IronCore%20Swag%20T-shirts%20Gifts/` pointing at
+/// `IronCore Swag T-shirts Gifts.md`.
+///
+/// Mirrors exactly what a real HTTP request undergoes:
+/// 1. Strip the fragment (`#...`), then the query string (`?...`).
+/// 2. Percent-decode (lossy UTF-8, matching axum's decoding).
+/// 3. Trim leading and trailing `/`.
+///
+/// Note: valid percent escapes are always decoded, so a literal `%` must be
+/// authored as `%25` (e.g. `100%25` normalizes to `100%`).
+pub fn normalize_link_target(href: &str) -> String {
+    let base = href.split('#').next().unwrap_or(href);
+    let base = base.split('?').next().unwrap_or(base);
+    let decoded = percent_encoding::percent_decode_str(base).decode_utf8_lossy();
+    decoded.trim_matches('/').to_string()
+}
+
 /// Resolves a URL path to determine what resource should be served.
 ///
 /// This is a pure function that performs filesystem checks but no I/O operations
@@ -614,6 +641,53 @@ mod tests {
             strip_trailing_separator(Path::new("relative/")),
             PathBuf::from("relative")
         );
+    }
+
+    // ==================== normalize_link_target Tests ====================
+
+    #[test]
+    fn test_normalize_link_target_plain_path() {
+        assert_eq!(normalize_link_target("docs/guide"), "docs/guide");
+    }
+
+    #[test]
+    fn test_normalize_link_target_decodes_encoded_spaces() {
+        assert_eq!(
+            normalize_link_target("/IronCore%20Swag%20T-shirts%20Gifts"),
+            "IronCore Swag T-shirts Gifts"
+        );
+    }
+
+    #[test]
+    fn test_normalize_link_target_strips_fragment() {
+        assert_eq!(normalize_link_target("/docs/guide/#section"), "docs/guide");
+    }
+
+    #[test]
+    fn test_normalize_link_target_strips_query() {
+        assert_eq!(normalize_link_target("/docs/guide/?x=1&y=2"), "docs/guide");
+    }
+
+    #[test]
+    fn test_normalize_link_target_strips_query_and_fragment_with_decoding() {
+        assert_eq!(
+            normalize_link_target("/My%20Page/?x=1#top"),
+            "My Page",
+            "fragment and query must be stripped before decoding/trimming"
+        );
+    }
+
+    #[test]
+    fn test_normalize_link_target_trims_leading_and_trailing_slashes() {
+        assert_eq!(normalize_link_target("/docs/guide/"), "docs/guide");
+        assert_eq!(normalize_link_target("docs/guide"), "docs/guide");
+        assert_eq!(normalize_link_target("/"), "");
+    }
+
+    #[test]
+    fn test_normalize_link_target_decodes_literal_percent_escape() {
+        // A literal `%` must be authored as `%25`; valid escapes always decode.
+        assert_eq!(normalize_link_target("/100%25"), "100%");
     }
 
     // ==================== Tag URL Resolution Tests ====================
