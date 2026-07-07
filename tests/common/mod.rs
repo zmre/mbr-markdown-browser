@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use tempfile::TempDir;
 
 /// A test fixture that creates a temporary markdown repository.
@@ -85,13 +86,21 @@ impl Default for TestRepo {
     }
 }
 
+/// Next candidate port for test servers. A process-global counter guarantees
+/// two parallel tests never receive the same port (binding :0 and dropping
+/// the listener allowed the OS to hand the same ephemeral port to two tests,
+/// so the losing server silently failed to bind and requests hit the wrong
+/// test's server).
+static NEXT_PORT: AtomicU16 = AtomicU16::new(15200);
+
 /// Finds an available port for testing.
 pub fn find_available_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to port");
-    listener
-        .local_addr()
-        .expect("Failed to get local address")
-        .port()
+    loop {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Asserts that HTML content contains the expected substring.

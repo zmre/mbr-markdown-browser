@@ -62,7 +62,7 @@ impl TestServer {
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
             // Start server (will run until task is dropped)
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         // Give server time to start
@@ -88,7 +88,7 @@ impl TestServer {
             let mut config = test_server_config(port, root_dir);
             config_fn(&mut config);
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -948,7 +948,7 @@ impl TestServerWithTemplates {
             config.template_folder = template_folder;
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1830,7 +1830,7 @@ impl TestServerWithTheme {
             config.theme = theme;
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2160,7 +2160,7 @@ impl TestServerNoLinkTracking {
             config.link_tracking = false; // DISABLED
             let server = mbr::server::Server::init(config).expect("Failed to initialize server");
 
-            let _ = server.start().await;
+            server.start().await.expect("test server failed to start");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3522,7 +3522,7 @@ async fn test_hls_traversal_blocked() {
         let mut config = test_server_config(port, server_root);
         config.transcode_enabled = true;
         let server = mbr::server::Server::init(config).expect("Failed to initialize server");
-        let _ = server.start().await;
+        server.start().await.expect("test server failed to start");
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
