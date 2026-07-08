@@ -6,7 +6,10 @@
 //!    resolve each through `path_resolver::resolve_request_path`.
 //! 2. Broken media references — parse rendered HTML for `<img>`, `<video>`,
 //!    `<audio>`, and `<source>` tags and confirm internal `src` attributes
-//!    resolve.
+//!    resolve when interpreted the way a browser would: relative to the
+//!    page's canonical URL, then through the same request pipeline the
+//!    server uses. Checking never duplicates resolution logic, so it cannot
+//!    disagree with what a live request actually serves.
 //! 3. Unresolved wikilinks — literal `[[...]]` substrings that escaped
 //!    `transform_wikilinks` (see `src/wikilink.rs`). Skipped inside `<code>`
 //!    and `<pre>` blocks.
@@ -18,10 +21,9 @@
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::LazyLock;
 
-use crate::link_index::OutboundLink;
+use crate::link_index::{OutboundLink, resolve_relative_url};
 use crate::path_resolver::{
     PathResolverConfig, ResolvedPath, normalize_link_target, resolve_request_path,
 };
@@ -128,13 +130,16 @@ pub fn validate_internal_links(
 /// Validates `<img>`, `<video>`, `<audio>` and `<source>` `src` attributes in
 /// the rendered HTML.
 ///
-/// For each internal `src`, we strip anchors / queries, URL-decode, and resolve
-/// relative paths against the markdown file's directory. A match is recorded
-/// when the target neither exists on disk nor is served by the resolver.
+/// `page_url` is the page's canonical directory-style URL (e.g.
+/// `/docs/guide/`; `/` for the root page). The rendered HTML contains srcs
+/// that the link transform has already rewritten relative to that URL, so
+/// each internal `src` is resolved against it exactly the way a browser
+/// would, then checked through the same pipeline a live HTTP request hits. An
+/// error is recorded only when the server would actually 404 the request.
 pub fn validate_media_references(
     html: &str,
     resolver_config: &PathResolverConfig,
-    markdown_dir: &Path,
+    page_url: &str,
 ) -> Vec<PageError> {
     // Parsing the HTML document is ~microseconds for typical page sizes; the
     // selectors below compile once per call which keeps the API ergonomic.
@@ -162,7 +167,7 @@ pub fn validate_media_references(
                 continue;
             }
 
-            if media_reference_resolves(src, resolver_config, markdown_dir) {
+            if media_reference_resolves(src, resolver_config, page_url) {
                 continue;
             }
 
@@ -176,49 +181,43 @@ pub fn validate_media_references(
     errors
 }
 
-/// Resolves a media `src` to check existence. Tries three strategies in order:
+/// Resolves a media `src` against the page's canonical URL and checks whether
+/// the server would serve it, mimicking exactly what a browser + live request
+/// does:
 ///
-/// 1. Path resolver (covers files in base_dir, static folder, tag pages).
-/// 2. Direct filesystem check against the markdown file's parent directory
-///    (handles relative paths that live next to the source markdown).
-/// 3. Direct filesystem check against the base directory (handles absolute
-///    site-root paths).
+/// 1. Strip the fragment / query from the (still percent-encoded) src.
+/// 2. Resolve the remaining path against `page_url` with browser semantics.
+///    The page URL is directory-style (ends in `/`), so all of its segments
+///    are kept while `.` / `..` segments are applied — which is
+///    [`resolve_relative_url`] with `is_index_file = true`. Absolute srcs
+///    (`/foo.png`) pass through unchanged.
+/// 3. Normalize (percent-decode, trim slashes — this also drops the trailing
+///    slash step 2 appends) via [`normalize_link_target`] and resolve via
+///    [`resolve_request_path`] — the identical pipeline a live HTTP request
+///    hits. If the resolver reports `NotFound` the browser would 404 too, so
+///    flagging the reference is always correct.
 fn media_reference_resolves(
     src: &str,
     resolver_config: &PathResolverConfig,
-    markdown_dir: &Path,
+    page_url: &str,
 ) -> bool {
-    // Normalize (strip anchor/query, percent-decode, trim slashes) exactly as
-    // a live HTTP request would be. See `normalize_link_target`.
-    let cleaned = normalize_link_target(src);
+    // Fragment / query stripping must happen before relative resolution so
+    // `#` / `?` payloads never participate in `.` / `..` segment handling.
+    let path_part = src.split(['#', '?']).next().unwrap_or_default();
 
-    if cleaned.is_empty() {
+    // A fragment- or query-only src refers to the page itself.
+    if path_part.is_empty() {
         return true;
     }
 
-    // Strategy 1: path resolver (this handles static folder overlays, index
-    // files, etc.). `resolve_request_path` expects no leading slash.
-    match resolve_request_path(resolver_config, &cleaned) {
-        ResolvedPath::StaticFile(_)
-        | ResolvedPath::MarkdownFile(_)
-        | ResolvedPath::TagPage { .. }
-        | ResolvedPath::TagSourceIndex { .. }
-        | ResolvedPath::Redirect(_)
-        | ResolvedPath::DirectoryListing(_) => return true,
-        ResolvedPath::NotFound => {}
-    }
+    let absolute_url = resolve_relative_url(page_url, path_part, true);
+    let request_path = normalize_link_target(&absolute_url);
 
-    // Strategy 2 / 3: explicit filesystem probes. These guard against edge
-    // cases in the resolver (e.g. hidden / dotfiles not served). The leading
-    // slash on the authored src (checked before normalization trims it)
-    // decides whether the path is site-root-absolute or relative to the
-    // markdown file.
-    let candidate = if src.starts_with('/') {
-        resolver_config.base_dir.join(&cleaned)
-    } else {
-        markdown_dir.join(&cleaned)
-    };
-    candidate.exists()
+    // "" means the site root; the resolver handles it like any live request.
+    !matches!(
+        resolve_request_path(resolver_config, &request_path),
+        ResolvedPath::NotFound
+    )
 }
 
 /// Matches a literal `[[...]]` that survived `transform_wikilinks`. We exclude
@@ -285,7 +284,7 @@ pub fn frontmatter_parse_errors(err: &Option<String>) -> Vec<PageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn make_config<'a>(
@@ -521,8 +520,9 @@ mod tests {
         let tags: Vec<String> = vec![];
         let cfg = make_config(&base, &exts, "index.md", &tags);
 
+        // Root-level page: srcs resolve against the site root URL "/".
         let html = r#"<p><img src="./missing.png" alt="x"></p>"#;
-        let errs = validate_media_references(html, &cfg, &base);
+        let errs = validate_media_references(html, &cfg, "/");
         assert_eq!(errs.len(), 1);
         assert!(matches!(
             &errs[0],
@@ -538,7 +538,7 @@ mod tests {
         let cfg = make_config(&base, &exts, "index.md", &tags);
 
         let html = r#"<p><img src="photo.png" alt="x"></p>"#;
-        let errs = validate_media_references(html, &cfg, &base);
+        let errs = validate_media_references(html, &cfg, "/");
         assert!(errs.is_empty());
     }
 
@@ -549,9 +549,10 @@ mod tests {
         let tags: Vec<String> = vec![];
         let cfg = make_config(&base, &exts, "index.md", &tags);
 
-        // "/images/ok.png" should resolve via the static folder overlay.
+        // "/images/ok.png" should resolve via the static folder overlay,
+        // regardless of which page references it.
         let html = r#"<p><img src="/images/ok.png" alt="x"></p>"#;
-        let errs = validate_media_references(html, &cfg, &base);
+        let errs = validate_media_references(html, &cfg, "/docs/guide/");
         assert!(errs.is_empty());
     }
 
@@ -563,7 +564,7 @@ mod tests {
         let cfg = make_config(&base, &exts, "index.md", &tags);
 
         let html = r#"<p><img src="https://example.com/a.png"></p>"#;
-        let errs = validate_media_references(html, &cfg, &base);
+        let errs = validate_media_references(html, &cfg, "/");
         assert!(errs.is_empty());
     }
 
@@ -579,7 +580,7 @@ mod tests {
             <audio src="./gone.mp3"></audio>
             <video><source src="./gone.webm"></video>
         "#;
-        let errs = validate_media_references(html, &cfg, &base);
+        let errs = validate_media_references(html, &cfg, "/");
 
         assert!(
             errs.iter().any(|e| matches!(
@@ -610,8 +611,8 @@ mod tests {
 
     #[test]
     fn percent_encoded_relative_img_next_to_markdown_is_ignored() {
-        // Guards the media_reference_resolves refactor: encoded relative srcs
-        // must decode and probe the markdown file's directory.
+        // Encoded relative srcs must resolve against the page URL first and
+        // percent-decode afterwards, matching axum's live-request decoding.
         let dir = TempDir::new().unwrap();
         let base = dir.path().canonicalize().unwrap();
         std::fs::write(base.join("my photo.png"), b"\x89PNG").unwrap();
@@ -620,8 +621,86 @@ mod tests {
         let cfg = make_config(&base, &exts, "index.md", &tags);
 
         let html = r#"<p><img src="./my%20photo.png" alt="x"></p>"#;
-        let errs = validate_media_references(html, &cfg, &base);
+        let errs = validate_media_references(html, &cfg, "/");
         assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    /// Layout matching the real-world false-positive report: an attachments
+    /// folder sitting next to the markdown file, referenced from a page
+    /// served at a directory-style URL. The server-mode link transform
+    /// rewrites the src to `../<attachments>/...` relative to the page URL.
+    fn attachments_setup() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let attachments = base.join("Projects/Ideas/hledger-web-gui_attachments");
+        std::fs::create_dir_all(&attachments).unwrap();
+        std::fs::write(base.join("Projects/Ideas/hledger-web-gui.md"), "# x").unwrap();
+        std::fs::write(attachments.join("img.png"), b"\x89PNG").unwrap();
+        std::fs::write(attachments.join("my photo.png"), b"\x89PNG").unwrap();
+        (dir, base)
+    }
+
+    #[test]
+    fn parent_relative_img_next_to_markdown_is_ignored() {
+        // Regression: the checker used to resolve `../` srcs against the
+        // markdown file's directory (one level too high) and falsely flag
+        // images that the browser loads fine via the page URL.
+        let (_guard, base) = attachments_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<p><img src="../hledger-web-gui_attachments/img.png" alt="x"></p>"#;
+        let errs = validate_media_references(html, &cfg, "/Projects/Ideas/hledger-web-gui/");
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn parent_relative_percent_encoded_img_is_ignored() {
+        let (_guard, base) = attachments_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<p><img src="../hledger-web-gui_attachments/my%20photo.png" alt="x"></p>"#;
+        let errs = validate_media_references(html, &cfg, "/Projects/Ideas/hledger-web-gui/");
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn index_page_sibling_img_is_ignored() {
+        // docs/index.md is served at /docs/, so a plain "img.png" src loads
+        // docs/img.png in the browser.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/index.md"), "# x").unwrap();
+        std::fs::write(base.join("docs/img.png"), b"\x89PNG").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<p><img src="img.png" alt="x"></p>"#;
+        let errs = validate_media_references(html, &cfg, "/docs/");
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn parent_relative_missing_img_is_reported() {
+        // A genuinely missing file reached via `../` must still be flagged.
+        let (_guard, base) = attachments_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<p><img src="../hledger-web-gui_attachments/nope.png" alt="x"></p>"#;
+        let errs = validate_media_references(html, &cfg, "/Projects/Ideas/hledger-web-gui/");
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            PageError::BrokenMediaReference { kind: MediaKind::Image, src }
+                if src == "../hledger-web-gui_attachments/nope.png"
+        ));
     }
 
     // --- detect_unresolved_wikilinks --------------------------------------

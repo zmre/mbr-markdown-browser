@@ -622,4 +622,21 @@ mod tests {
             "#section"
         );
     }
+
+    #[test]
+    fn test_resolve_relative_url_to_root() {
+        // Migrated from build.rs when its duplicate resolver was removed.
+        assert_eq!(resolve_relative_url("/source/", "../", false), "/");
+        assert_eq!(resolve_relative_url("/docs/guide/", "../../", false), "/");
+        assert_eq!(resolve_relative_url("/modes/", "../", true), "/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_nonindex_nested_parent_traversal() {
+        // Migrated from build.rs: strip guide → /docs/, then apply ../../.
+        assert_eq!(
+            resolve_relative_url("/docs/guide/", "../../other/", false),
+            "/other/"
+        );
+    }
 }
