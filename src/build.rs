@@ -24,7 +24,7 @@ use crate::{
     config::Config,
     embedded_pico,
     errors::BuildError,
-    link_index::{InboundLink, OutboundLink, PageLinks},
+    link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url},
     link_transform::{LinkTransformConfig, make_relative_url},
     markdown,
     oembed_cache::OembedCache,
@@ -125,66 +125,6 @@ pub(crate) fn relative_root(depth: usize) -> String {
         String::new()
     } else {
         "../".repeat(depth)
-    }
-}
-
-/// Resolves a relative URL against a base URL path.
-///
-/// Stored `OutboundLink.to` values are the original pre-transform markdown
-/// URLs. Their meaning depends on whether the source page is an index file:
-///
-/// - **Non-index** (`docs/guide.md` → `/docs/guide/`): the last URL segment
-///   is the file stem; siblings live in the parent directory. Strip it.
-/// - **Index** (`docs/modes/index.md` → `/modes/`): the URL is already a
-///   directory; siblings live inside. Keep all segments.
-///
-/// Examples:
-/// - resolve_relative_url("/modes/", "gui/", true) → "/modes/gui/"
-/// - resolve_relative_url("/docs/guide/", "intro/", false) → "/docs/intro/"
-/// - resolve_relative_url("/docs/guide/", "../other/", false) → "/other/"
-fn resolve_relative_url(base_url: &str, relative_url: &str, is_index_file: bool) -> String {
-    // If the relative URL is already absolute, just normalize it
-    if relative_url.starts_with('/') {
-        let trimmed = relative_url.trim_end_matches('/');
-        return if trimmed.is_empty() {
-            "/".to_string()
-        } else {
-            format!("{}/", trimmed)
-        };
-    }
-
-    let base_segments: Vec<&str> = base_url
-        .trim_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    // For non-index pages, drop the last URL segment (the file stem) before
-    // applying the relative URL; for index pages, every segment is a real
-    // directory component.
-    let mut segments: Vec<&str> = if is_index_file || base_segments.is_empty() {
-        base_segments
-    } else {
-        base_segments[..base_segments.len() - 1].to_vec()
-    };
-
-    for part in relative_url.split('/') {
-        match part {
-            "" | "." => {} // Skip empty or current directory
-            ".." => {
-                segments.pop();
-            }
-            segment => {
-                segments.push(segment);
-            }
-        }
-    }
-
-    // Reconstruct the absolute URL
-    if segments.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}/", segments.join("/"))
     }
 }
 
@@ -2452,72 +2392,6 @@ mod tests {
     fn test_relative_root_multiple_levels() {
         assert_eq!(relative_root(2), "../../");
         assert_eq!(relative_root(3), "../../../");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_nonindex_parent() {
-        // From non-index /source/ (= source.md), "../target/" goes up from /
-        // and into target/.
-        assert_eq!(
-            resolve_relative_url("/source/", "../target/", false),
-            "/target/"
-        );
-    }
-
-    #[test]
-    fn test_resolve_relative_url_nonindex_nested() {
-        // From /docs/guide/ (non-index docs/guide.md), strip guide → /docs/,
-        // then ../reference/ → /reference/
-        assert_eq!(
-            resolve_relative_url("/docs/guide/", "../reference/", false),
-            "/reference/"
-        );
-        assert_eq!(
-            resolve_relative_url("/docs/guide/", "../../other/", false),
-            "/other/"
-        );
-    }
-
-    #[test]
-    fn test_resolve_relative_url_nonindex_sibling() {
-        // From /docs/guide/ (non-index), sibling markdown link reference/ lives
-        // at /docs/reference/ (strip guide, add reference).
-        assert_eq!(
-            resolve_relative_url("/docs/guide/", "reference/", false),
-            "/docs/reference/"
-        );
-        assert_eq!(
-            resolve_relative_url("/source/", "target/", false),
-            "/target/"
-        );
-    }
-
-    #[test]
-    fn test_resolve_relative_url_index_sibling() {
-        // From /modes/ (index docs/modes/index.md), relative gui/ is a child
-        // inside /modes/ → /modes/gui/.
-        assert_eq!(resolve_relative_url("/modes/", "gui/", true), "/modes/gui/");
-        assert_eq!(
-            resolve_relative_url("/reference/", "cli/", true),
-            "/reference/cli/"
-        );
-    }
-
-    #[test]
-    fn test_resolve_relative_url_absolute() {
-        assert_eq!(
-            resolve_relative_url("/source/", "/target/", false),
-            "/target/"
-        );
-        assert_eq!(resolve_relative_url("/source/", "/", false), "/");
-        assert_eq!(resolve_relative_url("/modes/", "/", true), "/");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_to_root() {
-        assert_eq!(resolve_relative_url("/source/", "../", false), "/");
-        assert_eq!(resolve_relative_url("/docs/guide/", "../../", false), "/");
-        assert_eq!(resolve_relative_url("/modes/", "../", true), "/");
     }
 
     // ============================================================================

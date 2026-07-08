@@ -2587,10 +2587,9 @@ impl Server {
         // rendered HTML for media / wikilink scans (the `LinkCache` only holds
         // outbound links), so unlike `try_serve_links_json` we cannot short-
         // circuit through the cache when the HTML is missing.
-        let (outbound_links, html_for_scan, markdown_dir, frontmatter_error): (
+        let (outbound_links, html_for_scan, frontmatter_error): (
             Vec<crate::link_index::OutboundLink>,
             String,
-            PathBuf,
             Option<String>,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
@@ -2607,11 +2606,6 @@ impl Server {
                 };
 
                 let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
-
-                let md_dir = md_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| config.base_dir.clone());
 
                 match markdown::render_with_cache(
                     md_path,
@@ -2641,7 +2635,6 @@ impl Server {
                         (
                             resolved_links,
                             render_result.html,
-                            md_dir,
                             render_result.frontmatter_error,
                         )
                     }
@@ -2661,11 +2654,11 @@ impl Server {
                     &config.repo.tag_index,
                     &config.tag_sources,
                 );
-                (outbound, String::new(), config.base_dir.clone(), None)
+                (outbound, String::new(), None)
             }
             ResolvedPath::TagSourceIndex { source } => {
                 let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
-                (outbound, String::new(), config.base_dir.clone(), None)
+                (outbound, String::new(), None)
             }
             _ => {
                 tracing::debug!("errors.json: page not found: {}", page_url_path);
@@ -2680,7 +2673,7 @@ impl Server {
             errors.extend(validate_media_references(
                 &html_for_scan,
                 &resolver_config,
-                &markdown_dir,
+                &page_url_path,
             ));
             errors.extend(detect_unresolved_wikilinks(&html_for_scan));
         }
