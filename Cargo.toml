@@ -60,7 +60,7 @@ pdfium-render = { version = "0.8", optional = true, default-features = false, fe
 tempfile = { version = "3.27", optional = true } # Collision-free temp files for HLS segment transcoding (media-metadata)
 papaya = "0.2.4"
 pathdiff = "0.2.3"
-lopdf = { version = "0.43", default-features = false, features = ["rayon"] }
+lopdf = { version = "0.44", default-features = false, features = ["rayon"] }
 percent-encoding = "2.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
 pulldown-cmark-escape = { version = "0.11", default-features = false }
