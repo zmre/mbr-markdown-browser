@@ -375,7 +375,7 @@ async fn main() -> Result<(), MbrError> {
             render_result.frontmatter,
             std::collections::HashMap::new(),
         )?;
-        println!("{}", &html_output);
+        println!("{}", html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
         let server_config = server::ServerConfig::from(&config).with_gui_mode(false);

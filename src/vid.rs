@@ -567,7 +567,7 @@ mod markdown_integration_tests {
     fn test_from_vid_with_spaces_in_path() {
         let input = r#"{{ vid(path="Eric Jones/Eric Jones - Metal 3.mp4")}}"#;
         let vid = Vid::from_vid(input).unwrap();
-        println!("URL: {}", &vid.url);
+        println!("URL: {}", vid.url);
         assert!(vid.url.contains("/videos/"));
         assert!(vid.url.contains("Eric%20Jones")); // spaces should be URL-encoded
     }
