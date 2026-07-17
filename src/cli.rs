@@ -129,6 +129,18 @@ pub struct Args {
     #[cfg(feature = "media-metadata")]
     #[arg(long)]
     pub transcode: bool,
+
+    /// Enable the in-browser markdown editing endpoints (server/GUI mode only).
+    /// Loopback callers may edit without a token (still CSRF-protected); remote
+    /// callers require a token — see --generate-edit-token. Off by default.
+    #[arg(long)]
+    pub edit: bool,
+
+    /// Generate a hashed editing token from a password (prompted; leave blank to
+    /// auto-generate a random token), print the token and the `edit_token_hash`
+    /// config line, then exit. Nothing is written to disk.
+    #[arg(long)]
+    pub generate_edit_token: bool,
 }
 
 impl Args {
@@ -191,6 +203,8 @@ mod tests {
             title_suffix: None,
             #[cfg(feature = "media-metadata")]
             transcode: false,
+            edit: false,
+            generate_edit_token: false,
         }
     }
 

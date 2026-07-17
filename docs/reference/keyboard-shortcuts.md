@@ -28,6 +28,7 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 | `-` or `F2` | Open file browser |
 | `=` | Open media browser |
 | `Ctrl+g` | Toggle info panel |
+| `e` | Open the editor for the current file (when [editing](../modes/editing/) is enabled) |
 | `Esc` | Close current panel |
 
 ## Quick Navigation (Fuzzy Nav)

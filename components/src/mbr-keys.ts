@@ -136,6 +136,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: '=', description: 'Open media browser' },
       { keys: '- or F2', description: 'Open file browser' },
       { keys: 'Ctrl+g', description: 'Toggle info panel' },
+      { keys: 'e', description: 'Open editor (when editing enabled)' },
       { keys: 'Esc', description: 'Close panel' },
     ],
   },

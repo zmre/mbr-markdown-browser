@@ -36,6 +36,7 @@ Oh and on mac, it includes a quicklook plugin that's head and shoulders above an
 | **Keyboard Friendly** | Vim-like shortcuts are available for everything in the UI |
 | **Rich Media** | Embed videos, audio, PDFs, and YouTube with simple markdown standard syntax |
 | **Fully Customizable** | Override themes, templates, and UX per-repo |
+| **Editor** | mbr is primarily a viewer, but sometimes you just want to do a quick edit. Off by default, the option is there. |
 
 ## Quick Start
 

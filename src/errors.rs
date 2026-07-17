@@ -128,6 +128,13 @@ pub enum ConfigError {
 
     #[error("Invalid build_concurrency: {value}. Must be greater than 0")]
     InvalidBuildConcurrency { value: usize },
+
+    #[error(
+        "Editing is enabled on a non-loopback host but no edit_token_hash is set. \
+         Run `mbr --generate-edit-token` and add the printed edit_token_hash to \
+         .mbr/config.toml, or bind to 127.0.0.1."
+    )]
+    EditingRequiresToken,
 }
 
 /// Errors related to markdown parsing and rendering.

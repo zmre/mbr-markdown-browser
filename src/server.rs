@@ -1,8 +1,8 @@
 use axum::{
     Router,
     body::Body,
-    extract::{self, OriginalUri, State, ws::WebSocketUpgrade},
-    http::{HeaderValue, StatusCode, header},
+    extract::{self, ConnectInfo, DefaultBodyLimit, OriginalUri, State, ws::WebSocketUpgrade},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -422,6 +422,12 @@ pub struct ServerConfig {
     pub mark_incomplete: bool,
     /// Marker strings used by the incomplete-block highlighter.
     pub incomplete_markers: Vec<String>,
+    /// Enable the in-browser markdown editing endpoints.
+    pub edit_enabled: bool,
+    /// Require the editing token even for loopback callers.
+    pub edit_require_token_on_loopback: bool,
+    /// Argon2 PHC hash of the shared editing token (server-side only).
+    pub edit_token_hash: Option<String>,
     #[cfg(feature = "media-metadata")]
     pub transcode_enabled: bool,
 }
@@ -470,6 +476,9 @@ impl From<&crate::config::Config> for ServerConfig {
             // Server/GUI default: on unless config overrides.
             mark_incomplete: config.mark_incomplete.unwrap_or(true),
             incomplete_markers: config.incomplete_markers.clone(),
+            edit_enabled: config.edit_enabled,
+            edit_require_token_on_loopback: config.edit_require_token_on_loopback,
+            edit_token_hash: config.edit_token_hash.clone(),
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
         }
@@ -542,6 +551,21 @@ pub struct ServerState {
     pub mark_incomplete: bool,
     /// Marker strings used by the incomplete-block highlighter.
     pub incomplete_markers: Vec<String>,
+    /// Whether the in-browser markdown editing endpoints are enabled.
+    pub edit_enabled: bool,
+    /// Require the editing token even for loopback callers.
+    pub edit_require_token_on_loopback: bool,
+    /// Argon2 PHC hash of the shared editing token (never sent to the frontend).
+    pub edit_token_hash: Option<String>,
+}
+
+/// JSON body for `POST /.mbr/edit/{*path}`.
+#[derive(serde::Deserialize)]
+pub struct EditRequest {
+    /// Full new file contents (frontmatter + body, recombined by the client).
+    pub content: String,
+    /// SHA-256 hex of the content the client loaded, for optimistic concurrency.
+    pub base_hash: String,
 }
 
 impl Server {
@@ -572,6 +596,9 @@ impl Server {
             title_suffix,
             mark_incomplete,
             incomplete_markers,
+            edit_enabled,
+            edit_require_token_on_loopback,
+            edit_token_hash,
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
         } = config;
@@ -903,6 +930,9 @@ impl Server {
             title_suffix,
             mark_incomplete,
             incomplete_markers,
+            edit_enabled,
+            edit_require_token_on_loopback,
+            edit_token_hash,
         };
 
         let router = Router::new()
@@ -910,6 +940,14 @@ impl Server {
             .route("/.mbr/site.json", get(Self::get_site_info))
             .route("/.mbr/media.json", get(Self::get_media_info))
             .route("/.mbr/search", post(Self::search_handler))
+            // Editing endpoints: raw source fetch and save (gated by edit_enabled + auth)
+            .route("/.mbr/raw/{*path}", get(Self::raw_markdown_handler))
+            .route(
+                "/.mbr/edit/{*path}",
+                post(Self::save_markdown_handler)
+                    // Cap edit payloads at 5 MB (axum default is 2 MB).
+                    .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+            )
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
             // Media viewer routes - must be before the catch-all /.mbr/{*path}
             .route("/.mbr/videos/", get(Self::serve_media_viewer))
@@ -961,9 +999,14 @@ impl Server {
             tracing::debug!("Ready signal receiver dropped (shutdown in progress)");
         }
 
-        axum::serve(listener, self.router.clone())
-            .await
-            .map_err(ServerError::StartFailed)?;
+        axum::serve(
+            listener,
+            self.router
+                .clone()
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .map_err(ServerError::StartFailed)?;
         Ok(())
     }
 
@@ -999,9 +1042,14 @@ impl Server {
                         tracing::debug!("Port signal receiver dropped (shutdown in progress)");
                     }
 
-                    axum::serve(listener, self.router.clone())
-                        .await
-                        .map_err(ServerError::StartFailed)?;
+                    axum::serve(
+                        listener,
+                        self.router
+                            .clone()
+                            .into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                    .map_err(ServerError::StartFailed)?;
                     return Ok(());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < max_retries => {
@@ -1355,6 +1403,233 @@ impl Server {
                 )
             }
         }
+    }
+
+    /// Enforces the access policy shared by the raw-fetch and save editing
+    /// endpoints. Returns `Ok(())` when the request may proceed, or `Err(resp)`
+    /// with the appropriate error response.
+    ///
+    /// Policy:
+    /// 1. Editing must be enabled (`403` otherwise).
+    /// 2. CSRF: the request must carry `X-MBR-Edit: 1` and be same-origin
+    ///    (`403` otherwise). This defeats cross-origin/DNS-rebinding writes even
+    ///    for loopback callers.
+    /// 3. Token: required for non-loopback callers (or always, when
+    ///    `edit_require_token_on_loopback`). Verified against `edit_token_hash`
+    ///    as a bearer token (`401` otherwise).
+    fn check_edit_access(
+        config: &ServerState,
+        headers: &HeaderMap,
+        peer_ip: std::net::IpAddr,
+    ) -> Result<(), (StatusCode, &'static str)> {
+        if !config.edit_enabled {
+            return Err((StatusCode::FORBIDDEN, "Editing is not enabled"));
+        }
+
+        // CSRF: custom header that browsers won't send cross-origin without a
+        // CORS preflight (which we never grant).
+        let csrf_ok = headers
+            .get("x-mbr-edit")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if !csrf_ok {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Missing or invalid X-MBR-Edit header",
+            ));
+        }
+
+        if !Self::is_same_origin(headers) {
+            return Err((StatusCode::FORBIDDEN, "Cross-origin edit request blocked"));
+        }
+
+        let caller_is_loopback = peer_ip.is_loopback();
+        let require_token = !caller_is_loopback || config.edit_require_token_on_loopback;
+        if require_token {
+            let provided = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(str::trim);
+            let ok = match (&config.edit_token_hash, provided) {
+                (Some(hash), Some(token)) => crate::edit_auth::verify_token(hash, token),
+                _ => false,
+            };
+            if !ok {
+                return Err((StatusCode::UNAUTHORIZED, "A valid edit token is required"));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Best-effort same-origin check for CSRF protection.
+    ///
+    /// Prefers the `Sec-Fetch-Site` metadata header (sent by all modern
+    /// browsers); falls back to comparing the `Origin` host to the `Host`
+    /// header. A request with no `Origin` at all (e.g. a non-browser client) is
+    /// allowed — CSRF requires an attacker-controlled document, which always
+    /// yields an `Origin`/`Sec-Fetch-Site`.
+    fn is_same_origin(headers: &HeaderMap) -> bool {
+        if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+            return sfs == "same-origin" || sfs == "none";
+        }
+        match (
+            headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+            headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        ) {
+            (Some(origin), Some(host)) => origin
+                .split_once("://")
+                .map(|(_, origin_host)| origin_host == host)
+                .unwrap_or(false),
+            // No Origin header: not a cross-origin browser request.
+            (None, _) => true,
+            _ => false,
+        }
+    }
+
+    /// Resolves a URL path to an existing, editable markdown file on disk.
+    ///
+    /// Only `ResolvedPath::MarkdownFile` targets are accepted (no file
+    /// creation), and the canonical path must stay within the repository root
+    /// (defense-in-depth against traversal/symlink escape).
+    fn resolve_editable_markdown(
+        config: &ServerState,
+        path: &str,
+    ) -> Result<PathBuf, (StatusCode, &'static str)> {
+        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+        let resolver_config = PathResolverConfig {
+            base_dir: config.base_dir.as_path(),
+            canonical_base_dir: config.canonical_base_dir.as_deref(),
+            static_folder: &config.static_folder,
+            markdown_extensions: &config.markdown_extensions,
+            index_file: &config.index_file,
+            tag_sources: &tag_url_sources,
+        };
+
+        match resolve_request_path(&resolver_config, path) {
+            ResolvedPath::MarkdownFile(md_path) => {
+                let canonical = md_path.canonicalize().ok();
+                let base = config
+                    .canonical_base_dir
+                    .clone()
+                    .or_else(|| config.base_dir.canonicalize().ok());
+                match (canonical, base) {
+                    (Some(c), Some(b)) if c.starts_with(&b) && c.is_file() => Ok(c),
+                    _ => Err((StatusCode::BAD_REQUEST, "Invalid path")),
+                }
+            }
+            _ => Err((StatusCode::NOT_FOUND, "Not an editable markdown file")),
+        }
+    }
+
+    /// GET /.mbr/raw/{*path} — returns the raw markdown source of an existing
+    /// file plus an `X-MBR-Content-Hash` header for optimistic concurrency.
+    pub async fn raw_markdown_handler(
+        extract::Path(path): extract::Path<String>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let md_path = match Self::resolve_editable_markdown(&config, &path) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
+
+        match tokio::fs::read(&md_path).await {
+            Ok(bytes) => {
+                let hash = crate::edit_auth::content_hash(&bytes);
+                let mut resp = (StatusCode::OK, bytes).into_response();
+                resp.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/markdown; charset=utf-8"),
+                );
+                if let Ok(hv) = HeaderValue::from_str(&hash) {
+                    resp.headers_mut().insert("x-mbr-content-hash", hv);
+                }
+                resp
+            }
+            Err(e) => {
+                tracing::error!("Failed to read markdown for editing: {e}");
+                (StatusCode::NOT_FOUND, "File not found").into_response()
+            }
+        }
+    }
+
+    /// POST /.mbr/edit/{*path} — overwrites an existing markdown file with the
+    /// provided content, guarded by an optimistic-concurrency hash check and an
+    /// atomic temp-file-then-rename write.
+    pub async fn save_markdown_handler(
+        extract::Path(path): extract::Path<String>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<EditRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let md_path = match Self::resolve_editable_markdown(&config, &path) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
+
+        // Optimistic concurrency: reject if the file changed since it was loaded.
+        let current = match tokio::fs::read(&md_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Failed to read markdown before save: {e}");
+                return (StatusCode::NOT_FOUND, "File not found").into_response();
+            }
+        };
+        if crate::edit_auth::content_hash(&current) != req.base_hash {
+            return (
+                StatusCode::CONFLICT,
+                "File changed on disk since it was loaded",
+            )
+                .into_response();
+        }
+
+        let new_bytes = req.content.into_bytes();
+        let new_hash = crate::edit_auth::content_hash(&new_bytes);
+
+        // Atomic write: write a temp file in the same directory, then rename.
+        let parent = md_path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = md_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.md");
+        let tmp_path = parent.join(format!(".{file_name}.mbr-tmp"));
+        if let Err(e) = tokio::fs::write(&tmp_path, &new_bytes).await {
+            tracing::error!("Failed to write temp file: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
+        }
+        if let Err(e) = tokio::fs::rename(&tmp_path, &md_path).await {
+            tracing::error!("Failed to rename temp file into place: {e}");
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
+        }
+
+        // Trigger live-reload for connected clients.
+        if let Some(tx) = &config.file_change_tx {
+            let relative =
+                pathdiff::diff_paths(&md_path, &config.base_dir).unwrap_or_else(|| md_path.clone());
+            let _ = tx.send(crate::watcher::FileChangeEvent {
+                path: md_path.to_string_lossy().to_string(),
+                relative_path: relative.to_string_lossy().to_string(),
+                event: crate::watcher::ChangeEventType::Modified,
+            });
+        }
+
+        let mut resp = (StatusCode::OK, "Saved").into_response();
+        if let Ok(hv) = HeaderValue::from_str(&new_hash) {
+            resp.headers_mut().insert("x-mbr-content-hash", hv);
+        }
+        resp
     }
 
     /// Media viewer endpoint for video, PDF, audio, and image content.
@@ -3170,6 +3445,11 @@ impl Server {
             "gui_mode".into(),
             if config.gui_mode { "true" } else { "" }.into(),
         );
+        // Indicate whether in-browser editing is enabled (drives the edit button)
+        frontmatter.insert(
+            "edit_enabled".into(),
+            if config.edit_enabled { "true" } else { "" }.into(),
+        );
 
         // Compute breadcrumbs based on the URL path, not the file path
         // For a file like docs/guide.md, the URL is /docs/guide/ so breadcrumbs should include docs
@@ -3879,6 +4159,12 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/components/mbr-components.min.js",
         include_bytes!("../templates/components-js/mbr-components.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Heavy Milkdown/Crepe editor chunk, lazy-loaded by <mbr-editor>.
+        "/components/mbr-editor.min.js",
+        include_bytes!("../templates/components-js/mbr-editor.min.js"),
         "application/javascript",
     ),
     (
