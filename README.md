@@ -50,6 +50,8 @@ nix run github:zmre/mbr-markdown-browser -- /path/to/notes
 cargo install --git https://github.com/zmre/mbr-markdown-browser
 ```
 
+Or download a pre-built binary from [the releases page](https://github.com/zmre/mbr-markdown-browser/releases).
+
 _File an issue if you want it packaged in a particular way._
 
 ### Run
