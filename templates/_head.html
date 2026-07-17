@@ -16,6 +16,7 @@
       window.__MBR_CONFIG__ = {
         serverMode: {% if server_mode %}true{% else %}false{% endif %},
         guiMode: {% if gui_mode %}true{% else %}false{% endif %},
+        editEnabled: {% if edit_enabled %}true{% else %}false{% endif %},
         searchEndpoint: "{{ asset_base | safe }}search",
         basePath: "{{ relative_root | default(value='') | safe }}",
         tagSources: {{ tag_sources | default(value="[]") | safe }}

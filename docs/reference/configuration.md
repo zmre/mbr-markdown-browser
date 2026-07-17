@@ -186,6 +186,45 @@ CLI usage:
 mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 ```
 
+### Editing Settings
+
+In-browser editing (server/GUI mode only) is **off by default**. When enabled, a
+pencil button appears next to the info button and opens a Milkdown/Crepe editor
+for the current markdown file. See the [editing guide](../guide/editing.md).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `edit_enabled` | bool | `false` | Enable the `/.mbr/raw` and `/.mbr/edit` endpoints and the edit button. Also enabled by `--edit`. |
+| `edit_token_hash` | string / unset | (unset) | Argon2 PHC hash of the shared editing token. **Required** when editing is enabled on a non-loopback host. Generate with `mbr --generate-edit-token`. Never sent to the frontend. |
+| `edit_require_token_on_loopback` | bool | `false` | Require the token even for loopback callers. When `false`, local (127.0.0.1) edits need no token but are still CSRF-protected. |
+
+Environment variables use the `MBR_` prefix (e.g. `MBR_EDIT_ENABLED=true`).
+
+**Security model:**
+
+- **Enabled + editing gated:** every request must carry an `X-MBR-Edit: 1`
+  header and be same-origin, defeating cross-site / DNS-rebinding writes even on
+  localhost.
+- **Loopback callers** (127.0.0.1) may edit without a token unless
+  `edit_require_token_on_loopback = true`.
+- **Non-loopback callers** must present the token as
+  `Authorization: Bearer <token>`; startup validation refuses to enable editing
+  on a non-loopback host without an `edit_token_hash`.
+- **Concurrency:** saves include the hash of the loaded content and are rejected
+  with `409 Conflict` if the file changed on disk since it was loaded.
+- **Transport:** mbr serves plain HTTP. For remote editing, put mbr behind a
+  TLS-terminating reverse proxy — the token travels with every request.
+
+Example:
+```toml
+# .mbr/config.toml
+edit_enabled = true
+# Only needed for remote editing (non-loopback); generate with `mbr --generate-edit-token`
+edit_token_hash = "$argon2id$v=19$m=19456,t=2,p=1$...."
+# Optional: require the token even from localhost
+# edit_require_token_on_loopback = true
+```
+
 ### Tag Settings
 
 | Option | Type | Default | Description |

@@ -58,6 +58,7 @@ jobs:
           echo "=== Copied components ==="
           ls -la templates/components-js/
           test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7

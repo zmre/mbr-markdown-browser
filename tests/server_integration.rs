@@ -40,6 +40,9 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         title_suffix: String::new(),
         mark_incomplete: true,
         incomplete_markers: mbr::config::default_incomplete_markers(),
+        edit_enabled: false,
+        edit_require_token_on_loopback: false,
+        edit_token_hash: None,
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
     }
@@ -1667,7 +1670,7 @@ async fn test_components_js_bundle_served() {
 #[tokio::test]
 async fn test_components_js_bundle_no_missing_imports() {
     // This test verifies that the JS bundle doesn't try to dynamically import
-    // files that aren't served, which would cause 404 errors in the browser
+    // files that aren't served, which would cause 404 errors in the browser.
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
@@ -1675,22 +1678,36 @@ async fn test_components_js_bundle_no_missing_imports() {
         .get_text("/.mbr/components/mbr-components.min.js")
         .await;
 
-    // Check that there are no dynamic imports to external chunk files
-    // These would look like: import("./main-xxx.js") or import("/.mbr/components/main-xxx.js")
-    let has_dynamic_import_to_chunk =
-        js_content.contains(r#"import("./"#) || js_content.contains(r#"import("/.mbr/components/"#);
+    // Relative dynamic imports (e.g. import("./main-abc123.js")) indicate
+    // unintended vite code splitting into hashed chunks that are never served.
+    assert!(
+        !js_content.contains(r#"import("./"#) && !js_content.contains(r#"import('./"#),
+        "Components bundle contains relative dynamic imports (unintended code \
+         splitting). Check vite.config.ts inlineDynamicImports."
+    );
 
-    // If there are dynamic imports, they should either:
-    // 1. Not exist (everything bundled inline)
-    // 2. Or be to files that are served
-    if has_dynamic_import_to_chunk {
-        // Extract the imported paths and verify they're served
-        // For now, just fail with a helpful message
-        assert!(
-            !has_dynamic_import_to_chunk,
-            "Components bundle contains dynamic imports to external chunks. \
-             These chunks must either be bundled inline or explicitly served. \
-             Check vite.config.ts to disable code splitting."
+    // The `<mbr-editor>` trigger intentionally lazy-loads the heavy Crepe editor
+    // chunk via a runtime dynamic import. That chunk is explicitly served (see
+    // DEFAULT_FILES in server.rs), so it is allowed — but any OTHER absolute
+    // `/.mbr/components/` chunk import would be an unserved code-split artifact.
+    const EDITOR_CHUNK: &str = "/.mbr/components/mbr-editor.min.js";
+    let stripped = js_content
+        .replace(&format!(r#"import("{EDITOR_CHUNK}")"#), "")
+        .replace(&format!(r#"import('{EDITOR_CHUNK}')"#), "");
+    assert!(
+        !stripped.contains(r#"import("/.mbr/components/"#)
+            && !stripped.contains(r#"import('/.mbr/components/"#),
+        "Components bundle imports an unexpected /.mbr/components/ chunk that may \
+         not be served."
+    );
+
+    // If the editor chunk is referenced, confirm it is actually served.
+    if js_content.contains(EDITOR_CHUNK) {
+        let resp = server.get(EDITOR_CHUNK).await;
+        assert_eq!(
+            resp.status(),
+            200,
+            "The lazy-loaded editor chunk must be served at {EDITOR_CHUNK}"
         );
     }
 }
@@ -3542,4 +3559,231 @@ async fn test_hls_traversal_blocked() {
             "HLS path traversal must be blocked with 404 for {path}"
         );
     }
+}
+
+// ==================== Editing endpoint tests ====================
+
+/// Enables editing on a loopback test server.
+fn enable_editing(config: &mut mbr::server::ServerConfig) {
+    config.edit_enabled = true;
+}
+
+#[tokio::test]
+async fn test_edit_disabled_returns_403() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let raw = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 403, "raw fetch must be 403 when editing off");
+
+    let edit = server
+        .client
+        .post(server.url("/.mbr/edit/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"x","base_hash":"y"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(edit.status(), 403, "save must be 403 when editing off");
+}
+
+#[tokio::test]
+async fn test_edit_missing_csrf_header_returns_403() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // No X-MBR-Edit header → rejected even though editing is enabled + loopback.
+    let raw = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 403, "missing X-MBR-Edit must be 403");
+}
+
+#[tokio::test]
+async fn test_edit_cross_origin_blocked() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let raw = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Origin", "http://evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 403, "cross-origin edit must be 403");
+}
+
+#[tokio::test]
+async fn test_edit_roundtrip_loopback_no_token() {
+    let repo = TestRepo::new();
+    let original = "# Note\n\noriginal body";
+    let file = repo.create_markdown("note.md", original);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Fetch raw + hash.
+    let raw = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 200);
+    let base_hash = raw
+        .headers()
+        .get("x-mbr-content-hash")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(base_hash, mbr::edit_auth::content_hash(original.as_bytes()));
+    let fetched = raw.text().await.unwrap();
+    assert_eq!(fetched, original);
+
+    // Save new content.
+    let new_content = "---\ntitle: Edited\n---\n# Note\n\nedited body";
+    let body = serde_json::json!({ "content": new_content, "base_hash": base_hash }).to_string();
+    let save = server
+        .client
+        .post(server.url("/.mbr/edit/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        save.status(),
+        200,
+        "loopback save without token should succeed"
+    );
+    let new_hash = save
+        .headers()
+        .get("x-mbr-content-hash")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        new_hash,
+        mbr::edit_auth::content_hash(new_content.as_bytes())
+    );
+
+    // Verify on disk.
+    let on_disk = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(on_disk, new_content);
+}
+
+#[tokio::test]
+async fn test_edit_stale_hash_returns_409() {
+    let repo = TestRepo::new();
+    let original = "# Note\n\nbody";
+    repo.create_markdown("note.md", original);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let body = serde_json::json!({
+        "content": "new content",
+        "base_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    })
+    .to_string();
+    let save = server
+        .client
+        .post(server.url("/.mbr/edit/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), 409, "stale base_hash must be 409");
+}
+
+#[tokio::test]
+async fn test_edit_nonexistent_and_non_markdown_rejected() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_static_file("data.txt", b"not markdown");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for path in ["/.mbr/raw/missing.md", "/.mbr/raw/data.txt"] {
+        let resp = server
+            .client
+            .get(server.url(path))
+            .header("X-MBR-Edit", "1")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == 404 || resp.status() == 400,
+            "editing {path} must be rejected, got {}",
+            resp.status()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_edit_token_required_and_accepted() {
+    let repo = TestRepo::new();
+    let original = "# Note\n\nbody";
+    repo.create_markdown("note.md", original);
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_require_token_on_loopback = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    // Without a token → 401 even on loopback.
+    let no_token = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_token.status(), 401, "missing token must be 401");
+
+    // With a wrong token → 401.
+    let wrong = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Authorization", "Bearer nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401, "wrong token must be 401");
+
+    // With the right token → 200.
+    let ok = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Authorization", "Bearer s3cret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200, "valid token must be accepted");
 }

@@ -16,6 +16,7 @@ declare global {
     __MBR_CONFIG__?: {
       serverMode: boolean;
       guiMode: boolean;
+      editEnabled?: boolean;
       searchEndpoint?: string;
       basePath?: string;
       tagSources?: TagSourceConfig[];
@@ -29,6 +30,14 @@ declare global {
  */
 export function isGuiMode(): boolean {
   return window.__MBR_CONFIG__?.guiMode ?? false;
+}
+
+/**
+ * Check if in-browser editing is enabled for this page.
+ * Driven by the server config (`edit_enabled`); never reflects the token hash.
+ */
+export function isEditEnabled(): boolean {
+  return window.__MBR_CONFIG__?.editEnabled ?? false;
 }
 
 /**

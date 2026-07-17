@@ -51,8 +51,9 @@ jobs:
           cp -v result/* templates/components-js/
           echo "=== Copied components ==="
           ls -la templates/components-js/
-          # Fail fast if the required file doesn't exist
+          # Fail fast if the required files don't exist
           test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7
@@ -88,6 +89,10 @@ jobs:
           ls -la templates/components-js/
           if [ ! -f templates/components-js/mbr-components.min.js ]; then
             echo "ERROR: mbr-components.min.js not found!"
+            exit 1
+          fi
+          if [ ! -f templates/components-js/mbr-editor.min.js ]; then
+            echo "ERROR: mbr-editor.min.js not found!"
             exit 1
           fi
 

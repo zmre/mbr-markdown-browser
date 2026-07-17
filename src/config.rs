@@ -302,6 +302,21 @@ pub struct Config {
     /// `--mark-incomplete` / `--no-mark-incomplete` force a value.
     #[serde(default)]
     pub mark_incomplete: Option<bool>,
+    /// Enable the in-browser markdown editing endpoints (`/.mbr/raw`,
+    /// `/.mbr/edit`) in server/GUI mode. Off by default. Intended for private
+    /// use (e.g. GUI on localhost). CLI flag `--edit` also enables it.
+    #[serde(default)]
+    pub edit_enabled: bool,
+    /// Argon2 PHC hash of the shared editing token. Required when editing is
+    /// enabled on a non-loopback host; requests must present the matching token
+    /// as `Authorization: Bearer <token>`. Generate with
+    /// `mbr --generate-edit-token`. Never sent to the frontend.
+    #[serde(default)]
+    pub edit_token_hash: Option<String>,
+    /// Require the editing token even for loopback callers. Off by default:
+    /// loopback edits are allowed without a token (still CSRF-protected).
+    #[serde(default)]
+    pub edit_require_token_on_loopback: bool,
 }
 
 impl std::fmt::Display for IpArray {
@@ -388,6 +403,9 @@ impl Default for Config {
             title_suffix: String::new(),
             incomplete_markers: default_incomplete_markers(),
             mark_incomplete: None,
+            edit_enabled: false,
+            edit_token_hash: None,
+            edit_require_token_on_loopback: false,
         }
     }
 }
@@ -486,6 +504,15 @@ impl Config {
         // build_concurrency of 0 would mean no parallelism (None means auto-detect)
         if matches!(self.build_concurrency, Some(0)) {
             return Err(ConfigError::InvalidBuildConcurrency { value: 0 });
+        }
+
+        // Refuse to expose an unauthenticated writable endpoint to the network:
+        // editing on a non-loopback host requires a token hash.
+        if self.edit_enabled
+            && !std::net::Ipv4Addr::from(self.host.0).is_loopback()
+            && self.edit_token_hash.is_none()
+        {
+            return Err(ConfigError::EditingRequiresToken);
         }
 
         Ok(())
@@ -754,6 +781,42 @@ mod tests {
     fn test_default_title_suffix_empty() {
         let config = Config::default();
         assert_eq!(config.title_suffix, "");
+    }
+
+    #[test]
+    fn test_validate_editing_non_loopback_without_token_fails() {
+        let config = Config {
+            edit_enabled: true,
+            host: IpArray([0, 0, 0, 0]),
+            edit_token_hash: None,
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EditingRequiresToken)
+        ));
+    }
+
+    #[test]
+    fn test_validate_editing_non_loopback_with_token_passes() {
+        let config = Config {
+            edit_enabled: true,
+            host: IpArray([0, 0, 0, 0]),
+            edit_token_hash: Some("$argon2id$fake".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_editing_loopback_without_token_passes() {
+        let config = Config {
+            edit_enabled: true,
+            host: IpArray([127, 0, 0, 1]),
+            edit_token_hash: None,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

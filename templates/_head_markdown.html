@@ -1,6 +1,9 @@
 {% set asset_base = relative_base | default(value="/.mbr/") %}
 {% include "_head.html" %}
     {# HLJS and KaTeX CSS are now loaded dynamically by mbr-hljs and mbr-katex components #}
+    {# When editing is enabled, idle-prefetch the (large) editor chunk so clicking
+       the pencil opens instantly. Low priority; only on edit-enabled markdown pages. #}
+    {% if edit_enabled %}<link rel="prefetch" href="{{ asset_base }}components/mbr-editor.min.js" as="script" crossorigin />{% endif %}
     {% if tags %}
         {% if tags is string %}
     <meta name="keywords" content="{{tags}}" data-pagefind-filter="tag[content]" />

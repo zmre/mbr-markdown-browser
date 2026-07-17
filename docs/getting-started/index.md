@@ -3,7 +3,6 @@ title: Getting Started - Installation
 description: Install mbr on your system
 order: 1
 ---
-
 # Installation
 
 mbr can be installed via Nix (recommended), Cargo, or from binary releases.  More can be added so file an [issue](https://github.com/zmre/mbr-markdown-browser/issues) if you have a request.
@@ -19,11 +18,11 @@ Nix provides reproducible builds and includes all dependencies.
 nix run github:zmre/mbr -- -g /path/to/notes
 ```
 
-### Build and Install
+### Build from Source
 
 ```bash
-# Build the binary
-nix build github:zmre/mbr
+# Build the binary from inside the source dir
+nix build 
 
 # Run from build output
 ./result/bin/mbr -s /path/to/notes
@@ -54,8 +53,9 @@ cargo install --git https://github.com/zmre/mbr
 
 ### Prerequisites
 
-- Rust 1.75 or later
-- A C compiler (for some dependencies)
+* Rust 1.75 or later
+
+* A C compiler (for some dependencies)
 
 ## Binary Releases
 
@@ -65,9 +65,11 @@ Pre-built binaries are available on the [GitHub Releases](https://github.com/zmr
 
 The macOS release includes `MBR.app`, a native application bundle with:
 
-- Application icon
-- Native menu bar integration
-- QuickLook extension for Finder previews
+* Application icon
+
+* Native menu bar integration
+
+* QuickLook extension for Finder previews
 
 To install, move `MBR.app` to your Applications folder.
 
@@ -86,5 +88,7 @@ mbr -s README.md
 
 ## Next Steps
 
-- [Quick Start Guide](quickstart/) - Get productive in 5 minutes
-- [Modes of Operation](../modes/) - Learn about GUI, Server, and Build modes
+* [Quick Start Guide](quickstart/) - Get productive in 5 minutes
+
+* [Modes of Operation](../modes/) - Learn about GUI, Server, and Build modes
+

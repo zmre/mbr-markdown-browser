@@ -61,6 +61,8 @@ Supported media types are detected by file extension:
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
 | `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
+| `--edit` | Enable the in-browser markdown editing endpoints (server/GUI mode). Loopback callers may edit without a token (still CSRF-protected); non-loopback callers require a token. See [editing](../guide/editing.md). | `false` |
+| `--generate-edit-token` | Prompt for a password (blank to auto-generate a random token), print the token and the `edit_token_hash` config line, then exit. Writes nothing to disk. | |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
 | `--help` | Print help message | |
@@ -124,6 +126,12 @@ mbr -s --oembed-timeout-ms 2000 ~/notes
 
 # Disable oembed fetching (uses plain links)
 mbr -s --oembed-timeout-ms 0 ~/notes
+
+# Enable in-browser editing (loopback: no token needed)
+mbr -s --edit ~/notes
+
+# Generate a hashed editing token for remote use
+mbr --generate-edit-token
 ```
 
 ---

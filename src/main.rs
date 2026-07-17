@@ -63,6 +63,40 @@ async fn main() -> Result<(), MbrError> {
         .with(tracing_subscriber::fmt::layer())
         .try_init();
 
+    // Generate-edit-token mode: prompt for a password (or auto-generate a
+    // random token), print the token and the config line, then exit. This does
+    // not need a valid path or config, so handle it before any path resolution.
+    if args.generate_edit_token {
+        let entered = rpassword::prompt_password(
+            "Enter edit password (leave blank to auto-generate a random token): ",
+        )
+        .unwrap_or_default();
+        let token = if entered.trim().is_empty() {
+            mbr::edit_auth::generate_token()
+        } else {
+            entered
+        };
+        let hash = match mbr::edit_auth::hash_token(&token) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("Failed to hash token: {e}");
+                std::process::exit(1);
+            }
+        };
+        println!(
+            "\nEditing token (give this to the client; sent as `Authorization: Bearer <token>`):\n"
+        );
+        println!("    {token}\n");
+        println!("Add these lines to your repository's .mbr/config.toml:\n");
+        println!("    edit_enabled = true");
+        println!("    edit_token_hash = \"{hash}\"\n");
+        println!(
+            "For remote editing, put mbr behind a TLS-terminating reverse proxy — the token\n\
+             is sent with every request and mbr itself serves plain HTTP.\n"
+        );
+        std::process::exit(0);
+    }
+
     // Determine if we're in GUI mode (no --server, --stdout, --build, --extract-video-metadata, --extract-pdf-cover flags)
     #[cfg(all(feature = "gui", feature = "media-metadata"))]
     let is_gui_mode = !args.server
@@ -175,6 +209,12 @@ async fn main() -> Result<(), MbrError> {
     }
     if let Some(ref suffix) = args.title_suffix {
         config.title_suffix = suffix.clone();
+    }
+    // Enable in-browser editing from CLI
+    if args.edit {
+        config.edit_enabled = true;
+        // Re-validate now that editing is enabled (e.g. non-loopback needs a token).
+        config.validate()?;
     }
 
     let path_relative_to_root =

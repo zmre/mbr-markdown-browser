@@ -49,7 +49,10 @@ export class MbrKatexElement extends LitElement {
       loadScript(`${assetBase}katex.min.js`),
     ])
 
-    const katex = (window as WindowWithKatex).katex
+    // Cast via `unknown`: adding @milkdown/crepe brings katex's own global
+    // type declaration into scope, which no longer overlaps with this local
+    // `WindowWithKatex` shape, so a direct cast is rejected.
+    const katex = (window as unknown as WindowWithKatex).katex
     if (!katex) {
       console.warn('KaTeX failed to load')
       return
