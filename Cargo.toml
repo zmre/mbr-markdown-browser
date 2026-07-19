@@ -86,7 +86,7 @@ thiserror = "2.0"
 parking_lot = "0.12"
 # Editing feature: password/token hashing for the edit endpoint
 argon2 = { version = "0.5", features = ["std"] }
-sha2 = "0.10"
+sha2 = "0.11"
 rpassword = "7"
 uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 yaml-rust2 = "0.11"
