@@ -310,6 +310,14 @@
           ]));
       };
 
+      # Feature set for the CLI binary and checks.
+      # `ffi` (UniFFI/Swift bindings) is only needed for the macOS QuickLook
+      # extension, so it's enabled on Darwin only — Linux/Windows builds skip
+      # compiling the Swift bindings generator entirely.
+      cliFeatures =
+        "gui,media-metadata,ffmpeg-static"
+        + pkgs.lib.optionalString pkgs.stdenv.isDarwin ",ffi";
+
       # Common arguments shared between builds
       commonArgs =
         commonEnvVars
@@ -327,7 +335,7 @@
         // {
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
-          cargoExtraArgs = "--locked --features gui,media-metadata,ffmpeg-static,ffi";
+          cargoExtraArgs = "--locked --features ${cliFeatures}";
           preBuild = ''
             # Create empty component files for dependency resolution
             # Must match the actual file names produced by vite build (see vite.config.ts)
@@ -444,7 +452,7 @@
         // {
           inherit cargoArtifacts;
           pname = "mbr-cli";
-          cargoExtraArgs = "--locked --features gui,media-metadata,ffmpeg-static,ffi";
+          cargoExtraArgs = "--locked --features ${cliFeatures}";
           doCheck = false; # Tests run separately via packages.tests
 
           preBuild = ''
@@ -553,7 +561,7 @@
           tests = craneLib.cargoTest (commonArgs
         // {
           inherit cargoArtifacts;
-          cargoTestExtraArgs = "--features gui,media-metadata,ffmpeg-static,ffi";
+          cargoTestExtraArgs = "--features ${cliFeatures}";
 
           preBuild = ''
             mkdir -p templates/components-js

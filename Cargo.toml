@@ -88,7 +88,6 @@ parking_lot = "0.12"
 argon2 = { version = "0.5", features = ["std"] }
 sha2 = "0.10"
 rpassword = "7"
-uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 yaml-rust2 = "0.11"
 # GUI dependencies (optional, enabled by default "gui" feature)
 wry = { version = "0.55", default-features = true, features = ["devtools", "fullscreen"], optional = true }
@@ -110,15 +109,24 @@ rfd = { version = "0.17", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 muda = { version = "0.19", features = ["gtk", "libxdo"], optional = true }
 
+# UniFFI is only used for the macOS QuickLook Swift extension (ffi feature).
+# Target-gate it to macOS so Linux/Windows builds never compile the Swift
+# bindings generator, even transitively as a build-dependency.
+[target.'cfg(target_os = "macos")'.dependencies]
+uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
+
+# Non-optional (like a plain build-dependency) but macOS-only: build.rs needs
+# it whenever the ffi feature is on, and a feature can't reliably activate a
+# build-dependency via `dep:`. Absent entirely on Linux/Windows.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+uniffi = { version = "0.31", features = ["build"] }
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
 filetime = "0.2"
 flate2 = "1.0"
 proptest = "1.11"
 tempfile = "3.27"
-
-[build-dependencies]
-uniffi = { version = "0.31", features = ["build"] }
 
 [[bin]]
 name = "mbr"
