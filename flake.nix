@@ -310,6 +310,14 @@
           ]));
       };
 
+      # Feature set for the CLI binary and checks.
+      # `ffi` (UniFFI/Swift bindings) is only needed for the macOS QuickLook
+      # extension, so it's enabled on Darwin only — Linux/Windows builds skip
+      # compiling the Swift bindings generator entirely.
+      cliFeatures =
+        "gui,media-metadata,ffmpeg-static"
+        + pkgs.lib.optionalString pkgs.stdenv.isDarwin ",ffi";
+
       # Common arguments shared between builds
       commonArgs =
         commonEnvVars
@@ -327,8 +335,17 @@
         // {
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
-          cargoExtraArgs = "--locked --features gui,media-metadata,ffmpeg-static,ffi";
+          cargoExtraArgs = "--locked --features ${cliFeatures}";
           preBuild = ''
+            # crane's mkDummySrc strips `required-features` from every [[bin]]
+            # (see crane's cleanCargoToml.nix). That un-gates the `uniffi-bindgen`
+            # binary, so a deps-only `cargo build`/`check` builds it unconditionally
+            # and pulls in the macOS-only `uniffi` build-dependency even on Linux.
+            # Re-add the gate so the bin (and uniffi) is only built when `ffi` is on
+            # — enabled on Darwin, off elsewhere via cliFeatures.
+            grep -q 'required-features = \["ffi"\]' Cargo.toml \
+              || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
+
             # Create empty component files for dependency resolution
             # Must match the actual file names produced by vite build (see vite.config.ts)
             mkdir -p templates/components-js
@@ -348,7 +365,7 @@
         inherit version;
         src = ./components;
         #npmDepsHash = pkgs.lib.fakeHash;
-        npmDepsHash = "sha256-GwbLTDRbfoimz6/BiYCpywXBWpUwEkJkZuOlOt6xehI=";
+        npmDepsHash = "sha256-cD0WSF6yIGQKeE1l2VEmsGCKjOOpgiEn2KdhXt2HRIM=";
         buildPhase = ''
           npm run build
         '';
@@ -444,7 +461,7 @@
         // {
           inherit cargoArtifacts;
           pname = "mbr-cli";
-          cargoExtraArgs = "--locked --features gui,media-metadata,ffmpeg-static,ffi";
+          cargoExtraArgs = "--locked --features ${cliFeatures}";
           doCheck = false; # Tests run separately via packages.tests
 
           preBuild = ''
@@ -553,7 +570,7 @@
           tests = craneLib.cargoTest (commonArgs
         // {
           inherit cargoArtifacts;
-          cargoTestExtraArgs = "--features gui,media-metadata,ffmpeg-static,ffi";
+          cargoTestExtraArgs = "--features ${cliFeatures}";
 
           preBuild = ''
             mkdir -p templates/components-js
