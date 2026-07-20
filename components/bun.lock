@@ -5,15 +5,15 @@
     "": {
       "name": "mbr-components",
       "dependencies": {
-        "@milkdown/crepe": "^7.5.0",
+        "@milkdown/crepe": "^7.21.3",
         "lit": "^3.3.3",
       },
       "devDependencies": {
         "@vitest/browser": "^4.1.10",
-        "happy-dom": "^20.10.6",
+        "happy-dom": "^20.11.0",
         "terser": "^5.49.0",
         "typescript": "~7.0.2",
-        "vite": "^8.1.4",
+        "vite": "^8.1.5",
         "vitest": "^4.1.10",
       },
     },

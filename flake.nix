@@ -337,6 +337,15 @@
           src = craneLib.cleanCargoSource ./.;
           cargoExtraArgs = "--locked --features ${cliFeatures}";
           preBuild = ''
+            # crane's mkDummySrc strips `required-features` from every [[bin]]
+            # (see crane's cleanCargoToml.nix). That un-gates the `uniffi-bindgen`
+            # binary, so a deps-only `cargo build`/`check` builds it unconditionally
+            # and pulls in the macOS-only `uniffi` build-dependency even on Linux.
+            # Re-add the gate so the bin (and uniffi) is only built when `ffi` is on
+            # — enabled on Darwin, off elsewhere via cliFeatures.
+            grep -q 'required-features = \["ffi"\]' Cargo.toml \
+              || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
+
             # Create empty component files for dependency resolution
             # Must match the actual file names produced by vite build (see vite.config.ts)
             mkdir -p templates/components-js
