@@ -105,6 +105,12 @@ pub struct Args {
     #[arg(long)]
     pub no_link_tracking: bool,
 
+    /// Disable typed relationship tracking (named frontmatter relationships).
+    /// When disabled, relationships are omitted from links.json and site.json
+    /// and not rendered in the info panel.
+    #[arg(long)]
+    pub no_relationship_tracking: bool,
+
     /// Highlight blocks that start with an incomplete-marker (TK/TODO/FIXME/XXX).
     /// Default: on for server/GUI mode, off for static builds.
     #[arg(long, conflicts_with = "no_mark_incomplete")]
@@ -197,6 +203,7 @@ mod tests {
             build_concurrency: None,
             skip_link_checks: false,
             no_link_tracking: false,
+            no_relationship_tracking: false,
             mark_incomplete: false,
             no_mark_incomplete: false,
             title_prefix: None,
@@ -385,6 +392,12 @@ mod tests {
     fn test_parse_no_link_tracking() {
         let args = Args::parse_from(["mbr", "--no-link-tracking"]);
         assert!(args.no_link_tracking);
+    }
+
+    #[test]
+    fn test_parse_no_relationship_tracking() {
+        let args = Args::parse_from(["mbr", "--no-relationship-tracking"]);
+        assert!(args.no_relationship_tracking);
     }
 
     #[test]

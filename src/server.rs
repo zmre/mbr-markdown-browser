@@ -11,7 +11,7 @@ use percent_encoding::percent_decode_str;
 use std::{net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
 
-use crate::config::{SortField, TagSource};
+use crate::config::{RelationType, SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::{MbrError, ServerError};
@@ -413,6 +413,10 @@ pub struct ServerConfig {
     pub theme: String,
     pub log_filter: Option<String>,
     pub link_tracking: bool,
+    /// Enable typed relationship tracking.
+    pub relationship_tracking: bool,
+    /// Configured relation types (for the relationship index + site.json).
+    pub relationship_types: Vec<RelationType>,
     pub tag_sources: Vec<TagSource>,
     pub sidebar_style: String,
     pub sidebar_max_items: usize,
@@ -468,6 +472,8 @@ impl From<&crate::config::Config> for ServerConfig {
             theme: config.theme.clone(),
             log_filter: None, // Set via with_log_filter()
             link_tracking: config.link_tracking,
+            relationship_tracking: config.relationship_tracking,
+            relationship_types: config.relationship_types.clone(),
             tag_sources: config.tag_sources.clone(),
             sidebar_style: config.sidebar_style.clone(),
             sidebar_max_items: config.sidebar_max_items,
@@ -533,6 +539,10 @@ pub struct ServerState {
     pub sibling_nav_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>>,
     /// Whether bidirectional link tracking is enabled
     pub link_tracking: bool,
+    /// Whether typed relationship tracking is enabled
+    pub relationship_tracking: bool,
+    /// Configured relation types (for directory-scan temp repos + site.json)
+    pub relationship_types: Vec<RelationType>,
     /// Cache for outbound links extracted during page renders
     pub link_cache: Arc<LinkCache>,
     /// Cache for inbound links discovered via grep
@@ -589,6 +599,8 @@ impl Server {
             theme,
             log_filter,
             link_tracking,
+            relationship_tracking,
+            relationship_types,
             tag_sources,
             sidebar_style,
             sidebar_max_items,
@@ -648,6 +660,7 @@ impl Server {
             &ignore_globs,
             &index_file,
             &tag_sources,
+            &relationship_types,
         ));
 
         // Spawn background repo scan so site.json is ready before first request.
@@ -657,6 +670,8 @@ impl Server {
             if let Err(e) = repo_for_scan.scan_all() {
                 tracing::error!("Background scan failed: {e}");
             }
+            // Build the relationship index once all note titles are known.
+            repo_for_scan.build_relationship_index();
             repo_for_scan.mark_scan_complete();
 
             // Phase 1.5: scan static folder (deferred from scan_all for faster search)
@@ -850,6 +865,9 @@ impl Server {
                         if has_tag_changes {
                             repo.rebuild_tag_index();
                         }
+                        // Relationships may have changed on any create/modify/delete;
+                        // rebuild the index so endpoint resolution stays consistent.
+                        repo.build_relationship_index();
                     })
                     .await
                     .ok();
@@ -865,6 +883,7 @@ impl Server {
                             tracing::error!("Background rescan failed: {e}");
                             return;
                         }
+                        repo.build_relationship_index();
                         if let Err(e) = repo.scan_static_folder() {
                             tracing::error!("Background static rescan failed: {e}");
                         }
@@ -921,6 +940,8 @@ impl Server {
             video_resolution_cache,
             sibling_nav_cache,
             link_tracking,
+            relationship_tracking,
+            relationship_types,
             link_cache,
             inbound_link_cache,
             tag_sources,
@@ -1212,6 +1233,14 @@ impl Server {
                 "sidebar_max_items".to_string(),
                 serde_json::json!(config.sidebar_max_items),
             );
+        }
+
+        // Add relationship_types + per-note resolved relationships (if enabled).
+        if config.relationship_tracking {
+            config
+                .repo
+                .relationship_index
+                .inject_into_site_json(&mut response);
         }
 
         let resp = Response::builder()
@@ -2779,7 +2808,20 @@ impl Server {
             links
         };
 
-        let page_links = PageLinks { inbound, outbound };
+        // Typed relationships (declared + derived) for this page, if enabled.
+        // The index normalises keys (leading slash) on both insert and lookup,
+        // so `page_url_path` can be passed through without compensation.
+        let relationships = if config.relationship_tracking {
+            config.repo.relationship_index.get(&page_url_path)
+        } else {
+            Vec::new()
+        };
+
+        let page_links = PageLinks {
+            inbound,
+            outbound,
+            relationships,
+        };
 
         let json = match serde_json::to_string(&page_links) {
             Ok(j) => j,
@@ -3604,6 +3646,7 @@ impl Server {
             let ignore_globs = config.ignore_globs.clone();
             let index_file = config.index_file.clone();
             let tag_sources = config.tag_sources.clone();
+            let relationship_types = config.relationship_types.clone();
             let sort = config.sort.clone();
 
             let scan_result = tokio::task::spawn_blocking(move || {
@@ -3616,6 +3659,7 @@ impl Server {
                     &ignore_globs,
                     &index_file,
                     &tag_sources,
+                    &relationship_types,
                 );
 
                 // Scan this directory only (non-recursive)
@@ -4064,6 +4108,12 @@ pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
         .and_then(|fm| fm.get("tags"))
         .cloned();
 
+    let note_type = file_info
+        .frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get("type"))
+        .cloned();
+
     let modified_date = chrono::DateTime::from_timestamp(file_info.modified as i64, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "Unknown".to_string());
@@ -4073,6 +4123,7 @@ pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
         "url_path": file_info.url_path,
         "description": description,
         "tags": tags,
+        "type": note_type,
         "modified_date": modified_date,
         "modified": file_info.modified,
         "name": file_info.raw_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
@@ -4505,6 +4556,7 @@ mod tests {
             frontmatter: Some(frontmatter),
             created: 1699000000,
             modified: 1700000000,
+            relationships: Vec::new(),
         };
 
         let json = markdown_file_to_json(&file_info);
@@ -4525,6 +4577,7 @@ mod tests {
             frontmatter: None,
             created: 1699000000,
             modified: 1700000000,
+            relationships: Vec::new(),
         };
 
         let json = markdown_file_to_json(&file_info);
@@ -4551,6 +4604,7 @@ mod tests {
             frontmatter: Some(frontmatter),
             created: 1699000000,
             modified: 1700000000,
+            relationships: Vec::new(),
         };
 
         let json = markdown_file_to_json(&file_info);
@@ -5076,6 +5130,7 @@ mod tests {
             frontmatter: Some(frontmatter),
             created: 0,
             modified: 0,
+            relationships: Vec::new(),
         }
     }
 

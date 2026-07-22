@@ -1,0 +1,3 @@
+# Genealogy fixture: relies on the built-in genealogy relationship defaults
+# (parent <-> child, spouse, sibling). Present so the repository root is
+# detected here during integration tests.

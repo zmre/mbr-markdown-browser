@@ -1,6 +1,12 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { getTagSources, resolveUrl, type TagSourceConfig } from './shared.js';
+import { getTagSources, resolveUrl, subscribeSiteNav, type TagSourceConfig } from './shared.js';
+import {
+  buildRegistry,
+  capitalize,
+  type RelationTypeConfig,
+  type SiteRelationship,
+} from './mbr-relationships.js';
 
 interface Heading {
   level: number;
@@ -28,6 +34,7 @@ interface InboundLink {
 interface PageLinks {
   inbound: InboundLink[];
   outbound: OutboundLink[];
+  relationships?: SiteRelationship[];
 }
 
 interface PageNavLink {
@@ -84,6 +91,11 @@ export class MbrInfoElement extends LitElement {
   @state()
   private _extendedMeta: ExtendedMeta | null = null;
 
+  @state()
+  private _relationTypes: RelationTypeConfig[] = [];
+
+  private _unsubscribeSiteNav?: () => void;
+
   // Keys to skip (internal/technical fields)
   private static skipKeys = new Set(['markdown_source', 'server_mode', 'gui_mode']);
 
@@ -101,11 +113,20 @@ export class MbrInfoElement extends LitElement {
     this._frontmatter = window.frontmatter || {};
     this._headings = window.headings || [];
     this._extendedMeta = window.extendedMeta || null;
+
+    // Pull relationship type labels from site.json (already loaded globally).
+    this._unsubscribeSiteNav = subscribeSiteNav((state) => {
+      const types = state.data?.relationship_types;
+      if (Array.isArray(types)) {
+        this._relationTypes = types as RelationTypeConfig[];
+      }
+    });
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this._handleKeydown);
+    this._unsubscribeSiteNav?.();
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
@@ -440,6 +461,103 @@ export class MbrInfoElement extends LitElement {
     `;
   }
 
+  // ========================================
+  // Relationships
+  // ========================================
+
+  /**
+   * Returns the plural display label for a predicate, using the relation-type
+   * registry from site.json when available and falling back to a simple
+   * title-cased pluralization otherwise.
+   */
+  private _predicateLabel(predicate: string): string {
+    return (
+      buildRegistry(this._relationTypes).get(predicate)?.label_plural ??
+      `${capitalize(predicate)}s`
+    );
+  }
+
+  /** Formats an edge's attributes as "key value" pairs (e.g. "married 1925"). */
+  private _formatEdgeAttributes(attributes: Record<string, unknown>): string {
+    return Object.entries(attributes)
+      .map(([key, value]) => `${key.replace(/_/g, ' ')} ${this._formatValue(value)}`)
+      .join(' · ');
+  }
+
+  /** Renders a single neighbor row (linked when resolved). */
+  private _renderRelationshipRow(rel: SiteRelationship): TemplateResult {
+    const attrs = this._formatEdgeAttributes(rel.attributes ?? {});
+    const neighbor = rel.resolved && rel.neighbor
+      ? html`<a
+          href="${resolveUrl(rel.neighbor)}"
+          class="link-url"
+          @click=${() => this._close()}
+          >${rel.neighbor_title}</a
+        >`
+      : html`<span class="rel-unresolved" title="Unresolved">${rel.neighbor_title}</span>`;
+
+    return html`
+      <li class="link-item">
+        ${neighbor}
+        ${attrs ? html`<span class="rel-attrs">${attrs}</span>` : nothing}
+      </li>
+    `;
+  }
+
+  private _renderRelationshipsSection(): TemplateResult | typeof nothing {
+    if (this._linksLoading || this._linksError) {
+      return nothing;
+    }
+
+    const relationships = this._links?.relationships || [];
+    if (relationships.length === 0) {
+      return nothing;
+    }
+
+    // Group edges by viewpoint predicate, preserving registry order first.
+    const groups = new Map<string, SiteRelationship[]>();
+    for (const rel of relationships) {
+      const key = rel.predicate;
+      const bucket = groups.get(key);
+      if (bucket) {
+        bucket.push(rel);
+      } else {
+        groups.set(key, [rel]);
+      }
+    }
+
+    // Order groups by the registry's relation-type order, then any extras.
+    const orderedKeys: string[] = [];
+    for (const t of this._relationTypes) {
+      if (groups.has(t.name)) orderedKeys.push(t.name);
+    }
+    for (const key of groups.keys()) {
+      if (!orderedKeys.includes(key)) orderedKeys.push(key);
+    }
+
+    return html`
+      <details class="info-section" open>
+        <summary>
+          <strong>Relationships</strong>
+          <span class="link-count">(${relationships.length})</span>
+        </summary>
+        <div class="info-content">
+          ${orderedKeys.map((key) => {
+            const edges = groups.get(key) || [];
+            return html`
+              <div class="link-group">
+                <h4 class="link-group-title">${this._predicateLabel(key)} (${edges.length})</h4>
+                <ul class="links-list">
+                  ${edges.map((rel) => this._renderRelationshipRow(rel))}
+                </ul>
+              </div>
+            `;
+          })}
+        </div>
+      </details>
+    `;
+  }
+
   private _renderLinksOutSection(): TemplateResult | typeof nothing {
     if (this._linksLoading) {
       return html`
@@ -588,6 +706,7 @@ export class MbrInfoElement extends LitElement {
 
           ${this._renderMetadataSection()}
           ${this._renderDocumentInfoSection()}
+          ${this._renderRelationshipsSection()}
           ${this._renderTocSection()}
           ${this._renderLinksOutSection()}
           ${this._renderLinksInSection()}
@@ -933,6 +1052,19 @@ export class MbrInfoElement extends LitElement {
     }
 
     .loading-text {
+      color: var(--pico-muted-color, #666);
+      font-style: italic;
+    }
+
+    /* Relationship edge styling */
+    .rel-attrs {
+      display: block;
+      font-size: 0.8em;
+      color: var(--pico-muted-color, #666);
+      margin-top: 0.1rem;
+    }
+
+    .rel-unresolved {
       color: var(--pico-muted-color, #666);
       font-style: italic;
     }

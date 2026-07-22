@@ -124,6 +124,7 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--transcode` | Enable HLS video transcoding for 720p/480p variants (server/GUI only) | `false` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
+| `--no-relationship-tracking` | Disable typed relationship tracking (frontmatter relationships) | `false` |
 | `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
 | `--no-mark-incomplete` | Disable incomplete-block highlighting | (unset) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
@@ -234,6 +235,7 @@ Built components are placed in `dist/` and compiled into the binary via `include
 | `path_resolver.rs` | Pure path resolution logic (`ResolvedPath` enum) |
 | `markdown.rs` | pulldown-cmark markdown parsing with YAML frontmatter extraction |
 | `templates.rs` | Tera template engine - renders markdown into HTML wrapper |
+| `relationships.rs` | Typed frontmatter relationships (parse/registry/index) with inverse/symmetric derivation |
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
 | `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
@@ -298,9 +300,12 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 
 Components in `components/src/`:
 - `mbr-browse.ts` - Directory/file browser (`<mbr-browse>` element)
+- `mbr-relationships.ts` - Typed-relationship graph / family tree (`<mbr-relationships>`), rendered via the embedded mermaid pipeline from `site.json`. Included from `templates/_display_enhancements.html`, gated on `{% if type %}`. Graph traversal and mermaid-source generation are pure exported functions (unit-tested in `mbr-relationships.test.ts`).
 - `shared.ts` - Shared state (site navigation data)
 
 These are Lit-based custom elements using decorators (`@customElement`, `@state`, etc.) and compile to ES modules loaded by the HTML template.
+
+Display-enhancement elements (dynamic loaders like `<mbr-mermaid>`, `<mbr-hljs>`, and `<mbr-relationships>`) are included from `templates/_display_enhancements.html` (NOT `_scripts_markdown.html`).
 
 ### Template System
 

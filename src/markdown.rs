@@ -1130,9 +1130,20 @@ fn yaml_hash_to_metadata(hash: &yaml_rust2::yaml::Hash) -> SimpleMetadata {
 /// Frontmatter should always be at the top of the file, so 8KB is plenty.
 const FRONTMATTER_MAX_BYTES: usize = 8 * 1024;
 
-pub fn extract_metadata_from_file<P: AsRef<Path>>(
-    path: P,
-) -> Result<SimpleMetadata, MarkdownError> {
+/// Frontmatter extracted from a file: the simplified metadata map plus the
+/// typed relationships parsed from the raw YAML.
+///
+/// Returning both from a single read avoids a second file read for the typed
+/// relationship path (the simplified map is lossy for array-of-object fields).
+#[derive(Debug, Clone, Default)]
+pub struct FileMetadata {
+    /// The simplified frontmatter metadata (string/array/scalar values).
+    pub metadata: SimpleMetadata,
+    /// Typed relationships declared in frontmatter (unresolved endpoints).
+    pub relationships: Vec<crate::relationships::RawRelationship>,
+}
+
+pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadata, MarkdownError> {
     let path = path.as_ref();
     // Only read the first 8KB - frontmatter is always at the top
     let mut file = File::open(path).map_err(|e| MarkdownError::ReadFailed {
@@ -1152,6 +1163,7 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
     let parser = TextMergeStream::new(parser);
     let mut in_metadata = false;
     let mut hm = HashMap::new();
+    let mut relationships = Vec::new();
     for event in parser.take(4) {
         match &event {
             Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
@@ -1163,6 +1175,9 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
             Event::Text(text) if in_metadata => {
                 let metadata_parsed = YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
 
+                if let Some(ref yaml) = metadata_parsed {
+                    relationships = crate::relationships::parse_relationships(yaml);
+                }
                 hm = yaml_frontmatter_simplified(&metadata_parsed);
                 break;
             }
@@ -1177,7 +1192,10 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(
         hm.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
-    Ok(hm)
+    Ok(FileMetadata {
+        metadata: hm,
+        relationships,
+    })
 }
 
 /// Generates a URL-safe anchor ID from heading text.
@@ -1550,6 +1568,24 @@ mod tests {
         let result = render_result(content).await;
         assert!(result.frontmatter_error.is_none());
         assert!(result.frontmatter.contains_key("style"));
+    }
+
+    #[test]
+    fn extract_metadata_from_file_returns_relationships() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "---\ntype: person\nborn: 1901-05-02\nrelationships:\n  - type: child\n    from: \"[[Sam Doe]]\"\n---\n# John\n"
+        )
+        .unwrap();
+        let result = extract_metadata_from_file(file.path()).unwrap();
+        assert_eq!(
+            result.metadata.get("type"),
+            Some(&serde_json::Value::String("person".to_string()))
+        );
+        assert_eq!(result.relationships.len(), 1);
+        assert_eq!(result.relationships[0].rel_type, "child");
+        assert_eq!(result.relationships[0].from.as_deref(), Some("[[Sam Doe]]"));
     }
 
     #[test]

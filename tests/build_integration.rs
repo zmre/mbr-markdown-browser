@@ -1461,3 +1461,129 @@ async fn test_build_counts_frontmatter_parse_errors() {
         stats.frontmatter_errors
     );
 }
+
+// ============================================================================
+// Typed relationships (genealogy fixture)
+// ============================================================================
+
+/// Absolute path to the committed genealogy fixture.
+fn genealogy_fixture_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/genealogy")
+}
+
+/// Build the genealogy fixture into a fresh temp output dir. The `TempDir`
+/// guard is returned so it outlives the assertions.
+async fn build_genealogy() -> (tempfile::TempDir, std::path::PathBuf) {
+    let out = tempfile::TempDir::new().expect("temp output dir");
+    let output_dir = out.path().join("build");
+    let config = mbr::Config {
+        root_dir: genealogy_fixture_path(),
+        oembed_timeout_ms: 0,
+        ..Default::default()
+    };
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+    (out, output_dir)
+}
+
+#[tokio::test]
+async fn test_build_writes_relationships_into_links_json() {
+    let (_guard, output) = build_genealogy().await;
+
+    let links_path = output.join("people").join("john").join("links.json");
+    let body: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&links_path).expect("john links.json")).unwrap();
+
+    let rels = body["relationships"]
+        .as_array()
+        .expect("relationships array");
+    assert!(
+        rels.iter()
+            .any(|r| r["neighbor"] == "/people/george/" && r["predicate"] == "parent"),
+        "John's build links.json should include parent George"
+    );
+    let mary = rels
+        .iter()
+        .find(|r| r["neighbor"] == "/people/mary/")
+        .expect("mary edge");
+    assert_eq!(mary["predicate"], "spouse");
+    assert_eq!(mary["attributes"]["married"], "1948-06-01");
+}
+
+#[tokio::test]
+async fn test_build_site_json_has_relationships() {
+    let (_guard, output) = build_genealogy().await;
+
+    let site_path = output.join(".mbr").join("site.json");
+    let body: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&site_path).expect("site.json")).unwrap();
+
+    // relationship_types registry present.
+    let types = body["relationship_types"]
+        .as_array()
+        .expect("relationship_types");
+    assert!(
+        types
+            .iter()
+            .any(|t| t["name"] == "spouse" && t["symmetric"] == true)
+    );
+
+    // Per-note relationships attached.
+    let files = body["markdown_files"].as_array().expect("markdown_files");
+    let alice = files
+        .iter()
+        .find(|f| f["url_path"] == "/people/alice/")
+        .expect("alice entry");
+    let alice_rels = alice["relationships"].as_array().expect("alice rels");
+    // Alice's parents (John, Mary) are derived from edges declared elsewhere.
+    assert!(
+        alice_rels
+            .iter()
+            .any(|r| r["predicate"] == "parent" && r["neighbor"] == "/people/john/"),
+        "Alice should have derived parent John in site.json"
+    );
+}
+
+#[tokio::test]
+async fn test_build_person_infobox_and_aliases() {
+    let (_guard, output) = build_genealogy().await;
+
+    // Mary's page renders the optional person infobox (portrait / birthplace /
+    // aliases). The infobox lives inside `data-pagefind-body` so its text is
+    // also indexed for static search.
+    let mary_html = fs::read_to_string(output.join("people").join("mary").join("index.html"))
+        .expect("mary index.html");
+    // The portrait <img> element (distinct from the `.mbr-person-portrait` CSS
+    // rule in the scoped style block) proves the image field rendered.
+    assert!(
+        mary_html.contains(r#"<img class="mbr-person-portrait""#),
+        "Mary's page should render the portrait img element"
+    );
+    assert!(
+        mary_html.contains("Cheyenne, WY"),
+        "Mary's page should show her birthplace"
+    );
+    // "Also known as ..." text is emitted only by the infobox alias line.
+    assert!(
+        mary_html.contains("Also known as Mary Doe"),
+        "Mary's page should list her alias (maiden/married name)"
+    );
+
+    // Mary's site.json frontmatter carries the `aliases` array verbatim.
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr").join("site.json")).unwrap())
+            .unwrap();
+    let files = site["markdown_files"].as_array().expect("markdown_files");
+    let mary = files
+        .iter()
+        .find(|f| f["url_path"] == "/people/mary/")
+        .expect("mary entry");
+    let aliases = mary["frontmatter"]["aliases"]
+        .as_array()
+        .expect("aliases array in Mary's frontmatter");
+    assert!(
+        aliases.iter().any(|a| a == "Mary Doe"),
+        "Mary's frontmatter aliases should include 'Mary Doe'"
+    );
+}

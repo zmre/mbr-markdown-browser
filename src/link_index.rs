@@ -41,6 +41,10 @@ pub struct PageLinks {
     pub inbound: Vec<InboundLink>,
     /// Links from this page to other pages
     pub outbound: Vec<OutboundLink>,
+    /// Typed relationships (declared + derived) for this page. Empty when
+    /// relationship tracking is disabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relationships: Vec<crate::relationships::ResolvedRelationship>,
 }
 
 /// Splits a URL into its path and anchor components.

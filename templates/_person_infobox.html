@@ -1,0 +1,38 @@
+{# Person infobox: a compact floated card of first-class `type: person` vitals
+   (portrait, lifespan, birthplace, aliases). Every field is optional, so the
+   card renders only when at least one is present — an empty person note shows
+   nothing. Guarded with the existence-safe `type and type == "person"` pattern
+   so it never errors on notes that declare no `type`. #}
+{% if type and type == "person" %}{% if image or born or died or born_place or aliases %}
+<aside class="mbr-person-infobox"{% if gender %} data-gender="{{ gender }}"{% endif %}>
+  {% if image %}<img class="mbr-person-portrait" src="{{ image }}" alt="{% if title %}{{ title }}{% endif %}" />{% endif %}
+  {% if born or died %}<p class="mbr-person-vital mbr-person-lifespan">{% if born and died %}{{ born }} – {{ died }}{% elif born %}b. {{ born }}{% else %}d. {{ died }}{% endif %}</p>{% endif %}
+  {% if born_place %}<p class="mbr-person-vital mbr-person-birthplace">{{ born_place }}</p>{% endif %}
+  {% if aliases %}<p class="mbr-person-vital mbr-person-aliases">Also known as {{ aliases | join(sep=", ") }}</p>{% endif %}
+</aside>
+<style>
+  .mbr-person-infobox {
+    float: right;
+    max-width: 220px;
+    margin: 0 0 1rem 1.5rem;
+    padding: 0.75rem;
+    border: 1px solid var(--pico-muted-border-color, #e0e0e0);
+    border-radius: 8px;
+    background: var(--pico-card-background-color, transparent);
+  }
+  .mbr-person-portrait {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+  }
+  .mbr-person-vital {
+    margin: 0.5rem 0 0;
+    font-size: 0.9rem;
+    color: var(--pico-muted-color, #666);
+  }
+  .mbr-person-aliases {
+    font-style: italic;
+  }
+</style>
+{% endif %}{% endif %}

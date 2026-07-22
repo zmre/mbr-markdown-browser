@@ -40,6 +40,10 @@ fn default_link_tracking() -> bool {
     true
 }
 
+fn default_relationship_tracking() -> bool {
+    true
+}
+
 /// Default markers that flag a block as incomplete.
 ///
 /// A block whose first text matches `^(MARKER)\b` (uppercase, word boundary)
@@ -193,6 +197,113 @@ pub fn tag_sources_to_url_sources(sources: &[TagSource]) -> Vec<String> {
     sources.iter().map(|s| s.url_source()).collect()
 }
 
+/// Configuration for a relation type used by typed note relationships.
+///
+/// A relation type names an edge predicate (e.g. "parent", "spouse") and
+/// declares its semantics for automatic reverse-edge derivation:
+/// - `symmetric = true` — the reverse reads the same (spouse, sibling).
+/// - `inverse = Some("child")` — the reverse reads as the inverse (parent ↔
+///   child). Symmetric and inverse are mutually exclusive.
+///
+/// Unknown relation types (not listed here) are tolerated: they are tracked
+/// directed with no relabelling.
+///
+/// # Examples
+///
+/// ```toml
+/// relationship_types = [
+///     { name = "parent", inverse = "child", label = "Parent", label_plural = "Parents" },
+///     { name = "child", inverse = "parent", label = "Child", label_plural = "Children" },
+///     { name = "spouse", symmetric = true, label = "Spouse", label_plural = "Spouses" },
+/// ]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RelationType {
+    /// The relation-type name / predicate (e.g. "parent").
+    pub name: String,
+
+    /// Whether the relation is symmetric (the reverse reads the same).
+    #[serde(default)]
+    pub symmetric: bool,
+
+    /// The inverse relation-type name, if this is one half of an inverse pair.
+    #[serde(default)]
+    pub inverse: Option<String>,
+
+    /// Singular display label (e.g. "Parent"). Auto-derived from `name` if unset.
+    #[serde(default)]
+    pub label: Option<String>,
+
+    /// Plural display label (e.g. "Parents"). Auto-derived from the singular
+    /// label if unset. Set explicitly for irregular plurals (e.g. "Children").
+    #[serde(default)]
+    pub label_plural: Option<String>,
+}
+
+impl RelationType {
+    /// Returns the singular label (explicit `label`, else title-cased `name`).
+    pub fn singular_label(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| title_case_word(&self.name))
+    }
+
+    /// Returns the plural label (explicit `label_plural`, else singular + "s").
+    pub fn plural_label(&self) -> String {
+        self.label_plural
+            .clone()
+            .unwrap_or_else(|| format!("{}s", self.singular_label()))
+    }
+}
+
+/// Title-cases a single word (capitalizes the first letter), preserving the
+/// rest. Unlike [`title_case`], it does not strip a trailing plural "s".
+fn title_case_word(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Returns the default relation types: genealogy defaults.
+///
+/// - `parent` ↔ `child` (inverse pair)
+/// - `spouse` (symmetric)
+/// - `sibling` (symmetric)
+pub fn default_relationship_types() -> Vec<RelationType> {
+    vec![
+        RelationType {
+            name: "parent".to_string(),
+            symmetric: false,
+            inverse: Some("child".to_string()),
+            label: Some("Parent".to_string()),
+            label_plural: Some("Parents".to_string()),
+        },
+        RelationType {
+            name: "child".to_string(),
+            symmetric: false,
+            inverse: Some("parent".to_string()),
+            label: Some("Child".to_string()),
+            label_plural: Some("Children".to_string()),
+        },
+        RelationType {
+            name: "spouse".to_string(),
+            symmetric: true,
+            inverse: None,
+            label: Some("Spouse".to_string()),
+            label_plural: Some("Spouses".to_string()),
+        },
+        RelationType {
+            name: "sibling".to_string(),
+            symmetric: true,
+            inverse: None,
+            label: Some("Sibling".to_string()),
+            label_plural: Some("Siblings".to_string()),
+        },
+    ]
+}
+
 impl Default for SortField {
     fn default() -> Self {
         Self {
@@ -268,6 +379,17 @@ pub struct Config {
     /// Default: extract from "tags" field.
     #[serde(default = "default_tag_sources")]
     pub tag_sources: Vec<TagSource>,
+    /// Enable typed relationship tracking (named frontmatter relationships).
+    /// When enabled, per-note relationships are exposed via links.json and
+    /// site.json, and rendered in the info panel.
+    /// Default: true (enabled). Cheap when unused.
+    #[serde(default = "default_relationship_tracking")]
+    pub relationship_tracking: bool,
+    /// Relation types configuration for typed note relationships.
+    /// Declares symmetric / inverse-pair semantics and display labels.
+    /// Default: genealogy defaults (parent↔child, spouse, sibling).
+    #[serde(default = "default_relationship_types")]
+    pub relationship_types: Vec<RelationType>,
     /// Generate tag landing pages during static site builds.
     /// When enabled, creates /{source}/{value}/ pages for each tag value
     /// and /{source}/ index pages listing all tags.
@@ -396,6 +518,8 @@ impl Default for Config {
             skip_link_checks: false, // Link checking enabled by default
             link_tracking: true,     // Bidirectional link tracking enabled by default
             tag_sources: default_tag_sources(),
+            relationship_tracking: true, // Typed relationship tracking enabled by default
+            relationship_types: default_relationship_types(),
             build_tag_pages: true, // Tag pages enabled by default
             sidebar_style: default_sidebar_style(),
             sidebar_max_items: default_sidebar_max_items(),
@@ -616,6 +740,63 @@ mod tests {
         assert_eq!(config.tag_sources.len(), 1);
         assert_eq!(config.tag_sources[0].field, "tags");
         assert!(config.build_tag_pages);
+    }
+
+    #[test]
+    fn test_config_default_has_relationship_types() {
+        let config = Config::default();
+        assert!(config.relationship_tracking);
+        assert_eq!(config.relationship_types.len(), 4);
+        let names: Vec<&str> = config
+            .relationship_types
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(names.contains(&"parent"));
+        assert!(names.contains(&"child"));
+        assert!(names.contains(&"spouse"));
+        assert!(names.contains(&"sibling"));
+    }
+
+    #[test]
+    fn test_default_relationship_types_semantics() {
+        let types = default_relationship_types();
+        let parent = types.iter().find(|t| t.name == "parent").unwrap();
+        assert!(!parent.symmetric);
+        assert_eq!(parent.inverse.as_deref(), Some("child"));
+        assert_eq!(parent.plural_label(), "Parents");
+
+        let child = types.iter().find(|t| t.name == "child").unwrap();
+        assert_eq!(child.inverse.as_deref(), Some("parent"));
+        assert_eq!(child.plural_label(), "Children");
+
+        let spouse = types.iter().find(|t| t.name == "spouse").unwrap();
+        assert!(spouse.symmetric);
+        assert!(spouse.inverse.is_none());
+    }
+
+    #[test]
+    fn test_relation_type_label_derivation() {
+        let rel = RelationType {
+            name: "cousin".to_string(),
+            symmetric: true,
+            inverse: None,
+            label: None,
+            label_plural: None,
+        };
+        // Auto-derived from name.
+        assert_eq!(rel.singular_label(), "Cousin");
+        assert_eq!(rel.plural_label(), "Cousins");
+    }
+
+    #[test]
+    fn test_relation_type_deserialization_minimal() {
+        let json = r#"{"name": "friend", "symmetric": true}"#;
+        let rel: RelationType = serde_json::from_str(json).unwrap();
+        assert_eq!(rel.name, "friend");
+        assert!(rel.symmetric);
+        assert!(rel.inverse.is_none());
+        assert!(rel.label.is_none());
     }
 
     #[test]

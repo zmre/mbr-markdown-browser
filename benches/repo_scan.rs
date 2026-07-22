@@ -27,6 +27,7 @@ fn bench_scan_all(c: &mut Criterion) {
                     &[],
                     "index.md",
                     &[],
+                    &[],
                 );
                 repo.scan_all().expect("scan failed");
                 repo
@@ -51,6 +52,7 @@ fn bench_populate_basic_metadata(c: &mut Criterion) {
         &[],
         &[],
         "index.md",
+        &[],
         &[],
     );
     repo.scan_all().expect("scan failed");

@@ -116,6 +116,7 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
+| `relationship_tracking` | bool | `true` | Enable typed relationship tracking (named frontmatter relationships) |
 | `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight blocks starting with TK/TODO/FIXME/XXX |
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag a block as incomplete |
 
@@ -250,6 +251,43 @@ build_tag_pages = true
 ```
 
 See the [Tags feature documentation](tags/) for complete details.
+
+### Relationship Settings
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `relationship_tracking` | bool | `true` | Enable typed relationship tracking |
+| `relationship_types` | array | genealogy defaults | Relation types with symmetric / inverse semantics and labels |
+
+**Relation type configuration:**
+
+Each relation type can specify:
+- `name` (required): The relation predicate (e.g., `parent`, `spouse`)
+- `symmetric`: `true` when the reverse reads the same (spouse, sibling)
+- `inverse`: The inverse relation-type name, if it's one half of an inverse pair (parent ↔ child). Mutually exclusive with `symmetric`.
+- `label` / `label_plural`: Display labels (auto-derived from `name` when unset; set `label_plural` explicitly for irregular plurals such as "Children")
+
+The default `relationship_types` provide genealogy semantics:
+
+```toml
+# .mbr/config.toml (these are the built-in defaults)
+relationship_types = [
+    { name = "parent", inverse = "child", label = "Parent", label_plural = "Parents" },
+    { name = "child", inverse = "parent", label = "Child", label_plural = "Children" },
+    { name = "spouse", symmetric = true, label = "Spouse", label_plural = "Spouses" },
+    { name = "sibling", symmetric = true, label = "Sibling", label_plural = "Siblings" },
+]
+relationship_tracking = true
+```
+
+Relation types not listed here are still tracked, but as directed edges with no
+automatic reverse relabelling. See the
+[Relationships & Genealogy documentation](../markdown/relationships/) for the frontmatter
+schema and a walkthrough.
+
+> **Note:** `relationship_tracking` rides on the same `links.json` fetch as
+> backlinks (no extra request). Disabling it omits relationship data from
+> `links.json` and `site.json` and hides the info-panel section.
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 

@@ -14,8 +14,9 @@ use serde::{Serialize, Serializer, ser::SerializeSeq};
 use walkdir::WalkDir;
 
 use crate::Config;
-use crate::config::TagSource;
+use crate::config::{RelationType, TagSource};
 use crate::errors::RepoError;
+use crate::relationships::{NoteRelInput, RawRelationship, RelationshipIndex};
 use crate::tag_index::{TagIndex, TaggedPage};
 
 #[derive(Clone, Serialize)]
@@ -45,6 +46,9 @@ pub struct Repo {
     /// Thread-safe index of tagged pages.
     #[serde(skip)]
     pub tag_index: Arc<TagIndex>,
+    /// Thread-safe index of typed relationships between notes.
+    #[serde(skip)]
+    pub relationship_index: Arc<RelationshipIndex>,
     /// Configured tag sources for frontmatter extraction.
     #[serde(skip)]
     tag_sources: Vec<TagSource>,
@@ -115,6 +119,11 @@ pub struct MarkdownInfo {
     pub created: u64,
     pub modified: u64,
     pub frontmatter: Option<crate::markdown::SimpleMetadata>,
+    /// Typed relationships declared in frontmatter (unresolved endpoints).
+    /// Skipped in serialization — resolved relationships are exposed via the
+    /// relationship index in site.json/links.json instead.
+    #[serde(skip)]
+    pub relationships: Vec<RawRelationship>,
 }
 
 #[derive(Clone, Serialize)]
@@ -473,9 +482,11 @@ impl Repo {
             &c.ignore_globs[..],
             c.index_file.clone(),
             &c.tag_sources[..],
+            &c.relationship_types[..],
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn init<S: Into<String>, P: Into<std::path::PathBuf>>(
         root_dir: P,
         static_folder: S,
@@ -484,6 +495,7 @@ impl Repo {
         ignore_globs: &[String],
         index_file: S,
         tag_sources: &[TagSource],
+        relationship_types: &[RelationType],
     ) -> Self {
         // Pre-compile glob patterns for efficient matching during scans
         let compiled_ignore_globs: Vec<glob::Pattern> = ignore_globs
@@ -508,6 +520,9 @@ impl Repo {
             markdown_files: MarkdownFiles(HashMap::new()),
             other_files: OtherFiles(HashMap::new()),
             tag_index: Arc::new(TagIndex::new()),
+            relationship_index: Arc::new(RelationshipIndex::from_relation_types(
+                relationship_types,
+            )),
             tag_sources: tag_sources.to_vec(),
             text_extracted: Arc::new(AtomicBool::new(false)),
             media_populated: Arc::new(AtomicBool::new(false)),
@@ -570,6 +585,7 @@ impl Repo {
                         created,
                         modified,
                         frontmatter: None,
+                        relationships: Vec::new(),
                     };
                     markdown.insert(path.to_path_buf(), mdfile);
                 } else {
@@ -600,10 +616,12 @@ impl Repo {
         markdown
             .into_par_iter()
             .for_each(|(mdfile, mddetails): (PathBuf, MarkdownInfo)| {
-                let metadata = crate::markdown::extract_metadata_from_file(&mdfile).ok();
-                let details = if let Some(ref frontmatter) = metadata {
+                let file_meta = crate::markdown::extract_metadata_from_file(&mdfile).ok();
+                let details = if let Some(file_meta) = file_meta {
+                    let frontmatter = file_meta.metadata;
+                    let relationships = file_meta.relationships;
                     // Extract tags from frontmatter for each configured tag source
-                    let title = get_page_title(frontmatter, &mddetails.raw_path);
+                    let title = get_page_title(&frontmatter, &mddetails.raw_path);
                     let description = frontmatter
                         .get("description")
                         .and_then(|v| v.as_str())
@@ -630,7 +648,8 @@ impl Repo {
                     }
 
                     MarkdownInfo {
-                        frontmatter: metadata,
+                        frontmatter: Some(frontmatter),
+                        relationships,
                         ..mddetails
                     }
                 } else {
@@ -915,6 +934,7 @@ impl Repo {
         self.other_files.pin().clear();
         self.queued_folders.pin().clear();
         self.tag_index.clear();
+        self.relationship_index.clear();
         self.text_extracted.store(false, Ordering::SeqCst);
         self.media_populated.store(false, Ordering::SeqCst);
         // Note: scan_complete is NOT reset here. It tracks whether the initial background
@@ -941,8 +961,11 @@ impl Repo {
                     if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
                         let url =
                             build_markdown_url_path(abs_path, &self.root_dir, &self.index_file);
-                        let frontmatter =
-                            crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let file_meta = crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let (frontmatter, relationships) = match file_meta {
+                            Some(fm) => (Some(fm.metadata), fm.relationships),
+                            None => (None, Vec::new()),
+                        };
 
                         // Add tags from frontmatter
                         if let Some(ref fm) = frontmatter {
@@ -977,6 +1000,7 @@ impl Repo {
                             created,
                             modified,
                             frontmatter,
+                            relationships,
                         };
                         self.markdown_files
                             .pin()
@@ -999,14 +1023,18 @@ impl Repo {
                     if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
                         let url =
                             build_markdown_url_path(abs_path, &self.root_dir, &self.index_file);
-                        let frontmatter =
-                            crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let file_meta = crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let (frontmatter, relationships) = match file_meta {
+                            Some(fm) => (Some(fm.metadata), fm.relationships),
+                            None => (None, Vec::new()),
+                        };
                         let info = MarkdownInfo {
                             raw_path: abs_path.to_path_buf(),
                             url_path: url,
                             created,
                             modified,
                             frontmatter,
+                            relationships,
                         };
                         self.markdown_files
                             .pin()
@@ -1034,6 +1062,74 @@ impl Repo {
     /// Returns the configured tag sources.
     pub fn tag_sources(&self) -> &[TagSource] {
         &self.tag_sources
+    }
+
+    /// Rebuild the relationship index from the current cached markdown files.
+    ///
+    /// Must run after a scan (or file-change invalidation) once all note titles
+    /// are known, since endpoint resolution matches on titles and filename
+    /// stems across the whole repo. Modelled on [`Self::rebuild_tag_index`].
+    pub fn build_relationship_index(&self) {
+        let pin = self.markdown_files.pin();
+        // Short-circuit when no note declares any relationship: avoid the
+        // per-note NoteRelInput cloning and the O(n log n) sort / name-index /
+        // rebuild in `build_relationship_map` (mirrors the gated tag-index
+        // rebuild). An empty rebuild is otherwise pure overhead.
+        if !pin.iter().any(|(_, info)| !info.relationships.is_empty()) {
+            self.relationship_index.clear();
+            return;
+        }
+        let notes: Vec<NoteRelInput> = pin
+            .iter()
+            .map(|(_, info)| {
+                let title = info
+                    .frontmatter
+                    .as_ref()
+                    .map(|fm| get_page_title(fm, &info.raw_path))
+                    .unwrap_or_else(|| {
+                        info.raw_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string()
+                    });
+                let stem = info
+                    .raw_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                // Alternate names (e.g. maiden names) that also resolve to this
+                // note. Read from a frontmatter `aliases` array of strings;
+                // non-string elements and wrong types are ignored (empty vec).
+                let aliases = info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.get("aliases"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                let is_index = info
+                    .raw_path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|f| f == self.index_file);
+                NoteRelInput {
+                    url: info.url_path.clone(),
+                    title,
+                    stem,
+                    aliases,
+                    is_index,
+                    relationships: info.relationships.clone(),
+                }
+            })
+            .collect();
+        self.relationship_index
+            .rebuild(&notes, &self.markdown_extensions);
     }
 
     pub fn rebuild_tag_index(&self) {

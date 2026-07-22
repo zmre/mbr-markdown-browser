@@ -48,6 +48,7 @@ Frontmatter powers:
 - **Descriptions**: Search results and previews
 - **Tags**: Navigation and filtering
 - **Custom fields**: Available in templates
+- **Special page types**: like [slides](slides/) or [person](relationships/)
 
 ### Supported Fields
 
@@ -58,6 +59,7 @@ Frontmatter powers:
 | `tags` | Comma-separated tags |
 | `date` | Publication date |
 | `author` | Author name |
+| `type` | Note type |
 | Any field | Available via `frontmatter_json` |
 
 ## GitHub-style Alerts
@@ -390,6 +392,7 @@ URLs in angle brackets become clickable:
 ## See Also
 
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
+- [Relationships & Genealogy](relationships/) - Typed frontmatter relationships and family trees
 - [Presentation Slides](slides/) - Create slide presentations from markdown
 - [Slides Example](test-slides/) - A live example presentation
 

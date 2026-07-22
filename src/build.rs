@@ -332,6 +332,10 @@ impl Builder {
         print_stage("Scanning repository...");
         self.repo.scan_all()?;
         self.repo.scan_static_folder()?;
+        // Build the typed-relationship index once all note titles are known.
+        if self.config.relationship_tracking {
+            self.repo.build_relationship_index();
+        }
         let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
         print_stage_done(
             "Scanning repository",
@@ -702,7 +706,18 @@ impl Builder {
             .unwrap_or_else(|| outbound_index.get(url_path).cloned().unwrap_or_default());
         let inbound = inbound_index.get(url_path).cloned().unwrap_or_default();
 
-        let page_links = PageLinks { inbound, outbound };
+        // Typed relationships (declared + derived) for this page, if enabled.
+        let relationships = if self.config.relationship_tracking {
+            self.repo.relationship_index.get(url_path)
+        } else {
+            Vec::new()
+        };
+
+        let page_links = PageLinks {
+            inbound,
+            outbound,
+            relationships,
+        };
 
         // Determine output path: url_path → build/{url_path}/links.json
         let url_path_stripped = url_path.trim_start_matches('/');
@@ -1692,6 +1707,13 @@ impl Builder {
             }
         }
 
+        // Add relationship_types + per-note resolved relationships (if enabled).
+        if self.config.relationship_tracking {
+            self.repo
+                .relationship_index
+                .inject_into_site_json(&mut response);
+        }
+
         let site_json = serde_json::to_string(&response)
             .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
         let site_json_path = mbr_output.join("site.json");
@@ -2220,6 +2242,7 @@ mod tests {
             frontmatter: None,
             created: 0,
             modified: 0,
+            relationships: Vec::new(),
         }
     }
 

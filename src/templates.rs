@@ -295,6 +295,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         "_display_enhancements.html",
         include_str!("../templates/_display_enhancements.html"),
     ),
+    (
+        "_person_infobox.html",
+        include_str!("../templates/_person_infobox.html"),
+    ),
     // Main templates
     ("index.html", include_str!("../templates/index.html")),
     ("section.html", include_str!("../templates/section.html")),

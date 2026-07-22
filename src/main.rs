@@ -197,6 +197,10 @@ async fn main() -> Result<(), MbrError> {
     if args.no_link_tracking {
         config.link_tracking = false;
     }
+    // Apply no_relationship_tracking from CLI
+    if args.no_relationship_tracking {
+        config.relationship_tracking = false;
+    }
     // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
     if args.mark_incomplete {
         config.mark_incomplete = Some(true);

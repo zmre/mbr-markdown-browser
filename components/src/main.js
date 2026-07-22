@@ -13,6 +13,7 @@ export * from './mbr-video-extras.ts';
 export * from './mbr-media-viewer.ts';
 export * from './mbr-link-enhancement.ts';
 export * from './mbr-heading-enhancer.ts';
+export * from './mbr-relationships.ts';
 // Dynamic enhancement loaders
 export * from './mbr-hljs.ts';
 export * from './mbr-mermaid.ts';
