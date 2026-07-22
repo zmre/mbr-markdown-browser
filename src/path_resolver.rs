@@ -270,14 +270,17 @@ fn strip_trailing_separator(path: &Path) -> PathBuf {
 }
 
 /// Finds a markdown file by trying each configured extension.
+///
+/// The URL for a markdown file strips only its final extension (see
+/// `build_markdown_url_path`), so a file named `a.b.c.md` is served at `/a.b.c/`.
+/// We therefore reverse that by *appending* the extension to the full stem;
+/// `Path::set_extension` would instead replace the trailing dotted segment
+/// (`a.b.c` -> `a.b.md`) and 404 on any file whose name contains a dot.
 fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf> {
+    let file_name = base_path.file_name()?.to_str()?;
     extensions
         .iter()
-        .map(|ext| {
-            let mut path = base_path.to_path_buf();
-            path.set_extension(ext);
-            path
-        })
+        .map(|ext| base_path.with_file_name(format!("{file_name}.{ext}")))
         .find(|path| path.is_file())
 }
 
@@ -493,6 +496,70 @@ mod tests {
         assert_eq!(
             result,
             ResolvedPath::MarkdownFile(fixture.canonical_path().join("about.md"))
+        );
+    }
+
+    #[test]
+    fn test_dotted_filename_trailing_slash_to_markdown() {
+        // Regression: a file whose name contains a period is served at a URL that
+        // strips only the final extension (see build_markdown_url_path). The resolver
+        // must reverse that by appending the extension, not replacing the trailing
+        // dotted segment, otherwise `patrick-walsh-b.2010-03-03.md` 404s at
+        // `/patrick-walsh-b.2010-03-03/`.
+        let fixture = TestFixture::new();
+        fs::write(
+            fixture.path().join("patrick-walsh-b.2010-03-03.md"),
+            "# Patrick",
+        )
+        .unwrap();
+
+        let result = resolve_request_path(&fixture.config(), "patrick-walsh-b.2010-03-03/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::MarkdownFile(
+                fixture
+                    .canonical_path()
+                    .join("patrick-walsh-b.2010-03-03.md")
+            )
+        );
+    }
+
+    #[test]
+    fn test_dotted_filename_without_trailing_slash_to_markdown() {
+        // Mirrors test_trailing_slash_to_markdown semantics: a dotted filename must
+        // also resolve when requested WITHOUT the trailing slash.
+        let fixture = TestFixture::new();
+        fs::write(
+            fixture.path().join("patrick-walsh-b.2010-03-03.md"),
+            "# Patrick",
+        )
+        .unwrap();
+
+        let result = resolve_request_path(&fixture.config(), "patrick-walsh-b.2010-03-03");
+
+        assert_eq!(
+            result,
+            ResolvedPath::MarkdownFile(
+                fixture
+                    .canonical_path()
+                    .join("patrick-walsh-b.2010-03-03.md")
+            )
+        );
+    }
+
+    #[test]
+    fn test_multi_dot_filename_trailing_slash_to_markdown() {
+        // A filename with multiple interior dots must resolve at its canonical URL
+        // (`report.2024.final.md` -> `/report.2024.final/`).
+        let fixture = TestFixture::new();
+        fs::write(fixture.path().join("report.2024.final.md"), "# Report").unwrap();
+
+        let result = resolve_request_path(&fixture.config(), "report.2024.final/");
+
+        assert_eq!(
+            result,
+            ResolvedPath::MarkdownFile(fixture.canonical_path().join("report.2024.final.md"))
         );
     }
 

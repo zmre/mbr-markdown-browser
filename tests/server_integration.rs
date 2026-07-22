@@ -175,6 +175,28 @@ async fn test_serve_markdown_file() {
 }
 
 #[tokio::test]
+async fn test_serve_markdown_file_with_dotted_name() {
+    // Regression: a markdown file whose name contains a period is served at a
+    // canonical URL that strips only the final extension (e.g.
+    // `patrick-walsh-b.2010-03-03.md` -> `/patrick-walsh-b.2010-03-03/`). It must
+    // resolve rather than 404.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "patrick-walsh-b.2010-03-03.md",
+        "# Patrick Walsh\n\nBorn 2010.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/patrick-walsh-b.2010-03-03/").await;
+
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Patrick Walsh");
+    assert_html_contains(&html, "Born 2010.");
+}
+
+#[tokio::test]
 async fn test_server_marks_incomplete_blocks_by_default() {
     // Server/GUI default for mark_incomplete is true; rendered HTML should
     // wrap blocks starting with TK/TODO/FIXME/XXX in an mbr-incomplete span.
