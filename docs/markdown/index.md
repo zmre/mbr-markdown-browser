@@ -311,7 +311,9 @@ Here is a statement that needs citation[^1].
 
 mbr uses pulldown-cmark for markdown parsing[^1], which provides excellent CommonMark compliance and performance[^2].
 
-Footnotes appear at the bottom of the page.
+Footnotes appear at the bottom of the page. On desktop (hover-capable devices),
+hovering a footnote reference shows a preview card with the note's content;
+clicking still jumps to the definition at the bottom.
 
 ## Heading Anchors
 
