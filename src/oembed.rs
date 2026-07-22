@@ -272,19 +272,13 @@ impl PageInfo {
         None
     }
 
-    pub async fn new_from_url(url: &str, timeout_ms: u64) -> Result<Self, OembedError> {
-        // If timeout is 0, oembed is disabled - return a plain link without network call or substitution
-        if timeout_ms == 0 {
-            // tracing::debug!("Oembed disabled, ignoring url {}", &url);
-            return Ok(PageInfo {
-                url: url.to_string(),
-                ..Default::default()
-            });
-        }
-
+    /// Compute a no-network embed (Giphy, GitHub gist, or bare-URL media) for
+    /// `url`, if it matches one. Pure and synchronous — performs no I/O. Returns
+    /// `None` for URLs that would require a network (OpenGraph) fetch.
+    pub fn local_embed(url: &str) -> Option<PageInfo> {
         // Check for Giphy - embed directly without fetching
         if let Some(embed_html) = Self::giphy_embed(url) {
-            return Ok(PageInfo {
+            return Some(PageInfo {
                 url: url.to_string(),
                 embed_html: Some(embed_html),
                 ..Default::default()
@@ -293,7 +287,7 @@ impl PageInfo {
 
         // Check for GitHub gist - embed without fetching
         if let Some(embed_html) = Self::gist_embed(url) {
-            return Ok(PageInfo {
+            return Some(PageInfo {
                 url: url.to_string(),
                 embed_html: Some(embed_html),
                 ..Default::default()
@@ -304,9 +298,28 @@ impl PageInfo {
         // Parameters: server_mode=false (safe default for static builds),
         // transcode_enabled=true, hls_enabled=false
         if let Some(media) = MediaEmbed::from_bare_url(url) {
-            return Ok(PageInfo {
+            return Some(PageInfo {
                 url: url.to_string(),
                 embed_html: Some(media.to_html(false, true, false)),
+                ..Default::default()
+            });
+        }
+
+        None
+    }
+
+    pub async fn new_from_url(url: &str, timeout_ms: u64) -> Result<Self, OembedError> {
+        // No-network embeds (Giphy/gist/media) require no I/O and always work,
+        // even when network oembed is disabled (timeout 0).
+        if let Some(info) = Self::local_embed(url) {
+            return Ok(info);
+        }
+
+        // Network OpenGraph enrichment is gated by the timeout.
+        if timeout_ms == 0 {
+            // tracing::debug!("Oembed disabled, ignoring url {}", &url);
+            return Ok(PageInfo {
+                url: url.to_string(),
                 ..Default::default()
             });
         }
@@ -819,27 +832,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_zero_timeout_disables_youtube_embed() {
-        // With timeout=0, ALL enrichment is disabled - even no-network embeds like YouTube
+    async fn test_zero_timeout_still_allows_no_network_youtube_embed() {
+        // YouTube is a no-network embed (via MediaEmbed), so it must STILL embed
+        // even when network oembed is disabled (timeout 0). Only OpenGraph network
+        // fetches are gated by the timeout.
         let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
         let result = PageInfo::new_from_url(url, 0).await;
         assert!(result.is_ok());
         let info = result.unwrap();
-        assert!(info.embed_html.is_none());
-        // Should return a plain link instead
-        assert!(info.html().contains("<a href="));
+        assert!(info.embed_html.is_some());
+        assert!(info.html().contains("youtube-embed"));
     }
 
     #[tokio::test]
-    async fn test_zero_timeout_disables_giphy_embed() {
-        // With timeout=0, ALL enrichment is disabled - even no-network embeds like Giphy
+    async fn test_zero_timeout_still_allows_no_network_giphy_embed() {
+        // No-network embeds (Giphy) require no I/O, so they must STILL embed even
+        // when network oembed is disabled (timeout 0). Only OpenGraph network
+        // fetches are gated by the timeout.
         let url = "https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif";
         let result = PageInfo::new_from_url(url, 0).await;
         assert!(result.is_ok());
         let info = result.unwrap();
-        assert!(info.embed_html.is_none());
-        // Should return a plain link instead
-        assert!(info.html().contains("<a href="));
+        assert!(info.embed_html.is_some());
+        assert!(info.html().contains("giphy-embed"));
+
+        // A URL that WOULD require a network fetch still falls back to a plain
+        // link at timeout 0 (proving the fetch itself is skipped).
+        let network_info = PageInfo::new_from_url("https://example.com/some-page", 0)
+            .await
+            .unwrap();
+        assert!(network_info.embed_html.is_none());
+        assert!(network_info.html().contains("<a href="));
+    }
+
+    #[test]
+    fn test_local_embed_giphy_and_non_matching() {
+        // Giphy page URL yields a giphy-embed figure with the derived media URL
+        let page = PageInfo::local_embed("https://giphy.com/gifs/cat-funny-CAxbo8KC2A0y4")
+            .expect("giphy page URL should produce a local embed");
+        let page_html = page.embed_html.expect("embed html present");
+        assert!(page_html.contains("giphy-embed"));
+        assert!(page_html.contains("https://media.giphy.com/media/CAxbo8KC2A0y4/giphy.gif"));
+
+        // Giphy media URL yields a giphy-embed figure pointing at the media URL
+        let media_url = "https://media1.giphy.com/media/CAxbo8KC2A0y4/giphy.gif";
+        let media =
+            PageInfo::local_embed(media_url).expect("giphy media URL should produce a local embed");
+        let media_html = media.embed_html.expect("embed html present");
+        assert!(media_html.contains("giphy-embed"));
+        assert!(media_html.contains(media_url));
+
+        // A plain article URL requires a network fetch, so there is no local embed
+        assert!(PageInfo::local_embed("https://example.com/article").is_none());
     }
 
     #[test]

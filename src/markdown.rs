@@ -855,11 +855,13 @@ fn finalize_render(
 ///
 /// Performs the same rendering pipeline but without async: file reading (already sync),
 /// wikilink transformation, merged heading + rule-attrs pass, process_event pass, and
-/// HTML generation. Oembed fetching is skipped entirely in the sync path since the
-/// primary use case is build mode where `oembed_timeout_ms` defaults to 0.
+/// HTML generation.
 ///
-/// When `oembed_timeout_ms > 0`, bare URLs are still rendered gracefully as plain links
-/// (using the `PageInfo` default fallback in `process_event`).
+/// No-network embeds (Giphy, GitHub gist, and bare-URL media) ARE produced in the
+/// sync path — they are pure CPU (regex/string) and require no I/O, so they work in
+/// build mode regardless of `oembed_timeout_ms`. Only OpenGraph network fetches are
+/// skipped here; when `oembed_timeout_ms > 0` and a cache is present, previously
+/// cached network results are also merged in (but never fetched fresh).
 #[allow(clippy::too_many_arguments)]
 pub fn render_sync(
     file: PathBuf,
@@ -893,20 +895,18 @@ pub fn render_sync(
     // Detect if the first heading is an H1
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
-    // Sync path: skip oembed fetching entirely. Process_event handles missing
-    // oembed data gracefully by rendering bare URLs as plain links (PageInfo default).
-    // When oembed_timeout_ms > 0 AND we have a cache, try to use cached results
-    // for any bare URLs, but don't do network fetches.
-    let prefetched_oembed = if oembed_timeout_ms > 0 {
-        if let Some(ref cache) = oembed_cache {
-            // Use cached oembed results only (no network fetches in sync path)
-            collect_cached_oembed(&events_with_ids, cache)
-        } else {
-            HashMap::new()
+    // No-network embeds (Giphy/gist/media) are cheap and require no I/O, so
+    // compute them even in the sync/build path (they work regardless of
+    // oembed_timeout_ms). Network OpenGraph results are only pulled from cache
+    // here (the sync path never performs network fetches).
+    let mut prefetched_oembed = collect_local_embeds(&events_with_ids);
+    if oembed_timeout_ms > 0
+        && let Some(ref cache) = oembed_cache
+    {
+        for (url, info) in collect_cached_oembed(&events_with_ids, cache) {
+            prefetched_oembed.entry(url).or_insert(info);
         }
-    } else {
-        HashMap::new()
-    };
+    }
 
     // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
     let (processed_events, state) = process_all_events(
@@ -939,6 +939,15 @@ pub fn render_sync(
         headings,
         has_h1,
     )
+}
+
+/// Compute no-network oembed results (Giphy, gist, bare-URL media) for all
+/// bare URLs in `events`. Pure/synchronous — safe for the build (rayon) path.
+fn collect_local_embeds(events: &[Event<'_>]) -> HashMap<String, PageInfo> {
+    collect_bare_urls(events)
+        .into_iter()
+        .filter_map(|url| PageInfo::local_embed(&url).map(|info| (url, info)))
+        .collect()
 }
 
 /// Collect oembed results from cache only (no network fetches).

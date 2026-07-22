@@ -86,6 +86,39 @@ async fn test_build_creates_html_for_markdown() {
 }
 
 #[tokio::test]
+async fn test_build_embeds_bare_giphy_url_without_network() {
+    // Regression: no-network embeds (Giphy) must render in static builds even at
+    // the build-default oembed timeout of 0 (which skips network fetches). The
+    // bare URL should become a giphy-embed figure, not a plain <a> hotlink.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "index.md",
+        "# Gallery\n\nhttps://giphy.com/gifs/cat-funny-CAxbo8KC2A0y4\n",
+    );
+
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        oembed_timeout_ms: 0, // build default: network fetches disabled
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+
+    // index.md at the root renders to build/index.html
+    let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
+    assert!(
+        html.contains("giphy-embed"),
+        "expected a giphy embed, got:\n{html}"
+    );
+    assert!(
+        !html.contains(r#"<a href="https://giphy.com"#),
+        "bare giphy URL should not remain a plain hotlink, got:\n{html}"
+    );
+}
+
+#[tokio::test]
 async fn test_build_creates_section_pages() {
     let repo = TestRepo::new();
     repo.create_dir("docs");
