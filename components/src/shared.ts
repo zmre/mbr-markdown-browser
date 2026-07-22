@@ -108,8 +108,25 @@ export function getTagSources(): TagSourceConfig[] {
  *   basePath = "../../" (depth 2)
  *   Result: "/docs/guide/"
  */
+/**
+ * Percent-decode a URL path, falling back to the raw string on a malformed
+ * escape sequence (e.g. a lone `%`) so a bad URL never throws.
+ */
+function safeDecodePath(p: string): string {
+  try {
+    return decodeURIComponent(p);
+  } catch {
+    return p;
+  }
+}
+
 export function getCanonicalPath(): string {
-  const pathname = window.location.pathname;
+  // `window.location.pathname` is percent-encoded (e.g. spaces → `%20`), but
+  // site.json stores `url_path`/`neighbor` DECODED (literal spaces). Decode once
+  // here so both the server-mode return and the static-mode segment
+  // reconstruction match site.json keys. `%`-encoding never yields a literal
+  // `/`, so the static-mode `split('/')` below is unaffected.
+  const pathname = safeDecodePath(window.location.pathname);
 
   // In server mode, pathname is already canonical
   if (window.__MBR_CONFIG__?.serverMode) {

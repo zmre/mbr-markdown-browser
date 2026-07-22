@@ -258,6 +258,21 @@ const MAX_DEPTH = 6
 const DEFAULT_MAX_NODES = 80
 
 /**
+ * Normalize a note path to the canonical trailing-slash form used by
+ * `site.json` `url_path` keys.
+ *
+ * In server mode, markdown is served at non-trailing-slash URLs in place (200,
+ * no redirect), so `getCanonicalPath()` can return a slashless path (e.g.
+ * `/people/george`) while every `url_path` ends in `/` (e.g. `/people/george/`).
+ * Returns `p` unchanged when empty or already slash-terminated, else appends a
+ * trailing `/`.
+ */
+export function canonicalizeNotePath(p: string): string {
+  if (!p || p.endsWith('/')) return p
+  return `${p}/`
+}
+
+/**
  * Build a de-duplicated relationship graph around `focusPath`.
  *
  * Nodes are collected breadth-first up to `depth` hops from the focus (capped
@@ -272,16 +287,21 @@ export function buildRelationshipGraph(
   depth: number = DEFAULT_DEPTH,
   maxNodes: number = DEFAULT_MAX_NODES
 ): RelationshipGraph {
-  if (!notesByPath.has(focusPath)) {
-    return { focus: focusPath, nodes: [], edges: [] }
+  // Normalize the focus to the canonical trailing-slash form so slashless
+  // server-mode URLs (e.g. `/people/george`) match `site.json`'s `url_path`
+  // keys. Neighbors already come canonical, so only the focus needs this.
+  const focus = canonicalizeNotePath(focusPath)
+
+  if (!notesByPath.has(focus)) {
+    return { focus, nodes: [], edges: [] }
   }
 
   const clampedDepth = Math.max(1, Math.min(Math.floor(depth) || DEFAULT_DEPTH, MAX_DEPTH))
   const cap = Math.max(1, Math.floor(maxNodes) || DEFAULT_MAX_NODES)
 
   // Phase 1: breadth-first node collection.
-  const included = new Set<string>([focusPath])
-  let frontier: string[] = [focusPath]
+  const included = new Set<string>([focus])
+  let frontier: string[] = [focus]
   for (let d = 0; d < clampedDepth && frontier.length > 0 && included.size < cap; d++) {
     const next: string[] = []
     for (const path of frontier) {
@@ -308,7 +328,7 @@ export function buildRelationshipGraph(
       born: yearOf(fm['born']),
       died: yearOf(fm['died']),
       gender: normalizeGender(fm['gender']),
-      isFocus: path === focusPath,
+      isFocus: path === focus,
     }
   })
 
@@ -326,7 +346,7 @@ export function buildRelationshipGraph(
     }
   }
 
-  return { focus: focusPath, nodes, edges: [...edges.values()] }
+  return { focus, nodes, edges: [...edges.values()] }
 }
 
 /** True when the graph contains at least one hierarchical (tree) edge. */

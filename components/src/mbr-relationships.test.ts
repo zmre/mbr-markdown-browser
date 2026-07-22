@@ -9,6 +9,7 @@ import {
   buildRegistry,
   classifyRelationship,
   buildRelationshipGraph,
+  canonicalizeNotePath,
   generateMermaidSource,
   notesByPathFromSite,
   formatNodeLabel,
@@ -167,6 +168,13 @@ describe('helpers', () => {
     expect(sanitizeEdgeLabel('Spouse')).toBe('Spouse')
   })
 
+  it('canonicalizeNotePath appends a trailing slash only when needed', () => {
+    expect(canonicalizeNotePath('/people/george')).toBe('/people/george/')
+    expect(canonicalizeNotePath('/people/george/')).toBe('/people/george/')
+    expect(canonicalizeNotePath('')).toBe('')
+    expect(canonicalizeNotePath('/')).toBe('/')
+  })
+
   it('notesByPathFromSite indexes markdown_files by url_path', () => {
     const map = notesByPathFromSite({ markdown_files: [{ url_path: '/a/' }, { url_path: '/b/' }] })
     expect(map.size).toBe(2)
@@ -294,6 +302,61 @@ describe('buildRelationshipGraph', () => {
   it('respects the maxNodes cap', () => {
     const graph = buildRelationshipGraph('/people/john/', notes, registry, 3, 3)
     expect(graph.nodes.length).toBeLessThanOrEqual(3)
+  })
+
+  it('normalizes a slashless focus path to the canonical trailing-slash form', () => {
+    // Server mode serves markdown at non-trailing-slash URLs in place, so the
+    // focus path can arrive without the trailing slash that every site.json
+    // `url_path` key carries. The graph must be identical either way.
+    const withSlash = buildRelationshipGraph('/people/george/', notes, registry, 3)
+    const withoutSlash = buildRelationshipGraph('/people/george', notes, registry, 3)
+
+    // The slashless call must not fall through to the empty-graph guard.
+    expect(withoutSlash.nodes.length).toBeGreaterThan(0)
+    expect(withoutSlash.edges.length).toBeGreaterThan(0)
+
+    // Identical graphs (same focus, nodes, and edges) regardless of the slash.
+    expect(withoutSlash.focus).toBe('/people/george/')
+    expect(withoutSlash.focus).toBe(withSlash.focus)
+    expect(withoutSlash.nodes).toEqual(withSlash.nodes)
+    expect(withoutSlash.edges).toEqual(withSlash.edges)
+  })
+
+  it('sets the focus flag on the canonical node for a slashless focus path', () => {
+    const graph = buildRelationshipGraph('/people/george', notes, registry, 3)
+    const focusNodes = graph.nodes.filter((n) => n.isFocus)
+    expect(focusNodes).toHaveLength(1)
+    expect(focusNodes[0].urlPath).toBe('/people/george/')
+    expect(focusNodes[0].title).toBe('George Doe')
+  })
+
+  it('matches a decoded focus path with spaces against decoded site.json keys', () => {
+    // End-to-end contract: getCanonicalPath() now returns DECODED paths (literal
+    // spaces), matching site.json's decoded url_path/neighbor keys. No
+    // percent-encoding reaches buildRelationshipGraph.
+    const focusKey = '/Walsh/Patrick Joseph Walsh b.1977-10-01/'
+    const spaced = new Map<string, SiteNote>([
+      [
+        focusKey,
+        {
+          url_path: focusKey,
+          frontmatter: { type: 'person', title: 'Patrick Joseph Walsh' },
+          relationships: [rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/Walsh/Jane Walsh/', direction: 'outgoing' })],
+        },
+      ],
+      [
+        '/Walsh/Jane Walsh/',
+        {
+          url_path: '/Walsh/Jane Walsh/',
+          frontmatter: { type: 'person', title: 'Jane Walsh' },
+          relationships: [rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: focusKey, direction: 'incoming' })],
+        },
+      ],
+    ])
+    const graph = buildRelationshipGraph(focusKey, spaced, registry, 2)
+    expect(graph.nodes.map((n) => n.urlPath).sort()).toEqual(['/Walsh/Jane Walsh/', focusKey])
+    expect(graph.edges).toHaveLength(1)
+    expect(graph.nodes.find((n) => n.isFocus)!.urlPath).toBe(focusKey)
   })
 })
 
