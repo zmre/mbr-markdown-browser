@@ -80,6 +80,7 @@ pub mod video_transcode;
 pub mod video_transcode_cache;
 pub mod watcher;
 pub mod wikilink;
+pub mod wikilink_index;
 
 pub use build::{BuildStats, Builder};
 pub use config::{Config, RelationType, SortField, TagSource, find_root_dir};

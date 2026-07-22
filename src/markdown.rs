@@ -7,9 +7,10 @@ use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
 use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
+use crate::wikilink_index::WikilinkIndex;
 use pulldown_cmark::{
-    BlockQuoteKind, CowStr, Event, HeadingLevel, MetadataBlockKind, Options, Parser as MDParser,
-    Tag, TagEnd, TextMergeStream,
+    BlockQuoteKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind, Options,
+    Parser as MDParser, Tag, TagEnd, TextMergeStream,
 };
 use regex::Regex;
 use std::{
@@ -189,6 +190,10 @@ struct EventState {
     metadata_parsed: Option<Yaml>,
     /// Configuration for transforming relative links
     link_transform_config: LinkTransformConfig,
+    /// Global name index for Obsidian-style body-wikilink (`[[Name]]`)
+    /// resolution. `None` when there is no repo context (CLI/QuickLook paths);
+    /// only bare wikilinks not found in the current folder consult it.
+    wikilink_index: Option<Arc<WikilinkIndex>>,
     /// Pre-fetched oembed results for bare URLs (populated during parallel fetch phase)
     prefetched_oembed: HashMap<String, PageInfo>,
     /// True in server/GUI mode, false in build/CLI mode
@@ -559,6 +564,7 @@ pub async fn render(
     valid_tag_sources: HashSet<String>,
     mark_incomplete: bool,
     incomplete_markers: &[String],
+    wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     render_with_cache(
         file,
@@ -571,6 +577,7 @@ pub async fn render(
         valid_tag_sources,
         mark_incomplete,
         incomplete_markers,
+        wikilink_index,
     )
     .await
 }
@@ -596,6 +603,7 @@ pub async fn render_with_cache(
     valid_tag_sources: HashSet<String>,
     mark_incomplete: bool,
     incomplete_markers: &[String],
+    wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input. Use tokio's async filesystem API so this (potentially
     // slow) read does not block a tokio worker thread in the async render path.
@@ -640,6 +648,7 @@ pub async fn render_with_cache(
         server_mode,
         transcode_enabled,
         valid_tag_sources,
+        wikilink_index,
     );
 
     // Pass 3 (optional): wrap blocks starting with TK/TODO/FIXME/XXX in
@@ -678,6 +687,7 @@ fn process_all_events<'a>(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> (Vec<Event<'a>>, EventState) {
     let mut state = EventState {
         root_path: root_path.to_path_buf(),
@@ -687,6 +697,7 @@ fn process_all_events<'a>(
         metadata_source: None,
         metadata_parsed: None,
         link_transform_config,
+        wikilink_index,
         prefetched_oembed,
         server_mode,
         transcode_enabled,
@@ -874,6 +885,7 @@ pub fn render_sync(
     valid_tag_sources: HashSet<String>,
     mark_incomplete: bool,
     incomplete_markers: &[String],
+    wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input
     let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
@@ -917,6 +929,7 @@ pub fn render_sync(
         server_mode,
         transcode_enabled,
         valid_tag_sources,
+        wikilink_index,
     );
 
     // Pass 3 (optional): wrap blocks starting with TK/TODO/FIXME/XXX in
@@ -1308,13 +1321,40 @@ fn process_event(
 
             // First check if this is a tag link (e.g., Tags:rust, performers:Joshua Jay)
             // If so, transform to the tag URL path (/tags/rust/, /performers/joshua_jay/)
-            let transformed_url =
-                if let Some(wikilink) = parse_tag_link(dest_url, &state.valid_tag_sources) {
-                    transform_link(&wikilink.url_path(), &state.link_transform_config)
-                } else {
-                    // Not a tag link, use regular link transformation
-                    transform_link(dest_url, &state.link_transform_config)
-                };
+            let transformed_url = if let Some(wikilink) =
+                parse_tag_link(dest_url, &state.valid_tag_sources)
+            {
+                transform_link(&wikilink.url_path(), &state.link_transform_config)
+            } else {
+                // Not a tag link. For bare-name body wikilinks (`[[Name]]`),
+                // apply Obsidian-style global resolution: current folder first,
+                // else the first matching file anywhere. `resolve_wikilink`
+                // returns Some only for the global-fallback case, so same-folder
+                // links keep the default relative transform byte-for-byte.
+                let global =
+                    if matches!(link_type, LinkType::WikiLink { .. }) && !dest_url.contains('/') {
+                        state.wikilink_index.as_ref().and_then(|idx| {
+                            idx.resolve_wikilink(
+                                dest_url,
+                                &state.link_transform_config.current_page_url,
+                                state.link_transform_config.is_index_file,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                match global {
+                    Some(abs) => {
+                        // Override the recorded outbound target with the absolute
+                        // URL so link validation and backlinks resolve correctly
+                        // (its leading `/` makes `resolve_outbound_links` leave it
+                        // untouched, and the path resolver then finds it).
+                        state.current_link_dest = Some(abs.clone());
+                        transform_link(&abs, &state.link_transform_config)
+                    }
+                    None => transform_link(dest_url, &state.link_transform_config),
+                }
+            };
 
             let new_event = Event::Start(Tag::Link {
                 link_type: *link_type,
@@ -1467,6 +1507,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file,
             url_depth: None,
+            current_page_url: String::new(),
         };
         // Tests run with server_mode=false, transcode_enabled=false, mark_incomplete=false
         let result = render(
@@ -1479,6 +1520,7 @@ mod tests {
             tag_sources,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1496,6 +1538,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let owned: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
         let result = render(
@@ -1508,6 +1551,7 @@ mod tests {
             HashSet::new(),
             true,
             &owned,
+            None,
         )
         .await
         .unwrap();
@@ -1524,6 +1568,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         render(
             path,
@@ -1535,9 +1580,118 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap()
+    }
+
+    /// Renders `content` with an explicit current-page URL and wikilink index,
+    /// for exercising Obsidian-style body-wikilink resolution.
+    async fn render_with_wikilinks(
+        content: &str,
+        current_page_url: &str,
+        url_depth: Option<usize>,
+        wikilink_index: Option<Arc<WikilinkIndex>>,
+    ) -> MarkdownRenderResult {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth,
+            current_page_url: current_page_url.to_string(),
+        };
+        render(
+            path,
+            &root,
+            0,
+            config,
+            true, // server_mode
+            false,
+            HashSet::new(),
+            false,
+            &[],
+            wikilink_index,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn wikilink_note(url: &str, title: &str, stem: &str) -> crate::relationships::NoteRelInput {
+        crate::relationships::NoteRelInput {
+            url: url.to_string(),
+            title: title.to_string(),
+            stem: stem.to_string(),
+            aliases: Vec::new(),
+            is_index: false,
+            relationships: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn wikilink_global_fallback_rewrites_href_and_records_absolute_target() {
+        // `Patrick Walsh.md` lives in a *different* folder than the page that
+        // references `[[Patrick Walsh]]`, so the global fallback rewrites the
+        // href to the file's absolute URL and records that absolute target.
+        let index = Arc::new(WikilinkIndex::new());
+        index.rebuild(&[
+            wikilink_note("/walsh/patrick-walsh/", "Patrick Walsh", "patrick-walsh"),
+            wikilink_note("/notes/family/", "Family", "family"),
+        ]);
+
+        let result = render_with_wikilinks(
+            "See [[Patrick Walsh]] here.",
+            "/notes/family/",
+            None, // server mode: absolute URL left as-is
+            Some(index),
+        )
+        .await;
+
+        assert!(
+            result.html.contains(r#"href="/walsh/patrick-walsh/""#),
+            "expected absolute href, got: {}",
+            result.html
+        );
+        assert_eq!(
+            result.outbound_links[0].to, "/walsh/patrick-walsh/",
+            "outbound target should be the absolute URL for validation/backlinks"
+        );
+    }
+
+    #[tokio::test]
+    async fn wikilink_same_folder_keeps_default_transform() {
+        // `patrick-walsh.md` is a same-folder sibling of the referencing page,
+        // so the default relative transform is kept byte-for-byte (no absolute
+        // rewrite, and the recorded target stays the raw relative name).
+        let index = Arc::new(WikilinkIndex::new());
+        index.rebuild(&[
+            wikilink_note("/notes/patrick-walsh/", "Patrick Walsh", "patrick-walsh"),
+            wikilink_note("/notes/family/", "Family", "family"),
+        ]);
+
+        let result = render_with_wikilinks(
+            "See [[patrick-walsh]] here.",
+            "/notes/family/",
+            None,
+            Some(index),
+        )
+        .await;
+
+        assert!(
+            !result.html.contains(r#"href="/notes/patrick-walsh/""#),
+            "same-folder wikilink must not be rewritten to absolute: {}",
+            result.html
+        );
+        assert!(
+            result.html.contains(r#"href="../patrick-walsh""#),
+            "expected default relative href, got: {}",
+            result.html
+        );
+        assert_eq!(result.outbound_links[0].to, "patrick-walsh");
     }
 
     #[tokio::test]
@@ -1699,6 +1853,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let result = render(
             path,
@@ -1710,6 +1865,7 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1767,6 +1923,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let result = render(
             path,
@@ -1778,6 +1935,7 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1796,6 +1954,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let result = render(
             path,
@@ -1807,6 +1966,7 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1826,6 +1986,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let result = render(
             path,
@@ -1837,6 +1998,7 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1860,6 +2022,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let result = render(
             path,
@@ -1871,6 +2034,7 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1894,6 +2058,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         };
         let result = render(
             path,
@@ -1905,6 +2070,7 @@ mod tests {
             HashSet::new(),
             false,
             &[],
+            None,
         )
         .await
         .unwrap();

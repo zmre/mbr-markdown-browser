@@ -154,6 +154,10 @@ warning is emitted — a broken relationship never fails a render or build.
 Ambiguous names (two notes with the same title) resolve deterministically to
 the note with the lexicographically smallest URL.
 
+Body `[[Wikilinks]]` in page text resolve the same global way as relationship
+endpoints: the current folder is preferred, otherwise the first matching note in
+any folder (by title, alias, then filename stem) is used.
+
 ### Reserved keys and attributes
 
 On each edge object, `type`, `to`, `from`, and `label` are reserved. **Every

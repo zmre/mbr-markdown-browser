@@ -1587,3 +1587,45 @@ async fn test_build_person_infobox_and_aliases() {
         "Mary's frontmatter aliases should include 'Mary Doe'"
     );
 }
+
+#[tokio::test]
+async fn test_build_body_wikilink_resolves_globally() {
+    let repo = TestRepo::new();
+    // Target file in one folder; referencing page in a *different* folder.
+    repo.create_markdown("Walsh/Patrick Walsh.md", "# Patrick Walsh\n\nBio.");
+    repo.create_markdown(
+        "Notes/family.md",
+        "# Family\n\nSee [[Patrick Walsh]] and [[Totally Missing]].",
+    );
+
+    let (output, stats) = build_site_with_stats(&repo).await;
+
+    // The target page was emitted, so the globally-resolved link points at a
+    // real file in the output tree.
+    let target = output
+        .join("Walsh")
+        .join("Patrick Walsh")
+        .join("index.html");
+    assert!(
+        target.exists(),
+        "target page should be emitted at {}",
+        target.display()
+    );
+
+    // The referencing page links (relatively) to the target's URL — the build
+    // relativizes the absolute URL and percent-encodes the space.
+    let family_html = fs::read_to_string(output.join("Notes").join("family").join("index.html"))
+        .expect("family page html");
+    assert!(
+        family_html.contains("Walsh/Patrick%20Walsh/"),
+        "family page should link to the Patrick Walsh page, got:\n{family_html}"
+    );
+
+    // Exactly one broken link: `[[Totally Missing]]`. The resolved
+    // `[[Patrick Walsh]]` contributes zero broken links.
+    assert_eq!(
+        stats.broken_links, 1,
+        "only [[Totally Missing]] should be broken, got {}",
+        stats.broken_links
+    );
+}

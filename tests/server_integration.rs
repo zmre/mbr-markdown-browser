@@ -3988,3 +3988,70 @@ async fn test_no_relationship_tracking_disables() {
     let site = get_json(&server, "/.mbr/site.json").await;
     assert!(site.get("relationship_types").is_none());
 }
+
+// ============================================================================
+// Body wikilink global resolution (Obsidian-style: current folder first, else
+// first match anywhere)
+// ============================================================================
+
+#[tokio::test]
+async fn test_body_wikilink_resolves_globally_across_folders() {
+    let repo = TestRepo::new();
+    // Target file lives in one folder...
+    repo.create_markdown("Walsh/Patrick Walsh.md", "# Patrick Walsh\n\nBio.");
+    // ...and the referencing page is in a *different* folder. `[[Patrick Walsh]]`
+    // is not a sibling, so it must resolve to the file's absolute URL. The
+    // missing wikilink must stay unresolved (404).
+    repo.create_markdown(
+        "Notes/family.md",
+        "# Family\n\nSee [[Patrick Walsh]] and [[Totally Missing]].",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // The rendered page links to the target's absolute URL (space percent-
+    // encoded by the HTML href escaper).
+    let html = server.get_text("/Notes/family/").await;
+    assert!(
+        html.contains("/Walsh/Patrick%20Walsh/") || html.contains("/Walsh/Patrick Walsh/"),
+        "expected a global link to the Patrick Walsh page, got:\n{html}"
+    );
+
+    // The globally-resolved target actually serves.
+    assert_eq!(
+        server.get("/Walsh/Patrick%20Walsh/").await.status(),
+        200,
+        "globally-resolved wikilink target should serve 200"
+    );
+
+    // The genuinely-missing wikilink still 404s (nothing matches anywhere).
+    assert_eq!(
+        server.get("/Notes/Totally%20Missing/").await.status(),
+        404,
+        "missing wikilink target must still 404"
+    );
+
+    // errors.json: NO broken link for the resolved wikilink, but the missing
+    // one IS reported broken.
+    let json: serde_json::Value = server
+        .get("/Notes/family/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        !errors.iter().any(|e| e["type"] == "broken_internal_link"
+            && e["target"].as_str().unwrap_or("").contains("Patrick")),
+        "resolved [[Patrick Walsh]] must NOT be reported broken: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_internal_link"
+            && e["target"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Totally Missing")),
+        "unresolved [[Totally Missing]] must be reported broken: {errors:?}"
+    );
+}

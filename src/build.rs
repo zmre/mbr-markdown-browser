@@ -336,6 +336,9 @@ impl Builder {
         if self.config.relationship_tracking {
             self.repo.build_relationship_index();
         }
+        // Build the global wikilink name index (always on) so body `[[Name]]`
+        // links resolve globally during the render pass and link validation.
+        self.repo.build_wikilink_index();
         let file_count = self.repo.markdown_files.pin().len() + self.repo.other_files.pin().len();
         print_stage_done(
             "Scanning repository",
@@ -775,6 +778,7 @@ impl Builder {
             index_file: self.config.index_file.clone(),
             is_index_file,
             url_depth: Some(url_depth(&info.url_path)),
+            current_page_url: info.url_path.clone(),
         };
 
         tracing::debug!("build: rendering {}", path.display());
@@ -795,6 +799,7 @@ impl Builder {
             valid_tag_sources,
             mark_incomplete,
             &self.config.incomplete_markers,
+            Some(self.repo.wikilink_index.clone()),
         )
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),

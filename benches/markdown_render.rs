@@ -44,6 +44,7 @@ fn bench_render(c: &mut Criterion) {
                         tag_sources,
                         false, // mark_incomplete
                         &[],
+                        None, // no wikilink index in benchmarks
                     )
                     .await
                     .unwrap()

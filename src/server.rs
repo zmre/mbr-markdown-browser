@@ -672,6 +672,9 @@ impl Server {
             }
             // Build the relationship index once all note titles are known.
             repo_for_scan.build_relationship_index();
+            // Build the global wikilink name index (always on) so body
+            // `[[Name]]` links resolve globally on first render.
+            repo_for_scan.build_wikilink_index();
             repo_for_scan.mark_scan_complete();
 
             // Phase 1.5: scan static folder (deferred from scan_all for faster search)
@@ -868,6 +871,8 @@ impl Server {
                         // Relationships may have changed on any create/modify/delete;
                         // rebuild the index so endpoint resolution stays consistent.
                         repo.build_relationship_index();
+                        // The global wikilink index must track the same changes.
+                        repo.build_wikilink_index();
                     })
                     .await
                     .ok();
@@ -884,6 +889,7 @@ impl Server {
                             return;
                         }
                         repo.build_relationship_index();
+                        repo.build_wikilink_index();
                         if let Err(e) = repo.scan_static_folder() {
                             tracing::error!("Background static rescan failed: {e}");
                         }
@@ -2716,6 +2722,7 @@ impl Server {
                         index_file: config.index_file.clone(),
                         is_index_file,
                         url_depth: None,
+                        current_page_url: page_url_path.clone(),
                     };
 
                     let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
@@ -2730,6 +2737,7 @@ impl Server {
                         valid_tag_sources,
                         false, // mark_incomplete: not needed for link extraction
                         &config.incomplete_markers,
+                        Some(config.repo.wikilink_index.clone()),
                     )
                     .await
                     {
@@ -2920,6 +2928,7 @@ impl Server {
                     index_file: config.index_file.clone(),
                     is_index_file,
                     url_depth: None,
+                    current_page_url: page_url_path.clone(),
                 };
 
                 let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
@@ -2935,6 +2944,7 @@ impl Server {
                     valid_tag_sources,
                     false, // mark_incomplete: not needed for error scan
                     &config.incomplete_markers,
+                    Some(config.repo.wikilink_index.clone()),
                 )
                 .await
                 {
@@ -3438,6 +3448,11 @@ impl Server {
             index_file: config.index_file.clone(),
             is_index_file,
             url_depth: None,
+            current_page_url: crate::repo::build_markdown_url_path(
+                md_path,
+                root_path,
+                &config.index_file,
+            ),
         };
 
         // Transcoding is only available with media-metadata feature
@@ -3458,6 +3473,7 @@ impl Server {
             valid_tag_sources,
             config.mark_incomplete,
             &config.incomplete_markers,
+            Some(config.repo.wikilink_index.clone()),
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;

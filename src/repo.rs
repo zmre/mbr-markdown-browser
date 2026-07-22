@@ -18,6 +18,7 @@ use crate::config::{RelationType, TagSource};
 use crate::errors::RepoError;
 use crate::relationships::{NoteRelInput, RawRelationship, RelationshipIndex};
 use crate::tag_index::{TagIndex, TaggedPage};
+use crate::wikilink_index::WikilinkIndex;
 
 #[derive(Clone, Serialize)]
 pub struct Repo {
@@ -49,6 +50,10 @@ pub struct Repo {
     /// Thread-safe index of typed relationships between notes.
     #[serde(skip)]
     pub relationship_index: Arc<RelationshipIndex>,
+    /// Thread-safe global name index for body-wikilink (`[[Name]]`) resolution.
+    /// Always built (independent of relationship tracking).
+    #[serde(skip)]
+    pub wikilink_index: Arc<WikilinkIndex>,
     /// Configured tag sources for frontmatter extraction.
     #[serde(skip)]
     tag_sources: Vec<TagSource>,
@@ -523,6 +528,7 @@ impl Repo {
             relationship_index: Arc::new(RelationshipIndex::from_relation_types(
                 relationship_types,
             )),
+            wikilink_index: Arc::new(WikilinkIndex::new()),
             tag_sources: tag_sources.to_vec(),
             text_extracted: Arc::new(AtomicBool::new(false)),
             media_populated: Arc::new(AtomicBool::new(false)),
@@ -935,6 +941,7 @@ impl Repo {
         self.queued_folders.pin().clear();
         self.tag_index.clear();
         self.relationship_index.clear();
+        self.wikilink_index.clear();
         self.text_extracted.store(false, Ordering::SeqCst);
         self.media_populated.store(false, Ordering::SeqCst);
         // Note: scan_complete is NOT reset here. It tracks whether the initial background
@@ -1070,17 +1077,45 @@ impl Repo {
     /// are known, since endpoint resolution matches on titles and filename
     /// stems across the whole repo. Modelled on [`Self::rebuild_tag_index`].
     pub fn build_relationship_index(&self) {
-        let pin = self.markdown_files.pin();
         // Short-circuit when no note declares any relationship: avoid the
         // per-note NoteRelInput cloning and the O(n log n) sort / name-index /
         // rebuild in `build_relationship_map` (mirrors the gated tag-index
         // rebuild). An empty rebuild is otherwise pure overhead.
-        if !pin.iter().any(|(_, info)| !info.relationships.is_empty()) {
+        if !self
+            .markdown_files
+            .pin()
+            .iter()
+            .any(|(_, info)| !info.relationships.is_empty())
+        {
             self.relationship_index.clear();
             return;
         }
-        let notes: Vec<NoteRelInput> = pin
-            .iter()
+        let notes = self.collect_note_inputs();
+        self.relationship_index
+            .rebuild(&notes, &self.markdown_extensions);
+    }
+
+    /// Rebuild the global wikilink name index from the current cached markdown
+    /// files.
+    ///
+    /// Unlike [`Self::build_relationship_index`] this is **ungated** — the index
+    /// powers Obsidian-style `[[Name]]` body-link resolution for every repo, so
+    /// it is rebuilt whenever the repo is (re)scanned or a file changes. Must run
+    /// after a scan once all note titles/stems are known.
+    pub fn build_wikilink_index(&self) {
+        let notes = self.collect_note_inputs();
+        self.wikilink_index.rebuild(&notes);
+    }
+
+    /// Assembles one [`NoteRelInput`] per cached markdown file (url, title,
+    /// filename stem, frontmatter aliases, index flag, declared relationships).
+    ///
+    /// Shared by [`Self::build_relationship_index`] and
+    /// [`Self::build_wikilink_index`] so the per-note title/stem/alias derivation
+    /// lives in one place.
+    fn collect_note_inputs(&self) -> Vec<NoteRelInput> {
+        let pin = self.markdown_files.pin();
+        pin.iter()
             .map(|(_, info)| {
                 let title = info
                     .frontmatter
@@ -1127,9 +1162,7 @@ impl Repo {
                     relationships: info.relationships.clone(),
                 }
             })
-            .collect();
-        self.relationship_index
-            .rebuild(&notes, &self.markdown_extensions);
+            .collect()
     }
 
     pub fn rebuild_tag_index(&self) {
