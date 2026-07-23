@@ -1,8 +1,8 @@
 /**
  * Unit tests for shared.ts utility functions (keyboard navigation helpers).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isNewTabModifier, openInNewTab } from './shared.ts';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { isNewTabModifier, openInNewTab, getCanonicalPath } from './shared.ts';
 
 describe('isNewTabModifier', () => {
   function makeKeyboardEvent(opts: Partial<KeyboardEventInit> = {}): KeyboardEvent {
@@ -49,5 +49,45 @@ describe('openInNewTab', () => {
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
     openInNewTab('https://example.com/page');
     expect(openSpy).toHaveBeenCalledWith('https://example.com/page', '_blank');
+  });
+});
+
+describe('getCanonicalPath', () => {
+  const originalConfig = window.__MBR_CONFIG__;
+
+  function setLocation(pathname: string): void {
+    vi.stubGlobal('location', { pathname });
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.__MBR_CONFIG__ = originalConfig;
+  });
+
+  it('decodes a percent-encoded pathname in server mode to match site.json keys', () => {
+    // site.json stores url_path DECODED (literal spaces); the browser pathname
+    // is percent-encoded. getCanonicalPath must decode so they match.
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+    setLocation('/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/');
+    expect(getCanonicalPath()).toBe('/Walsh/Patrick Joseph Walsh b.1977-10-01/');
+  });
+
+  it('returns an already-decoded/plain path unchanged in server mode', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+    setLocation('/people/george/');
+    expect(getCanonicalPath()).toBe('/people/george/');
+  });
+
+  it('falls back to the raw string on a malformed escape without throwing', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+    setLocation('/a%b/');
+    expect(getCanonicalPath()).toBe('/a%b/');
+  });
+
+  it('decodes %20 segments in static mode too', () => {
+    // Deployed under a prefix; depth 2 keeps the last two DECODED segments.
+    window.__MBR_CONFIG__ = { serverMode: false, guiMode: false, basePath: '../../' };
+    setLocation('/prefix/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/');
+    expect(getCanonicalPath()).toBe('/Walsh/Patrick Joseph Walsh b.1977-10-01/');
   });
 });

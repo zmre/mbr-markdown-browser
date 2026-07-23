@@ -13,7 +13,10 @@
 
 import { Crepe, CrepeFeature } from '@milkdown/crepe';
 import crepeCommonCss from '@milkdown/crepe/theme/common/style.css?inline';
-import { recombine, splitFrontmatter } from './editor-frontmatter.js';
+import { editorViewCtx, schemaCtx } from '@milkdown/kit/core';
+import { TextSelection } from '@milkdown/kit/prose/state';
+import type { Ctx } from '@milkdown/kit/ctx';
+import { recombine, splitFrontmatter, unescapeWikilinks } from './editor-frontmatter.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -44,7 +47,9 @@ function injectStyles(): void {
   // onto the page's Pico variables, so the editor inherits the active theme —
   // color variant, `.mbr/theme.css`/`user.css` overrides, and light/dark — all
   // of which Pico already switches. THEME_CSS comes after common so it wins.
-  style.textContent = [crepeCommonCss, THEME_CSS, MODAL_CSS].join('\n');
+  style.textContent = [crepeCommonCss, THEME_CSS, FOOTNOTE_CSS, MODAL_CSS].join(
+    '\n',
+  );
   document.head.appendChild(style);
 }
 
@@ -138,6 +143,99 @@ const MODAL_CSS = `
 .mbr-editor-footer button { padding: 0.35rem 0.9rem; cursor: pointer; }
 .mbr-editor-loading { padding: 2rem; text-align: center; opacity: 0.7; }
 `;
+
+// Footnote nodes (from the gfm preset) are unstyled in the editor by default.
+// Style the inline reference as a raised citation badge and the definition as a
+// clearly-delimited note, reusing the same Crepe theme variables as THEME_CSS.
+const FOOTNOTE_CSS = `
+.milkdown .ProseMirror sup[data-type="footnote_reference"] {
+  font-size: 0.75em;
+  line-height: 0;
+  vertical-align: super;
+  font-weight: 600;
+  color: var(--crepe-color-primary);
+  padding: 0 0.15em;
+  cursor: default;
+  user-select: none;
+}
+.milkdown .ProseMirror dl[data-type="footnote_definition"] {
+  margin: 0.4rem 0;
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  border-left: 2px solid var(--crepe-color-selected, var(--pico-muted-border-color, #e1e2e8));
+  font-size: 0.9em;
+  color: var(--crepe-color-on-surface-variant, var(--pico-muted-color, #43474e));
+}
+.milkdown .ProseMirror dl[data-type="footnote_definition"] dt {
+  display: inline;
+  margin-right: 0.35rem;
+  font-weight: 700;
+  color: var(--crepe-color-primary);
+}
+.milkdown .ProseMirror dl[data-type="footnote_definition"] dt::before { content: "["; }
+.milkdown .ProseMirror dl[data-type="footnote_definition"] dt::after { content: "]"; }
+.milkdown .ProseMirror dl[data-type="footnote_definition"] dd {
+  display: inline;
+  margin: 0;
+}
+.mbr-editor-footnote { margin-right: auto; }
+`;
+
+/**
+ * Smallest positive integer (as a string) not already present in `used`.
+ * Footnote labels default to sequential numbers; this keeps them unique.
+ */
+function nextFootnoteLabel(used: ReadonlySet<string>): string {
+  let n = 1;
+  while (used.has(String(n))) n++;
+  return String(n);
+}
+
+/**
+ * Insert a footnote in a single transaction: a `footnote_reference` at the
+ * current selection and an empty `footnote_definition` appended to the end of
+ * the document, then move the cursor into the new definition so the user can
+ * type the note immediately.
+ *
+ * Run via `crepe.editor.action(insertFootnote)`.
+ */
+function insertFootnote(ctx: Ctx): void {
+  const view = ctx.get(editorViewCtx);
+  const schema = ctx.get(schemaCtx);
+  const refType = schema.nodes.footnote_reference;
+  const defType = schema.nodes.footnote_definition;
+  const paragraph = schema.nodes.paragraph;
+  if (!refType || !defType || !paragraph) return;
+
+  const { state } = view;
+
+  // Collect labels already used by references or definitions so the new one is
+  // unique across the whole document.
+  const used = new Set<string>();
+  state.doc.descendants((node) => {
+    if (node.type === refType || node.type === defType) {
+      const label = node.attrs.label;
+      if (typeof label === 'string' && label) used.add(label);
+    }
+    return true;
+  });
+  const label = nextFootnoteLabel(used);
+
+  const refNode = refType.create({ label });
+  const defNode = defType.create({ label }, paragraph.create());
+
+  let tr = state.tr.replaceSelectionWith(refNode, false);
+  // Append the definition at the end of the document (positions already
+  // reflect the inserted reference because `tr` tracks them).
+  const defStart = tr.doc.content.size;
+  tr = tr.insert(defStart, defNode);
+  // Cursor inside the definition's empty paragraph: +1 enters the <dl>, +1
+  // more enters the paragraph.
+  const cursorPos = Math.min(defStart + 2, tr.doc.content.size);
+  tr = tr.setSelection(TextSelection.create(tr.doc, cursorPos)).scrollIntoView();
+
+  view.dispatch(tr);
+  view.focus();
+}
 
 /** Builds the editing modal, loads the file, and wires up save/auth/errors. */
 export async function openEditor(opts: OpenEditorOptions): Promise<void> {
@@ -256,12 +354,30 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   tokenInput.placeholder = 'Edit token';
   tokenInput.value = sessionToken;
   tokenInput.autocomplete = 'off';
+  // Insert-footnote helper. Lives in the footer chrome we fully control (rather
+  // than a slash-menu item) so the insert never has to reconcile with Crepe's
+  // typed `/query` range. ProseMirror keeps the last selection even when focus
+  // moves to this button, so the reference lands at the previous cursor.
+  const footnoteBtn = document.createElement('button');
+  footnoteBtn.type = 'button';
+  footnoteBtn.className = 'mbr-editor-footnote';
+  footnoteBtn.textContent = 'Footnote';
+  footnoteBtn.title = 'Insert a footnote at the cursor';
+  footnoteBtn.setAttribute('aria-label', 'Insert footnote');
+  footnoteBtn.addEventListener('click', () => {
+    if (!crepe) return;
+    try {
+      crepe.editor.action(insertFootnote);
+    } catch (err) {
+      setStatus(`Could not insert footnote: ${(err as Error).message}`, 'error');
+    }
+  });
   const cancelBtn = document.createElement('button');
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', close);
   const saveBtn = document.createElement('button');
   saveBtn.textContent = 'Save';
-  footer.append(status, tokenInput, cancelBtn, saveBtn);
+  footer.append(footnoteBtn, status, tokenInput, cancelBtn, saveBtn);
   modal.appendChild(footer);
 
   const setStatus = (msg: string, kind: '' | 'ok' | 'error' = '') => {
@@ -295,7 +411,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   const doSave = async () => {
     if (!crepe) return;
     sessionToken = tokenInput.value.trim();
-    const content = recombine(fmTextarea.value, crepe.getMarkdown());
+    const content = recombine(fmTextarea.value, unescapeWikilinks(crepe.getMarkdown()));
     saveBtn.setAttribute('aria-busy', 'true');
     setStatus('Saving…');
     try {

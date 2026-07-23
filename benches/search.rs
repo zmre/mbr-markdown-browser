@@ -41,6 +41,7 @@ fn bench_search_metadata(c: &mut Criterion) {
         &[],
         "index.md",
         &[],
+        &[],
     );
     repo.scan_all().expect("scan failed");
 

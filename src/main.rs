@@ -197,6 +197,10 @@ async fn main() -> Result<(), MbrError> {
     if args.no_link_tracking {
         config.link_tracking = false;
     }
+    // Apply no_relationship_tracking from CLI
+    if args.no_relationship_tracking {
+        config.relationship_tracking = false;
+    }
     // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
     if args.mark_incomplete {
         config.mark_incomplete = Some(true);
@@ -388,6 +392,9 @@ async fn main() -> Result<(), MbrError> {
             index_file: config.index_file.clone(),
             is_index_file,
             url_depth: None,
+            // CLI stdout mode renders a single file with no repo index, so
+            // body wikilinks never resolve globally; the page URL is unused.
+            current_page_url: String::new(),
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only).
@@ -404,6 +411,7 @@ async fn main() -> Result<(), MbrError> {
             valid_tag_sources,
             mark_incomplete,
             &config.incomplete_markers,
+            None, // no repo wikilink index in CLI stdout mode
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;

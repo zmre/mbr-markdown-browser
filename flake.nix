@@ -486,30 +486,31 @@
             pname = "mbr";
             inherit version;
 
-            # No source needed - we're wrapping mbr-cli
+            # No source needed - we're assembling the app bundle around mbr-cli
             dontUnpack = true;
 
-            # Use makeBinaryWrapper for macOS - shell scripts can't be CFBundleExecutable
-            # for properly signed apps (Gatekeeper issues, code signing problems)
+            # makeBinaryWrapper produces a compiled Mach-O wrapper (not a shell
+            # script) for the bin/ entry point below.
             nativeBuildInputs = [pkgs.makeBinaryWrapper];
 
             installPhase = ''
-              # CLI binary accessible at $out/bin/mbr (wrapped with pdfium path)
-              mkdir -p $out/bin
-              makeBinaryWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
-                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
-
-              # macOS app bundle
+              # macOS app bundle. The REAL binary lives inside the bundle at
+              # Contents/MacOS/mbr — it is NOT a wrapper that execs out to the
+              # nix-store CLI. macOS derives NSBundle.mainBundle (and thus the
+              # dock icon, app name, and Info.plist identity) from the running
+              # executable's path, read UNRESOLVED via _NSGetExecutablePath. So a
+              # bundle executable that execs a path outside the bundle would lose
+              # the app identity. Keeping the real binary here makes a Finder
+              # launch resolve to MBR.app correctly.
               mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Frameworks,Resources,PlugIns}
 
-              # Use makeBinaryWrapper for app bundle executable (creates compiled binary, not shell script)
-              # This is required for proper code signing and Gatekeeper compatibility
-              makeBinaryWrapper ${packages.mbr-cli}/bin/mbr \
-                $out/Applications/MBR.app/Contents/MacOS/mbr \
-                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+              cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
+              chmod u+w $out/Applications/MBR.app/Contents/MacOS/mbr
 
-              # Bundle pdfium in Frameworks/ for fallback (release builds need this when
-              # Nix store paths don't exist; Rust code searches Contents/Frameworks/)
+              # Bundle pdfium in Frameworks/. The bundle binary discovers it
+              # relative to the executable (Contents/MacOS/mbr -> ../Frameworks/),
+              # so no PDFIUM_DYNAMIC_LIB_PATH is needed when launched from the
+              # bundle. Release builds also rely on this when Nix store paths are absent.
               cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib $out/Applications/MBR.app/Contents/Frameworks/
 
               cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
@@ -527,8 +528,20 @@
               /usr/bin/codesign --force --sign - \
                 --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
                 $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
-              # 3. Sign the app bundle
+              # 3. Sign the app bundle (also signs Contents/MacOS/mbr)
               /usr/bin/codesign --force --sign - $out/Applications/MBR.app
+
+              # CLI entry point: a thin wrapper that execs the binary INSIDE the
+              # bundle. Because the wrapper execs a path within MBR.app, after the
+              # exec the process's executable path is Contents/MacOS/mbr, so
+              # running `mbr` from the command line inherits the app identity and
+              # gets the proper dock icon. A bare symlink would NOT work here:
+              # macOS reads the exec path unresolved, so it would look for a bundle
+              # around $out/bin and find none. PDFIUM_DYNAMIC_LIB_PATH is set as a
+              # belt-and-suspenders fallback (the Frameworks copy also works).
+              mkdir -p $out/bin
+              makeBinaryWrapper $out/Applications/MBR.app/Contents/MacOS/mbr $out/bin/mbr \
+                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
             '';
 
             meta = with pkgs.lib; {

@@ -30,6 +30,13 @@ pub struct LinkTransformConfig {
     /// Page depth for converting root-relative URLs to relative (build mode).
     /// None = leave root-relative URLs unchanged (server mode).
     pub url_depth: Option<usize>,
+    /// The canonical URL of the page being rendered (e.g. `/docs/guide/`).
+    ///
+    /// Used together with `is_index_file` for Obsidian-style body-wikilink
+    /// resolution (current folder first, else global). Empty when there is no
+    /// current page context (e.g. CLI/QuickLook paths, which never resolve
+    /// wikilinks globally).
+    pub current_page_url: String,
 }
 
 impl Default for LinkTransformConfig {
@@ -39,6 +46,7 @@ impl Default for LinkTransformConfig {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         }
     }
 }
@@ -64,6 +72,7 @@ impl Default for LinkTransformConfig {
 ///     index_file: "index.md".to_string(),
 ///     is_index_file: false,
 ///     url_depth: None,
+///     current_page_url: String::new(),
 /// };
 ///
 /// // Regular markdown file: add ../ and trailing slash
@@ -276,6 +285,7 @@ mod tests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         }
     }
 
@@ -672,6 +682,7 @@ mod proptests {
             index_file: "index.md".to_string(),
             is_index_file: false,
             url_depth: None,
+            current_page_url: String::new(),
         }
     }
 

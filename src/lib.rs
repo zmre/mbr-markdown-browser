@@ -62,6 +62,7 @@ pub mod pdf_metadata;
 #[cfg(feature = "ffi")]
 pub mod quicklook;
 pub mod readability;
+pub mod relationships;
 pub mod repo;
 pub mod search;
 pub mod server;
@@ -79,9 +80,10 @@ pub mod video_transcode;
 pub mod video_transcode_cache;
 pub mod watcher;
 pub mod wikilink;
+pub mod wikilink_index;
 
 pub use build::{BuildStats, Builder};
-pub use config::{Config, SortField, TagSource, find_root_dir};
+pub use config::{Config, RelationType, SortField, TagSource, find_root_dir};
 #[cfg(feature = "media-metadata")]
 pub use errors::MetadataError;
 #[cfg(feature = "media-metadata")]

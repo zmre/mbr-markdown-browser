@@ -2,6 +2,13 @@
 
 ## What's Next
 
+* **Relationships & genealogy** (see [docs](docs/markdown/relationships.md))
+  * [ ] Better relationship graph: hover to preview a person (dates, portrait), click a node to navigate to that person's page and re-center/highlight their edges. Consider pan/zoom and collapse/expand for large trees.
+  * [ ] Nicer per-person data display: formatted/localized dates (e.g. "Mar 19, 1927", computed age/lifespan) and a small icon per line indicating what it is (born, died, birthplace, aliases, spouse, …), rather than plain text rows.
+  * [ ] Edit-mode support for structured person data: a friendlier way to view/edit the person frontmatter (born, died, born_place, gender, aliases, relationships) than hand-editing raw YAML in the in-browser editor — e.g. a small form for the known fields.
+  * [ ] Display the person `image` everywhere a person surfaces (infobox done; consider graph nodes and link/hover previews).
+  * [ ] Edit the person `image` from edit mode — pick/replace the portrait. If the in-browser editor can't upload images yet, add image/photo upload to the editor and wire it to the `image` field.
+
 * [ ] Can we allow cmd-f (ctrl-f elsewhere except that's page down so...) to do in-page search in gui? works fine already in browser so this should be part of the gui shell probably, not in-page javascript.
 * [ ] Should we allow tabs for viewing multiple markdown files in one session (gui)?
 * [ ] CriticMarkup support?

@@ -33,6 +33,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         theme: "default".to_string(),
         log_filter: None,
         link_tracking: true,
+        relationship_tracking: true,
+        relationship_types: mbr::config::default_relationship_types(),
         tag_sources: mbr::config::default_tag_sources(),
         sidebar_style: "panel".to_string(),
         sidebar_max_items: 100,
@@ -84,8 +86,16 @@ impl TestServer {
         repo: &TestRepo,
         config_fn: impl FnOnce(&mut mbr::server::ServerConfig) + Send + 'static,
     ) -> Self {
+        Self::start_at_path_with(repo.path().to_path_buf(), config_fn).await
+    }
+
+    /// Starts a server rooted at an arbitrary on-disk path (used for the
+    /// committed genealogy fixture), applying an optional config tweak.
+    async fn start_at_path_with(
+        root_dir: PathBuf,
+        config_fn: impl FnOnce(&mut mbr::server::ServerConfig) + Send + 'static,
+    ) -> Self {
         let port = find_available_port();
-        let root_dir = repo.path().to_path_buf();
 
         let handle = tokio::spawn(async move {
             let mut config = test_server_config(port, root_dir);
@@ -103,6 +113,11 @@ impl TestServer {
             client,
             _handle: handle,
         }
+    }
+
+    /// Starts a server rooted at an arbitrary on-disk path with default config.
+    async fn start_at_path(root_dir: PathBuf) -> Self {
+        Self::start_at_path_with(root_dir, |_| {}).await
     }
 
     fn url(&self, path: &str) -> String {
@@ -157,6 +172,28 @@ async fn test_serve_markdown_file() {
     let html = response.text().await.unwrap();
     assert_html_contains(&html, "<h1 id=\"hello-world\">Hello World</h1>");
     assert_html_contains(&html, "This is a test.");
+}
+
+#[tokio::test]
+async fn test_serve_markdown_file_with_dotted_name() {
+    // Regression: a markdown file whose name contains a period is served at a
+    // canonical URL that strips only the final extension (e.g.
+    // `patrick-walsh-b.2010-03-03.md` -> `/patrick-walsh-b.2010-03-03/`). It must
+    // resolve rather than 404.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "patrick-walsh-b.2010-03-03.md",
+        "# Patrick Walsh\n\nBorn 2010.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/patrick-walsh-b.2010-03-03/").await;
+
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Patrick Walsh");
+    assert_html_contains(&html, "Born 2010.");
 }
 
 #[tokio::test]
@@ -3786,4 +3823,235 @@ async fn test_edit_token_required_and_accepted() {
         .await
         .unwrap();
     assert_eq!(ok.status(), 200, "valid token must be accepted");
+}
+
+// ============================================================================
+// Typed relationships (genealogy fixture)
+// ============================================================================
+
+/// Absolute path to the committed genealogy fixture.
+fn genealogy_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/genealogy")
+}
+
+/// Fetch and parse a JSON endpoint.
+async fn get_json(server: &TestServer, path: &str) -> serde_json::Value {
+    let text = server.get_text(path).await;
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("invalid JSON from {path}: {e}\n{text}"))
+}
+
+#[tokio::test]
+async fn test_relationships_in_links_json() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+    server.wait_for_scan().await;
+
+    // John declares parent (George/Martha), spouse (Mary), sibling (Robert),
+    // and children (Alice/Sam).
+    let john = get_json(&server, "/people/john/links.json").await;
+    let rels = john["relationships"]
+        .as_array()
+        .expect("relationships array");
+
+    // Reciprocal parent edge resolves to George under predicate "parent".
+    let george = rels
+        .iter()
+        .find(|r| r["neighbor"] == "/people/george/")
+        .expect("john should have an edge to george");
+    assert_eq!(george["predicate"], "parent");
+    assert_eq!(george["resolved"], true);
+
+    // Spouse edge to Mary carries the marriage attributes.
+    let mary = rels
+        .iter()
+        .find(|r| r["neighbor"] == "/people/mary/")
+        .expect("john should have an edge to mary");
+    assert_eq!(mary["predicate"], "spouse");
+    assert_eq!(mary["attributes"]["married"], "1948-06-01");
+    assert_eq!(mary["attributes"]["place"], "Denver, CO");
+
+    // Children appear under predicate "child".
+    assert!(
+        rels.iter()
+            .any(|r| r["neighbor"] == "/people/alice/" && r["predicate"] == "child"),
+        "john should list Alice as a child"
+    );
+}
+
+#[tokio::test]
+async fn test_derived_relationships_on_counterpart() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+    server.wait_for_scan().await;
+
+    // Sam declares NO relationships, but should still see derived parents
+    // (John, Mary) and a derived sibling (Alice).
+    let sam = get_json(&server, "/people/sam/links.json").await;
+    let rels = sam["relationships"]
+        .as_array()
+        .expect("relationships array");
+
+    let parents: Vec<&str> = rels
+        .iter()
+        .filter(|r| r["predicate"] == "parent")
+        .map(|r| r["neighbor"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        parents.contains(&"/people/john/"),
+        "Sam's parents: {parents:?}"
+    );
+    assert!(
+        parents.contains(&"/people/mary/"),
+        "Sam's parents: {parents:?}"
+    );
+
+    assert!(
+        rels.iter()
+            .any(|r| r["predicate"] == "sibling" && r["neighbor"] == "/people/alice/"),
+        "Sam should have derived sibling Alice"
+    );
+
+    // All of Sam's edges are derived (declared on other notes).
+    assert!(rels.iter().all(|r| r["derived"] == true));
+}
+
+#[tokio::test]
+async fn test_unresolved_relationship_endpoint_kept_raw() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+    server.wait_for_scan().await;
+
+    // Robert has a spouse edge to an unknown "[[Jane Ghost]]".
+    let robert = get_json(&server, "/people/robert/links.json").await;
+    let rels = robert["relationships"]
+        .as_array()
+        .expect("relationships array");
+    let ghost = rels
+        .iter()
+        .find(|r| r["neighbor_raw"] == "[[Jane Ghost]]")
+        .expect("unresolved edge should be present");
+    assert_eq!(ghost["resolved"], false);
+    assert_eq!(ghost["neighbor"], "");
+    assert_eq!(ghost["neighbor_title"], "Jane Ghost");
+}
+
+#[tokio::test]
+async fn test_site_json_relationship_types_and_edges() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+    server.wait_for_scan().await;
+
+    let site = get_json(&server, "/.mbr/site.json").await;
+
+    // relationship_types registry is exposed with concrete labels.
+    let types = site["relationship_types"]
+        .as_array()
+        .expect("relationship_types array");
+    let child = types
+        .iter()
+        .find(|t| t["name"] == "child")
+        .expect("child type");
+    assert_eq!(child["label_plural"], "Children");
+    assert_eq!(child["inverse"], "parent");
+
+    // Per-note resolved relationships are attached to markdown_files entries.
+    let files = site["markdown_files"].as_array().expect("markdown_files");
+    let george = files
+        .iter()
+        .find(|f| f["url_path"] == "/people/george/")
+        .expect("george entry");
+    // In site.json, markdown_files entries carry frontmatter nested (the flat
+    // `type` field is a directory-listing convenience, not a site.json field).
+    assert_eq!(george["frontmatter"]["type"], "person");
+    let george_rels = george["relationships"].as_array().expect("george rels");
+    assert!(
+        george_rels
+            .iter()
+            .any(|r| r["predicate"] == "child" && r["neighbor"] == "/people/john/"),
+        "George should list John as a child in site.json"
+    );
+}
+
+#[tokio::test]
+async fn test_no_relationship_tracking_disables() {
+    let server = TestServer::start_at_path_with(genealogy_fixture_path(), |c| {
+        c.relationship_tracking = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    // links.json still serves, but with no relationships array.
+    let john = get_json(&server, "/people/john/links.json").await;
+    assert!(
+        john.get("relationships").is_none()
+            || john["relationships"].as_array().map(|a| a.is_empty()) == Some(true),
+        "relationships must be absent/empty when tracking is disabled: {john}"
+    );
+
+    // site.json omits relationship_types entirely.
+    let site = get_json(&server, "/.mbr/site.json").await;
+    assert!(site.get("relationship_types").is_none());
+}
+
+// ============================================================================
+// Body wikilink global resolution (Obsidian-style: current folder first, else
+// first match anywhere)
+// ============================================================================
+
+#[tokio::test]
+async fn test_body_wikilink_resolves_globally_across_folders() {
+    let repo = TestRepo::new();
+    // Target file lives in one folder...
+    repo.create_markdown("Walsh/Patrick Walsh.md", "# Patrick Walsh\n\nBio.");
+    // ...and the referencing page is in a *different* folder. `[[Patrick Walsh]]`
+    // is not a sibling, so it must resolve to the file's absolute URL. The
+    // missing wikilink must stay unresolved (404).
+    repo.create_markdown(
+        "Notes/family.md",
+        "# Family\n\nSee [[Patrick Walsh]] and [[Totally Missing]].",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // The rendered page links to the target's absolute URL (space percent-
+    // encoded by the HTML href escaper).
+    let html = server.get_text("/Notes/family/").await;
+    assert!(
+        html.contains("/Walsh/Patrick%20Walsh/") || html.contains("/Walsh/Patrick Walsh/"),
+        "expected a global link to the Patrick Walsh page, got:\n{html}"
+    );
+
+    // The globally-resolved target actually serves.
+    assert_eq!(
+        server.get("/Walsh/Patrick%20Walsh/").await.status(),
+        200,
+        "globally-resolved wikilink target should serve 200"
+    );
+
+    // The genuinely-missing wikilink still 404s (nothing matches anywhere).
+    assert_eq!(
+        server.get("/Notes/Totally%20Missing/").await.status(),
+        404,
+        "missing wikilink target must still 404"
+    );
+
+    // errors.json: NO broken link for the resolved wikilink, but the missing
+    // one IS reported broken.
+    let json: serde_json::Value = server
+        .get("/Notes/family/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        !errors.iter().any(|e| e["type"] == "broken_internal_link"
+            && e["target"].as_str().unwrap_or("").contains("Patrick")),
+        "resolved [[Patrick Walsh]] must NOT be reported broken: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_internal_link"
+            && e["target"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Totally Missing")),
+        "unresolved [[Totally Missing]] must be reported broken: {errors:?}"
+    );
 }

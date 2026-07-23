@@ -140,6 +140,9 @@ pub fn render_preview_with_config(
         index_file: config.index_file.clone(),
         is_index_file,
         url_depth: None,
+        // QuickLook previews a single file with no repo index, so body
+        // wikilinks never resolve globally; the page URL is unused.
+        current_page_url: String::new(),
     };
 
     // Create a minimal tokio runtime for async markdown rendering
@@ -168,6 +171,7 @@ pub fn render_preview_with_config(
                 std::collections::HashSet::new(), // No tag sources in QuickLook
                 mark_incomplete,
                 &incomplete_markers,
+                None, // no repo wikilink index in QuickLook
             )
             .await
         })

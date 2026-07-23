@@ -52,6 +52,11 @@ impl Templates {
             Tera::default()
         });
 
+        // Custom filters. `humandate` humanizes ISO-ish date strings (see
+        // `humanize_date`); registered here so it survives `reload()` and the
+        // `Tera::default()` fallback above.
+        tera.register_filter("humandate", humandate_filter);
+
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {
                 tracing::debug!("Adding default template {}", name);
@@ -251,6 +256,101 @@ impl Templates {
     }
 }
 
+/// Full English month names, indexed by `month - 1`.
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Tera `humandate` filter: humanize a date string, passing through any other
+/// value unchanged.
+///
+/// Strings are run through [`humanize_date`]; non-string values (numbers, bools,
+/// null, arrays, objects) are returned as-is so the filter never errors.
+fn humandate_filter(
+    value: &serde_json::Value,
+    _args: &HashMap<String, serde_json::Value>,
+) -> tera::Result<serde_json::Value> {
+    match value {
+        serde_json::Value::String(s) => Ok(serde_json::Value::String(humanize_date(s))),
+        other => Ok(other.clone()),
+    }
+}
+
+/// Returns `true` when `s` is a non-empty run of ASCII digits.
+fn is_all_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Parse an exactly-4-digit year component (e.g. `"1855"`).
+fn parse_year4(s: &str) -> Option<u32> {
+    if s.len() == 4 && is_all_ascii_digits(s) {
+        s.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Parse an exactly-2-digit month in `1..=12`.
+fn parse_month2(s: &str) -> Option<u32> {
+    if s.len() == 2 && is_all_ascii_digits(s) {
+        let m: u32 = s.parse().ok()?;
+        (1..=12).contains(&m).then_some(m)
+    } else {
+        None
+    }
+}
+
+/// Parse an exactly-2-digit day in `1..=31`.
+fn parse_day2(s: &str) -> Option<u32> {
+    if s.len() == 2 && is_all_ascii_digits(s) {
+        let d: u32 = s.parse().ok()?;
+        (1..=31).contains(&d).then_some(d)
+    } else {
+        None
+    }
+}
+
+/// Humanize an ISO-ish date string into a reader-friendly form.
+///
+/// - `YYYY-MM-DD` (valid month 1-12, day 1-31) → `"Month D, YYYY"` with the
+///   day's leading zero stripped (e.g. `"1855-10-30"` → `"October 30, 1855"`).
+/// - `YYYY-MM` (valid month) → `"Month YYYY"` (e.g. `"1855-10"` → `"October 1855"`).
+/// - `YYYY` → unchanged.
+/// - Anything else — partial, prefixed ("circa 1855"), already-formatted, or
+///   out-of-range (e.g. `"2020-13-40"`) — is returned UNCHANGED.
+fn humanize_date(input: &str) -> String {
+    let parts: Vec<&str> = input.split('-').collect();
+    match parts.as_slice() {
+        [y, m, d] => {
+            if let (Some(year), Some(month), Some(day)) =
+                (parse_year4(y), parse_month2(m), parse_day2(d))
+            {
+                return format!("{} {}, {}", MONTH_NAMES[(month - 1) as usize], day, year);
+            }
+        }
+        [y, m] => {
+            if let (Some(year), Some(month)) = (parse_year4(y), parse_month2(m)) {
+                return format!("{} {}", MONTH_NAMES[(month - 1) as usize], year);
+            }
+        }
+        // Everything else — a bare `YYYY`, partials, prose, already-formatted,
+        // or out-of-range dates — is returned unchanged by the fallthrough.
+        _ => {}
+    }
+    input.to_string()
+}
+
 /// Normalize a style frontmatter value to a space-separated string.
 ///
 /// Handles:
@@ -294,6 +394,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     (
         "_display_enhancements.html",
         include_str!("../templates/_display_enhancements.html"),
+    ),
+    (
+        "_person_infobox.html",
+        include_str!("../templates/_person_infobox.html"),
     ),
     // Main templates
     ("index.html", include_str!("../templates/index.html")),
@@ -358,5 +462,65 @@ mod tests {
     fn test_normalize_style_number() {
         let value = json!(42);
         assert_eq!(normalize_style_value(&value), "42");
+    }
+
+    #[test]
+    fn test_humanize_date_full() {
+        assert_eq!(humanize_date("1855-10-30"), "October 30, 1855");
+        assert_eq!(humanize_date("1902-01-10"), "January 10, 1902");
+    }
+
+    #[test]
+    fn test_humanize_date_full_strips_leading_zero_day() {
+        assert_eq!(humanize_date("1855-10-05"), "October 5, 1855");
+        assert_eq!(humanize_date("2000-12-01"), "December 1, 2000");
+    }
+
+    #[test]
+    fn test_humanize_date_year_month() {
+        assert_eq!(humanize_date("1855-10"), "October 1855");
+        assert_eq!(humanize_date("1902-01"), "January 1902");
+    }
+
+    #[test]
+    fn test_humanize_date_year_only_unchanged() {
+        assert_eq!(humanize_date("1855"), "1855");
+    }
+
+    #[test]
+    fn test_humanize_date_invalid_passthrough() {
+        // Out-of-range month/day, partials, prose, and already-formatted strings
+        // all pass through unchanged.
+        assert_eq!(humanize_date("2020-13-40"), "2020-13-40");
+        assert_eq!(humanize_date("2020-00-10"), "2020-00-10");
+        assert_eq!(humanize_date("2020-02-32"), "2020-02-32");
+        assert_eq!(humanize_date("circa 1855"), "circa 1855");
+        assert_eq!(humanize_date("October 30, 1855"), "October 30, 1855");
+        assert_eq!(humanize_date("1855-1-1"), "1855-1-1"); // not zero-padded
+        assert_eq!(humanize_date("55-10-30"), "55-10-30"); // 2-digit year
+        assert_eq!(humanize_date(""), "");
+    }
+
+    #[test]
+    fn test_humandate_filter_string_and_passthrough() {
+        let args = HashMap::new();
+        assert_eq!(
+            humandate_filter(&json!("1855-10-30"), &args).unwrap(),
+            json!("October 30, 1855")
+        );
+        // Non-string values pass through unchanged.
+        assert_eq!(humandate_filter(&json!(1855), &args).unwrap(), json!(1855));
+        assert_eq!(humandate_filter(&json!(null), &args).unwrap(), json!(null));
+    }
+
+    #[test]
+    fn test_humandate_filter_registered_in_tera() {
+        let mut tera = Tera::default();
+        tera.register_filter("humandate", humandate_filter);
+        tera.add_raw_template("t", "{{ born | humandate }}")
+            .unwrap();
+        let mut ctx = Context::new();
+        ctx.insert("born", "1855-10-30");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "October 30, 1855");
     }
 }

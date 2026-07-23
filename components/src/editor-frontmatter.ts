@@ -60,3 +60,24 @@ export function recombine(frontmatter: string | null, body: string): string {
   }
   return `---\n${fm}\n---\n${body}`;
 }
+
+/**
+ * Restore `[[wikilink]]` brackets that Milkdown's markdown serializer escapes.
+ *
+ * `crepe.getMarkdown()` runs remark-stringify, which escapes the `[` and `]` of
+ * `[[...]]` (and can escape interior `|`, `#`, or `\`) because `[[...]]` is not a
+ * node in the editor schema — turning `[[John Doe]]` into `\[\[John Doe\]\]` and
+ * breaking the link on save. This reverses that escaping so wikilinks survive an
+ * edit round-trip.
+ *
+ * Matches `[[...]]` with an optional backslash before ANY of the four brackets
+ * (so fully- or partially-escaped forms both restore) and un-escapes interior
+ * `\\`, `\|`, and `\#`. Ordinary `[text](url)` links and lone escaped brackets
+ * outside a `[[…]]` pair are left untouched.
+ */
+export function unescapeWikilinks(md: string): string {
+  return md.replace(
+    /\\?\[\\?\[([^\n\]]*?)\\?\]\\?\]/g,
+    (_m, inner: string) => `[[${inner.replace(/\\([\\|#])/g, '$1')}]]`,
+  );
+}

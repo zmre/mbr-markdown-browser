@@ -22,7 +22,7 @@ These are pulldown-cmark's built-in extensions:
 | [Heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html) | `# Title {#id}` or `# Title {.myclass}` | Custom anchor IDs or classes |
 | Autolinks | `<https://...>` | Clickable URLs |
 | [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$` | LaTeX via KaTeX |
-| [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" |
+| [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
 
 ## YAML Frontmatter
 
@@ -48,6 +48,7 @@ Frontmatter powers:
 - **Descriptions**: Search results and previews
 - **Tags**: Navigation and filtering
 - **Custom fields**: Available in templates
+- **Special page types**: like [slides](slides/) or [person](relationships/)
 
 ### Supported Fields
 
@@ -58,6 +59,7 @@ Frontmatter powers:
 | `tags` | Comma-separated tags |
 | `date` | Publication date |
 | `author` | Author name |
+| `type` | Note type |
 | Any field | Available via `frontmatter_json` |
 
 ## GitHub-style Alerts
@@ -309,7 +311,9 @@ Here is a statement that needs citation[^1].
 
 mbr uses pulldown-cmark for markdown parsing[^1], which provides excellent CommonMark compliance and performance[^2].
 
-Footnotes appear at the bottom of the page.
+Footnotes appear at the bottom of the page. On desktop (hover-capable devices),
+hovering a footnote reference shows a preview card with the note's content;
+clicking still jumps to the definition at the bottom.
 
 ## Heading Anchors
 
@@ -390,6 +394,7 @@ URLs in angle brackets become clickable:
 ## See Also
 
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
+- [Relationships & Genealogy](relationships/) - Typed frontmatter relationships and family trees
 - [Presentation Slides](slides/) - Create slide presentations from markdown
 - [Slides Example](test-slides/) - A live example presentation
 

@@ -138,7 +138,8 @@ fn facet_matches(
 fn field_weight(field: &str) -> u32 {
     match field {
         "title" => 3,
-        "tags" | "keywords" | "categories" | "category" => 2,
+        // An exact maiden-name (alias) hit is a strong signal, like a tag.
+        "tags" | "keywords" | "categories" | "category" | "aliases" | "alias" => 2,
         "description" | "summary" => 1,
         _ => 1, // All other fields get base weight
     }
@@ -1319,6 +1320,8 @@ mod tests {
         assert_eq!(field_weight("keywords"), 2);
         assert_eq!(field_weight("categories"), 2);
         assert_eq!(field_weight("category"), 2);
+        assert_eq!(field_weight("aliases"), 2);
+        assert_eq!(field_weight("alias"), 2);
         assert_eq!(field_weight("description"), 1);
         assert_eq!(field_weight("summary"), 1);
         assert_eq!(field_weight("custom_field"), 1);
