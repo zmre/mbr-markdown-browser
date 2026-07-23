@@ -9,8 +9,18 @@ import {
   buildRegistry,
   classifyRelationship,
   buildRelationshipGraph,
+  isGraphRelationship,
   canonicalizeNotePath,
+  computeGenerations,
+  mermaidNodeId,
   generateMermaidSource,
+  parseViewBox,
+  formatViewBox,
+  clampViewBoxScale,
+  zoomViewBoxAtPoint,
+  panViewBox,
+  clientPointToSvg,
+  type ViewBox,
   notesByPathFromSite,
   formatNodeLabel,
   formatLifespan,
@@ -255,12 +265,17 @@ describe('buildRelationshipGraph', () => {
 
   it('collects the whole family and de-duplicates every reciprocal edge', () => {
     const graph = buildRelationshipGraph('/people/john/', notes, registry, 3)
-    // All seven people are reachable within one hop of John.
+    // All seven people are reachable within three hops of John (Robert via
+    // George's child edge, not the — now excluded — John↔Robert sibling link).
     expect(graph.nodes).toHaveLength(7)
-    // 8 parent→child edges + 4 symmetric (2 spouse, 2 sibling) = 12 unique.
-    expect(graph.edges).toHaveLength(12)
+    // 8 parent→child edges + 2 spouse; sibling edges are excluded.
+    expect(graph.edges).toHaveLength(10)
     expect(graph.edges.filter((e) => e.kind === 'hierarchical')).toHaveLength(8)
-    expect(graph.edges.filter((e) => e.kind === 'symmetric')).toHaveLength(4)
+    expect(graph.edges.filter((e) => e.kind === 'symmetric')).toHaveLength(2)
+    // No sibling edge is ever produced.
+    expect(graph.edges.some((e) => e.relType === 'sibling')).toBe(false)
+    // A sibling that is a co-child of an in-graph parent still appears as a node.
+    expect(graph.nodes.some((n) => n.urlPath === '/people/robert/')).toBe(true)
     // The unresolved Jane Ghost spouse edge must not appear.
     expect(graph.nodes.some((n) => n.title === 'Jane Ghost')).toBe(false)
     // Focus flag is set exactly once.
@@ -269,18 +284,24 @@ describe('buildRelationshipGraph', () => {
   })
 
   it('honours the depth bound (nodes within N hops of the focus)', () => {
-    // Sam declares no edges of his own; at depth 1 only his direct neighbours appear.
+    // Sam's own edges are his two parents (the sibling link to Alice is excluded),
+    // so at depth 1 only John and Mary join him.
     const depth1 = buildRelationshipGraph('/people/sam/', notes, registry, 1)
     expect(new Set(depth1.nodes.map((n) => n.urlPath))).toEqual(
-      new Set(['/people/sam/', '/people/john/', '/people/mary/', '/people/alice/'])
+      new Set(['/people/sam/', '/people/john/', '/people/mary/'])
     )
-    // Edges among the collected set (Sam's parents/sibling + the parents' own links).
-    expect(depth1.edges).toHaveLength(6)
+    // John→Sam, Mary→Sam (hierarchical) + John↔Mary (spouse) = 3 edges.
+    expect(depth1.edges).toHaveLength(3)
 
-    // Depth 2 reaches the grandparents and uncle: the full family.
+    // Depth 2 reaches Alice and the grandparents (but not Robert, who is only
+    // within reach at depth 3 via George's child edge).
     const depth2 = buildRelationshipGraph('/people/sam/', notes, registry, 2)
-    expect(depth2.nodes).toHaveLength(7)
-    expect(depth2.edges).toHaveLength(12)
+    expect(new Set(depth2.nodes.map((n) => n.urlPath))).toEqual(
+      new Set(['/people/sam/', '/people/john/', '/people/mary/', '/people/alice/', '/people/george/', '/people/martha/'])
+    )
+    // 6 parent→child edges + 2 spouse (George↔Martha, John↔Mary) = 8.
+    expect(depth2.edges).toHaveLength(8)
+    expect(depth2.edges.some((e) => e.relType === 'sibling')).toBe(false)
   })
 
   it('derives edges purely from other notes for a note with no declarations', () => {
@@ -361,13 +382,47 @@ describe('buildRelationshipGraph', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Sibling exclusion
+// ---------------------------------------------------------------------------
+
+describe('sibling exclusion', () => {
+  it('isGraphRelationship rejects only sibling relationships', () => {
+    expect(isGraphRelationship(rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/x/', direction: 'outgoing' }))).toBe(false)
+    // Matches on either field, case-insensitively.
+    expect(isGraphRelationship(rel({ rel_type: 'Sibling', predicate: 'child', neighbor: '/x/', direction: 'outgoing' }))).toBe(false)
+    expect(isGraphRelationship(rel({ rel_type: 'child', predicate: 'child', neighbor: '/x/', direction: 'outgoing' }))).toBe(true)
+    expect(isGraphRelationship(rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/x/', direction: 'outgoing' }))).toBe(true)
+  })
+
+  it('excludes a node reachable ONLY through a sibling link', () => {
+    // X has a spouse (Z) and a sibling (Y). Y has no other connection, so it is
+    // reachable only via the excluded sibling link and must not appear.
+    const notes = new Map<string, SiteNote>([
+      ['/x/', { url_path: '/x/', frontmatter: { title: 'X' }, relationships: [
+        rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/z/', direction: 'outgoing' }),
+        rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/y/', direction: 'outgoing' }),
+      ] }],
+      ['/z/', { url_path: '/z/', frontmatter: { title: 'Z' }, relationships: [rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/x/', direction: 'incoming' })] }],
+      ['/y/', { url_path: '/y/', frontmatter: { title: 'Y' }, relationships: [rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/x/', direction: 'incoming' })] }],
+    ])
+    const graph = buildRelationshipGraph('/x/', notes, registry, 3)
+    expect(graph.nodes.map((n) => n.urlPath).sort()).toEqual(['/x/', '/z/'])
+    expect(graph.nodes.some((n) => n.urlPath === '/y/')).toBe(false)
+    // Only the spouse edge remains.
+    expect(graph.edges).toHaveLength(1)
+    expect(graph.edges[0].kind).toBe('symmetric')
+    expect(graph.edges.some((e) => e.relType === 'sibling')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // generateMermaidSource
 // ---------------------------------------------------------------------------
 
 describe('generateMermaidSource', () => {
   const notes = genealogyNotes()
 
-  it('renders a top-down family tree with a highlighted focus', () => {
+  it('renders a top-down family tree grouped into per-generation LR subgraphs', () => {
     const graph = buildRelationshipGraph('/people/john/', notes, registry, 3)
     const src = generateMermaidSource(graph)
 
@@ -377,13 +432,31 @@ describe('generateMermaidSource', () => {
     // Node label includes the lifespan.
     expect(src).toContain('John Doe (1925–1999)')
 
-    // One node declaration per node, and one edge statement per unique edge.
-    const nodeDecls = src.split('\n').filter((l) => /^ {2}n\d+\["/.test(l))
+    // Three generations (grandparents / John's row / grandchildren), each in a
+    // `subgraph … direction LR` block.
+    const subgraphs = src.split('\n').filter((l) => /^ {2}subgraph gen\d+ \[" "\]$/.test(l))
+    expect(subgraphs).toHaveLength(3)
+    const lrDirectives = src.split('\n').filter((l) => /^ {4}direction LR$/.test(l))
+    expect(lrDirectives).toHaveLength(3)
+
+    // One node declaration per node, indented inside its generation subgraph.
+    const nodeDecls = src.split('\n').filter((l) => /^ {4}n\d+\["/.test(l))
     expect(nodeDecls).toHaveLength(7)
+
+    // Edges are emitted after the subgraphs (at top-level indent), one per edge.
     const arrowEdges = src.split('\n').filter((l) => l.includes('-->'))
     expect(arrowEdges).toHaveLength(8) // hierarchical arrows
     const dottedEdges = src.split('\n').filter((l) => /-\.-|-\. /.test(l))
-    expect(dottedEdges).toHaveLength(4) // symmetric dotted links
+    expect(dottedEdges).toHaveLength(2) // symmetric dotted links (spouses only)
+    // Sibling links are excluded entirely.
+    expect(src).not.toContain('Sibling')
+
+    // Generations are emitted ancestors-first (gen0 before gen1 before gen2).
+    const genOrder = src
+      .split('\n')
+      .filter((l) => /^ {2}subgraph gen\d+ /.test(l))
+      .map((l) => l.match(/gen(\d+)/)![1])
+    expect(genOrder).toEqual(['0', '1', '2'])
 
     // Focus highlighting present.
     expect(src).toContain('classDef focus')
@@ -391,10 +464,10 @@ describe('generateMermaidSource', () => {
   })
 
   it('uses left-to-right orientation when there is no hierarchy', () => {
-    // A note with only symmetric siblings → no hierarchical edges.
+    // A note with only a symmetric spouse link → no hierarchical edges.
     const flat = new Map<string, SiteNote>([
-      ['/p/a/', { url_path: '/p/a/', frontmatter: { title: 'A' }, relationships: [rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/p/b/', direction: 'outgoing' })] }],
-      ['/p/b/', { url_path: '/p/b/', frontmatter: { title: 'B' }, relationships: [rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/p/a/', direction: 'incoming' })] }],
+      ['/p/a/', { url_path: '/p/a/', frontmatter: { title: 'A' }, relationships: [rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/p/b/', direction: 'outgoing' })] }],
+      ['/p/b/', { url_path: '/p/b/', frontmatter: { title: 'B' }, relationships: [rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/p/a/', direction: 'incoming' })] }],
     ])
     const graph = buildRelationshipGraph('/p/a/', flat, registry, 2)
     const src = generateMermaidSource(graph)
@@ -467,5 +540,221 @@ describe('gender tinting', () => {
     expect(src).not.toContain('classDef genderMale')
     // Focus highlight still emitted.
     expect(/class n\d+ focus;/.test(src)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeGenerations
+// ---------------------------------------------------------------------------
+
+describe('computeGenerations', () => {
+  /**
+   * GP → (P + spouse SP) → (C + SB). C and SB are BOTH children of P (co-children)
+   * and also declare a sibling link to each other. The sibling link is excluded
+   * from the graph, but SB still appears at the child generation via P→SB.
+   */
+  function threeGenFamily(): Map<string, SiteNote> {
+    const notes: SiteNote[] = [
+      {
+        url_path: '/gp/',
+        frontmatter: { type: 'person', title: 'GP' },
+        relationships: [rel({ rel_type: 'child', predicate: 'child', neighbor: '/p/', direction: 'outgoing' })],
+      },
+      {
+        url_path: '/p/',
+        frontmatter: { type: 'person', title: 'P' },
+        relationships: [
+          rel({ rel_type: 'child', predicate: 'parent', neighbor: '/gp/', direction: 'incoming' }),
+          rel({ rel_type: 'child', predicate: 'child', neighbor: '/c/', direction: 'outgoing' }),
+          rel({ rel_type: 'child', predicate: 'child', neighbor: '/sb/', direction: 'outgoing' }),
+          rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/sp/', direction: 'outgoing' }),
+        ],
+      },
+      {
+        url_path: '/sp/',
+        frontmatter: { type: 'person', title: 'SP' },
+        relationships: [rel({ rel_type: 'spouse', predicate: 'spouse', neighbor: '/p/', direction: 'incoming' })],
+      },
+      {
+        url_path: '/c/',
+        frontmatter: { type: 'person', title: 'C' },
+        relationships: [
+          rel({ rel_type: 'child', predicate: 'parent', neighbor: '/p/', direction: 'incoming' }),
+          rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/sb/', direction: 'outgoing' }),
+        ],
+      },
+      {
+        url_path: '/sb/',
+        frontmatter: { type: 'person', title: 'SB' },
+        relationships: [
+          rel({ rel_type: 'child', predicate: 'parent', neighbor: '/p/', direction: 'incoming' }),
+          rel({ rel_type: 'sibling', predicate: 'sibling', neighbor: '/c/', direction: 'incoming' }),
+        ],
+      },
+    ]
+    return new Map(notes.map((n) => [n.url_path, n]))
+  }
+
+  it('numbers generations ancestors-first, co-children on the same row', () => {
+    // Focus on the middle generation (P): ancestors go negative then normalize
+    // so the grandparent row is 0. SB lands on the child row via P→SB (its
+    // sibling link to C is excluded).
+    const graph = buildRelationshipGraph('/p/', threeGenFamily(), registry, 3)
+    const gens = computeGenerations(graph)
+    expect(gens.get('/gp/')).toBe(0) // grandparent
+    expect(gens.get('/p/')).toBe(1) // parent (focus)
+    expect(gens.get('/sp/')).toBe(1) // spouse: same generation as parent
+    expect(gens.get('/c/')).toBe(2) // child
+    expect(gens.get('/sb/')).toBe(2) // co-child (not via the sibling link)
+  })
+
+  it('normalizes the minimum generation to 0', () => {
+    const graph = buildRelationshipGraph('/p/', threeGenFamily(), registry, 3)
+    const values = [...computeGenerations(graph).values()]
+    expect(Math.min(...values)).toBe(0)
+  })
+
+  it('returns an empty map for an empty graph', () => {
+    expect(computeGenerations({ focus: '/x/', nodes: [], edges: [] }).size).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// mermaidNodeId
+// ---------------------------------------------------------------------------
+
+describe('mermaidNodeId', () => {
+  it('extracts the node id from a mermaid v11 flowchart element id', () => {
+    expect(mermaidNodeId('flowchart-n0-1')).toBe('n0')
+    expect(mermaidNodeId('flowchart-n12-3')).toBe('n12')
+    expect(mermaidNodeId('flowchart-n7-10')).toBe('n7')
+  })
+
+  it('falls back to a trailing n<number>', () => {
+    expect(mermaidNodeId('n5')).toBe('n5')
+    expect(mermaidNodeId('flowchart-n2')).toBe('n2')
+  })
+
+  it('returns null when there is no node id', () => {
+    expect(mermaidNodeId('')).toBeNull()
+    expect(mermaidNodeId('flowchart-node-0')).toBeNull()
+    expect(mermaidNodeId('random-thing')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Viewport (zoom / pan) math
+// ---------------------------------------------------------------------------
+
+describe('parseViewBox / formatViewBox', () => {
+  it('parses a space-separated viewBox', () => {
+    expect(parseViewBox('0 0 100 50')).toEqual({ x: 0, y: 0, w: 100, h: 50 })
+  })
+
+  it('parses a comma/whitespace-separated viewBox', () => {
+    expect(parseViewBox(' 1, 2, 30 , 40 ')).toEqual({ x: 1, y: 2, w: 30, h: 40 })
+  })
+
+  it('rejects malformed, wrong-arity, or non-positive-size boxes', () => {
+    expect(parseViewBox(null)).toBeNull()
+    expect(parseViewBox('')).toBeNull()
+    expect(parseViewBox('0 0 100')).toBeNull()
+    expect(parseViewBox('0 0 100 nan')).toBeNull()
+    expect(parseViewBox('0 0 0 50')).toBeNull()
+    expect(parseViewBox('0 0 100 -5')).toBeNull()
+  })
+
+  it('round-trips through formatViewBox', () => {
+    const vb: ViewBox = { x: 5, y: -3, w: 200, h: 120 }
+    expect(formatViewBox(vb)).toBe('5 -3 200 120')
+    expect(parseViewBox(formatViewBox(vb))).toEqual(vb)
+  })
+})
+
+describe('clampViewBoxScale', () => {
+  const baseW = 100
+  it('clamps zoom-in to maxScale (smallest width)', () => {
+    // Requesting an absurdly small width clamps to baseW / maxScale.
+    expect(clampViewBoxScale(1, baseW, 1, 8)).toBeCloseTo(100 / 8)
+  })
+
+  it('clamps zoom-out to minScale (largest width)', () => {
+    // Requesting a huge width clamps to baseW / minScale.
+    expect(clampViewBoxScale(10000, baseW, 1, 8)).toBeCloseTo(100 / 1)
+  })
+
+  it('passes through a width within bounds', () => {
+    expect(clampViewBoxScale(40, baseW, 1, 8)).toBe(40)
+  })
+})
+
+describe('zoomViewBoxAtPoint', () => {
+  const base: ViewBox = { x: 0, y: 0, w: 100, h: 80 }
+  const opts = { minScale: 1, maxScale: 8, baseW: 100 }
+
+  it('keeps the zoom point fixed (same fractional position)', () => {
+    const point = { x: 25, y: 20 }
+    const before = { fx: (point.x - base.x) / base.w, fy: (point.y - base.y) / base.h }
+    const out = zoomViewBoxAtPoint(base, 2, point, opts)
+    const after = { fx: (point.x - out.x) / out.w, fy: (point.y - out.y) / out.h }
+    expect(after.fx).toBeCloseTo(before.fx)
+    expect(after.fy).toBeCloseTo(before.fy)
+  })
+
+  it('zooms in: a factor > 1 shrinks the viewBox uniformly', () => {
+    const out = zoomViewBoxAtPoint(base, 2, { x: 50, y: 40 }, opts)
+    expect(out.w).toBeCloseTo(50)
+    expect(out.h).toBeCloseTo(40) // aspect preserved
+  })
+
+  it('zooms out: a factor < 1 grows the viewBox (bounded by minScale = fit)', () => {
+    // Already at fit (scale 1); zooming out cannot exceed the base width.
+    const out = zoomViewBoxAtPoint(base, 0.5, { x: 50, y: 40 }, opts)
+    expect(out.w).toBeCloseTo(100)
+  })
+
+  it('does not zoom in past maxScale', () => {
+    const out = zoomViewBoxAtPoint(base, 1000, { x: 50, y: 40 }, opts)
+    expect(out.w).toBeCloseTo(100 / 8)
+  })
+
+  it('returns the input unchanged for a non-positive factor or empty box', () => {
+    expect(zoomViewBoxAtPoint(base, 0, { x: 0, y: 0 }, opts)).toEqual(base)
+    expect(zoomViewBoxAtPoint({ x: 0, y: 0, w: 0, h: 0 }, 2, { x: 0, y: 0 }, opts)).toEqual({ x: 0, y: 0, w: 0, h: 0 })
+  })
+})
+
+describe('panViewBox', () => {
+  it('translates the origin by the negated user delta', () => {
+    const vb: ViewBox = { x: 10, y: 20, w: 100, h: 80 }
+    // Dragging content right (positive dx) moves the viewBox origin left.
+    expect(panViewBox(vb, 5, -3)).toEqual({ x: 5, y: 23, w: 100, h: 80 })
+  })
+
+  it('preserves width and height', () => {
+    const vb: ViewBox = { x: 0, y: 0, w: 100, h: 80 }
+    const out = panViewBox(vb, 40, 40)
+    expect(out.w).toBe(100)
+    expect(out.h).toBe(80)
+  })
+})
+
+describe('clientPointToSvg', () => {
+  const rect = { left: 0, top: 0, width: 200, height: 160 }
+  const vb: ViewBox = { x: 0, y: 0, w: 100, h: 80 }
+
+  it('maps the canvas center to the viewBox center', () => {
+    expect(clientPointToSvg(100, 80, rect, vb)).toEqual({ x: 50, y: 40 })
+  })
+
+  it('maps a corner accounting for the rect offset', () => {
+    const offset = { left: 20, top: 10, width: 200, height: 160 }
+    expect(clientPointToSvg(20, 10, offset, vb)).toEqual({ x: 0, y: 0 })
+    expect(clientPointToSvg(220, 170, offset, vb)).toEqual({ x: 100, y: 80 })
+  })
+
+  it('accounts for a non-zero viewBox origin', () => {
+    const shifted: ViewBox = { x: 10, y: 5, w: 100, h: 80 }
+    expect(clientPointToSvg(0, 0, rect, shifted)).toEqual({ x: 10, y: 5 })
   })
 })

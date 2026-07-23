@@ -6,7 +6,10 @@
 {% if type and type == "person" %}{% if image or born or died or born_place or aliases %}
 <aside class="mbr-person-infobox"{% if gender %} data-gender="{{ gender }}"{% endif %}>
   {% if image %}<img class="mbr-person-portrait" src="{{ image }}" alt="{% if title %}{{ title }}{% endif %}" />{% endif %}
-  {% if born or died %}<p class="mbr-person-vital mbr-person-lifespan">{% if born and died %}{{ born }} – {{ died }}{% elif born %}b. {{ born }}{% else %}d. {{ died }}{% endif %}</p>{% endif %}
+  {% if born or died %}
+  {% if born %}<p class="mbr-person-vital mbr-person-date"><svg class="mbr-person-date-icon" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg><span class="mbr-person-date-label">Born</span> {{ born | humandate }}</p>{% endif %}
+  {% if died %}<p class="mbr-person-vital mbr-person-date"><svg class="mbr-person-date-icon" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg><span class="mbr-person-date-label">Died</span> {{ died | humandate }}</p>{% endif %}
+  {% endif %}
   {% if born_place %}<p class="mbr-person-vital mbr-person-birthplace">{{ born_place }}</p>{% endif %}
   {% if aliases %}<p class="mbr-person-vital mbr-person-aliases">Also known as {{ aliases | join(sep=", ") }}</p>{% endif %}
 </aside>
@@ -33,6 +36,23 @@
   }
   .mbr-person-aliases {
     font-style: italic;
+  }
+  .mbr-person-date {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+  }
+  .mbr-person-date-icon {
+    flex: none;
+    align-self: center;
+    opacity: 0.8;
+  }
+  .mbr-person-date-label {
+    font-weight: 600;
+    color: var(--pico-muted-color, #666);
+  }
+  .mbr-person-date-label::after {
+    content: ":";
   }
 </style>
 {% endif %}{% endif %}

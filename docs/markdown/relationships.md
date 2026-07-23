@@ -50,9 +50,9 @@ but mbr gives a few of them first-class treatment:
 
 | Field | Type | Purpose |
 |--------|------|---------|
-| `born` | date/string | Birth date; shown as the start of the lifespan (e.g. *1925–1999*). |
-| `died` | date/string | Death date; shown as the end of the lifespan. |
-| `born_place` | string | Birthplace; displayed with the lifespan on the person's page. |
+| `born` | date/string | Birth date; shown on its own line in the person infobox with a 📅 icon, humanized when it's an ISO date (e.g. `1855-10-30` → *October 30, 1855*). Other formats display as written. |
+| `died` | date/string | Death date; shown on its own line beneath `born`, humanized the same way. |
+| `born_place` | string | Birthplace; displayed on the person's page beneath the dates. |
 | `image` | path or URL | Portrait; displayed on the person's page. |
 | `gender` | string | Styles the family-tree nodes (e.g. `male`, `female`); any value is accepted. |
 | `aliases` | array of strings | Alternate and maiden names (see below). |

@@ -17,7 +17,7 @@ import { LitElement, html, css, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { waitForDom, loadScript, getMbrAssetBase } from './dynamic-loader.ts'
-import { subscribeSiteNav, getCanonicalPath } from './shared.ts'
+import { subscribeSiteNav, getCanonicalPath, resolveUrl } from './shared.ts'
 
 // ============================================================================
 // site.json data shapes (subset we consume)
@@ -258,6 +258,27 @@ const MAX_DEPTH = 6
 const DEFAULT_MAX_NODES = 80
 
 /**
+ * Relationship types excluded from the graph entirely. Sibling links clutter the
+ * family tree and are redundant: siblings share parents, so a sibling that is a
+ * co-child of an in-graph parent still appears via the parent→child edges (with
+ * the correct generation). Only a sibling reachable *solely* through a sibling
+ * link drops out — which is intended.
+ */
+const EXCLUDED_REL_TYPES = new Set(['sibling'])
+
+/**
+ * True when a relationship should participate in the graph (node expansion,
+ * edges, and generations). Matches the excluded set against both the lowercased
+ * `predicate` and `rel_type` so either spelling is caught.
+ */
+export function isGraphRelationship(rel: SiteRelationship): boolean {
+  return (
+    !EXCLUDED_REL_TYPES.has((rel.predicate || '').toLowerCase()) &&
+    !EXCLUDED_REL_TYPES.has((rel.rel_type || '').toLowerCase())
+  )
+}
+
+/**
  * Normalize a note path to the canonical trailing-slash form used by
  * `site.json` `url_path` keys.
  *
@@ -308,6 +329,7 @@ export function buildRelationshipGraph(
       const note = notesByPath.get(path)
       if (!note?.relationships) continue
       for (const rel of note.relationships) {
+        if (!isGraphRelationship(rel)) continue
         if (!rel.resolved || !rel.neighbor || rel.neighbor === path) continue
         const neighbor = rel.neighbor
         if (!notesByPath.has(neighbor) || included.has(neighbor)) continue
@@ -338,6 +360,7 @@ export function buildRelationshipGraph(
     const note = notesByPath.get(path)
     if (!note?.relationships) continue
     for (const rel of note.relationships) {
+      if (!isGraphRelationship(rel)) continue
       const classified = classifyRelationship(path, rel, registry)
       if (!classified) continue
       const { edge, key } = classified
@@ -353,6 +376,95 @@ export function buildRelationshipGraph(
 export function hasHierarchy(graph: RelationshipGraph): boolean {
   return graph.edges.some((e) => e.kind === 'hierarchical')
 }
+
+/**
+ * Assign each node a generation index for the hierarchical family-tree layout.
+ * Lower indices are older generations (emitted first / on top).
+ *
+ * Relative offsets between adjacent nodes:
+ *  - a hierarchical edge `from`→`to` is parent→child, so `child = parent + 1`;
+ *  - a symmetric edge (spouse/sibling) — and any non-hierarchical edge — keeps
+ *    both endpoints on the SAME generation.
+ *
+ * The focus is seeded at 0 and generations propagate by BFS; the first value
+ * assigned to a node wins, which both guards against cycles and guarantees
+ * termination (each node is enqueued at most once). Nodes in components
+ * disconnected from the focus are seeded from their own local 0. Finally every
+ * value is shifted so the minimum generation is 0, giving clean ascending
+ * indices (ancestors first) suitable for subgraph ids.
+ */
+export function computeGenerations(graph: RelationshipGraph): Map<string, number> {
+  const gen = new Map<string, number>()
+  const paths = graph.nodes.map((n) => n.urlPath)
+  if (paths.length === 0) return gen
+
+  // Adjacency carrying the generation delta from a node to its neighbour.
+  // `graph.edges` is already free of excluded (sibling) relationships — they are
+  // filtered out in `buildRelationshipGraph` — so generations aren't influenced
+  // by sibling links.
+  const adj = new Map<string, Array<{ other: string; delta: number }>>()
+  for (const p of paths) adj.set(p, [])
+  for (const e of graph.edges) {
+    const fromAdj = adj.get(e.from)
+    const toAdj = adj.get(e.to)
+    if (!fromAdj || !toAdj) continue
+    const delta = e.kind === 'hierarchical' ? 1 : 0
+    fromAdj.push({ other: e.to, delta })
+    toAdj.push({ other: e.from, delta: -delta })
+  }
+
+  // BFS from the focus first, then from any still-unassigned node (disconnected
+  // components). First-assignment-wins is the cycle guard.
+  const seeds = [graph.focus, ...paths]
+  for (const seed of seeds) {
+    if (!adj.has(seed) || gen.has(seed)) continue
+    gen.set(seed, 0)
+    const queue: string[] = [seed]
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      const curGen = gen.get(cur)!
+      for (const { other, delta } of adj.get(cur)!) {
+        if (gen.has(other)) continue
+        gen.set(other, curGen + delta)
+        queue.push(other)
+      }
+    }
+  }
+
+  // Shift so the minimum generation is 0 (ancestors, seeded negative, become the
+  // lowest indices and thus the top rows).
+  let min = Infinity
+  for (const v of gen.values()) if (v < min) min = v
+  if (min !== 0 && Number.isFinite(min)) {
+    for (const [k, v] of gen) gen.set(k, v - min)
+  }
+  return gen
+}
+
+/**
+ * Extract the mermaid graph node id (e.g. `n3`) from a rendered SVG node
+ * element's `id` attribute. Mermaid v11 flowcharts use `flowchart-<nodeId>-<n>`;
+ * a trailing `n\d+` is accepted as a fallback. Returns `null` when no id is
+ * present. Pure/exported for unit testing.
+ */
+export function mermaidNodeId(elId: string): string | null {
+  if (!elId) return null
+  const primary = elId.match(/^flowchart-(n\d+)-\d+$/)
+  if (primary) return primary[1]
+  const fallback = elId.match(/(n\d+)(?:-\d+)?$/)
+  return fallback ? fallback[1] : null
+}
+
+/**
+ * When true, the hierarchical layout wraps each generation's nodes in a
+ * `subgraph ... direction LR` block so a generation renders as a horizontal row.
+ *
+ * CAVEAT: mermaid/dagre often IGNORES a subgraph's `direction` once edges cross
+ * subgraph boundaries — which family-tree (parent→child) edges always do. If the
+ * layout regresses, flip this to `false` to emit a plain `graph TD` with flat
+ * node declarations (a one-line revert); all other output is identical.
+ */
+const USE_GENERATION_SUBGRAPHS = true
 
 /**
  * Generate mermaid `graph` source for a relationship graph.
@@ -380,14 +492,35 @@ export function generateMermaidSource(graph: RelationshipGraph): string {
   const ids = new Map<string, string>()
   graph.nodes.forEach((node, index) => ids.set(node.urlPath, `n${index}`))
 
-  const direction = hasHierarchy(graph) ? 'TD' : 'LR'
+  const hierarchical = hasHierarchy(graph)
+  const direction = hierarchical ? 'TD' : 'LR'
   const lines: string[] = [`graph ${direction}`]
 
-  for (const node of graph.nodes) {
-    const id = ids.get(node.urlPath)!
-    lines.push(`  ${id}["${escapeMermaidLabel(formatNodeLabel(node))}"]`)
+  const nodeDecl = (node: GraphNode, indent: string): string =>
+    `${indent}${ids.get(node.urlPath)!}["${escapeMermaidLabel(formatNodeLabel(node))}"]`
+
+  if (hierarchical && USE_GENERATION_SUBGRAPHS) {
+    // Group nodes into per-generation LR subgraphs, oldest generation first.
+    const gens = computeGenerations(graph)
+    const byGen = new Map<number, GraphNode[]>()
+    for (const node of graph.nodes) {
+      const g = gens.get(node.urlPath) ?? 0
+      const bucket = byGen.get(g)
+      if (bucket) bucket.push(node)
+      else byGen.set(g, [node])
+    }
+    for (const g of [...byGen.keys()].sort((a, b) => a - b)) {
+      lines.push(`  subgraph gen${g} [" "]`)
+      lines.push('    direction LR')
+      for (const node of byGen.get(g)!) lines.push(nodeDecl(node, '    '))
+      lines.push('  end')
+    }
+  } else {
+    for (const node of graph.nodes) lines.push(nodeDecl(node, '  '))
   }
 
+  // Edges are emitted AFTER any subgraphs; mermaid resolves the node ids across
+  // subgraph boundaries.
   for (const edge of graph.edges) {
     const a = ids.get(edge.from)
     const b = ids.get(edge.to)
@@ -424,6 +557,105 @@ export function generateMermaidSource(graph: RelationshipGraph): string {
   }
 
   return lines.join('\n')
+}
+
+// ============================================================================
+// Viewport (zoom / pan) math — pure & unit-tested
+// ============================================================================
+
+/** An SVG `viewBox` as separate numbers. */
+export interface ViewBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** Wheel zoom sensitivity: `factor = exp(-deltaY * sens)`. */
+const ZOOM_WHEEL_SENS = 0.001
+/** Per-click zoom step for the +/- buttons. */
+const ZOOM_BUTTON_FACTOR = 1.3
+/**
+ * Scale bounds relative to the initial "fit" viewBox. `minScale = 1` means the
+ * fit is the most zoomed-OUT state (you cannot zoom out past fit); `maxScale`
+ * caps zoom-in at 8×.
+ */
+const MIN_SCALE = 1
+const MAX_SCALE = 8
+/** Pointer travel (px) above which a gesture is a pan/drag, not a click. */
+const DRAG_THRESHOLD_PX = 4
+
+/** Parse an SVG `viewBox` attribute (`"x y w h"`). Returns null when invalid. */
+export function parseViewBox(attr: string | null): ViewBox | null {
+  if (!attr) return null
+  const parts = attr.trim().split(/[\s,]+/).map(Number)
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null
+  const [x, y, w, h] = parts
+  if (w <= 0 || h <= 0) return null
+  return { x, y, w, h }
+}
+
+/** Serialize a viewBox to the `"x y w h"` attribute form. */
+export function formatViewBox(vb: ViewBox): string {
+  return `${vb.x} ${vb.y} ${vb.w} ${vb.h}`
+}
+
+/**
+ * Clamp a desired viewBox width to the range implied by the scale bounds:
+ * width is `baseW / scale`, so a larger scale ⇒ smaller width (more zoomed in).
+ */
+export function clampViewBoxScale(
+  desiredW: number,
+  baseW: number,
+  minScale: number,
+  maxScale: number
+): number {
+  const minW = baseW / maxScale // most zoomed in → smallest width
+  const maxW = baseW / minScale // most zoomed out → largest width
+  return Math.min(maxW, Math.max(minW, desiredW))
+}
+
+/**
+ * Zoom a viewBox by `factor` (>1 zooms in) while keeping `point` (in SVG-user
+ * coordinates) fixed on screen. The zoom is uniform (aspect preserved) and the
+ * resulting width is clamped to the configured scale bounds.
+ */
+export function zoomViewBoxAtPoint(
+  vb: ViewBox,
+  factor: number,
+  point: { x: number; y: number },
+  opts: { minScale: number; maxScale: number; baseW: number }
+): ViewBox {
+  if (!(factor > 0) || vb.w <= 0 || vb.h <= 0) return vb
+  const aspect = vb.h / vb.w
+  const newW = clampViewBoxScale(vb.w / factor, opts.baseW, opts.minScale, opts.maxScale)
+  const newH = newW * aspect
+  // Preserve the point's fractional position within the viewBox so it stays put.
+  const relX = (point.x - vb.x) / vb.w
+  const relY = (point.y - vb.y) / vb.h
+  return { x: point.x - relX * newW, y: point.y - relY * newH, w: newW, h: newH }
+}
+
+/** Translate a viewBox by a delta expressed in SVG-user units. */
+export function panViewBox(vb: ViewBox, dxUser: number, dyUser: number): ViewBox {
+  return { x: vb.x - dxUser, y: vb.y - dyUser, w: vb.w, h: vb.h }
+}
+
+/**
+ * Map a client (screen) point to SVG-user coordinates using the canvas rect and
+ * current viewBox. Uses a straightforward fractional mapping across the rect;
+ * this is exact when the SVG fills the canvas and a good approximation under
+ * `preserveAspectRatio` letterboxing (sufficient for cursor-centered zoom).
+ */
+export function clientPointToSvg(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number; height: number },
+  vb: ViewBox
+): { x: number; y: number } {
+  const fx = rect.width > 0 ? (clientX - rect.left) / rect.width : 0
+  const fy = rect.height > 0 ? (clientY - rect.top) / rect.height : 0
+  return { x: vb.x + fx * vb.w, y: vb.y + fy * vb.h }
 }
 
 // ============================================================================
@@ -466,7 +698,29 @@ export class MbrRelationshipsElement extends LitElement {
 
   private _siteData: { markdown_files?: SiteNote[]; relationship_types?: RelationTypeConfig[] } | null = null
   private _source = ''
+  /** Mermaid node id (`n0`, `n1`, …) → the note's `url_path`, for click nav. */
+  private _nodeIdToPath: Map<string, string> = new Map()
   private _unsubscribeSiteNav?: () => void
+
+  // Zoom/pan viewport state -------------------------------------------------
+  /** The live SVG element and its fit ("base") + current viewBox. */
+  private _svgEl: SVGSVGElement | null = null
+  private _baseViewBox: ViewBox | null = null
+  private _viewBox: ViewBox | null = null
+  /** Aborts the canvas wheel/pointer listeners; the canvas we bound them to. */
+  private _viewportListeners?: AbortController
+  private _boundCanvas: HTMLElement | null = null
+  /** Single-pointer pan gesture state. */
+  private _panPointerId: number | null = null
+  private _panStartClient: { x: number; y: number } | null = null
+  private _panStartVB: ViewBox | null = null
+  private _panMoved = 0
+  private _panActive = false
+  /** Set when a gesture dragged past threshold, so the node click is skipped. */
+  private _wasDragging = false
+  /** Active pointers (for two-finger pinch-zoom) and last pinch distance. */
+  private _activePointers: Map<number, { x: number; y: number }> = new Map()
+  private _pinchPrevDist: number | null = null
 
   override connectedCallback() {
     super.connectedCallback()
@@ -483,11 +737,18 @@ export class MbrRelationshipsElement extends LitElement {
   override disconnectedCallback() {
     super.disconnectedCallback()
     this._unsubscribeSiteNav?.()
+    this._viewportListeners?.abort()
   }
 
   override updated(changed: PropertyValues) {
     if ((changed.has('depth') || changed.has('maxNodes')) && this._siteData) {
       void this._rebuild()
+    }
+    // After each render that produced a new SVG: normalize the viewport (re-fit
+    // to the fresh graph) and (re)bind node click-navigation.
+    if (changed.has('_svg') && this._svg) {
+      this._setupViewport()
+      this._bindNodeLinks()
     }
   }
 
@@ -504,6 +765,8 @@ export class MbrRelationshipsElement extends LitElement {
     const types = Array.isArray(data.relationship_types) ? data.relationship_types : []
     const registry = buildRegistry(types)
     const graph = buildRelationshipGraph(focusPath, notes, registry, this.depth, this.maxNodes)
+    // Node ids mirror `generateMermaidSource`'s `n${index}` assignment order.
+    this._nodeIdToPath = new Map(graph.nodes.map((nd, i) => [`n${i}`, nd.urlPath]))
 
     const source = graph.edges.length > 0 ? generateMermaidSource(graph) : ''
 
@@ -535,12 +798,289 @@ export class MbrRelationshipsElement extends LitElement {
     }
   }
 
+  /**
+   * After each mermaid render, make graph nodes act as SAME-TAB links to their
+   * note. Chosen approach: bind handlers manually in the shadow DOM rather than
+   * mermaid-native `click` directives — that keeps navigation same-tab and
+   * avoids downgrading mermaid's `securityLevel` to `'loose'`. Idempotent per
+   * SVG via a data flag; the focus/self node is linked too (harmless).
+   */
+  private _bindNodeLinks(): void {
+    const root = this.shadowRoot
+    if (!root) return
+    const nodeEls = root.querySelectorAll<SVGGElement>('.rel-graph-canvas g.node')
+    nodeEls.forEach((g) => {
+      if (g.dataset.mbrLinked === '1') return
+      const nodeId = mermaidNodeId(g.id)
+      if (!nodeId) return
+      const urlPath = this._nodeIdToPath.get(nodeId)
+      if (!urlPath) return
+      g.dataset.mbrLinked = '1'
+
+      const target = resolveUrl(urlPath)
+      const node = this._graph?.nodes.find((n) => n.urlPath === urlPath)
+      const label = node ? node.title : urlPath
+      g.style.cursor = 'pointer'
+      g.setAttribute('role', 'link')
+      g.setAttribute('tabindex', '0')
+      g.setAttribute('aria-label', `Go to ${label}`)
+
+      g.addEventListener('click', () => {
+        // A pan that started on this node must not navigate; consume the flag so
+        // the next genuine click works again.
+        if (this._wasDragging) {
+          this._wasDragging = false
+          return
+        }
+        window.location.assign(target)
+      })
+      g.addEventListener('keydown', (e: KeyboardEvent) => {
+        // Keyboard activation always navigates (never a drag).
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          window.location.assign(target)
+        }
+      })
+    })
+  }
+
+  // Viewport (zoom/pan) wiring -----------------------------------------------
+
+  private get _scaleOpts(): { minScale: number; maxScale: number; baseW: number } {
+    return { minScale: MIN_SCALE, maxScale: MAX_SCALE, baseW: this._baseViewBox?.w ?? 1 }
+  }
+
+  /**
+   * Normalize the freshly-rendered mermaid SVG for a bounded, zoomable viewport:
+   * strip mermaid's inline sizing, make it fill the fixed-height canvas, read
+   * the fit viewBox (falling back to the content bbox), and reset the current
+   * viewBox to it. Interaction listeners are bound once per canvas element.
+   */
+  private _setupViewport(): void {
+    const root = this.shadowRoot
+    if (!root) return
+    const canvas = root.querySelector<HTMLElement>('.rel-graph-canvas')
+    const svg = canvas?.querySelector('svg') ?? null
+    if (!canvas || !(svg instanceof SVGSVGElement)) return
+    this._svgEl = svg
+
+    // Strip mermaid's inline sizing so the SVG fills the fixed-height canvas.
+    svg.style.maxWidth = 'none'
+    svg.style.width = '100%'
+    svg.style.height = '100%'
+    svg.style.display = 'block'
+    svg.removeAttribute('width')
+    svg.removeAttribute('height')
+
+    // Re-fit: a fresh graph resets both the base and current viewBox.
+    const base = parseViewBox(svg.getAttribute('viewBox')) ?? this._bboxViewBox(svg)
+    if (base) {
+      this._baseViewBox = base
+      this._viewBox = { ...base }
+      this._applyViewBox()
+    }
+
+    // Bind pointer/wheel listeners once to the (stable) canvas element.
+    if (this._boundCanvas !== canvas) {
+      this._viewportListeners?.abort()
+      this._viewportListeners = new AbortController()
+      this._boundCanvas = canvas
+      this._bindViewportListeners(canvas, this._viewportListeners.signal)
+    }
+  }
+
+  /** Fallback fit box from the rendered content when no `viewBox` is present. */
+  private _bboxViewBox(svg: SVGSVGElement): ViewBox | null {
+    try {
+      const b = svg.getBBox()
+      if (b.width > 0 && b.height > 0) return { x: b.x, y: b.y, w: b.width, h: b.height }
+    } catch {
+      // getBBox throws if the element is not yet rendered; ignore.
+    }
+    return null
+  }
+
+  private _applyViewBox(): void {
+    if (this._svgEl && this._viewBox) {
+      this._svgEl.setAttribute('viewBox', formatViewBox(this._viewBox))
+    }
+  }
+
+  private _bindViewportListeners(canvas: HTMLElement, signal: AbortSignal): void {
+    const opts = { signal }
+    canvas.addEventListener('wheel', (e) => this._onWheel(e, canvas), { signal, passive: false })
+    canvas.addEventListener('pointerdown', (e) => this._onPointerDown(e, canvas), opts)
+    canvas.addEventListener('pointermove', (e) => this._onPointerMove(e, canvas), opts)
+    const end = (e: PointerEvent) => this._onPointerUp(e, canvas)
+    canvas.addEventListener('pointerup', end, opts)
+    canvas.addEventListener('pointercancel', end, opts)
+    canvas.addEventListener(
+      'dblclick',
+      (e) => {
+        if ((e.target as Element | null)?.closest('.rel-graph-controls')) return
+        this._resetView()
+      },
+      opts
+    )
+  }
+
+  private _onWheel(e: WheelEvent, canvas: HTMLElement): void {
+    if (!this._viewBox || !this._baseViewBox) return
+    // Prevent the page from scrolling; also covers macOS trackpad pinch, which
+    // arrives here as a wheel event with `ctrlKey` set.
+    e.preventDefault()
+    const rect = canvas.getBoundingClientRect()
+    const point = clientPointToSvg(e.clientX, e.clientY, rect, this._viewBox)
+    const factor = Math.exp(-e.deltaY * ZOOM_WHEEL_SENS)
+    this._viewBox = zoomViewBoxAtPoint(this._viewBox, factor, point, this._scaleOpts)
+    this._applyViewBox()
+  }
+
+  private _onPointerDown(e: PointerEvent, canvas: HTMLElement): void {
+    if ((e.target as Element | null)?.closest('.rel-graph-controls')) return
+    if (!this._viewBox) return
+    this._activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (this._activePointers.size >= 2) {
+      // Entering a pinch: abandon any in-progress single-pointer pan.
+      this._endPan(canvas)
+      this._pinchPrevDist = null
+      return
+    }
+    // Tentative pan. Pointer capture is deferred until movement passes the drag
+    // threshold, so a genuine click still reaches the node and navigates.
+    this._panPointerId = e.pointerId
+    this._panStartClient = { x: e.clientX, y: e.clientY }
+    this._panStartVB = { ...this._viewBox }
+    this._panMoved = 0
+    this._panActive = false
+    this._wasDragging = false
+  }
+
+  private _onPointerMove(e: PointerEvent, canvas: HTMLElement): void {
+    if (this._activePointers.has(e.pointerId)) {
+      this._activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    }
+    if (this._activePointers.size >= 2) {
+      this._handlePinch(canvas)
+      return
+    }
+    if (this._panPointerId !== e.pointerId || !this._panStartVB || !this._panStartClient) return
+
+    const rect = canvas.getBoundingClientRect()
+    const dxClient = e.clientX - this._panStartClient.x
+    const dyClient = e.clientY - this._panStartClient.y
+    this._panMoved = Math.max(this._panMoved, Math.hypot(dxClient, dyClient))
+    if (!this._panActive) {
+      if (this._panMoved <= DRAG_THRESHOLD_PX) return
+      this._panActive = true
+      try {
+        canvas.setPointerCapture(e.pointerId)
+      } catch {
+        // Capture can fail if the pointer already ended; harmless.
+      }
+      canvas.style.cursor = 'grabbing'
+    }
+    const dxUser = rect.width > 0 ? dxClient * (this._panStartVB.w / rect.width) : 0
+    const dyUser = rect.height > 0 ? dyClient * (this._panStartVB.h / rect.height) : 0
+    this._viewBox = panViewBox(this._panStartVB, dxUser, dyUser)
+    this._applyViewBox()
+  }
+
+  private _onPointerUp(e: PointerEvent, canvas: HTMLElement): void {
+    this._activePointers.delete(e.pointerId)
+    if (this._panPointerId === e.pointerId) {
+      // Only a real drag suppresses the ensuing node click.
+      this._wasDragging = this._panActive
+      this._endPan(canvas, e.pointerId)
+    }
+    if (this._activePointers.size < 2) this._pinchPrevDist = null
+  }
+
+  private _endPan(canvas: HTMLElement, pointerId?: number): void {
+    if (this._panActive) {
+      if (pointerId != null) {
+        try {
+          canvas.releasePointerCapture(pointerId)
+        } catch {
+          // Already released; ignore.
+        }
+      }
+      canvas.style.cursor = 'grab'
+    }
+    this._panActive = false
+    this._panPointerId = null
+    this._panStartClient = null
+    this._panStartVB = null
+    this._panMoved = 0
+  }
+
+  private _handlePinch(canvas: HTMLElement): void {
+    if (!this._viewBox || !this._baseViewBox) return
+    const pts = [...this._activePointers.values()]
+    if (pts.length < 2) return
+    const [a, b] = pts
+    const dist = Math.hypot(a.x - b.x, a.y - b.y)
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    if (this._pinchPrevDist != null && this._pinchPrevDist > 0 && dist > 0) {
+      const factor = dist / this._pinchPrevDist
+      const rect = canvas.getBoundingClientRect()
+      const point = clientPointToSvg(mid.x, mid.y, rect, this._viewBox)
+      this._viewBox = zoomViewBoxAtPoint(this._viewBox, factor, point, this._scaleOpts)
+      this._applyViewBox()
+    }
+    this._pinchPrevDist = dist
+  }
+
+  private _zoomByButton(factor: number): void {
+    if (!this._viewBox || !this._baseViewBox) return
+    const center = {
+      x: this._viewBox.x + this._viewBox.w / 2,
+      y: this._viewBox.y + this._viewBox.h / 2,
+    }
+    this._viewBox = zoomViewBoxAtPoint(this._viewBox, factor, center, this._scaleOpts)
+    this._applyViewBox()
+  }
+
+  private _resetView(): void {
+    if (!this._baseViewBox) return
+    this._viewBox = { ...this._baseViewBox }
+    this._applyViewBox()
+  }
+
   override render() {
     if (!this._svg) return nothing
     return html`
       <figure class="rel-graph" role="group" aria-label="${this._heading}">
         <figcaption>${this._heading}</figcaption>
-        <div class="rel-graph-canvas">${unsafeHTML(this._svg)}</div>
+        <div class="rel-graph-canvas">
+          ${unsafeHTML(this._svg)}
+          <div class="rel-graph-controls">
+            <button
+              type="button"
+              aria-label="Zoom in"
+              title="Zoom in"
+              @click=${() => this._zoomByButton(ZOOM_BUTTON_FACTOR)}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              aria-label="Zoom out"
+              title="Zoom out"
+              @click=${() => this._zoomByButton(1 / ZOOM_BUTTON_FACTOR)}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              aria-label="Reset view"
+              title="Reset view"
+              @click=${() => this._resetView()}
+            >
+              ⤢
+            </button>
+          </div>
+        </div>
       </figure>
     `
   }
@@ -565,15 +1105,56 @@ export class MbrRelationshipsElement extends LitElement {
       color: var(--pico-color, #333);
     }
 
+    /* Bounded viewport: fixed height stops mermaid from auto-shrinking the SVG,
+       and pan/zoom happen via viewBox manipulation inside this window. */
     .rel-graph-canvas {
-      overflow-x: auto;
+      position: relative;
+      height: min(70vh, 640px);
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+      border-radius: 4px;
     }
 
     .rel-graph-canvas svg {
-      max-width: 100%;
-      height: auto;
+      width: 100%;
+      height: 100%;
       display: block;
-      margin: 0 auto;
+    }
+
+    .rel-graph-canvas g.node {
+      cursor: pointer;
+    }
+
+    .rel-graph-controls {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      z-index: 2;
+    }
+
+    .rel-graph-controls button {
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      line-height: 1;
+      cursor: pointer;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      border-radius: 4px;
+      background: var(--pico-background-color, #fff);
+      color: var(--pico-color, #333);
+      opacity: 0.85;
+    }
+
+    .rel-graph-controls button:hover {
+      opacity: 1;
     }
   `
 }
