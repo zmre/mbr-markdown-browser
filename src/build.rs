@@ -22,7 +22,7 @@ use papaya::HashMap as ConcurrentHashMap;
 
 use crate::{
     config::Config,
-    embedded_pico,
+    embedded_katex, embedded_pico,
     errors::BuildError,
     link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url},
     link_transform::{LinkTransformConfig, make_relative_url},
@@ -1647,6 +1647,29 @@ impl Builder {
                     source: e,
                 })?;
             }
+        }
+
+        // Step 3c: Write embedded KaTeX assets (CSS, JS, WOFF2 fonts). Server
+        // mode serves these from KATEX_FILES via serve_default_file(); the
+        // static build must mirror that, or the <mbr-katex> component's fetch
+        // of `.mbr/katex.min.css` 404s and math never renders. Font routes
+        // like "/fonts/KaTeX_*.woff2" nest under `.mbr/fonts/`.
+        for (route, content, _mime_type) in embedded_katex::KATEX_FILES.iter() {
+            let filename = route.trim_start_matches('/');
+            let output_path = mbr_output.join(filename);
+            if output_path.exists() {
+                continue;
+            }
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            fs::write(&output_path, content).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
         }
 
         // Step 3b: Write themed pico.min.css (only if not already present from repo's .mbr/)

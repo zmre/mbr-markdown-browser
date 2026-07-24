@@ -324,6 +324,36 @@ async fn test_pagefind_page_count_matches() {
 }
 
 // ============================================================================
+// KaTeX asset tests
+// ============================================================================
+
+/// Regression test: KaTeX renders in server/GUI mode because
+/// serve_default_file() also serves KATEX_FILES, but the static build's
+/// `.mbr` step only mirrored DEFAULT_FILES. That gap meant the CSS, JS, and
+/// WOFF2 fonts were never written, so <mbr-katex>'s fetch of
+/// `.mbr/katex.min.css` (and the CSS's relative `fonts/…` urls) 404'd and math
+/// never rendered. The build must write these assets, including the nested
+/// `fonts/` subdirectory.
+#[tokio::test]
+async fn test_build_writes_katex_assets() {
+    let repo = TestRepo::new();
+    repo.create_markdown("math.md", "# Math\n\n$$E = mc^2$$");
+
+    let output = build_site(&repo).await;
+
+    let css = output.join(".mbr").join("katex.min.css");
+    let js = output.join(".mbr").join("katex.min.js");
+    let font = output
+        .join(".mbr")
+        .join("fonts")
+        .join("KaTeX_Main-Regular.woff2");
+
+    assert!(css.exists(), "Expected KaTeX CSS at {:?}", css);
+    assert!(js.exists(), "Expected KaTeX JS at {:?}", js);
+    assert!(font.exists(), "Expected KaTeX font at {:?}", font);
+}
+
+// ============================================================================
 // Directory exclusion tests
 // ============================================================================
 
