@@ -1,6 +1,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { resolveUrl, subscribeSiteNav, isNewTabModifier, openInNewTab } from './shared.js';
+import { fuzzyScore } from './fuzzy.js';
 
 /**
  * Markdown file from site.json.
@@ -281,75 +282,6 @@ export class MbrFuzzyNavElement extends LitElement {
   }
 
   // ========================================
-  // Fuzzy Search
-  // ========================================
-
-  /**
-   * Fuzzy search scoring algorithm.
-   * Higher scores = better matches.
-   *
-   * Scoring:
-   * - Exact substring: 1000
-   * - Word-start match: 500
-   * - Character-by-character fuzzy: sum of position bonuses
-   */
-  private _fuzzyScore(text: string, query: string): number {
-    if (!query) return 0;
-
-    const lowerText = text.toLowerCase();
-    const lowerQuery = query.toLowerCase();
-
-    // Exact substring match (highest priority)
-    if (lowerText.includes(lowerQuery)) {
-      // Bonus for exact match at start
-      if (lowerText.startsWith(lowerQuery)) {
-        return 1500;
-      }
-      // Bonus for word-start match
-      const wordStart = new RegExp(`\\b${this._escapeRegex(lowerQuery)}`);
-      if (wordStart.test(lowerText)) {
-        return 1200;
-      }
-      return 1000;
-    }
-
-    // Character-by-character fuzzy matching
-    let score = 0;
-    let textIndex = 0;
-    let consecutiveBonus = 0;
-
-    for (const char of lowerQuery) {
-      const foundIndex = lowerText.indexOf(char, textIndex);
-      if (foundIndex === -1) {
-        return 0; // Character not found, no match
-      }
-
-      // Bonus for consecutive characters
-      if (foundIndex === textIndex) {
-        consecutiveBonus += 10;
-      } else {
-        consecutiveBonus = 0;
-      }
-
-      // Base score + position bonus (earlier = better) + consecutive bonus
-      score += 10 + Math.max(0, 50 - foundIndex) + consecutiveBonus;
-
-      // Bonus for word boundary match
-      if (foundIndex === 0 || /\W/.test(lowerText[foundIndex - 1])) {
-        score += 25;
-      }
-
-      textIndex = foundIndex + 1;
-    }
-
-    return score;
-  }
-
-  private _escapeRegex(str: string): string {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  // ========================================
   // Get Filtered Items
   // ========================================
 
@@ -373,7 +305,7 @@ export class MbrFuzzyNavElement extends LitElement {
       const scored = items
         .map(item => ({
           item,
-          score: this._fuzzyScore(item.text, this._searchQuery),
+          score: fuzzyScore(item.text, this._searchQuery),
         }))
         .filter(({ score }) => score > 0)
         .sort((a, b) => b.score - a.score);

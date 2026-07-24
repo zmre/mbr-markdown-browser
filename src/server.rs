@@ -7,7 +7,8 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use std::collections::HashSet;
 use std::{net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
 
@@ -81,9 +82,10 @@ const DEFAULT_LINK_CACHE_SIZE: usize = 2 * 1024 * 1024;
 /// which fans out links.json requests for many pages at once.
 const DEFAULT_INBOUND_LINK_CACHE_SIZE: usize = 4 * 1024 * 1024;
 
-/// TTL for inbound link cache entries in seconds. Staleness is acceptable:
-/// nothing invalidates this cache on file changes today, and a longer TTL
-/// keeps mini-graph bursts from re-grepping the repository.
+/// TTL for inbound link cache entries in seconds. The editing endpoints
+/// (`/.mbr/create`, `/.mbr/move`, `/.mbr/mkdir`) and the file watcher invalidate
+/// this cache surgically on changes, but a bounded TTL still guards against any
+/// missed invalidation and keeps mini-graph bursts from re-grepping the repo.
 const INBOUND_LINK_CACHE_TTL_SECS: u64 = 300;
 
 /// Maximum inbound-link greps allowed to run concurrently. Each grep walks
@@ -445,6 +447,8 @@ pub struct ServerConfig {
     pub edit_require_token_on_loopback: bool,
     /// Argon2 PHC hash of the shared editing token (server-side only).
     pub edit_token_hash: Option<String>,
+    /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
+    pub upload_max_bytes: usize,
     #[cfg(feature = "media-metadata")]
     pub transcode_enabled: bool,
 }
@@ -499,6 +503,7 @@ impl From<&crate::config::Config> for ServerConfig {
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
+            upload_max_bytes: config.upload_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
         }
@@ -591,6 +596,8 @@ pub struct ServerState {
     pub edit_require_token_on_loopback: bool,
     /// Argon2 PHC hash of the shared editing token (never sent to the frontend).
     pub edit_token_hash: Option<String>,
+    /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
+    pub upload_max_bytes: usize,
 }
 
 /// JSON body for `POST /.mbr/edit/{*path}`.
@@ -600,6 +607,246 @@ pub struct EditRequest {
     pub content: String,
     /// SHA-256 hex of the content the client loaded, for optimistic concurrency.
     pub base_hash: String,
+}
+
+/// JSON body for `POST /.mbr/create/{*path}`.
+#[derive(serde::Deserialize)]
+pub struct CreateRequest {
+    /// Full file contents (frontmatter + body) for the new markdown file.
+    pub content: String,
+    /// Create any missing parent directories.
+    #[serde(default)]
+    pub create_dirs: bool,
+}
+
+/// JSON body for `POST /.mbr/move/{*path}`.
+#[derive(serde::Deserialize)]
+pub struct MoveRequest {
+    /// Destination repo-relative filesystem path (with markdown extension).
+    pub to: String,
+    /// Create any missing parent directories at the destination.
+    #[serde(default)]
+    pub create_dirs: bool,
+}
+
+/// Response for a successful `POST /.mbr/create`.
+#[derive(serde::Serialize)]
+pub struct CreateResponse {
+    /// The canonical site URL of the new page.
+    pub url_path: String,
+    /// The repo-relative filesystem path of the new file.
+    pub path: String,
+}
+
+/// Response for a successful `POST /.mbr/mkdir`.
+#[derive(serde::Serialize)]
+pub struct MkdirResponse {
+    /// The repo-relative filesystem path of the folder.
+    pub path: String,
+}
+
+/// Response for a successful `POST /.mbr/move`.
+#[derive(serde::Serialize)]
+pub struct MoveResponse {
+    /// The canonical site URL the page moved *from* (now gone).
+    pub from_url: String,
+    /// The canonical site URL the page moved *to*.
+    pub url_path: String,
+    /// The repo-relative filesystem path of the destination file.
+    pub path: String,
+    /// Site URLs of pages whose inbound links were rewritten (A4-A).
+    pub rewritten: Vec<String>,
+    /// Site URLs of pages whose bare `[[Name]]` links were rewritten (A4-C).
+    pub wikilinks_rewritten: Vec<String>,
+    /// Whether any missing destination parent directories were created.
+    pub created_dirs: bool,
+}
+
+/// Query parameters for `POST /.mbr/upload`.
+#[derive(serde::Deserialize)]
+pub struct UploadParams {
+    /// Repo-relative destination folder (the note's own folder). May be empty
+    /// (`""`) for a root-level note.
+    #[serde(default)]
+    pub dir: String,
+    /// Desired filename (basename with extension).
+    pub name: String,
+}
+
+/// Response for a successful `POST /.mbr/upload`.
+#[derive(serde::Serialize)]
+pub struct UploadResponse {
+    /// Root-absolute, percent-encoded URL of the saved file (matches how mbr
+    /// serves it), e.g. `/notes/image.png`.
+    pub url: String,
+    /// Repo-relative filesystem path of the saved file, e.g. `notes/image.png`.
+    pub path: String,
+    /// Final filename after collision de-duplication, e.g. `image-1.png`.
+    pub name: String,
+}
+
+/// Error type for the file-management editing endpoints
+/// (`/.mbr/create`, `/.mbr/move`, `/.mbr/mkdir`, `/.mbr/upload`). Mirrors the
+/// inline `(StatusCode, &str)` convention used by the other edit handlers rather
+/// than the crate-wide `MbrError`.
+#[derive(Debug)]
+enum FileOpError {
+    /// The target path already exists (create/move collision) → `409`.
+    AlreadyExists,
+    /// The destination parent directory does not exist (and `create_dirs`
+    /// was not set) → `400`.
+    ParentMissing,
+    /// The destination lacks a configured markdown extension → `400`.
+    NotMarkdown,
+    /// An uploaded filename was empty, contained path separators / `..`, lacked
+    /// an extension, or carried a markdown extension (markdown goes through
+    /// `/.mbr/create`) → `400`.
+    InvalidUploadName,
+    /// The move source is not an existing markdown file → `404`.
+    SourceNotFound,
+    /// The path escaped the repository root (traversal/symlink) → `400`.
+    Traversal,
+    /// A filesystem error occurred → `500`.
+    Io(std::io::Error),
+}
+
+impl IntoResponse for FileOpError {
+    fn into_response(self) -> Response {
+        let (status, msg): (StatusCode, &'static str) = match self {
+            FileOpError::AlreadyExists => (StatusCode::CONFLICT, "Target already exists"),
+            FileOpError::ParentMissing => (
+                StatusCode::BAD_REQUEST,
+                "Destination parent directory does not exist (set create_dirs to create it)",
+            ),
+            FileOpError::NotMarkdown => (
+                StatusCode::BAD_REQUEST,
+                "Path must end in a markdown extension",
+            ),
+            FileOpError::InvalidUploadName => (
+                StatusCode::BAD_REQUEST,
+                "Invalid upload filename (must be a basename with a non-markdown extension)",
+            ),
+            FileOpError::SourceNotFound => {
+                (StatusCode::NOT_FOUND, "Source markdown file not found")
+            }
+            FileOpError::Traversal => (StatusCode::BAD_REQUEST, "Invalid path"),
+            FileOpError::Io(e) => {
+                tracing::error!("file operation I/O error: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "I/O error")
+            }
+        };
+        (status, msg).into_response()
+    }
+}
+
+/// Resolves a repo-relative path (that may not yet exist) against an
+/// already-canonical repository root, guarding against traversal/symlink
+/// escape. Shared core of [`Server::resolve_new_target`], factored out for
+/// unit testing.
+///
+/// Rejects any `..` or absolute component, joins onto `canonical_base`, then
+/// canonicalizes the deepest **existing** ancestor and asserts it stays within
+/// the root (so a symlink in the existing portion cannot escape).
+fn resolve_new_target_path(canonical_base: &Path, rel: &str) -> Result<PathBuf, FileOpError> {
+    let clean = rel.trim_start_matches('/');
+    if clean.is_empty() {
+        return Err(FileOpError::Traversal);
+    }
+    // Reject `..`/absolute components before any filesystem access.
+    for component in Path::new(clean).components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => return Err(FileOpError::Traversal),
+        }
+    }
+
+    let candidate = canonical_base.join(clean);
+
+    // Canonicalize the deepest existing ancestor to defeat symlink escape
+    // through the already-existing portion of the path.
+    let mut ancestor = candidate.as_path();
+    let existing = loop {
+        if ancestor.exists() {
+            break ancestor;
+        }
+        match ancestor.parent() {
+            Some(p) => ancestor = p,
+            None => break ancestor,
+        }
+    };
+    let canonical_existing = existing.canonicalize().map_err(FileOpError::Io)?;
+    if !canonical_existing.starts_with(canonical_base) {
+        return Err(FileOpError::Traversal);
+    }
+
+    Ok(candidate)
+}
+
+/// Percent-encode set for upload-response URLs. Encodes everything except the
+/// RFC 3986 unreserved characters (`A-Z a-z 0-9 - . _ ~`) and the `/` path
+/// separator, so the returned URL round-trips through mbr's request-path
+/// percent-decoding and the browser can load the saved file (e.g. a space in a
+/// filename becomes `%20`).
+const UPLOAD_URL_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'/')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Sanitizes a desired upload filename down to a safe basename.
+///
+/// Returns `None` (which callers map to `400`) when `name`:
+/// - is empty or whitespace-only,
+/// - contains a path separator (`/` or `\`) or a `..` sequence,
+/// - is not a pure basename (has directory components),
+/// - lacks a non-empty stem or a non-empty extension, or
+/// - carries a configured markdown extension (those go through `/.mbr/create`).
+///
+/// On success returns the trimmed, validated basename unchanged.
+fn sanitize_upload_name(name: &str, markdown_extensions: &[String]) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    // Reject path separators and parent-traversal outright: only a basename is
+    // accepted. `\\` is rejected too so a Windows-style path can't sneak through.
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return None;
+    }
+    // The input must be exactly its own file name (no directory components,
+    // and not `.`/`..` which have no file name).
+    let path = Path::new(name);
+    if path.file_name().and_then(|n| n.to_str()) != Some(name) {
+        return None;
+    }
+    // Require a non-empty stem AND a non-empty extension.
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(e) if !e.is_empty() => e,
+        _ => return None,
+    };
+    if stem.is_empty() {
+        return None;
+    }
+    // Markdown files must be created via `/.mbr/create`, not uploaded.
+    if crate::repo::is_markdown_extension(&ext.to_lowercase(), markdown_extensions) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Finds a non-colliding destination path for `stem`.`ext` inside `dir`.
+///
+/// Returns `dir/stem.ext` when free, otherwise the first free
+/// `dir/stem-N.ext` (N = 1, 2, 3, …). `exists` reports whether a candidate is
+/// taken, so the collision loop is pure and unit-testable without touching the
+/// filesystem.
+fn dedupe_name(dir: &Path, stem: &str, ext: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    std::iter::once(dir.join(format!("{stem}.{ext}")))
+        .chain((1u64..).map(|n| dir.join(format!("{stem}-{n}.{ext}"))))
+        .find(|candidate| !exists(candidate))
+        .expect("candidate sequence is infinite, so a free path always exists")
 }
 
 impl Server {
@@ -636,6 +883,7 @@ impl Server {
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
+            upload_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
         } = config;
@@ -992,6 +1240,7 @@ impl Server {
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
+            upload_max_bytes,
         };
 
         let router = Router::new()
@@ -1006,6 +1255,22 @@ impl Server {
                 post(Self::save_markdown_handler)
                     // Cap edit payloads at 5 MB (axum default is 2 MB).
                     .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+            )
+            // File-management endpoints (gated by edit_enabled + auth): create a
+            // new file, move/rename with repo-wide link rewrite, create a folder.
+            .route(
+                "/.mbr/create/{*path}",
+                post(Self::create_markdown_handler)
+                    // Cap create payloads at 5 MB (axum default is 2 MB).
+                    .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+            )
+            .route("/.mbr/move/{*path}", post(Self::move_markdown_handler))
+            .route("/.mbr/mkdir/{*path}", post(Self::mkdir_handler))
+            // Binary asset upload (the editor's image uploader). Body limit comes
+            // from `upload_max_bytes`; oversize bodies get 413 automatically.
+            .route(
+                "/.mbr/upload",
+                post(Self::upload_handler).layer(DefaultBodyLimit::max(upload_max_bytes)),
             )
             .route("/.mbr/ws/changes", get(Self::websocket_handler))
             // Media viewer routes - must be before the catch-all /.mbr/{*path}
@@ -1697,6 +1962,563 @@ impl Server {
             resp.headers_mut().insert("x-mbr-content-hash", hv);
         }
         resp
+    }
+
+    /// Resolves a repo-relative path that may not yet exist to an absolute
+    /// path, guarding against traversal and symlink escape.
+    ///
+    /// Rejects any `..` (or absolute) component, joins onto the canonical repo
+    /// root, then canonicalizes the deepest **existing** ancestor and asserts it
+    /// stays within the root. Does not require the target to exist or to be
+    /// markdown — callers enforce extensions where relevant (create/move do;
+    /// mkdir does not).
+    fn resolve_new_target(config: &ServerState, rel: &str) -> Result<PathBuf, FileOpError> {
+        let canonical_base = config
+            .canonical_base_dir
+            .clone()
+            .or_else(|| config.base_dir.canonicalize().ok())
+            .ok_or_else(|| {
+                FileOpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "repository root not found",
+                ))
+            })?;
+        resolve_new_target_path(&canonical_base, rel)
+    }
+
+    /// Whether `path` ends in a configured markdown extension (case-insensitive).
+    fn path_has_markdown_extension(path: &Path, exts: &[String]) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| crate::repo::is_markdown_extension(&e.to_lowercase(), exts))
+            .unwrap_or(false)
+    }
+
+    /// Whether `path`'s file name is the configured index file.
+    fn path_is_index(path: &Path, index_file: &str) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == index_file)
+    }
+
+    /// The repo-relative filesystem path of `path` as a string.
+    fn rel_path_string(path: &Path, base_dir: &Path) -> String {
+        pathdiff::diff_paths(path, base_dir)
+            .unwrap_or_else(|| path.to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
+    fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), FileOpError> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.md");
+        let tmp = parent.join(format!(".{file_name}.mbr-tmp"));
+        std::fs::write(&tmp, bytes).map_err(FileOpError::Io)?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FileOpError::Io(e));
+        }
+        Ok(())
+    }
+
+    /// Broadcasts a `FileChangeEvent` for live-reload + watcher reconciliation.
+    fn broadcast_change(
+        config: &ServerState,
+        abs_path: &Path,
+        event: crate::watcher::ChangeEventType,
+    ) {
+        if let Some(tx) = &config.file_change_tx {
+            let relative = pathdiff::diff_paths(abs_path, &config.base_dir)
+                .unwrap_or_else(|| abs_path.to_path_buf());
+            let _ = tx.send(crate::watcher::FileChangeEvent {
+                path: abs_path.to_string_lossy().to_string(),
+                relative_path: relative.to_string_lossy().to_string(),
+                event,
+            });
+        }
+    }
+
+    /// POST /.mbr/create/{*path} — creates a new markdown file with the given
+    /// contents. `{*path}` is a repo-relative filesystem path with extension.
+    pub async fn create_markdown_handler(
+        extract::Path(path): extract::Path<String>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<CreateRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let result =
+            tokio::task::spawn_blocking(move || Self::do_create(&config, &path, req)).await;
+        match result {
+            Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
+            Ok(Err(e)) => e.into_response(),
+            Err(e) => {
+                tracing::error!("create task panicked: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Create failed").into_response()
+            }
+        }
+    }
+
+    /// Blocking body of [`Self::create_markdown_handler`].
+    fn do_create(
+        config: &ServerState,
+        rel: &str,
+        req: CreateRequest,
+    ) -> Result<CreateResponse, FileOpError> {
+        let dst = Self::resolve_new_target(config, rel)?;
+        if !Self::path_has_markdown_extension(&dst, &config.markdown_extensions) {
+            return Err(FileOpError::NotMarkdown);
+        }
+        if dst.exists() {
+            return Err(FileOpError::AlreadyExists);
+        }
+        let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            if req.create_dirs {
+                std::fs::create_dir_all(parent).map_err(FileOpError::Io)?;
+            } else {
+                return Err(FileOpError::ParentMissing);
+            }
+        }
+        Self::atomic_write_file(&dst, req.content.as_bytes())?;
+
+        let url_path =
+            crate::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
+        let rel_path = Self::rel_path_string(&dst, &config.base_dir);
+
+        // Surgical state update (Created): the new file adds its own tags inline
+        // in invalidate_file, so no tag-index rebuild is needed.
+        config
+            .repo
+            .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
+        config.repo.build_relationship_index();
+        config.repo.build_wikilink_index();
+        config.sibling_nav_cache.pin().clear();
+        config.inbound_link_cache.invalidate_all();
+
+        Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
+
+        Ok(CreateResponse {
+            url_path,
+            path: rel_path,
+        })
+    }
+
+    /// POST /.mbr/mkdir/{*path} — creates a directory (idempotent). `{*path}` is
+    /// a repo-relative filesystem path. No request body.
+    pub async fn mkdir_handler(
+        extract::Path(path): extract::Path<String>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let result = tokio::task::spawn_blocking(move || Self::do_mkdir(&config, &path)).await;
+        match result {
+            Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
+            Ok(Err(e)) => e.into_response(),
+            Err(e) => {
+                tracing::error!("mkdir task panicked: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Mkdir failed").into_response()
+            }
+        }
+    }
+
+    /// Blocking body of [`Self::mkdir_handler`].
+    fn do_mkdir(config: &ServerState, rel: &str) -> Result<MkdirResponse, FileOpError> {
+        let target = Self::resolve_new_target(config, rel)?;
+        let rel_path = Self::rel_path_string(&target, &config.base_dir);
+        if target.is_dir() {
+            // Idempotent: pre-creating an existing folder is retry-safe.
+            return Ok(MkdirResponse { path: rel_path });
+        }
+        if target.exists() {
+            // A file occupies the path.
+            return Err(FileOpError::AlreadyExists);
+        }
+        std::fs::create_dir_all(&target).map_err(FileOpError::Io)?;
+        Self::broadcast_change(config, &target, crate::watcher::ChangeEventType::Created);
+        Ok(MkdirResponse { path: rel_path })
+    }
+
+    /// POST /.mbr/upload?dir=<>&name=<> — writes a raw binary asset (the
+    /// editor's image uploader) into the repo next to the note being edited and
+    /// returns a URL the editor and rendered site both resolve. The body is the
+    /// raw file bytes; the body-size cap comes from `upload_max_bytes`
+    /// (oversized bodies are rejected with `413` by `DefaultBodyLimit`).
+    pub async fn upload_handler(
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        extract::Query(params): extract::Query<UploadParams>,
+        body: axum::body::Bytes,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let result = tokio::task::spawn_blocking(move || {
+            Self::do_upload(&config, &params.dir, &params.name, &body)
+        })
+        .await;
+        match result {
+            Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
+            Ok(Err(e)) => e.into_response(),
+            Err(e) => {
+                tracing::error!("upload task panicked: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Upload failed").into_response()
+            }
+        }
+    }
+
+    /// Blocking body of [`Self::upload_handler`].
+    fn do_upload(
+        config: &ServerState,
+        dir: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<UploadResponse, FileOpError> {
+        let safe_name = sanitize_upload_name(name, &config.markdown_extensions)
+            .ok_or(FileOpError::InvalidUploadName)?;
+
+        // Compose `<dir>/<name>` and resolve it traversal-safely. `dir` may be
+        // empty (root-level note); leading/trailing slashes are tolerated.
+        let dir_clean = dir.trim_matches('/');
+        let rel = if dir_clean.is_empty() {
+            safe_name.clone()
+        } else {
+            format!("{dir_clean}/{safe_name}")
+        };
+        let target = Self::resolve_new_target(config, &rel)?;
+
+        // The destination is normally the note's own (existing) folder; create
+        // it defensively if missing. `safe_name` is a pure basename, so the
+        // parent is the resolved, containment-checked directory.
+        let dest_dir = target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        if !dest_dir.exists() {
+            std::fs::create_dir_all(&dest_dir).map_err(FileOpError::Io)?;
+        }
+
+        // Collision policy: keep the name, suffix `-1`, `-2`, … on collision.
+        let name_path = Path::new(&safe_name);
+        let stem = name_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&safe_name);
+        let ext = name_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let final_path = dedupe_name(&dest_dir, stem, ext, |p| p.exists());
+
+        Self::atomic_write_file(&final_path, bytes)?;
+
+        // Root-absolute URL that matches how mbr serves the file. Reuse
+        // `build_static_url_path` (same util used for every static asset URL),
+        // then percent-encode so special characters load in the browser.
+        let root_abs = crate::repo::build_static_url_path(
+            &final_path,
+            &config.base_dir,
+            &config.static_folder,
+        );
+        let url = utf8_percent_encode(&root_abs, UPLOAD_URL_ENCODE_SET).to_string();
+        let rel_path = Self::rel_path_string(&final_path, &config.base_dir);
+        let final_name = final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&safe_name)
+            .to_string();
+
+        // A static asset needs no markdown/index rebuild; the watcher will pick
+        // it up into media.json. Broadcast so live-reload clients learn of it.
+        Self::broadcast_change(
+            config,
+            &final_path,
+            crate::watcher::ChangeEventType::Created,
+        );
+
+        Ok(UploadResponse {
+            url,
+            path: rel_path,
+            name: final_name,
+        })
+    }
+
+    /// POST /.mbr/move/{*path} — moves/renames a markdown file, rewriting
+    /// inbound links repo-wide and (on stem change) bare `[[Name]]` links.
+    /// `{*path}` is the source repo-relative filesystem path with extension.
+    pub async fn move_markdown_handler(
+        extract::Path(path): extract::Path<String>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<MoveRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+
+        // One inbound-grep permit guards the whole repo-wide rewrite pass, held
+        // across the blocking work (mirrors links.json grep throttling).
+        let _permit = match config.inbound_grep_semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Server shutting down").into_response();
+            }
+        };
+
+        let result = tokio::task::spawn_blocking(move || Self::do_move(&config, &path, req)).await;
+        match result {
+            Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
+            Ok(Err(e)) => e.into_response(),
+            Err(e) => {
+                tracing::error!("move task panicked: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Move failed").into_response()
+            }
+        }
+    }
+
+    /// Blocking body of [`Self::move_markdown_handler`].
+    fn do_move(
+        config: &ServerState,
+        from: &str,
+        req: MoveRequest,
+    ) -> Result<MoveResponse, FileOpError> {
+        // Resolve source (existing markdown) and destination (new path).
+        let src = Self::resolve_editable_markdown(config, from).map_err(|(status, _)| {
+            if status == StatusCode::NOT_FOUND {
+                FileOpError::SourceNotFound
+            } else {
+                FileOpError::Traversal
+            }
+        })?;
+        let dst = Self::resolve_new_target(config, &req.to)?;
+        if !Self::path_has_markdown_extension(&dst, &config.markdown_extensions) {
+            return Err(FileOpError::NotMarkdown);
+        }
+
+        // Collision: destination exists and is not the same file. A case-only
+        // rename on a case-insensitive filesystem canonicalizes back to source.
+        let dst_canon = dst.canonicalize().ok();
+        let case_only = dst.exists() && dst_canon.as_deref() == Some(src.as_path());
+        if dst.exists() && !case_only {
+            return Err(FileOpError::AlreadyExists);
+        }
+
+        // Create the destination parent if requested.
+        let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+        let mut created_dirs = false;
+        if !parent.exists() {
+            if req.create_dirs {
+                std::fs::create_dir_all(parent).map_err(FileOpError::Io)?;
+                created_dirs = true;
+            } else {
+                return Err(FileOpError::ParentMissing);
+            }
+        }
+
+        // Compute index-stripped page URLs before touching disk.
+        let old_url =
+            crate::repo::build_markdown_url_path(&src, &config.base_dir, &config.index_file);
+        let new_url =
+            crate::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
+        let old_is_index = Self::path_is_index(&src, &config.index_file);
+        let new_is_index = Self::path_is_index(&dst, &config.index_file);
+
+        // A4-C delta names (bare `[[Name]]` rewrite on stem change) need the
+        // source frontmatter (title/aliases) so still-resolvable names are kept.
+        let src_meta = crate::markdown::extract_metadata_from_file(&src).ok();
+        let old_stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let new_stem = dst
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let delta = Self::wikilink_delta_names(
+            src_meta.as_ref().map(|m| &m.metadata),
+            &old_stem,
+            &new_stem,
+        );
+
+        // Read source, re-express its own relative links against the new folder
+        // (A4-B), then write the rewritten content to the destination.
+        let src_content = std::fs::read_to_string(&src).map_err(FileOpError::Io)?;
+        let moved_content = crate::link_rewrite::rewrite_moved_file_outbound_links(
+            &old_url,
+            old_is_index,
+            &new_url,
+            new_is_index,
+            &config.markdown_extensions,
+            &src_content,
+        );
+
+        // Content changed (A4-B), so this is a temp-write + delete-source, not a
+        // plain rename. For a case-only rename the old-cased name must be removed
+        // before the rename lands so the new case is preserved.
+        let parent_dir = dst.parent().unwrap_or_else(|| Path::new("."));
+        let dst_name = dst
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.md");
+        let tmp = parent_dir.join(format!(".{dst_name}.mbr-tmp"));
+        std::fs::write(&tmp, moved_content.as_bytes()).map_err(FileOpError::Io)?;
+        let rename_result = if case_only {
+            std::fs::remove_file(&src).and_then(|()| std::fs::rename(&tmp, &dst))
+        } else {
+            std::fs::rename(&tmp, &dst).and_then(|()| std::fs::remove_file(&src))
+        };
+        if let Err(e) = rename_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FileOpError::Io(e));
+        }
+
+        // Skip set for the repo-wide walkers: the destination file (already
+        // written); the source no longer exists so it won't be walked.
+        let mut skip: HashSet<PathBuf> = HashSet::new();
+        skip.insert(dst.clone());
+        if let Ok(c) = dst.canonicalize() {
+            skip.insert(c);
+        }
+
+        // A4-A: rewrite inbound links across the whole repo.
+        let rewritten_paths = crate::link_rewrite::rewrite_inbound_links_for_move(
+            &old_url,
+            &new_url,
+            &config.base_dir,
+            &config.markdown_extensions,
+            &config.ignore_dirs,
+            &config.ignore_globs,
+            &skip,
+        )
+        .map_err(FileOpError::Io)?;
+
+        // A4-C: rewrite bare `[[Name]]` links, guarded by the pre-move index.
+        let wiki_paths = crate::link_rewrite::rewrite_bare_wikilinks_for_rename(
+            &delta,
+            &old_url,
+            &config.base_dir,
+            &config.markdown_extensions,
+            &config.ignore_dirs,
+            &config.ignore_globs,
+            &config.index_file,
+            &config.repo.wikilink_index,
+            &skip,
+        )
+        .map_err(FileOpError::Io)?;
+
+        // A5: surgical repo/cache updates + broadcasts.
+        config
+            .repo
+            .invalidate_file(&src, &crate::watcher::ChangeEventType::Deleted);
+        config
+            .repo
+            .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
+        let mut changed_union: Vec<PathBuf> = Vec::new();
+        for p in rewritten_paths.iter().chain(wiki_paths.iter()) {
+            if !changed_union.iter().any(|q| q == p) {
+                changed_union.push(p.clone());
+            }
+        }
+        for p in &changed_union {
+            config
+                .repo
+                .invalidate_file(p, &crate::watcher::ChangeEventType::Modified);
+        }
+        config.repo.build_relationship_index();
+        config.repo.build_wikilink_index();
+        config.repo.rebuild_tag_index();
+        config.sibling_nav_cache.pin().clear();
+        config.inbound_link_cache.invalidate_all();
+        config.link_cache.invalidate_all();
+
+        Self::broadcast_change(config, &src, crate::watcher::ChangeEventType::Deleted);
+        Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
+        for p in &changed_union {
+            Self::broadcast_change(config, p, crate::watcher::ChangeEventType::Modified);
+        }
+
+        let to_urls = |paths: &[PathBuf]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| {
+                    crate::repo::build_markdown_url_path(p, &config.base_dir, &config.index_file)
+                })
+                .collect()
+        };
+
+        Ok(MoveResponse {
+            from_url: old_url,
+            url_path: new_url,
+            path: Self::rel_path_string(&dst, &config.base_dir),
+            rewritten: to_urls(&rewritten_paths),
+            wikilinks_rewritten: to_urls(&wiki_paths),
+            created_dirs,
+        })
+    }
+
+    /// Computes the old resolvable names that no longer resolve to the file
+    /// after a move (for A4-C bare-`[[Name]]` rewriting), each paired with the
+    /// new filename stem. Title and aliases are unchanged by a move, so in
+    /// practice only a changed filename stem contributes.
+    fn wikilink_delta_names(
+        frontmatter: Option<&crate::markdown::SimpleMetadata>,
+        old_stem: &str,
+        new_stem: &str,
+    ) -> Vec<(String, String)> {
+        let title_for = |stem: &str| -> String {
+            frontmatter
+                .and_then(|fm| fm.get("title"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| stem.to_string())
+        };
+        let aliases: Vec<String> = frontmatter
+            .and_then(|fm| fm.get("aliases"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let old_title = title_for(old_stem);
+        let new_title = title_for(new_stem);
+
+        // Names that still resolve to the file after the move must NOT be
+        // rewritten: the new stem, the (unchanged) title, and any aliases.
+        let mut new_names: HashSet<String> = HashSet::new();
+        new_names.insert(crate::relationships::normalize_name(new_stem));
+        new_names.insert(crate::relationships::normalize_name(&new_title));
+        for a in &aliases {
+            new_names.insert(crate::relationships::normalize_name(a));
+        }
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for cand in std::iter::once(old_stem.to_string())
+            .chain(std::iter::once(old_title))
+            .chain(aliases.iter().cloned())
+        {
+            let norm = crate::relationships::normalize_name(&cand);
+            if new_names.contains(&norm) || !seen.insert(norm) {
+                continue;
+            }
+            out.push((cand, new_stem.to_string()));
+        }
+        out
     }
 
     /// Media viewer endpoint for video, PDF, audio, and image content.
@@ -5402,6 +6224,147 @@ mod tests {
         assert!(vtt.is_some());
 
         assert!(Server::metadata_response_from_cache(CachedMetadata::NotAvailable).is_none());
+    }
+
+    // ===== resolve_new_target_path (file-management path safety) =====
+
+    #[test]
+    fn test_resolve_new_target_rejects_parent_traversal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        assert!(matches!(
+            resolve_new_target_path(&base, "../escape.md"),
+            Err(FileOpError::Traversal)
+        ));
+        assert!(matches!(
+            resolve_new_target_path(&base, "docs/../../escape.md"),
+            Err(FileOpError::Traversal)
+        ));
+        // Nothing was written outside the root.
+        assert!(!base.join("../escape.md").exists());
+    }
+
+    #[test]
+    fn test_resolve_new_target_rejects_empty_or_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        assert!(matches!(
+            resolve_new_target_path(&base, ""),
+            Err(FileOpError::Traversal)
+        ));
+        assert!(matches!(
+            resolve_new_target_path(&base, "/"),
+            Err(FileOpError::Traversal)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_new_target_accepts_valid_new_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let resolved = resolve_new_target_path(&base, "docs/new.md").expect("valid path");
+        assert_eq!(resolved, base.join("docs/new.md"));
+    }
+
+    #[test]
+    fn test_resolve_new_target_normalizes_leading_slash() {
+        // A leading slash is treated as repo-root-relative, never an escape.
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let resolved = resolve_new_target_path(&base, "/docs/new.md").expect("valid path");
+        assert_eq!(resolved, base.join("docs/new.md"));
+    }
+
+    // ===== sanitize_upload_name (upload filename validation) =====
+
+    fn md_exts() -> Vec<String> {
+        vec!["md".to_string(), "markdown".to_string()]
+    }
+
+    #[test]
+    fn test_sanitize_upload_name_basename_and_trim() {
+        assert_eq!(
+            sanitize_upload_name("image.png", &md_exts()).as_deref(),
+            Some("image.png")
+        );
+        // Surrounding whitespace is trimmed.
+        assert_eq!(
+            sanitize_upload_name("  pic.jpeg  ", &md_exts()).as_deref(),
+            Some("pic.jpeg")
+        );
+        // Multiple dots: only the final segment is the extension.
+        assert_eq!(
+            sanitize_upload_name("archive.tar.gz", &md_exts()).as_deref(),
+            Some("archive.tar.gz")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_upload_name_rejects_separators_and_traversal() {
+        assert_eq!(sanitize_upload_name("../secret.png", &md_exts()), None);
+        assert_eq!(sanitize_upload_name("notes/pic.png", &md_exts()), None);
+        assert_eq!(sanitize_upload_name("a\\b.png", &md_exts()), None);
+        assert_eq!(sanitize_upload_name("..", &md_exts()), None);
+        assert_eq!(sanitize_upload_name(".", &md_exts()), None);
+        assert_eq!(sanitize_upload_name("my..pic.png", &md_exts()), None);
+    }
+
+    #[test]
+    fn test_sanitize_upload_name_requires_stem_and_extension() {
+        // No extension at all.
+        assert_eq!(sanitize_upload_name("noext", &md_exts()), None);
+        // Dotfile with no other extension → no extension.
+        assert_eq!(sanitize_upload_name(".png", &md_exts()), None);
+        // Trailing dot → empty extension.
+        assert_eq!(sanitize_upload_name("pic.", &md_exts()), None);
+        // Empty / whitespace-only.
+        assert_eq!(sanitize_upload_name("", &md_exts()), None);
+        assert_eq!(sanitize_upload_name("   ", &md_exts()), None);
+    }
+
+    #[test]
+    fn test_sanitize_upload_name_rejects_markdown_extensions() {
+        // Markdown files must be created via /.mbr/create, not uploaded.
+        assert_eq!(sanitize_upload_name("note.md", &md_exts()), None);
+        assert_eq!(sanitize_upload_name("note.markdown", &md_exts()), None);
+        // Case-insensitive.
+        assert_eq!(sanitize_upload_name("note.MD", &md_exts()), None);
+        // A non-markdown extension is still accepted.
+        assert_eq!(
+            sanitize_upload_name("note.pdf", &md_exts()).as_deref(),
+            Some("note.pdf")
+        );
+    }
+
+    // ===== dedupe_name (collision suffixing) =====
+
+    #[test]
+    fn test_dedupe_name_no_collision() {
+        let dir = Path::new("/repo/notes");
+        let chosen = dedupe_name(dir, "pic", "png", |_| false);
+        assert_eq!(chosen, dir.join("pic.png"));
+    }
+
+    #[test]
+    fn test_dedupe_name_first_collision() {
+        let dir = Path::new("/repo");
+        let taken: std::collections::HashSet<PathBuf> = [dir.join("a.txt")].into_iter().collect();
+        let chosen = dedupe_name(dir, "a", "txt", |p| taken.contains(p));
+        assert_eq!(chosen, dir.join("a-1.txt"));
+    }
+
+    #[test]
+    fn test_dedupe_name_suffix_sequence() {
+        let dir = Path::new("/repo/notes");
+        let taken: std::collections::HashSet<PathBuf> = [
+            dir.join("pic.png"),
+            dir.join("pic-1.png"),
+            dir.join("pic-2.png"),
+        ]
+        .into_iter()
+        .collect();
+        let chosen = dedupe_name(dir, "pic", "png", |p| taken.contains(p));
+        assert_eq!(chosen, dir.join("pic-3.png"));
     }
 }
 

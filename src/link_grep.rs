@@ -212,7 +212,7 @@ impl InboundLinkCache {
 ///
 /// # Returns
 /// The relative path from source to target (e.g., `c/1` or `../1`)
-fn compute_relative_path(source_folder: &str, target_path: &str) -> String {
+pub(crate) fn compute_relative_path(source_folder: &str, target_path: &str) -> String {
     // Normalize: strip leading slash and any trailing slashes for comparison
     let source = source_folder.trim_start_matches('/').trim_end_matches('/');
     let target = target_path.trim_start_matches('/').trim_end_matches('/');
@@ -273,7 +273,10 @@ fn compute_relative_path(source_folder: &str, target_path: &str) -> String {
 ///
 /// # Returns
 /// A vector of all patterns that could be valid links to the target from this folder
-fn compute_patterns_for_folder(source_folder: &str, target_url_path: &str) -> Vec<String> {
+pub(crate) fn compute_patterns_for_folder(
+    source_folder: &str,
+    target_url_path: &str,
+) -> Vec<String> {
     let mut patterns = HashSet::new();
 
     // Normalize target (strip leading/trailing slashes for the base)
@@ -313,7 +316,7 @@ fn compute_patterns_for_folder(source_folder: &str, target_url_path: &str) -> Ve
 /// - `a/b/c/`
 /// - `a/b/c.md`
 /// - `a/b/c#` (for anchor detection)
-fn add_pattern_variants(patterns: &mut HashSet<String>, base: &str) {
+pub(crate) fn add_pattern_variants(patterns: &mut HashSet<String>, base: &str) {
     let normalized = base.trim_end_matches('/');
     patterns.insert(normalized.to_string());
     patterns.insert(format!("{}/", normalized));
@@ -697,7 +700,7 @@ pub fn find_inbound_links(
 /// Gets the folder URL path from a file URL path.
 /// `/a/b/c/` -> `/a/b/`
 /// `/a/` -> `/`
-fn get_folder_url_path(file_url_path: &str) -> String {
+pub(crate) fn get_folder_url_path(file_url_path: &str) -> String {
     let trimmed = file_url_path.trim_end_matches('/');
     if let Some(pos) = trimmed.rfind('/') {
         format!("{}/", &trimmed[..pos])
@@ -707,7 +710,11 @@ fn get_folder_url_path(file_url_path: &str) -> String {
 }
 
 /// Computes the URL path for a markdown file.
-fn compute_url_path(file_path: &Path, root_dir: &Path, markdown_extensions: &[String]) -> String {
+pub(crate) fn compute_url_path(
+    file_path: &Path,
+    root_dir: &Path,
+    markdown_extensions: &[String],
+) -> String {
     let relative = file_path.strip_prefix(root_dir).unwrap_or(file_path);
 
     let mut url_path = String::from("/");

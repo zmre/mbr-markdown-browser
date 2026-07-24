@@ -15,8 +15,17 @@ import { Crepe, CrepeFeature } from '@milkdown/crepe';
 import crepeCommonCss from '@milkdown/crepe/theme/common/style.css?inline';
 import { editorViewCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
+import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx } from '@milkdown/kit/ctx';
 import { recombine, splitFrontmatter, unescapeWikilinks } from './editor-frontmatter.js';
+import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
+import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
+import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
+import { createLinkAutocompletePlugin, AUTOCOMPLETE_CSS } from './editor-link-autocomplete.js';
+import type { EditTarget } from './editor-media-target.js';
+import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
+import { noteDir } from './editor-upload.js';
+import { mediaProxyURL } from './editor-media-proxy.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -47,9 +56,15 @@ function injectStyles(): void {
   // onto the page's Pico variables, so the editor inherits the active theme —
   // color variant, `.mbr/theme.css`/`user.css` overrides, and light/dark — all
   // of which Pico already switches. THEME_CSS comes after common so it wins.
-  style.textContent = [crepeCommonCss, THEME_CSS, FOOTNOTE_CSS, MODAL_CSS].join(
-    '\n',
-  );
+  style.textContent = [
+    crepeCommonCss,
+    THEME_CSS,
+    FOOTNOTE_CSS,
+    MODAL_CSS,
+    HEADER_CSS,
+    PICKER_CSS,
+    AUTOCOMPLETE_CSS,
+  ].join('\n');
   document.head.appendChild(style);
 }
 
@@ -142,6 +157,19 @@ const MODAL_CSS = `
 .mbr-editor-token.show { display: inline-block; }
 .mbr-editor-footer button { padding: 0.35rem 0.9rem; cursor: pointer; }
 .mbr-editor-loading { padding: 2rem; text-align: center; opacity: 0.7; }
+`;
+
+// Header file actions (New / Rename / Move) and the footer "Insert media"
+// button. Kept visually light so they don't compete with the title/close.
+const HEADER_CSS = `
+.mbr-editor-fileactions { display: flex; align-items: center; gap: 0.3rem; margin-left: auto; margin-right: 0.5rem; }
+.mbr-editor-fileactions button {
+  font-size: 0.8rem; padding: 0.2rem 0.55rem; cursor: pointer;
+  background: transparent; color: inherit;
+  border: 1px solid var(--pico-muted-border-color, #ccc); border-radius: 5px;
+}
+.mbr-editor-fileactions button:hover { background: var(--pico-secondary-hover-background, #eceef4); }
+.mbr-editor-media { }
 `;
 
 // Footnote nodes (from the gfm preset) are unstyled in the editor by default.
@@ -249,6 +277,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
 
   let crepe: Crepe | null = null;
   let baseHash = '';
+  // Normalized document content as of load / last successful save. Compared
+  // against the live content to detect unsaved edits before File operations.
+  let savedContent = '';
 
   const close = () => {
     if (crepe) {
@@ -285,6 +316,29 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     return h;
   };
 
+  // Uploads a pasted/dropped/picked image to the server and returns its
+  // root-absolute URL, which Crepe uses as the image `src`. Wired into the
+  // ImageBlock feature's `onUpload` (see the Crepe config below), replacing
+  // Crepe's default client-only `blob:` object URL so images actually persist.
+  // Assets land in the note's own folder; the endpoint returns a root-absolute
+  // `url` (e.g. `/notes/image.png`) which we return as-is — a bare-relative path
+  // would resolve against the editor page URL and break the preview + render.
+  async function uploadFile(file: File): Promise<string> {
+    const dir = noteDir(opts.filePath);
+    const resp = await fetch(
+      `/.mbr/upload?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}`,
+      {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': file.type || 'application/octet-stream' }),
+        credentials: 'same-origin',
+        body: file,
+      },
+    );
+    if (!resp.ok) throw new Error(describeUploadError(resp.status));
+    const data = (await resp.json()) as { url: string; path: string; name: string };
+    return data.url;
+  }
+
   // Fetch raw markdown.
   let raw: string;
   try {
@@ -312,6 +366,27 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   header.className = 'mbr-editor-header';
   header.innerHTML = `<h2>Edit<span class="path"></span></h2>`;
   header.querySelector('.path')!.textContent = opts.filePath;
+
+  // File actions (New / Rename / Move). Rename and Move share the path picker
+  // (rename = move to a new filename); they differ only in the initial cursor
+  // selection. Each guards unsaved edits before navigating away.
+  const fileActions = document.createElement('div');
+  fileActions.className = 'mbr-editor-fileactions';
+  const mkFileBtn = (label: string, title: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.title = title;
+    b.addEventListener('click', onClick);
+    return b;
+  };
+  fileActions.append(
+    mkFileBtn('New', 'Create a new markdown file', () => void handleNew()),
+    mkFileBtn('Rename', 'Rename this file', () => void handleMove('basename')),
+    mkFileBtn('Move', 'Move this file to another folder', () => void handleMove('folder')),
+  );
+  header.appendChild(fileActions);
+
   const closeBtn = document.createElement('button');
   closeBtn.className = 'mbr-editor-close';
   closeBtn.setAttribute('aria-label', 'Close editor');
@@ -372,17 +447,41 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       setStatus(`Could not insert footnote: ${(err as Error).message}`, 'error');
     }
   });
+  // Insert-media helper. Context-aware: with an embed at/adjacent to the cursor
+  // it opens the picker in edit mode (prefilled) to replace it; otherwise it
+  // inserts a new embed at the cursor. Its label tracks that context (see
+  // `setMediaButtonMode`); double-clicking any embed is the primary edit path.
+  const mediaBtn = document.createElement('button');
+  mediaBtn.type = 'button';
+  mediaBtn.className = 'mbr-editor-media';
+  mediaBtn.textContent = 'Insert media';
+  mediaBtn.title = 'Insert a media embed — double-click an existing embed to edit';
+  mediaBtn.setAttribute('aria-label', 'Insert media');
+  mediaBtn.addEventListener('click', () => void handleMedia());
   const cancelBtn = document.createElement('button');
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', close);
   const saveBtn = document.createElement('button');
   saveBtn.textContent = 'Save';
-  footer.append(footnoteBtn, status, tokenInput, cancelBtn, saveBtn);
+  footer.append(footnoteBtn, mediaBtn, status, tokenInput, cancelBtn, saveBtn);
   modal.appendChild(footer);
 
   const setStatus = (msg: string, kind: '' | 'ok' | 'error' = '') => {
     status.textContent = msg;
     status.className = `status${kind ? ' ' + kind : ''}`;
+  };
+
+  // Reflects context on the media button: when an embed is the current target
+  // (selection or cursor-adjacent) it reads "Edit media"; otherwise "Insert
+  // media". Driven by the media-edit plugin's selection-change hook. Defined
+  // before Crepe so the plugin can call it from its first `update`.
+  const setMediaButtonMode = (target: EditTarget | null): void => {
+    const editing = target !== null;
+    mediaBtn.textContent = editing ? 'Edit media' : 'Insert media';
+    mediaBtn.setAttribute('aria-label', editing ? 'Edit media' : 'Insert media');
+    mediaBtn.title = editing
+      ? 'Edit the selected embed — or double-click any embed to edit'
+      : 'Insert a media embed — double-click an existing embed to edit';
   };
 
   // Instantiate Crepe with CodeMirror (and its dependent LaTeX feature)
@@ -400,7 +499,40 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
         [CrepeFeature.CodeMirror]: false,
         [CrepeFeature.Latex]: false,
       },
+      // Route the ImageBlock uploader to our server endpoint. Crepe falls back
+      // `inlineOnUpload ?? onUpload` and `blockOnUpload ?? onUpload`, and its
+      // drop/paste uploader reads the same block `onUpload`, so this single
+      // `onUpload` covers the upload button, drag-drop, and paste.
+      //
+      // `proxyDomURL` swaps heavy media (video/audio/PDF authored with image
+      // syntax) for a lightweight inline-SVG icon in the displayed `<img>`, so
+      // the browser never tries to download the whole file as an image. Crepe
+      // forwards this single `proxyDomURL` to both inline and block images, and
+      // it only touches the reactive `src` — the saved markdown is unchanged.
+      featureConfigs: {
+        [CrepeFeature.ImageBlock]: {
+          onUpload: (file: File) => uploadFile(file),
+          proxyDomURL: (url: string) => mediaProxyURL(url),
+        },
+      },
     });
+    // Register the `[[` link-autocomplete plugin on the underlying Milkdown
+    // editor before create() — the Crepe 7.21.3 plugin-injection point.
+    crepe.editor.use(
+      createLinkAutocompletePlugin({
+        fetchSiteFiles: fetchSiteMarkdownFiles,
+        currentUrl: () => safeDecodePath(window.location.pathname),
+      }),
+    );
+    // Double-click-to-edit for media embeds (same injection point). It calls
+    // back into the picker flow below: `onEditMedia` for a double-clicked node,
+    // `onTargetChange` to keep the footer button label in sync.
+    crepe.editor.use(
+      createMediaEditPlugin({
+        onEditMedia: (target) => void handleMediaWith(target),
+        onTargetChange: (target) => setMediaButtonMode(target),
+      }),
+    );
     await crepe.create();
   } catch (err) {
     console.error('Crepe failed to initialize:', err);
@@ -408,10 +540,17 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     return;
   }
 
-  const doSave = async () => {
-    if (!crepe) return;
+  // Baseline for dirty-tracking: Crepe normalizes markdown on load, so capture
+  // the normalized content now rather than comparing against the raw source.
+  const currentContent = (): string =>
+    crepe ? recombine(fmTextarea.value, unescapeWikilinks(crepe.getMarkdown())) : savedContent;
+  const isDirty = (): boolean => crepe !== null && currentContent() !== savedContent;
+  savedContent = currentContent();
+
+  const doSave = async (): Promise<boolean> => {
+    if (!crepe) return false;
     sessionToken = tokenInput.value.trim();
-    const content = recombine(fmTextarea.value, unescapeWikilinks(crepe.getMarkdown()));
+    const content = currentContent();
     saveBtn.setAttribute('aria-busy', 'true');
     setStatus('Saving…');
     try {
@@ -424,20 +563,198 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       saveBtn.removeAttribute('aria-busy');
       if (resp.ok) {
         baseHash = resp.headers.get('X-MBR-Content-Hash') ?? baseHash;
+        savedContent = content;
         setStatus('Saved. The page will reload.', 'ok');
-        return;
+        return true;
       }
       if (resp.status === 401) {
         tokenInput.classList.add('show');
         tokenInput.focus();
       }
       setStatus(describeError(resp.status, 'save'), 'error');
+      return false;
     } catch (err) {
       saveBtn.removeAttribute('aria-busy');
       setStatus(`Save failed: ${(err as Error).message}`, 'error');
+      return false;
     }
   };
-  saveBtn.addEventListener('click', doSave);
+  saveBtn.addEventListener('click', () => void doSave());
+
+  // ---------------------------------------------------------------------------
+  // File operations (New / Rename / Move) and media insertion.
+  // ---------------------------------------------------------------------------
+
+  const encodeFsPath = (p: string): string =>
+    p.split('/').map(encodeURIComponent).join('/');
+
+  /** Minimal starter body for a newly created file (an H1 of its stem). */
+  const newFileTemplate = (path: string): string => {
+    const stem = (path.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
+    return `# ${stem}\n`;
+  };
+
+  /**
+   * Prompts to save/discard/cancel when there are unsaved edits. Resolves
+   * `true` when it's safe to proceed (saved or discarded), `false` on cancel.
+   */
+  const guardUnsaved = async (): Promise<boolean> => {
+    if (!isDirty()) return true;
+    const choice = await confirmUnsaved();
+    if (choice === 'cancel') return false;
+    if (choice === 'save') return doSave();
+    return true; // discard
+  };
+
+  const handleNew = async (): Promise<void> => {
+    if (!(await guardUnsaved())) return;
+    const dest = await openPathPicker({
+      mode: 'new',
+      currentFsPath: opts.filePath,
+      fetchSiteFiles: fetchSiteMarkdownFiles,
+    });
+    if (dest) await doCreate(dest.path, dest.createDirs);
+  };
+
+  const handleMove = async (select: 'basename' | 'folder'): Promise<void> => {
+    if (!(await guardUnsaved())) return;
+    const dest = await openPathPicker({
+      mode: 'move',
+      currentFsPath: opts.filePath,
+      select,
+      fetchSiteFiles: fetchSiteMarkdownFiles,
+    });
+    if (dest) await doMove(dest.path, dest.createDirs);
+  };
+
+  const doCreate = async (path: string, createDirs: boolean): Promise<void> => {
+    setStatus('Creating…');
+    try {
+      const resp = await fetch(`/.mbr/create/${encodeFsPath(path)}`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'same-origin',
+        body: JSON.stringify({ content: newFileTemplate(path), create_dirs: createDirs }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { url_path: string };
+        setStatus('Created. Opening…', 'ok');
+        window.location.href = data.url_path;
+        return;
+      }
+      if (resp.status === 401) {
+        tokenInput.classList.add('show');
+        tokenInput.focus();
+      }
+      setStatus(describeFileOpError(resp.status, 'create'), 'error');
+    } catch (err) {
+      setStatus(`Create failed: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  const doMove = async (to: string, createDirs: boolean): Promise<void> => {
+    setStatus('Moving…');
+    try {
+      const resp = await fetch(`/.mbr/move/${encodeFsPath(opts.filePath)}`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'same-origin',
+        body: JSON.stringify({ to, create_dirs: createDirs }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          url_path: string;
+          rewritten?: string[];
+          wikilinks_rewritten?: string[];
+        };
+        const n = (data.rewritten?.length ?? 0) + (data.wikilinks_rewritten?.length ?? 0);
+        // Mark clean so we don't re-prompt; the target page reloads fresh anyway.
+        savedContent = currentContent();
+        setStatus(
+          n > 0
+            ? `Moved. ${n} link${n === 1 ? '' : 's'} rewritten. Opening…`
+            : 'Moved. Opening…',
+          'ok',
+        );
+        window.location.href = data.url_path;
+        return;
+      }
+      if (resp.status === 401) {
+        tokenInput.classList.add('show');
+        tokenInput.focus();
+      }
+      setStatus(describeFileOpError(resp.status, 'move'), 'error');
+    } catch (err) {
+      setStatus(`Move failed: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  /**
+   * Opens the media picker for `editTarget` (edit mode, prefilled) or, when
+   * `null`, in insert mode at the cursor, then applies the result. Shared by the
+   * footer button and the double-click-to-edit plugin.
+   */
+  const handleMediaWith = async (editTarget: EditTarget | null): Promise<void> => {
+    if (!crepe) return;
+    const result = await openMediaPicker({
+      mode: editTarget ? 'edit' : 'insert',
+      initial: editTarget ? { src: editTarget.src, caption: editTarget.caption } : undefined,
+      fetchMediaFiles: fetchMediaOtherFiles,
+    });
+    if (!result) return;
+    try {
+      applyMediaResult(crepe, result, editTarget);
+    } catch (err) {
+      setStatus(`Could not insert media: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  /** Footer media button: edit the embed at the cursor, else insert a new one. */
+  const handleMedia = async (): Promise<void> => {
+    if (!crepe) return;
+    await handleMediaWith(selectedImageNode(crepe));
+  };
+
+  /** Small nested Save/Discard/Cancel dialog for the unsaved-changes guard. */
+  const confirmUnsaved = (): Promise<'save' | 'discard' | 'cancel'> =>
+    new Promise((resolve) => {
+      let done = false;
+      const finish = (r: 'save' | 'discard' | 'cancel') => {
+        if (done) return;
+        done = true;
+        shell.destroy();
+        resolve(r);
+      };
+      const shell = createNestedModal({
+        ariaLabel: 'Unsaved changes',
+        onCancel: () => finish('cancel'),
+      });
+      const head = document.createElement('div');
+      head.className = 'mbr-picker-header';
+      head.innerHTML = '<h3>Unsaved changes</h3>';
+      const body = document.createElement('div');
+      body.className = 'mbr-picker-field';
+      body.textContent = 'Save your changes before continuing?';
+      const foot = document.createElement('div');
+      foot.className = 'mbr-picker-footer';
+      const spacer = document.createElement('span');
+      spacer.className = 'mbr-picker-status';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', () => finish('cancel'));
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.textContent = 'Discard';
+      discard.addEventListener('click', () => finish('discard'));
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.textContent = 'Save';
+      save.addEventListener('click', () => finish('save'));
+      foot.append(spacer, cancel, discard, save);
+      shell.modal.append(head, body, foot);
+      save.focus();
+    });
 
   // If we already know a token is needed (revealed on a prior 401), keep it shown.
   if (sessionToken) tokenInput.classList.add('show');
@@ -456,4 +773,125 @@ function describeError(status: number, phase: 'load' | 'save'): string {
     default:
       return `Failed to ${phase} (HTTP ${status}).`;
   }
+}
+
+/** Maps create/move HTTP failures to friendly messages. */
+function describeFileOpError(status: number, op: 'create' | 'move'): string {
+  switch (status) {
+    case 400:
+      return 'The destination folder does not exist. Retry and allow creating it.';
+    case 401:
+      return 'Authentication required — enter your edit token and try again.';
+    case 403:
+      return 'Editing is disabled or this request was blocked.';
+    case 404:
+      return op === 'move' ? 'The source file was not found.' : 'Destination not found.';
+    case 409:
+      return op === 'create'
+        ? 'A file already exists at that path.'
+        : 'Something already exists at the destination.';
+    default:
+      return `Failed to ${op} (HTTP ${status}).`;
+  }
+}
+
+/**
+ * Maps image-upload HTTP failures to friendly messages. Crepe surfaces the
+ * thrown Error's message in the image block, so keep it self-explanatory.
+ */
+function describeUploadError(status: number): string {
+  switch (status) {
+    case 401:
+      return 'Authentication required — enter your edit token and save once, then retry.';
+    case 403:
+      return 'Editing is disabled or this upload was blocked.';
+    default:
+      return `Upload failed (HTTP ${status}).`;
+  }
+}
+
+/** Percent-decodes a URL path, tolerating a malformed escape sequence. */
+function safeDecodePath(p: string): string {
+  try {
+    return decodeURIComponent(p);
+  } catch {
+    return p;
+  }
+}
+
+/** Fetches the fresh `markdown_files` array from site.json (server mode). */
+async function fetchSiteMarkdownFiles(): Promise<SiteMarkdownFile[]> {
+  const resp = await fetch('/.mbr/site.json', { credentials: 'same-origin' });
+  if (!resp.ok) throw new Error(`site.json ${resp.status}`);
+  const data = (await resp.json()) as { markdown_files?: SiteMarkdownFile[] };
+  return data.markdown_files ?? [];
+}
+
+/** Fetches the fresh `other_files` array from media.json (server mode). */
+async function fetchMediaOtherFiles(): Promise<MediaFile[]> {
+  const resp = await fetch('/.mbr/media.json', { credentials: 'same-origin' });
+  if (!resp.ok) throw new Error(`media.json ${resp.status}`);
+  const data = (await resp.json()) as { other_files?: MediaFile[] };
+  return data.other_files ?? [];
+}
+
+/**
+ * The embed at/adjacent to the current selection that the media picker can edit
+ * in place, or `null`. See {@link detectEditTarget}: it matches a strict
+ * `NodeSelection` on an image as well as an image just after/before the cursor,
+ * so the footer button also works for Crepe's atom `image-block` (which rarely
+ * yields a `NodeSelection`).
+ */
+function selectedImageNode(crepe: Crepe): EditTarget | null {
+  return crepe.editor.action((ctx): EditTarget | null =>
+    detectEditTarget(ctx.get(editorViewCtx).state.selection),
+  );
+}
+
+/**
+ * Applies a media picker result to the document: inserts a new embed at the
+ * cursor, or (with `editTarget`) replaces the selected image. A `shortcode`
+ * result (video with timestamps) is written as literal `{{ vid(...) }}` text —
+ * a paragraph when replacing a block image, inline otherwise.
+ */
+function applyMediaResult(
+  crepe: Crepe,
+  result: MediaPickResult,
+  editTarget: EditTarget | null,
+): void {
+  crepe.editor.action((ctx) => {
+    const view: EditorView = ctx.get(editorViewCtx);
+    const schema = ctx.get(schemaCtx);
+    const { state } = view;
+    let tr = state.tr;
+
+    if (editTarget) {
+      const from = editTarget.pos;
+      const to = editTarget.pos + editTarget.nodeSize;
+      if (result.form === 'image') {
+        const node = state.doc.nodeAt(from);
+        if (!node) return;
+        const attrs =
+          editTarget.typeName === 'image-block'
+            ? { ...node.attrs, src: result.src, caption: result.caption }
+            : { ...node.attrs, src: result.src, alt: result.caption };
+        tr = tr.setNodeMarkup(from, undefined, attrs);
+      } else if (editTarget.typeName === 'image-block') {
+        const para = schema.nodes.paragraph.create(null, schema.text(result.shortcode));
+        tr = tr.replaceRangeWith(from, to, para);
+      } else {
+        tr = tr.insertText(result.shortcode, from, to);
+      }
+    } else if (result.form === 'image') {
+      const imageType = schema.nodes.image;
+      if (!imageType) return;
+      const node = imageType.create({ src: result.src, alt: result.caption, title: null });
+      tr = tr.replaceSelectionWith(node, false);
+    } else {
+      tr = tr.insertText(result.shortcode);
+    }
+
+    view.dispatch(tr.scrollIntoView());
+    view.focus();
+  });
 }

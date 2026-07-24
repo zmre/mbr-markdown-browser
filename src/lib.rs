@@ -49,6 +49,7 @@ pub mod errors;
 pub mod html;
 pub mod link_grep;
 pub mod link_index;
+pub mod link_rewrite;
 pub mod link_transform;
 pub mod markdown;
 pub mod media;
