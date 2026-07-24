@@ -888,6 +888,7 @@ impl Builder {
                 tag_sources: &self.config.tag_sources,
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_prefix: &self.config.title_prefix,
                 title_suffix: &self.config.title_suffix,
             },
@@ -1132,6 +1133,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1352,6 +1354,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1430,6 +1433,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1766,6 +1770,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth: 0 },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: None,
             },
         );
@@ -1848,6 +1853,7 @@ impl Builder {
                     mode: ModeFlags::Static { depth },
                     sidebar_style: &self.config.sidebar_style,
                     sidebar_max_items: self.config.sidebar_max_items,
+                    graph_depth: self.config.graph_depth,
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 },
             );

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{TestRepo, assert_html_contains, find_available_port};
+use common::{TestRepo, assert_html_contains, assert_html_not_contains, find_available_port};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,6 +38,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         tag_sources: mbr::config::default_tag_sources(),
         sidebar_style: "panel".to_string(),
         sidebar_max_items: 100,
+        graph_depth: 2,
         title_prefix: String::new(),
         title_suffix: String::new(),
         mark_incomplete: true,
@@ -194,6 +195,25 @@ async fn test_serve_markdown_file_with_dotted_name() {
     let html = response.text().await.unwrap();
     assert_html_contains(&html, "Patrick Walsh");
     assert_html_contains(&html, "Born 2010.");
+}
+
+#[tokio::test]
+async fn test_head_config_includes_graph_depth() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\nBody.");
+
+    // Default config surfaces graphDepth: 2 in the __MBR_CONFIG__ head script.
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, "graphDepth: 2");
+
+    // A graph_depth override flows through to the template.
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.graph_depth = 4;
+    })
+    .await;
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, "graphDepth: 4");
 }
 
 #[tokio::test]
@@ -1705,6 +1725,29 @@ async fn test_components_js_bundle_served() {
 }
 
 #[tokio::test]
+async fn test_graph_chunks_served() {
+    // The lazy-loaded mini-graph and genealogy chunks are compiled into the
+    // binary (DEFAULT_FILES) and must be served alongside the main bundle.
+    let repo = TestRepo::new();
+
+    let server = TestServer::start(&repo).await;
+
+    for path in [
+        "/.mbr/components/mbr-graph.min.js",
+        "/.mbr/components/mbr-genealogy.min.js",
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status(), 200, "Chunk should be served at {path}");
+
+        let content_type = response.headers().get("content-type").unwrap();
+        assert!(
+            content_type.to_str().unwrap().contains("javascript"),
+            "{path} should have javascript content type"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_components_js_bundle_no_missing_imports() {
     // This test verifies that the JS bundle doesn't try to dynamically import
     // files that aren't served, which would cause 404 errors in the browser.
@@ -1746,6 +1789,22 @@ async fn test_components_js_bundle_no_missing_imports() {
             200,
             "The lazy-loaded editor chunk must be served at {EDITOR_CHUNK}"
         );
+    }
+
+    // The mini-graph and genealogy chunks are lazy-loaded through
+    // runtime-computed URLs (asset base + "components/<chunk>.min.js"), so
+    // they never appear as literal import() targets. If the bundle references
+    // either chunk filename, that chunk must actually be served.
+    for chunk in ["mbr-graph.min.js", "mbr-genealogy.min.js"] {
+        if js_content.contains(chunk) {
+            let path = format!("/.mbr/components/{chunk}");
+            let resp = server.get(&path).await;
+            assert_eq!(
+                resp.status(),
+                200,
+                "The lazy-loaded chunk referenced by the bundle must be served at {path}"
+            );
+        }
     }
 }
 
@@ -3987,6 +4046,83 @@ async fn test_no_relationship_tracking_disables() {
     // site.json omits relationship_types entirely.
     let site = get_json(&server, "/.mbr/site.json").await;
     assert!(site.get("relationship_types").is_none());
+}
+
+/// The sidebar mini graph fans out many links.json requests at once. A burst
+/// of uncached lookups must all succeed: the inbound grep is single-flighted
+/// per page and bounded by a semaphore, so no request stampedes or hangs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_links_json_concurrent_burst_all_succeed() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+    server.wait_for_scan().await;
+
+    // Every person page (distinct inbound greps) plus repeats of the same
+    // pages (same-page single-flight) in one concurrent volley.
+    let people = [
+        "john", "mary", "george", "martha", "alice", "robert", "sam", // distinct
+        "john", "mary", "george", // repeats exercise the single-flight path
+    ];
+    let handles: Vec<_> = people
+        .iter()
+        .map(|person| {
+            let client = server.client.clone();
+            let url = server.url(&format!("/people/{person}/links.json"));
+            tokio::spawn(async move {
+                let response = client.get(&url).send().await.expect("request failed");
+                assert_eq!(response.status(), 200, "burst request failed for {url}");
+                let text = response.text().await.expect("body read failed");
+                let json: serde_json::Value = serde_json::from_str(&text)
+                    .unwrap_or_else(|e| panic!("invalid JSON from {url}: {e}\n{text}"));
+                assert!(json.is_object(), "expected a JSON object from {url}");
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.await.expect("burst task panicked");
+    }
+}
+
+#[tokio::test]
+async fn test_person_page_renders_genealogy_element() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+
+    // Person pages get the d3 genealogy chart element, not the removed
+    // mermaid relationships element.
+    let html = server.get_text("/people/john/").await;
+    assert_html_contains(&html, "<mbr-genealogy");
+    assert_html_not_contains(&html, "<mbr-relationships");
+}
+
+#[tokio::test]
+async fn test_typed_nonperson_page_has_no_graph_element() {
+    // Typed non-person notes lost the inline graph entirely: the sidebar mini
+    // graph and the textual Relationships section cover them.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "gandalf.md",
+        "---\ntype: character\ntitle: Gandalf\n---\n\n# Gandalf\n\nA wizard.\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/gandalf/").await;
+    assert_html_not_contains(&html, "<mbr-genealogy");
+    assert_html_not_contains(&html, "<mbr-relationships");
+}
+
+#[tokio::test]
+async fn test_person_page_prefetches_genealogy_chunk() {
+    let server = TestServer::start_at_path(genealogy_fixture_path()).await;
+
+    // Person pages idle-prefetch the genealogy chunk so the chart opens fast.
+    let html = server.get_text("/people/john/").await;
+    assert_html_contains(&html, r#"rel="prefetch""#);
+    assert_html_contains(&html, "components/mbr-genealogy.min.js");
+
+    // Non-person pages (the fixture index has no `type`) must not reference
+    // the chunk at all.
+    let html = server.get_text("/").await;
+    assert_html_not_contains(&html, "components/mbr-genealogy.min.js");
 }
 
 // ============================================================================

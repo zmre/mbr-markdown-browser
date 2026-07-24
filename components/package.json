@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && vite build --config vite.editor.config.ts",
+    "build": "tsc && vite build && vite build --config vite.editor.config.ts && vite build --config vite.graph.config.ts && vite build --config vite.genealogy.config.ts",
     "watch": "tsc && vite build --watch",
     "preview": "vite preview",
     "test": "vitest run",
@@ -14,9 +14,12 @@
   },
   "dependencies": {
     "@milkdown/crepe": "^7.21.3",
+    "d3-force": "^3.0.0",
+    "family-chart": "^0.9.0",
     "lit": "^3.3.3"
   },
   "devDependencies": {
+    "@types/d3-force": "^3.0.10",
     "@vitest/browser": "^4.1.10",
     "happy-dom": "^20.11.0",
     "terser": "^5.49.0",

@@ -126,6 +126,7 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 |--------|------|---------|-------------|
 | `sidebar_style` | string | `"panel"` | Sidebar navigation style: `"panel"` (modal 3-pane) or `"single"` (persistent sidebar) |
 | `sidebar_max_items` | number | `100` | Maximum items per section in sidebar navigation |
+| `graph_depth` | number | `2` | Default depth (`1`–`5`) of the link graph shown in the info panel; startup fails on out-of-range values |
 | `title_prefix` | string | `""` | Text to prepend to all page titles |
 | `title_suffix` | string | `""` | Text to append to all page titles |
 
@@ -151,6 +152,15 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 }
 ```
 
+**Link graph depth (`graph_depth`):**
+
+The info panel (Ctrl+g) shows a force-directed mini graph of the current note's
+neighbourhood (inbound links, outbound internal links, and typed
+relationships). `graph_depth` sets how many hops out the graph expands by
+default; the expanded full-screen view has an on-screen depth stepper for
+one-off changes. Exposed to the frontend as
+`window.__MBR_CONFIG__.graphDepth`; also settable via `MBR_GRAPH_DEPTH`.
+
 Example configuration:
 ```toml
 # .mbr/config.toml
@@ -160,6 +170,9 @@ sidebar_style = "single"
 
 # Show more items in large repositories
 sidebar_max_items = 200
+
+# Expand the info-panel link graph one hop further
+graph_depth = 3
 ```
 
 ### Title Settings
@@ -289,6 +302,11 @@ schema and a walkthrough.
 > backlinks (no extra request). Disabling it omits relationship data from
 > `links.json` and `site.json` and hides the info-panel section.
 
+> **Note:** Typed relationships are visualized by the d3-based genealogy charts
+> on `type: person` pages and as edges in the info panel's mini link graph —
+> not by mermaid. See
+> [Relationships & Genealogy](../markdown/relationships/) for both.
+
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
 > **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.
@@ -336,7 +354,7 @@ mbr automatically tracks bidirectional links between pages. The info panel (Ctrl
 - **Links Out**: Pages this document links to
 - **Links In**: Pages that link to this document (backlinks)
 
-This feature enables wiki-style backlink navigation without requiring any special syntax.
+This feature enables wiki-style backlink navigation without requiring any special syntax. The same data powers the info panel's **mini link graph**, which walks outward from the current page by fetching neighbouring pages' `links.json` files client-side (a few at a time, capped and session-cached) — see [Relationships & Genealogy](../markdown/relationships/#link-graph-in-the-sidebar).
 
 **How it works:**
 
@@ -344,6 +362,11 @@ This feature enables wiki-style backlink navigation without requiring any specia
 |------|--------|-------------|
 | Server/GUI | On-demand grep search (cached) | First request: ~1-3s, subsequent: instant |
 | Build | Eager index during render | Computed in parallel, no runtime cost |
+
+In server mode, concurrent inbound-link scans are bounded (two repository scans
+at a time, single-flight per page) and results are cached (~5 minute TTL), so
+bursts of `links.json` requests — such as the mini link graph fetching a whole
+neighbourhood — stay responsive even on large repositories.
 
 **API:** Each page has a `links.json` endpoint:
 ```bash
@@ -376,7 +399,7 @@ Or in `.mbr/config.toml`:
 link_tracking = false
 ```
 
-When disabled, the `links.json` endpoint returns 404 and no link files are generated during builds.
+When disabled, the `links.json` endpoint returns 404, no link files are generated during builds, and the info panel's link sections and mini link graph don't appear.
 
 ### Incomplete-Block Highlighting
 
@@ -655,6 +678,9 @@ MBR_INDEX_FILE=README.md
 # Behavior
 MBR_OEMBED_TIMEOUT_MS=1000
 MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
+
+# Navigation
+MBR_GRAPH_DEPTH=3
 
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true

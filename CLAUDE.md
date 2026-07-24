@@ -219,6 +219,17 @@ bun run build      # Production build (tsc + vite)
 
 Built components are placed in `dist/` and compiled into the binary via `include_bytes!`.
 
+The build produces **four bundles** — one main bundle plus three lazy chunks, each with its own vite config:
+
+| Bundle | Vite config | Contents | Loaded |
+|--------|-------------|----------|--------|
+| `mbr-components.min.js` | `vite.config.ts` | Main bundle: all always-on elements + lazy-chunk trigger elements | Every page |
+| `mbr-editor.min.js` | `vite.editor.config.ts` | Milkdown/Crepe markdown editor | Lazily, when editing opens |
+| `mbr-graph.min.js` | `vite.graph.config.ts` | `<mbr-mini-graph>` + d3-force (~57 kB min / ~19 kB gz) | Lazily, when the info panel first opens |
+| `mbr-genealogy.min.js` | `vite.genealogy.config.ts` | Genealogy charts: family-chart + timeline tree (~204 kB min / ~61 kB gz) | Lazily, near-viewport on person pages (prefetched there) |
+
+Stateful modules (top-level fetches/caches like `shared.ts`) live only in the main bundle; chunk elements receive data and services via Lit properties.
+
 ## Architecture
 
 ### Rust Modules (src/)
@@ -300,12 +311,15 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 
 Components in `components/src/`:
 - `mbr-browse.ts` - Directory/file browser (`<mbr-browse>` element)
-- `mbr-relationships.ts` - Typed-relationship graph / family tree (`<mbr-relationships>`), rendered via the embedded mermaid pipeline from `site.json`. Included from `templates/_display_enhancements.html`, gated on `{% if type %}`. Graph traversal and mermaid-source generation are pure exported functions (unit-tested in `mbr-relationships.test.ts`).
+- `mbr-info.ts` - Info panel (`<mbr-info>`, Ctrl/Cmd+G): metadata, links, relationships, and the mini link graph at the top. Lazy-loads the `mbr-graph.min.js` chunk on first open and binds data/services (`.fetchLinks`, `.getMeta`, …) onto `<mbr-mini-graph>`; graph section is omitted when the page has no `links.json` (link tracking disabled).
+- `graph/` - Shared pure graph code (relationship-graph building, viewport math, links.json BFS) used by both graph features, plus `mbr-mini-graph.ts` — the force-directed neighborhood graph element shipped in the `mbr-graph.min.js` chunk. Depth defaults come from the `graph_depth` config option (default 2, range 1–5, env `MBR_GRAPH_DEPTH`), exposed to the frontend as `window.__MBR_CONFIG__.graphDepth`.
+- `mbr-genealogy.ts` - Person-page trigger element (`<mbr-genealogy>`, main bundle). Emitted by `templates/_display_enhancements.html` gated on `{% if type and type == "person" %}`. Builds the relationship graph from `site.json`; renders nothing when the person has no resolved relationships, otherwise lazy-loads the `mbr-genealogy.min.js` chunk when scrolled near the viewport.
+- `genealogy/` - Genealogy chunk source: chart registry + selector (localStorage `mbr_genealogy_chart`), family-chart view (default), and the custom d3-free timeline-tree layout/view. The registry is the extension point for future chart types (sunburst, edge bundling, birth-place bubble map).
 - `shared.ts` - Shared state (site navigation data)
 
 These are Lit-based custom elements using decorators (`@customElement`, `@state`, etc.) and compile to ES modules loaded by the HTML template.
 
-Display-enhancement elements (dynamic loaders like `<mbr-mermaid>`, `<mbr-hljs>`, and `<mbr-relationships>`) are included from `templates/_display_enhancements.html` (NOT `_scripts_markdown.html`).
+Display-enhancement elements (dynamic loaders like `<mbr-mermaid>` and `<mbr-hljs>`, and the person-page `<mbr-genealogy>`) are included from `templates/_display_enhancements.html`. The old mermaid-based `<mbr-relationships>` element has been removed.
 
 ### Template System
 
@@ -318,11 +332,11 @@ The project uses Tera templates with a partial-based architecture. Templates are
 
 **Partial Templates (underscore prefix, not exposed as URLs):**
 - `_head.html` - Base head with meta tags and core CSS
-- `_head_markdown.html` - Extended head for markdown pages (includes `_head.html`)
+- `_head_markdown.html` - Extended head for markdown pages (includes `_head.html`); prefetches the genealogy chunk on person pages
 - `_nav.html` - Navigation header with breadcrumbs and menus
 - `_footer.html` - Page footer with web components
-- `_scripts.html` - Base script includes
-- `_scripts_markdown.html` - Extended scripts for markdown (hljs, mermaid)
+- `_scripts.html` - Script includes
+- `_display_enhancements.html` - Display-enhancement elements (mermaid/hljs loaders; `<mbr-genealogy>` gated on `{% if type and type == "person" %}`)
 
 **Tera Template Gotchas:**
 - Chained `default()` filters don't work as expected for variable fallbacks. Use conditionals instead:
@@ -471,6 +485,8 @@ build/
 **Frontend:**
 - **lit** - Web components framework
 - **vite** - Build tool
+- **d3-force** - Force simulation for the info-panel mini link graph (ISC; in the lazy `mbr-graph.min.js` chunk)
+- **family-chart** - Genealogy family chart on person pages (ISC; depends on d3, ISC/BSD-3; in the lazy `mbr-genealogy.min.js` chunk)
 
 ## macOS App Bundle
 

@@ -162,6 +162,23 @@ async fn test_build_sets_static_mode() {
 }
 
 #[tokio::test]
+async fn test_build_head_includes_graph_depth() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("test").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    // The default graph_depth flows into the __MBR_CONFIG__ head script.
+    assert!(
+        html.contains("graphDepth: 2"),
+        "Expected graphDepth: 2 in built HTML"
+    );
+}
+
+#[tokio::test]
 async fn test_build_no_incomplete_spans_by_default() {
     // Static builds default mark_incomplete=false; published sites must not
     // contain mbr-incomplete spans unless the user explicitly opts in.
@@ -1586,6 +1603,64 @@ async fn test_build_person_infobox_and_aliases() {
         aliases.iter().any(|a| a == "Mary Doe"),
         "Mary's frontmatter aliases should include 'Mary Doe'"
     );
+}
+
+#[tokio::test]
+async fn test_build_person_page_has_genealogy_element() {
+    let (_guard, output) = build_genealogy().await;
+
+    // Person pages get the d3 genealogy chart element, not the removed
+    // mermaid relationships element.
+    let john_html = fs::read_to_string(output.join("people").join("john").join("index.html"))
+        .expect("john index.html");
+    assert!(
+        john_html.contains("<mbr-genealogy"),
+        "Built person page should contain <mbr-genealogy>: {john_html}"
+    );
+    assert!(
+        !john_html.contains("<mbr-relationships"),
+        "Built person page must not contain the removed <mbr-relationships> element"
+    );
+}
+
+#[tokio::test]
+async fn test_build_nonperson_typed_page_has_no_graph_element() {
+    // Typed non-person notes lost the inline graph entirely. Uses a fresh
+    // TestRepo so the shared genealogy fixture stays untouched.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "gandalf.md",
+        "---\ntype: character\ntitle: Gandalf\n---\n\n# Gandalf\n\nA wizard.\n",
+    );
+
+    let output = build_site(&repo).await;
+
+    let html =
+        fs::read_to_string(output.join("gandalf").join("index.html")).expect("gandalf index.html");
+    assert!(
+        !html.contains("<mbr-genealogy"),
+        "Typed non-person page must not contain <mbr-genealogy>: {html}"
+    );
+    assert!(
+        !html.contains("<mbr-relationships"),
+        "Typed non-person page must not contain the removed <mbr-relationships> element"
+    );
+}
+
+#[tokio::test]
+async fn test_build_writes_graph_chunks() {
+    // Static builds ship the lazy-loaded chunks via DEFAULT_FILES.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let output = build_site(&repo).await;
+
+    for chunk in ["mbr-graph.min.js", "mbr-genealogy.min.js"] {
+        let path = output.join(".mbr").join("components").join(chunk);
+        assert!(path.exists(), "Expected chunk at {}", path.display());
+        let size = fs::metadata(&path).expect("chunk metadata").len();
+        assert!(size > 0, "{} should be non-empty", path.display());
+    }
 }
 
 #[tokio::test]

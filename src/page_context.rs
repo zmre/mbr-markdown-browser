@@ -84,6 +84,7 @@ pub struct PageChrome<'a> {
     pub mode: ModeFlags,
     pub sidebar_style: &'a str,
     pub sidebar_max_items: usize,
+    pub graph_depth: usize,
     /// `Some((prefix, suffix))` for content pages; `None` for error pages,
     /// which historically omit `title_prefix`/`title_suffix`.
     pub title_affixes: Option<(&'a str, &'a str)>,
@@ -112,6 +113,7 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
         "sidebar_max_items".to_string(),
         json!(chrome.sidebar_max_items),
     );
+    ctx.insert("graph_depth".to_string(), json!(chrome.graph_depth));
     if let Some((prefix, suffix)) = chrome.title_affixes {
         ctx.insert("title_prefix".to_string(), json!(prefix));
         ctx.insert("title_suffix".to_string(), json!(suffix));
@@ -255,6 +257,7 @@ pub struct MarkdownContextOptions<'a> {
     pub tag_sources: &'a [TagSource],
     pub sidebar_style: &'a str,
     pub sidebar_max_items: usize,
+    pub graph_depth: usize,
     pub title_prefix: &'a str,
     pub title_suffix: &'a str,
 }
@@ -327,6 +330,7 @@ pub fn markdown_extra_context(
         "sidebar_max_items".to_string(),
         json!(opts.sidebar_max_items),
     );
+    ctx.insert("graph_depth".to_string(), json!(opts.graph_depth));
     ctx.insert("title_prefix".to_string(), json!(opts.title_prefix));
     ctx.insert("title_suffix".to_string(), json!(opts.title_suffix));
 
@@ -409,6 +413,7 @@ mod tests {
                 },
                 sidebar_style: "auto",
                 sidebar_max_items: 10,
+                graph_depth: 3,
                 title_affixes: Some(("pre ", " suf")),
             },
         );
@@ -417,6 +422,7 @@ mod tests {
         assert_eq!(ctx.get("relative_base"), Some(&json!("/.mbr/")));
         assert_eq!(ctx.get("sidebar_style"), Some(&json!("auto")));
         assert_eq!(ctx.get("sidebar_max_items"), Some(&json!(10)));
+        assert_eq!(ctx.get("graph_depth"), Some(&json!(3)));
         assert_eq!(ctx.get("title_prefix"), Some(&json!("pre ")));
         assert_eq!(ctx.get("title_suffix"), Some(&json!(" suf")));
         assert!(!ctx.contains_key("relative_root"));
@@ -434,6 +440,7 @@ mod tests {
                 },
                 sidebar_style: "auto",
                 sidebar_max_items: 10,
+                graph_depth: 2,
                 title_affixes: None,
             },
         );
@@ -453,6 +460,7 @@ mod tests {
                 mode: ModeFlags::Static { depth: 2 },
                 sidebar_style: "auto",
                 sidebar_max_items: 5,
+                graph_depth: 2,
                 title_affixes: Some(("", "")),
             },
         );
@@ -604,6 +612,7 @@ mod tests {
             tag_sources: sources,
             sidebar_style: "auto",
             sidebar_max_items: 10,
+            graph_depth: 2,
             title_prefix: "",
             title_suffix: "",
         }

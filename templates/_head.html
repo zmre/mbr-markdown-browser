@@ -19,6 +19,7 @@
         editEnabled: {% if edit_enabled %}true{% else %}false{% endif %},
         searchEndpoint: "{{ asset_base | safe }}search",
         basePath: "{{ relative_root | default(value='') | safe }}",
-        tagSources: {{ tag_sources | default(value="[]") | safe }}
+        tagSources: {{ tag_sources | default(value="[]") | safe }},
+        graphDepth: {{ graph_depth | default(value=2) }}
       };
     </script>

@@ -1,6 +1,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { isEditEnabled } from './shared.js';
+import { isInputTarget, isModalOpen } from './mbr-keys.js';
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -38,7 +39,9 @@ export class MbrEditorElement extends LitElement {
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
-    // "e" opens the editor, but only when it's safe to hijack the key.
+    // "e" opens the editor, but only when it's safe to hijack the key: not
+    // while typing in an input (isInputTarget uses composedPath so inputs
+    // inside shadow DOMs are detected) and not while a modal is open.
     if (
       e.key === 'e' &&
       !e.ctrlKey &&
@@ -47,7 +50,8 @@ export class MbrEditorElement extends LitElement {
       isEditEnabled() &&
       !this._isOpen &&
       !this._loading &&
-      !isTypingTarget(document.activeElement)
+      !isInputTarget(e) &&
+      !isModalOpen()
     ) {
       e.preventDefault();
       void this._open();
@@ -190,12 +194,4 @@ export class MbrEditorElement extends LitElement {
       }
     }
   `;
-}
-
-/** True when focus is in a text-entry context where "e" should type, not open. */
-function isTypingTarget(el: Element | null): boolean {
-  if (!el) return false;
-  const tag = el.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-  return (el as HTMLElement).isContentEditable === true;
 }

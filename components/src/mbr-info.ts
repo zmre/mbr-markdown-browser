@@ -1,12 +1,26 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { getTagSources, resolveUrl, subscribeSiteNav, type TagSourceConfig } from './shared.js';
+import {
+  getCanonicalPath,
+  getGraphDepth,
+  getTagSources,
+  resolveUrl,
+  subscribeSiteNav,
+  type TagSourceConfig,
+} from './shared.js';
 import {
   buildRegistry,
+  canonicalizeNotePath,
   capitalize,
+  nodeTitle,
+  DEFAULT_MAX_NODES,
+  type PageLinks,
   type RelationTypeConfig,
+  type SiteNote,
   type SiteRelationship,
-} from './mbr-relationships.js';
+} from './graph/relationship-graph.js';
+import { fetchPageLinks } from './graph/links-cache.js';
+import { getMbrAssetBase } from './dynamic-loader.js';
 
 interface Heading {
   level: number;
@@ -16,25 +30,6 @@ interface Heading {
 
 interface Frontmatter {
   [key: string]: unknown;
-}
-
-interface OutboundLink {
-  to: string;
-  text: string;
-  anchor?: string;
-  internal: boolean;
-}
-
-interface InboundLink {
-  from: string;
-  text: string;
-  anchor?: string;
-}
-
-interface PageLinks {
-  inbound: InboundLink[];
-  outbound: OutboundLink[];
-  relationships?: SiteRelationship[];
 }
 
 interface PageNavLink {
@@ -64,6 +59,44 @@ declare global {
   }
 }
 
+/** Title/description for a note, built from site.json frontmatter. */
+interface NoteMeta {
+  title: string;
+  description?: string;
+}
+
+/**
+ * Import the lazy mini-graph chunk (`mbr-graph.min.js`), which registers the
+ * `<mbr-mini-graph>` element. The URL is computed against the asset base so it
+ * works in server mode AND in static builds deployed at arbitrary depths.
+ * Overridable seam so tests can stub the dynamic import.
+ */
+let importGraphChunk: () => Promise<unknown> = () => {
+  const url = new URL(getMbrAssetBase() + 'components/mbr-graph.min.js', document.baseURI).href;
+  return import(/* @vite-ignore */ url);
+};
+
+/** Test hook: replace the chunk importer (module-level seam). */
+export function setGraphChunkImporter(importer: () => Promise<unknown>): void {
+  importGraphChunk = importer;
+  graphChunkPromise = null;
+}
+
+/** Shared once-per-page promise for the chunk load; `true` when usable. */
+let graphChunkPromise: Promise<boolean> | null = null;
+
+function loadGraphChunk(): Promise<boolean> {
+  if (!graphChunkPromise) {
+    graphChunkPromise = importGraphChunk()
+      .then(() => true)
+      .catch((err) => {
+        console.warn('Failed to load the graph chunk:', err);
+        return false; // No graph this page load; sections still render.
+      });
+  }
+  return graphChunkPromise;
+}
+
 /**
  * Info panel component - displays document metadata, table of contents, and links.
  * Self-contained with trigger button and slide-out panel.
@@ -85,8 +118,13 @@ export class MbrInfoElement extends LitElement {
   @state()
   private _linksLoading = false;
 
+  /** True when this page has no links.json (link tracking disabled or 404). */
   @state()
-  private _linksError: string | null = null;
+  private _linksUnavailable = false;
+
+  /** True once the lazy graph chunk has loaded (element is defined). */
+  @state()
+  private _graphReady = false;
 
   @state()
   private _extendedMeta: ExtendedMeta | null = null;
@@ -94,7 +132,18 @@ export class MbrInfoElement extends LitElement {
   @state()
   private _relationTypes: RelationTypeConfig[] = [];
 
+  /** Canonical url_path → title/description, from site.json frontmatter. */
+  private _noteMeta = new Map<string, NoteMeta>();
+
   private _unsubscribeSiteNav?: () => void;
+
+  /** Injected into <mbr-mini-graph>: whether a path is a known note. */
+  private _isKnownNote = (path: string): boolean =>
+    this._noteMeta.has(canonicalizeNotePath(path));
+
+  /** Injected into <mbr-mini-graph>: hover-card metadata for a note. */
+  private _getMeta = (path: string): NoteMeta | undefined =>
+    this._noteMeta.get(canonicalizeNotePath(path));
 
   // Keys to skip (internal/technical fields)
   private static skipKeys = new Set(['markdown_source', 'server_mode', 'gui_mode']);
@@ -114,11 +163,27 @@ export class MbrInfoElement extends LitElement {
     this._headings = window.headings || [];
     this._extendedMeta = window.extendedMeta || null;
 
-    // Pull relationship type labels from site.json (already loaded globally).
+    // Pull relationship type labels and per-note metadata from site.json
+    // (already loaded globally). The note-meta map backs the mini graph's
+    // known-note gate and hover cards.
     this._unsubscribeSiteNav = subscribeSiteNav((state) => {
       const types = state.data?.relationship_types;
       if (Array.isArray(types)) {
         this._relationTypes = types as RelationTypeConfig[];
+      }
+      const files = state.data?.markdown_files;
+      if (Array.isArray(files)) {
+        const map = new Map<string, NoteMeta>();
+        for (const file of files as SiteNote[]) {
+          if (!file || typeof file.url_path !== 'string') continue;
+          const fm = file.frontmatter ?? {};
+          const description = fm['description'];
+          map.set(canonicalizeNotePath(file.url_path), {
+            title: nodeTitle(fm, file.url_path),
+            description: typeof description === 'string' ? description : undefined,
+          });
+        }
+        this._noteMeta = map;
       }
     });
   }
@@ -153,8 +218,8 @@ export class MbrInfoElement extends LitElement {
   private _open() {
     this._isOpen = true;
     // Load links data when panel opens (if not already loaded)
-    if (!this._links && !this._linksLoading) {
-      this._loadLinks();
+    if (!this._links && !this._linksLoading && !this._linksUnavailable) {
+      void this._loadLinks();
     }
   }
 
@@ -164,33 +229,20 @@ export class MbrInfoElement extends LitElement {
 
   private async _loadLinks() {
     this._linksLoading = true;
-    this._linksError = null;
 
-    try {
-      // Get current path and construct links.json URL
-      const currentPath = window.location.pathname;
-      // Ensure path ends with / for directory-style URLs
-      const normalizedPath = currentPath.endsWith('/') ? currentPath : currentPath + '/';
-      const linksUrl = normalizedPath + 'links.json';
+    // The shared cache canonicalizes the path, de-duplicates concurrent
+    // callers, and handles base paths for static builds. A null result means
+    // this page has no links.json (e.g. link tracking disabled): the links/
+    // relationships/graph sections all stay hidden.
+    const links = await fetchPageLinks(getCanonicalPath());
+    this._links = links;
+    this._linksUnavailable = links === null;
+    this._linksLoading = false;
 
-      const response = await fetch(linksUrl);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          // Link tracking may be disabled - not an error
-          this._links = { inbound: [], outbound: [] };
-          return;
-        }
-        throw new Error(`Failed to load links: ${response.status}`);
-      }
-
-      this._links = await response.json() as PageLinks;
-    } catch (error) {
-      console.warn('Failed to load links:', error);
-      this._linksError = error instanceof Error ? error.message : 'Unknown error';
-      this._links = { inbound: [], outbound: [] };
-    } finally {
-      this._linksLoading = false;
+    // With links present, pull in the lazy mini-graph chunk (once per page).
+    if (links !== null) {
+      const ready = await loadGraphChunk();
+      this._graphReady = ready;
     }
   }
 
@@ -505,7 +557,7 @@ export class MbrInfoElement extends LitElement {
   }
 
   private _renderRelationshipsSection(): TemplateResult | typeof nothing {
-    if (this._linksLoading || this._linksError) {
+    if (this._linksLoading) {
       return nothing;
     }
 
@@ -570,10 +622,6 @@ export class MbrInfoElement extends LitElement {
       `;
     }
 
-    if (this._linksError) {
-      return nothing; // Hide section on error
-    }
-
     const outbound = this._links?.outbound || [];
     const internalLinks = outbound.filter(l => l.internal);
     const externalLinks = outbound.filter(l => !l.internal);
@@ -633,10 +681,6 @@ export class MbrInfoElement extends LitElement {
       `;
     }
 
-    if (this._linksError) {
-      return nothing; // Hide section on error
-    }
-
     const inbound = this._links?.inbound || [];
 
     if (inbound.length === 0) {
@@ -693,6 +737,30 @@ export class MbrInfoElement extends LitElement {
     `;
   }
 
+  /**
+   * The mini link-graph, first in the panel. Rendered only when this page has
+   * a links.json AND the lazy graph chunk loaded; the element itself renders
+   * nothing when the graph has fewer than two nodes. All services are injected
+   * as properties so the chunk stays free of stateful main-bundle imports.
+   */
+  private _renderGraphSection(): TemplateResult | typeof nothing {
+    if (!this._links || !this._graphReady) {
+      return nothing;
+    }
+
+    return html`
+      <mbr-mini-graph
+        .focusPath=${getCanonicalPath()}
+        .depth=${getGraphDepth()}
+        .maxNodes=${DEFAULT_MAX_NODES}
+        .fetchLinks=${fetchPageLinks}
+        .isKnownNote=${this._isKnownNote}
+        .getMeta=${this._getMeta}
+        .resolveHref=${resolveUrl}
+      ></mbr-mini-graph>
+    `;
+  }
+
   private _renderPanel(): TemplateResult {
     return html`
       <div class="info-panel-backdrop" @click=${() => this._close()}></div>
@@ -704,6 +772,7 @@ export class MbrInfoElement extends LitElement {
 
           <h2>Info</h2>
 
+          ${this._renderGraphSection()}
           ${this._renderMetadataSection()}
           ${this._renderDocumentInfoSection()}
           ${this._renderRelationshipsSection()}
