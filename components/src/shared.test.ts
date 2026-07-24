@@ -2,7 +2,7 @@
  * Unit tests for shared.ts utility functions (keyboard navigation helpers).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isNewTabModifier, openInNewTab, getCanonicalPath } from './shared.ts';
+import { isNewTabModifier, openInNewTab, getCanonicalPath, getGraphDepth } from './shared.ts';
 
 describe('isNewTabModifier', () => {
   function makeKeyboardEvent(opts: Partial<KeyboardEventInit> = {}): KeyboardEvent {
@@ -89,5 +89,57 @@ describe('getCanonicalPath', () => {
     window.__MBR_CONFIG__ = { serverMode: false, guiMode: false, basePath: '../../' };
     setLocation('/prefix/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/');
     expect(getCanonicalPath()).toBe('/Walsh/Patrick Joseph Walsh b.1977-10-01/');
+  });
+});
+
+describe('getGraphDepth', () => {
+  const originalConfig = window.__MBR_CONFIG__;
+
+  afterEach(() => {
+    window.__MBR_CONFIG__ = originalConfig;
+  });
+
+  function setDepth(graphDepth: unknown): void {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, graphDepth: graphDepth as number };
+  }
+
+  it('defaults to 2 when the config is absent', () => {
+    window.__MBR_CONFIG__ = undefined;
+    expect(getGraphDepth()).toBe(2);
+  });
+
+  it('defaults to 2 when graphDepth is missing', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+    expect(getGraphDepth()).toBe(2);
+  });
+
+  it('defaults to 2 for non-numeric values', () => {
+    setDepth('3');
+    expect(getGraphDepth()).toBe(2);
+    setDepth(NaN);
+    expect(getGraphDepth()).toBe(2);
+  });
+
+  it('passes through in-range values', () => {
+    setDepth(1);
+    expect(getGraphDepth()).toBe(1);
+    setDepth(4);
+    expect(getGraphDepth()).toBe(4);
+  });
+
+  it('clamps out-of-range values to 1–5', () => {
+    setDepth(0);
+    expect(getGraphDepth()).toBe(1);
+    setDepth(-3);
+    expect(getGraphDepth()).toBe(1);
+    setDepth(6);
+    expect(getGraphDepth()).toBe(5);
+    setDepth(99);
+    expect(getGraphDepth()).toBe(5);
+  });
+
+  it('floors fractional values', () => {
+    setDepth(3.9);
+    expect(getGraphDepth()).toBe(3);
   });
 });

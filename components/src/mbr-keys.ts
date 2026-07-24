@@ -17,20 +17,28 @@ const FONT_SIZE_MAX = 250;     // maximum %
 
 /**
  * Check if the event target is an input element where we shouldn't intercept keys.
- * Uses composedPath to correctly identify inputs inside shadow DOMs.
+ * Uses composedPath to correctly identify inputs inside shadow DOMs: a
+ * document-level listener sees the event retargeted to the shadow HOST, so
+ * `e.target` and `document.activeElement` are unreliable there.
+ *
+ * Shared by other components with global key handlers (mbr-editor, mbr-slides,
+ * mbr-browse, mbr-browse-single).
  */
-function isInputTarget(e: KeyboardEvent): boolean {
+export function isInputTarget(e: KeyboardEvent): boolean {
   // Use composedPath to get the actual target, even inside shadow DOMs
   const target = e.composedPath()[0];
   if (!target || !(target instanceof HTMLElement)) return false;
   const tagName = target.tagName.toLowerCase();
-  return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable;
 }
 
 /**
  * Check if any modal/popup is currently open (excluding help overlay).
+ *
+ * Shared with mbr-editor so bare-letter shortcuts don't hijack keys while a
+ * modal is open (e.g. arrow-keying through search results).
  */
-function isModalOpen(): boolean {
+export function isModalOpen(): boolean {
   // Check for mbr-search modal
   const search = document.querySelector('mbr-search');
   if (search && (search as any)._isOpen) return true;

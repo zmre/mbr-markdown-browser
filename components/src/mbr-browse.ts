@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl } from './shared.js'
+import { isInputTarget } from './mbr-keys.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -152,7 +153,7 @@ export class MbrBrowseElement extends LitElement {
     // Setup keyboard event listener
     this._keyboardHandler = (e: KeyboardEvent) => {
       // Open with '-' key (when not in input field)
-      if (e.key === '-' && !e.ctrlKey && !e.metaKey && !this._isInputTarget(e.target)) {
+      if (e.key === '-' && !e.ctrlKey && !e.metaKey && !isInputTarget(e)) {
         e.preventDefault();
         this.toggle();
         return;
@@ -550,12 +551,6 @@ export class MbrBrowseElement extends LitElement {
     });
   }
 
-  private _isInputTarget(target: EventTarget | null): boolean {
-    if (!target || !(target instanceof HTMLElement)) return false;
-    const tagName = target.tagName.toLowerCase();
-    return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
-  }
-
   private _autoExpandCurrentPath(path: string) {
     const parts = path.split('/').filter(p => p.length > 0);
     let accumulated = '';
@@ -645,7 +640,7 @@ export class MbrBrowseElement extends LitElement {
   // ========================================
 
   private _handlePanelKeydown(e: KeyboardEvent) {
-    if (this._isInputTarget(e.target)) return;
+    if (isInputTarget(e)) return;
 
     // Tab switches between panes
     if (e.key === 'Tab' && this._showMiddlePane) {

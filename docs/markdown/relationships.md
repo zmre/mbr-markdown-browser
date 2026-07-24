@@ -54,7 +54,7 @@ but mbr gives a few of them first-class treatment:
 | `died` | date/string | Death date; shown on its own line beneath `born`, humanized the same way. |
 | `born_place` | string | Birthplace; displayed on the person's page beneath the dates. |
 | `image` | path or URL | Portrait; displayed on the person's page. |
-| `gender` | string | Styles the family-tree nodes (e.g. `male`, `female`); any value is accepted. |
+| `gender` | string | Styles the genealogy charts (e.g. `male`, `female`) — card tinting and parent-line colors; any value is accepted. |
 | `aliases` | array of strings | Alternate and maiden names (see below). |
 
 ```yaml
@@ -258,70 +258,108 @@ unresolved), `neighbor_title`, `neighbor_raw`, `resolved`, `direction`
 (`outgoing`/`incoming`), optional `label`, `attributes`, and `derived` (true
 when produced by the reverse-edge rule rather than declared on this note).
 
-## Visualizing relationships (graph / family tree)
+## Visualizing relationships
 
-Notes that declare a `type` also render a **relationship graph** — a family
-tree for genealogy, or a general relationship graph for any other domain. This
-is the `<mbr-relationships>` web component, which reuses the built-in mermaid
-renderer (no extra downloads or dependencies) and draws directly from
-`site.json`, so it works identically in the live server and in static builds.
+mbr ships two complementary visualizations. Both are lazy-loaded (they cost
+nothing until used) and both work identically in server, GUI, and static-build
+modes:
 
-Starting from the current note, the component walks outward through the
-resolved edges and draws the neighbourhood it finds:
+- **Genealogy charts** — interactive family charts rendered inline on
+  `type: person` pages.
+- **Link graph in the sidebar** — a force-directed mini graph of the current
+  note's neighbourhood (content links *and* typed relationships), shown at the
+  top of the info panel on every note.
 
-- **Parent → child** edges are drawn top-down, so ancestors sit above
-  descendants (the diagram uses mermaid's `graph TD`).
-- **Spouse / sibling** (and any other *symmetric* type) are drawn as
-  **undirected dotted links**, labelled with the relationship (e.g. *Spouse*).
-- **Other directed types** (anything not in the registry) are drawn as
-  **labelled arrows** from subject to object.
-- The **current note is highlighted** so you can orient yourself in the tree.
-- Node labels show the person's title and, when present, their lifespan from
-  the `born`/`died` frontmatter (e.g. *John Doe (1925–1999)*).
-- Nodes are **tinted by `gender`** when that field is set, so a family tree
-  reads at a glance.
+> **Breaking change:** the old mermaid-based `<mbr-relationships>` element has
+> been removed. A custom `.mbr/_display_enhancements.html` override that still
+> references it silently renders nothing (unknown elements are inert), and its
+> `depth` / `max-nodes` attributes are superseded by the `graph_depth` config
+> option and the new elements. Mermaid diagrams in ordinary code blocks are
+> unaffected.
 
-Reciprocal and derived edges are **de-duplicated**: an edge between two notes is
-drawn exactly once, regardless of which note (or how many notes) declared it.
+### Genealogy charts on person pages
 
-### When the graph appears
+Notes with `type: person` render an interactive family chart — the
+`<mbr-genealogy>` web component, emitted by `_display_enhancements.html` for
+person pages only. It draws from the resolved relationships in `site.json` and
+renders **nothing** when the person has no resolved relationships, so a person
+note without edges never produces an empty box.
 
-The graph is included on any note that declares a `type` frontmatter field
-(`type: person`, `type: character`, `type: service`, …). It renders **nothing**
-when the focused note has no resolved relationships, so simply having a `type`
-never produces an empty box. Gating on `type` (rather than only `person`) keeps
-the visualization available to *any* domain that models a typed graph, while
-still staying out of ordinary prose notes that declare no `type`.
+A selector in the top-left corner of the chart switches between two views; the
+choice persists in localStorage (`mbr_genealogy_chart`):
 
-To restrict it further (for example to people only), override
-`.mbr/_display_enhancements.html` in your repository and change the include
-condition to `{% if type == "person" %}`.
+**Family chart** (default) — built on the
+[family-chart](https://github.com/donatso/family-chart) library (ISC license):
 
-### Recursion depth and size
+- SVG person cards with **portraits** from the `image` frontmatter field.
+- Shows **ancestors and descendants two generations each** around the current
+  person.
+- **Expand/collapse** of non-blood branches via per-card mini-tree and
+  link-break toggles.
+- Native pan/zoom; clicking a card navigates to that person; `⤢` recenters.
 
-By default the graph expands **3 relationship hops** out from the focused note.
-For a typical family that is enough to show the whole tree from any person. You
-can change the depth (and a safety cap on the number of nodes for very large
-graphs) by setting attributes when you override the template:
+**Timeline tree** — a custom time-aware layout:
+
+- Ancestors above, descendants below the current person (two generations each).
+- A **year axis** on the left positions each person by birth year. People
+  without a `born` date fall back to their generation's median year, then to
+  estimated 28-year generations; if no one has dates the axis is hidden.
+- Lines are colored by parent — **blue father-lines**, **pink mother-lines**
+  (gray when `gender` is unknown) — and couples are joined by **marriage bars**.
+- Pan, zoom, and click-to-navigate as above.
+
+The chart JS is a lazy chunk (`/.mbr/components/mbr-genealogy.min.js`, ~204 kB
+min / ~61 kB gz). Person pages prefetch it, but it loads and renders only when
+the chart scrolls near the viewport, so it never blocks page render.
+
+**Roadmap:** the chart selector is designed for additional chart types — a
+bubble map of birth places, hierarchical edge bundling across all notes, and an
+ancestors/descendants sunburst are planned.
+
+### When the charts appear
+
+The inline chart appears only on `type: person` notes that have at least one
+resolved relationship. Notes with other `type` values (`type: character`,
+`type: service`, …) get no inline chart — their typed relationships appear in
+the **sidebar link graph** (below) and in the info panel's textual
+**Relationships** section instead.
+
+To gate the chart differently or place it elsewhere, override
+`.mbr/_display_enhancements.html` in your repository:
 
 ```html
 <!-- .mbr/_display_enhancements.html -->
-{% if type %}<mbr-relationships depth="4" max-nodes="120"></mbr-relationships>{% endif %}
+{% if type and type == "person" %}<mbr-genealogy></mbr-genealogy>{% endif %}
 ```
 
-- `depth` — how many hops to expand from the focus (default `3`, clamped to
-  `1`–`6`).
-- `max-nodes` — hard cap on graph size for performance on huge repositories
-  (default `80`).
+### Link graph in the sidebar
 
-### Couple / marriage layout limitation
+The info panel (`Ctrl+g` / `Cmd+g`) shows a **force-directed mini graph** at
+the top: the current note plus its neighbourhood of inbound links, outbound
+internal links, and typed relationships. It appears on any note that has a
+`links.json` — not just typed notes — so it doubles as a visual backlink map.
 
-mermaid flowcharts have no native concept of a "couple" node, so a married pair
-is not joined by the classic horizontal marriage bar with children hanging
-beneath both parents. Instead, **each parent draws its own arrow down to a
-shared child**, and the marriage itself is shown as a dotted *Spouse* link
-between the two. This keeps the feature dependency-free (a deliberate trade-off)
-while still conveying every relationship correctly.
+- Nodes are **colored by degree**: the focus note uses the theme's primary
+  color, and 1st-, 2nd-, … degree neighbours step down a ramp of the same hue.
+- **Hovering** a node shows a card with the note's title and description
+  (desktop only); **clicking** navigates; **dragging** repositions.
+- The `⤢` button opens a **full-screen view** with pan/zoom, node labels, and a
+  **depth stepper** (`1`–`5`) to widen or narrow the neighbourhood on the fly.
+
+The default depth comes from the `graph_depth` config option (default `2`,
+valid `1`–`5`, env `MBR_GRAPH_DEPTH`).
+
+The graph is assembled **client-side** by a breadth-first walk over each
+neighbour's per-page `links.json` (about 4 fetches in flight at a time, capped
+at 80 nodes, cached for the session). Because it needs no dedicated server
+endpoint, it works identically in **static builds**. In server mode, mbr
+additionally bounds concurrent inbound-link repository scans so a burst of
+`links.json` requests can't stampede the server.
+
+The graph JS is a lazy chunk (`/.mbr/components/mbr-graph.min.js`, d3-force,
+~57 kB min / ~19 kB gz) loaded only when the info panel first opens. If link
+tracking is disabled (`--no-link-tracking` / `link_tracking = false`), there is
+no `links.json` and the graph section simply doesn't appear.
 
 ## Configuration
 
@@ -329,7 +367,8 @@ while still conveying every relationship correctly.
 |--------|------|---------|-------------|
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking |
 | `relationship_types` | array | genealogy defaults | Relation types and their semantics/labels |
+| `graph_depth` | number | `2` | Default neighbourhood depth (`1`–`5`) for the sidebar link graph (env `MBR_GRAPH_DEPTH`) |
 
 CLI: `--no-relationship-tracking` disables the feature for a single run. See the
-[Configuration Reference](../../reference/configuration/#relationship-settings) and
-[CLI Reference](../../reference/cli/).
+[Configuration Reference](../reference/configuration/#relationship-settings) and
+[CLI Reference](../reference/cli/).

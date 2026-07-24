@@ -59,6 +59,8 @@ jobs:
           ls -la templates/components-js/
           test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
           test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7
@@ -166,6 +168,9 @@ jobs:
 
       - name: Build
         run: nix build -L .#mbr
+
+      - name: Check docs for broken links
+        run: ./result/bin/mbr -b docs --fail-on-broken-links
 
   # Swift checks - only run on macOS
   swift-check:

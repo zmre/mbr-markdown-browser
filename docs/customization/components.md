@@ -14,7 +14,8 @@ mbr uses [Lit](https://lit.dev/) web components for interactive features. You ca
 | `mbr-browse` | File browser sidebar | `<mbr-browse>` |
 | `mbr-search` | Search interface | `<mbr-search>` |
 | `mbr-nav` | Next/prev buttons | `<mbr-nav>` |
-| `mbr-info` | Info panel | `<mbr-info>` |
+| `mbr-info` | Info panel: metadata, links, relationships, and a mini link graph of the current note's neighbourhood | `<mbr-info>` |
+| `mbr-genealogy` | Genealogy charts (family chart / timeline tree) on `type: person` pages | `<mbr-genealogy>` |
 | `mbr-live-reload` | Development hot reload | `<mbr-live-reload>` |
 | `mbr-video-extras` | Video player enhancements | `<mbr-video-extras>` |
 
@@ -44,7 +45,15 @@ Components load site metadata from `/.mbr/site.json` and render interactive UI.
 
 ## Overriding Components
 
-At the moment, we're bundling all the components together in `mbr-components.js` -- this is efficient from a loading / speed perspective and makes current development easier. Start with the source components and make your own `mbr-components.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
+At the moment, we're bundling all the always-on components together in `mbr-components.min.js` -- this is efficient from a loading / speed perspective and makes current development easier. Three heavier features live in their own lazy chunks that are only fetched on demand:
+
+| Chunk | Contents | Loaded when |
+|-------|----------|-------------|
+| `mbr-editor.min.js` | In-browser markdown editor | Editing opens (server/GUI, opt-in) |
+| `mbr-graph.min.js` | Mini link graph (d3-force) | Info panel first opens |
+| `mbr-genealogy.min.js` | Genealogy charts (family-chart + timeline tree) | A person-page chart scrolls near the viewport |
+
+Start with the source components and make your own `mbr-components.min.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
 
 ### Future: Selective Override
 

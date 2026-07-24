@@ -87,12 +87,26 @@ describe('MbrBrowseElement', () => {
       input.focus()
 
       const event = new KeyboardEvent('keydown', { key: '-', bubbles: true })
-      Object.defineProperty(event, 'target', { value: input })
-      document.dispatchEvent(event)
+      input.dispatchEvent(event)
       await element.updateComplete
 
       expect(element.shadowRoot?.querySelector('.navigator-backdrop')).toBeNull()
       input.remove()
+    })
+
+    it('should not open with "-" typed in an input inside a shadow root', async () => {
+      // Regression: the event is retargeted to the shadow HOST at the
+      // document level, so the guard must use composedPath.
+      const host = document.body.appendChild(document.createElement('div'))
+      const shadow = host.attachShadow({ mode: 'open' })
+      const input = shadow.appendChild(document.createElement('input'))
+
+      const event = new KeyboardEvent('keydown', { key: '-', bubbles: true, composed: true })
+      input.dispatchEvent(event)
+      await element.updateComplete
+
+      expect(element.shadowRoot?.querySelector('.navigator-backdrop')).toBeNull()
+      host.remove()
     })
   })
 

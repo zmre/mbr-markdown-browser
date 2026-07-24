@@ -29,7 +29,7 @@ Partials are prefixed with underscore and included by other templates:
 | `_info_panel.html` | Document info sidebar |
 | `_footer.html` | Page footer |
 | `_scripts.html` | Base JavaScript includes |
-| `_scripts_markdown.html` | Markdown-specific scripts |
+| `_display_enhancements.html` | Display-enhancement loaders (mermaid, hljs; `<mbr-genealogy>` on person pages) |
 
 ## Template Variables
 
@@ -237,7 +237,7 @@ Create `.mbr/index.html`:
   </main>
 
   {% include "_footer.html" %}
-  {% include "_scripts_markdown.html" %}
+  {% include "_scripts.html" %}
 </body>
 </html>
 ```

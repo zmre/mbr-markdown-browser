@@ -20,8 +20,26 @@ declare global {
       searchEndpoint?: string;
       basePath?: string;
       tagSources?: TagSourceConfig[];
+      graphDepth?: number;
     };
   }
+}
+
+/** Bounds for the sidebar mini-graph BFS depth (mirrors the Rust config). */
+const GRAPH_DEPTH_MIN = 1;
+const GRAPH_DEPTH_MAX = 5;
+const GRAPH_DEPTH_DEFAULT = 2;
+
+/**
+ * Get the configured relationship-graph BFS depth (`graph_depth` config).
+ * Clamped to 1–5; a missing or non-numeric value yields the default of 2.
+ */
+export function getGraphDepth(): number {
+  const raw = window.__MBR_CONFIG__?.graphDepth;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return GRAPH_DEPTH_DEFAULT;
+  }
+  return Math.max(GRAPH_DEPTH_MIN, Math.min(GRAPH_DEPTH_MAX, Math.floor(raw)));
 }
 
 /**

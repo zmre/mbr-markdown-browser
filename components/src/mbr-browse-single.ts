@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
+import { isInputTarget } from './mbr-keys.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -265,7 +266,7 @@ export class MbrBrowseSingleElement extends LitElement {
   private _setupKeyboardHandler() {
     this._keyboardHandler = (e: KeyboardEvent) => {
       // Handle - and F2 for toggle (in overlay mode)
-      if (this._isOverlayMode && !this._isInputTarget(e.target)) {
+      if (this._isOverlayMode && !isInputTarget(e)) {
         if ((e.key === '-' && !e.ctrlKey && !e.metaKey) || e.key === 'F2') {
           e.preventDefault();
           this.toggle();
@@ -295,7 +296,7 @@ export class MbrBrowseSingleElement extends LitElement {
   }
 
   private _handleSidebarKeydown(e: KeyboardEvent) {
-    if (this._isInputTarget(e.target)) return;
+    if (isInputTarget(e)) return;
 
     // Build flat list of navigable items for arrow key nav
     if (this._flatItems.length === 0) {
@@ -647,12 +648,6 @@ export class MbrBrowseSingleElement extends LitElement {
     const normalizedCurrent = currentPath.endsWith('/') ? currentPath : currentPath + '/';
     const normalizedPath = path.endsWith('/') ? path : path + '/';
     return normalizedCurrent === normalizedPath;
-  }
-
-  private _isInputTarget(target: EventTarget | null): boolean {
-    if (!target || !(target instanceof HTMLElement)) return false;
-    const tagName = target.tagName.toLowerCase();
-    return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
   }
 
   // ========================================

@@ -14,7 +14,7 @@ export * from './mbr-media-viewer.ts';
 export * from './mbr-link-enhancement.ts';
 export * from './mbr-heading-enhancer.ts';
 export * from './mbr-footnote-preview.ts';
-export * from './mbr-relationships.ts';
+export * from './mbr-genealogy.ts';
 // Dynamic enhancement loaders
 export * from './mbr-hljs.ts';
 export * from './mbr-mermaid.ts';
