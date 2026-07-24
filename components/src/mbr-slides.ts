@@ -18,6 +18,7 @@
 import { LitElement, html, css, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
+import { isInputTarget, isModalOpen } from './mbr-keys.js'
 
 interface RevealPlugin {
   id: string
@@ -187,9 +188,10 @@ export class MbrSlidesElement extends LitElement {
   }
 
   private _handleKeyPress(e: KeyboardEvent) {
-    // Don't trigger if user is typing in an input or textarea
-    const target = e.target as HTMLElement
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+    // Don't trigger if user is typing in an input (isInputTarget uses
+    // composedPath so inputs inside shadow DOMs are detected) or while a
+    // modal such as search is open.
+    if (isInputTarget(e) || isModalOpen()) {
       return
     }
 

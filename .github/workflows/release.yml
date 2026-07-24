@@ -54,6 +54,8 @@ jobs:
           # Fail fast if the required files don't exist
           test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
           test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7
@@ -93,6 +95,14 @@ jobs:
           fi
           if [ ! -f templates/components-js/mbr-editor.min.js ]; then
             echo "ERROR: mbr-editor.min.js not found!"
+            exit 1
+          fi
+          if [ ! -f templates/components-js/mbr-graph.min.js ]; then
+            echo "ERROR: mbr-graph.min.js not found!"
+            exit 1
+          fi
+          if [ ! -f templates/components-js/mbr-genealogy.min.js ]; then
+            echo "ERROR: mbr-genealogy.min.js not found!"
             exit 1
           fi
 

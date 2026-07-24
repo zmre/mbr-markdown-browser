@@ -71,6 +71,10 @@ fn default_sidebar_max_items() -> usize {
     DEFAULT_SIDEBAR_MAX_ITEMS
 }
 
+fn default_graph_depth() -> usize {
+    2
+}
+
 /// Configuration for a tag source - a frontmatter field that contains tags.
 ///
 /// # Examples
@@ -405,6 +409,11 @@ pub struct Config {
     /// Default: 100. Only applies when sidebar_style = "single".
     #[serde(default = "default_sidebar_max_items")]
     pub sidebar_max_items: usize,
+    /// Depth (hops) of the link/relationship neighborhood shown in the
+    /// sidebar mini graph. Range 1-5.
+    /// Default: 2.
+    #[serde(default = "default_graph_depth")]
+    pub graph_depth: usize,
     /// Text to prepend to all page titles (e.g., "My Site: ").
     /// Default: empty string (no prefix).
     #[serde(default)]
@@ -523,6 +532,7 @@ impl Default for Config {
             build_tag_pages: true, // Tag pages enabled by default
             sidebar_style: default_sidebar_style(),
             sidebar_max_items: default_sidebar_max_items(),
+            graph_depth: default_graph_depth(),
             title_prefix: String::new(),
             title_suffix: String::new(),
             incomplete_markers: default_incomplete_markers(),
@@ -609,6 +619,7 @@ impl Config {
     /// Checks that numeric configuration options are within valid bounds:
     /// - `port`: Must be 1-65535 (port 0 means "auto-assign", which isn't useful for display)
     /// - `sidebar_max_items`: Must be > 0
+    /// - `graph_depth`: Must be between 1 and 5
     /// - `build_concurrency`: If set, must be > 0
     ///
     /// Note: `oembed_cache_size` of 0 is valid (disables caching).
@@ -622,6 +633,14 @@ impl Config {
         if self.sidebar_max_items == 0 {
             return Err(ConfigError::InvalidSidebarMaxItems {
                 value: self.sidebar_max_items,
+            });
+        }
+
+        // graph_depth of 0 would show nothing; more than 5 hops fans out into
+        // an unreadable graph (and an explosive number of links.json fetches)
+        if !(1..=5).contains(&self.graph_depth) {
+            return Err(ConfigError::InvalidGraphDepth {
+                value: self.graph_depth,
             });
         }
 
@@ -902,6 +921,51 @@ mod tests {
 
         let config = Config {
             sidebar_max_items: 10000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_default_graph_depth_is_2() {
+        let config = Config::default();
+        assert_eq!(config.graph_depth, 2);
+    }
+
+    #[test]
+    fn test_validate_graph_depth_zero_fails() {
+        let config = Config {
+            graph_depth: 0,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidGraphDepth { value: 0 }));
+    }
+
+    #[test]
+    fn test_validate_graph_depth_six_fails() {
+        let config = Config {
+            graph_depth: 6,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidGraphDepth { value: 6 }));
+    }
+
+    #[test]
+    fn test_validate_graph_depth_bounds_pass() {
+        let config = Config {
+            graph_depth: 1,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = Config {
+            graph_depth: 5,
             ..Default::default()
         };
         assert!(config.validate().is_ok());

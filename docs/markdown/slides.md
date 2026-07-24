@@ -127,11 +127,11 @@ This is the title slide
 
 ## Code Example
 
-\`\`\`rust
-fn main() {
-    println!("Hello slides!");
-}
-\`\`\`
+ ```rust
+ fn main() {
+     println!("Hello slides!");
+ }
+⎜```
 
 --- {#conclusion .highlight}
 

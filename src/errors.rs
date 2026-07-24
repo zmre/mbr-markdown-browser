@@ -126,6 +126,9 @@ pub enum ConfigError {
     #[error("Invalid sidebar_max_items: {value}. Must be greater than 0")]
     InvalidSidebarMaxItems { value: usize },
 
+    #[error("Invalid graph_depth: {value}. Must be between 1 and 5")]
+    InvalidGraphDepth { value: usize },
+
     #[error("Invalid build_concurrency: {value}. Must be greater than 0")]
     InvalidBuildConcurrency { value: usize },
 
@@ -523,6 +526,11 @@ mod tests {
         let err = ConfigError::InvalidSidebarMaxItems { value: 0 };
         assert!(err.to_string().contains("sidebar_max_items"));
         assert!(err.to_string().contains("greater than 0"));
+
+        let err = ConfigError::InvalidGraphDepth { value: 6 };
+        assert!(err.to_string().contains("graph_depth"));
+        assert!(err.to_string().contains("6"));
+        assert!(err.to_string().contains("between 1 and 5"));
 
         let err = ConfigError::InvalidBuildConcurrency { value: 0 };
         assert!(err.to_string().contains("build_concurrency"));

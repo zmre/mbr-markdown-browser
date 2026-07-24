@@ -44,7 +44,6 @@ const DEFAULT_HLS_CACHE_SIZE: usize = 200 * 1024 * 1024;
 const METADATA_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Outcome of trying to claim an in-flight single-flight slot for a cache key.
-#[cfg(feature = "media-metadata")]
 enum InflightClaim {
     /// This caller won the slot and must produce the result, then release it.
     Produce(Arc<tokio::sync::Notify>),
@@ -58,8 +57,8 @@ enum InflightClaim {
 /// Returns [`InflightClaim::Produce`] to exactly one caller (which inserts a
 /// fresh `Notify`) and [`InflightClaim::Wait`] to any caller that finds an
 /// existing in-progress entry. Modeled on `HlsCache::start_generation`, so N
-/// concurrent requests for the same media only trigger one decode.
-#[cfg(feature = "media-metadata")]
+/// concurrent requests for the same media only trigger one decode. Also used
+/// to single-flight inbound-link greps for links.json requests.
 fn claim_inflight(
     inflight: &papaya::HashMap<String, Arc<tokio::sync::Notify>>,
     key: &str,
@@ -78,11 +77,23 @@ fn claim_inflight(
 /// Default outbound link cache size: 2 MB.
 const DEFAULT_LINK_CACHE_SIZE: usize = 2 * 1024 * 1024;
 
-/// Default inbound link cache size: 1 MB.
-const DEFAULT_INBOUND_LINK_CACHE_SIZE: usize = 1024 * 1024;
+/// Default inbound link cache size: 4 MB. Sized for the sidebar mini graph,
+/// which fans out links.json requests for many pages at once.
+const DEFAULT_INBOUND_LINK_CACHE_SIZE: usize = 4 * 1024 * 1024;
 
-/// TTL for inbound link cache entries in seconds.
-const INBOUND_LINK_CACHE_TTL_SECS: u64 = 60;
+/// TTL for inbound link cache entries in seconds. Staleness is acceptable:
+/// nothing invalidates this cache on file changes today, and a longer TTL
+/// keeps mini-graph bursts from re-grepping the repository.
+const INBOUND_LINK_CACHE_TTL_SECS: u64 = 300;
+
+/// Maximum inbound-link greps allowed to run concurrently. Each grep walks
+/// the whole repository, so a burst of links.json requests (the sidebar mini
+/// graph fetches 10-80 pages) must not stampede the filesystem.
+const INBOUND_GREP_MAX_CONCURRENCY: usize = 2;
+
+/// Maximum time a request waits for an in-progress inbound-link grep before
+/// giving up (degrades a lost wakeup into a retryable `None`).
+const INBOUND_GREP_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Type of media for the viewer page.
 ///
@@ -420,6 +431,8 @@ pub struct ServerConfig {
     pub tag_sources: Vec<TagSource>,
     pub sidebar_style: String,
     pub sidebar_max_items: usize,
+    /// Depth (hops) of the sidebar mini graph neighborhood (1-5).
+    pub graph_depth: usize,
     pub title_prefix: String,
     pub title_suffix: String,
     /// Highlight blocks beginning with an incomplete marker (TK/TODO/FIXME/XXX).
@@ -477,6 +490,7 @@ impl From<&crate::config::Config> for ServerConfig {
             tag_sources: config.tag_sources.clone(),
             sidebar_style: config.sidebar_style.clone(),
             sidebar_max_items: config.sidebar_max_items,
+            graph_depth: config.graph_depth,
             title_prefix: config.title_prefix.clone(),
             title_suffix: config.title_suffix.clone(),
             // Server/GUI default: on unless config overrides.
@@ -547,12 +561,22 @@ pub struct ServerState {
     pub link_cache: Arc<LinkCache>,
     /// Cache for inbound links discovered via grep
     pub inbound_link_cache: Arc<InboundLinkCache>,
+    /// Bounds concurrent inbound-link greps: each cache miss walks the whole
+    /// repository, and the sidebar mini graph fans out many links.json
+    /// requests at once, so at most two full-repo walks run at a time.
+    pub inbound_grep_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Single-flight guard for inbound-link greps: maps a page URL path to a
+    /// `Notify` while a grep is in progress, so N concurrent links.json
+    /// requests for the same page trigger one repo walk (others await).
+    pub inbound_grep_inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>>,
     /// Tag sources for frontmatter extraction
     pub tag_sources: Vec<TagSource>,
     /// Sidebar navigation style ("panel" for mbr-browse, "single" for mbr-browse-single)
     pub sidebar_style: String,
     /// Maximum items per section in sidebar navigation
     pub sidebar_max_items: usize,
+    /// Depth (hops) of the sidebar mini graph neighborhood (1-5)
+    pub graph_depth: usize,
     /// Text to prepend to all page titles
     pub title_prefix: String,
     /// Text to append to all page titles
@@ -604,6 +628,7 @@ impl Server {
             tag_sources,
             sidebar_style,
             sidebar_max_items,
+            graph_depth,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -915,6 +940,10 @@ impl Server {
             DEFAULT_INBOUND_LINK_CACHE_SIZE,
             INBOUND_LINK_CACHE_TTL_SECS,
         ));
+        let inbound_grep_semaphore =
+            Arc::new(tokio::sync::Semaphore::new(INBOUND_GREP_MAX_CONCURRENCY));
+        let inbound_grep_inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
+            Arc::new(papaya::HashMap::new());
 
         let canonical_base_dir = base_dir.canonicalize().ok();
         let state = ServerState {
@@ -950,9 +979,12 @@ impl Server {
             relationship_types,
             link_cache,
             inbound_link_cache,
+            inbound_grep_semaphore,
+            inbound_grep_inflight,
             tag_sources,
             sidebar_style,
             sidebar_max_items,
+            graph_depth,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -1699,6 +1731,7 @@ impl Server {
                     config.gui_mode,
                     &config.sidebar_style,
                     config.sidebar_max_items,
+                    config.graph_depth,
                 );
             }
         };
@@ -1717,6 +1750,7 @@ impl Server {
                     config.gui_mode,
                     &config.sidebar_style,
                     config.sidebar_max_items,
+                    config.graph_depth,
                 );
             }
         };
@@ -1736,6 +1770,7 @@ impl Server {
                         config.gui_mode,
                         &config.sidebar_style,
                         config.sidebar_max_items,
+                        config.graph_depth,
                     );
                 }
                 Err(MbrError::InvalidMediaPath(msg)) => {
@@ -1749,6 +1784,7 @@ impl Server {
                         config.gui_mode,
                         &config.sidebar_style,
                         config.sidebar_max_items,
+                        config.graph_depth,
                     );
                 }
                 Err(e) => {
@@ -1762,6 +1798,7 @@ impl Server {
                         config.gui_mode,
                         &config.sidebar_style,
                         config.sidebar_max_items,
+                        config.graph_depth,
                     );
                 }
             };
@@ -1809,6 +1846,7 @@ impl Server {
                 },
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -1837,6 +1875,7 @@ impl Server {
                     config.gui_mode,
                     &config.sidebar_style,
                     config.sidebar_max_items,
+                    config.graph_depth,
                 )
             }
         }
@@ -1998,6 +2037,7 @@ impl Server {
         gui_mode: bool,
         sidebar_style: &str,
         sidebar_max_items: usize,
+        graph_depth: usize,
     ) -> Response<Body> {
         use std::collections::HashMap;
 
@@ -2022,6 +2062,7 @@ impl Server {
                 },
                 sidebar_style,
                 sidebar_max_items,
+                graph_depth,
                 title_affixes: None,
             },
         );
@@ -2204,6 +2245,7 @@ impl Server {
                     config.gui_mode,
                     &config.sidebar_style,
                     config.sidebar_max_items,
+                    config.graph_depth,
                 ))
             }
         }
@@ -2658,7 +2700,6 @@ impl Server {
     /// Returns Some(Response) if the request was for links.json and we successfully
     /// generated it, None otherwise (fall through to 404).
     async fn try_serve_links_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::link_grep::find_inbound_links;
         use crate::link_index::PageLinks;
 
         // Check if this is a links.json request
@@ -2785,35 +2826,51 @@ impl Server {
             }
         };
 
-        // Get inbound links from cache or grep
+        // Get inbound links from cache, or grep with single-flight + bounded
+        // concurrency: each miss walks the whole repository, and the sidebar
+        // mini graph fans out many links.json requests at once, so a burst
+        // must not stampede the filesystem. Mirrors the race-free video
+        // metadata pattern (register interest before re-checking).
         let inbound = if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
             cached
         } else {
-            // Grep for inbound links. This walks the whole repository (blocking
-            // filesystem + CPU work), so run it on a blocking thread to avoid
-            // stalling the async worker. All captured data is owned/`Send`.
-            let target = page_url_path.clone();
-            let base_dir = config.base_dir.clone();
-            let markdown_extensions = config.markdown_extensions.clone();
-            let ignore_dirs = config.ignore_dirs.clone();
-            let ignore_globs = config.ignore_globs.clone();
-            let links = tokio::task::spawn_blocking(move || {
-                find_inbound_links(
-                    &target,
-                    &base_dir,
-                    &markdown_extensions,
-                    &ignore_dirs,
-                    &ignore_globs,
-                )
-            })
-            .await
-            .inspect_err(|e| tracing::error!("inbound link grep task failed: {e}"))
-            .ok()?;
-            // Cache the result
-            config
-                .inbound_link_cache
-                .insert(page_url_path.clone(), links.clone());
-            links
+            match claim_inflight(&config.inbound_grep_inflight, &page_url_path) {
+                InflightClaim::Produce(notify) => {
+                    // Re-check the cache after winning the slot: a previous
+                    // producer may have populated it between our miss and the
+                    // claim.
+                    let links = match config.inbound_link_cache.get(&page_url_path) {
+                        Some(cached) => Some(cached),
+                        None => Self::grep_inbound_links_bounded(&page_url_path, config).await,
+                    };
+                    // Release the slot and wake waiters even on failure so
+                    // they degrade to a retryable miss instead of hanging.
+                    config.inbound_grep_inflight.pin().remove(&page_url_path);
+                    notify.notify_waiters();
+                    links?
+                }
+                InflightClaim::Wait(notify) => {
+                    // Register interest before re-checking so a completion
+                    // that lands between claim and here is not missed.
+                    let notified = notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
+                        cached
+                    } else {
+                        match tokio::time::timeout(INBOUND_GREP_WAIT_TIMEOUT, notified).await {
+                            Ok(()) => config.inbound_link_cache.get(&page_url_path)?,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "Timed out waiting for in-progress inbound link grep: {}",
+                                    page_url_path
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
         };
 
         // Typed relationships (declared + derived) for this page, if enabled.
@@ -2846,6 +2903,46 @@ impl Server {
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .body(Body::from(json)),
         ))
+    }
+
+    /// Runs the inbound-link grep for `page_url_path` on a blocking thread,
+    /// bounded by the inbound-grep semaphore, and caches the result. Returns
+    /// `None` if the task fails (callers degrade to a retryable miss).
+    async fn grep_inbound_links_bounded(
+        page_url_path: &str,
+        config: &ServerState,
+    ) -> Option<Vec<crate::link_index::InboundLink>> {
+        use crate::link_grep::find_inbound_links;
+
+        // Bound concurrent full-repo walks. The semaphore is never closed, so
+        // acquire only fails if the runtime is shutting down.
+        let _permit = config.inbound_grep_semaphore.acquire().await.ok()?;
+
+        // Grep for inbound links. This walks the whole repository (blocking
+        // filesystem + CPU work), so run it on a blocking thread to avoid
+        // stalling the async worker. All captured data is owned/`Send`.
+        let target = page_url_path.to_string();
+        let base_dir = config.base_dir.clone();
+        let markdown_extensions = config.markdown_extensions.clone();
+        let ignore_dirs = config.ignore_dirs.clone();
+        let ignore_globs = config.ignore_globs.clone();
+        let links = tokio::task::spawn_blocking(move || {
+            find_inbound_links(
+                &target,
+                &base_dir,
+                &markdown_extensions,
+                &ignore_dirs,
+                &ignore_globs,
+            )
+        })
+        .await
+        .inspect_err(|e| tracing::error!("inbound link grep task failed: {e}"))
+        .ok()?;
+        // Cache the result
+        config
+            .inbound_link_cache
+            .insert(page_url_path.to_string(), links.clone());
+        Some(links)
     }
 
     /// Try to serve `errors.json` for per-page problem reporting.
@@ -3599,6 +3696,7 @@ impl Server {
                 tag_sources: &config.tag_sources,
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
             },
@@ -3783,6 +3881,7 @@ impl Server {
                 },
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -3859,6 +3958,7 @@ impl Server {
                 },
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -3900,6 +4000,7 @@ impl Server {
                 },
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -4232,6 +4333,20 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         // Heavy Milkdown/Crepe editor chunk, lazy-loaded by <mbr-editor>.
         "/components/mbr-editor.min.js",
         include_bytes!("../templates/components-js/mbr-editor.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Sidebar mini force-graph chunk (d3-force), lazy-loaded by <mbr-info>
+        // when the info panel first opens.
+        "/components/mbr-graph.min.js",
+        include_bytes!("../templates/components-js/mbr-graph.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Genealogy chart chunk (family-chart + timeline tree), lazy-loaded by
+        // <mbr-genealogy> on `type: person` pages only.
+        "/components/mbr-genealogy.min.js",
+        include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
         "application/javascript",
     ),
     (

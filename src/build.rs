@@ -22,7 +22,7 @@ use papaya::HashMap as ConcurrentHashMap;
 
 use crate::{
     config::Config,
-    embedded_pico,
+    embedded_katex, embedded_pico,
     errors::BuildError,
     link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url},
     link_transform::{LinkTransformConfig, make_relative_url},
@@ -888,6 +888,7 @@ impl Builder {
                 tag_sources: &self.config.tag_sources,
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_prefix: &self.config.title_prefix,
                 title_suffix: &self.config.title_suffix,
             },
@@ -1132,6 +1133,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1352,6 +1354,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1430,6 +1433,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1645,6 +1649,29 @@ impl Builder {
             }
         }
 
+        // Step 3c: Write embedded KaTeX assets (CSS, JS, WOFF2 fonts). Server
+        // mode serves these from KATEX_FILES via serve_default_file(); the
+        // static build must mirror that, or the <mbr-katex> component's fetch
+        // of `.mbr/katex.min.css` 404s and math never renders. Font routes
+        // like "/fonts/KaTeX_*.woff2" nest under `.mbr/fonts/`.
+        for (route, content, _mime_type) in embedded_katex::KATEX_FILES.iter() {
+            let filename = route.trim_start_matches('/');
+            let output_path = mbr_output.join(filename);
+            if output_path.exists() {
+                continue;
+            }
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            fs::write(&output_path, content).map_err(|e| BuildError::WriteFailed {
+                path: output_path,
+                source: e,
+            })?;
+        }
+
         // Step 3b: Write themed pico.min.css (only if not already present from repo's .mbr/)
         let pico_output_path = mbr_output.join("pico.min.css");
         if !pico_output_path.exists() {
@@ -1766,6 +1793,7 @@ impl Builder {
                 mode: ModeFlags::Static { depth: 0 },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
                 title_affixes: None,
             },
         );
@@ -1848,6 +1876,7 @@ impl Builder {
                     mode: ModeFlags::Static { depth },
                     sidebar_style: &self.config.sidebar_style,
                     sidebar_max_items: self.config.sidebar_max_items,
+                    graph_depth: self.config.graph_depth,
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 },
             );

@@ -127,7 +127,7 @@ const MODAL_CSS = `
 .mbr-editor-fm summary { cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem; opacity: 0.85; }
 .mbr-editor-fm textarea {
   width: 100%; box-sizing: border-box; border: none; resize: vertical;
-  min-height: 4rem; font-family: var(--pico-font-family-monospace, monospace);
+  min-height: 8rem; font-family: var(--pico-font-family-monospace, monospace);
   font-size: 0.85rem; padding: 0.5rem 1rem; background: var(--pico-code-background-color, #f6f8fa); color: inherit;
 }
 .mbr-editor-crepe { flex: 1; min-height: 12rem; overflow: auto; }
