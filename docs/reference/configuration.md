@@ -204,7 +204,7 @@ mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 
 In-browser editing (server/GUI mode only) is **off by default**. When enabled, a
 pencil button appears next to the info button and opens a Milkdown/Crepe editor
-for the current markdown file. See the [editing guide](../guide/editing.md).
+for the current markdown file. See the [editing guide](../modes/editing.md).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

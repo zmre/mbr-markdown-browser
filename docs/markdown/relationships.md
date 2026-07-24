@@ -370,5 +370,5 @@ no `links.json` and the graph section simply doesn't appear.
 | `graph_depth` | number | `2` | Default neighbourhood depth (`1`–`5`) for the sidebar link graph (env `MBR_GRAPH_DEPTH`) |
 
 CLI: `--no-relationship-tracking` disables the feature for a single run. See the
-[Configuration Reference](../../reference/configuration/#relationship-settings) and
-[CLI Reference](../../reference/cli/).
+[Configuration Reference](../reference/configuration/#relationship-settings) and
+[CLI Reference](../reference/cli/).

@@ -123,6 +123,7 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--transcode` | Enable HLS video transcoding for 720p/480p variants (server/GUI only) | `false` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
+| `--fail-on-broken-links` | Exit non-zero if the build finds broken internal links (for CI) | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking (frontmatter relationships) | `false` |
 | `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |

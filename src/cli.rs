@@ -99,6 +99,12 @@ pub struct Args {
     #[arg(long)]
     pub skip_link_checks: bool,
 
+    /// Exit with a non-zero status if the static build (-b) detects broken
+    /// internal links. Intended for CI. Has no effect with --skip-link-checks
+    /// (which skips validation entirely) or outside build mode.
+    #[arg(long)]
+    pub fail_on_broken_links: bool,
+
     /// Disable bidirectional link tracking (backlinks).
     /// When disabled, the links.json endpoint returns 404 and no links.json files
     /// are generated during static builds.
@@ -202,6 +208,7 @@ mod tests {
             theme: None,
             build_concurrency: None,
             skip_link_checks: false,
+            fail_on_broken_links: false,
             no_link_tracking: false,
             no_relationship_tracking: false,
             mark_incomplete: false,
@@ -386,6 +393,12 @@ mod tests {
     fn test_parse_skip_link_checks() {
         let args = Args::parse_from(["mbr", "-b", "--skip-link-checks"]);
         assert!(args.skip_link_checks);
+    }
+
+    #[test]
+    fn test_parse_fail_on_broken_links() {
+        let args = Args::parse_from(["mbr", "-b", "--fail-on-broken-links"]);
+        assert!(args.fail_on_broken_links);
     }
 
     #[test]

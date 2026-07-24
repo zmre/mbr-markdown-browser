@@ -368,6 +368,13 @@ async fn main() -> Result<(), MbrError> {
                     stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.duration
                 );
             }
+            if args.fail_on_broken_links && stats.broken_links > 0 {
+                eprintln!(
+                    "Error: {} broken internal link(s) detected; failing because --fail-on-broken-links was set.",
+                    stats.broken_links
+                );
+                std::process::exit(1);
+            }
             return Ok(());
         }
     } else if args.stdout {

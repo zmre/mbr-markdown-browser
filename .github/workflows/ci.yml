@@ -169,6 +169,9 @@ jobs:
       - name: Build
         run: nix build -L .#mbr
 
+      - name: Check docs for broken links
+        run: ./result/bin/mbr -b docs --fail-on-broken-links
+
   # Swift checks - only run on macOS
   swift-check:
     name: Swift Checks
