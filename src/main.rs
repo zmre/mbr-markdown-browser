@@ -332,51 +332,42 @@ async fn main() -> Result<(), MbrError> {
             config.oembed_timeout_ms = 0;
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            eprintln!("Error: Static site generation is not supported on Windows");
+        let output_dir = if args.output.is_absolute() {
+            args.output.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(ConfigError::CurrentDirFailed)?
+                .join(&args.output)
+        };
+
+        tracing::info!("Building static site to: {}", output_dir.display());
+
+        let builder = Builder::new(config, output_dir)?;
+        let stats = builder.build().await?;
+
+        if stats.broken_links > 0 {
+            println!(
+                "Build complete: {} markdown pages, {} section pages, {} assets linked, {} broken links in {:?}",
+                stats.markdown_pages,
+                stats.section_pages,
+                stats.assets_linked,
+                stats.broken_links,
+                stats.duration
+            );
+        } else {
+            println!(
+                "Build complete: {} markdown pages, {} section pages, {} assets linked in {:?}",
+                stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.duration
+            );
+        }
+        if args.fail_on_broken_links && stats.broken_links > 0 {
+            eprintln!(
+                "Error: {} broken internal link(s) detected; failing because --fail-on-broken-links was set.",
+                stats.broken_links
+            );
             std::process::exit(1);
         }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let output_dir = if args.output.is_absolute() {
-                args.output.clone()
-            } else {
-                std::env::current_dir()
-                    .map_err(ConfigError::CurrentDirFailed)?
-                    .join(&args.output)
-            };
-
-            tracing::info!("Building static site to: {}", output_dir.display());
-
-            let builder = Builder::new(config, output_dir)?;
-            let stats = builder.build().await?;
-
-            if stats.broken_links > 0 {
-                println!(
-                    "Build complete: {} markdown pages, {} section pages, {} assets linked, {} broken links in {:?}",
-                    stats.markdown_pages,
-                    stats.section_pages,
-                    stats.assets_linked,
-                    stats.broken_links,
-                    stats.duration
-                );
-            } else {
-                println!(
-                    "Build complete: {} markdown pages, {} section pages, {} assets linked in {:?}",
-                    stats.markdown_pages, stats.section_pages, stats.assets_linked, stats.duration
-                );
-            }
-            if args.fail_on_broken_links && stats.broken_links > 0 {
-                eprintln!(
-                    "Error: {} broken internal link(s) detected; failing because --fail-on-broken-links was set.",
-                    stats.broken_links
-                );
-                std::process::exit(1);
-            }
-            return Ok(());
-        }
+        return Ok(());
     } else if args.stdout {
         // CLI mode - render markdown to stdout (explicit -o/--stdout flag)
         if is_directory {
@@ -564,7 +555,9 @@ pub fn build_url_path(
     is_directory: bool,
     markdown_extensions: &[String],
 ) -> String {
-    let relative_str = relative_path.to_str().unwrap_or_default();
+    // `path_to_url` keeps the result `/`-separated on Windows, where
+    // `to_str()` would hand back `docs\guide.md`.
+    let relative_str = mbr::url_path::path_to_url(relative_path);
 
     if is_directory {
         if relative_str.is_empty() {
@@ -573,7 +566,7 @@ pub fn build_url_path(
             format!("{}/", relative_str)
         }
     } else {
-        replace_markdown_extension_with_slash(relative_str, markdown_extensions)
+        replace_markdown_extension_with_slash(&relative_str, markdown_extensions)
     }
 }
 

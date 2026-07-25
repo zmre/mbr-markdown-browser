@@ -70,6 +70,7 @@ pub mod server;
 pub mod sorting;
 pub mod tag_index;
 pub mod templates;
+pub mod url_path;
 pub mod vid;
 #[cfg(feature = "media-metadata")]
 pub mod video_metadata;

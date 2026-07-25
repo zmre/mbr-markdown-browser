@@ -420,6 +420,9 @@ async fn test_static_folder_with_spaces_in_path() {
     assert_eq!(bytes.as_ref(), b"spaced content");
 }
 
+// Only the macOS and Linux canonicalize() behaviors are asserted below, so the
+// test is gated to those platforms rather than silently passing elsewhere.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn test_static_folder_trailing_slash_platform_behavior() {
     // Behavior is platform-dependent:

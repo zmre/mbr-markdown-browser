@@ -15,6 +15,23 @@ pub struct Templates {
     template_path: PathBuf,
 }
 
+/// Returns true if `dir` contains at least one `.html` file at any depth.
+///
+/// Only called when zero templates loaded, so it costs nothing on the happy
+/// path.
+fn contains_html_file(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+        })
+}
+
 impl Templates {
     /// Creates a new Templates instance.
     ///
@@ -39,11 +56,25 @@ impl Templates {
 
     /// Load Tera templates from the given path, with fallback to compiled defaults.
     fn load_tera(template_path: &Path) -> Result<Tera, TemplateError> {
-        let globs = template_path.join("**/*.html");
         let source_desc = format!("{}", template_path.display());
+        let template_path_str = template_path
+            .to_str()
+            .ok_or(TemplateError::InvalidPathEncoding)?;
 
-        let globs_str = globs.to_str().ok_or(TemplateError::InvalidPathEncoding)?;
-        let mut tera = Tera::new(globs_str).unwrap_or_else(|e| {
+        // Build the glob as a string with `/` separators rather than via
+        // `Path::join`. On Windows the joined form is
+        // `C:\notes\.mbr\**\*.html`, and globwalk (which Tera uses) treats `\`
+        // as an escape character, not a separator — so the pattern matches
+        // zero files and every user template override is silently ignored.
+        // Forward slashes work on all platforms. The rewrite is gated to
+        // Windows because `\` is a legal filename character on Unix.
+        #[cfg(windows)]
+        let glob_base = template_path_str.replace('\\', "/");
+        #[cfg(not(windows))]
+        let glob_base = template_path_str.to_string();
+        let globs = format!("{}/**/*.html", glob_base.trim_end_matches('/'));
+
+        let mut tera = Tera::new(&globs).unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to load user templates from {}: {}. Using built-in defaults.",
                 source_desc,
@@ -51,6 +82,21 @@ impl Templates {
             );
             Tera::default()
         });
+
+        // `Tera::new` *succeeds* with an empty template set when the glob
+        // matches nothing, so a malformed pattern produces no error at all —
+        // which is exactly what hid the Windows separator bug above. Only walk
+        // the folder in the already-degenerate zero-template case, and only
+        // complain when there really are `.html` files being missed (a `.mbr/`
+        // containing just `config.toml` is perfectly normal).
+        if tera.get_template_names().next().is_none() && contains_html_file(template_path) {
+            tracing::warn!(
+                "No templates matched glob {} even though {} contains .html files. \
+                 Using built-in defaults; user template overrides will be ignored.",
+                globs,
+                source_desc
+            );
+        }
 
         // Custom filters. `humandate` humanizes ISO-ish date strings (see
         // `humanize_date`); registered here so it survives `reload()` and the
@@ -421,6 +467,62 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// User templates in `.mbr/` must actually be picked up by the glob.
+    ///
+    /// This is the regression guard for the Windows separator bug: building the
+    /// pattern with `Path::join` yields `...\.mbr\**\*.html`, globwalk treats
+    /// `\` as an escape rather than a separator, and `Tera::new` then *succeeds*
+    /// with zero user templates — silently ignoring every override.
+    #[test]
+    fn test_user_templates_are_loaded_from_mbr_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr_dir = tmp.path().join(".mbr");
+        std::fs::create_dir_all(mbr_dir.join("partials")).unwrap();
+
+        // Names deliberately absent from DEFAULT_TEMPLATES, so finding them
+        // proves they came from disk rather than the compiled-in fallbacks.
+        std::fs::write(mbr_dir.join("zz_custom_page.html"), "<p>custom</p>").unwrap();
+        std::fs::write(
+            mbr_dir.join("partials").join("zz_nested_page.html"),
+            "<p>nested</p>",
+        )
+        .unwrap();
+
+        let templates = Templates::new(tmp.path(), None).expect("templates should build");
+        let tera = templates.tera.read();
+        let names: Vec<String> = tera.get_template_names().map(String::from).collect();
+
+        assert!(
+            names.iter().any(|n| n == "zz_custom_page.html"),
+            "top-level user template should be loaded, got: {names:?}"
+        );
+        // Asserted by suffix because Tera derives template names from the
+        // relative path, whose separator is platform dependent.
+        assert!(
+            names.iter().any(|n| n.ends_with("zz_nested_page.html")),
+            "nested user template should be loaded via `**`, got: {names:?}"
+        );
+    }
+
+    /// A `.mbr/` folder holding no HTML at all is normal (e.g. only
+    /// `config.toml`) and must still produce a working template set from the
+    /// compiled-in defaults.
+    #[test]
+    fn test_templates_fall_back_to_defaults_without_user_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr_dir = tmp.path().join(".mbr");
+        std::fs::create_dir_all(&mbr_dir).unwrap();
+        std::fs::write(mbr_dir.join("config.toml"), "theme = \"amber\"").unwrap();
+
+        let templates = Templates::new(tmp.path(), None).expect("templates should build");
+        let tera = templates.tera.read();
+
+        assert!(
+            tera.get_template_names().any(|n| n == "index.html"),
+            "built-in defaults should still be registered"
+        );
+    }
 
     #[test]
     fn test_normalize_style_string() {

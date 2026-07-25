@@ -1290,14 +1290,11 @@ fn should_ignore_compiled(
 /// - Removes index file from path (e.g., /docs/index.md → /docs/)
 /// - Replaces file extension with trailing slash
 pub fn build_markdown_url_path(path: &Path, root_dir: &Path, index_file: &str) -> String {
-    let mut url = pathdiff::diff_paths(path, root_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // Ensure leading slash
-    if !url.starts_with('/') {
-        url.insert(0, '/');
-    }
+    // `path_to_url` (not `to_string_lossy`) so the separators below are `/` on
+    // every platform; otherwise the `rsplit('/')` and `contains('/')` checks
+    // that follow silently stop matching on Windows.
+    let relative = pathdiff::diff_paths(path, root_dir).unwrap_or_default();
+    let mut url = format!("/{}", crate::url_path::path_to_url(&relative));
 
     // Remove index file from path — only when the final path component (file name)
     // exactly equals the index file, not merely when it's a suffix substring.
@@ -1329,14 +1326,8 @@ pub fn build_static_url_path(path: &Path, root_dir: &Path, static_folder: &str) 
     // occurrence of the folder name. A plain `.replacen` would corrupt paths like
     // "notes/static-analysis/img.png" (with static_folder="static").
     let stripped = relative.strip_prefix(static_folder).unwrap_or(&relative);
-    let mut url = stripped.to_string_lossy().to_string();
 
-    // Ensure leading slash
-    if !url.starts_with('/') {
-        url.insert(0, '/');
-    }
-
-    url
+    format!("/{}", crate::url_path::path_to_url(stripped))
 }
 
 /// Checks if a file has a markdown extension.
@@ -1743,6 +1734,7 @@ mod proptests {
 
             let url = build_markdown_url_path(&full_path, &root, "index.md");
             prop_assert!(url.starts_with('/'), "URL should start with /: {}", url);
+            prop_assert!(!url.contains('\\'), "URL must not contain a backslash: {}", url);
         }
 
         /// build_markdown_url_path always returns path ending with /
@@ -1760,6 +1752,7 @@ mod proptests {
 
             let url = build_markdown_url_path(&full_path, &root, "index.md");
             prop_assert!(url.ends_with('/'), "URL should end with /: {}", url);
+            prop_assert!(!url.contains('\\'), "URL must not contain a backslash: {}", url);
         }
 
         /// build_static_url_path always returns path starting with /
@@ -1778,6 +1771,7 @@ mod proptests {
 
             let url = build_static_url_path(&full_path, &root, "static");
             prop_assert!(url.starts_with('/'), "URL should start with /: {}", url);
+            prop_assert!(!url.contains('\\'), "URL must not contain a backslash: {}", url);
         }
 
         /// URL paths don't contain double slashes
@@ -1795,6 +1789,7 @@ mod proptests {
 
             let url = build_markdown_url_path(&full_path, &root, "index.md");
             prop_assert!(!url.contains("//"), "URL should not contain //: {}", url);
+            prop_assert!(!url.contains('\\'), "URL must not contain a backslash: {}", url);
         }
     }
 }

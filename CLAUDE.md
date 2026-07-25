@@ -464,7 +464,11 @@ build/
     └── *.js/*.css          # Built-in assets
 ```
 
-**Note:** Static site generation is not supported on Windows (symlinks require admin).
+**Note:** Asset placement is platform dependent. macOS/Linux symlink assets into the
+output; Windows copies them, because `CreateSymbolicLinkW` requires Developer Mode or
+elevation. The decision lives in `build::AssetPlacement::for_current_platform()` and
+`Builder::place_asset()` takes the strategy as a parameter so both paths are testable
+on any host.
 
 ## Key Dependencies
 

@@ -1250,6 +1250,10 @@ mod tests {
         assert_eq!(result, ResolvedPath::StaticFile(expected));
     }
 
+    // Only the macOS and Linux canonicalize() behaviors are asserted below, so
+    // the test is gated to those platforms rather than silently passing
+    // elsewhere.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn test_static_folder_with_trailing_slash_request() {
         // Request "images/photo.png/" with trailing slash

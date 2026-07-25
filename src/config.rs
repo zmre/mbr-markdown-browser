@@ -560,7 +560,12 @@ impl Default for Config {
 
 /// Returns true if the given path is the user's home directory.
 fn is_home_dir(path: &Path) -> bool {
-    std::env::var_os("HOME")
+    // Windows does not set `HOME`; the equivalent is `USERPROFILE`. Without
+    // this the guard below never fires there, so a stray `C:\Users\you\.git`
+    // or `.obsidian` would silently make the entire home directory the repo
+    // root and trigger a scan of everything the user owns.
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(home_var)
         .map(PathBuf::from)
         .is_some_and(|home| path == home)
 }

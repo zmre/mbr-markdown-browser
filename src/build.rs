@@ -251,6 +251,53 @@ impl<E> FirstError<E> {
     }
 }
 
+/// How static assets are materialized into the build output directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetPlacement {
+    /// Create a relative symlink pointing back at the source file. Effectively
+    /// free, and the output tree stays small even for repos holding gigabytes
+    /// of images and video.
+    Symlink,
+    /// Copy the file's bytes into the output directory.
+    Copy,
+}
+
+impl AssetPlacement {
+    /// The strategy used on the platform this binary was compiled for.
+    ///
+    /// Windows copies rather than symlinks: `CreateSymbolicLinkW` needs either
+    /// Developer Mode or an elevated process, neither of which we can assume.
+    /// Copying makes `--build` work out of the box at the cost of disk space.
+    pub const fn for_current_platform() -> Self {
+        if cfg!(windows) {
+            Self::Copy
+        } else {
+            Self::Symlink
+        }
+    }
+
+    /// Present-tense verb for progress output ("Linking"/"Copying").
+    const fn progress_verb(self) -> &'static str {
+        match self {
+            Self::Symlink => "Linking",
+            Self::Copy => "Copying",
+        }
+    }
+}
+
+/// Creates a filesystem symlink to a file.
+///
+/// Cross-platform shim so [`Builder::place_asset`] stays platform independent.
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
 /// Statistics from a build run.
 #[derive(Debug, Default)]
 pub struct BuildStats {
@@ -370,12 +417,13 @@ impl Builder {
             println!("Generating tag pages ... skipped");
         }
 
-        // Symlink assets (images, PDFs, etc.)
+        // Place assets (images, PDFs, etc.): symlinked on Unix, copied on Windows
         let stage_start = Instant::now();
-        print_stage("Linking assets...");
-        stats.assets_linked = self.symlink_assets()?;
+        let asset_verb = AssetPlacement::for_current_platform().progress_verb();
+        print_stage(&format!("{asset_verb} assets..."));
+        stats.assets_linked = self.place_assets()?;
         print_stage_done(
-            "Linking assets",
+            &format!("{asset_verb} assets"),
             stats.assets_linked,
             Some(stage_start.elapsed()),
         );
@@ -1066,11 +1114,12 @@ impl Builder {
             );
         }
 
-        // Collect files in this directory
+        // Collect files in this directory. `path_to_url` keeps this comparable
+        // to the `/`-separated `url_path` values stored on each file.
         let dir_prefix = if is_root {
             "/".to_string()
         } else {
-            format!("/{}/", relative_dir.to_string_lossy())
+            format!("/{}/", crate::url_path::path_to_url(relative_dir))
         };
 
         // Look up this directory's direct child files and immediate subdirs from
@@ -1468,8 +1517,8 @@ impl Builder {
         Some((context, output_path))
     }
 
-    /// Creates symlinks for static assets.
-    fn symlink_assets(&self) -> Result<usize, BuildError> {
+    /// Places static assets (images, PDFs, videos) into the build output.
+    fn place_assets(&self) -> Result<usize, BuildError> {
         let other_files: Vec<_> = self
             .repo
             .other_files
@@ -1479,6 +1528,7 @@ impl Builder {
             .collect();
 
         let count = other_files.len();
+        let placement = AssetPlacement::for_current_platform();
 
         for file_info in other_files {
             let url_path = file_info.url_path.trim_start_matches('/');
@@ -1492,23 +1542,46 @@ impl Builder {
                 })?;
             }
 
-            // Calculate relative path from output location to original file
-            let target = self.calculate_relative_symlink(&output_path, &file_info.raw_path)?;
-
-            // Create symlink (skip if already exists)
+            // Skip if already present (an earlier asset wins)
             if !output_path.exists() {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| {
-                    BuildError::SymlinkFailed {
-                        target: target.clone(),
-                        link: output_path.clone(),
-                        source: e,
-                    }
-                })?;
+                self.place_asset(&file_info.raw_path, &output_path, placement)?;
             }
         }
 
         Ok(count)
+    }
+
+    /// Materializes a single asset in the build output.
+    ///
+    /// `source` is the absolute path of the original file, `output_path` is
+    /// where it should appear in the generated site. Callers are responsible
+    /// for creating the parent directory and for skipping existing files.
+    fn place_asset(
+        &self,
+        source: &Path,
+        output_path: &Path,
+        placement: AssetPlacement,
+    ) -> Result<(), BuildError> {
+        match placement {
+            AssetPlacement::Symlink => {
+                // Relative (not absolute) so the output tree stays relocatable.
+                let target = self.calculate_relative_symlink(output_path, source)?;
+                create_file_symlink(&target, output_path).map_err(|e| BuildError::SymlinkFailed {
+                    target,
+                    link: output_path.to_path_buf(),
+                    source: e,
+                })
+            }
+            AssetPlacement::Copy => {
+                fs::copy(source, output_path)
+                    .map(|_| ())
+                    .map_err(|e| BuildError::CopyFailed {
+                        from: source.to_path_buf(),
+                        to: output_path.to_path_buf(),
+                        source: e,
+                    })
+            }
+        }
     }
 
     /// Calculates a relative path for symlinking.
@@ -1551,6 +1624,8 @@ impl Builder {
             return Ok(());
         }
 
+        let placement = AssetPlacement::for_current_platform();
+
         for entry in WalkDir::new(&static_path)
             .follow_links(true)
             .min_depth(1)
@@ -1567,7 +1642,7 @@ impl Builder {
 
                 let output_path = self.output_dir.join(relative);
 
-                // Only symlink if path doesn't already exist (asset wins over static)
+                // Only place if path doesn't already exist (asset wins over static)
                 if !output_path.exists() {
                     if let Some(parent) = output_path.parent() {
                         fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
@@ -1576,16 +1651,7 @@ impl Builder {
                         })?;
                     }
 
-                    let target = self.calculate_relative_symlink(&output_path, entry.path())?;
-
-                    #[cfg(unix)]
-                    std::os::unix::fs::symlink(&target, &output_path).map_err(|e| {
-                        BuildError::SymlinkFailed {
-                            target,
-                            link: output_path,
-                            source: e,
-                        }
-                    })?;
+                    self.place_asset(entry.path(), &output_path, placement)?;
                 }
             }
         }
@@ -2302,7 +2368,7 @@ mod tests {
             let dir_prefix = if is_root {
                 "/".to_string()
             } else {
-                format!("/{}/", dir.to_string_lossy())
+                format!("/{}/", crate::url_path::path_to_url(dir))
             };
 
             // Reference (old) full-scan logic.
@@ -2829,6 +2895,108 @@ mod tests {
 
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0].link_url, "missing/");
+    }
+
+    // ---------------------- asset placement tests ----------------------
+
+    /// Builds a `Builder` plus a source asset, and returns the output path the
+    /// asset should be placed at (parent directory already created).
+    fn asset_fixture(temp: &tempfile::TempDir, bytes: &[u8]) -> (Builder, PathBuf, PathBuf) {
+        let root = temp.path().join("root");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+        std::fs::create_dir_all(output.join("images")).unwrap();
+
+        let source = root.join("photo.png");
+        std::fs::write(&source, bytes).unwrap();
+
+        let output_path = output.join("images").join("photo.png");
+        let builder = test_builder(output, root);
+        (builder, source, output_path)
+    }
+
+    #[test]
+    fn test_asset_placement_matches_platform() {
+        // Windows cannot create symlinks without Developer Mode or elevation,
+        // so it must copy; every other platform symlinks.
+        let expected = if cfg!(windows) {
+            AssetPlacement::Copy
+        } else {
+            AssetPlacement::Symlink
+        };
+        assert_eq!(AssetPlacement::for_current_platform(), expected);
+    }
+
+    #[test]
+    fn test_place_asset_copy_writes_real_file() {
+        // Exercised on every platform so the Windows code path stays covered
+        // even though CI for it may run elsewhere.
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, source, output_path) = asset_fixture(&temp, b"image-bytes");
+
+        builder
+            .place_asset(&source, &output_path, AssetPlacement::Copy)
+            .expect("copy placement should succeed");
+
+        assert!(output_path.exists(), "copied asset should exist");
+        assert!(
+            !output_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "copy placement must produce a regular file, not a symlink"
+        );
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"image-bytes");
+    }
+
+    #[test]
+    fn test_place_asset_copy_is_independent_of_source() {
+        // A copy must not track later edits to the original file.
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, source, output_path) = asset_fixture(&temp, b"original");
+
+        builder
+            .place_asset(&source, &output_path, AssetPlacement::Copy)
+            .unwrap();
+        std::fs::write(&source, b"modified").unwrap();
+
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"original");
+    }
+
+    #[test]
+    fn test_place_asset_copy_missing_source_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, source, output_path) = asset_fixture(&temp, b"x");
+        std::fs::remove_file(&source).unwrap();
+
+        let err = builder
+            .place_asset(&source, &output_path, AssetPlacement::Copy)
+            .expect_err("copying a missing source must fail");
+        assert!(matches!(err, BuildError::CopyFailed { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_place_asset_symlink_creates_relative_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, source, output_path) = asset_fixture(&temp, b"image-bytes");
+
+        builder
+            .place_asset(&source, &output_path, AssetPlacement::Symlink)
+            .expect("symlink placement should succeed");
+
+        let meta = output_path.symlink_metadata().unwrap();
+        assert!(meta.file_type().is_symlink(), "expected a symlink");
+
+        // Relative, so the generated site stays relocatable.
+        let target = std::fs::read_link(&output_path).unwrap();
+        assert!(
+            target.is_relative(),
+            "symlink target should be relative, got {}",
+            target.display()
+        );
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"image-bytes");
     }
 
     // ---------------------- calculate_relative_symlink tests ----------------------
