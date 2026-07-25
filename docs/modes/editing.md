@@ -45,6 +45,15 @@ On loopback (127.0.0.1), that's all you need — local edits require no token
 3. Click **Save**. On success the file is written and the page live-reloads.
 4. Press `Esc` or click outside the modal to close it.
 
+### Editing media
+
+To embed an image, video, audio clip, or PDF, click **Insert media** in the
+footer and pick a file. To change an embed that's already in the document,
+**double-click it** — the media picker reopens prefilled with its current file
+and caption so you can swap the file or edit the caption. You can also place the
+cursor on (or next to) an embed and use the footer button: when an embed is the
+current target it reads **Edit media** instead of **Insert media**.
+
 ### Error handling
 
 | Result | Meaning |
@@ -53,8 +62,47 @@ On loopback (127.0.0.1), that's all you need — local edits require no token
 | Editing is disabled or blocked | Editing is off, or the request failed the CSRF/same-origin check. |
 | File changed on disk | The file was modified since you loaded it (e.g. by the watcher or another editor). Reload the page before saving. |
 
-Only existing markdown files can be edited — the editor does not create or
-delete files.
+## Creating, renaming, and moving files
+
+Beyond editing an existing file's contents, the editor can also create new
+markdown files, create folders, and rename or move files. These operations are
+**server/GUI-mode only** and gated by the same access checks as editing (see
+[Security model](#security-model)); the editor does **not** delete files.
+
+- **New file** — create a markdown file at a chosen destination path. Missing
+  parent folders can be created as part of the request.
+- **New folder** — create an (empty) directory. Creating an existing folder is a
+  no-op, so it is safe to retry.
+- **Rename / move** — move a markdown file to a new path (a rename is just a move
+  to a new filename in the same folder). Moving a file **automatically rewrites
+  links across the whole repository** so nothing breaks:
+  - Inbound links to the moved page — inline `[text](path)`, reference
+    definitions `[ref]: path`, and path-style `[[dir/note]]` wiki links — are
+    updated, preserving each link's original style (absolute vs relative vs
+    `./`), any `.md`/trailing slash, `#anchor`, `?query`, and wiki `|display`.
+  - The moved file's own relative links are re-expressed against its new folder.
+  - On a **rename** (the filename stem changes), bare `[[Name]]` wiki links that
+    resolved to the file are rewritten to the new name. Bare links that resolve
+    to a *different* note are left untouched.
+
+  The response reports how many pages were rewritten.
+
+### File-management endpoints
+
+All three require the same `X-MBR-Edit: 1` header, same-origin, and (where
+applicable) token as `/.mbr/edit`. The `{*path}` segment is a repo-relative
+**filesystem** path *with* extension (e.g. `docs/new.md`) — the same convention
+as `/.mbr/raw` and `/.mbr/edit` — and each returns the computed `url_path` in
+its JSON response.
+
+| Endpoint | Body | Purpose |
+|----------|------|---------|
+| `POST /.mbr/create/{*path}` | `{ "content": "…", "create_dirs": false }` | Create a new markdown file (409 if it already exists). |
+| `POST /.mbr/move/{*path}` | `{ "to": "docs/new.md", "create_dirs": false }` | Move/rename `{*path}` to `to`, rewriting links repo-wide (409 on collision). |
+| `POST /.mbr/mkdir/{*path}` | *(none)* | Create a folder (idempotent). |
+
+Set `create_dirs: true` to create any missing parent directories at the
+destination; otherwise a missing parent is rejected with `400`.
 
 ## Generating a token
 

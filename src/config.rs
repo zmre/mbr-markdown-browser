@@ -14,6 +14,7 @@ use crate::errors::ConfigError;
 const DEFAULT_PORT: u16 = 5200;
 const DEFAULT_OEMBED_TIMEOUT_MS: u64 = 500;
 const DEFAULT_OEMBED_CACHE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+const DEFAULT_UPLOAD_MAX_BYTES: usize = 25 * 1024 * 1024; // 25 MiB (26214400)
 
 /// Configuration for a single sort field in multi-level sorting.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -73,6 +74,10 @@ fn default_sidebar_max_items() -> usize {
 
 fn default_graph_depth() -> usize {
     2
+}
+
+fn default_upload_max_bytes() -> usize {
+    DEFAULT_UPLOAD_MAX_BYTES
 }
 
 /// Configuration for a tag source - a frontmatter field that contains tags.
@@ -433,9 +438,12 @@ pub struct Config {
     /// `--mark-incomplete` / `--no-mark-incomplete` force a value.
     #[serde(default)]
     pub mark_incomplete: Option<bool>,
-    /// Enable the in-browser markdown editing endpoints (`/.mbr/raw`,
-    /// `/.mbr/edit`) in server/GUI mode. Off by default. Intended for private
-    /// use (e.g. GUI on localhost). CLI flag `--edit` also enables it.
+    /// Enable the in-browser markdown editing endpoints in server/GUI mode:
+    /// `/.mbr/raw` + `/.mbr/edit` (read/save an existing file) and the
+    /// file-management endpoints `/.mbr/create` (new file), `/.mbr/move`
+    /// (move/rename with repo-wide link rewrite), and `/.mbr/mkdir` (new
+    /// folder). Off by default. Intended for private use (e.g. GUI on
+    /// localhost). CLI flag `--edit` also enables it.
     #[serde(default)]
     pub edit_enabled: bool,
     /// Argon2 PHC hash of the shared editing token. Required when editing is
@@ -448,6 +456,11 @@ pub struct Config {
     /// loopback edits are allowed without a token (still CSRF-protected).
     #[serde(default)]
     pub edit_require_token_on_loopback: bool,
+    /// Maximum size in bytes for a single asset uploaded via `/.mbr/upload`
+    /// (the in-browser editor's image uploader). Requests with a larger body are
+    /// rejected with `413 Payload Too Large`. Default: 25 MiB (26214400 bytes).
+    #[serde(default = "default_upload_max_bytes")]
+    pub upload_max_bytes: usize,
 }
 
 impl std::fmt::Display for IpArray {
@@ -540,6 +553,7 @@ impl Default for Config {
             edit_enabled: false,
             edit_token_hash: None,
             edit_require_token_on_loopback: false,
+            upload_max_bytes: DEFAULT_UPLOAD_MAX_BYTES,
         }
     }
 }

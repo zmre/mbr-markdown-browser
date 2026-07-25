@@ -338,6 +338,19 @@ impl LinkCache {
         }
     }
 
+    /// Invalidates all cached entries (e.g., after a file move rewrites
+    /// outbound links across many pages). Clears the map and resets the tracked
+    /// size so the cache doesn't ratchet after a bulk change.
+    pub fn invalidate_all(&self) {
+        let guard = self.cache.pin();
+        let keys: Vec<String> = guard.iter().map(|(k, _)| k.clone()).collect();
+        for key in keys {
+            guard.remove(&key);
+        }
+        self.current_size.store(0, Ordering::Relaxed);
+        tracing::debug!("link cache invalidated");
+    }
+
     /// Returns the current approximate size of the cache in bytes.
     #[cfg(test)]
     pub fn current_size(&self) -> usize {
@@ -511,6 +524,26 @@ mod tests {
         // two-link entry stacked on top of the one-link entry.
         let expected_delta = "/b/".len() + "B".len() + 32;
         assert_eq!(large - small, expected_delta);
+    }
+
+    #[test]
+    fn test_link_cache_invalidate_all_clears_and_resets_size() {
+        let cache = LinkCache::new(1024 * 1024);
+        let links = vec![OutboundLink {
+            to: "/other/".to_string(),
+            text: "Other".to_string(),
+            anchor: None,
+            internal: true,
+        }];
+        cache.insert("/a/".to_string(), links.clone());
+        cache.insert("/b/".to_string(), links);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.current_size() > 0);
+
+        cache.invalidate_all();
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.current_size(), 0);
     }
 
     #[test]

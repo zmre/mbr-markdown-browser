@@ -46,6 +46,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         edit_enabled: false,
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
+        upload_max_bytes: 25 * 1024 * 1024,
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
     }
@@ -3882,6 +3883,615 @@ async fn test_edit_token_required_and_accepted() {
         .await
         .unwrap();
     assert_eq!(ok.status(), 200, "valid token must be accepted");
+}
+
+// ==================== File-management editing endpoints ====================
+
+/// POST helper carrying the CSRF header + JSON body for the file endpoints.
+async fn edit_post(server: &TestServer, path: &str, body: serde_json::Value) -> reqwest::Response {
+    server
+        .client
+        .post(server.url(path))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .expect("request failed")
+}
+
+#[tokio::test]
+async fn test_create_markdown_happy_path() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/hello.md",
+        serde_json::json!({ "content": "# Hello\n\nbody" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["url_path"], "/hello/");
+    assert_eq!(json["path"], "hello.md");
+
+    let on_disk = std::fs::read_to_string(repo.path().join("hello.md")).unwrap();
+    assert_eq!(on_disk, "# Hello\n\nbody");
+
+    // The new page is served immediately.
+    assert_eq!(server.get("/hello/").await.status(), 200);
+}
+
+#[tokio::test]
+async fn test_create_markdown_create_dirs() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Missing parent without create_dirs → 400, nothing written.
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/new/deep/note.md",
+        serde_json::json!({ "content": "# Deep" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    assert!(!repo.path().join("new/deep/note.md").exists());
+
+    // With create_dirs → 200 and directories created.
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/new/deep/note.md",
+        serde_json::json!({ "content": "# Deep", "create_dirs": true }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert!(repo.path().join("new/deep/note.md").exists());
+}
+
+#[tokio::test]
+async fn test_create_markdown_collision_409() {
+    let repo = TestRepo::new();
+    repo.create_markdown("exists.md", "# Exists");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/exists.md",
+        serde_json::json!({ "content": "# New" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    // Original content preserved.
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("exists.md")).unwrap(),
+        "# Exists"
+    );
+}
+
+#[tokio::test]
+async fn test_create_markdown_non_markdown_extension_400() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/notes.txt",
+        serde_json::json!({ "content": "not markdown" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    assert!(!repo.path().join("notes.txt").exists());
+}
+
+#[tokio::test]
+async fn test_create_markdown_traversal_rejected() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Percent-encoded slash keeps the ".." segment intact through the client.
+    let resp = server
+        .client
+        .post(server.url("/.mbr/create/..%2Fescape.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"x"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(!repo.path().parent().unwrap().join("escape.md").exists());
+}
+
+#[tokio::test]
+async fn test_move_markdown_rewrites_inbound_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown("guide.md", "# Guide\n\nThe guide.");
+    // Three inbound link forms from a sibling folder: absolute, relative,
+    // and a reference definition (its [g][ref] use must stay untouched).
+    repo.create_markdown("refs/abs.md", "See [g](/guide/).");
+    repo.create_markdown("refs/rel.md", "See [g](../guide/).");
+    repo.create_markdown("refs/refdef.md", "See [g][ref].\n\n[ref]: /guide/\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/move/guide.md",
+        serde_json::json!({ "to": "manual.md" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["from_url"], "/guide/");
+    assert_eq!(json["url_path"], "/manual/");
+
+    // All three inbound forms rewritten on disk.
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("refs/abs.md")).unwrap(),
+        "See [g](/manual/)."
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("refs/rel.md")).unwrap(),
+        "See [g](../manual/)."
+    );
+    let refdef = std::fs::read_to_string(repo.path().join("refs/refdef.md")).unwrap();
+    assert!(
+        refdef.contains("[ref]: /manual/"),
+        "ref def rewritten: {refdef}"
+    );
+    assert!(refdef.contains("[g][ref]"), "ref use untouched: {refdef}");
+
+    // MoveResponse.rewritten lists the three source pages.
+    let urls: Vec<&str> = json["rewritten"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(urls.contains(&"/refs/abs/"), "rewritten={urls:?}");
+    assert!(urls.contains(&"/refs/rel/"), "rewritten={urls:?}");
+    assert!(urls.contains(&"/refs/refdef/"), "rewritten={urls:?}");
+
+    // Old file gone, new file present; old URL 404s, new URL serves.
+    assert!(!repo.path().join("guide.md").exists());
+    assert!(repo.path().join("manual.md").exists());
+    assert_eq!(server.get("/guide/").await.status(), 404);
+    assert_eq!(server.get("/manual/").await.status(), 200);
+}
+
+#[tokio::test]
+async fn test_move_markdown_rename_rewrites_bare_wikilinks_with_guard() {
+    let repo = TestRepo::new();
+    // The note to rename (title differs from stem so [[alpha]] resolves by stem).
+    repo.create_markdown("x/alpha.md", "# Alpha X\n\nbody");
+    // A referrer whose [[alpha]] resolves globally to /x/alpha/.
+    repo.create_markdown("notes/ref.md", "See [[alpha]].");
+    // A decoy note also named "alpha" in a later-sorting folder, plus a sibling
+    // whose [[alpha]] resolves to the DECOY (same-folder-first), not /x/alpha/.
+    repo.create_markdown("zdecoy/alpha.md", "# Zdecoy Alpha\n\nbody");
+    repo.create_markdown("zdecoy/other.md", "See [[alpha]].");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/move/x/alpha.md",
+        serde_json::json!({ "to": "x/omega.md" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+
+    // Referrer resolving to the renamed note is rewritten...
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes/ref.md")).unwrap(),
+        "See [[omega]]."
+    );
+    // ...but the decoy's sibling [[alpha]] (a DIFFERENT note) is left intact.
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("zdecoy/other.md")).unwrap(),
+        "See [[alpha]]."
+    );
+
+    let wikis: Vec<&str> = json["wikilinks_rewritten"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(wikis.contains(&"/notes/ref/"), "wikilinks={wikis:?}");
+    assert!(!wikis.contains(&"/zdecoy/other/"), "wikilinks={wikis:?}");
+
+    assert!(!repo.path().join("x/alpha.md").exists());
+    assert!(repo.path().join("x/omega.md").exists());
+}
+
+#[tokio::test]
+async fn test_move_markdown_collision_409() {
+    let repo = TestRepo::new();
+    repo.create_markdown("guide.md", "# Guide");
+    repo.create_markdown("other.md", "# Other");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/move/guide.md",
+        serde_json::json!({ "to": "other.md" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    // Both files intact.
+    assert!(repo.path().join("guide.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("other.md")).unwrap(),
+        "# Other"
+    );
+}
+
+#[tokio::test]
+async fn test_move_markdown_traversal_rejected() {
+    let repo = TestRepo::new();
+    repo.create_markdown("guide.md", "# Guide");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/move/guide.md",
+        serde_json::json!({ "to": "../escape.md" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    assert!(
+        repo.path().join("guide.md").exists(),
+        "source must be intact"
+    );
+    assert!(!repo.path().parent().unwrap().join("escape.md").exists());
+}
+
+#[tokio::test]
+async fn test_mkdir_happy_and_idempotent() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = server
+        .client
+        .post(server.url("/.mbr/mkdir/newdir"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["path"], "newdir");
+    assert!(repo.path().join("newdir").is_dir());
+
+    // Idempotent: pre-creating an existing folder succeeds again.
+    let resp2 = server
+        .client
+        .post(server.url("/.mbr/mkdir/newdir"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+}
+
+#[tokio::test]
+async fn test_mkdir_file_in_the_way_409() {
+    let repo = TestRepo::new();
+    repo.create_markdown("occupied.md", "# Occupied");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = server
+        .client
+        .post(server.url("/.mbr/mkdir/occupied.md"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+}
+
+#[tokio::test]
+async fn test_file_ops_disabled_returns_403() {
+    let repo = TestRepo::new();
+    repo.create_markdown("guide.md", "# Guide");
+    let server = TestServer::start(&repo).await; // editing OFF
+    server.wait_for_scan().await;
+
+    let create = edit_post(
+        &server,
+        "/.mbr/create/x.md",
+        serde_json::json!({ "content": "x" }),
+    )
+    .await;
+    assert_eq!(create.status(), 403);
+    let mv = edit_post(
+        &server,
+        "/.mbr/move/guide.md",
+        serde_json::json!({ "to": "y.md" }),
+    )
+    .await;
+    assert_eq!(mv.status(), 403);
+    let mk = server
+        .client
+        .post(server.url("/.mbr/mkdir/d"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mk.status(), 403);
+}
+
+#[tokio::test]
+async fn test_file_ops_missing_csrf_and_cross_origin_403() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Missing X-MBR-Edit header → 403.
+    let no_csrf = server
+        .client
+        .post(server.url("/.mbr/create/x.md"))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"x"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+
+    // Cross-origin request → 403.
+    let cross = server
+        .client
+        .post(server.url("/.mbr/mkdir/d"))
+        .header("X-MBR-Edit", "1")
+        .header("Origin", "http://evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross.status(), 403);
+}
+
+#[tokio::test]
+async fn test_file_ops_token_required_401() {
+    let repo = TestRepo::new();
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_require_token_on_loopback = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    // No token → 401 even on loopback.
+    let no_token = edit_post(
+        &server,
+        "/.mbr/create/x.md",
+        serde_json::json!({ "content": "x" }),
+    )
+    .await;
+    assert_eq!(no_token.status(), 401);
+
+    // Wrong token → 401.
+    let wrong = server
+        .client
+        .post(server.url("/.mbr/create/x.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Authorization", "Bearer nope")
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"x"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401);
+
+    // Correct token → 200.
+    let ok = server
+        .client
+        .post(server.url("/.mbr/create/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Authorization", "Bearer s3cret-token")
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "content": "# Note" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+}
+
+// ==================== Asset upload endpoint ====================
+
+/// Minimal percent-encoder for a query-parameter value (RFC 3986 unreserved
+/// pass through; everything else is `%XX` over UTF-8 bytes).
+fn q(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Builds the `/.mbr/upload?dir=&name=` URL for the given params.
+fn upload_url(dir: &str, name: &str) -> String {
+    format!("/.mbr/upload?dir={}&name={}", q(dir), q(name))
+}
+
+/// POST helper for `/.mbr/upload` carrying the CSRF header + raw file bytes.
+async fn upload_post(
+    server: &TestServer,
+    dir: &str,
+    name: &str,
+    bytes: Vec<u8>,
+) -> reqwest::Response {
+    server
+        .client
+        .post(server.url(&upload_url(dir, name)))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .expect("request failed")
+}
+
+#[tokio::test]
+async fn test_upload_happy_path() {
+    let repo = TestRepo::new();
+    // Upload lands next to an existing note in its own folder (the norm).
+    repo.create_markdown("notes/note.md", "# Note");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let bytes = b"\x89PNG\r\n\x1a\nfake-png-bytes".to_vec();
+    let resp = upload_post(&server, "notes", "pic.png", bytes.clone()).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["url"], "/notes/pic.png");
+    assert_eq!(json["path"], "notes/pic.png");
+    assert_eq!(json["name"], "pic.png");
+
+    // Exact bytes are on disk at the reported path.
+    let on_disk = std::fs::read(repo.path().join("notes/pic.png")).unwrap();
+    assert_eq!(on_disk, bytes);
+}
+
+#[tokio::test]
+async fn test_upload_collision_suffixes_name() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let first = upload_post(&server, "notes", "pic.png", b"one".to_vec()).await;
+    assert_eq!(first.status(), 200);
+    let first_json: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(first_json["url"], "/notes/pic.png");
+
+    // A second upload of the same name keeps the name and suffixes `-1`.
+    let second = upload_post(&server, "notes", "pic.png", b"two".to_vec()).await;
+    assert_eq!(second.status(), 200);
+    let second_json: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(second_json["url"], "/notes/pic-1.png");
+    assert_eq!(second_json["name"], "pic-1.png");
+    assert_eq!(second_json["path"], "notes/pic-1.png");
+
+    // Both files exist with their own bytes.
+    assert_eq!(
+        std::fs::read(repo.path().join("notes/pic.png")).unwrap(),
+        b"one"
+    );
+    assert_eq!(
+        std::fs::read(repo.path().join("notes/pic-1.png")).unwrap(),
+        b"two"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_root_dir() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Empty dir → root-level note; url has no folder segment.
+    let resp = upload_post(&server, "", "pic.png", b"root".to_vec()).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["url"], "/pic.png");
+    assert_eq!(json["path"], "pic.png");
+    assert_eq!(json["name"], "pic.png");
+    assert_eq!(std::fs::read(repo.path().join("pic.png")).unwrap(), b"root");
+}
+
+#[tokio::test]
+async fn test_upload_auth_rejected() {
+    let repo = TestRepo::new();
+
+    // Editing disabled → 403 even with the CSRF header.
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let disabled = server
+        .client
+        .post(server.url(&upload_url("", "pic.png")))
+        .header("X-MBR-Edit", "1")
+        .body(b"x".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), 403);
+    assert!(!repo.path().join("pic.png").exists());
+
+    // Editing enabled but missing the CSRF header → 403.
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+    let no_csrf = server
+        .client
+        .post(server.url(&upload_url("", "pic.png")))
+        .body(b"x".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+    assert!(!repo.path().join("pic.png").exists());
+}
+
+#[tokio::test]
+async fn test_upload_traversal_rejected() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // `dir=..` escapes the root → 400, nothing written outside.
+    let dir_esc = upload_post(&server, "..", "pic.png", b"x".to_vec()).await;
+    assert_eq!(dir_esc.status(), 400);
+    assert!(!repo.path().parent().unwrap().join("pic.png").exists());
+
+    // A name containing a separator / `..` → 400 (not a pure basename).
+    let name_esc = upload_post(&server, "notes", "../evil.png", b"x".to_vec()).await;
+    assert_eq!(name_esc.status(), 400);
+    assert!(!repo.path().parent().unwrap().join("evil.png").exists());
+}
+
+#[tokio::test]
+async fn test_upload_markdown_extension_rejected() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Markdown files must go through /.mbr/create, not /.mbr/upload.
+    let resp = upload_post(&server, "notes", "foo.md", b"# not allowed".to_vec()).await;
+    assert_eq!(resp.status(), 400);
+    assert!(!repo.path().join("notes/foo.md").exists());
+}
+
+#[tokio::test]
+async fn test_upload_body_limit_rejects_oversize() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.upload_max_bytes = 1024; // 1 KiB cap for the test
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    // A 2 KiB body exceeds the 1 KiB cap → 413 (from DefaultBodyLimit).
+    let big = vec![0u8; 2048];
+    let resp = upload_post(&server, "", "big.bin", big).await;
+    assert_eq!(resp.status(), 413);
+    assert!(!repo.path().join("big.bin").exists());
 }
 
 // ============================================================================

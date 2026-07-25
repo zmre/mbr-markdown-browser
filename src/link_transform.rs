@@ -58,7 +58,7 @@ impl Default for LinkTransformConfig {
 /// 1. Absolute URLs (`http://`, `https://`, `//`) → unchanged
 /// 2. Root-relative URLs (starts with `/`) → unchanged
 /// 3. Anchor-only links (`#...`) → unchanged
-/// 4. Data/javascript URLs → unchanged
+/// 4. Data/blob/javascript URLs → unchanged
 /// 5. Relative markdown links → prepend `../` (if not index file), replace extension with `/`
 /// 6. Relative static files → prepend `../` (if not index file)
 ///
@@ -109,8 +109,10 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
         };
     }
 
-    // Data URLs and javascript URLs
-    if url.starts_with("data:") || url.starts_with("javascript:") {
+    // Data, blob, and javascript URLs — inline/opaque resources, never rewritten.
+    // (`blob:` is what the Crepe editor mints for a freshly pasted image before
+    // it is uploaded; without this it would get a bogus `../` prepended.)
+    if url.starts_with("data:") || url.starts_with("blob:") || url.starts_with("javascript:") {
         return url.to_string();
     }
 
@@ -523,6 +525,23 @@ mod tests {
     fn test_data_url() {
         let url = "data:image/png;base64,abc123";
         assert_eq!(transform_link(url, &regular_config()), url);
+    }
+
+    #[test]
+    fn test_data_image_url_unchanged() {
+        // A realistic data: image URL must pass through untouched (no ../).
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ";
+        assert_eq!(transform_link(url, &regular_config()), url);
+        assert_eq!(transform_link(url, &index_config()), url);
+    }
+
+    #[test]
+    fn test_blob_url_unchanged() {
+        // The Crepe editor mints blob: URLs for pasted images before upload;
+        // rewriting one to `../blob:...` would break the in-editor preview.
+        let url = "blob:http://localhost:5220/550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(transform_link(url, &regular_config()), url);
+        assert_eq!(transform_link(url, &index_config()), url);
     }
 
     #[test]

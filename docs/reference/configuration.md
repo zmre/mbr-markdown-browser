@@ -211,6 +211,7 @@ for the current markdown file. See the [editing guide](../modes/editing.md).
 | `edit_enabled` | bool | `false` | Enable the `/.mbr/raw` and `/.mbr/edit` endpoints and the edit button. Also enabled by `--edit`. |
 | `edit_token_hash` | string / unset | (unset) | Argon2 PHC hash of the shared editing token. **Required** when editing is enabled on a non-loopback host. Generate with `mbr --generate-edit-token`. Never sent to the frontend. |
 | `edit_require_token_on_loopback` | bool | `false` | Require the token even for loopback callers. When `false`, local (127.0.0.1) edits need no token but are still CSRF-protected. |
+| `upload_max_bytes` | number | `26214400` (25 MiB) | Maximum size in bytes of a single asset uploaded via `/.mbr/upload` (the editor's image uploader). Larger bodies are rejected with `413 Payload Too Large`. |
 
 Environment variables use the `MBR_` prefix (e.g. `MBR_EDIT_ENABLED=true`).
 
@@ -237,7 +238,14 @@ edit_enabled = true
 edit_token_hash = "$argon2id$v=19$m=19456,t=2,p=1$...."
 # Optional: require the token even from localhost
 # edit_require_token_on_loopback = true
+# Optional: cap for editor asset uploads (bytes); default 25 MiB
+# upload_max_bytes = 26214400
 ```
+
+The editor's image uploader `POST`s bytes to `/.mbr/upload?dir=<folder>&name=<file>`,
+which writes the asset next to the note being edited and returns its root-absolute
+URL. It is gated by the same `X-MBR-Edit` + same-origin (+ token) checks as the
+other editing endpoints, and its body size is capped by `upload_max_bytes`.
 
 ### Tag Settings
 
@@ -688,6 +696,10 @@ MBR_TRANSCODE=true
 # Incomplete-block highlighting (TK / TODO / FIXME / XXX)
 MBR_MARK_INCOMPLETE=true
 MBR_INCOMPLETE_MARKERS='["NOTE","DRAFT"]'
+
+# Editing
+MBR_EDIT_ENABLED=true
+MBR_UPLOAD_MAX_BYTES=26214400  # 25 MiB cap for editor asset uploads
 ```
 
 Environment variables override config file settings.
