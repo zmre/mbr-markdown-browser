@@ -26,8 +26,22 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@main
 
+      # Without this the flake's own extra-substituters are ignored ("untrusted
+      # flake configuration"), so nothing is pulled from the zmre cache and every
+      # dependency is built from source.
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: nix-community
+
+      # `nix build .#fmt` (craneLib.cargoFmt), not `nix develop --command cargo
+      # fmt`. The dev shell pulls in the whole build closure — ffmpeg, webkitgtk,
+      # GTK — to run a check that only needs rustfmt, which meant a formatting
+      # check could fail because ffmpeg.org refused a download.
       - name: Check formatting
-        run: nix develop --command cargo fmt -- --check
+        run: nix build -L .#fmt
 
   # Build frontend components - needed by lint and test jobs
   build-components:
