@@ -66,7 +66,13 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 pulldown-cmark-escape = { version = "0.11", default-features = false }
 rayon = "1.11"
 regex = "1.13"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+# "rustls-no-provider" (not "rustls"): the plain feature force-enables the
+# aws-lc-rs crypto provider, which needs NASM + a C toolchain on
+# x86_64-pc-windows-msvc and is not displaced by selecting ring elsewhere
+# (cargo features are additive). We supply our own provider via
+# `lib::http_client_builder()` -> `use_preconfigured_tls`, so reqwest must not
+# pick one for us.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 webpki-roots = "1"
 scraper = "0.27"
@@ -96,7 +102,11 @@ wry = { version = "0.55", default-features = true, features = ["devtools", "full
 nucleo-matcher = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
-pagefind = "1.5"
+# default-features = false drops the "serve" feature (actix-web + actix-files +
+# portpicker), which we never use and which drags in the C-built zstd-sys.
+# Never enable "extended": its lindera-unidic dependency downloads a dictionary
+# from S3 in a build script, which breaks sandboxed/nix builds.
+pagefind = { version = "1.5", default-features = false }
 aho-corasick = "1.1"
 
 # Image processing with minimal features (only needed formats)
