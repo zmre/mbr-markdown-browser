@@ -22,8 +22,27 @@ use crate::wikilink_index::WikilinkIndex;
 
 #[derive(Clone, Serialize)]
 pub struct Repo {
+    /// Repository root, **always canonicalized** (see [`canonicalize_root`]).
+    ///
+    /// This must stay canonical. `scan_folder` walks from
+    /// `canonical_root.join(rel).canonicalize()`, and every path that WalkDir
+    /// yields is relativized back against this same value. If the two were
+    /// allowed to differ — a raw root here and a canonicalized one there —
+    /// `pathdiff::diff_paths` would find no common prefix and hand back an
+    /// effectively absolute path, so every `url_path` would embed the whole
+    /// filesystem path.
+    ///
+    /// That is not hypothetical: on Windows `canonicalize` returns a verbatim
+    /// prefix (`\\?\D:\x`), and `Prefix::VerbatimDisk != Prefix::Disk`, so a
+    /// raw `D:\x` base silently failed to match. On Unix the same thing happens
+    /// through a symlinked temp dir (`/tmp` vs `/private/tmp`).
+    ///
+    /// Note this is deliberately *not* the same value as `Config::root_dir`,
+    /// which stays as the user supplied it (it feeds template globs and
+    /// user-facing output, where a verbatim prefix would cause its own
+    /// problems).
     #[serde(skip)]
-    root_dir: PathBuf,
+    canonical_root: PathBuf,
     #[serde(skip)]
     static_folder: String,
     #[serde(skip)]
@@ -501,6 +520,16 @@ impl StaticFileMetadata {
     }
 }
 
+/// Canonicalizes a repository root for use as [`Repo::canonical_root`].
+///
+/// Falls back to the path as given when canonicalization fails (a root that
+/// does not exist yet). That is safe: `scan_folder` canonicalizes the same path
+/// and surfaces the real error, and with both sides raw the relativization
+/// invariant still holds.
+fn canonicalize_root(root_dir: PathBuf) -> PathBuf {
+    root_dir.canonicalize().unwrap_or(root_dir)
+}
+
 impl Repo {
     pub fn init_from_config(c: &Config) -> Self {
         Self::init(
@@ -537,7 +566,7 @@ impl Repo {
             .collect();
 
         Self {
-            root_dir: root_dir.into(),
+            canonical_root: canonicalize_root(root_dir.into()),
             static_folder: static_folder.into(),
             markdown_extensions: markdown_extensions.to_vec(),
             ignore_dirs: ignore_dirs.to_vec(),
@@ -571,12 +600,13 @@ impl Repo {
     /// host path. Both inputs are absolute in practice, so the fallback is
     /// unreachable.
     fn relative_to_root(&self, abs_path: &Path) -> PathBuf {
-        pathdiff::diff_paths(abs_path, &self.root_dir).unwrap_or_else(|| abs_path.to_path_buf())
+        pathdiff::diff_paths(abs_path, &self.canonical_root)
+            .unwrap_or_else(|| abs_path.to_path_buf())
     }
 
     pub fn scan_folder<P: AsRef<Path>>(&self, relative_folder_path: &P) -> Result<(), RepoError> {
         let relative_folder_path_ref = relative_folder_path.as_ref();
-        let joined = self.root_dir.join(relative_folder_path_ref);
+        let joined = self.canonical_root.join(relative_folder_path_ref);
         let start_folder =
             joined
                 .canonicalize()
@@ -613,14 +643,14 @@ impl Repo {
             if path.is_dir() {
                 // Queue subdirectory for later scanning
                 let relative_entry =
-                    pathdiff::diff_paths(path, &self.root_dir).unwrap_or(path.to_path_buf());
+                    pathdiff::diff_paths(path, &self.canonical_root).unwrap_or(path.to_path_buf());
                 self.queued_folders
                     .pin()
                     .insert(path.to_path_buf(), relative_entry);
             } else if is_markdown_extension(extension, &self.markdown_extensions) {
                 // Process markdown file
                 if let Ok((_filesize, created, modified)) = file_details_from_path(path) {
-                    let url = build_markdown_url_path(path, &self.root_dir, &self.index_file);
+                    let url = build_markdown_url_path(path, &self.canonical_root, &self.index_file);
                     let mdfile = MarkdownInfo {
                         raw_path: self.relative_to_root(path),
                         url_path: url,
@@ -635,7 +665,7 @@ impl Repo {
                 }
             } else {
                 // Process static file
-                let url = build_static_url_path(path, &self.root_dir, &self.static_folder);
+                let url = build_static_url_path(path, &self.canonical_root, &self.static_folder);
                 let other_file = OtherFileInfo {
                     raw_path: path.to_path_buf(),
                     url_path: url,
@@ -727,7 +757,7 @@ impl Repo {
         // This defers static file registration to scan_static_folder() so
         // mark_scan_complete() fires faster (search only needs markdown).
         let static_deferred = self
-            .root_dir
+            .canonical_root
             .join(&self.static_folder)
             .canonicalize()
             .ok()
@@ -800,7 +830,7 @@ impl Repo {
     /// Deferred from scan_all() so mark_scan_complete() fires faster.
     pub fn scan_static_folder(&self) -> Result<(), RepoError> {
         let start = Instant::now();
-        let static_path = self.root_dir.join(&self.static_folder);
+        let static_path = self.canonical_root.join(&self.static_folder);
         if !static_path.is_dir() {
             return Ok(());
         }
@@ -1002,8 +1032,11 @@ impl Repo {
             crate::watcher::ChangeEventType::Created => {
                 if is_markdown {
                     if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
-                        let url =
-                            build_markdown_url_path(abs_path, &self.root_dir, &self.index_file);
+                        let url = build_markdown_url_path(
+                            abs_path,
+                            &self.canonical_root,
+                            &self.index_file,
+                        );
                         let file_meta = crate::markdown::extract_metadata_from_file(abs_path).ok();
                         let (frontmatter, relationships) = match file_meta {
                             Some(fm) => (Some(fm.metadata), fm.relationships),
@@ -1050,7 +1083,8 @@ impl Repo {
                             .insert(abs_path.to_path_buf(), info);
                     }
                 } else {
-                    let url = build_static_url_path(abs_path, &self.root_dir, &self.static_folder);
+                    let url =
+                        build_static_url_path(abs_path, &self.canonical_root, &self.static_folder);
                     let info = OtherFileInfo {
                         raw_path: abs_path.to_path_buf(),
                         url_path: url,
@@ -1064,8 +1098,11 @@ impl Repo {
                 if is_markdown {
                     // Re-extract frontmatter and update
                     if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
-                        let url =
-                            build_markdown_url_path(abs_path, &self.root_dir, &self.index_file);
+                        let url = build_markdown_url_path(
+                            abs_path,
+                            &self.canonical_root,
+                            &self.index_file,
+                        );
                         let file_meta = crate::markdown::extract_metadata_from_file(abs_path).ok();
                         let (frontmatter, relationships) = match file_meta {
                             Some(fm) => (Some(fm.metadata), fm.relationships),
@@ -1085,7 +1122,8 @@ impl Repo {
                     }
                 } else {
                     // Update basic metadata for modified static files
-                    let url = build_static_url_path(abs_path, &self.root_dir, &self.static_folder);
+                    let url =
+                        build_static_url_path(abs_path, &self.canonical_root, &self.static_folder);
                     let info = OtherFileInfo {
                         raw_path: abs_path.to_path_buf(),
                         url_path: url,
@@ -1438,6 +1476,40 @@ fn get_page_title(frontmatter: &crate::markdown::SimpleMetadata, path: &Path) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Repo` must canonicalize the root it is handed, so that the base used to
+    /// relativize scanned paths is identical to the one `WalkDir` starts from.
+    /// If these drift, `diff_paths` returns an effectively absolute path and
+    /// every `url_path` embeds the whole filesystem path.
+    #[test]
+    fn test_repo_canonicalizes_its_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+
+        let repo = Repo::init(
+            tmp.path().to_path_buf(),
+            "static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        );
+
+        assert_eq!(
+            repo.canonical_root, canonical,
+            "Repo must store the canonical root, not the path as supplied"
+        );
+    }
+
+    /// Canonicalization must not lose a root that does not exist yet; falling
+    /// back to the given path keeps the two sides consistent.
+    #[test]
+    fn test_canonicalize_root_falls_back_when_missing() {
+        let missing = PathBuf::from("/definitely/does/not/exist/anywhere");
+        assert_eq!(canonicalize_root(missing.clone()), missing);
+    }
 
     #[test]
     fn test_should_ignore_hidden_file() {
