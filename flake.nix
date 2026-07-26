@@ -145,6 +145,14 @@
         then "linux-x86_64"
         else system;
 
+      # swiftc target triple for the QuickLook extension. Must track the host
+      # arch: an x86_64-darwin build has to produce an Intel .appex so that the
+      # release job can lipo it together with the arm64 one into a universal app.
+      swiftTarget =
+        if system == "x86_64-darwin"
+        then "x86_64-apple-macos14.0"
+        else "arm64-apple-macos14.0";
+
       # Source filtering - include Rust sources, templates, and embedded assets
       src = pkgs.lib.cleanSourceWith {
         src = ./.;
@@ -423,7 +431,7 @@
               -O \
               -parse-as-library \
               -application-extension \
-              -target arm64-apple-macos14.0 \
+              -target ${swiftTarget} \
               -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
               -L ${packages.mbr-quicklook-staticlib}/lib \
               -lmbr \

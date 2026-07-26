@@ -647,7 +647,11 @@ impl SearchEngine {
         matcher: &grep_regex::RegexMatcher,
         info: &MarkdownInfo,
     ) -> Result<Option<SearchResult>, SearchError> {
-        let path = &info.raw_path;
+        // `raw_path` is repo-relative, so rejoin the root before touching the
+        // filesystem. Reading it directly would resolve against the process
+        // working directory, which is not the repo root.
+        let path = self.root_dir.join(&info.raw_path);
+        let path = path.as_path();
 
         // Skip if file doesn't exist
         if !path.exists() {

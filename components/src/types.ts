@@ -125,14 +125,19 @@ export const MEDIA_TYPE_PRIORITY: readonly MediaType[] = [
  * Base metadata fields present on all static files.
  * Mirrors Rust: StaticFileMetadata struct
  *
- * - `path`: Filesystem path relative to repo root
  * - `created`: Unix timestamp (seconds since epoch)
  * - `modified`: Unix timestamp (seconds since epoch)
  * - `file_size_bytes`: File size in bytes
  * - `kind`: Discriminated union of file type metadata
  */
 export interface StaticFileMetadata {
-  readonly path: string;
+  /*
+   * Note: Rust's `StaticFileMetadata` also has a `path` field, but it is
+   * skipped in serialization (serde(skip)) because it is an absolute path on
+   * the machine that generated the site. It is deliberately not declared here,
+   * so referencing it is a compile error rather than a silent `undefined`.
+   * Use `url_path` on the parent `OtherFileInfo` instead.
+   */
   readonly created?: number;
   readonly modified?: number;
   readonly file_size_bytes?: number;

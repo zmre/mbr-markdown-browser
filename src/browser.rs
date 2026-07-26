@@ -376,7 +376,9 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     #[cfg(target_os = "windows")]
     unsafe {
         use tao::platform::windows::WindowExtWindows;
-        menu_bar.init_for_hwnd(window.hwnd() as isize);
+        if let Err(e) = menu_bar.init_for_hwnd(window.hwnd()) {
+            tracing::warn!("Failed to attach menu bar to window: {e}");
+        }
     }
 
     // Initialize menu for Linux (GTK-based)
@@ -555,7 +557,9 @@ pub fn launch_url(url: &str) -> Result<(), BrowserError> {
     #[cfg(target_os = "windows")]
     unsafe {
         use tao::platform::windows::WindowExtWindows;
-        menu_bar.init_for_hwnd(window.hwnd() as isize);
+        if let Err(e) = menu_bar.init_for_hwnd(window.hwnd()) {
+            tracing::warn!("Failed to attach menu bar to window: {e}");
+        }
     }
 
     // Initialize menu for Linux (GTK-based)

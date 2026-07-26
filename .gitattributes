@@ -1,0 +1,4 @@
+# Git for Windows defaults to core.autocrlf=true, which would rewrite checked
+# out files to CRLF. Test fixtures, templates and golden files are compared
+# byte-for-byte, so keep every file exactly as committed on all platforms.
+* -text

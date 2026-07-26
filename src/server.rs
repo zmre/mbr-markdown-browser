@@ -1025,7 +1025,14 @@ impl Server {
                 let should_reload = if let Some(ref tf) = template_folder_for_reload {
                     event.path.starts_with(&tf.to_string_lossy().to_string())
                 } else {
-                    event.path.contains("/.mbr/")
+                    // Match `.mbr` as a path component rather than substring
+                    // matching "/.mbr/". The watcher reports native separators,
+                    // so on Windows this string is `...\.mbr\theme.css` and the
+                    // slash form would never match, silently disabling template
+                    // hot reload.
+                    Path::new(&event.path)
+                        .components()
+                        .any(|c| c.as_os_str() == ".mbr")
                 };
 
                 if should_reload {
@@ -2001,12 +2008,14 @@ impl Server {
             .is_some_and(|n| n == index_file)
     }
 
-    /// The repo-relative filesystem path of `path` as a string.
+    /// The repo-relative path of `path`, always `/`-separated.
+    ///
+    /// This feeds the `path` field of the file-operation responses, which is
+    /// documented as e.g. `notes/image.png`, so it must not become
+    /// `notes\image.png` on Windows.
     fn rel_path_string(path: &Path, base_dir: &Path) -> String {
-        pathdiff::diff_paths(path, base_dir)
-            .unwrap_or_else(|| path.to_path_buf())
-            .to_string_lossy()
-            .to_string()
+        let relative = pathdiff::diff_paths(path, base_dir).unwrap_or_else(|| path.to_path_buf());
+        crate::url_path::path_to_url(&relative)
     }
 
     /// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
@@ -4408,12 +4417,16 @@ impl Server {
             syllables: render_result.syllable_count,
         };
         let readability_scores = crate::readability::scores(&readability_counts);
-        // Use relative path for markdown_source so live reload can match it
+        // Use relative path for markdown_source so live reload can match it.
+        // `path_to_url` keeps it `/`-separated: the editor splits this value on
+        // `/` to build the raw/save URLs and to derive the note's folder for
+        // image uploads, so a Windows `docs\guide.md` would collapse to a single
+        // segment and drop uploads into the repo root.
         let relative_md_path =
             pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
         frontmatter.insert(
             "markdown_source".into(),
-            relative_md_path.to_string_lossy().into(),
+            crate::url_path::path_to_url(&relative_md_path).into(),
         );
         // Indicate server mode for frontend search functionality
         frontmatter.insert("server_mode".into(), "true".into());
@@ -4448,13 +4461,22 @@ impl Server {
             parent.join(stem)
         };
 
+        // This page's canonical URL. Built with `path_to_url` rather than
+        // `display()`: on Windows the latter yields `/docs\guide/`, which never
+        // matches the `/docs/guide/` key the links.json request handler looks
+        // up, making the link cache a permanent miss. (The `replace` collapses
+        // the `//` produced when the path is empty, i.e. the root index.)
+        let current_url =
+            format!("/{}/", crate::url_path::path_to_url(&url_path_buf)).replace("//", "/");
+
         // Cache outbound links for links.json endpoint if link tracking is enabled
         if config.link_tracking && !outbound_links.is_empty() {
-            let url_path_str = format!("/{}/", url_path_buf.display()).replace("//", "/");
             // Resolve relative URLs to absolute before caching
             let resolved_links =
-                resolve_outbound_links(&url_path_str, outbound_links, is_index_file);
-            config.link_cache.insert(url_path_str, resolved_links);
+                resolve_outbound_links(&current_url, outbound_links, is_index_file);
+            config
+                .link_cache
+                .insert(current_url.clone(), resolved_links);
         }
 
         // Get modified date from file metadata (blocking fs work stays async here)
@@ -4465,8 +4487,8 @@ impl Server {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
-        // Compute prev/next sibling pages for navigation
-        let current_url = format!("/{}/", url_path_buf.display()).replace("//", "/");
+        // Compute prev/next sibling pages for navigation (reuses `current_url`
+        // computed above).
         let parent_dir = relative_md_path.parent().unwrap_or(Path::new(""));
 
         // Get sibling markdown files in the same directory. The sorted list is
@@ -4624,7 +4646,7 @@ impl Server {
                         let parent = abs_path.parent()?;
                         if parent == dir_path.as_path() {
                             let name = abs_path.file_name()?.to_str()?.to_string();
-                            let mut url_path = rel_path.to_str()?.to_string();
+                            let mut url_path = crate::url_path::path_to_url(rel_path);
                             if !url_path.starts_with('/') {
                                 url_path = "/".to_string() + &url_path;
                             }
@@ -4949,8 +4971,9 @@ pub fn generate_breadcrumbs(relative_path: &Path) -> Vec<Breadcrumb> {
         .enumerate()
         .take(path_components.len().saturating_sub(1))
     {
-        let partial_path: std::path::PathBuf = path_components.iter().take(idx + 1).collect();
-        let url = format!("/{}/", partial_path.to_string_lossy());
+        // Join the already-extracted `&str` components directly: routing them
+        // back through a `PathBuf` would reintroduce the platform separator.
+        let url = format!("/{}/", path_components[..=idx].join("/"));
         let name = path_components[idx].to_string();
         breadcrumbs.push(Breadcrumb::new(name, url));
     }
@@ -4981,11 +5004,10 @@ pub fn get_parent_path(relative_path: &Path) -> Option<String> {
         .collect();
 
     if path_components.len() > 1 {
-        let parent: std::path::PathBuf = path_components
-            .iter()
-            .take(path_components.len() - 1)
-            .collect();
-        Some(format!("/{}/", parent.to_string_lossy()))
+        // Join the `&str` components directly rather than via `PathBuf`, which
+        // would use `\` on Windows.
+        let parent = path_components[..path_components.len() - 1].join("/");
+        Some(format!("/{}/", parent))
     } else if !path_components.is_empty() {
         Some("/".to_string())
     } else {
@@ -5504,7 +5526,7 @@ mod tests {
         frontmatter.insert("tags".to_string(), serde_json::json!(["rust", "testing"]));
 
         let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("/root/test.md"),
+            raw_path: PathBuf::from("test.md"),
             url_path: "/test/".to_string(),
             frontmatter: Some(frontmatter),
             created: 1699000000,
@@ -5525,7 +5547,7 @@ mod tests {
     #[test]
     fn test_markdown_file_to_json_without_frontmatter() {
         let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("/root/my-document.md"),
+            raw_path: PathBuf::from("my-document.md"),
             url_path: "/my-document/".to_string(),
             frontmatter: None,
             created: 1699000000,
@@ -5552,7 +5574,7 @@ mod tests {
         // No description or tags
 
         let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("/root/partial.md"),
+            raw_path: PathBuf::from("partial.md"),
             url_path: "/partial/".to_string(),
             frontmatter: Some(frontmatter),
             created: 1699000000,

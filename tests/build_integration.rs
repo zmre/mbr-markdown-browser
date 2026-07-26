@@ -1734,3 +1734,159 @@ async fn test_build_body_wikilink_resolves_globally() {
         stats.broken_links
     );
 }
+
+/// A published static site must not contain the absolute path of the machine
+/// that built it. This is the end-to-end guard: it scans **every** generated
+/// file, so it covers `site.json`, `media.json` and any HTML/JS output at once.
+///
+/// The fixture deliberately includes non-markdown assets — with a markdown-only
+/// repo `other_files` is empty and the whole `StaticFileMetadata` surface goes
+/// unchecked, which is how an absolute `metadata.path` shipped undetected.
+#[tokio::test]
+async fn test_built_site_contains_no_absolute_host_paths() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
+    repo.create_static_file("docs/report.pdf", b"%PDF-1.4 fake");
+    repo.create_static_file("videos/clip.mp4", b"\x00\x00\x00\x18ftypmp42");
+    repo.create_static_file("data/notes.txt", b"some text");
+
+    let output = build_site(&repo).await;
+    let root_str = repo.path().to_string_lossy().to_string();
+
+    // Sanity: the fixture must really have produced media entries, otherwise a
+    // clean scan would prove nothing.
+    let media: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join(".mbr").join("media.json")).expect("media.json"),
+    )
+    .expect("valid media.json");
+    assert!(
+        !media["other_files"]
+            .as_array()
+            .expect("other_files")
+            .is_empty(),
+        "fixture must produce other_files for this test to be meaningful"
+    );
+
+    // Walk the output tree without following symlinks (assets are symlinked
+    // back into the source repo on Unix, and we only care about generated
+    // text output, not the originals).
+    let mut offenders = Vec::new();
+    let mut stack = vec![output.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            } else if let Ok(content) = fs::read_to_string(&path)
+                && content.contains(&root_str)
+            {
+                offenders.push(path.display().to_string());
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "built site leaked the absolute repo root {root_str} in:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// A non-canonical `root_dir` must still produce short, repo-relative URLs.
+///
+/// Regression guard for a canonicalization asymmetry: `scan_folder` walked from
+/// `root_dir.canonicalize()` while paths were relativized against the raw
+/// `root_dir`. When the two differ, `diff_paths` finds no common prefix and
+/// every `url_path` embeds the whole filesystem path — which then makes the
+/// build emit one "section" per markdown file instead of one per directory.
+///
+/// Reproducible on Unix because the temp dir is reached via a symlink
+/// (`/tmp` -> `/private/tmp` on macOS), so the raw and canonical roots differ
+/// exactly the way `D:\...` and `\\?\D:\...` do on Windows.
+#[tokio::test]
+async fn test_build_with_non_canonical_root_dir() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    // Deliberately NOT canonicalized - this is the whole point of the test.
+    let root = tmp.path().to_path_buf();
+
+    std::fs::create_dir_all(root.join("people")).expect("create people dir");
+    std::fs::write(root.join("index.md"), "# Home").expect("write index");
+    std::fs::write(root.join("people/john.md"), "# John").expect("write john");
+    std::fs::write(root.join("people/jane.md"), "# Jane").expect("write jane");
+
+    // Sanity: the test is only meaningful if the root really is non-canonical.
+    let canonical = root.canonicalize().expect("canonicalize root");
+    if canonical == root {
+        eprintln!("skipping: temp dir is already canonical on this platform");
+        return;
+    }
+
+    let output_dir = tmp.path().join("out");
+    let config = mbr::Config {
+        root_dir: root.clone(),
+        oembed_timeout_ms: 0,
+        ..Default::default()
+    };
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    let stats = builder.build().await.expect("Build failed");
+
+    // Exactly one section page per directory: the root and `people`.
+    assert_eq!(
+        stats.section_pages, 2,
+        "expected one section per directory (root + people), got {}",
+        stats.section_pages
+    );
+
+    // Pages land at their short relative URLs, not at a mirror of the
+    // filesystem layout.
+    assert!(
+        output_dir
+            .join("people")
+            .join("john")
+            .join("index.html")
+            .exists(),
+        "expected people/john/index.html; output tree: {:?}",
+        std::fs::read_dir(&output_dir).map(|d| d
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>())
+    );
+    assert!(
+        output_dir
+            .join("people")
+            .join("jane")
+            .join("index.html")
+            .exists(),
+        "expected people/jane/index.html"
+    );
+
+    // And the recorded URLs are short and relative.
+    let site: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output_dir.join(".mbr").join("site.json")).expect("site.json"),
+    )
+    .expect("valid site.json");
+    let mut urls: Vec<String> = site["markdown_files"]
+        .as_array()
+        .expect("markdown_files")
+        .iter()
+        .map(|f| f["url_path"].as_str().unwrap_or("").to_string())
+        .collect();
+    urls.sort();
+    assert_eq!(
+        urls,
+        vec!["/", "/people/jane/", "/people/john/"],
+        "url_path values must be short and repo-relative"
+    );
+}

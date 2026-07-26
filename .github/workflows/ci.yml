@@ -26,8 +26,22 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@main
 
+      # Without this the flake's own extra-substituters are ignored ("untrusted
+      # flake configuration"), so nothing is pulled from the zmre cache and every
+      # dependency is built from source.
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: nix-community
+
+      # `nix build .#fmt` (craneLib.cargoFmt), not `nix develop --command cargo
+      # fmt`. The dev shell pulls in the whole build closure — ffmpeg, webkitgtk,
+      # GTK — to run a check that only needs rustfmt, which meant a formatting
+      # check could fail because ffmpeg.org refused a download.
       - name: Check formatting
-        run: nix develop --command cargo fmt -- --check
+        run: nix build -L .#fmt
 
   # Build frontend components - needed by lint and test jobs
   build-components:
@@ -171,6 +185,115 @@ jobs:
 
       - name: Check docs for broken links
         run: ./result/bin/mbr -b docs --fail-on-broken-links
+
+  # Build and test the exact feature set Windows ships, but on Linux.
+  #
+  # Cargo feature combinations are only as tested as the combinations you build.
+  # `--no-default-features --features gui` turns off `media-metadata`, which
+  # cfg-gates whole CLI arguments — and a stale `conflicts_with_all` reference to
+  # a gated argument makes clap panic at startup on *every* invocation, not just
+  # in tests. That is a feature-resolution bug, not a platform bug, so catching it
+  # here gives fast feedback instead of waiting on a Windows runner.
+  minimal-features:
+    name: Minimal Feature Set (no media-metadata)
+    needs: [format-check, build-components]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download components
+        uses: actions/download-artifact@v8
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: nix-community
+
+      - name: Clippy lint
+        run: nix develop --command cargo clippy --all-targets --no-default-features --features gui -- -D warnings
+
+      - name: Run tests
+        run: nix develop --command cargo test --no-default-features --features gui
+
+  # Windows build + lint + test.
+  #
+  # Nix does not run on Windows, so this job is the one place in CI that uses the
+  # rustup-provided toolchain instead of `nix build`. `rust-toolchain.toml` still
+  # pins the version, so the compiler matches the Nix jobs.
+  #
+  # Windows builds without `media-metadata`. The blocker is ffmpeg-sys-next, which
+  # needs prebuilt dev libraries (headers + .lib import libs) via FFMPEG_DIR or
+  # vcpkg — note that actions like setup-ffmpeg install ffmpeg.exe only, not the
+  # dev libraries. pdfium-render would in fact build here (we use pre-generated
+  # bindings and libloading, so pdfium.dll is a runtime-only dependency), but it
+  # is gated behind the same feature. Splitting `media-metadata` into `pdf-cover`
+  # and `video-metadata` would recover PDF cover extraction on Windows.
+  #
+  # So Windows gets server, GUI (WebView2), static site generation, and search;
+  # it does not get video metadata/transcoding or PDF cover images.
+  windows:
+    name: Windows (${{ matrix.arch }})
+    needs: [format-check, build-components]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x86_64
+          - os: windows-11-arm
+            arch: aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Components are built once on Linux via Nix and reused here — Windows has
+      # no Nix, and these files are `include_bytes!`'d so they must exist before
+      # cargo runs.
+      - name: Download components
+        uses: actions/download-artifact@v8
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Reads channel and components from rust-toolchain.toml.
+          cache-workspaces: "."
+
+      - name: Clippy lint
+        run: cargo clippy --all-targets --no-default-features --features gui -- -D warnings
+
+      - name: Run tests
+        run: cargo test --no-default-features --features gui
+
+      - name: Build release binary
+        run: cargo build --release --no-default-features --features gui
+
+      - name: Smoke test the binary
+        run: |
+          ./target/release/mbr.exe --version
+          ./target/release/mbr.exe -b docs --output build-test --fail-on-broken-links
+
+      # Downloadable from the workflow run summary, so a Windows machine can try
+      # a build without waiting for a release.
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: mbr-windows-${{ matrix.arch }}
+          path: target/release/mbr.exe
+          if-no-files-found: error
+          retention-days: 14
 
   # Swift checks - only run on macOS
   swift-check:

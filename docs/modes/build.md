@@ -50,7 +50,7 @@ Directories get index pages listing their contents:
 - Subdirectory links
 - Breadcrumb navigation
 
-### 4. Symlink Assets
+### 4. Place Assets
 
 Static assets (images, PDFs, videos) are symlinked rather than copied:
 
@@ -58,7 +58,12 @@ Static assets (images, PDFs, videos) are symlinked rather than copied:
 build/images/ → ../images/
 ```
 
-> **Note**: Symlinks require Unix-like systems (macOS, Linux). Windows is not currently supported for static builds.
+> **Note**: Symlinking is used on macOS and Linux. On Windows, assets are
+> **copied** instead, because creating symlinks there requires Developer Mode or
+> an elevated process. Builds work the same either way, but on Windows the
+> output directory is as large as your assets rather than nearly empty. If you
+> are publishing the `build/` directory, note that symlinks must be dereferenced
+> when archiving (for example `tar -h`) whereas copies need no special handling.
 
 ### 5. Pagefind Index
 
@@ -186,9 +191,12 @@ For faster iteration during development, use server mode (`mbr -s`) instead.
 
 ## Troubleshooting
 
-### Windows Not Supported
+### Windows Output Is Larger Than Expected
 
-Static site generation uses symlinks, which require administrator privileges on Windows. Use WSL (Windows Subsystem for Linux) instead:
+On Windows, assets are copied into the output directory rather than symlinked
+(symlink creation requires Developer Mode or an elevated process). A repository
+with large images or video will therefore produce a correspondingly large
+`build/` directory. To get symlink behavior, build under WSL instead:
 
 ```bash
 # In WSL

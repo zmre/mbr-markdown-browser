@@ -61,6 +61,14 @@ cargo install --git https://github.com/zmre/mbr
 
 Pre-built binaries are available on the [GitHub Releases](https://github.com/zmre/mbr-markdown-browser/releases) page.
 
+| Platform | File | Notes |
+|----------|------|-------|
+| macOS | `mbr-macos-universal.dmg` | Universal app, Intel and Apple Silicon |
+| macOS | `mbr-macos-arm64.tar.gz`, `mbr-macos-x86_64.tar.gz` | Single-architecture app bundles |
+| macOS | `mbr-cli-macos-*.tar.gz` | Command-line binary only |
+| Linux | `mbr-linux-x86_64.tar.gz` | Command-line binary |
+| Windows | `mbr-windows-x86_64.zip` | See limitations below |
+
 ### macOS App Bundle
 
 The macOS release includes `MBR.app`, a native application bundle with:
@@ -71,7 +79,33 @@ The macOS release includes `MBR.app`, a native application bundle with:
 
 * QuickLook extension for Finder previews
 
-To install, move `MBR.app` to your Applications folder.
+The easiest install is the DMG: open it and drag `MBR.app` to the Applications
+folder. You can also extract a `.tar.gz` and move `MBR.app` yourself.
+
+These builds are ad-hoc signed but not notarized, so macOS blocks the first
+launch. Open **System Settings › Privacy & Security** and click **Open Anyway**,
+or clear the quarantine flag from a terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/MBR.app
+```
+
+Extracting the tarball with `tar` in a terminal avoids the quarantine flag
+entirely, since command-line tools do not set it.
+
+### Windows
+
+Unzip `mbr-windows-x86_64.zip` and run `mbr.exe`. GUI mode needs the Microsoft
+Edge WebView2 runtime, which ships with Windows 11 and current Windows 10.
+
+Two features are missing from Windows builds because their dependencies do not
+build on `windows-msvc` without a prebuilt ffmpeg SDK:
+
+* Video metadata and HLS transcoding
+
+* PDF cover image extraction
+
+Server mode, GUI mode, static site generation, and search all work normally.
 
 ## Verify Installation
 

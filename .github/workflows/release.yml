@@ -169,6 +169,12 @@ jobs:
         include:
           - os: macos-latest
             arch: macos-arm64
+          # Intel macOS, needed to build the x86_64 half of the universal app.
+          # `macos-13` was retired in Dec 2025; `macos-26-intel` is the current
+          # standard-tier (free for public repos) Intel image. Intel runners are
+          # scheduled to disappear after the macOS 15 image retires in Aug 2027.
+          - os: macos-26-intel
+            arch: macos-x86_64
           - os: ubuntu-latest
             arch: linux-x86_64
 
@@ -204,10 +210,107 @@ jobs:
           path: staging/*
           if-no-files-found: error
 
+  # Windows release build. Nix is unavailable on Windows, so this uses the
+  # rustup toolchain pinned by rust-toolchain.toml and packages a plain .zip.
+  # `media-metadata` is off — see the note on the Windows job in ci.yml.
+  build-windows:
+    name: Build (windows-${{ matrix.arch }})
+    needs: validate-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x86_64
+          - os: windows-11-arm
+            arch: aarch64
+
+    env:
+      VERSION: ${{ needs.validate-version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download components
+        uses: actions/download-artifact@v8
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: "."
+
+      - name: Build release binary
+        run: cargo build --release --no-default-features --features gui
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item target/release/mbr.exe staging/
+          Copy-Item README.md staging/
+          Copy-Item LICENSE staging/LICENSE.txt
+          Compress-Archive -Path staging/* -DestinationPath mbr-windows-${{ matrix.arch }}.zip -Force
+          Get-ChildItem mbr-windows-${{ matrix.arch }}.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: mbr-windows-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  # Fuse the two macOS builds into a universal MBR.app and wrap it in a DMG.
+  # Nix only builds for the host platform, so the arm64 and x86_64 bundles come
+  # from separate runners in the `build` matrix and are joined here with lipo.
+  package-dmg:
+    name: Package Universal DMG
+    needs: [validate-version, build]
+    runs-on: macos-latest
+
+    env:
+      VERSION: ${{ needs.validate-version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: release-macos-*
+
+      - name: Unpack app bundles
+        run: |
+          set -euo pipefail
+          mkdir -p apps/arm64 apps/x86_64
+          tar xzf artifacts/release-macos-arm64/mbr-macos-arm64.tar.gz -C apps/arm64
+          tar xzf artifacts/release-macos-x86_64/mbr-macos-x86_64.tar.gz -C apps/x86_64
+          ls -la apps/arm64 apps/x86_64
+
+      - name: Build universal DMG
+        run: |
+          scripts/make-universal-dmg.sh \
+            apps/arm64/MBR.app \
+            apps/x86_64/MBR.app \
+            dist/mbr-macos-universal.dmg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-universal-dmg
+          path: dist/mbr-macos-universal.dmg
+          if-no-files-found: error
+
   # Create GitHub Release with all artifacts
   release:
     name: Create Release
-    needs: [validate-version, build]
+    needs: [validate-version, build, build-windows, package-dmg]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -227,11 +330,14 @@ jobs:
           mkdir -p release
 
           # Copy all artifacts
-          find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          find artifacts \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' \) \
+            -exec cp {} release/ \;
 
-          # Generate combined checksums
+          # Generate combined checksums. nullglob keeps an absent artifact type
+          # from leaving an unexpanded glob on the sha256sum command line.
           cd release
-          sha256sum *.tar.gz > SHA256SUMS
+          shopt -s nullglob
+          sha256sum -- *.tar.gz *.zip *.dmg > SHA256SUMS
 
           echo "Release files:"
           ls -la
@@ -245,12 +351,27 @@ jobs:
 
           | Platform | Architecture | Download |
           |----------|--------------|----------|
-          | macOS | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
+          | macOS (app) | Universal (Intel + Apple Silicon) | `mbr-macos-universal.dmg` |
+          | macOS (app) | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
+          | macOS (app) | x86_64 (Intel) | `mbr-macos-x86_64.tar.gz` |
+          | macOS (CLI) | ARM64 / x86_64 | `mbr-cli-macos-*.tar.gz` |
           | Linux | x86_64 | `mbr-linux-x86_64.tar.gz` |
+          | Windows | x86_64 | `mbr-windows-x86_64.zip` |
+          | Windows | ARM64 | `mbr-windows-aarch64.zip` |
 
           ### Installation
 
-          **macOS (Apple Silicon):**
+          **macOS (easiest):** download `mbr-macos-universal.dmg`, open it, and drag
+          `MBR.app` to the Applications folder.
+
+          These builds are ad-hoc signed but **not notarized**, so the first launch is
+          blocked by Gatekeeper. Right-click `MBR.app` → **Open** → **Open**, or run:
+
+          ```bash
+          xattr -dr com.apple.quarantine /Applications/MBR.app
+          ```
+
+          **macOS (tarball):**
           ```bash
           tar xzf mbr-macos-arm64.tar.gz
           cp -r MBR.app /Applications/
@@ -261,6 +382,12 @@ jobs:
           tar xzf mbr-linux-x86_64.tar.gz
           sudo mv mbr /usr/local/bin/
           ```
+
+          **Windows:**
+          Unzip `mbr-windows-x86_64.zip` and run `mbr.exe`. Requires the Microsoft
+          Edge WebView2 runtime for GUI mode (preinstalled on Windows 11 and current
+          Windows 10). Windows builds do not include video metadata/transcoding or
+          PDF cover extraction.
 
           ### Verification
 
