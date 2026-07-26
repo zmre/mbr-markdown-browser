@@ -119,6 +119,19 @@ impl Serialize for OtherFiles {
 
 #[derive(Clone, Serialize)]
 pub struct MarkdownInfo {
+    /// Path to the source file, **relative to the repo root**.
+    ///
+    /// Relative rather than absolute for two reasons: it is serialized into
+    /// `site.json`, where an absolute path would leak the build machine's
+    /// directory layout into every published static site; and consumers
+    /// (including `.mbr/` customizations) split it on `/` to recover the file
+    /// name. It is serialized through [`crate::url_path::serialize_as_url`] so
+    /// the JSON stays `/`-separated even on Windows.
+    ///
+    /// Join it with the repo root before doing any file I/O — see
+    /// `SearchEngine::search_file_content`. The `markdown_files` map is still
+    /// keyed by absolute path.
+    #[serde(serialize_with = "crate::url_path::serialize_as_url")]
     pub raw_path: PathBuf,
     pub url_path: String,
     pub created: u64,
@@ -233,6 +246,17 @@ impl OtherFileInfo {
 
 #[derive(Clone, Default, Serialize)]
 pub struct StaticFileMetadata {
+    /// Absolute path to the source file.
+    ///
+    /// Used internally to probe the file for kind-specific metadata (see
+    /// `populate_basic` / `populate_full`), so it must stay absolute.
+    ///
+    /// **Not serialized.** It reaches both `site.json` (static builds) and
+    /// `/.mbr/media.json` (server mode), where an absolute path would publish
+    /// the build machine's directory layout to every visitor. Nothing consumes
+    /// it on the wire — the frontend reads only `kind`, `created`, `modified`
+    /// and `file_size_bytes`.
+    #[serde(skip)]
     path: PathBuf,
     created: Option<u64>,
     modified: Option<u64>,
@@ -538,6 +562,18 @@ impl Repo {
         }
     }
 
+    /// Converts an absolute file path into the repo-relative form stored in
+    /// [`MarkdownInfo::raw_path`].
+    ///
+    /// Uses `diff_paths` rather than `strip_prefix` so a file that somehow sits
+    /// outside the root still yields a *relative* result (`../outside.md`)
+    /// instead of an absolute one — `site.json` must never contain an absolute
+    /// host path. Both inputs are absolute in practice, so the fallback is
+    /// unreachable.
+    fn relative_to_root(&self, abs_path: &Path) -> PathBuf {
+        pathdiff::diff_paths(abs_path, &self.root_dir).unwrap_or_else(|| abs_path.to_path_buf())
+    }
+
     pub fn scan_folder<P: AsRef<Path>>(&self, relative_folder_path: &P) -> Result<(), RepoError> {
         let relative_folder_path_ref = relative_folder_path.as_ref();
         let joined = self.root_dir.join(relative_folder_path_ref);
@@ -586,7 +622,7 @@ impl Repo {
                 if let Ok((_filesize, created, modified)) = file_details_from_path(path) {
                     let url = build_markdown_url_path(path, &self.root_dir, &self.index_file);
                     let mdfile = MarkdownInfo {
-                        raw_path: path.to_path_buf(),
+                        raw_path: self.relative_to_root(path),
                         url_path: url,
                         created,
                         modified,
@@ -1002,7 +1038,7 @@ impl Repo {
                         }
 
                         let info = MarkdownInfo {
-                            raw_path: abs_path.to_path_buf(),
+                            raw_path: self.relative_to_root(abs_path),
                             url_path: url,
                             created,
                             modified,
@@ -1036,7 +1072,7 @@ impl Repo {
                             None => (None, Vec::new()),
                         };
                         let info = MarkdownInfo {
-                            raw_path: abs_path.to_path_buf(),
+                            raw_path: self.relative_to_root(abs_path),
                             url_path: url,
                             created,
                             modified,

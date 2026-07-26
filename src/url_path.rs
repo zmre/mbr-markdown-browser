@@ -56,6 +56,19 @@ pub fn path_to_url(relative: &Path) -> String {
     url
 }
 
+/// Serde helper: serializes a **relative** path as a `/`-separated string.
+///
+/// Use via `#[serde(serialize_with = "crate::url_path::serialize_as_url")]` on
+/// any `Path`/`PathBuf` field that crosses into JSON consumed by the frontend,
+/// so the wire format stays platform independent even though the in-memory
+/// value uses native separators.
+pub fn serialize_as_url<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&path_to_url(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

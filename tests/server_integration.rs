@@ -1233,6 +1233,211 @@ async fn test_site_json_returns_valid_structure() {
     }
 }
 
+/// `raw_path` is a public customization API (`file.raw_path.split('/').pop()`),
+/// so it must be repo-relative and `/`-separated on every platform, and must
+/// never leak the host's absolute directory layout into a published site.
+#[tokio::test]
+async fn test_site_json_raw_path_is_relative_and_slash_separated() {
+    let repo = TestRepo::new();
+    repo.create_markdown("top.md", "# Top");
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_markdown("docs/deep/nested/page.md", "# Nested");
+    repo.create_markdown("docs/index.md", "# Docs Index");
+
+    let server = TestServer::start(&repo).await;
+    let body: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+
+    // The absolute root, in the form it would appear if it leaked.
+    let root_str = repo.path().to_string_lossy().to_string();
+
+    let raw_paths: Vec<String> = body["markdown_files"]
+        .as_array()
+        .expect("markdown_files array")
+        .iter()
+        .map(|f| {
+            f["raw_path"]
+                .as_str()
+                .expect("raw_path should be a string")
+                .to_string()
+        })
+        .collect();
+
+    assert!(!raw_paths.is_empty(), "expected markdown files");
+
+    for raw in &raw_paths {
+        assert!(
+            !raw.contains('\\'),
+            "raw_path must be `/`-separated, got {raw}"
+        );
+        assert!(
+            !raw.contains(&root_str),
+            "raw_path must not leak the absolute root {root_str}, got {raw}"
+        );
+        // Relative, and (for this fixture, whose files all live under the root)
+        // without upward traversal.
+        assert!(
+            !raw.starts_with('/') && !raw.starts_with(".."),
+            "raw_path must be repo-relative, got {raw}"
+        );
+        // Windows absolute paths start with a drive letter rather than `/`.
+        assert!(
+            !raw.contains(':'),
+            "raw_path must not contain a drive prefix, got {raw}"
+        );
+    }
+
+    let mut sorted = raw_paths.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec![
+            "docs/deep/nested/page.md".to_string(),
+            "docs/guide.md".to_string(),
+            "docs/index.md".to_string(),
+            "top.md".to_string(),
+        ],
+        "raw_path values should be exactly the repo-relative source paths"
+    );
+
+    // The documented customization idiom must still recover the file name.
+    let names: Vec<&str> = raw_paths
+        .iter()
+        .map(|p| p.rsplit('/').next().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"index.md"),
+        "index detection must still work"
+    );
+}
+
+/// Creates a repo containing one of every payload-reachable file kind, so a
+/// whole-document leak scan actually exercises the `other_files` /
+/// `StaticFileMetadata` surface rather than only `markdown_files`.
+///
+/// An earlier version of the leak test used a markdown-only fixture, which left
+/// `other_files` empty and missed an absolute path in `metadata.path`.
+fn repo_with_all_file_kinds() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_markdown("docs/index.md", "# Docs");
+    repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
+    repo.create_static_file("images/nested/deep.jpg", b"\xff\xd8\xfffake");
+    repo.create_static_file("docs/report.pdf", b"%PDF-1.4 fake");
+    repo.create_static_file("videos/clip.mp4", b"\x00\x00\x00\x18ftypmp42");
+    repo.create_static_file("audio/sound.mp3", b"ID3fake");
+    repo.create_static_file("data/notes.txt", b"some searchable text");
+    repo.create_static_file("data/blob.bin", b"\x00\x01\x02");
+    repo
+}
+
+/// Asserts no value anywhere in `json` contains the repo's absolute root.
+///
+/// Walks the parsed document rather than substring-scanning the raw text so a
+/// failure names the exact JSON path, and checks both the plain and
+/// JSON-escaped forms (a Windows path is embedded with doubled backslashes).
+fn assert_no_absolute_paths(label: &str, body: &str, root: &std::path::Path) {
+    let root_str = root.to_string_lossy().to_string();
+    let escaped = root_str.replace('\\', "\\\\");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("{label} should be valid JSON: {e}"));
+
+    fn walk(node: &serde_json::Value, path: &str, needle: &str, hits: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    walk(v, &format!("{path}.{k}"), needle, hits);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, v) in items.iter().enumerate() {
+                    walk(v, &format!("{path}[{i}]"), needle, hits);
+                }
+            }
+            serde_json::Value::String(s) if s.contains(needle) => {
+                hits.push(format!("{path} = {s}"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut hits = Vec::new();
+    walk(&parsed, "", &root_str, &mut hits);
+    assert!(
+        hits.is_empty(),
+        "{label} leaked the absolute repo root at:\n  {}",
+        hits.join("\n  ")
+    );
+
+    assert!(
+        !body.contains(&escaped),
+        "{label} leaked the escaped absolute repo root {escaped}"
+    );
+}
+
+/// No absolute host path may appear anywhere in `site.json`. Guards the whole
+/// document, including the `other_files` / `StaticFileMetadata` surface.
+#[tokio::test]
+async fn test_site_json_contains_no_absolute_host_paths() {
+    let repo = repo_with_all_file_kinds();
+    let server = TestServer::start(&repo).await;
+    let body = server.get("/.mbr/site.json").await.text().await.unwrap();
+
+    assert_no_absolute_paths("site.json", &body, repo.path());
+}
+
+/// Same guarantee for `media.json`, which is where server mode serves
+/// `other_files` (site.json strips them). This is the payload that actually
+/// carries `StaticFileMetadata`, so without this test the struct is unchecked.
+#[tokio::test]
+async fn test_media_json_contains_no_absolute_host_paths() {
+    let repo = repo_with_all_file_kinds();
+    let server = TestServer::start(&repo).await;
+    let body = server.get("/.mbr/media.json").await.text().await.unwrap();
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let other = parsed["other_files"]
+        .as_array()
+        .expect("media.json should expose other_files");
+    assert!(
+        !other.is_empty(),
+        "fixture must actually produce other_files, otherwise this test proves nothing"
+    );
+
+    assert_no_absolute_paths("media.json", &body, repo.path());
+}
+
+/// Prev/next sibling navigation is computed by matching each file's parent
+/// directory against the current page's. Both sides must use the same
+/// representation; when `raw_path` was absolute and the current page's parent
+/// was repo-relative they never matched and the links silently vanished.
+#[tokio::test]
+async fn test_sibling_navigation_links_are_populated() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/a.md", "# Alpha");
+    repo.create_markdown("docs/b.md", "# Bravo");
+    repo.create_markdown("docs/c.md", "# Charlie");
+    // A file in a different folder must not appear as a sibling.
+    repo.create_markdown("other/z.md", "# Zulu");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get("/docs/b/").await.text().await.unwrap();
+
+    assert!(
+        html.contains("prevPage") || html.contains("nextPage"),
+        "expected sibling navigation to be emitted for a page with siblings"
+    );
+    assert!(
+        html.contains("/docs/a/") && html.contains("/docs/c/"),
+        "expected both siblings to be linked, got:\n{html}"
+    );
+    assert!(
+        !html.contains("/other/z/"),
+        "a file in another folder must not be treated as a sibling"
+    );
+}
+
 #[tokio::test]
 async fn test_site_json_includes_frontmatter() {
     let repo = TestRepo::new();

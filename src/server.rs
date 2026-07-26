@@ -5526,7 +5526,7 @@ mod tests {
         frontmatter.insert("tags".to_string(), serde_json::json!(["rust", "testing"]));
 
         let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("/root/test.md"),
+            raw_path: PathBuf::from("test.md"),
             url_path: "/test/".to_string(),
             frontmatter: Some(frontmatter),
             created: 1699000000,
@@ -5547,7 +5547,7 @@ mod tests {
     #[test]
     fn test_markdown_file_to_json_without_frontmatter() {
         let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("/root/my-document.md"),
+            raw_path: PathBuf::from("my-document.md"),
             url_path: "/my-document/".to_string(),
             frontmatter: None,
             created: 1699000000,
@@ -5574,7 +5574,7 @@ mod tests {
         // No description or tags
 
         let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("/root/partial.md"),
+            raw_path: PathBuf::from("partial.md"),
             url_path: "/partial/".to_string(),
             frontmatter: Some(frontmatter),
             created: 1699000000,

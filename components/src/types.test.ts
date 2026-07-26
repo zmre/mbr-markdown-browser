@@ -31,7 +31,6 @@ function createFileInfo(
   return {
     url_path: urlPath,
     metadata: {
-      path: urlPath.replace(/^\//, ''),
       kind,
     },
   };

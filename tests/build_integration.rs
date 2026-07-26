@@ -1734,3 +1734,71 @@ async fn test_build_body_wikilink_resolves_globally() {
         stats.broken_links
     );
 }
+
+/// A published static site must not contain the absolute path of the machine
+/// that built it. This is the end-to-end guard: it scans **every** generated
+/// file, so it covers `site.json`, `media.json` and any HTML/JS output at once.
+///
+/// The fixture deliberately includes non-markdown assets — with a markdown-only
+/// repo `other_files` is empty and the whole `StaticFileMetadata` surface goes
+/// unchecked, which is how an absolute `metadata.path` shipped undetected.
+#[tokio::test]
+async fn test_built_site_contains_no_absolute_host_paths() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
+    repo.create_static_file("docs/report.pdf", b"%PDF-1.4 fake");
+    repo.create_static_file("videos/clip.mp4", b"\x00\x00\x00\x18ftypmp42");
+    repo.create_static_file("data/notes.txt", b"some text");
+
+    let output = build_site(&repo).await;
+    let root_str = repo.path().to_string_lossy().to_string();
+
+    // Sanity: the fixture must really have produced media entries, otherwise a
+    // clean scan would prove nothing.
+    let media: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join(".mbr").join("media.json")).expect("media.json"),
+    )
+    .expect("valid media.json");
+    assert!(
+        !media["other_files"]
+            .as_array()
+            .expect("other_files")
+            .is_empty(),
+        "fixture must produce other_files for this test to be meaningful"
+    );
+
+    // Walk the output tree without following symlinks (assets are symlinked
+    // back into the source repo on Unix, and we only care about generated
+    // text output, not the originals).
+    let mut offenders = Vec::new();
+    let mut stack = vec![output.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            } else if let Ok(content) = fs::read_to_string(&path)
+                && content.contains(&root_str)
+            {
+                offenders.push(path.display().to_string());
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "built site leaked the absolute repo root {root_str} in:\n  {}",
+        offenders.join("\n  ")
+    );
+}

@@ -155,6 +155,14 @@ Use in your template:
 
 Components can fetch site metadata using a shared library:
 
+> [!NOTE]
+> `file.raw_path` is the source file's path **relative to the repository root**,
+> always using `/` separators regardless of the platform mbr ran on — for
+> example `docs/guide.md`. It is never an absolute path, so a published site
+> does not expose the directory layout of the machine that built it. This means
+> `file.raw_path.split('/').pop()` reliably yields the file name (useful for
+> spotting index files), and the leading segments are safe to display.
+
 ```typescript
 import { subscribeSiteNav } from './shared.js'
 @customElement('my-custom-browse')
