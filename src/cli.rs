@@ -1,38 +1,47 @@
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use std::path::PathBuf;
 
 /// Markdown browser and previewer
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
+// The mode flags below are mutually exclusive. This is expressed as an
+// `ArgGroup` rather than per-argument `conflicts_with_all` lists because two of
+// the members are `#[cfg(feature = "media-metadata")]`. A `#[cfg]`-removed
+// argument is simply never added to the group, whereas naming it in
+// `conflicts_with_all` left a dangling reference that tripped clap's debug
+// assertions and panicked on *every* invocation of a build without that
+// feature. Keeping the exclusivity in one place also means new mode flags only
+// have to join the group instead of being added to every other flag's list.
+#[command(group(ArgGroup::new("mode").multiple(false)))]
 pub struct Args {
     /// Launch GUI window (default if no mode specified)
-    #[arg(short, long, conflicts_with_all = ["server", "stdout", "build", "extract_video_metadata", "extract_pdf_cover"])]
+    #[arg(short, long, group = "mode")]
     pub gui: bool,
 
     /// Launch HTTP server only (no GUI)
-    #[arg(short, long, conflicts_with_all = ["gui", "stdout", "build", "extract_video_metadata", "extract_pdf_cover"])]
+    #[arg(short, long, group = "mode")]
     pub server: bool,
 
     /// Render single markdown file to stdout (CLI mode)
-    #[arg(short = 'o', long, conflicts_with_all = ["gui", "server", "build", "extract_video_metadata", "extract_pdf_cover"])]
+    #[arg(short = 'o', long, group = "mode")]
     pub stdout: bool,
 
     /// Build static site (generate HTML for all markdown files)
-    #[arg(short, long, conflicts_with_all = ["gui", "server", "stdout", "extract_video_metadata", "extract_pdf_cover"])]
+    #[arg(short, long, group = "mode")]
     pub build: bool,
 
     /// Extract video metadata (cover, chapters, captions) and save as sidecar files.
     /// Takes a video file path and generates .cover.jpg, .chapters.en.vtt, and
     /// .captions.en.vtt files next to it (if the video contains this data).
     #[cfg(feature = "media-metadata")]
-    #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build", "extract_pdf_cover"])]
+    #[arg(long, group = "mode")]
     pub extract_video_metadata: bool,
 
     /// Extract cover images from PDF files and save as sidecar files.
     /// Takes a PDF file or directory path and generates {file}.cover.jpg next to each PDF.
     /// For directories, recursively processes all .pdf files.
     #[cfg(feature = "media-metadata")]
-    #[arg(long, conflicts_with_all = ["gui", "server", "stdout", "build", "extract_video_metadata"])]
+    #[arg(long, group = "mode")]
     pub extract_pdf_cover: bool,
 
     /// Output directory for static site build (default: "build")
@@ -431,6 +440,66 @@ mod tests {
     fn test_parse_mark_incomplete_conflicts_with_no_mark_incomplete() {
         let result = Args::try_parse_from(["mbr", "--mark-incomplete", "--no-mark-incomplete"]);
         assert!(result.is_err(), "Mutually exclusive flags should error");
+    }
+
+    /// Validates the entire clap command definition: dangling `conflicts_with`
+    /// / group references, duplicate ids, invalid defaults.
+    ///
+    /// This is clap's own self-check and it must hold under *every* feature
+    /// combination. Without it, a build compiled without `media-metadata`
+    /// referenced the feature-gated `extract_*` arguments in the mode flags'
+    /// conflict lists and panicked inside clap on **every** invocation — a
+    /// shipped-binary bug, not just a test failure.
+    #[test]
+    fn test_command_definition_is_valid() {
+        use clap::CommandFactory;
+        Args::command().debug_assert();
+    }
+
+    /// The mode flags are mutually exclusive. Only the ungated flags are used
+    /// here, so this holds no matter how the crate is compiled.
+    #[test]
+    fn test_mode_flags_are_mutually_exclusive() {
+        let modes = ["--gui", "--server", "--stdout", "--build"];
+        for (i, first) in modes.iter().enumerate() {
+            for second in &modes[i + 1..] {
+                let result = Args::try_parse_from(["mbr", first, second]);
+                assert!(
+                    result.is_err(),
+                    "{first} and {second} should be mutually exclusive"
+                );
+            }
+        }
+    }
+
+    /// Each mode flag must still be accepted on its own.
+    #[test]
+    fn test_each_mode_flag_parses_alone() {
+        for mode in ["--gui", "--server", "--stdout", "--build"] {
+            assert!(
+                Args::try_parse_from(["mbr", mode]).is_ok(),
+                "{mode} should parse on its own"
+            );
+        }
+    }
+
+    /// With `media-metadata` on, the extract flags join the same exclusivity
+    /// group as the other modes. This pins the behavior the `ArgGroup` replaced.
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_extract_flags_conflict_with_other_modes() {
+        for extract in ["--extract-video-metadata", "--extract-pdf-cover"] {
+            for mode in ["--gui", "--server", "--stdout", "--build"] {
+                let result = Args::try_parse_from(["mbr", extract, mode]);
+                assert!(result.is_err(), "{extract} and {mode} should conflict");
+            }
+        }
+        let result =
+            Args::try_parse_from(["mbr", "--extract-video-metadata", "--extract-pdf-cover"]);
+        assert!(
+            result.is_err(),
+            "the two extract flags should conflict with each other"
+        );
     }
 
     #[cfg(feature = "media-metadata")]

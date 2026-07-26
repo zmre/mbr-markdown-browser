@@ -203,7 +203,10 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
                     let canonical = canonical_base
                         .and_then(|base| pathdiff::diff_paths(parent, base))
                         .map(|p| {
-                            let s = p.to_string_lossy();
+                            // `path_to_url`, not `to_string_lossy`: this value is
+                            // a redirect target, so it must stay `/`-separated
+                            // rather than becoming `/a\b\c/` on Windows.
+                            let s = crate::url_path::path_to_url(&p);
                             if s.is_empty() {
                                 "/".to_string()
                             } else {
@@ -262,10 +265,15 @@ fn is_markdown_file(path: &Path, extensions: &[String]) -> bool {
         .unwrap_or(false)
 }
 
-/// Strips trailing path separator from a path.
+/// Strips trailing path separator(s) from a path.
+///
+/// Both `/` and the platform separator are trimmed. The input here is derived
+/// from a request URL, where the separator is *always* `/` regardless of
+/// platform — trimming only `std::path::MAIN_SEPARATOR` silently did nothing on
+/// Windows, leaving a trailing slash on the candidate path.
 fn strip_trailing_separator(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
-    let trimmed = s.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let trimmed = s.trim_end_matches(['/', std::path::MAIN_SEPARATOR]);
     PathBuf::from(trimmed)
 }
 
@@ -696,6 +704,9 @@ mod tests {
 
     #[test]
     fn test_strip_trailing_separator() {
+        // A forward slash must be stripped on every platform: this function's
+        // input comes from a request URL, so `/` is the separator even where
+        // `std::path::MAIN_SEPARATOR` is `\`.
         assert_eq!(
             strip_trailing_separator(Path::new("/foo/bar/")),
             PathBuf::from("/foo/bar")
@@ -707,6 +718,27 @@ mod tests {
         assert_eq!(
             strip_trailing_separator(Path::new("relative/")),
             PathBuf::from("relative")
+        );
+        // Repeated separators are all removed.
+        assert_eq!(
+            strip_trailing_separator(Path::new("/foo/bar//")),
+            PathBuf::from("/foo/bar")
+        );
+    }
+
+    /// The platform separator is stripped too, so a natively-joined path with a
+    /// trailing separator is handled the same way as a URL-derived one.
+    #[cfg(windows)]
+    #[test]
+    fn test_strip_trailing_separator_windows_backslash() {
+        assert_eq!(
+            strip_trailing_separator(Path::new(r"\foo\bar\")),
+            PathBuf::from(r"\foo\bar")
+        );
+        // Mixed separators, which Windows accepts in real request handling.
+        assert_eq!(
+            strip_trailing_separator(Path::new(r"\foo\bar/")),
+            PathBuf::from(r"\foo\bar")
         );
     }
 
@@ -985,6 +1017,17 @@ mod tests {
         // /a/b/c/index/ should redirect to /a/b/c/
         let result = resolve_request_path(&fixture.config(), "a/b/c/index/");
         assert_eq!(result, ResolvedPath::Redirect("/a/b/c/".to_string()));
+
+        // A redirect target is a URL, so it must never carry a platform
+        // separator. Asserted explicitly because the equality above only fails
+        // on platforms where `\` is the separator.
+        let ResolvedPath::Redirect(target) = result else {
+            panic!("expected a redirect");
+        };
+        assert!(
+            !target.contains('\\'),
+            "redirect target must not contain a backslash, got {target}"
+        );
     }
 
     #[test]
@@ -1365,7 +1408,11 @@ mod proptests {
             prop_assert_eq!(once, twice);
         }
 
-        /// strip_trailing_separator never ends with separator (except for root)
+        /// strip_trailing_separator never ends with a separator (except for root).
+        ///
+        /// Asserts on `/` (the URL contract this function actually operates
+        /// under) *and* on the platform separator, so neither assumption can
+        /// regress independently.
         #[test]
         fn prop_strip_trailing_separator_no_trailing(
             components in proptest::collection::vec(path_component_strategy(), 1..5)
@@ -1378,6 +1425,11 @@ mod proptests {
             prop_assert!(
                 !result_str.ends_with('/'),
                 "Result {:?} should not end with /",
+                result_str
+            );
+            prop_assert!(
+                !result_str.ends_with(std::path::MAIN_SEPARATOR),
+                "Result {:?} should not end with the platform separator",
                 result_str
             );
         }

@@ -186,6 +186,44 @@ jobs:
       - name: Check docs for broken links
         run: ./result/bin/mbr -b docs --fail-on-broken-links
 
+  # Build and test the exact feature set Windows ships, but on Linux.
+  #
+  # Cargo feature combinations are only as tested as the combinations you build.
+  # `--no-default-features --features gui` turns off `media-metadata`, which
+  # cfg-gates whole CLI arguments — and a stale `conflicts_with_all` reference to
+  # a gated argument makes clap panic at startup on *every* invocation, not just
+  # in tests. That is a feature-resolution bug, not a platform bug, so catching it
+  # here gives fast feedback instead of waiting on a Windows runner.
+  minimal-features:
+    name: Minimal Feature Set (no media-metadata)
+    needs: [format-check, build-components]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download components
+        uses: actions/download-artifact@v8
+        with:
+          name: components
+          path: templates/components-js/
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: zmre
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: nix-community
+
+      - name: Clippy lint
+        run: nix develop --command cargo clippy --all-targets --no-default-features --features gui -- -D warnings
+
+      - name: Run tests
+        run: nix develop --command cargo test --no-default-features --features gui
+
   # Windows build + lint + test.
   #
   # Nix does not run on Windows, so this job is the one place in CI that uses the

@@ -2008,12 +2008,14 @@ impl Server {
             .is_some_and(|n| n == index_file)
     }
 
-    /// The repo-relative filesystem path of `path` as a string.
+    /// The repo-relative path of `path`, always `/`-separated.
+    ///
+    /// This feeds the `path` field of the file-operation responses, which is
+    /// documented as e.g. `notes/image.png`, so it must not become
+    /// `notes\image.png` on Windows.
     fn rel_path_string(path: &Path, base_dir: &Path) -> String {
-        pathdiff::diff_paths(path, base_dir)
-            .unwrap_or_else(|| path.to_path_buf())
-            .to_string_lossy()
-            .to_string()
+        let relative = pathdiff::diff_paths(path, base_dir).unwrap_or_else(|| path.to_path_buf());
+        crate::url_path::path_to_url(&relative)
     }
 
     /// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
@@ -4415,12 +4417,16 @@ impl Server {
             syllables: render_result.syllable_count,
         };
         let readability_scores = crate::readability::scores(&readability_counts);
-        // Use relative path for markdown_source so live reload can match it
+        // Use relative path for markdown_source so live reload can match it.
+        // `path_to_url` keeps it `/`-separated: the editor splits this value on
+        // `/` to build the raw/save URLs and to derive the note's folder for
+        // image uploads, so a Windows `docs\guide.md` would collapse to a single
+        // segment and drop uploads into the repo root.
         let relative_md_path =
             pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
         frontmatter.insert(
             "markdown_source".into(),
-            relative_md_path.to_string_lossy().into(),
+            crate::url_path::path_to_url(&relative_md_path).into(),
         );
         // Indicate server mode for frontend search functionality
         frontmatter.insert("server_mode".into(), "true".into());
