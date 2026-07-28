@@ -818,8 +818,28 @@ impl Builder {
 
             // Only internal links produce backlinks on their target.
             for link in outbound_links.iter().filter(|link| link.internal) {
+                // `link.to` is the *raw* markdown destination — the renderer
+                // records it before rewriting the href — so an ordinary
+                // `[beta](beta.md)` arrives as `beta.md` and resolves to
+                // `/beta.md/`, a URL no page has. Every extension-style link,
+                // the most common form there is, silently produced no backlink
+                // at all, while `[beta](beta/)` and `[[Beta]]` worked. Running
+                // it through the same `transform_link` the renderer applies to
+                // the href yields `../beta/`, which resolves to the real page
+                // URL. The server's inbound index does the same, so both modes
+                // now agree.
+                let transformed = crate::link_transform::transform_link(
+                    &link.to,
+                    &LinkTransformConfig {
+                        markdown_extensions: self.config.markdown_extensions.clone(),
+                        index_file: self.config.index_file.clone(),
+                        is_index_file: *is_index_file,
+                        url_depth: None,
+                        current_page_url: source_url.clone(),
+                    },
+                );
                 // Resolve the relative URL to an absolute URL based on the source page
-                let target_url = resolve_relative_url(source_url, &link.to, *is_index_file);
+                let target_url = resolve_relative_url(source_url, &transformed, *is_index_file);
 
                 let inbound_link = InboundLink {
                     from: source_url.clone(),

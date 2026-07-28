@@ -2181,6 +2181,59 @@ async fn test_rebuild_leaves_no_old_output_directory() {
     );
 }
 
+/// Every way of writing an internal link must produce a backlink.
+///
+/// `OutboundLink.to` holds the raw markdown destination, so inverting it
+/// directly turned `[beta](beta.md)` into a backlink on `/beta.md/` — a URL no
+/// page has — and the link vanished from the target's `links.json`. Only the
+/// trailing-slash and `[[wikilink]]` spellings survived, which made the bug
+/// easy to miss: the two forms this project's own docs favour both worked,
+/// while the plainest markdown link, the one every other renderer accepts,
+/// silently did not.
+#[tokio::test]
+async fn test_build_backlinks_cover_every_internal_link_style() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "alpha.md",
+        "---\ntitle: Alpha\n---\n\nExtension [b1](beta.md), slash [b2](beta/), wiki [[Beta]].\n",
+    );
+    repo.create_markdown("beta.md", "---\ntitle: Beta\n---\n\nTarget.\n");
+
+    let output = build_site(&repo).await;
+
+    let links: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join("beta").join("links.json")).expect("beta links.json"),
+    )
+    .expect("valid links.json");
+
+    let texts: Vec<&str> = links["inbound"]
+        .as_array()
+        .expect("inbound array")
+        .iter()
+        .map(|l| l["text"].as_str().expect("link text"))
+        .collect();
+
+    assert!(
+        texts.contains(&"b1"),
+        "an extension-style [text](beta.md) link must produce a backlink: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"b2"),
+        "a trailing-slash link must produce a backlink: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"Beta"),
+        "a [[wikilink]] must produce a backlink: {texts:?}"
+    );
+    for link in links["inbound"].as_array().expect("inbound array") {
+        assert_eq!(
+            link["from"].as_str(),
+            Some("/alpha/"),
+            "every backlink here comes from /alpha/"
+        );
+    }
+}
+
 /// `site.json` must not carry the media catalog: it ships in `media.json`, and
 /// duplicating it makes site.json overwhelmingly media on asset-heavy repos.
 /// Mirrors the server-mode assertion in `tests/server_integration.rs`.
