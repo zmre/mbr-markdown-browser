@@ -1,12 +1,13 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { siteNav } from './shared.js'
+import { getCanonicalPath, getSiteFolderTree, resolveUrl, siteNav } from './shared.js'
+import { scheduleIdleTask } from './dynamic-loader.js'
 import {
+  type FolderNode,
   type MarkdownFile,
   type SortField,
   DEFAULT_SORT_CONFIG,
   getFileName,
-  buildFolderTree,
   flattenToLinearSequence,
 } from './sorting.js'
 
@@ -18,6 +19,12 @@ interface SiteNav {
   other_files?: any[];
   sort?: SortField[];
 }
+
+/**
+ * Upper bound on how long the idle scheduler may defer the prev/next
+ * computation; the H/L keyboard shortcuts depend on the rendered links.
+ */
+const IDLE_TIMEOUT_MS = 500;
 
 /**
  * Previous/Next navigation component.
@@ -42,30 +49,46 @@ export class MbrNavElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
 
-    // Load site navigation data and compute prev/next
-    siteNav.then((nav: SiteNav) => {
-      if (nav?.markdown_files) {
-        // Load sort config if available
-        if (nav.sort && Array.isArray(nav.sort) && nav.sort.length > 0) {
-          this._sortConfig = nav.sort;
-        }
-        this._computeNavigation(nav.markdown_files);
+    // Prev/next lives below the fold, so keep the whole-site sort off the
+    // first-paint path. Falls back to setTimeout where requestIdleCallback is
+    // unavailable (Safari, happy-dom).
+    scheduleIdleTask(() => {
+      void this._loadNavigation();
+    }, IDLE_TIMEOUT_MS);
+  }
+
+  /**
+   * Load site navigation data and compute prev/next.
+   * Uses the memoized site-wide folder tree from shared.ts rather than
+   * rebuilding one per component.
+   */
+  private async _loadNavigation(): Promise<void> {
+    try {
+      const nav = (await siteNav) as SiteNav;
+      if (!nav?.markdown_files) {
+        return;
       }
-    }).catch(() => {
+      // Load sort config if available
+      if (nav.sort && Array.isArray(nav.sort) && nav.sort.length > 0) {
+        this._sortConfig = nav.sort;
+      }
+      this._computeNavigation(await getSiteFolderTree());
+    } catch {
       // Failed to load site.json - buttons remain disabled
-    });
+    }
   }
 
   /**
    * Compute prev/next navigation for the current page using global linear order.
    * This creates a "book-like" navigation through the entire site.
    */
-  private _computeNavigation(allFiles: MarkdownFile[]) {
-    const currentPath = window.location.pathname;
+  private _computeNavigation(tree: FolderNode) {
+    // site.json stores url_path decoded and without any deployment prefix, so
+    // compare against the canonical path, not the raw percent-encoded pathname.
+    const currentPath = getCanonicalPath();
     const normalizedCurrent = currentPath.endsWith('/') ? currentPath : currentPath + '/';
 
-    // Build folder tree and flatten to linear sequence
-    const tree = buildFolderTree(allFiles);
+    // Flatten the shared folder tree to a linear sequence
     const orderedFiles = flattenToLinearSequence(tree, this._sortConfig);
 
     // Find current file in global sequence
@@ -104,7 +127,7 @@ export class MbrNavElement extends LitElement {
         <ul>
           <li>
             ${this._prevFile ? html`
-              <a href="${this._prevFile.url_path}" class="nav-button prev" title="${this._getTitle(this._prevFile)}">
+              <a href="${resolveUrl(this._prevFile.url_path)}" class="nav-button prev" title="${this._getTitle(this._prevFile)}">
                 &lt; Previous
               </a>
             ` : html`
@@ -115,7 +138,7 @@ export class MbrNavElement extends LitElement {
         <ul>
           <li>
             ${this._nextFile ? html`
-              <a href="${this._nextFile.url_path}" class="nav-button next" title="${this._getTitle(this._nextFile)}">
+              <a href="${resolveUrl(this._nextFile.url_path)}" class="nav-button next" title="${this._getTitle(this._nextFile)}">
                 Next &gt;
               </a>
             ` : html`

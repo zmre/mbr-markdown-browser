@@ -1,5 +1,7 @@
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
+import { findOverlay, isAnyOverlayOpen } from './overlay.js'
+import type { NavTab } from './mbr-fuzzy-nav.js'
 
 /**
  * Scroll amount constants.
@@ -39,27 +41,40 @@ export function isInputTarget(e: KeyboardEvent): boolean {
  * modal is open (e.g. arrow-keying through search results).
  */
 export function isModalOpen(): boolean {
-  // Check for mbr-search modal
-  const search = document.querySelector('mbr-search');
-  if (search && (search as any)._isOpen) return true;
-
-  // Check for mbr-browse panel
-  const browse = document.querySelector('mbr-browse');
-  if (browse && (browse as any)._isOpen) return true;
-
-  // Check for mbr-browse-single drawer (in overlay mode)
-  const browseSingle = document.querySelector('mbr-browse-single');
-  if (browseSingle && (browseSingle as any)._isDrawerOpen) return true;
-
-  // Check for mbr-fuzzy-nav modal
-  const fuzzyNav = document.querySelector('mbr-fuzzy-nav');
-  if (fuzzyNav && (fuzzyNav as any)._isOpen) return true;
+  // Search modal, browse panel, sidebar drawer, fuzzy-nav modal. Each reports
+  // itself through the shared MbrOverlay contract rather than through a
+  // private field, so renaming their backing state cannot silently disable
+  // this guard (see overlay.ts).
+  if (isAnyOverlayOpen()) return true;
 
   // Check for info panel
   const infoPanel = document.getElementById('info-panel-toggle') as HTMLInputElement | null;
   if (infoPanel?.checked) return true;
 
   return false;
+}
+
+/**
+ * Open `<mbr-fuzzy-nav>` on a tab, if the element is present and upgraded.
+ * Its `open()` takes a tab argument, so it is driven through its element type
+ * rather than the narrower MbrOverlay contract.
+ */
+function openFuzzyNav(tab: NavTab): void {
+  const nav = document.querySelector('mbr-fuzzy-nav');
+  if (nav && typeof nav.open === 'function') {
+    nav.open(tab);
+  }
+}
+
+/**
+ * Open `<mbr-search>`'s media-browser popup (the `=` shortcut). Not part of the
+ * MbrOverlay contract — it is a popup nested inside the search element.
+ */
+function openMediaBrowser(): void {
+  const search = document.querySelector('mbr-search');
+  if (search && typeof search.openMediaBrowser === 'function') {
+    void search.openMediaBrowser();
+  }
 }
 
 /**
@@ -240,8 +255,10 @@ export class MbrKeysElement extends LitElement {
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
-    // Handle ? for help (works even in inputs, with shift)
-    if (e.key === '?' && !e.ctrlKey && !e.metaKey) {
+    // Handle ? for help. Skipped while typing in an input/textarea/select/
+    // contenteditable so a literal "?" can still be typed (editor, search box,
+    // rename and picker fields all live behind this document-level listener).
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !isInputTarget(e)) {
       e.preventDefault();
       this._helpOpen = !this._helpOpen;
       return;
@@ -374,20 +391,14 @@ export class MbrKeysElement extends LitElement {
       case '/': // Open search
         if (!isModalOpen()) {
           e.preventDefault();
-          const search = document.querySelector('mbr-search');
-          if (search && typeof (search as any)._openSearch === 'function') {
-            (search as any)._openSearch();
-          }
+          findOverlay('mbr-search')?.open();
         }
         break;
 
       case '=': // Open media browser
         if (!isModalOpen()) {
           e.preventDefault();
-          const searchForMedia = document.querySelector('mbr-search');
-          if (searchForMedia && typeof (searchForMedia as any)._openMediaBrowser === 'function') {
-            (searchForMedia as any)._openMediaBrowser();
-          }
+          openMediaBrowser();
         }
         break;
 
@@ -397,10 +408,7 @@ export class MbrKeysElement extends LitElement {
 
       case 'F2': // Open browse
         e.preventDefault();
-        const browse = document.querySelector('mbr-browse');
-        if (browse && typeof (browse as any).open === 'function') {
-          (browse as any).open();
-        }
+        findOverlay('mbr-browse')?.open();
         break;
 
       case 'j': // Scroll down (main page only, modals handle their own j/k)
@@ -453,30 +461,21 @@ export class MbrKeysElement extends LitElement {
       case 'f': // Open fuzzy nav - links out (lowercase f)
         if (!e.shiftKey && !isModalOpen()) {
           e.preventDefault();
-          const fuzzyNavOut = document.querySelector('mbr-fuzzy-nav');
-          if (fuzzyNavOut && typeof (fuzzyNavOut as any).open === 'function') {
-            (fuzzyNavOut as any).open('links-out');
-          }
+          openFuzzyNav('links-out');
         }
         break;
 
       case 'F': // Open fuzzy nav - links in (Shift+f)
         if (e.shiftKey && !isModalOpen()) {
           e.preventDefault();
-          const fuzzyNavIn = document.querySelector('mbr-fuzzy-nav');
-          if (fuzzyNavIn && typeof (fuzzyNavIn as any).open === 'function') {
-            (fuzzyNavIn as any).open('links-in');
-          }
+          openFuzzyNav('links-in');
         }
         break;
 
       case 'T': // Open fuzzy nav - table of contents (Shift+t)
         if (e.shiftKey && !isModalOpen()) {
           e.preventDefault();
-          const fuzzyNavToc = document.querySelector('mbr-fuzzy-nav');
-          if (fuzzyNavToc && typeof (fuzzyNavToc as any).open === 'function') {
-            (fuzzyNavToc as any).open('toc');
-          }
+          openFuzzyNav('toc');
         }
         break;
     }

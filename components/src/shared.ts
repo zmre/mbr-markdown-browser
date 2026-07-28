@@ -1,3 +1,5 @@
+import { buildFolderTree, type FolderNode, type MarkdownFile } from './sorting.js';
+
 /**
  * Tag source configuration for linking tag values.
  */
@@ -243,6 +245,32 @@ export const siteNav = fetch(siteJsonUrl)
     throw err;
   })
 
+/**
+ * Memoized folder tree derived from site.json.
+ *
+ * Building the tree is O(files) and every consumer needs the *same* tree, so it
+ * is computed once off the shared `siteNav` promise instead of once per
+ * component (mbr-nav used to rebuild the whole tree just to render two buttons).
+ * The repo's configured `index_file` is honored, so repos using `_index.md`
+ * attach their landing page to the folder node rather than the parent.
+ */
+let siteFolderTreePromise: Promise<FolderNode> | null = null;
+
+/**
+ * Get the shared folder tree for the whole site (memoized).
+ * Rejects if site.json failed to load.
+ */
+export function getSiteFolderTree(): Promise<FolderNode> {
+  if (!siteFolderTreePromise) {
+    siteFolderTreePromise = siteNav.then((data: any) => {
+      const files: MarkdownFile[] = data?.markdown_files ?? [];
+      const indexFile: string = data?.index_file || 'index.md';
+      return buildFolderTree(files, indexFile);
+    });
+  }
+  return siteFolderTreePromise;
+}
+
 // ============================================================================
 // Media Navigation (separate endpoint for media/static file metadata)
 // ============================================================================
@@ -268,9 +296,15 @@ const mediaNavListeners: Set<(state: MediaNavState) => void> = new Set();
 /**
  * Subscribe to media navigation state changes.
  * Returns an unsubscribe function.
+ *
+ * The first subscription lazily kicks off the media.json fetch; the catalog is
+ * only needed by the media browser, which lives behind the search popup.
  */
 export function subscribeMediaNav(callback: (state: MediaNavState) => void): () => void {
   mediaNavListeners.add(callback);
+  // Errors are surfaced through mediaNavState, so swallow the rejection here to
+  // avoid an unhandled promise rejection for subscribers that never await.
+  loadMediaNav().catch(() => {});
   // Immediately notify with current state
   callback(mediaNavState);
   return () => mediaNavListeners.delete(callback);
@@ -291,30 +325,44 @@ function getMediaJsonUrl(): string {
   return getBasePath() + '.mbr/media.json'; // Relative path in static mode
 }
 
+let mediaNavPromise: Promise<any> | null = null;
+
 /**
- * Promise-based access to media navigation data.
+ * Promise-based access to media navigation data (memoized, lazy).
  *
  * In server mode, fetches from the dedicated /.mbr/media.json endpoint.
  * In static mode, fetches from .mbr/media.json (generated during build).
+ *
+ * This is deliberately NOT fetched at module scope: shared.ts ships in the
+ * always-loaded main bundle, but media.json is only consumed by the media
+ * browser inside the search popup, and in server mode the endpoint blocks on
+ * media probing (PDF parsing, video metadata). The first `subscribeMediaNav`
+ * triggers it; later calls reuse the same promise.
  */
-export const mediaNav: Promise<any> = fetch(getMediaJsonUrl())
-  .then((resp) => {
-    if (!resp.ok) {
-      throw new Error(`Failed to load media data: ${resp.status}`);
-    }
-    return resp.json();
-  })
-  .then((data) => {
-    mediaNavState.isLoading = false;
-    mediaNavState.data = data;
-    mediaNavState.error = null;
-    mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
-    return data;
-  })
-  .catch((err) => {
-    mediaNavState.isLoading = false;
-    mediaNavState.data = null;
-    mediaNavState.error = err.message || 'Failed to load media data';
-    mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
-    throw err;
-  })
+export function loadMediaNav(): Promise<any> {
+  if (!mediaNavPromise) {
+    mediaNavState.isLoading = true;
+    mediaNavPromise = fetch(getMediaJsonUrl())
+      .then((resp) => {
+        if (!resp.ok) {
+          throw new Error(`Failed to load media data: ${resp.status}`);
+        }
+        return resp.json();
+      })
+      .then((data) => {
+        mediaNavState.isLoading = false;
+        mediaNavState.data = data;
+        mediaNavState.error = null;
+        mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+        return data;
+      })
+      .catch((err) => {
+        mediaNavState.isLoading = false;
+        mediaNavState.data = null;
+        mediaNavState.error = err.message || 'Failed to load media data';
+        mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+        throw err;
+      });
+  }
+  return mediaNavPromise;
+}

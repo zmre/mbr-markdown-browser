@@ -1,5 +1,17 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
+import type { LitElement } from 'lit'
 import { isInputTarget, isModalOpen } from './mbr-keys.js'
+import type { MbrKeysElement } from './mbr-keys.js'
+import { isAnyOverlayOpen, findOverlay, OVERLAY_TAGS } from './overlay.js'
+import type { MbrOverlay, OverlayTag } from './overlay.js'
+// Side-effect imports: the overlays must be REGISTERED for these tests to
+// exercise the real contract. Without them `document.createElement('mbr-search')`
+// yields a bare HTMLElement and any assertion about open/closed state is
+// vacuous (which is how the previous private-field tests passed).
+import './mbr-search.js'
+import './mbr-browse.js'
+import './mbr-browse-single.js'
+import './mbr-fuzzy-nav.js'
 
 /**
  * Tests for the shared keyboard-guard helpers. `isInputTarget` must see the
@@ -67,35 +79,113 @@ describe('isInputTarget', () => {
   })
 })
 
+/**
+ * Every overlay element, created through `document.createElement` so the tag
+ * name map supplies its concrete element type.
+ *
+ * The `MbrOverlay & LitElement` annotation is the COMPILE-TIME half of the
+ * contract test: if a component drops, renames or narrows `isOpen`/`open()`/
+ * `close()`, this array stops type-checking. (The components also declare
+ * `implements MbrOverlay`, so the same rename fails at the definition site.)
+ */
+const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay & LitElement }> = [
+  { tag: 'mbr-search', create: () => document.createElement('mbr-search') },
+  { tag: 'mbr-browse', create: () => document.createElement('mbr-browse') },
+  { tag: 'mbr-browse-single', create: () => document.createElement('mbr-browse-single') },
+  { tag: 'mbr-fuzzy-nav', create: () => document.createElement('mbr-fuzzy-nav') },
+]
+
 describe('isModalOpen', () => {
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    window.headings = []
+    // <mbr-fuzzy-nav>.open() kicks off a links.json fetch; keep it well-formed
+    // so the modal can render without the shared cache seeing garbage.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ inbound: [], outbound: [] }) }),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    window.__MBR_CONFIG__ = undefined
+  })
+
   it('returns false with no modal elements present', () => {
     expect(isModalOpen()).toBe(false)
   })
 
-  it('detects an open mbr-search modal via its _isOpen state', () => {
-    const search = document.body.appendChild(document.createElement('mbr-search'))
-    ;(search as any)._isOpen = false
+  it('covers every registered overlay tag', () => {
+    expect(OVERLAY_CASES.map((c) => c.tag)).toEqual([...OVERLAY_TAGS])
+  })
+
+  it('returns false when all four overlays are present but closed', async () => {
+    for (const { create } of OVERLAY_CASES) {
+      const el = document.body.appendChild(create())
+      await el.updateComplete
+    }
     expect(isModalOpen()).toBe(false)
-    ;(search as any)._isOpen = true
+    expect(isAnyOverlayOpen()).toBe(false)
+  })
+
+  // Drives each overlay through its PUBLIC contract instead of poking the
+  // private backing field (`_isOpen` / `_isDrawerOpen`) the way this suite used
+  // to: those assertions passed against un-upgraded elements and would not have
+  // noticed a rename on the component.
+  for (const { tag, create } of OVERLAY_CASES) {
+    it(`detects an open <${tag}> through its public open()/close()`, async () => {
+      const overlay = document.body.appendChild(create())
+      await overlay.updateComplete
+
+      expect(overlay.isOpen).toBe(false)
+      expect(isModalOpen()).toBe(false)
+
+      overlay.open()
+      expect(overlay.isOpen).toBe(true)
+      expect(isModalOpen()).toBe(true)
+
+      overlay.close()
+      expect(overlay.isOpen).toBe(false)
+      expect(isModalOpen()).toBe(false)
+    })
+  }
+
+  it('reads the public isOpen contract rather than a specific private field', () => {
+    // Stand-in for a component whose backing state was renamed: the private
+    // fields the old implementation read (`_isOpen`, `_isDrawerOpen`) say
+    // "closed", but the contract says open. The old private-field lookup
+    // reported false here and let bare-letter shortcuts hijack the keyboard.
+    const overlay = document.body.appendChild(document.createElement('mbr-browse-single'))
+    Object.defineProperty(overlay, 'isOpen', { get: () => true, configurable: true })
+
+    expect((overlay as unknown as { _isDrawerOpen: boolean })._isDrawerOpen).toBe(false)
     expect(isModalOpen()).toBe(true)
   })
 
-  it('detects an open mbr-browse panel', () => {
-    const browse = document.body.appendChild(document.createElement('mbr-browse'))
-    ;(browse as any)._isOpen = true
-    expect(isModalOpen()).toBe(true)
+  it('treats a present-but-not-upgraded overlay element as closed', () => {
+    // An element can sit in the DOM before its definition runs (lazy chunk, a
+    // bundle that failed to load), exposing neither `isOpen` nor `open()`.
+    // Shadow both to model that: it must count as closed and must not be
+    // driven, rather than throwing or falling back to the private field.
+    const stale = document.body.appendChild(document.createElement('mbr-search'))
+    Object.defineProperty(stale, 'isOpen', { value: undefined, configurable: true })
+    Object.defineProperty(stale, 'open', { value: undefined, configurable: true })
+    ;(stale as unknown as { _isOpen: boolean })._isOpen = true
+
+    expect(isAnyOverlayOpen()).toBe(false)
+    expect(isModalOpen()).toBe(false)
+    expect(findOverlay('mbr-search')).toBeNull()
   })
 
-  it('detects an open mbr-browse-single drawer', () => {
-    const single = document.body.appendChild(document.createElement('mbr-browse-single'))
-    ;(single as any)._isDrawerOpen = true
-    expect(isModalOpen()).toBe(true)
-  })
+  it('finds an upgraded overlay through findOverlay', async () => {
+    const search = document.body.appendChild(document.createElement('mbr-search'))
+    await search.updateComplete
 
-  it('detects an open mbr-fuzzy-nav modal', () => {
-    const fuzzy = document.body.appendChild(document.createElement('mbr-fuzzy-nav'))
-    ;(fuzzy as any)._isOpen = true
-    expect(isModalOpen()).toBe(true)
+    const found = findOverlay('mbr-search')
+    expect(found).toBe(search)
+    found?.open()
+    expect(search.isOpen).toBe(true)
   })
 
   it('detects an open info panel via its toggle checkbox', () => {
@@ -105,5 +195,174 @@ describe('isModalOpen', () => {
     expect(isModalOpen()).toBe(false)
     checkbox.checked = true
     expect(isModalOpen()).toBe(true)
+  })
+})
+
+/**
+ * The global handler opens overlays through the same public contract, so a
+ * component that renames its internals breaks the build instead of quietly
+ * making a shortcut do nothing.
+ */
+describe('MbrKeysElement overlay shortcuts', () => {
+  let keys: MbrKeysElement
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    window.headings = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ inbound: [], outbound: [] }) }),
+    )
+    keys = document.body.appendChild(document.createElement('mbr-keys'))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  /** Dispatch a bare-key keydown from document.body and let Lit settle. */
+  async function press(key: string, init: KeyboardEventInit = {}): Promise<KeyboardEvent> {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true, ...init })
+    document.body.dispatchEvent(event)
+    await keys.updateComplete
+    return event
+  }
+
+  it('opens <mbr-search> on /', async () => {
+    const search = document.body.appendChild(document.createElement('mbr-search'))
+    const event = await press('/')
+    expect(search.isOpen).toBe(true)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('opens the media browser on = via the public method', async () => {
+    const search = document.body.appendChild(document.createElement('mbr-search'))
+    // Spying is only possible because the entry point is public; it also keeps
+    // the lazily imported <mbr-media-browser> chunk out of the test.
+    const spy = vi.spyOn(search, 'openMediaBrowser').mockResolvedValue(undefined)
+    await press('=')
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens <mbr-browse> on F2', async () => {
+    // <mbr-browse> lives in the header (_nav.html) and <mbr-keys> in the footer,
+    // so mbr-browse registers its own document listener first and its F2
+    // `toggle()` runs before mbr-keys' `open()`. Re-connect mbr-keys to
+    // reproduce that ordering; with it reversed the two handlers cancel out.
+    keys.remove()
+    const browse = document.body.appendChild(document.createElement('mbr-browse'))
+    document.body.appendChild(keys)
+
+    await press('F2')
+    expect(browse.isOpen).toBe(true)
+  })
+
+  it('opens <mbr-fuzzy-nav> on f, F and T', async () => {
+    for (const [key, init] of [['f', {}], ['F', { shiftKey: true }], ['T', { shiftKey: true }]] as const) {
+      const nav = document.body.appendChild(document.createElement('mbr-fuzzy-nav'))
+      await press(key, init)
+      expect(nav.isOpen).toBe(true)
+      nav.remove()
+    }
+  })
+
+  it('does not open a second overlay while one is already open', async () => {
+    const search = document.body.appendChild(document.createElement('mbr-search'))
+    const nav = document.body.appendChild(document.createElement('mbr-fuzzy-nav'))
+    search.open()
+
+    const event = await press('f')
+    expect(nav.isOpen).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('does not throw when the overlay element is absent', async () => {
+    await expect(press('/')).resolves.toBeDefined()
+    await expect(press('F2')).resolves.toBeDefined()
+    await expect(press('f')).resolves.toBeDefined()
+  })
+})
+
+describe('MbrKeysElement help overlay', () => {
+  let element: MbrKeysElement
+
+  beforeEach(() => {
+    element = document.createElement('mbr-keys') as MbrKeysElement
+    document.body.appendChild(element)
+  })
+
+  /** True when the help modal is currently rendered. */
+  function helpIsOpen(): boolean {
+    return element.shadowRoot?.querySelector('.help-backdrop') != null
+  }
+
+  /**
+   * Dispatch a composed, bubbling keydown from `origin` so it reaches the
+   * document-level listener, then let Lit re-render. Returns the event so
+   * callers can assert on `defaultPrevented`.
+   */
+  async function press(key: string, origin: EventTarget): Promise<KeyboardEvent> {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true })
+    origin.dispatchEvent(event)
+    await element.updateComplete
+    return event
+  }
+
+  it('opens help when ? is typed outside an input', async () => {
+    const event = await press('?', document.body)
+    expect(helpIsOpen()).toBe(true)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('toggles help closed when ? is pressed again outside an input', async () => {
+    await press('?', document.body)
+    expect(helpIsOpen()).toBe(true)
+    await press('?', document.body)
+    expect(helpIsOpen()).toBe(false)
+  })
+
+  it('lets ? through in an input without opening help', async () => {
+    const input = document.body.appendChild(document.createElement('input'))
+    const event = await press('?', input)
+    expect(helpIsOpen()).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('lets ? through in a textarea without opening help', async () => {
+    const textarea = document.body.appendChild(document.createElement('textarea'))
+    const event = await press('?', textarea)
+    expect(helpIsOpen()).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('lets ? through in a contenteditable without opening help', async () => {
+    const editable = document.body.appendChild(document.createElement('div'))
+    editable.setAttribute('contenteditable', 'true')
+    const event = await press('?', editable)
+    expect(helpIsOpen()).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('lets ? through in an input inside a shadow root (the retargeting case)', async () => {
+    // At the document level the event is retargeted to the shadow HOST, so the
+    // guard has to consult composedPath, not e.target.
+    const host = document.body.appendChild(document.createElement('div'))
+    const shadow = host.attachShadow({ mode: 'open' })
+    const input = shadow.appendChild(document.createElement('input'))
+
+    const event = await press('?', input)
+    expect(helpIsOpen()).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('still closes help with Escape pressed from inside an input', async () => {
+    await press('?', document.body)
+    expect(helpIsOpen()).toBe(true)
+
+    const input = document.body.appendChild(document.createElement('input'))
+    const event = await press('Escape', input)
+    expect(helpIsOpen()).toBe(false)
+    expect(event.defaultPrevented).toBe(true)
   })
 })

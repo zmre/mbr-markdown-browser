@@ -1,4 +1,40 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+/**
+ * site.json arrival is driven manually in this file so the late-resolution
+ * case can be tested: the real `subscribeSiteNav` fires once, at module import
+ * time, and cannot be replayed. Everything else in `shared.js` is the real
+ * implementation, so exported function identities still match.
+ */
+type SiteNavTestState = { isLoading: boolean; data: unknown; error: string | null }
+
+const { siteNavListeners, siteNavStateRef, emitSiteNav } = vi.hoisted(() => {
+  const listeners = new Set<(state: SiteNavTestState) => void>()
+  const stateRef = {
+    current: { isLoading: true, data: null, error: null } as SiteNavTestState,
+  }
+  return {
+    siteNavListeners: listeners,
+    siteNavStateRef: stateRef,
+    emitSiteNav: (data: unknown) => {
+      stateRef.current = { isLoading: false, data, error: null }
+      listeners.forEach((cb) => cb(stateRef.current))
+    },
+  }
+})
+
+vi.mock('./shared.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./shared.js')>()
+  return {
+    ...actual,
+    subscribeSiteNav: (callback: (state: SiteNavTestState) => void) => {
+      siteNavListeners.add(callback)
+      callback(siteNavStateRef.current)
+      return () => siteNavListeners.delete(callback)
+    },
+  }
+})
+
 import './mbr-info.js'
 import { setGraphChunkImporter } from './mbr-info.js'
 import { fetchPageLinks } from './graph/links-cache.js'
@@ -203,5 +239,121 @@ describe('MbrInfoElement graph section', () => {
     } finally {
       setGraphChunkImporter(() => Promise.reject(new Error('unset test importer')))
     }
+  })
+})
+
+describe('MbrInfoElement late site.json arrival', () => {
+  let element: HTMLElement
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    window.frontmatter = { title: 'Test Note' }
+    // site.json still in flight when the element connects.
+    siteNavStateRef.current = { isLoading: true, data: null, error: null }
+    element = document.createElement('mbr-info')
+    document.body.appendChild(element)
+  })
+
+  afterEach(() => {
+    element.remove()
+    siteNavStateRef.current = { isLoading: true, data: null, error: null }
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  it('rebuilds the graph lookups when site.json resolves after the panel opened', async () => {
+    const el = element as any
+    el._isOpen = true
+    el._links = { inbound: [], outbound: [] }
+    el._graphReady = true
+    el.requestUpdate()
+    await el.updateComplete
+
+    const graph = () => el.shadowRoot.querySelector('mbr-mini-graph') as any
+    const before = graph().isKnownNote
+    // No site.json yet: every neighbor is rejected, so the BFS yields nothing.
+    expect(before('/notes/one/')).toBe(false)
+
+    emitSiteNav({
+      markdown_files: [
+        { url_path: '/notes/one/', frontmatter: { title: 'One', description: 'First note' } },
+      ],
+    })
+    await el.updateComplete
+
+    // A NEW function identity is what makes <mbr-mini-graph> restart its BFS
+    // (willUpdate keys on `changed.has('isKnownNote')`); reusing the old
+    // closure left the graph permanently empty until a close/reopen.
+    const after = graph().isKnownNote
+    expect(after).not.toBe(before)
+    expect(after('/notes/one/')).toBe(true)
+
+    const getMeta = graph().getMeta
+    expect(getMeta('/notes/one/')).toEqual({ title: 'One', description: 'First note' })
+  })
+
+  it('re-renders the panel when site.json resolves while it is open', async () => {
+    const el = element as any
+    el._isOpen = true
+    el._links = { inbound: [], outbound: [] }
+    el._graphReady = true
+    el.requestUpdate()
+    await el.updateComplete
+
+    const rendersBefore = el.shadowRoot.querySelector('mbr-mini-graph').getMeta
+    emitSiteNav({ markdown_files: [{ url_path: '/notes/two/', frontmatter: {} }] })
+    // The reactive `_noteMeta` must schedule an update; without it the child
+    // keeps the stale bindings forever.
+    await el.updateComplete
+    expect(el.shadowRoot.querySelector('mbr-mini-graph').getMeta).not.toBe(rendersBefore)
+  })
+})
+
+describe('MbrInfoElement link sanitization', () => {
+  let element: HTMLElement
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    window.frontmatter = {}
+    element = document.createElement('mbr-info')
+    document.body.appendChild(element)
+  })
+
+  afterEach(() => {
+    element.remove()
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  async function openWithOutbound(outbound: unknown[]): Promise<ShadowRoot> {
+    const el = element as any
+    el._isOpen = true
+    el._links = { inbound: [], outbound }
+    el.requestUpdate()
+    await el.updateComplete
+    return el.shadowRoot as ShadowRoot
+  }
+
+  it('neutralizes script-capable external destinations', async () => {
+    const root = await openWithOutbound([
+      { to: 'javascript:alert(1)', text: 'evil', internal: false },
+      { to: 'DATA:text/html,<script>alert(1)</script>', text: 'evil data', internal: false },
+      { to: 'https://example.com/ok', text: 'fine', internal: false },
+    ])
+
+    const hrefs = Array.from(root.querySelectorAll('a.link-url.external')).map((a) =>
+      a.getAttribute('href')
+    )
+    expect(hrefs).toEqual(['#', '#', 'https://example.com/ok'])
+  })
+
+  it('neutralizes script-capable internal destinations, anchor included', async () => {
+    const root = await openWithOutbound([
+      { to: 'java\tscript:alert(1)', text: 'evil', internal: true, anchor: '#x' },
+      { to: '/docs/guide/', text: 'fine', internal: true, anchor: '#intro' },
+    ])
+
+    const hrefs = Array.from(root.querySelectorAll('a.link-url:not(.external)')).map((a) =>
+      a.getAttribute('href')
+    )
+    expect(hrefs).toEqual(['#', '/docs/guide/#intro'])
   })
 })

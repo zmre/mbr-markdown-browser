@@ -1,4 +1,4 @@
-import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
+import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { subscribeMediaNav, isNewTabModifier, openInNewTab } from './shared.js';
 import {
@@ -97,9 +97,43 @@ export class MbrMediaBrowserElement extends LitElement {
 
   private _unsubscribeMediaNav: (() => void) | null = null;
 
+  /**
+   * Memoized filtered + sorted view of `_allMediaFiles`.
+   *
+   * Recomputed in `willUpdate` only when an input to the computation changes.
+   * Render reads this field instead of re-filtering and re-sorting the whole
+   * library (previously three times per render), so high-frequency state changes
+   * that do not affect it — notably `_selectedIndex` from card `@mouseenter` and
+   * keyboard nav — cost nothing.
+   */
+  private _filteredFiles: OtherFileInfo[] = [];
+
+  /** Memoized per-type counts for the type tabs, keyed off `_allMediaFiles`. */
+  private _typeCounts: Map<MediaType, number> = new Map();
+
   // ========================================
   // Lifecycle
   // ========================================
+
+  /**
+   * Recompute the memoized derived views before rendering.
+   *
+   * Keys must stay in sync with everything `_computeFilteredFiles` reads.
+   */
+  override willUpdate(changed: PropertyValues) {
+    if (
+      changed.has('_allMediaFiles') ||
+      changed.has('_selectedType') ||
+      changed.has('_textFilter') ||
+      changed.has('_sortField') ||
+      changed.has('_sortDirection')
+    ) {
+      this._filteredFiles = this._computeFilteredFiles();
+    }
+    if (changed.has('_allMediaFiles')) {
+      this._typeCounts = this._computeTypeCounts();
+    }
+  }
 
   override connectedCallback() {
     super.connectedCallback();
@@ -241,30 +275,51 @@ export class MbrMediaBrowserElement extends LitElement {
   }
 
   /**
-   * Get filtered media files based on current filters.
+   * Filter and sort the whole library. Call only from `willUpdate`; render code
+   * must read the memoized `_getFilteredFiles()` instead.
    */
-  private _getFilteredFiles(): OtherFileInfo[] {
+  private _computeFilteredFiles(): OtherFileInfo[] {
     const filtered = this._allMediaFiles.filter(
       (file) => this._matchesType(file) && this._matchesTextFilter(file)
     );
 
-    // Apply sorting
+    // Apply sorting (`filtered` is a fresh array, so `_allMediaFiles` is untouched)
     return filtered.sort((a, b) => this._compareFiles(a, b));
+  }
+
+  /**
+   * Count files per media type in a single pass. Call only from `willUpdate`.
+   */
+  private _computeTypeCounts(): Map<MediaType, number> {
+    const counts = new Map<MediaType, number>();
+    for (const file of this._allMediaFiles) {
+      const mediaType = getMediaType(file);
+      if (mediaType) {
+        counts.set(mediaType, (counts.get(mediaType) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }
+
+  /**
+   * Get filtered media files based on current filters (memoized).
+   */
+  private _getFilteredFiles(): OtherFileInfo[] {
+    return this._filteredFiles;
   }
 
   /**
    * Get displayed files (filtered, sorted, and paginated).
    */
   private _getDisplayedFiles(): OtherFileInfo[] {
-    const filtered = this._getFilteredFiles();
-    return filtered.slice(0, this._displayLimit);
+    return this._filteredFiles.slice(0, this._displayLimit);
   }
 
   /**
-   * Get count of files for a specific media type.
+   * Get count of files for a specific media type (memoized).
    */
   private _getTypeCount(type: MediaType): number {
-    return this._allMediaFiles.filter((file) => getMediaType(file) === type).length;
+    return this._typeCounts.get(type) ?? 0;
   }
 
   // ========================================

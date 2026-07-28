@@ -1,7 +1,17 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
-import { resolveUrl, subscribeSiteNav, isNewTabModifier, openInNewTab } from './shared.js';
+import {
+  getCanonicalPath,
+  resolveUrl,
+  subscribeSiteNav,
+  isNewTabModifier,
+  openInNewTab,
+} from './shared.js';
 import { fuzzyScore } from './fuzzy.js';
+import { fetchPageLinksResult } from './graph/links-cache.js';
+import type { PageLinks } from './graph/relationship-graph.js';
+import { safeHref } from './safe-href.js';
+import type { MbrOverlay } from './overlay.js';
 
 /**
  * Markdown file from site.json.
@@ -24,33 +34,6 @@ interface Heading {
 }
 
 /**
- * Outbound link from links.json.
- */
-interface OutboundLink {
-  to: string;
-  text: string;
-  anchor?: string;
-  internal: boolean;
-}
-
-/**
- * Inbound link from links.json.
- */
-interface InboundLink {
-  from: string;
-  text: string;
-  anchor?: string;
-}
-
-/**
- * Combined page links response from links.json.
- */
-interface PageLinks {
-  inbound: InboundLink[];
-  outbound: OutboundLink[];
-}
-
-/**
  * Navigation item for display in the fuzzy nav modal.
  */
 interface NavItem {
@@ -68,7 +51,8 @@ interface NavItem {
 /**
  * Tab options for the navigation modal.
  */
-type NavTab = 'links-out' | 'links-in' | 'toc';
+/** Tab the modal can be opened on. Exported so `mbr-keys` can type its calls. */
+export type NavTab = 'links-out' | 'links-in' | 'toc';
 
 declare global {
   interface Window {
@@ -95,7 +79,7 @@ declare global {
  * - Visible items prioritized in sorting
  */
 @customElement('mbr-fuzzy-nav')
-export class MbrFuzzyNavElement extends LitElement {
+export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
   // ========================================
   // State
   // ========================================
@@ -202,28 +186,23 @@ export class MbrFuzzyNavElement extends LitElement {
     this._linksError = null;
 
     try {
-      const currentPath = window.location.pathname;
-      const normalizedPath = currentPath.endsWith('/') ? currentPath : currentPath + '/';
-      const linksUrl = normalizedPath + 'links.json';
+      // Shared module-level cache: `<mbr-info>` and the mini graph go through
+      // the same entry point, so links.json is fetched once per page. It also
+      // canonicalizes the path and handles static-build base paths.
+      const result = await fetchPageLinksResult(getCanonicalPath());
 
-      const response = await fetch(linksUrl);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          // Link tracking disabled
-          this._links = { inbound: [], outbound: [] };
-          this._linksCache = this._links;
-          return;
-        }
-        throw new Error(`Failed to load links: ${response.status}`);
+      if (result.status === 'error') {
+        // Not cached locally, so reopening the modal retries.
+        console.warn('Failed to load links:', result.message);
+        this._linksError = result.message;
+        this._links = { inbound: [], outbound: [] };
+        return;
       }
 
-      this._links = await response.json() as PageLinks;
+      // 'unavailable' means a 404: link tracking is disabled for this page,
+      // which is an empty result rather than an error.
+      this._links = result.status === 'ok' ? result.links : { inbound: [], outbound: [] };
       this._linksCache = this._links;
-    } catch (error) {
-      console.warn('Failed to load links:', error);
-      this._linksError = error instanceof Error ? error.message : 'Unknown error';
-      this._links = { inbound: [], outbound: [] };
     } finally {
       this._linksLoading = false;
     }
@@ -701,8 +680,10 @@ export class MbrFuzzyNavElement extends LitElement {
       `;
     }
 
-    // Link items use native <a> for Cmd+Click / middle-click / right-click support
-    const href = isExternal ? item.url : resolveUrl(item.url);
+    // Link items use native <a> for Cmd+Click / middle-click / right-click
+    // support. The URL is a raw markdown destination from links.json, so the
+    // scheme is filtered before it reaches the href.
+    const href = safeHref(isExternal ? item.url : resolveUrl(item.url));
     if (isExternal) {
       return html`
         <a

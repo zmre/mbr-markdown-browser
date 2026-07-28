@@ -2,6 +2,7 @@ import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state, query } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab } from './shared.js'
+import type { MbrOverlay } from './overlay.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
 
 // Dynamically import the media browser component when needed
@@ -71,7 +72,6 @@ interface Pagefind {
   init: () => Promise<void>;
   options: (opts: { baseUrl?: string;[key: string]: any }) => Promise<void>;
   search: (query: string) => Promise<PagefindSearchResponse>;
-  debouncedSearch: (query: string, options?: { debounceTimeoutMs?: number }) => Promise<PagefindSearchResponse | null>;
 }
 
 /**
@@ -88,6 +88,31 @@ type FolderScope = 'current' | 'everywhere';
  * Filetype options.
  */
 type FiletypeFilter = 'markdown' | 'all';
+
+/**
+ * POST body for the server search endpoint.
+ *
+ * Field names and values mirror the Rust `SearchQuery` struct (src/search.rs):
+ * `filetype`, `folder` and `folder_scope` are `#[serde(default)]` and the struct
+ * does NOT set `deny_unknown_fields`, so a misspelled key is silently ignored by
+ * the server and degrades to its default instead of returning an error. This
+ * type plus the exact-body assertions in mbr-search.test.ts are the only guards
+ * against that drift.
+ */
+export interface SearchRequestBody {
+  /** Query string (supports `key:value` facet syntax). */
+  q: string;
+  /** Maximum number of results to return. */
+  limit: number;
+  /** Rust `SearchScope`, serialized lowercase. */
+  scope: SearchScope;
+  /** Rust `FolderScope`, serialized lowercase. */
+  folder_scope: FolderScope;
+  /** Folder prefix to search within; only sent when `folder_scope` is `current`. */
+  folder?: string;
+  /** Only sent when non-markdown files should be included. */
+  filetype?: 'all';
+}
 
 /**
  * Get MBR configuration from the global scope.
@@ -126,7 +151,7 @@ function getCurrentFolder(): string {
  * In static mode, uses Pagefind for client-side search.
  */
 @customElement('mbr-search')
-export class MbrSearchElement extends LitElement {
+export class MbrSearchElement extends LitElement implements MbrOverlay {
   @state()
   private _query = '';
 
@@ -177,6 +202,25 @@ export class MbrSearchElement extends LitElement {
   private _pagefind: Pagefind | null = null;
   private _pagefindLoadPromise: Promise<Pagefind | null> | null = null;
 
+  /**
+   * Monotonic id for search runs. Bumped when a search starts and when the modal
+   * closes, so a slow in-flight search can detect that it has been superseded and
+   * skip its state writes. The 150 ms input debounce only prevents *starting* a
+   * search per keystroke; a search slower than that can still overlap the next
+   * one and land last, leaving results that do not match the visible query.
+   */
+  private _searchGeneration = 0;
+
+  /**
+   * Build a predicate that reports whether the search run identified by
+   * `generation`/`query` has been superseded (newer search started, query
+   * changed, or the modal closed). Callers must consult it before every state
+   * write that follows an `await`.
+   */
+  private _makeStaleCheck(generation: number, query: string): () => boolean {
+    return () => generation !== this._searchGeneration || query !== this._query;
+  }
+
   override connectedCallback() {
     super.connectedCallback();
     // Listen for keyboard shortcut (Ctrl+K or Cmd+K)
@@ -198,6 +242,33 @@ export class MbrSearchElement extends LitElement {
     if (this._abortController) {
       this._abortController.abort();
     }
+  }
+
+  // ========================================
+  // Public Methods (the MbrOverlay contract, called from mbr-keys)
+  // ========================================
+
+  /** True while the search modal is showing. */
+  public get isOpen(): boolean {
+    return this._isOpen;
+  }
+
+  /** Open the search modal and focus its input. */
+  public open(): void {
+    this._openSearch();
+  }
+
+  /** Close the search modal, clearing the query and any in-flight search. */
+  public close(): void {
+    this._closeSearch();
+  }
+
+  /**
+   * Open the media-browser popup (the `=` shortcut). Resolves once the lazily
+   * imported `<mbr-media-browser>` chunk has loaded.
+   */
+  public openMediaBrowser(): Promise<void> {
+    return this._openMediaBrowser();
   }
 
   /**
@@ -277,6 +348,18 @@ export class MbrSearchElement extends LitElement {
     this._results = [];
     this._selectedIndex = -1;
     this._error = null;
+    // Invalidate any in-flight search so its response cannot repopulate the
+    // results we just cleared (visible again the next time the modal opens).
+    this._searchGeneration++;
+    this._isLoading = false;
+    if (this._abortController) {
+      this._abortController.abort();
+      this._abortController = null;
+    }
+    if (this._debounceTimeout) {
+      clearTimeout(this._debounceTimeout);
+      this._debounceTimeout = null;
+    }
   }
 
   private async _openMediaBrowser() {
@@ -444,15 +527,20 @@ export class MbrSearchElement extends LitElement {
     if (this._abortController) {
       this._abortController.abort();
     }
-    this._abortController = new AbortController();
+    const abortController = new AbortController();
+    this._abortController = abortController;
+
+    const query = this._query;
+    const generation = ++this._searchGeneration;
+    const isStale = this._makeStaleCheck(generation, query);
 
     this._isLoading = true;
     this._error = null;
 
     try {
       // Build search request with folder context
-      const searchBody: Record<string, any> = {
-        q: this._query,
+      const searchBody: SearchRequestBody = {
+        q: query,
         limit: 20,
         scope: this._scope,
         folder_scope: this._folderScope,
@@ -474,7 +562,7 @@ export class MbrSearchElement extends LitElement {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(searchBody),
-        signal: this._abortController.signal,
+        signal: abortController.signal,
       });
 
       const data: SearchResponse = await response.json();
@@ -482,6 +570,7 @@ export class MbrSearchElement extends LitElement {
       if (!response.ok || data.error) {
         throw new Error(data.error || `Search failed: ${response.status}`);
       }
+      if (isStale()) return;
       this._results = data.results.map((r: SearchResult) => ({ ...r, snippetHtml: null }));
       this._totalMatches = data.total_matches;
       this._durationMs = data.duration_ms;
@@ -490,11 +579,16 @@ export class MbrSearchElement extends LitElement {
         // Ignore abort errors
         return;
       }
+      if (isStale()) return;
       console.error('Search error:', err);
       this._error = err instanceof Error ? err.message : 'Search failed';
       this._results = [];
     } finally {
-      this._isLoading = false;
+      // Only the newest run owns the loading indicator; a superseded run
+      // clearing it would hide "Searching..." while a search is still running.
+      if (generation === this._searchGeneration) {
+        this._isLoading = false;
+      }
     }
   }
 
@@ -504,24 +598,34 @@ export class MbrSearchElement extends LitElement {
   private async _performPagefindSearch() {
     const startTime = performance.now();
 
+    const query = this._query;
+    const generation = ++this._searchGeneration;
+    const isStale = this._makeStaleCheck(generation, query);
+
     this._isLoading = true;
     this._error = null;
 
     try {
       const pagefind = await this._loadPagefind();
+      if (isStale()) return;
       if (!pagefind) {
         this._error = 'Search index not available. Run "npx pagefind --site <build_dir> --output-subdir .mbr/pagefind" after building.';
         this._results = [];
         return;
       }
 
-      // Perform the search
-      const searchResponse = await pagefind.search(this._query);
-      this._totalMatches = searchResponse.results.length;
+      // Perform the search against the captured query, not the live one
+      const searchResponse = await pagefind.search(query);
+      if (isStale()) return;
 
       // Load data for the first 20 results
       const resultPromises = searchResponse.results.slice(0, 20).map(r => r.data());
       const resultData = await Promise.all(resultPromises);
+      // All state writes happen after the last await so a superseded run cannot
+      // leave _totalMatches describing one query and _results another.
+      if (isStale()) return;
+
+      this._totalMatches = searchResponse.results.length;
 
       // Map Pagefind results to our format
       this._results = resultData.map((data, index): SearchResult => ({
@@ -538,11 +642,14 @@ export class MbrSearchElement extends LitElement {
 
       this._durationMs = Math.round(performance.now() - startTime);
     } catch (err) {
+      if (isStale()) return;
       console.error('Pagefind search error:', err);
       this._error = err instanceof Error ? err.message : 'Search failed';
       this._results = [];
     } finally {
-      this._isLoading = false;
+      if (generation === this._searchGeneration) {
+        this._isLoading = false;
+      }
     }
   }
 

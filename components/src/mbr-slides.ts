@@ -160,6 +160,13 @@ export class MbrSlidesElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback()
     waitForDom().then(() => {
+      // The element can be removed again while this promise is pending (it
+      // always is, since waitForDom() resolves on a microtask). Registering the
+      // document-level key handler from a detached element would leave a
+      // listener that disconnectedCallback has already run past, so a removed
+      // component would keep hijacking "p" and rewriting the page.
+      if (!this.isConnected) return
+
       this._isSlideDocument = document.body.classList.contains('slides')
 
       // Auto-start presentation for speaker notes windows and multiplex receivers
@@ -249,7 +256,11 @@ export class MbrSlidesElement extends LitElement {
 
       if (!win.Reveal) {
         console.error('[mbr-slides] Reveal.js failed to load')
-        this._isLoading = false
+        // Restore the original body class, same as the catch below: without
+        // this the page is left as .slides-container with no presentation to
+        // fill it, which loses the .slides page styling for good.
+        document.body.classList.remove('slides-container')
+        document.body.classList.add('slides')
         return
       }
 
@@ -289,6 +300,20 @@ export class MbrSlidesElement extends LitElement {
     } finally {
       this._isLoading = false
     }
+  }
+
+  /**
+   * True when `section` has a `<section>` ancestor below `root`. Walking up to
+   * `root` rather than using `closest('section')` keeps the answer independent
+   * of whatever wraps `main` in a custom template.
+   */
+  private _isNestedIn(section: Element, root: Element): boolean {
+    let parent = section.parentElement
+    while (parent && parent !== root) {
+      if (parent.tagName === 'SECTION') return true
+      parent = parent.parentElement
+    }
+    return false
   }
 
   private _transformDom() {
@@ -340,8 +365,14 @@ export class MbrSlidesElement extends LitElement {
     const slidesDiv = document.createElement('div')
     slidesDiv.className = 'slides'
 
-    // Move sections into slides container
+    // Move sections into slides container. Only sections that are not already
+    // inside another section become slides: a nested section already travels
+    // with its ancestor's deep clone (Reveal.js reads it as a vertical slide),
+    // so cloning it again would repeat its content as its own horizontal
+    // slide. The renderer emits nesting whenever a `---` divider lands inside
+    // a blockquote or list item.
     main.querySelectorAll('section').forEach(section => {
+      if (this._isNestedIn(section, main)) return
       slidesDiv.appendChild(section.cloneNode(true))
     })
 

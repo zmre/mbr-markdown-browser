@@ -1,7 +1,47 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-nav.js'
 import type { MbrNavElement } from './mbr-nav.js'
 import { type MarkdownFile, type SortField, sortFiles } from './sorting.js'
+
+// shared.ts fetches site.json at module scope, so the fixture has to be in place
+// before mbr-nav.js (and transitively shared.ts) is evaluated. vi.hoisted runs
+// above the import statements.
+vi.hoisted(() => {
+  const fixtureFile = (url_path: string, raw_path: string, title: string) => ({
+    url_path,
+    raw_path,
+    created: 1000,
+    modified: 2000,
+    frontmatter: { title },
+  })
+
+  /**
+   * site.json fixture used by the whole file.
+   *
+   * `url_path` values are stored DECODED (literal spaces), exactly as Rust
+   * serializes them, and the repo is configured with `_index.md` so the folder
+   * landing page must attach to the folder node rather than the root file list.
+   *
+   * Linear order with the default title sort:
+   *   /Walsh/Alice/ → /Walsh/Patrick Joseph Walsh b.1977-10-01/ → /Walsh/ → /Walsh/Zoe/
+   */
+  const site = {
+    index_file: '_index.md',
+    markdown_files: [
+      fixtureFile('/Walsh/', 'Walsh/_index.md', 'Walsh Family'),
+      fixtureFile('/Walsh/Alice/', 'Walsh/Alice.md', 'Alice'),
+      fixtureFile(
+        '/Walsh/Patrick Joseph Walsh b.1977-10-01/',
+        'Walsh/Patrick Joseph Walsh b.1977-10-01.md',
+        'Patrick Joseph Walsh',
+      ),
+      fixtureFile('/Walsh/Zoe/', 'Walsh/Zoe.md', 'Zoe'),
+    ],
+  }
+
+  globalThis.fetch = (() =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve(site) })) as unknown as typeof fetch
+})
 
 describe('MbrNavElement', () => {
   let element: MbrNavElement
@@ -46,6 +86,99 @@ describe('MbrNavElement', () => {
       expect(prevButton?.hasAttribute('disabled')).toBe(true)
       expect(nextButton?.hasAttribute('disabled')).toBe(true)
     })
+  })
+})
+
+describe('MbrNavElement current-page resolution', () => {
+  const originalConfig = window.__MBR_CONFIG__
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    window.__MBR_CONFIG__ = originalConfig
+    document.querySelectorAll('mbr-nav').forEach(el => el.remove())
+  })
+
+  /** Drain the idle-deferred computation and the site.json promise chain. */
+  async function mountNav(): Promise<MbrNavElement> {
+    const el = document.createElement('mbr-nav') as MbrNavElement
+    document.body.appendChild(el)
+    for (let i = 0; i < 10; i++) {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await el.updateComplete
+    }
+    return el
+  }
+
+  function hrefs(el: MbrNavElement): { prev: string | null; next: string | null } {
+    return {
+      prev: el.shadowRoot?.querySelector('a.nav-button.prev')?.getAttribute('href') ?? null,
+      next: el.shadowRoot?.querySelector('a.nav-button.next')?.getAttribute('href') ?? null,
+    }
+  }
+
+  it('matches a percent-encoded pathname against the decoded url_path', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    vi.stubGlobal('location', { pathname: '/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/' })
+
+    const el = await mountNav()
+
+    // Comparing the raw pathname finds nothing and leaves both buttons disabled.
+    expect(hrefs(el).prev).toBe('/Walsh/Alice/')
+  })
+
+  it('honors the configured index_file when ordering the sequence', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    vi.stubGlobal('location', { pathname: '/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/' })
+
+    const el = await mountNav()
+
+    // '_index.md' belongs to the /Walsh/ folder, so it sorts among that
+    // folder's files ("Walsh Family") instead of leading the root list.
+    expect(hrefs(el).next).toBe('/Walsh/')
+  })
+
+  it('prefixes hrefs with the base path for a static build under a subdirectory', async () => {
+    window.__MBR_CONFIG__ = { serverMode: false, guiMode: false, basePath: '../../' }
+    vi.stubGlobal('location', {
+      pathname: '/deploy/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/',
+    })
+
+    const el = await mountNav()
+
+    expect(hrefs(el)).toEqual({ prev: '../../Walsh/Alice/', next: '../../Walsh/' })
+  })
+
+  it('leaves the buttons disabled when the page is not in site.json', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    vi.stubGlobal('location', { pathname: '/not/in/the/index/' })
+
+    const el = await mountNav()
+
+    expect(hrefs(el)).toEqual({ prev: null, next: null })
+    expect(el.shadowRoot?.querySelector('button.nav-button.prev')?.hasAttribute('disabled')).toBe(true)
+  })
+
+  it('defers the computation through requestIdleCallback when it exists', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    vi.stubGlobal('location', { pathname: '/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/' })
+    const idleCallbacks: Array<() => void> = []
+    vi.stubGlobal('requestIdleCallback', vi.fn((cb: () => void) => idleCallbacks.push(cb)))
+
+    const el = document.createElement('mbr-nav') as MbrNavElement
+    document.body.appendChild(el)
+    await el.updateComplete
+
+    // Nothing computed yet: the work is queued, not run on the paint path.
+    expect(idleCallbacks).toHaveLength(1)
+    expect(hrefs(el).prev).toBeNull()
+
+    idleCallbacks.forEach(cb => cb())
+    for (let i = 0; i < 10; i++) {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await el.updateComplete
+    }
+
+    expect(hrefs(el).prev).toBe('/Walsh/Alice/')
   })
 })
 
