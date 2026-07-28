@@ -1,4 +1,35 @@
 [build]
 jobs = 8
 
-
+# Statically link the MSVC C runtime on Windows.
+#
+# Rust's *-pc-windows-msvc targets link the CRT dynamically by default, so
+# mbr.exe imports VCRUNTIME140.dll. That file is not part of Windows; it arrives
+# with the Microsoft Visual C++ 2015-2022 Redistributable, which a clean Windows
+# 11 install does not have and which almost nothing else drags in on ARM64.
+# Without this block the shipped binary dies before main() with "The code
+# execution cannot proceed because VCRUNTIME140.dll was not found." CI never
+# caught it because the windows-latest and windows-11-arm runners have Visual
+# Studio, and therefore the redistributable, already installed.
+#
+# This is safe for our dependency set. The usual thing that blocks a static CRT
+# is LNK2038 "mismatch detected for 'RuntimeLibrary'" from a prebuilt .lib that
+# hardcodes the dynamic CRT. The candidate here is webview2-com-sys, which links
+# WebView2LoaderStatic.lib on MSVC. The complete set of linker directives
+# embedded in both the arm64 and x64 copies of that .lib is /DEFAULTLIB:ole32.lib
+# and /DEFAULTLIB:uuid.lib — no /DEFAULTLIB:MSVCRT and no /FAILIFMISMATCH on
+# RuntimeLibrary — so Microsoft compiled it CRT-agnostic (/Zl) and it links
+# against either CRT. The only other C-compiled dependency in the Windows feature
+# set (`--no-default-features --features gui`) is ring, and the cc crate reads
+# crt-static out of CARGO_CFG_TARGET_FEATURE and switches to /MT by itself.
+#
+# ci.yml and release.yml both assert that the built mbr.exe imports neither
+# VCRUNTIME140 nor MSVCP140, so deleting this block fails CI rather than quietly
+# shipping an exe that cannot start.
+#
+# Known limitation: `cargo install` from crates.io does NOT pick this up.
+# .cargo/config.toml is not part of the published crate and cargo install builds
+# in a temp directory, so the flag is never read. That is acceptable — anyone
+# building from source already has the MSVC toolchain, and with it the redist.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

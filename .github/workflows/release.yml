@@ -295,9 +295,33 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-workspaces: "."
+          # Must stay empty or cargo never reads the static-CRT rustflags from
+          # .cargo/config.toml — the action otherwise exports RUSTFLAGS=-D
+          # warnings, which outranks every config-file flag source. See the
+          # longer note on the Windows job in ci.yml.
+          rustflags: ""
 
       - name: Build release binary
         run: cargo build --release --no-default-features --features gui
+
+      # Duplicated from ci.yml on purpose: this job builds the exe that actually
+      # ships, and a release must not be able to go out with a CRT dependency
+      # just because it skipped the CI path. See .cargo/config.toml.
+      - name: Assert no VC++ redistributable dependency
+        shell: pwsh
+        run: |
+          # dumpbin is not on PATH without a Visual Studio developer shell, so
+          # scan the raw bytes instead — imported DLL names sit in .rdata as
+          # plain ASCII. api-ms-win-crt-*.dll and ucrtbase.dll are deliberately
+          # not flagged: the UCRT is an inbox Windows 10+ component.
+          $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/mbr.exe"))
+          foreach ($dll in @('VCRUNTIME140','MSVCP140')) {
+            if ($ascii -match $dll) {
+              Write-Host "::error::mbr.exe imports $dll - the static CRT rustflags in .cargo/config.toml are not taking effect"
+              exit 1
+            }
+          }
+          Write-Host "OK: no Visual C++ Redistributable dependency"
 
       - name: Package zip
         shell: pwsh
@@ -516,7 +540,8 @@ jobs:
 
           **Windows:**
           Unzip `mbr-windows-x86_64.zip` (or `mbr-windows-aarch64.zip` on ARM64)
-          and run `mbr.exe`. Requires the Microsoft
+          and run `mbr.exe`. No Visual C++ Redistributable is needed — the C
+          runtime is linked statically. Requires the Microsoft
           Edge WebView2 runtime for GUI mode (preinstalled on Windows 11 and current
           Windows 10). Windows builds do not include video metadata/transcoding or
           PDF cover extraction.
