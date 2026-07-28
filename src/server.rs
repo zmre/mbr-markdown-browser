@@ -1707,20 +1707,7 @@ impl Server {
                         relevant_events.len()
                     );
                     tokio::task::spawn_blocking(move || {
-                        repo.clear();
-                        if let Err(e) = repo.scan_all() {
-                            tracing::error!("Background rescan failed: {e}");
-                            return;
-                        }
-                        repo.build_relationship_index();
-                        repo.build_wikilink_index();
-                        if let Err(e) = repo.scan_static_folder() {
-                            tracing::error!("Background static rescan failed: {e}");
-                        }
-                        repo.populate_basic_metadata();
-                        repo.populate_media_metadata();
-                        repo.notify_media_populated();
-                        repo.ensure_text_extracted();
+                        repo.full_rescan();
                         let _ = base_dir; // keep alive for potential future use
                     })
                     .await

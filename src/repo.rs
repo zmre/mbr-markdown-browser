@@ -1005,6 +1005,33 @@ impl Repo {
         self.scan_notify.notify_waiters();
     }
 
+    /// Drop every cached view of the repository and rebuild it from disk.
+    ///
+    /// Used by the watcher when a change batch is too large to invalidate file
+    /// by file. Blocking; call from `spawn_blocking`.
+    ///
+    /// **No step may return early.** `clear()` resets `media_populated`, so any
+    /// path that skips [`Repo::notify_media_populated`] leaves every later
+    /// [`Repo::wait_for_media`] — that is, `/.mbr/media.json` — blocked for the
+    /// life of the process. A failed scan is logged and the pass continues on
+    /// whatever was indexed: `clear()` already discarded the previous contents,
+    /// so the real choice is between serving partial data and hanging.
+    pub fn full_rescan(&self) {
+        self.clear();
+        if let Err(e) = self.scan_all() {
+            tracing::error!("Rescan failed, continuing with partial repository state: {e}");
+        }
+        self.build_relationship_index();
+        self.build_wikilink_index();
+        if let Err(e) = self.scan_static_folder() {
+            tracing::error!("Static folder rescan failed: {e}");
+        }
+        self.populate_basic_metadata();
+        self.populate_media_metadata();
+        self.notify_media_populated();
+        self.ensure_text_extracted();
+    }
+
     /// Populate basic file metadata (size, timestamps) for all other files.
     /// Deferred from scan_folder() to avoid blocking scan_all() completion,
     /// so search (which only needs markdown files) can proceed sooner.
@@ -2365,6 +2392,39 @@ mod tests {
             .await
             .expect("waiter must be woken once media metadata is populated")
             .expect("waiter task panicked");
+    }
+
+    /// A rescan whose scan step fails must still release `wait_for_media()`.
+    ///
+    /// `full_rescan()` calls `clear()` first, which resets `media_populated`.
+    /// When the scan error caused an early return, `notify_media_populated()`
+    /// never ran and `/.mbr/media.json` blocked for the life of the process —
+    /// one unreadable repository root wedged the endpoint permanently.
+    #[tokio::test]
+    async fn test_full_rescan_releases_media_waiters_even_when_scan_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = Arc::new(test_repo(dir.path()));
+
+        // Populate once so the flag starts set, as it would on a live server.
+        repo.populate_media_metadata();
+        repo.notify_media_populated();
+        assert!(repo.is_media_populated());
+
+        // Delete the root out from under the repo so `scan_all()` errors. The
+        // canonical root was resolved at construction, so it still points here.
+        dir.close().expect("remove repo root");
+
+        let rescanning = Arc::clone(&repo);
+        let rescan = tokio::task::spawn_blocking(move || rescanning.full_rescan());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), rescan)
+            .await
+            .expect("rescan must not hang")
+            .expect("rescan task panicked");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), repo.wait_for_media())
+            .await
+            .expect("a failed rescan must still release media waiters");
     }
 
     // ==================== Deterministic serialization ====================
