@@ -63,11 +63,17 @@ Pre-built binaries are available on the [GitHub Releases](https://github.com/zmr
 
 | Platform | File | Notes |
 |----------|------|-------|
-| macOS | `mbr-macos-universal.dmg` | Universal app, Intel and Apple Silicon |
-| macOS | `mbr-macos-arm64.tar.gz`, `mbr-macos-x86_64.tar.gz` | Single-architecture app bundles |
-| macOS | `mbr-cli-macos-*.tar.gz` | Command-line binary only |
+| macOS | `mbr-macos-arm64.dmg` | App bundle, Apple Silicon |
+| macOS | `mbr-macos-arm64.tar.gz` | App bundle, Apple Silicon |
+| macOS | `mbr-cli-macos-arm64.tar.gz` | Command-line binary only |
 | Linux | `mbr-linux-x86_64.tar.gz` | Command-line binary |
 | Windows | `mbr-windows-x86_64.zip` | See limitations below |
+
+> **Intel Macs are not supported.** Prebuilt macOS downloads are Apple Silicon
+> (arm64) only. Intel (x86_64) macOS builds were dropped, because Apple has not
+> shipped an Intel Mac since 2020 and macOS 26 is the last release to support
+> them. Intel Macs can still build from source — both `cargo install` and
+> `nix build .#mbr` work on `x86_64-darwin`.
 
 ### macOS App Bundle
 

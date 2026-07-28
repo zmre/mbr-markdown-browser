@@ -30,16 +30,33 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
+      # Without this the flake's own extra-substituters are ignored ("untrusted
+      # flake configuration"), so nothing is pulled from the zmre cache and every
+      # dependency is built from source.
+      #
+      # `extraPullNames: nix-community` is not optional decoration. That is where
+      # the rust-overlay toolchains live; omit it and every Nix job in this
+      # workflow re-fetches and rebuilds the pinned Rust toolchain that ci.yml
+      # gets substituted for free.
+      #
+      # Keep this block byte-identical to the one in ci.yml. Release runs on a
+      # tag that CI already built and pushed, so the derivations are the same
+      # ones sitting in the cache — any drift here (different installer, missing
+      # substituter) silently turns a cache hit into a from-source rebuild of
+      # ffmpeg, pdfium, and the entire crate dependency graph.
+      #
+      # There is deliberately no magic-nix-cache step: the action is deprecated,
+      # ci.yml does not use it, and its GitHub-Actions-cache store only ever
+      # helped within a single workflow — Cachix is what carries store paths
+      # between CI and Release.
       - name: Setup Cachix
         uses: cachix/cachix-action@v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v14
+          extraPullNames: nix-community
 
       - name: Build components
         run: |
@@ -66,9 +83,30 @@ jobs:
           if-no-files-found: error
 
   # Run tests first - must pass before building release artifacts
+  #
+  # NOTE: no `needs: build-components` and no artifact download here, unlike the
+  # build-windows and publish-crate jobs below. That is deliberate, not an
+  # omission.
+  #
+  # `nix build -L .#tests` supplies the components itself: the flake's `tests`
+  # attr has a preBuild that copies `${packages.mbr-components}` into
+  # templates/components-js (flake.nix ~595-598). The downloaded artifact was
+  # overwritten by that preBuild before a single test ran.
+  #
+  # More to the point, the artifact is *invisible* to Nix. templates/components-js
+  # is gitignored (.gitignore:15) and `.#` resolves as a git-tree flake ref, so
+  # those files are stripped from the flake source before the `src` filter in
+  # flake.nix ever sees them. Verified empirically: `.#tests.drvPath` is
+  # byte-identical with the directory populated, with an extra file added, and
+  # with the directory deleted outright. Gating on build-components only
+  # serialized ~2-4 min of npm build onto the release critical path.
+  #
+  # HAZARD: this holds only for the bare `.#` ref. `path:.#` copies untracked
+  # files into the store and DOES hash differently (confirmed: different
+  # drvPath). If anyone un-gitignores templates/components-js, or switches this
+  # invocation to `path:.`, this decoupling silently becomes wrong.
   test:
     name: Test (${{ matrix.os }})
-    needs: build-components
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -79,47 +117,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Download components
-        uses: actions/download-artifact@v8
-        with:
-          name: components
-          path: templates/components-js/
-
-      - name: Verify components downloaded
-        run: |
-          echo "Downloaded components:"
-          ls -la templates/components-js/
-          if [ ! -f templates/components-js/mbr-components.min.js ]; then
-            echo "ERROR: mbr-components.min.js not found!"
-            exit 1
-          fi
-          if [ ! -f templates/components-js/mbr-editor.min.js ]; then
-            echo "ERROR: mbr-editor.min.js not found!"
-            exit 1
-          fi
-          if [ ! -f templates/components-js/mbr-graph.min.js ]; then
-            echo "ERROR: mbr-graph.min.js not found!"
-            exit 1
-          fi
-          if [ ! -f templates/components-js/mbr-genealogy.min.js ]; then
-            echo "ERROR: mbr-genealogy.min.js not found!"
-            exit 1
-          fi
-
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
+      # Same setup as build-components above — see the comment there for why the
+      # cachix step and `extraPullNames` are load-bearing rather than cosmetic.
       - name: Setup Cachix
         uses: cachix/cachix-action@v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: nix-community
 
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v14
-
+      # `nix build -L .#tests` (craneLib.cargoTest) — the same command ci.yml's
+      # Test job runs, so "the tested feature set" has exactly one definition:
+      # the flake's `cliFeatures`. That is gui + media-metadata + ffmpeg-static,
+      # plus `ffi` on Darwin only, which is precisely what the `build` job below
+      # compiles the shipped artifacts from.
+      #
+      # Do NOT use `--all-features` here. `ffi` (UniFFI bindings for the macOS
+      # QuickLook extension) is macOS-only *by design*: `uniffi` is declared
+      # solely under [target.'cfg(target_os = "macos")'] in Cargo.toml, as both a
+      # dependency and a build-dependency. On Linux `--all-features` therefore
+      # enables `ffi` while the crate is absent, and three things fail to
+      # compile: build.rs, the `uniffi-bindgen` bin (required-features = ["ffi"]),
+      # and src/lib.rs's quicklook module. On macOS `--all-features` happens to
+      # equal `cliFeatures` today, but only by coincidence — it tracks the
+      # feature *table* rather than what we ship, so any feature added to
+      # Cargo.toml silently changes what the release gate tests.
       - name: Run tests
-        run: nix develop --command cargo test --all-features
+        run: nix build -L .#tests
 
   # Validate version consistency between tag and Cargo.toml
   validate-version:
@@ -167,14 +194,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS is Apple Silicon only. An Intel (x86_64-darwin) leg used to
+          # live here, but nothing in ci.yml ever built Intel Darwin, so it
+          # substituted nothing it had not pushed itself and every release paid
+          # a 15-40 minute from-source build of ffmpeg-static and the whole
+          # dependency graph on a slow Intel runner.
+          #
+          # The flake still builds on x86_64-darwin for anyone compiling from
+          # source, but note that nixpkgs 26.05 (what flake.nix pins) is the
+          # LAST nixpkgs release to support x86_64-darwin at all — bumping past
+          # it removes that ability, at which point the Intel branches in
+          # flake.nix (`nixpkgsForSystem`, `archString`, `swiftTarget`) can go.
           - os: macos-latest
             arch: macos-arm64
-          # Intel macOS, needed to build the x86_64 half of the universal app.
-          # `macos-13` was retired in Dec 2025; `macos-26-intel` is the current
-          # standard-tier (free for public repos) Intel image. Intel runners are
-          # scheduled to disappear after the macOS 15 image retires in Aug 2027.
-          - os: macos-26-intel
-            arch: macos-x86_64
           - os: ubuntu-latest
             arch: linux-x86_64
 
@@ -186,13 +218,20 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: DeterminateSystems/determinate-nix-action@main
 
+      # Same setup as build-components above — see the comment there for why the
+      # cachix step and `extraPullNames` are load-bearing rather than cosmetic.
+      # Every arch in this matrix is also built by ci.yml, so these builds are
+      # cache hits rather than from-source rebuilds. Keep it that way: adding a
+      # target here that ci.yml does not build reintroduces the cold-cache stall
+      # that got the Intel leg deleted.
       - name: Setup Cachix
         uses: cachix/cachix-action@v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: nix-community
 
       - name: Build release artifacts
         run: |
@@ -213,9 +252,16 @@ jobs:
   # Windows release build. Nix is unavailable on Windows, so this uses the
   # rustup toolchain pinned by rust-toolchain.toml and packages a plain .zip.
   # `media-metadata` is off — see the note on the Windows job in ci.yml.
+  # `build-components` is listed explicitly even though this job does not use its
+  # output directly in a `nix build`: cargo here is rustup's, and the components
+  # are `include_bytes!`'d, so the artifact must exist before cargo runs. This
+  # job used to get that ordering transitively (build-windows -> validate-version
+  # -> test -> build-components); the `test` job no longer depends on
+  # build-components, so the edge has to be declared here or the download races
+  # the upload.
   build-windows:
     name: Build (windows-${{ matrix.arch }})
-    needs: validate-version
+    needs: [validate-version, build-components]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -264,11 +310,12 @@ jobs:
           path: mbr-windows-${{ matrix.arch }}.zip
           if-no-files-found: error
 
-  # Fuse the two macOS builds into a universal MBR.app and wrap it in a DMG.
-  # Nix only builds for the host platform, so the arm64 and x86_64 bundles come
-  # from separate runners in the `build` matrix and are joined here with lipo.
+  # Wrap the arm64 macOS app bundle in a drag-to-/Applications DMG. This ran on
+  # a separate job when it had to lipo two architectures together; it stays
+  # separate because the DMG must be built on macOS while the `build` matrix
+  # artifact it consumes is just a tarball.
   package-dmg:
-    name: Package Universal DMG
+    name: Package macOS DMG
     needs: [validate-version, build]
     runs-on: macos-latest
 
@@ -279,32 +326,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Download macOS artifacts
+      # `name:` (a single artifact) unpacks straight into `path`, whereas the
+      # `pattern:` form this used to use nests each artifact in a subdirectory
+      # named after it. Hence `artifacts/mbr-...` here and not
+      # `artifacts/release-macos-arm64/mbr-...`.
+      - name: Download macOS artifact
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: release-macos-*
+          name: release-macos-arm64
 
-      - name: Unpack app bundles
+      - name: Unpack app bundle
         run: |
           set -euo pipefail
-          mkdir -p apps/arm64 apps/x86_64
-          tar xzf artifacts/release-macos-arm64/mbr-macos-arm64.tar.gz -C apps/arm64
-          tar xzf artifacts/release-macos-x86_64/mbr-macos-x86_64.tar.gz -C apps/x86_64
-          ls -la apps/arm64 apps/x86_64
+          ls -la artifacts
+          # Fail with a readable message rather than a bare tar error if the
+          # artifact layout ever shifts under us.
+          test -f artifacts/mbr-macos-arm64.tar.gz || {
+            echo "::error::mbr-macos-arm64.tar.gz missing from the release-macos-arm64 artifact"
+            exit 1
+          }
+          mkdir -p apps/arm64
+          tar xzf artifacts/mbr-macos-arm64.tar.gz -C apps/arm64
+          test -d apps/arm64/MBR.app || {
+            echo "::error::MBR.app missing from mbr-macos-arm64.tar.gz"
+            exit 1
+          }
+          ls -la apps/arm64
 
-      - name: Build universal DMG
+      - name: Build DMG
         run: |
-          scripts/make-universal-dmg.sh \
+          scripts/make-macos-dmg.sh \
             apps/arm64/MBR.app \
-            apps/x86_64/MBR.app \
-            dist/mbr-macos-universal.dmg
+            dist/mbr-macos-arm64.dmg
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: release-macos-universal-dmg
-          path: dist/mbr-macos-universal.dmg
+          name: release-macos-arm64-dmg
+          path: dist/mbr-macos-arm64.dmg
           if-no-files-found: error
 
   # Create GitHub Release with all artifacts
@@ -351,17 +411,21 @@ jobs:
 
           | Platform | Architecture | Download |
           |----------|--------------|----------|
-          | macOS (app) | Universal (Intel + Apple Silicon) | `mbr-macos-universal.dmg` |
+          | macOS (app) | ARM64 (Apple Silicon) | `mbr-macos-arm64.dmg` |
           | macOS (app) | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
-          | macOS (app) | x86_64 (Intel) | `mbr-macos-x86_64.tar.gz` |
-          | macOS (CLI) | ARM64 / x86_64 | `mbr-cli-macos-*.tar.gz` |
+          | macOS (CLI) | ARM64 (Apple Silicon) | `mbr-cli-macos-arm64.tar.gz` |
           | Linux | x86_64 | `mbr-linux-x86_64.tar.gz` |
           | Windows | x86_64 | `mbr-windows-x86_64.zip` |
           | Windows | ARM64 | `mbr-windows-aarch64.zip` |
 
+          > **Intel Macs are no longer supported.** Starting with this release there
+          > are no x86_64 macOS builds — the DMG and tarballs are Apple Silicon only.
+          > Intel users can still build from source (`cargo install --git ...`, or
+          > `nix build .#mbr`, both of which work on x86_64-darwin).
+
           ### Installation
 
-          **macOS (easiest):** download `mbr-macos-universal.dmg`, open it, and drag
+          **macOS (easiest):** download `mbr-macos-arm64.dmg`, open it, and drag
           `MBR.app` to the Applications folder.
 
           These builds are ad-hoc signed but **not notarized**, so the first launch is
@@ -414,11 +478,14 @@ jobs:
   # --allow-dirty: templates/components-js/ is gitignored but must be present
   #   in the tree so include_bytes! picks up the built component.
   # --no-verify: the `test` and `build` jobs above have already compiled the
-  #   crate with all features; skipping the verify recompile avoids needing
-  #   ffmpeg/pdfium system libs here.
+  #   crate with the shipped feature set; skipping the verify recompile avoids
+  #   needing ffmpeg/pdfium system libs here.
+  # `build-components` is listed explicitly for the same reason as build-windows
+  # above: this job downloads the components artifact, and it used to inherit the
+  # ordering transitively via `test`, which no longer depends on build-components.
   publish-crate:
     name: Publish to crates.io
-    needs: [validate-version, test, release]
+    needs: [validate-version, test, release, build-components]
     runs-on: ubuntu-latest
 
     steps:
