@@ -17,7 +17,7 @@ use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::{MbrError, ServerError};
 use crate::link_grep::InboundLinkCache;
-use crate::link_index::{LinkCache, resolve_outbound_links};
+use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
 use crate::oembed_cache::OembedCache;
 use crate::page_context::{self, ModeFlags, PageChrome, UrlMode};
@@ -31,6 +31,7 @@ use crate::video_metadata_cache::VideoMetadataCache;
 #[cfg(feature = "media-metadata")]
 use crate::video_transcode_cache::HlsCache;
 use crate::{markdown, repo::Repo};
+use std::time::Instant;
 use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -191,6 +192,124 @@ fn invalidate_derived_caches(
     listing_caches.invalidate();
     link_cache.invalidate_all();
     inbound_link_cache.invalidate_all();
+}
+
+/// Everything [`index_page_links`] needs to reproduce the renderer's link
+/// resolution outside a request.
+///
+/// Cloned once at startup rather than read from `ServerState`, because the
+/// index is built and maintained from background tasks that outlive any
+/// individual request.
+#[derive(Clone)]
+struct LinkIndexConfig {
+    base_dir: PathBuf,
+    index_file: String,
+    markdown_extensions: Vec<String>,
+    valid_tag_sources: HashSet<String>,
+}
+
+/// Parse one markdown file and record its contribution to the backlink index.
+///
+/// Link resolution must match what a real render would produce, or the info
+/// panel would show backlinks the page does not actually contain. That is why
+/// this goes through the same `extract_outbound_links_sync` →
+/// `resolve_outbound_links` pair the request path uses, with the same
+/// `LinkTransformConfig`, rather than re-deriving URLs.
+fn index_page_links(
+    repo: &Repo,
+    index: &InboundIndex,
+    cfg: &LinkIndexConfig,
+    path: &Path,
+    url_path: &str,
+) {
+    let is_index_file = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f == cfg.index_file);
+
+    let link_transform_config = LinkTransformConfig {
+        markdown_extensions: cfg.markdown_extensions.clone(),
+        index_file: cfg.index_file.clone(),
+        is_index_file,
+        url_depth: None,
+        current_page_url: url_path.to_string(),
+    };
+
+    match markdown::extract_outbound_links_sync(
+        path.to_path_buf(),
+        &cfg.base_dir,
+        link_transform_config,
+        true, // server_mode
+        cfg.valid_tag_sources.clone(),
+        Some(repo.wikilink_index.clone()),
+    ) {
+        Ok(links) => {
+            // `OutboundLink.to` is the *raw* markdown destination
+            // (`alpha.md`, `../notes/x.md`) — the renderer records it before
+            // rewriting the href. Resolving that directly against the page URL
+            // yields `/alpha.md/`, which matches no page, so every
+            // extension-style link would silently produce no backlink.
+            // Running it through the same `transform_link` the renderer uses
+            // for the href first gives `../alpha/`, which resolves to the
+            // page's real URL.
+            let resolved: Vec<crate::link_index::OutboundLink> = links
+                .into_iter()
+                .map(|mut link| {
+                    if link.internal && !link.to.is_empty() {
+                        link.to = crate::link_transform::transform_link(
+                            &link.to,
+                            &LinkTransformConfig {
+                                markdown_extensions: cfg.markdown_extensions.clone(),
+                                index_file: cfg.index_file.clone(),
+                                is_index_file,
+                                url_depth: None,
+                                current_page_url: url_path.to_string(),
+                            },
+                        );
+                    }
+                    link
+                })
+                .collect();
+            let resolved = resolve_outbound_links(url_path, resolved, is_index_file);
+            index.set_page_links(url_path, &resolved);
+        }
+        Err(e) => {
+            // A file that cannot be parsed contributes no backlinks. Withdraw
+            // whatever it contributed before so a file that became unreadable
+            // does not leave stale backlinks behind.
+            tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
+            index.remove_page(url_path);
+        }
+    }
+}
+
+/// Build the whole backlink index from the current repository contents.
+///
+/// Blocking and rayon-parallel; call from `spawn_blocking`.
+fn populate_inbound_index(repo: &Repo, index: &InboundIndex, cfg: &LinkIndexConfig) {
+    use rayon::prelude::*;
+
+    let pages: Vec<(PathBuf, String)> = repo
+        .markdown_files
+        .pin()
+        .iter()
+        .map(|(path, info)| (path.clone(), info.url_path.clone()))
+        .collect();
+
+    let page_count = pages.len();
+    let started = Instant::now();
+
+    pages.par_iter().for_each(|(path, url_path)| {
+        index_page_links(repo, index, cfg, path, url_path);
+    });
+
+    index.mark_ready();
+    tracing::info!(
+        "Backlink index built in {:?}: {} pages parsed, {} pages have backlinks",
+        started.elapsed(),
+        page_count,
+        index.target_count(),
+    );
 }
 
 /// The three caches that hold pre-rendered *listings* of the repository: the
@@ -1006,6 +1125,10 @@ pub struct ServerState {
     pub link_cache: Arc<LinkCache>,
     /// Cache for inbound links discovered via grep
     pub inbound_link_cache: Arc<InboundLinkCache>,
+    /// Repository-wide backlink index, built once in the background after the
+    /// initial scan and maintained incrementally by the watcher. Until it
+    /// reports ready, `links.json` falls back to the per-page grep below.
+    pub inbound_index: Arc<InboundIndex>,
     /// Bounds concurrent inbound-link greps: each cache miss walks the whole
     /// repository, and the sidebar mini graph fans out many links.json
     /// requests at once, so at most two full-repo walks run at a time.
@@ -1586,6 +1709,38 @@ impl Server {
             INBOUND_LINK_CACHE_TTL_SECS,
         ));
 
+        // Repository-wide backlink index. Built once, in the background, after
+        // the initial scan (which is what makes the wikilink index — and so
+        // link resolution — trustworthy). Until it is ready, links.json falls
+        // back to the per-page grep, so startup is not blocked on it.
+        let inbound_index = Arc::new(InboundIndex::new());
+        // Serializes the initial full build against the watcher's incremental
+        // updates. Both mutate the same index, and an update that interleaves
+        // with the build can be silently undone by it.
+        let index_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let link_index_config = LinkIndexConfig {
+            base_dir: base_dir.clone(),
+            index_file: index_file.clone(),
+            markdown_extensions: markdown_extensions.clone(),
+            valid_tag_sources: crate::config::tag_sources_to_set(&tag_sources),
+        };
+        if link_tracking {
+            let repo_for_index = Arc::clone(&repo);
+            let index_for_build = Arc::clone(&inbound_index);
+            let cfg_for_build = link_index_config.clone();
+            let index_lock_for_build = Arc::clone(&index_lock);
+            tokio::spawn(async move {
+                repo_for_index.wait_for_scan().await;
+                let _guard = index_lock_for_build.lock().await;
+                let repo = Arc::clone(&repo_for_index);
+                tokio::task::spawn_blocking(move || {
+                    populate_inbound_index(&repo, &index_for_build, &cfg_for_build);
+                })
+                .await
+                .unwrap_or_else(|e| tracing::error!("Backlink index build task failed: {e}"));
+            });
+        }
+
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
         // For small batches (<=50 files): surgical per-file invalidation.
@@ -1596,6 +1751,9 @@ impl Server {
         let listing_caches_for_invalidation = listing_caches.clone();
         let link_cache_for_invalidation = Arc::clone(&link_cache);
         let inbound_link_cache_for_invalidation = Arc::clone(&inbound_link_cache);
+        let inbound_index_for_invalidation = Arc::clone(&inbound_index);
+        let link_index_config_for_invalidation = link_index_config.clone();
+        let index_lock_for_invalidation = Arc::clone(&index_lock);
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1663,6 +1821,9 @@ impl Server {
 
                 let repo = Arc::clone(&repo_for_invalidation);
                 let base_dir = base_dir_for_invalidation.clone();
+                let inbound_index = Arc::clone(&inbound_index_for_invalidation);
+                let link_index_cfg = link_index_config_for_invalidation.clone();
+                let index_lock = Arc::clone(&index_lock_for_invalidation);
 
                 if relevant_events.len() <= SURGICAL_THRESHOLD {
                     // Surgical invalidation: update individual files
@@ -1678,13 +1839,36 @@ impl Server {
                         )
                     });
 
+                    // Serialized against the initial index build; see the
+                    // `is_ready()` comment below.
+                    let _index_guard = index_lock.lock().await;
                     tokio::task::spawn_blocking(move || {
+                        let mut index_targets: Vec<(PathBuf, Option<String>, bool)> = Vec::new();
                         for event in &relevant_events {
                             let abs_path = if event.path.is_empty() {
                                 continue;
                             } else {
                                 PathBuf::from(&event.path)
                             };
+                            index_targets.push((
+                                abs_path.clone(),
+                                // Take the URL from the repository's own map
+                                // rather than recomputing it. `base_dir` is the
+                                // path as configured, while the scanner keys
+                                // everything by the *canonical* root, and on
+                                // macOS a temp dir differs (`/var` vs
+                                // `/private/var`). A recomputed URL would not
+                                // match the key the initial build inserted
+                                // under, so the edit would write a second entry
+                                // and never withdraw the stale one. Captured
+                                // before `invalidate_file` because a deletion
+                                // removes the entry it is read from.
+                                repo.markdown_files
+                                    .pin()
+                                    .get(&abs_path)
+                                    .map(|info| info.url_path.clone()),
+                                matches!(event.event, crate::watcher::ChangeEventType::Deleted),
+                            ));
                             repo.invalidate_file(&abs_path, &event.event);
                         }
                         // Rebuild tag index if any files were deleted or modified
@@ -1697,6 +1881,53 @@ impl Server {
                         repo.build_relationship_index();
                         // The global wikilink index must track the same changes.
                         repo.build_wikilink_index();
+
+                        // Re-index only the pages that changed. This runs after
+                        // build_wikilink_index() on purpose: `[[Name]]` links
+                        // resolve through that index, so re-extracting first
+                        // would record links against the pre-edit name table.
+                        //
+                        // `is_ready()` gates it because the initial build is
+                        // still filling the index otherwise. That is safe only
+                        // because the caller holds `index_lock` across this
+                        // whole task: without it, an edit arriving mid-build
+                        // would be skipped here and then overwritten by the
+                        // build's pre-edit contents, leaving links.json stale
+                        // until the next full rescan.
+                        if inbound_index.is_ready() {
+                            for (abs_path, known_url, is_delete) in &index_targets {
+                                if !link_index_cfg.markdown_extensions.iter().any(|ext| {
+                                    abs_path
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+                                }) {
+                                    continue;
+                                }
+                                let url_path = match known_url {
+                                    Some(url) => url.clone(),
+                                    // Only reachable for a file the scan never
+                                    // saw (created inside this batch, or
+                                    // deleted before it was ever indexed).
+                                    None => crate::repo::build_markdown_url_path(
+                                        abs_path,
+                                        &link_index_cfg.base_dir,
+                                        &link_index_cfg.index_file,
+                                    ),
+                                };
+                                if *is_delete {
+                                    inbound_index.remove_page(&url_path);
+                                } else {
+                                    index_page_links(
+                                        &repo,
+                                        &inbound_index,
+                                        &link_index_cfg,
+                                        abs_path,
+                                        &url_path,
+                                    );
+                                }
+                            }
+                        }
                     })
                     .await
                     .ok();
@@ -1708,6 +1939,13 @@ impl Server {
                     );
                     tokio::task::spawn_blocking(move || {
                         repo.full_rescan();
+                        // Every page may have changed, so rebuild rather than
+                        // patch. `populate_inbound_index` re-marks it ready; the
+                        // stale index stays queryable in the meantime, which is
+                        // better than falling back to a full-repo grep per page.
+                        if inbound_index.is_ready() {
+                            populate_inbound_index(&repo, &inbound_index, &link_index_cfg);
+                        }
                         let _ = base_dir; // keep alive for potential future use
                     })
                     .await
@@ -1768,6 +2006,7 @@ impl Server {
             relationship_types,
             link_cache,
             inbound_link_cache,
+            inbound_index,
             inbound_grep_semaphore,
             inbound_grep_inflight,
             tag_sources,
@@ -4304,7 +4543,12 @@ impl Server {
         // mini graph fans out many links.json requests at once, so a burst
         // must not stampede the filesystem. Mirrors the race-free video
         // metadata pattern (register interest before re-checking).
-        let inbound = if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
+        let inbound = if config.inbound_index.is_ready() {
+            // The repository-wide index is authoritative once built: it was
+            // produced by inverting every page's resolved links, the same way
+            // static builds do, so no grep and no per-page cache is involved.
+            config.inbound_index.get(&page_url_path)
+        } else if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
             cached
         } else {
             match claim_inflight(&config.inbound_grep_inflight, &page_url_path) {
@@ -7052,6 +7296,87 @@ mod tests {
             &[],
             &[],
         )
+    }
+
+    /// The backlink index must report exactly what the full-repository grep it
+    /// replaces reported.
+    ///
+    /// These are two independent implementations of the same question — the
+    /// grep matches path spellings inside each file, the index inverts the
+    /// renderer's own resolved links — and the server answered `links.json`
+    /// with the grep until this index landed. Any disagreement is a
+    /// user-visible change in the info panel and the mini graph, so it has to
+    /// be asserted rather than assumed.
+    #[test]
+    fn test_inbound_index_agrees_with_grep_backlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntitle: Alpha\n---\n\nSee [the guide](docs/guide.md) and [beta](beta.md).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("beta.md"),
+            "---\ntitle: Beta\n---\n\nBack to [alpha](alpha.md).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/guide.md"),
+            "---\ntitle: Guide\n---\n\nUp to [alpha](../alpha.md); also [beta](../beta.md).\n",
+        )
+        .unwrap();
+        // A page nobody links to: both implementations must report empty.
+        std::fs::write(
+            root.join("orphan.md"),
+            "---\ntitle: Orphan\n---\n\nAlone.\n",
+        )
+        .unwrap();
+
+        let repo = Arc::new(fixture_repo(&root));
+        repo.scan_all().unwrap();
+        repo.build_wikilink_index();
+
+        let cfg = LinkIndexConfig {
+            base_dir: root.clone(),
+            index_file: "index.md".to_string(),
+            markdown_extensions: vec!["md".to_string()],
+            valid_tag_sources: HashSet::new(),
+        };
+        let index = InboundIndex::new();
+        populate_inbound_index(&repo, &index, &cfg);
+        assert!(index.is_ready());
+
+        for page in ["/alpha/", "/beta/", "/docs/guide/", "/orphan/"] {
+            let indexed: Vec<String> = index.get(page).into_iter().map(|l| l.from).collect();
+
+            let mut grepped = crate::link_grep::find_inbound_links(
+                page,
+                &root,
+                &["md".to_string()],
+                &[],
+                &[],
+                "index.md",
+            );
+            crate::link_index::sort_inbound_links(&mut grepped);
+            let grepped: Vec<String> = grepped.into_iter().map(|l| l.from).collect();
+
+            assert_eq!(
+                indexed, grepped,
+                "backlink sources for {page} disagree: index={indexed:?} grep={grepped:?}"
+            );
+        }
+
+        // Sanity-check the fixture actually exercises the comparison, so a
+        // future edit that silently stops producing backlinks still fails.
+        assert_eq!(
+            index.get("/alpha/").len(),
+            2,
+            "alpha should be linked from beta and the guide"
+        );
+        assert!(index.get("/orphan/").is_empty());
     }
 
     /// The in-memory listing must reproduce what the per-request disk scan

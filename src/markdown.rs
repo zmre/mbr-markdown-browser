@@ -1024,6 +1024,67 @@ pub fn render_sync(
     )
 }
 
+/// Extract only the outbound links of a markdown file.
+///
+/// Runs the same sync pipeline as [`render_sync`] — BOM strip, tag-wikilink
+/// substitution, event collection, `process_all_events` (which is where link
+/// transformation and `[[wikilink]]` resolution happen) — and then stops,
+/// skipping HTML generation and frontmatter extraction. Callers that need the
+/// rendered page should use [`render_sync`]; this exists for the server's
+/// repository-wide backlink index, which parses every markdown file once and
+/// only ever looks at the collected links.
+///
+/// Links are deduplicated by target exactly as [`finalize_render`] does, so a
+/// page's link list is identical whichever entry point produced it.
+///
+/// Network oembed is not consulted (the sync pipeline never fetches anyway).
+/// That can change which *external* links are collected — a bare URL that
+/// would have become an embed stays an autolink — but never the internal ones,
+/// which are all the backlink index inverts.
+pub fn extract_outbound_links_sync(
+    file: PathBuf,
+    root_path: &Path,
+    link_transform_config: LinkTransformConfig,
+    server_mode: bool,
+    valid_tag_sources: HashSet<String>,
+    wikilink_index: Option<Arc<WikilinkIndex>>,
+) -> Result<Vec<OutboundLink>, MarkdownError> {
+    let mut raw_markdown_input =
+        fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+            path: file.clone(),
+            source: e,
+        })?;
+    strip_bom_in_place(&mut raw_markdown_input);
+
+    let markdown_input = if valid_tag_sources.is_empty() {
+        raw_markdown_input
+    } else {
+        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
+    };
+
+    let (events_with_ids, _headings, _section_attrs) = collect_events_and_headings(&markdown_input);
+
+    let prefetched_oembed = collect_local_embeds(&events_with_ids);
+
+    let (_processed_events, state) = process_all_events(
+        events_with_ids,
+        root_path,
+        link_transform_config,
+        prefetched_oembed,
+        server_mode,
+        false, // transcode_enabled: irrelevant to link collection
+        valid_tag_sources,
+        wikilink_index,
+    );
+
+    let mut seen_targets: HashSet<String> = HashSet::new();
+    Ok(state
+        .collected_links
+        .into_iter()
+        .filter(|link| seen_targets.insert(link.to.clone()))
+        .collect())
+}
+
 /// Compute no-network oembed results (Giphy, gist, bare-URL media) for all
 /// bare URLs in `events`. Pure/synchronous — safe for the build (rayon) path.
 fn collect_local_embeds(events: &[Event<'_>]) -> HashMap<String, PageInfo> {

@@ -390,9 +390,314 @@ impl LinkCache {
     }
 }
 
+/// One target page's backlinks, keyed by the source page URL.
+///
+/// A `BTreeMap` rather than a `Vec` for two reasons: withdrawing one source's
+/// contribution when that file changes is O(log n) instead of a linear scan,
+/// and iteration is already in `from` order, which is the order
+/// [`sort_inbound_links`] produces. `from` is unique within a bucket because
+/// outbound links are deduplicated by target before they get here.
+type InboundBucket =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, InboundLink>>>;
+
+/// Repository-wide backlink index for server mode.
+///
+/// The server used to answer every `links.json` request by walking the entire
+/// repository and grepping each markdown file for references to that one page
+/// (`link_grep::find_inbound_links`). That is O(repository) per *page*, and the
+/// info panel's mini graph requests many pages at once, so a large repo paid
+/// for a full walk per distinct page on every cache miss.
+///
+/// This inverts the relationship once instead: each markdown file is parsed a
+/// single time, its internal outbound links are resolved to absolute URLs, and
+/// each one is recorded as a backlink on its target. Lookups are then a hash
+/// hit. It is the same inversion `build::Builder::write_link_files` performs
+/// for static output, which also closes the long-standing server/build
+/// disagreement about which links produce backlinks — the grep matched on path
+/// spelling, while both inverted indexes use the renderer's own resolution.
+///
+/// `contributions` is what makes incremental maintenance cheap: it remembers
+/// which targets a given source page currently contributes to, so a changed
+/// file's old backlinks can be withdrawn without touching any other bucket.
+#[derive(Default)]
+pub struct InboundIndex {
+    /// target page URL -> its backlinks, keyed by source page URL.
+    inbound: ConcurrentHashMap<String, InboundBucket>,
+    /// source page URL -> the target URLs it currently contributes to.
+    contributions: ConcurrentHashMap<String, Vec<String>>,
+    /// Whether the initial full-repository pass has finished. Until it has,
+    /// the index is incomplete and callers must not treat a miss as "no
+    /// backlinks".
+    ready: std::sync::atomic::AtomicBool,
+    /// Woken when `ready` first flips. Lets callers (and tests) await the
+    /// initial build instead of polling.
+    ready_notify: tokio::sync::Notify,
+}
+
+impl InboundIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True once the initial full-repository pass has completed.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    /// Mark the index queryable. Called after the initial pass.
+    pub fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.ready_notify.notify_waiters();
+    }
+
+    /// Wait until the initial full-repository pass has finished.
+    ///
+    /// `notify_waiters()` stores no permit, so interest is registered *before*
+    /// the flag is re-checked; otherwise a build that completes in that window
+    /// would leave the caller parked forever (same pattern as
+    /// `Repo::wait_for_scan`).
+    pub async fn wait_until_ready(&self) {
+        loop {
+            let notified = self.ready_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if self.is_ready() {
+                return;
+            }
+
+            notified.await;
+        }
+    }
+
+    /// Record `source_url`'s links, replacing whatever it contributed before.
+    ///
+    /// `links` must already be resolved to absolute URLs (see
+    /// [`resolve_outbound_links`]); external links are ignored, since only an
+    /// internal target can display a backlink.
+    pub fn set_page_links(&self, source_url: &str, links: &[OutboundLink]) {
+        self.withdraw(source_url);
+
+        let targets: Vec<String> = links
+            .iter()
+            .filter(|link| link.internal && !link.to.is_empty())
+            .map(|link| {
+                let bucket = {
+                    let guard = self.inbound.pin();
+                    guard
+                        .get_or_insert_with(link.to.clone(), InboundBucket::default)
+                        .clone()
+                };
+                bucket.lock().expect("inbound bucket poisoned").insert(
+                    source_url.to_string(),
+                    InboundLink {
+                        from: source_url.to_string(),
+                        text: link.text.clone(),
+                        anchor: link.anchor.clone(),
+                    },
+                );
+                link.to.clone()
+            })
+            .collect();
+
+        if targets.is_empty() {
+            self.contributions.pin().remove(source_url);
+        } else {
+            self.contributions
+                .pin()
+                .insert(source_url.to_string(), targets);
+        }
+    }
+
+    /// Remove every backlink contributed by `source_url` (the page was deleted).
+    pub fn remove_page(&self, source_url: &str) {
+        self.withdraw(source_url);
+        self.contributions.pin().remove(source_url);
+    }
+
+    /// Drop `source_url`'s existing contributions from every target it fed.
+    fn withdraw(&self, source_url: &str) {
+        let previous = self.contributions.pin().get(source_url).cloned();
+        let Some(previous) = previous else {
+            return;
+        };
+        let guard = self.inbound.pin();
+        for target in previous {
+            if let Some(bucket) = guard.get(&target) {
+                let mut entries = bucket.lock().expect("inbound bucket poisoned");
+                entries.remove(source_url);
+                // Leave the empty bucket in place: a page that lost its only
+                // backlink usually gains another on the next edit, and the key
+                // count is bounded by the number of link targets.
+            }
+        }
+    }
+
+    /// Backlinks for `target_url`, in `from` order.
+    pub fn get(&self, target_url: &str) -> Vec<InboundLink> {
+        let bucket = self.inbound.pin().get(target_url).cloned();
+        match bucket {
+            Some(bucket) => bucket
+                .lock()
+                .expect("inbound bucket poisoned")
+                .values()
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Drop everything, including readiness (a full rescan rebuilds it).
+    pub fn clear(&self) {
+        self.inbound.pin().clear();
+        self.contributions.pin().clear();
+        self.ready.store(false, Ordering::Release);
+    }
+
+    /// Number of pages that currently have at least one backlink recorded.
+    pub fn target_count(&self) -> usize {
+        self.inbound
+            .pin()
+            .iter()
+            .filter(|(_, bucket)| !bucket.lock().expect("inbound bucket poisoned").is_empty())
+            .count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== InboundIndex ====================
+
+    fn link_to(to: &str, text: &str) -> OutboundLink {
+        OutboundLink {
+            to: to.to_string(),
+            text: text.to_string(),
+            anchor: None,
+            internal: true,
+        }
+    }
+
+    #[test]
+    fn inbound_index_inverts_internal_links() {
+        let index = InboundIndex::new();
+        index.set_page_links("/a/", &[link_to("/b/", "see B"), link_to("/c/", "see C")]);
+
+        let b = index.get("/b/");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].from, "/a/");
+        assert_eq!(b[0].text, "see B");
+        assert_eq!(index.get("/c/").len(), 1);
+        assert!(index.get("/nowhere/").is_empty());
+    }
+
+    #[test]
+    fn inbound_index_ignores_external_links() {
+        let index = InboundIndex::new();
+        let external = OutboundLink {
+            to: "https://example.com/".to_string(),
+            text: "out".to_string(),
+            anchor: None,
+            internal: false,
+        };
+        index.set_page_links("/a/", &[external]);
+
+        assert!(index.get("https://example.com/").is_empty());
+        assert_eq!(index.target_count(), 0);
+    }
+
+    /// Editing a page must withdraw the backlinks it no longer contains.
+    /// Without `contributions` this would need a scan of every bucket, and
+    /// skipping it leaves a backlink pointing at a link the author deleted.
+    #[test]
+    fn inbound_index_withdraws_links_removed_by_an_edit() {
+        let index = InboundIndex::new();
+        index.set_page_links("/a/", &[link_to("/b/", "see B"), link_to("/c/", "see C")]);
+        assert_eq!(index.get("/b/").len(), 1);
+
+        // The author deleted the link to B, kept C, and added D.
+        index.set_page_links("/a/", &[link_to("/c/", "see C"), link_to("/d/", "see D")]);
+
+        assert!(
+            index.get("/b/").is_empty(),
+            "a link removed by an edit must stop producing a backlink"
+        );
+        assert_eq!(index.get("/c/").len(), 1);
+        assert_eq!(index.get("/d/").len(), 1);
+    }
+
+    #[test]
+    fn inbound_index_removing_a_page_drops_only_its_own_backlinks() {
+        let index = InboundIndex::new();
+        index.set_page_links("/a/", &[link_to("/target/", "from A")]);
+        index.set_page_links("/b/", &[link_to("/target/", "from B")]);
+        assert_eq!(index.get("/target/").len(), 2);
+
+        index.remove_page("/a/");
+
+        let remaining = index.get("/target/");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].from, "/b/");
+    }
+
+    /// Backlinks are returned in `from` order regardless of insertion order,
+    /// matching what [`sort_inbound_links`] produces for the build path.
+    #[test]
+    fn inbound_index_returns_backlinks_in_from_order() {
+        let index = InboundIndex::new();
+        index.set_page_links("/zeta/", &[link_to("/t/", "z")]);
+        index.set_page_links("/alpha/", &[link_to("/t/", "a")]);
+        index.set_page_links("/mid/", &[link_to("/t/", "m")]);
+
+        let froms: Vec<String> = index.get("/t/").into_iter().map(|l| l.from).collect();
+        assert_eq!(froms, vec!["/alpha/", "/mid/", "/zeta/"]);
+
+        let mut expected = index.get("/t/");
+        sort_inbound_links(&mut expected);
+        assert_eq!(index.get("/t/"), expected, "must already be sorted");
+    }
+
+    #[test]
+    fn inbound_index_clear_resets_readiness() {
+        let index = InboundIndex::new();
+        index.set_page_links("/a/", &[link_to("/b/", "see B")]);
+        index.mark_ready();
+        assert!(index.is_ready());
+
+        index.clear();
+
+        assert!(!index.is_ready());
+        assert!(index.get("/b/").is_empty());
+    }
+
+    #[tokio::test]
+    async fn inbound_index_wait_until_ready_returns_after_late_build() {
+        let index = std::sync::Arc::new(InboundIndex::new());
+
+        let waiting = std::sync::Arc::clone(&index);
+        let waiter = tokio::spawn(async move { waiting.wait_until_ready().await });
+        tokio::task::yield_now().await;
+
+        index.mark_ready();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must be woken by mark_ready")
+            .expect("waiter task panicked");
+    }
+
+    /// A waiter created after the build already finished must not block:
+    /// `notify_waiters()` leaves no permit behind.
+    #[tokio::test]
+    async fn inbound_index_wait_until_ready_returns_immediately_when_already_ready() {
+        let index = InboundIndex::new();
+        index.mark_ready();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), index.wait_until_ready())
+            .await
+            .expect("a waiter started after readiness must not block");
+    }
 
     #[test]
     fn test_split_url_anchor_with_anchor() {
