@@ -8,24 +8,24 @@ updates:
   - package-ecosystem: "nix" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "cargo" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "rust-toolchain" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "bun" # See documentation for possible values
     directory: "/components" # Location of package manifests
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "swift" # See documentation for possible values
     directory: "/quicklook" # Location of package manifests
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "github-actions" # See documentation for possible values
     directory: "/.github/workflows" # Location of package manifests
     schedule:
-      interval: "weekly"
+      interval: "monthly"
