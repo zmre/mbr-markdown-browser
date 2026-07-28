@@ -261,6 +261,23 @@ async fn main() -> Result<(), MbrError> {
 
         tracing::info!("Building static site to: {}", output_dir.display());
 
+        // `--skip-link-checks` short-circuits validation entirely, so
+        // `broken_links` stays 0 and the `--fail-on-broken-links` gate below
+        // can never fire. Asking for both is almost always a mistake in CI —
+        // the build reports success over a repository nobody checked — and
+        // until now it happened silently. Warn before the build rather than
+        // after, so it is visible even when the build takes a while.
+        // `config.skip_link_checks` (not `args`) because the value can also
+        // arrive from `.mbr/config.toml` or `MBR_SKIP_LINK_CHECKS`, which is
+        // the easier case to miss.
+        if config.skip_link_checks && args.fail_on_broken_links {
+            eprintln!(
+                "Warning: --fail-on-broken-links has no effect because link checking is skipped; \
+                 this build cannot fail on broken links. Drop --skip-link-checks (or the \
+                 skip_link_checks config/MBR_SKIP_LINK_CHECKS setting) to enable the check."
+            );
+        }
+
         let builder = Builder::new(config, output_dir)?;
         let stats = builder.build().await?;
 

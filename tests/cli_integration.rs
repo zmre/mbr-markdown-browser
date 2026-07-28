@@ -166,6 +166,29 @@ fn test_skip_link_checks_suppresses_fail_on_broken_links() {
         !stderr_of(&output).contains("broken internal link"),
         "the gate must not fire when validation was skipped"
     );
+    // The combination disarms the CI gate completely, so it must say so.
+    // Silently exiting 0 here is how a repository full of broken links passes
+    // a pipeline that looks like it is checking them.
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("--fail-on-broken-links has no effect"),
+        "combining the two flags must warn that the gate is disarmed.\nstderr:\n{stderr}"
+    );
+}
+
+/// The warning is specific to the disarmed combination: asking to fail on
+/// broken links, without skipping the checks, must stay quiet.
+#[test]
+fn test_fail_on_broken_links_alone_does_not_warn_about_being_disabled() {
+    let repo = repo_with_broken_link();
+    let out = TempDir::new().expect("temp output dir");
+    let output = run_build(&repo, out.path(), &["--fail-on-broken-links"]);
+
+    let stderr = stderr_of(&output);
+    assert!(
+        !stderr.contains("has no effect"),
+        "the gate was active here; there is nothing to warn about.\nstderr:\n{stderr}"
+    );
 }
 
 // ---- flag → Config wiring ---------------------------------------------------
