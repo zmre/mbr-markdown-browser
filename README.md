@@ -30,7 +30,7 @@ Oh and on mac, it includes a quicklook plugin that's head and shoulders above an
 | Feature | Description |
 |---------|-------------|
 | **Instant Preview** | Sub-second markdown rendering with live reload |
-| **Native GUI** | macOS/Linux app with native menus and shortcuts (Windows should work, but is untested) |
+| **Native GUI** | macOS/Linux app with native menus and shortcuts (Windows binaries are built and tested in CI, but the GUI window itself is not exercised there) |
 | **Static Sites** | Optionally generate deployable websites with full-text search |
 | **Smart Navigation** | Browse by folders, tags, recents, and full-text search |
 | **Keyboard Friendly** | Vim-like shortcuts are available for everything in the UI |
