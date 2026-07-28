@@ -67,7 +67,9 @@ Pre-built binaries are available on the [GitHub Releases](https://github.com/zmr
 | macOS | `mbr-macos-arm64.tar.gz` | App bundle, Apple Silicon |
 | macOS | `mbr-cli-macos-arm64.tar.gz` | Command-line binary only |
 | Linux | `mbr-linux-x86_64.tar.gz` | Command-line binary |
+| Linux | `mbr-linux-arm64.tar.gz` | Command-line binary, aarch64 |
 | Windows | `mbr-windows-x86_64.zip` | See limitations below |
+| Windows | `mbr-windows-aarch64.zip` | ARM64, see limitations below |
 
 > **Intel Macs are not supported.** Prebuilt macOS downloads are Apple Silicon
 > (arm64) only. Intel (x86_64) macOS builds were dropped, because Apple has not
@@ -101,8 +103,10 @@ entirely, since command-line tools do not set it.
 
 ### Windows
 
-Unzip `mbr-windows-x86_64.zip` and run `mbr.exe`. GUI mode needs the Microsoft
-Edge WebView2 runtime, which ships with Windows 11 and current Windows 10.
+Unzip the archive matching your machine — `mbr-windows-x86_64.zip` on Intel and
+AMD, `mbr-windows-aarch64.zip` on ARM64 — and run `mbr.exe`. GUI mode needs the
+Microsoft Edge WebView2 runtime, which ships with Windows 11 and current
+Windows 10.
 
 Two features are missing from Windows builds because their dependencies do not
 build on `windows-msvc` without a prebuilt ffmpeg SDK:

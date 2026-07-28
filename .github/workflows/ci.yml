@@ -172,6 +172,14 @@ jobs:
   # `mbr-cli`, whose preBuild copies the components in (flake.nix ~474-477). See
   # the long note on the `lint` job above for the full reasoning and the
   # `path:.#` hazard.
+  #
+  # ubuntu-24.04-arm is in this matrix specifically so release.yml's linux-arm64
+  # leg is a cachix hit rather than a from-source build. Nothing else builds
+  # aarch64-linux, and the closure is expensive (ffmpeg-minimal-static, x264,
+  # webkitgtk). Dropping it here does not fail CI — it silently moves a 30-60
+  # minute build onto the release critical path, which is exactly how the Intel
+  # Darwin leg died. There is no `ubuntu-latest-arm` alias; the version has to be
+  # pinned explicitly.
   build:
     name: Build (${{ matrix.os }})
     needs: format-check
@@ -179,7 +187,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
 
     steps:
       - name: Checkout

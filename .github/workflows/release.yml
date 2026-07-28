@@ -209,6 +209,12 @@ jobs:
             arch: macos-arm64
           - os: ubuntu-latest
             arch: linux-x86_64
+          # `arch` here only names the uploaded artifact. The tarball *inside* it
+          # is named by the flake's `archString`, which maps aarch64-linux to
+          # "linux-arm64" — so these two must agree or the release notes point at
+          # a filename that does not exist.
+          - os: ubuntu-24.04-arm
+            arch: linux-arm64
 
     env:
       VERSION: ${{ needs.validate-version.outputs.version }}
@@ -376,8 +382,13 @@ jobs:
       contents: write
 
     steps:
+      # fetch-depth: 0 for the tags — the "Generate release notes" step below
+      # picks the changelog base itself and needs the full tag list. The default
+      # shallow checkout fetches only the tagged commit.
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -402,8 +413,63 @@ jobs:
           echo "Release files:"
           ls -la
 
+      # Pin the changelog base explicitly instead of letting GitHub infer it.
+      #
+      # `generate_release_notes: true` on softprops/action-gh-release delegates
+      # the choice of "previous tag" to GitHub, which picked a base far back in
+      # history and produced a What's Changed list spanning many releases —
+      # hand-edited after every tag. softprops exposes no `previous_tag_name`
+      # input, so we call the generate-notes API ourselves and append the result
+      # to the body below (the same position GitHub would have put it).
+      #
+      # Base = highest *stable* tag below the current one. A '-' in the version
+      # marks a prerelease, matching the `prerelease:` rule on the release step,
+      # so rc tags are never the base: v0.5.1's notes cover everything since
+      # v0.5.0 rather than just the delta from v0.5.1-rc1.
+      #
+      # target_commitish is required because on workflow_dispatch the tag does
+      # not exist yet — the release action creates it.
       - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate-version.outputs.version }}
+          TAG: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', needs.validate-version.outputs.version) }}
         run: |
+          set -euo pipefail
+
+          # Splice the current version into the stable-tag list, sort, and take
+          # the line before it. Handles the first-ever release (nothing before
+          # it, so PREV lands on CURRENT itself) via the guard below.
+          CURRENT="v${VERSION}"
+          # The `|| true` matters: with `set -euo pipefail`, a repo whose tags are
+          # all prereleases makes this grep exit 1 and takes the whole step with
+          # it. The outer grep needs no guard — CURRENT is always in its input.
+          PREV=$(
+            { git tag --list 'v*' | { grep -v -- '-' || true; }; echo "$CURRENT"; } \
+              | sort -V -u \
+              | grep -B1 -Fx -- "$CURRENT" \
+              | head -n1
+          )
+          if [ "$PREV" = "$CURRENT" ]; then
+            echo "No earlier stable tag; generating notes over full history."
+            PREV=""
+          else
+            echo "Changelog base: $PREV -> $TAG"
+          fi
+
+          if [ -n "$PREV" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              -f target_commitish="${GITHUB_SHA}" \
+              -f previous_tag_name="$PREV" \
+              --jq .body > generated_notes.md
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              -f target_commitish="${GITHUB_SHA}" \
+              --jq .body > generated_notes.md
+          fi
+
           cat << 'EOF' > release_notes.md
           ## mbr v${{ needs.validate-version.outputs.version }}
 
@@ -415,6 +481,7 @@ jobs:
           | macOS (app) | ARM64 (Apple Silicon) | `mbr-macos-arm64.tar.gz` |
           | macOS (CLI) | ARM64 (Apple Silicon) | `mbr-cli-macos-arm64.tar.gz` |
           | Linux | x86_64 | `mbr-linux-x86_64.tar.gz` |
+          | Linux | ARM64 (aarch64) | `mbr-linux-arm64.tar.gz` |
           | Windows | x86_64 | `mbr-windows-x86_64.zip` |
           | Windows | ARM64 | `mbr-windows-aarch64.zip` |
 
@@ -441,14 +508,15 @@ jobs:
           cp -r MBR.app /Applications/
           ```
 
-          **Linux:**
+          **Linux:** pick the tarball matching `uname -m` — `x86_64` or `aarch64`.
           ```bash
-          tar xzf mbr-linux-x86_64.tar.gz
+          tar xzf mbr-linux-x86_64.tar.gz   # or mbr-linux-arm64.tar.gz
           sudo mv mbr /usr/local/bin/
           ```
 
           **Windows:**
-          Unzip `mbr-windows-x86_64.zip` and run `mbr.exe`. Requires the Microsoft
+          Unzip `mbr-windows-x86_64.zip` (or `mbr-windows-aarch64.zip` on ARM64)
+          and run `mbr.exe`. Requires the Microsoft
           Edge WebView2 runtime for GUI mode (preinstalled on Windows 11 and current
           Windows 10). Windows builds do not include video metadata/transcoding or
           PDF cover extraction.
@@ -461,6 +529,13 @@ jobs:
           ```
           EOF
 
+          # Where `generate_release_notes: true` used to splice its output in.
+          cat generated_notes.md >> release_notes.md
+
+      # No `generate_release_notes` — the step above already appended notes
+      # generated against an explicit base tag. Turning it back on would make
+      # GitHub append a *second* What's Changed section over its own inferred
+      # range.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -470,7 +545,6 @@ jobs:
           files: release/*
           draft: false
           prerelease: ${{ contains(needs.validate-version.outputs.version, '-') }}
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
