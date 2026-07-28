@@ -4,6 +4,7 @@
 // Renders markdown files using MBR's rendering engine via UniFFI bindings.
 
 import Cocoa
+import Darwin
 import os.log
 import Quartz
 import WebKit
@@ -18,9 +19,58 @@ private let logger = OSLog(subsystem: "com.zmre.mbr.MBRPreview", category: "Prev
 /// to use `loadFileURL()` (which requires a temp file). The Rust side converts
 /// root-relative URLs like `/videos/test.mp4` to `mbrfile:///path/to/root/videos/test.mp4`,
 /// and this handler intercepts those requests and serves the file data.
+///
+/// # Security
+///
+/// The previewed markdown is untrusted: it can contain raw HTML, so a `<script>`
+/// in it can request *any* mbrfile:// URL it likes, not just the ones the Rust
+/// side generated. This handler is therefore the security boundary, and it obeys
+/// one rule:
+///
+/// > Serve a file only if its fully resolved path lies inside `allowedRoot`.
+///
+/// `allowedRoot` is the previewed document's repository root and is set by
+/// `PreviewViewController` before any HTML is loaded. Until it is set, every
+/// request is refused, so a mistake in the setup path fails closed.
 class MBRFileSchemeHandler: NSObject, WKURLSchemeHandler {
+    /// Fully resolved path of the only directory this handler will read from.
+    ///
+    /// `nil` means "nothing is allowed yet". Read and written on the main thread
+    /// only: `WKURLSchemeHandler` callbacks are delivered on the main thread, and
+    /// so is `preparePreviewOfFile(at:completionHandler:)`.
+    var allowedRoot: String?
+
+    /// Fully resolved absolute path with every symbolic link and `..` expanded,
+    /// or `nil` if the path does not exist.
+    ///
+    /// This is `realpath(3)` — the same primitive Rust's `Path::canonicalize`
+    /// uses on the other side of the FFI, so both halves agree on what a path
+    /// "really" is.
+    static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// Whether `path` lies strictly inside `root`. Both must already be resolved
+    /// by `realPath`, otherwise a symlink or `..` could make this lie.
+    ///
+    /// The trailing separator is what keeps `/notes-evil/secret` from passing as
+    /// inside `/notes`.
+    static func isContained(_ path: String, in root: String) -> Bool {
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return path.hasPrefix(prefix)
+    }
+
+    /// Fails the task with a message, without disclosing whether the target exists.
+    private func refuse(_ urlSchemeTask: WKURLSchemeTask, reason: String) {
+        os_log(.error, log: logger, "MBRFileSchemeHandler refused request: %{public}@", reason)
+        urlSchemeTask.didFailWithError(NSError(domain: "MBRPreview", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "Refused: \(reason)"
+        ]))
+    }
+
     func webView(_: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        NSLog("[MBRFileSchemeHandler] received request: %@", urlSchemeTask.request.url?.absoluteString ?? "nil")
         os_log(
             .info,
             log: logger,
@@ -31,15 +81,24 @@ class MBRFileSchemeHandler: NSObject, WKURLSchemeHandler {
         guard let url = urlSchemeTask.request.url,
               url.scheme == "mbrfile"
         else {
-            os_log(.error, log: logger, "MBRFileSchemeHandler: invalid scheme in request")
-            urlSchemeTask.didFailWithError(NSError(domain: "MBRPreview", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Invalid URL scheme"
-            ]))
+            self.refuse(urlSchemeTask, reason: "invalid URL scheme")
             return
         }
 
-        // The path portion of mbrfile:///path/to/file is the actual file path
-        let filePath = url.path
+        // The path portion of mbrfile:///path/to/file is the actual file path.
+        // It is attacker-controlled, so nothing below may trust its spelling.
+        guard let allowedRoot = self.allowedRoot else {
+            self.refuse(urlSchemeTask, reason: "no preview root has been established")
+            return
+        }
+
+        guard let filePath = Self.realPath(url.path),
+              Self.isContained(filePath, in: allowedRoot)
+        else {
+            self.refuse(urlSchemeTask, reason: "path is outside the previewed repository")
+            return
+        }
+
         let fileURL = URL(fileURLWithPath: filePath)
 
         os_log(.info, log: logger, "MBRFileSchemeHandler loading file: %{public}@", filePath)
@@ -132,17 +191,25 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
     private var webView: WKWebView!
     private var completionHandler: ((Error?) -> Void)?
 
+    /// Retained so `preparePreviewOfFile` can confine it to the previewed
+    /// document's repository before any HTML is loaded.
+    let fileSchemeHandler = MBRFileSchemeHandler()
+
     override func loadView() {
         os_log(.error, log: logger, "loadView called")
 
         // Create WebView configuration
         let config = WKWebViewConfiguration()
-        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        #if DEBUG
+            // Never in a shipped extension: the previewed markdown is untrusted
+            // and this exposes the Web Inspector to it.
+            config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        #endif
 
         // Register custom URL scheme handler for local file access
         // The Rust side converts root-relative URLs (/videos/...) to mbrfile:// URLs
         // which this handler intercepts and serves from disk
-        config.setURLSchemeHandler(MBRFileSchemeHandler(), forURLScheme: "mbrfile")
+        config.setURLSchemeHandler(self.fileSchemeHandler, forURLScheme: "mbrfile")
 
         // Create WebView - QuickLook will resize it
         self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
@@ -195,45 +262,37 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
         let configRoot = findConfigRoot(filePath: filePath)
         os_log(.info, log: logger, "configRoot = %{public}@", configRoot)
 
+        // Confine the WebView's file access to this document's repository.
+        // Must happen before loadHTMLString: the WebView issues no mbrfile://
+        // request until the HTML is loaded, and a nil root refuses them all.
+        self.fileSchemeHandler.allowedRoot = MBRFileSchemeHandler.realPath(configRoot)
+        if self.fileSchemeHandler.allowedRoot == nil {
+            os_log(.error, log: logger, "could not resolve preview root; local assets will not load")
+        }
+
         do {
             os_log(.info, log: logger, "calling renderPreview...")
             // Call Rust FFI to render markdown
             let html = try renderPreview(filePath: filePath, configRoot: configRoot)
             os_log(.info, log: logger, "renderPreview succeeded, HTML length = %d", html.count)
 
-            // Write HTML to debug file for inspection
-            let debugPath = "/tmp/mbr-quicklook-debug.html"
-            try? html.write(toFile: debugPath, atomically: true, encoding: .utf8)
-
-            // Check if mbrfile:// URLs are present (for debugging)
-            if html.contains("mbrfile://") {
-                try? "HTML CONTAINS mbrfile:// URLs\n".write(
-                    toFile: "/tmp/mbr-quicklook-status.txt",
+            // Debug-only: dumps the rendered document to a world-readable
+            // location, so it must never run in a shipped extension.
+            #if DEBUG
+                try? html.write(
+                    toFile: "/tmp/mbr-quicklook-debug.html",
                     atomically: true,
                     encoding: .utf8
                 )
-                NSLog("[MBRPreview] HTML contains mbrfile:// URLs - scheme handler should intercept")
-                os_log(.info, log: logger, "HTML contains mbrfile:// URLs - scheme handler should intercept")
-                // Find a sample mbrfile URL for logging
-                if let range = html.range(of: "mbrfile://[^'\"\\s]+", options: .regularExpression) {
-                    let sample = String(html[range])
-                    try? "Sample URL: \(sample)\n".write(
-                        toFile: "/tmp/mbr-quicklook-sample-url.txt",
-                        atomically: true,
-                        encoding: .utf8
-                    )
-                    NSLog("[MBRPreview] Sample mbrfile URL: %@", sample)
-                    os_log(.info, log: logger, "Sample mbrfile URL: %{public}@", sample)
+                if html.contains("mbrfile://") {
+                    os_log(.info, log: logger, "HTML contains mbrfile:// URLs - scheme handler should intercept")
+                    if let range = html.range(of: "mbrfile://[^'\"\\s]+", options: .regularExpression) {
+                        os_log(.info, log: logger, "Sample mbrfile URL: %{public}@", String(html[range]))
+                    }
+                } else {
+                    os_log(.error, log: logger, "HTML does NOT contain mbrfile:// URLs - check Rust conversion")
                 }
-            } else {
-                try? "HTML does NOT contain mbrfile:// URLs\n".write(
-                    toFile: "/tmp/mbr-quicklook-status.txt",
-                    atomically: true,
-                    encoding: .utf8
-                )
-                NSLog("[MBRPreview] HTML does NOT contain mbrfile:// URLs")
-                os_log(.error, log: logger, "HTML does NOT contain mbrfile:// URLs - check Rust conversion")
-            }
+            #endif
 
             // Load HTML in WebView
             // Note: The Rust code converts root-relative URLs (/path) to mbrfile:// URLs

@@ -34,6 +34,15 @@ HLJS_LANGUAGES=(
     markdown
 )
 
+# Options shared by every download.
+#
+# --fail is the load-bearing one: without it curl exits 0 on an HTTP error,
+# writes the error body into the asset file, and neither `set -e` nor the
+# `|| error` handlers below ever fire — the script then reports "downloaded
+# successfully" over a 52-byte error page that gets include_bytes!'d into the
+# binary. --proto '=https' and --tlsv1.2 keep the transfer on modern TLS.
+CURL_OPTS=(--silent --location --fail --proto '=https' --tlsv1.2)
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -77,20 +86,20 @@ download_hljs() {
 
     # Download core
     info "  Core: highlight.min.js"
-    curl -sL "${base_url}/highlight.min.js" -o "$TEMPLATES_DIR/hljs.${version}.js" || error "Failed to download highlight.min.js"
+    curl "${CURL_OPTS[@]}" "${base_url}/highlight.min.js" -o "$TEMPLATES_DIR/hljs.${version}.js" || error "Failed to download highlight.min.js"
 
     # Download dark theme CSS
     info "  Theme: dark.min.css"
-    curl -sL "${base_url}/styles/dark.min.css" -o "$TEMPLATES_DIR/hljs.dark.${version}.css" || error "Failed to download dark.min.css"
+    curl "${CURL_OPTS[@]}" "${base_url}/styles/dark.min.css" -o "$TEMPLATES_DIR/hljs.dark.${version}.css" || error "Failed to download dark.min.css"
 
     # Download atom-one-dark theme CSS
     info "  Theme: dark.min.css"
-    curl -sL "${base_url}/styles/atom-one-dark.css" -o "$TEMPLATES_DIR/hljs.atom-one-dark.${version}.css" || error "Failed to download dark.atom-one-dark.css"
+    curl "${CURL_OPTS[@]}" "${base_url}/styles/atom-one-dark.css" -o "$TEMPLATES_DIR/hljs.atom-one-dark.${version}.css" || error "Failed to download dark.atom-one-dark.css"
 
     # Download language modules
     for lang in "${HLJS_LANGUAGES[@]}"; do
         info "  Language: ${lang}"
-        curl -sL "${base_url}/languages/${lang}.min.js" -o "$TEMPLATES_DIR/hljs.lang.${lang}.${version}.js" || warn "Failed to download ${lang}.min.js"
+        curl "${CURL_OPTS[@]}" "${base_url}/languages/${lang}.min.js" -o "$TEMPLATES_DIR/hljs.lang.${lang}.${version}.js" || warn "Failed to download ${lang}.min.js"
     done
 
     echo
@@ -112,7 +121,7 @@ download_mermaid() {
     info "Downloading mermaid.js v${version}..."
     info "  Source: ${url}"
 
-    curl -sL "$url" -o "$TEMPLATES_DIR/mermaid.${version}.min.js" || error "Failed to download mermaid.min.js"
+    curl "${CURL_OPTS[@]}" "$url" -o "$TEMPLATES_DIR/mermaid.${version}.min.js" || error "Failed to download mermaid.min.js"
 
     echo
     info "mermaid.js v${version} downloaded successfully!"

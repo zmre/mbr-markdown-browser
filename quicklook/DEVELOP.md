@@ -13,6 +13,40 @@ The QuickLook extension consists of:
 
 The extension uses a custom URL scheme (`mbrfile://`) to serve local assets (images, etc.) through a `WKURLSchemeHandler` in the WebView.
 
+### Security invariant: mbrfile:// is confined to the previewed repository
+
+Previewed markdown is untrusted and may contain raw HTML, so a `<script>` inside a
+`.md` can request any `mbrfile://` URL it wants — not only the ones mbr generated.
+Two independent checks keep that from becoming an arbitrary file read, and **both
+must stay in place**:
+
+1. **Swift — `MBRFileSchemeHandler` (`MBRPreview/PreviewViewController.swift`).**
+   The real boundary. It serves a file only when the requested path, fully resolved
+   with `realpath(3)`, lies inside `allowedRoot` — the previewed document's
+   repository root, set by `preparePreviewOfFile` before any HTML is loaded. Until
+   that root is set, every request is refused, so the setup path fails closed.
+2. **Rust — `resolve_asset_path` (`src/quicklook.rs`).** Defence in depth. It mints
+   an `mbrfile://` URL only for a file that exists and canonically lives inside the
+   repo root; anything else keeps its original root-relative URL and simply fails to
+   load.
+
+Both sides canonicalize (`realpath(3)` / `Path::canonicalize`) and compare the
+*resolved* path, never the requested string, so `..`, extra leading slashes and
+symlinks pointing out of the repo are all rejected the same way.
+
+This matters because `MBRPreview/MBRPreview.entitlements` grants read access to `/`
+— see the comment in that file for why it is that broad and what would have to
+change to narrow it.
+
+To sanity-check by hand, preview a `.md` containing:
+
+```html
+<script>fetch('mbrfile:///etc/passwd').then(r=>r.text()).then(t=>document.body.textContent=t)</script>
+```
+
+The fetch must reject, and the log must show
+`MBRFileSchemeHandler refused request: path is outside the previewed repository`.
+
 
 ## Useful Tips
 
