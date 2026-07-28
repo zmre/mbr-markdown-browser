@@ -84,10 +84,33 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Clippy lint - runs after components are built
+  # Clippy lint
+  #
+  # NOTE: no `needs: build-components` and no artifact download here, unlike the
+  # minimal-features and windows jobs below. That is deliberate, not an omission.
+  #
+  # `nix build .#clippy` supplies the components itself: the flake's `clippy`
+  # attr has a preBuild that copies `${packages.mbr-components}` into
+  # templates/components-js (flake.nix ~583-586). Downloading the artifact would
+  # at best be redundant -- the preBuild overwrites it either way.
+  #
+  # More to the point, the artifact is *invisible* to Nix. templates/components-js
+  # is gitignored (.gitignore:15) and `.#` resolves as a git-tree flake ref, so
+  # those files are stripped from the flake source before the `src` filter in
+  # flake.nix ever sees them (the filter's `.*templates.*` rule would otherwise
+  # match). Verified empirically: `.#clippy.drvPath` is byte-identical with the
+  # directory populated, with an extra file added, and with the directory deleted
+  # outright. So gating on build-components only serialized ~2-4 min of npm build
+  # onto the critical path in exchange for nothing.
+  #
+  # HAZARD: this holds only for the bare `.#` ref. `path:.#` copies untracked
+  # files into the store and DOES hash differently (confirmed: different drvPath).
+  # If anyone un-gitignores templates/components-js, or switches these
+  # invocations to `path:.`, this decoupling silently becomes wrong and these
+  # jobs need their `needs` + download restored.
   lint:
     name: Clippy Lint (${{ matrix.os }})
-    needs: [format-check, build-components]
+    needs: format-check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -97,12 +120,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Download components
-        uses: actions/download-artifact@v8
-        with:
-          name: components
-          path: templates/components-js/
 
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@main
@@ -117,10 +134,15 @@ jobs:
       - name: Clippy lint
         run: nix build -L .#clippy
 
-  # Tests - runs after components are built
+  # Tests
+  #
+  # No `needs: build-components` / artifact download -- `nix build .#tests` is
+  # self-supplying via the `tests` attr's preBuild (flake.nix ~595-598). See the
+  # long note on the `lint` job above for the full reasoning and the `path:.#`
+  # hazard.
   test:
     name: Test (${{ matrix.os }})
-    needs: [format-check, build-components]
+    needs: format-check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -130,12 +152,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Download components
-        uses: actions/download-artifact@v8
-        with:
-          name: components
-          path: templates/components-js/
 
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@main
@@ -151,9 +167,14 @@ jobs:
         run: nix build -L .#tests
 
   # Full build - runs in parallel with lint/test
+  #
+  # No `needs: build-components` / artifact download -- `nix build .#mbr` reaches
+  # `mbr-cli`, whose preBuild copies the components in (flake.nix ~474-477). See
+  # the long note on the `lint` job above for the full reasoning and the
+  # `path:.#` hazard.
   build:
     name: Build (${{ matrix.os }})
-    needs: [format-check, build-components]
+    needs: format-check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -163,12 +184,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Download components
-        uses: actions/download-artifact@v8
-        with:
-          name: components
-          path: templates/components-js/
 
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@main
@@ -194,19 +209,27 @@ jobs:
   # a gated argument makes clap panic at startup on *every* invocation, not just
   # in tests. That is a feature-resolution bug, not a platform bug, so catching it
   # here gives fast feedback instead of waiting on a Windows runner.
+  #
+  # This used to run `nix develop --command cargo clippy/test ...`. The dev shell
+  # was cached, but the cargo build *inside* it was not — no cache-workspaces, no
+  # rust-cache, no cachix participation — and this feature set shares no compiled
+  # artifacts with the crane-built jobs, so it recompiled the entire dependency
+  # tree on every PR (~10-20 min). `.#clippy-minimal` / `.#tests-minimal` are
+  # crane derivations over their own `cargoArtifactsMinimal` (flake.nix), so the
+  # dep tree is content-addressed, pushed to cachix, and reused across runs and
+  # between these two steps. The lint and the tests still run at exactly the same
+  # feature set, so the bug class above is still caught.
+  #
+  # `needs: build-components` and the artifact download are gone for the same
+  # reason as the lint/test/build jobs above — these are now `nix build .#` and
+  # self-supply components via preBuild. See the note on `lint`.
   minimal-features:
     name: Minimal Feature Set (no media-metadata)
-    needs: [format-check, build-components]
+    needs: format-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Download components
-        uses: actions/download-artifact@v8
-        with:
-          name: components
-          path: templates/components-js/
 
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@main
@@ -219,10 +242,10 @@ jobs:
           extraPullNames: nix-community
 
       - name: Clippy lint
-        run: nix develop --command cargo clippy --all-targets --no-default-features --features gui -- -D warnings
+        run: nix build -L .#clippy-minimal
 
       - name: Run tests
-        run: nix develop --command cargo test --no-default-features --features gui
+        run: nix build -L .#tests-minimal
 
   # Windows build + lint + test.
   #

@@ -146,8 +146,9 @@
         else system;
 
       # swiftc target triple for the QuickLook extension. Must track the host
-      # arch: an x86_64-darwin build has to produce an Intel .appex so that the
-      # release job can lipo it together with the arm64 one into a universal app.
+      # arch: the .appex has to match the binary it ships next to or macOS will
+      # refuse to load it. Releases are arm64-only now, but x86_64-darwin is
+      # still buildable from source, so the Intel branch stays.
       swiftTarget =
         if system == "x86_64-darwin"
         then "x86_64-apple-macos14.0"
@@ -360,6 +361,42 @@
             touch templates/components-js/mbr-components.min.js
           '';
         });
+
+      # The exact feature set Windows ships: GUI, no media-metadata, no ffi.
+      # Bound once so `packages.clippy-minimal`, `packages.tests-minimal`, and
+      # ci.yml's Windows job cannot drift apart silently.
+      minimalFeatures = "gui";
+
+      # Dependency artifacts for the minimal feature set.
+      #
+      # This cannot reuse `cargoArtifacts` above: a different feature set is a
+      # different dependency graph (no ffmpeg-next, pdfium-render, metadata, or
+      # uniffi), so cargo would rebuild the world anyway. Giving the minimal
+      # checks their own buildDepsOnly means the dep tree is content-addressed
+      # and lands in the binary cache — it rebuilds when Cargo.lock changes, not
+      # on every source change, and clippy-minimal/tests-minimal share it.
+      #
+      # commonArgs is reused verbatim (ffmpeg/pdfium stay in buildInputs even
+      # though this feature set does not link them). They are already built and
+      # cached for the other derivations, so pruning them would cost a second
+      # ffmpeg closure rather than save one.
+      cargoArtifactsMinimal = craneLib.buildDepsOnly (commonArgs
+        // {
+          src = craneLib.cleanCargoSource ./.;
+          pname = "mbr-minimal";
+          cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+          preBuild = ''
+            # Same crane mkDummySrc workaround as cargoArtifacts above — see the
+            # comment there. It matters more here: `ffi` is off in this feature
+            # set, so an un-gated uniffi-bindgen bin would pull the macOS-only
+            # uniffi build-dependency into a build that never wants it.
+            grep -q 'required-features = \["ffi"\]' Cargo.toml \
+              || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
+
+            mkdir -p templates/components-js
+            touch templates/components-js/mbr-components.min.js
+          '';
+        });
     in rec {
       # Package set is assembled as a base set merged with darwin-only sets via
       # `// lib.optionalAttrs isDarwin { ... }`. On Linux those merges contribute
@@ -369,235 +406,281 @@
         {
           # Build frontend components first
           mbr-components = pkgs.buildNpmPackage {
-        pname = "mbr-components";
-        inherit version;
-        src = ./components;
-        #npmDepsHash = pkgs.lib.fakeHash;
-        npmDepsHash = "sha256-gaMOQgF3bWOUC89Iy6LNU2AwgEuARpFf0y+ypU2vB+E=";
-        buildPhase = ''
-          npm run build
-        '';
-        installPhase = ''
-          mkdir -p $out
-          cp -r ../templates/components-js/* $out/
-        '';
+            pname = "mbr-components";
+            inherit version;
+            src = ./components;
+            #npmDepsHash = pkgs.lib.fakeHash;
+            npmDepsHash = "sha256-gaMOQgF3bWOUC89Iy6LNU2AwgEuARpFf0y+ypU2vB+E=";
+            buildPhase = ''
+              npm run build
+            '';
+            installPhase = ''
+              mkdir -p $out
+              cp -r ../templates/components-js/* $out/
+            '';
           };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           # QuickLook staticlib: builds libmbr.a without GUI/ffmpeg for sandbox compatibility
-          mbr-quicklook-staticlib =
-            craneLib.buildPackage (commonArgs
-          // {
-            inherit cargoArtifacts;
-            pname = "mbr-quicklook-staticlib";
-            # Build only the staticlib without GUI or media-metadata features
-            # These would pull in SDL/ffmpeg which crash in QuickLook sandbox
-            # Enable ffi feature for UniFFI bindings (required for Swift interop)
-            cargoExtraArgs = "--locked --no-default-features --features ffi --lib";
+          mbr-quicklook-staticlib = craneLib.buildPackage (commonArgs
+            // {
+              inherit cargoArtifacts;
+              pname = "mbr-quicklook-staticlib";
+              # Build only the staticlib without GUI or media-metadata features
+              # These would pull in SDL/ffmpeg which crash in QuickLook sandbox
+              # Enable ffi feature for UniFFI bindings (required for Swift interop)
+              cargoExtraArgs = "--locked --no-default-features --features ffi --lib";
 
-            preBuild = ''
-              mkdir -p templates/components-js
-              cp -r ${packages.mbr-components}/* templates/components-js/
-            '';
+              preBuild = ''
+                mkdir -p templates/components-js
+                cp -r ${packages.mbr-components}/* templates/components-js/
+              '';
 
-            # Only install the static library
-            installPhaseCommand = ''
-              mkdir -p $out/lib
-              cp target/release/libmbr.a $out/lib/
-            '';
-          });
+              # Only install the static library
+              installPhaseCommand = ''
+                mkdir -p $out/lib
+                cp target/release/libmbr.a $out/lib/
+              '';
+            });
 
           # QuickLook extension: builds the .appex using swiftc directly
-          mbr-quicklook =
-            pkgs.stdenv.mkDerivation {
-          pname = "mbr-quicklook";
-          inherit version;
-          inherit src;
+          mbr-quicklook = pkgs.stdenv.mkDerivation {
+            pname = "mbr-quicklook";
+            inherit version;
+            inherit src;
 
-          nativeBuildInputs = [
-            pkgs.swift
-            pkgs.apple-sdk
-          ];
+            nativeBuildInputs = [
+              pkgs.swift
+              pkgs.apple-sdk
+            ];
 
-          buildPhase = ''
-            mkdir -p build/MBRPreview.appex/Contents/MacOS
+            buildPhase = ''
+              mkdir -p build/MBRPreview.appex/Contents/MacOS
 
-            # Compile the QuickLook extension using swiftc from nixpkgs
-            # App extensions should be MH_EXECUTE (executables), not MH_BUNDLE
-            # -parse-as-library: Don't look for main() function
-            # -application-extension: Mark as app extension (required for sandboxing)
-            # -e _NSExtensionMain: Use extension entry point instead of _main
-            swiftc \
-              -O \
-              -parse-as-library \
-              -application-extension \
-              -target ${swiftTarget} \
-              -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
-              -L ${packages.mbr-quicklook-staticlib}/lib \
-              -lmbr \
-              -framework Foundation \
-              -framework CoreFoundation \
-              -framework Security \
-              -framework SystemConfiguration \
-              -framework Cocoa \
-              -framework QuickLookUI \
-              -framework Quartz \
-              -framework WebKit \
-              -framework ExtensionKit \
-              -module-name MBRPreview \
-              -Xlinker -e -Xlinker _NSExtensionMain \
-              -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
-              -I quicklook/Generated \
-              -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
-              quicklook/Generated/mbr.swift \
-              quicklook/MBRPreview/PreviewViewController.swift
+              # Compile the QuickLook extension using swiftc from nixpkgs
+              # App extensions should be MH_EXECUTE (executables), not MH_BUNDLE
+              # -parse-as-library: Don't look for main() function
+              # -application-extension: Mark as app extension (required for sandboxing)
+              # -e _NSExtensionMain: Use extension entry point instead of _main
+              swiftc \
+                -O \
+                -parse-as-library \
+                -application-extension \
+                -target ${swiftTarget} \
+                -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
+                -L ${packages.mbr-quicklook-staticlib}/lib \
+                -lmbr \
+                -framework Foundation \
+                -framework CoreFoundation \
+                -framework Security \
+                -framework SystemConfiguration \
+                -framework Cocoa \
+                -framework QuickLookUI \
+                -framework Quartz \
+                -framework WebKit \
+                -framework ExtensionKit \
+                -module-name MBRPreview \
+                -Xlinker -e -Xlinker _NSExtensionMain \
+                -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
+                -I quicklook/Generated \
+                -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
+                quicklook/Generated/mbr.swift \
+                quicklook/MBRPreview/PreviewViewController.swift
 
-            # Copy Info.plist to complete the .appex bundle structure
-            cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
-          '';
+              # Copy Info.plist to complete the .appex bundle structure
+              cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
+            '';
 
-              installPhase = ''
-                mkdir -p $out
-                cp -R build/MBRPreview.appex $out/
-              '';
-            };
+            installPhase = ''
+              mkdir -p $out
+              cp -R build/MBRPreview.appex $out/
+            '';
+          };
         }
         // {
           # Core CLI binary (all platforms) - no app bundle, no QuickLook
           # Statically links ffmpeg — no runtime ffmpeg dependency
           mbr-cli = craneLib.buildPackage (commonArgs
-        // {
-          inherit cargoArtifacts;
-          pname = "mbr-cli";
-          cargoExtraArgs = "--locked --features ${cliFeatures}";
-          doCheck = false; # Tests run separately via packages.tests
+            // {
+              inherit cargoArtifacts;
+              pname = "mbr-cli";
+              cargoExtraArgs = "--locked --features ${cliFeatures}";
+              doCheck = false; # Tests run separately via packages.tests
 
-          preBuild = ''
-            mkdir -p templates/components-js
-            cp -r ${packages.mbr-components}/* templates/components-js/
-          '';
+              preBuild = ''
+                mkdir -p templates/components-js
+                cp -r ${packages.mbr-components}/* templates/components-js/
+              '';
 
-          meta = with pkgs.lib; {
-            description = "A markdown viewer, browser, and static site generator (CLI only)";
-            homepage = "https://github.com/zmre/mbr";
-            license = licenses.gpl3Plus;
-            mainProgram = "mbr";
-            platforms = platforms.unix;
-          };
-        });
+              meta = with pkgs.lib; {
+                description = "A markdown viewer, browser, and static site generator (CLI only)";
+                homepage = "https://github.com/zmre/mbr";
+                license = licenses.gpl3Plus;
+                mainProgram = "mbr";
+                platforms = platforms.unix;
+              };
+            });
 
           # Main package: CLI on Linux, CLI + app bundle + QuickLook on macOS
           mbr =
             if pkgs.stdenv.isDarwin
-        then
-          pkgs.stdenv.mkDerivation {
-            pname = "mbr";
-            inherit version;
+            then
+              pkgs.stdenv.mkDerivation {
+                pname = "mbr";
+                inherit version;
 
-            # No source needed - we're assembling the app bundle around mbr-cli
-            dontUnpack = true;
+                # No source needed - we're assembling the app bundle around mbr-cli
+                dontUnpack = true;
 
-            # makeBinaryWrapper produces a compiled Mach-O wrapper (not a shell
-            # script) for the bin/ entry point below.
-            nativeBuildInputs = [pkgs.makeBinaryWrapper];
+                # makeBinaryWrapper produces a compiled Mach-O wrapper (not a shell
+                # script) for the bin/ entry point below.
+                nativeBuildInputs = [pkgs.makeBinaryWrapper];
 
-            installPhase = ''
-              # macOS app bundle. The REAL binary lives inside the bundle at
-              # Contents/MacOS/mbr — it is NOT a wrapper that execs out to the
-              # nix-store CLI. macOS derives NSBundle.mainBundle (and thus the
-              # dock icon, app name, and Info.plist identity) from the running
-              # executable's path, read UNRESOLVED via _NSGetExecutablePath. So a
-              # bundle executable that execs a path outside the bundle would lose
-              # the app identity. Keeping the real binary here makes a Finder
-              # launch resolve to MBR.app correctly.
-              mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Frameworks,Resources,PlugIns}
+                installPhase = ''
+                  # macOS app bundle. The REAL binary lives inside the bundle at
+                  # Contents/MacOS/mbr — it is NOT a wrapper that execs out to the
+                  # nix-store CLI. macOS derives NSBundle.mainBundle (and thus the
+                  # dock icon, app name, and Info.plist identity) from the running
+                  # executable's path, read UNRESOLVED via _NSGetExecutablePath. So a
+                  # bundle executable that execs a path outside the bundle would lose
+                  # the app identity. Keeping the real binary here makes a Finder
+                  # launch resolve to MBR.app correctly.
+                  mkdir -p $out/Applications/MBR.app/Contents/{MacOS,Frameworks,Resources,PlugIns}
 
-              cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
-              chmod u+w $out/Applications/MBR.app/Contents/MacOS/mbr
+                  cp ${packages.mbr-cli}/bin/mbr $out/Applications/MBR.app/Contents/MacOS/mbr
+                  chmod u+w $out/Applications/MBR.app/Contents/MacOS/mbr
 
-              # Bundle pdfium in Frameworks/. The bundle binary discovers it
-              # relative to the executable (Contents/MacOS/mbr -> ../Frameworks/),
-              # so no PDFIUM_DYNAMIC_LIB_PATH is needed when launched from the
-              # bundle. Release builds also rely on this when Nix store paths are absent.
-              cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib $out/Applications/MBR.app/Contents/Frameworks/
+                  # Bundle pdfium in Frameworks/. The bundle binary discovers it
+                  # relative to the executable (Contents/MacOS/mbr -> ../Frameworks/),
+                  # so no PDFIUM_DYNAMIC_LIB_PATH is needed when launched from the
+                  # bundle. Release builds also rely on this when Nix store paths are absent.
+                  cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib $out/Applications/MBR.app/Contents/Frameworks/
 
-              cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
-              cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
+                  cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
+                  cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-              # QuickLook extension (make writable for codesigning)
-              cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
-              chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+                  # QuickLook extension (make writable for codesigning)
+                  cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
+                  chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
 
-              # Sign components from innermost to outermost:
-              # 1. Sign the bundled framework library
-              /usr/bin/codesign --force --sign - \
-                $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
-              # 2. Sign the QuickLook extension with its entitlements
-              /usr/bin/codesign --force --sign - \
-                --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
-                $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
-              # 3. Sign the app bundle (also signs Contents/MacOS/mbr)
-              /usr/bin/codesign --force --sign - $out/Applications/MBR.app
+                  # Sign components from innermost to outermost:
+                  # 1. Sign the bundled framework library
+                  /usr/bin/codesign --force --sign - \
+                    $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
+                  # 2. Sign the QuickLook extension with its entitlements
+                  /usr/bin/codesign --force --sign - \
+                    --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+                  # 3. Sign the app bundle (also signs Contents/MacOS/mbr)
+                  /usr/bin/codesign --force --sign - $out/Applications/MBR.app
 
-              # CLI entry point: a thin wrapper that execs the binary INSIDE the
-              # bundle. Because the wrapper execs a path within MBR.app, after the
-              # exec the process's executable path is Contents/MacOS/mbr, so
-              # running `mbr` from the command line inherits the app identity and
-              # gets the proper dock icon. A bare symlink would NOT work here:
-              # macOS reads the exec path unresolved, so it would look for a bundle
-              # around $out/bin and find none. PDFIUM_DYNAMIC_LIB_PATH is set as a
-              # belt-and-suspenders fallback (the Frameworks copy also works).
-              mkdir -p $out/bin
-              makeBinaryWrapper $out/Applications/MBR.app/Contents/MacOS/mbr $out/bin/mbr \
-                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
-            '';
+                  # CLI entry point: a thin wrapper that execs the binary INSIDE the
+                  # bundle. Because the wrapper execs a path within MBR.app, after the
+                  # exec the process's executable path is Contents/MacOS/mbr, so
+                  # running `mbr` from the command line inherits the app identity and
+                  # gets the proper dock icon. A bare symlink would NOT work here:
+                  # macOS reads the exec path unresolved, so it would look for a bundle
+                  # around $out/bin and find none. PDFIUM_DYNAMIC_LIB_PATH is set as a
+                  # belt-and-suspenders fallback (the Frameworks copy also works).
+                  mkdir -p $out/bin
+                  makeBinaryWrapper $out/Applications/MBR.app/Contents/MacOS/mbr $out/bin/mbr \
+                    --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+                '';
 
-            meta = with pkgs.lib; {
-              description = "A markdown viewer, browser, and static site generator";
-              homepage = "https://github.com/zmre/mbr";
-              license = licenses.gpl3Plus;
-              mainProgram = "mbr";
-              platforms = platforms.darwin;
-            };
-          }
-        else
-          # Linux: wrap the CLI binary with pdfium path
-          pkgs.stdenv.mkDerivation {
-            pname = "mbr";
-            inherit version;
-            dontUnpack = true;
-            nativeBuildInputs = [pkgs.makeBinaryWrapper];
-            installPhase = ''
-              mkdir -p $out/bin
-              makeBinaryWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
-                --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
-            '';
-            meta = packages.mbr-cli.meta;
-          };
+                meta = with pkgs.lib; {
+                  description = "A markdown viewer, browser, and static site generator";
+                  homepage = "https://github.com/zmre/mbr";
+                  license = licenses.gpl3Plus;
+                  mainProgram = "mbr";
+                  platforms = platforms.darwin;
+                };
+              }
+            else
+              # Linux: wrap the CLI binary with pdfium path
+              pkgs.stdenv.mkDerivation {
+                pname = "mbr";
+                inherit version;
+                dontUnpack = true;
+                nativeBuildInputs = [pkgs.makeBinaryWrapper];
+                installPhase = ''
+                  mkdir -p $out/bin
+                  makeBinaryWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
+                    --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+                '';
+                meta = packages.mbr-cli.meta;
+              };
 
           # Clippy check - runs lints without full build
           clippy = craneLib.cargoClippy (commonArgs
-        // {
-          inherit cargoArtifacts;
-          cargoClippyExtraArgs = "--all-targets -- -D warnings";
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
 
-          preBuild = ''
-            mkdir -p templates/components-js
-            cp -r ${packages.mbr-components}/* templates/components-js/
-          '';
-        });
+              preBuild = ''
+                mkdir -p templates/components-js
+                cp -r ${packages.mbr-components}/* templates/components-js/
+              '';
+            });
 
           # Test - runs all tests
           tests = craneLib.cargoTest (commonArgs
-        // {
-          inherit cargoArtifacts;
-          cargoTestExtraArgs = "--features ${cliFeatures}";
+            // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "--features ${cliFeatures}";
 
-          preBuild = ''
-            mkdir -p templates/components-js
-            cp -r ${packages.mbr-components}/* templates/components-js/
-          '';
-        });
+              preBuild = ''
+                mkdir -p templates/components-js
+                cp -r ${packages.mbr-components}/* templates/components-js/
+              '';
+            });
+
+          # Lint + test the exact feature set Windows ships, but on the Nix
+          # builder.
+          #
+          # Cargo feature combinations are only as tested as the combinations you
+          # build. `--no-default-features --features gui` turns off
+          # `media-metadata`, which cfg-gates whole CLI arguments — and a stale
+          # `conflicts_with_all` reference to a gated argument makes clap panic at
+          # startup on *every* invocation, not just in tests. That is a
+          # feature-resolution bug, not a platform bug, so catching it here gives
+          # fast feedback instead of waiting on a Windows runner.
+          #
+          # These exist as flake attrs rather than `nix develop --command cargo
+          # ...` in CI so the compile is cached like every other check: the dev
+          # shell was cached, but the cargo build inside it was not, so ci.yml's
+          # minimal-features job recompiled this whole dependency tree on every
+          # PR.
+          clippy-minimal = craneLib.cargoClippy (commonArgs
+            // {
+              cargoArtifacts = cargoArtifactsMinimal;
+              pname = "mbr-minimal";
+              cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+
+              preBuild = ''
+                mkdir -p templates/components-js
+                cp -r ${packages.mbr-components}/* templates/components-js/
+              '';
+            });
+
+          tests-minimal = craneLib.cargoTest (commonArgs
+            // {
+              cargoArtifacts = cargoArtifactsMinimal;
+              pname = "mbr-minimal";
+              # Features go in cargoExtraArgs ONLY. crane composes the command as
+              # `cargo test ${cargoExtraArgs} ${cargoTestExtraArgs}`, and cargo
+              # rejects a repeated `--no-default-features` ("cannot be used
+              # multiple times"), so setting the feature flags in both places
+              # fails the build. The sibling `tests` attr above puts them in
+              # cargoTestExtraArgs instead, which is fine there only because it
+              # passes `--features` alone.
+              cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+
+              preBuild = ''
+                mkdir -p templates/components-js
+                cp -r ${packages.mbr-components}/* templates/components-js/
+              '';
+            });
 
           # Format check
           fmt = craneLib.cargoFmt {
@@ -609,33 +692,33 @@
           # Excludes Generated/ directory (UniFFI auto-generated code)
           swiftfmt =
             pkgs.runCommand "mbr-swiftfmt-check" {
-          nativeBuildInputs = [pkgs.swiftformat];
-        } ''
-          cd ${src}/quicklook
-          # Use explicit exclusion since config file may not be accessible in sandbox
-          swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed" && exit 1)
-          touch $out
-        '';
+              nativeBuildInputs = [pkgs.swiftformat];
+            } ''
+              cd ${src}/quicklook
+              # Use explicit exclusion since config file may not be accessible in sandbox
+              swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed" && exit 1)
+              touch $out
+            '';
 
           # Swift lint check (Darwin only)
           # Excludes Generated/ directory (UniFFI auto-generated code)
           swiftlint-check =
             pkgs.runCommand "mbr-swiftlint-check" {
-          nativeBuildInputs = [pkgs.swiftlint];
-          # SwiftLint needs HOME for cache directory
-          HOME = "/tmp";
-        } ''
-          cd ${src}/quicklook
-          # Check for violations (swiftlint may error about cache but still report correctly)
-          output=$(swiftlint lint --config .swiftlint.yml . 2>&1 || true)
-          echo "$output"
-          # Fail if violations found
-          if echo "$output" | grep -q "Found [1-9][0-9]* violation"; then
-            echo "SwiftLint check failed - violations found"
-            exit 1
-          fi
-          touch $out
-        '';
+              nativeBuildInputs = [pkgs.swiftlint];
+              # SwiftLint needs HOME for cache directory
+              HOME = "/tmp";
+            } ''
+              cd ${src}/quicklook
+              # Check for violations (swiftlint may error about cache but still report correctly)
+              output=$(swiftlint lint --config .swiftlint.yml . 2>&1 || true)
+              echo "$output"
+              # Fail if violations found
+              if echo "$output" | grep -q "Found [1-9][0-9]* violation"; then
+                echo "SwiftLint check failed - violations found"
+                exit 1
+              fi
+              touch $out
+            '';
         }
         // {
           # Expose the minimal static ffmpeg for independent build/verification
@@ -647,97 +730,97 @@
           # Bundles pdfium library for PDF cover image generation
           release =
             pkgs.runCommand "mbr-release-${version}" {
-          nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
-        } (
-          if pkgs.stdenv.isDarwin
-          then ''
-            mkdir -p $out
+              nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
+            } (
+              if pkgs.stdenv.isDarwin
+              then ''
+                mkdir -p $out
 
-            # Create staging directory for app bundle
-            # Start from the full app bundle (has pdfium, QuickLook, etc.)
-            mkdir -p staging
-            cp -R ${packages.mbr}/Applications/MBR.app staging/
+                # Create staging directory for app bundle
+                # Start from the full app bundle (has pdfium, QuickLook, etc.)
+                mkdir -p staging
+                cp -R ${packages.mbr}/Applications/MBR.app staging/
 
-            # Replace the wrapper binary with the unwrapped binary (no pdfium env var wrapper)
-            # The release bundle has pdfium in Frameworks/ so the wrapper is unnecessary
-            chmod u+w staging/MBR.app/Contents/MacOS
-            chmod u+w staging/MBR.app/Contents/MacOS/mbr
-            cp ${packages.mbr-cli}/bin/mbr staging/MBR.app/Contents/MacOS/mbr
+                # Replace the wrapper binary with the unwrapped binary (no pdfium env var wrapper)
+                # The release bundle has pdfium in Frameworks/ so the wrapper is unnecessary
+                chmod u+w staging/MBR.app/Contents/MacOS
+                chmod u+w staging/MBR.app/Contents/MacOS/mbr
+                cp ${packages.mbr-cli}/bin/mbr staging/MBR.app/Contents/MacOS/mbr
 
-            # Rewrite Nix store libiconv path to system libiconv
-            # Nix's linker uses its own libiconv, but macOS ships /usr/lib/libiconv.2.dylib
-            /usr/bin/install_name_tool -change \
-              ${pkgs.libiconv}/lib/libiconv.2.dylib \
-              /usr/lib/libiconv.2.dylib \
-              staging/MBR.app/Contents/MacOS/mbr
+                # Rewrite Nix store libiconv path to system libiconv
+                # Nix's linker uses its own libiconv, but macOS ships /usr/lib/libiconv.2.dylib
+                /usr/bin/install_name_tool -change \
+                  ${pkgs.libiconv}/lib/libiconv.2.dylib \
+                  /usr/lib/libiconv.2.dylib \
+                  staging/MBR.app/Contents/MacOS/mbr
 
-            # Re-sign: replacing the binary invalidates the original signature.
-            # codesign may fail inside Nix sandbox, so allow failure and strip
-            # invalid signatures if signing doesn't work.
-            /usr/bin/codesign --force --sign - \
-              staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || \
-              /usr/bin/codesign --remove-signature \
-                staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || true
-            /usr/bin/codesign --force --sign - \
-              --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
-              staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || \
-              /usr/bin/codesign --remove-signature \
-                staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
-            /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || \
-              /usr/bin/codesign --remove-signature staging/MBR.app 2>/dev/null || true
+                # Re-sign: replacing the binary invalidates the original signature.
+                # codesign may fail inside Nix sandbox, so allow failure and strip
+                # invalid signatures if signing doesn't work.
+                /usr/bin/codesign --force --sign - \
+                  staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || \
+                  /usr/bin/codesign --remove-signature \
+                    staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || true
+                /usr/bin/codesign --force --sign - \
+                  --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                  staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || \
+                  /usr/bin/codesign --remove-signature \
+                    staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
+                /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || \
+                  /usr/bin/codesign --remove-signature staging/MBR.app 2>/dev/null || true
 
-            # Create .app bundle archive
-            tar -czvf $out/mbr-${archString}.tar.gz \
-              -C staging \
-              MBR.app
+                # Create .app bundle archive
+                tar -czvf $out/mbr-${archString}.tar.gz \
+                  -C staging \
+                  MBR.app
 
-            # Create CLI archive with bundled pdfium in lib/ subdirectory
-            mkdir -p staging-cli/lib
-            cp ${packages.mbr-cli}/bin/mbr staging-cli/
-            cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging-cli/lib/
-            # Rewrite Nix store libiconv path to system libiconv
-            /usr/bin/install_name_tool -change \
-              ${pkgs.libiconv}/lib/libiconv.2.dylib \
-              /usr/lib/libiconv.2.dylib \
-              staging-cli/mbr
-            tar -czvf $out/mbr-cli-${archString}.tar.gz \
-              -C staging-cli \
-              mbr lib
+                # Create CLI archive with bundled pdfium in lib/ subdirectory
+                mkdir -p staging-cli/lib
+                cp ${packages.mbr-cli}/bin/mbr staging-cli/
+                cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging-cli/lib/
+                # Rewrite Nix store libiconv path to system libiconv
+                /usr/bin/install_name_tool -change \
+                  ${pkgs.libiconv}/lib/libiconv.2.dylib \
+                  /usr/lib/libiconv.2.dylib \
+                  staging-cli/mbr
+                tar -czvf $out/mbr-cli-${archString}.tar.gz \
+                  -C staging-cli \
+                  mbr lib
 
-            # Create checksums
-            cd $out
-            sha256sum *.tar.gz > SHA256SUMS
+                # Create checksums
+                cd $out
+                sha256sum *.tar.gz > SHA256SUMS
 
-            echo ""
-            echo "Release artifacts:"
-            ls -lh $out/
-          ''
-          else ''
-            mkdir -p $out
+                echo ""
+                echo "Release artifacts:"
+                ls -lh $out/
+              ''
+              else ''
+                mkdir -p $out
 
-            # Create CLI archive with bundled pdfium in lib/ subdirectory
-            mkdir -p staging/lib
-            cp ${packages.mbr-cli}/bin/mbr staging/
-            cp ${pkgs.pdfium-binaries}/lib/libpdfium.so staging/lib/
-            tar -czvf $out/mbr-${archString}.tar.gz \
-              -C staging \
-              mbr lib
+                # Create CLI archive with bundled pdfium in lib/ subdirectory
+                mkdir -p staging/lib
+                cp ${packages.mbr-cli}/bin/mbr staging/
+                cp ${pkgs.pdfium-binaries}/lib/libpdfium.so staging/lib/
+                tar -czvf $out/mbr-${archString}.tar.gz \
+                  -C staging \
+                  mbr lib
 
-            # Create checksums
-            cd $out
-            sha256sum *.tar.gz > SHA256SUMS
+                # Create checksums
+                cd $out
+                sha256sum *.tar.gz > SHA256SUMS
 
-            echo ""
-            echo "Release artifacts:"
-            ls -lh $out/
-          ''
-        );
+                echo ""
+                echo "Release artifacts:"
+                ls -lh $out/
+              ''
+            );
         };
 
       # Checks run by `nix flake check`
       checks =
         {
-          inherit (packages) mbr-cli clippy fmt tests;
+          inherit (packages) mbr-cli clippy fmt tests clippy-minimal tests-minimal;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           inherit (packages) swiftfmt swiftlint-check mbr;
@@ -777,6 +860,7 @@
           packages = with pkgs;
             [
               cargo-watch
+              cargo-audit
               imagemagick
             ]
             ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [
