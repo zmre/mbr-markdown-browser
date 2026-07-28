@@ -15,13 +15,25 @@ jobs = 8
 # This is safe for our dependency set. The usual thing that blocks a static CRT
 # is LNK2038 "mismatch detected for 'RuntimeLibrary'" from a prebuilt .lib that
 # hardcodes the dynamic CRT. The candidate here is webview2-com-sys, which links
-# WebView2LoaderStatic.lib on MSVC. The complete set of linker directives
-# embedded in both the arm64 and x64 copies of that .lib is /DEFAULTLIB:ole32.lib
-# and /DEFAULTLIB:uuid.lib — no /DEFAULTLIB:MSVCRT and no /FAILIFMISMATCH on
-# RuntimeLibrary — so Microsoft compiled it CRT-agnostic (/Zl) and it links
-# against either CRT. The only other C-compiled dependency in the Windows feature
-# set (`--no-default-features --features gui`) is ring, and the cc crate reads
-# crt-static out of CARGO_CFG_TARGET_FEATURE and switches to /MT by itself.
+# WebView2LoaderStatic.lib on MSVC and offers no way to use the DLL instead (the
+# choice is hardcoded in its src/lib.rs, and neither webview2-com nor wry exposes
+# a feature for it). That library cannot produce LNK2038: both the arm64 and x64
+# copies are clang-built with -D_MT -D_VC_NODEFAULTLIB and contain no _DLL, no
+# detect_mismatch/FAILIFMISMATCH records, no __imp_-prefixed CRT imports, and no
+# CRT DEFAULTLIB directive (only ole32.lib and uuid.lib). LNK2038 fires only when
+# two objects carry *conflicting* detect_mismatch values; with none present there
+# is nothing to conflict. It calls CRT symbols directly (memcpy, _purecall), which
+# resolve against libcmt.lib under /MT and msvcrt.lib's forwarding thunks under
+# /MD — hence it links cleanly either way.
+#
+# The only other C-compiled dependency in the Windows feature set
+# (`--no-default-features --features gui`) is ring; tao, muda, rfd, wry and
+# webview2-com have no build scripts at all. The cc crate reads crt-static out of
+# CARGO_CFG_TARGET_FEATURE and switches to /MT by itself. Note that ring's
+# build.rs force-sets `c.compiler("clang")` on Windows ARM64, and cc only emits
+# /MT for its Msvc tool family — if that ever lands as plain Clang instead, the
+# ARM64 build fails loudly at link time (LNK4098 plus unresolved __imp_*) rather
+# than shipping a subtly wrong binary.
 #
 # ci.yml and release.yml both assert that the built mbr.exe imports neither
 # VCRUNTIME140 nor MSVCP140, so deleting this block fails CI rather than quietly
@@ -31,5 +43,15 @@ jobs = 8
 # .cargo/config.toml is not part of the published crate and cargo install builds
 # in a temp directory, so the flag is never read. That is acceptable — anyone
 # building from source already has the MSVC toolchain, and with it the redist.
+#
+# Accepted trade-off: this also statically links the UCRT, which Microsoft ships
+# as a Windows-Update-serviced OS component, so UCRT fixes never reach mbr.exe.
+# The alternative is a hybrid — static vcruntime, dynamic UCRT — which is what
+# Tauri ships for this same wry/tao/webview2 stack. It is deliberately not done
+# here because the link args are profile-dependent (release wants
+# /nodefaultlib:libucrt.lib + ucrt.lib, debug wants the ...d.lib variants) and
+# config-file rustflags cannot vary by profile, so doing it properly means taking
+# on a build-script dependency. Revisit if UCRT servicing starts to matter; the
+# CI import assertions work unchanged either way. See TODO.md.
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "target-feature=+crt-static"]
