@@ -5,8 +5,10 @@
 //! while preserving the original display form.
 
 use papaya::HashMap;
+use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use crate::wikilink::normalize_tag_value;
 
@@ -66,15 +68,30 @@ pub struct TagInfo {
     pub count: usize,
 }
 
+/// The pages carrying one tag, keyed by `url_path`.
+///
+/// Keying by `url_path` makes the duplicate check O(log k) instead of the O(k)
+/// linear scan it used to be, and a `BTreeMap` additionally yields pages in url
+/// order on read, so tag pages are deterministic no matter what order the
+/// parallel scanner happened to visit files in.
+///
+/// The bucket lives behind its own lock rather than being stored in the papaya
+/// map by value: a papaya `update_or_insert_with` closure must produce a *new*
+/// value from the old one, so growing a `Vec` that way cloned every page
+/// already under the tag on every insert (quadratic), and the closure re-ran on
+/// every CAS retry under parallel insertion. Here the papaya entry is written
+/// once per tag and every later insert only takes the bucket's own lock.
+type TagBucket = Arc<Mutex<BTreeMap<String, TaggedPage>>>;
+
 /// Thread-safe index of tagged pages.
 ///
 /// Uses papaya concurrent HashMap for lock-free reads and writes.
 /// Keys are normalized (lowercase source, lowercase+underscore value),
 /// while display forms are preserved from the first occurrence.
 pub struct TagIndex {
-    /// Map of (source, tag_value) -> Vec<TaggedPage>
+    /// Map of (source, tag_value) -> pages carrying that tag.
     /// Key format: "{normalized_source}:{normalized_value}"
-    index: HashMap<String, Vec<TaggedPage>>,
+    index: HashMap<String, TagBucket>,
     /// Map of normalized tag key -> display value (first occurrence wins)
     display_values: HashMap<String, String>,
     /// Set of all sources that have at least one tag
@@ -114,6 +131,9 @@ impl TagIndex {
 
     /// Adds a page to the index under the given source and tag value.
     ///
+    /// Adding a page already present under this tag (same `url_path`) is a
+    /// no-op: the first occurrence wins.
+    ///
     /// # Arguments
     ///
     /// * `source` - The tag source (e.g., "tags", "performers")
@@ -127,7 +147,7 @@ impl TagIndex {
         // Track the source (first occurrence wins for display)
         let sources_guard = self.sources.pin();
         if sources_guard.get(&norm_source).is_none() {
-            sources_guard.insert(norm_source.clone(), source.to_string());
+            sources_guard.insert(norm_source, source.to_string());
         }
 
         // Track display value (first occurrence wins)
@@ -136,26 +156,24 @@ impl TagIndex {
             display_guard.insert(key.clone(), value.to_string());
         }
 
-        // Add page to the index atomically to avoid TOCTOU race under parallel insertion.
-        let guard = self.index.pin();
-        let page_for_insert = page.clone();
-        guard.update_or_insert_with(
-            key,
-            move |existing| {
-                // Avoid duplicate pages (same url_path)
-                if existing.iter().any(|p| p.url_path == page.url_path) {
-                    existing.clone()
-                } else {
-                    let mut pages = existing.clone();
-                    pages.push(page.clone());
-                    pages
-                }
-            },
-            || vec![page_for_insert],
-        );
+        // Resolve this tag's bucket, creating it if this is the tag's first
+        // page. `get_or_insert_with` always hands back whichever bucket won the
+        // race, so concurrent callers converge on one bucket instead of each
+        // rebuilding the tag's whole page list.
+        let bucket = self
+            .index
+            .pin()
+            .get_or_insert_with(key, TagBucket::default)
+            .clone();
+
+        // Dedupe on url_path; the first page recorded for a url wins.
+        bucket.lock().entry(page.url_path.clone()).or_insert(page);
     }
 
     /// Gets all pages tagged with the given source and value.
+    ///
+    /// Pages are returned sorted by `url_path`, so repeated calls (and repeated
+    /// static builds) produce the same order regardless of scan order.
     ///
     /// Returns an empty vector if no pages have this tag.
     pub fn get_pages(&self, source: &str, value: &str) -> Vec<TaggedPage> {
@@ -163,7 +181,11 @@ impl TagIndex {
         let norm_value = Self::normalize_value(value);
         let key = Self::make_key(&norm_source, &norm_value);
 
-        self.index.pin().get(&key).cloned().unwrap_or_default()
+        self.index
+            .pin()
+            .get(&key)
+            .map(|bucket| bucket.lock().values().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Gets all unique tags for a given source.
@@ -179,17 +201,23 @@ impl TagIndex {
         let mut tags: Vec<TagInfo> = guard
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(key, pages)| {
-                let norm_value = key.strip_prefix(&prefix).unwrap_or(key).to_string();
-                let display = display_guard
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| norm_value.clone());
-                TagInfo {
-                    normalized: norm_value,
-                    display,
-                    count: pages.len(),
-                }
+            .filter_map(|(key, bucket)| {
+                // A bucket is only ever observably empty in the instant between
+                // its creation and its first page landing; skip it so a tag is
+                // never listed with zero pages.
+                let count = bucket.lock().len();
+                (count > 0).then(|| {
+                    let norm_value = key.strip_prefix(&prefix).unwrap_or(key).to_string();
+                    let display = display_guard
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| norm_value.clone());
+                    TagInfo {
+                        normalized: norm_value,
+                        display,
+                        count,
+                    }
+                })
             })
             .collect();
 
@@ -220,13 +248,16 @@ impl TagIndex {
         self.display_values.pin().get(&key).cloned()
     }
 
-    /// Checks if a tag exists in the index.
+    /// Checks if a tag exists in the index (i.e. has at least one page).
     pub fn has_tag(&self, source: &str, value: &str) -> bool {
         let norm_source = Self::normalize_source(source);
         let norm_value = Self::normalize_value(value);
         let key = Self::make_key(&norm_source, &norm_value);
 
-        self.index.pin().get(&key).is_some()
+        self.index
+            .pin()
+            .get(&key)
+            .is_some_and(|bucket| !bucket.lock().is_empty())
     }
 
     /// Checks if a source has any tags.
@@ -259,6 +290,7 @@ impl TagIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rayon::prelude::*;
 
     #[test]
     fn test_normalize_source() {
@@ -471,5 +503,143 @@ mod tests {
 
         assert_eq!(page.title, "Page Title");
         assert_eq!(page.description, Some("This is a description".to_string()));
+    }
+
+    #[test]
+    fn test_get_pages_sorted_by_url_path() {
+        let index = TagIndex::new();
+
+        // Insert out of order; read order must not depend on insertion order.
+        index.add_page("tags", "rust", TaggedPage::new("/z-last/", "Z", "rust"));
+        index.add_page("tags", "rust", TaggedPage::new("/m-middle/", "M", "rust"));
+        index.add_page("tags", "rust", TaggedPage::new("/a-first/", "A", "rust"));
+
+        let urls: Vec<String> = index
+            .get_pages("tags", "rust")
+            .into_iter()
+            .map(|p| p.url_path)
+            .collect();
+
+        assert_eq!(urls, vec!["/a-first/", "/m-middle/", "/z-last/"]);
+    }
+
+    #[test]
+    fn test_duplicate_page_keeps_first_occurrence() {
+        let index = TagIndex::new();
+
+        index.add_page(
+            "tags",
+            "rust",
+            TaggedPage::new("/page/", "First Title", "rust"),
+        );
+        index.add_page(
+            "tags",
+            "rust",
+            TaggedPage::new("/page/", "Second Title", "rust"),
+        );
+
+        let pages = index.get_pages("tags", "rust");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].title, "First Title");
+    }
+
+    #[test]
+    fn test_parallel_add_page_has_no_lost_updates() {
+        let index = TagIndex::new();
+        let pages = dominant_tag_pages(2_000);
+
+        // Every page shares the dominant tag and each also gets its own tag, so
+        // threads contend on one bucket while also creating fresh buckets.
+        pages.par_iter().enumerate().for_each(|(i, page)| {
+            index.add_page("tags", "note", page.clone());
+            index.add_page("tags", &format!("topic-{}", i % 10), page.clone());
+        });
+
+        let dominant = index.get_pages("tags", "note");
+        assert_eq!(dominant.len(), 2_000, "lost updates under parallel insert");
+
+        // No duplicates, and still sorted.
+        let urls: Vec<&str> = dominant.iter().map(|p| p.url_path.as_str()).collect();
+        let unique: HashSet<&str> = urls.iter().copied().collect();
+        assert_eq!(unique.len(), 2_000, "duplicate pages under parallel insert");
+        assert!(urls.windows(2).all(|w| w[0] < w[1]), "not url-sorted");
+
+        // Long-tail buckets each hold their share, and counts agree with reads.
+        let tags = index.get_all_tags("tags");
+        assert_eq!(tags.len(), 11);
+        for tag in &tags {
+            assert_eq!(
+                tag.count,
+                index.get_pages("tags", &tag.normalized).len(),
+                "count disagrees with get_pages for {}",
+                tag.normalized
+            );
+        }
+    }
+
+    #[test]
+    fn test_parallel_add_of_same_page_dedupes() {
+        let index = TagIndex::new();
+        let page = TaggedPage::new("/page/", "Page", "rust");
+
+        // Same page inserted concurrently from many threads.
+        (0..1_000).into_par_iter().for_each(|_| {
+            index.add_page("tags", "rust", page.clone());
+        });
+
+        assert_eq!(index.get_pages("tags", "rust").len(), 1);
+        assert_eq!(index.get_all_tags("tags")[0].count, 1);
+    }
+
+    /// Builds `count` pages that all share a single dominant tag, mirroring the
+    /// common vault shape where most notes carry the same `tags: [note]` entry.
+    fn dominant_tag_pages(count: usize) -> Vec<TaggedPage> {
+        (0..count)
+            .map(|i| {
+                TaggedPage::with_description(
+                    format!("/notes/note-{i:05}/"),
+                    format!("Note {i}"),
+                    "A note in a large vault",
+                    "note",
+                )
+            })
+            .collect()
+    }
+
+    /// Timing harness for the dominant-tag insert path (not an assertion).
+    ///
+    /// Run with:
+    /// `cargo test --lib tag_index::tests::timing_dominant_tag_inserts -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing harness: run manually with --ignored --nocapture"]
+    fn timing_dominant_tag_inserts() {
+        use std::time::Instant;
+
+        let pages = dominant_tag_pages(10_000);
+
+        let index = TagIndex::new();
+        let serial_start = Instant::now();
+        for page in &pages {
+            index.add_page("tags", "note", page.clone());
+        }
+        let serial = serial_start.elapsed();
+        assert_eq!(index.get_pages("tags", "note").len(), 10_000);
+
+        let par_index = TagIndex::new();
+        let par_start = Instant::now();
+        pages.par_iter().for_each(|page| {
+            par_index.add_page("tags", "note", page.clone());
+        });
+        let parallel = par_start.elapsed();
+        assert_eq!(par_index.get_pages("tags", "note").len(), 10_000);
+
+        let read_start = Instant::now();
+        let read = index.get_pages("tags", "note");
+        let read_elapsed = read_start.elapsed();
+        assert_eq!(read.len(), 10_000);
+
+        println!("10k dominant-tag inserts, serial:   {serial:?}");
+        println!("10k dominant-tag inserts, parallel: {parallel:?}");
+        println!("get_pages over 10k pages:           {read_elapsed:?}");
     }
 }

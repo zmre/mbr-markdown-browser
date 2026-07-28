@@ -292,9 +292,16 @@ These functions have been extracted for testability:
 
 ### Configuration Hierarchy
 
+Lowest precedence first (later layers win):
+
 1. Compiled-in defaults (config.rs `Default` impl)
-2. Environment variables (`MBR_*` prefix)
-3. `.mbr/config.toml` in the markdown root
+2. `.mbr/config.toml` in the markdown root
+3. Environment variables (`MBR_*` prefix)
+4. Command-line flags
+
+Environment variables deliberately override `.mbr/config.toml`, because the
+config file ships inside the markdown repository and the operator serving it may
+not be its author.
 
 The root directory is found by searching upward for common repository markers:
 - **Directories** (in order): `.mbr/`, `.git/`, `.zk/`, `.obsidian/`

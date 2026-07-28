@@ -111,6 +111,12 @@ impl Vid {
     /// - Original MP4 as final fallback (no media query) - Chrome/Firefox/Edge on mobile
     ///
     /// Note: Time fragments (#t=start,end) only apply to MP4 sources, not HLS.
+    ///
+    /// Every interpolated value is HTML-escaped. The result is emitted as a raw
+    /// `Event::Html` that `html.rs` writes verbatim, and pulldown-cmark hands
+    /// back an image destination exactly as authored — so a destination such as
+    /// `a"onerror="alert(1)"b.mp4` would otherwise break out of the attribute,
+    /// and an everyday `Q&A.mp4` would emit a bare ampersand.
     pub fn to_html(&self, open_only: bool, server_mode: bool, transcode_enabled: bool) -> String {
         let mut time = "".to_string();
         if let Some(start) = self.start.as_ref() {
@@ -120,67 +126,64 @@ impl Vid {
             }
         }
 
+        // `encode_quoted_attribute` escapes both quote characters, so one
+        // encoding is correct for the single- and double-quoted attributes
+        // below.
+        let media_url = format!("{}{}", self.url, time);
+        let src_attr = html_escape::encode_quoted_attribute(&media_url);
+        let url_attr = html_escape::encode_quoted_attribute(&self.url);
+        let mime = self.to_mime_type();
+        let mime_attr = html_escape::encode_quoted_attribute(&mime);
+
         // Build source tags based on transcode mode
         let sources = if server_mode && transcode_enabled {
             // Generate multiple sources with media queries for responsive loading
-            // HLS variants for Safari, MP4 fallback for other browsers
-            let base_url = &self.url;
-            let mime = self.to_mime_type();
-
-            // Strip extension for HLS variant URLs
-            let url_base = match base_url.rsplit_once('.') {
-                Some((base, _)) => base.to_string(),
-                None => base_url.clone(),
-            };
-
-            // HLS mime type for playlists
+            // HLS variants for Safari, MP4 fallback for other browsers.
+            //
+            // HLS variant URLs *append* to the full video URL, extension
+            // included (`interview.mov-720p.m3u8`). Stripping the extension
+            // would make `interview.mov` and `interview.mp4` share one URL,
+            // and `video_transcode::parse_hls_request` could not tell which
+            // file to transcode back from it.
             let hls_mime = "application/vnd.apple.mpegurl";
 
             format!(
-                r#"<source src='{base_url}{time}' media="(min-width: 1280px)" type="{mime}">
-                    <source src='{url_base}-720p.m3u8' media="(min-width: 640px)" type="{hls_mime}">
-                    <source src='{url_base}-480p.m3u8' type="{hls_mime}">
-                    <source src='{base_url}{time}' type="{mime}">"#,
+                r#"<source src='{src_attr}' media="(min-width: 1280px)" type="{mime_attr}">
+                    <source src='{url_attr}-720p.m3u8' media="(min-width: 640px)" type="{hls_mime}">
+                    <source src='{url_attr}-480p.m3u8' type="{hls_mime}">
+                    <source src='{src_attr}' type="{mime_attr}">"#,
             )
         } else {
             // Single source - original behavior
-            format!(
-                "<source src='{}{}' type='{}'>",
-                self.url,
-                time,
-                self.to_mime_type()
-            )
+            format!("<source src='{src_attr}' type='{mime_attr}'>")
         };
 
         let caption = self
             .caption
             .clone()
             .unwrap_or_else(|| Self::fallback_caption(&self.url));
+        let caption_text = html_escape::encode_text(&caption);
+        let start_attr = html_escape::encode_quoted_attribute(self.start.as_deref().unwrap_or(""));
+        let end_attr = html_escape::encode_quoted_attribute(self.end.as_deref().unwrap_or(""));
+        let close = if open_only {
+            String::new()
+        } else {
+            Self::html_close()
+        };
 
         format!(
             r#"
             <figure>
-                <video controls preload="none" playsinline poster="{url}.cover.jpg">
+                <video controls preload="none" playsinline poster="{url_attr}.cover.jpg">
                     {sources}
-                    <track kind="captions" label="English captions" src="{url}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
-                    <track kind="chapters" language="en-US" label="Chapters" src="{url}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />
+                    <track kind="captions" label="English captions" src="{url_attr}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
+                    <track kind="chapters" language="en-US" label="Chapters" src="{url_attr}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />
                 </video>
                 <figcaption>
-                <mbr-video-extras src='{url}' start='{vidstart}' end='{vidend}'></mbr-video-extras>
-                {caption}
-                {}
+                <mbr-video-extras src='{url_attr}' start='{start_attr}' end='{end_attr}'></mbr-video-extras>
+                {caption_text}
+                {close}
             "#,
-            {
-                if open_only {
-                    "".to_string()
-                } else {
-                    Self::html_close()
-                }
-            },
-            caption = caption,
-            url = self.url,
-            vidstart = self.start.as_ref().unwrap_or(&"".to_string()),
-            vidend = self.end.as_ref().unwrap_or(&"".to_string())
         )
     }
 
@@ -386,11 +389,12 @@ mod tests {
         assert!(html.contains("<video"));
         // Original MP4 source with media query for wide screens
         assert!(html.contains(r#"src='/videos/foo.mp4#t=10,20' media="(min-width: 1280px)""#));
-        // HLS 720p variant (no time fragment - HLS doesn't support it)
-        assert!(html.contains(r#"src='/videos/foo-720p.m3u8' media="(min-width: 640px)""#));
+        // HLS 720p variant (no time fragment - HLS doesn't support it). The
+        // source extension is kept so the URL identifies exactly one file.
+        assert!(html.contains(r#"src='/videos/foo.mp4-720p.m3u8' media="(min-width: 640px)""#));
         assert!(html.contains(r#"type="application/vnd.apple.mpegurl""#));
         // HLS 480p variant (no media query - smallest HLS)
-        assert!(html.contains("src='/videos/foo-480p.m3u8'"));
+        assert!(html.contains("src='/videos/foo.mp4-480p.m3u8'"));
         // MP4 fallback (no media query) for non-Safari browsers
         // Count the number of times the original MP4 appears (should be twice)
         assert_eq!(
@@ -418,6 +422,129 @@ mod tests {
         assert!(html.contains("src='/videos/foo.mp4'"));
         // No caption provided, so fallback to filename
         assert!(html.contains("foo"));
+    }
+
+    #[test]
+    fn test_to_html_hls_urls_keep_source_extension() {
+        // A `.mov` embed must not be handed `.mp4`'s transcode: the variant
+        // URLs append to the full file name so each source has its own URLs.
+        let vid = Vid {
+            url: "/videos/interview.mov".to_string(),
+            ext: Some("mov".to_string()),
+            start: None,
+            end: None,
+            caption: None,
+        };
+        let html = vid.to_html(false, true, true);
+
+        assert!(html.contains("src='/videos/interview.mov-720p.m3u8'"));
+        assert!(html.contains("src='/videos/interview.mov-480p.m3u8'"));
+        assert!(
+            !html.contains("interview-720p.m3u8"),
+            "the extension-stripped URL collides with a same-stem .mp4 sibling"
+        );
+    }
+
+    #[test]
+    fn test_to_html_escapes_hostile_destination() {
+        // pulldown-cmark hands back `![x](a"onerror="alert(1)"b.mp4)` verbatim,
+        // and html.rs writes this string out unmodified.
+        let vid = Vid {
+            url: r#"a"onerror="alert(1)"b.mp4"#.to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: Some("Safe caption".to_string()),
+        };
+        let html = vid.to_html(false, false, false);
+
+        assert!(
+            html.contains("&quot;"),
+            "quotes in the destination must be escaped: {html}"
+        );
+        // `&quot;onerror=&quot;` is inert: the quotes that would have closed
+        // the attribute and started a handler are entities. The raw sequence
+        // must not survive anywhere.
+        assert!(
+            !html.contains(r#""onerror=""#),
+            "an escaped destination cannot introduce an event handler: {html}"
+        );
+    }
+
+    #[test]
+    fn test_to_html_hostile_destination_stays_inside_attributes() {
+        // With no caption the destination is also echoed as figcaption *text*,
+        // where quotes are harmless. What must not happen is the raw form
+        // appearing inside a tag, where it would close an attribute.
+        let vid = Vid {
+            url: r#"a"onerror="alert(1)"b.mp4"#.to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: None,
+        };
+        let html = vid.to_html(false, false, false);
+
+        let caption_start = html.find("<figcaption>").expect("figcaption is emitted");
+        assert!(
+            !html[..caption_start].contains(r#""onerror"#),
+            "no tag attribute may carry an unescaped quote: {html}"
+        );
+    }
+
+    #[test]
+    fn test_to_html_escapes_single_quote_in_destination() {
+        // The `<source>`/`<mbr-video-extras>` attributes are single-quoted, so
+        // an apostrophe in a filename must not terminate them.
+        let vid = Vid {
+            url: "/videos/Rubik's Cube.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: None,
+        };
+        let html = vid.to_html(false, false, false);
+
+        assert!(
+            html.contains("&#x27;"),
+            "apostrophe must be escaped: {html}"
+        );
+        assert!(!html.contains("src='/videos/Rubik's"));
+    }
+
+    #[test]
+    fn test_to_html_escapes_ampersand_in_filename() {
+        // Plain output correctness: a bare `&` is not valid in an attribute.
+        let vid = Vid {
+            url: "/videos/Q&A.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: None,
+        };
+        let html = vid.to_html(false, false, false);
+
+        assert!(html.contains("/videos/Q&amp;A.mp4"));
+        assert!(
+            !html.contains("Q&A.mp4"),
+            "no unescaped ampersand may reach the output: {html}"
+        );
+    }
+
+    #[test]
+    fn test_to_html_escapes_caption() {
+        let vid = Vid {
+            url: "/videos/foo.mp4".to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: Some("<script>alert(1)</script> & more".to_string()),
+        };
+        let html = vid.to_html(false, false, false);
+
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&amp; more"));
+        assert!(!html.contains("<script>"));
     }
 
     #[test]

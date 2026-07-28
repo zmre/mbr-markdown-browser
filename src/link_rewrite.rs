@@ -28,11 +28,11 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::link_grep::{
-    compute_patterns_for_folder, compute_relative_path, compute_url_path, get_folder_url_path,
+    compute_patterns_for_folder, compute_relative_path, get_folder_url_path, page_and_folder_urls,
 };
 use crate::link_index::{is_internal_link, normalize_url_path, resolve_relative_url};
 use crate::relationships::normalize_name;
-use crate::repo::{build_markdown_url_path, is_markdown_extension, should_ignore};
+use crate::repo::{is_markdown_extension, should_ignore};
 use crate::wikilink_index::WikilinkIndex;
 
 /// The bare link "bases" that could reference `old_url` from `source_folder`:
@@ -400,14 +400,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Iterates markdown files under `root_dir`, skipping ignored directories and
-/// the paths in `skip_abs`. Yields `(path, computed_url_path)` for each.
+/// the paths in `skip_abs`. Yields `(path, page_url, folder_url)` for each, as
+/// computed by [`page_and_folder_urls`] — so with `index_file` supplied the
+/// page URL is the canonical one (`docs/index.md` → `/docs/`) while the folder
+/// URL stays the one relative links resolve against (`/docs/`).
 fn markdown_files<'a>(
     root_dir: &'a Path,
     markdown_extensions: &'a [String],
     ignore_dirs: &'a [String],
     ignore_globs: &'a [String],
+    index_file: Option<&'a str>,
     skip_abs: &'a HashSet<PathBuf>,
-) -> impl Iterator<Item = (PathBuf, String)> + 'a {
+) -> impl Iterator<Item = (PathBuf, String, String)> + 'a {
     WalkDir::new(root_dir)
         .follow_links(true)
         .into_iter()
@@ -437,8 +441,9 @@ fn markdown_files<'a>(
             if should_ignore(path, ignore_dirs, ignore_globs) {
                 return None;
             }
-            let url = compute_url_path(path, root_dir, markdown_extensions);
-            Some((path.to_path_buf(), url))
+            let (page_url, folder_url) =
+                page_and_folder_urls(path, root_dir, markdown_extensions, index_file);
+            Some((path.to_path_buf(), page_url, folder_url))
         })
 }
 
@@ -466,18 +471,21 @@ pub fn rewrite_inbound_links_for_move(
 
     // Bucket files by folder URL so per-folder patterns are computed once.
     let mut folder_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for (path, source_url) in markdown_files(
+    // No index file here: this walker's caller does not carry one, and the
+    // moved file itself is already excluded by `skip_abs`, so the positional
+    // page URL below is only a defensive second check.
+    for (path, source_url, folder) in markdown_files(
         root_dir,
         markdown_extensions,
         ignore_dirs,
         ignore_globs,
+        None,
         skip_abs,
     ) {
         // Defensive: never rewrite the moved file itself.
         if source_url.trim_end_matches('/') == new_norm {
             continue;
         }
-        let folder = get_folder_url_path(&source_url);
         folder_files.entry(folder).or_default().push(path);
     }
 
@@ -537,19 +545,19 @@ pub fn rewrite_bare_wikilinks_for_rename(
     let old_norm = normalize_url_path(old_url);
     let mut changed = Vec::new();
 
-    for (path, _url) in markdown_files(
+    // Index-aware page URLs for the resolution guard (the wikilink index is
+    // keyed on index-stripped URLs).
+    for (path, file_url, _folder) in markdown_files(
         root_dir,
         markdown_extensions,
         ignore_dirs,
         ignore_globs,
+        Some(index_file),
         skip_abs,
     ) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        // Index-aware URL/flag for the resolution guard (matches the wikilink
-        // index, which is keyed on index-stripped URLs).
-        let file_url = build_markdown_url_path(&path, root_dir, index_file);
         let file_is_index = path
             .file_name()
             .and_then(|n| n.to_str())

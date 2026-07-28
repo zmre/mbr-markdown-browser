@@ -50,7 +50,13 @@ impl Audio {
 
     /// Generate HTML for audio embedding
     /// If open_only is true, leaves the figcaption unclosed for the markdown parser to add content
+    ///
+    /// The URL and MIME type are the raw markdown link destination and its
+    /// derived type (pulldown-cmark does not escape the destination, and
+    /// neither does `link_transform`), so both are escaped for double-quoted
+    /// attribute context. The caption is escaped for element-text context.
     pub fn to_html(&self, open_only: bool) -> String {
+        let mime_type = self.to_mime_type();
         format!(
             r#"
             <figure class="audio-embed">
@@ -59,9 +65,12 @@ impl Audio {
                     Your browser does not support the audio element.
                 </audio>
                 <figcaption>{}{}"#,
-            self.url,
-            self.to_mime_type(),
-            self.caption.as_deref().unwrap_or(""),
+            html_escape::encode_double_quoted_attribute(&self.url),
+            html_escape::encode_double_quoted_attribute(&mime_type),
+            self.caption
+                .as_deref()
+                .map(html_escape::encode_text)
+                .unwrap_or_default(),
             if open_only { "" } else { Self::html_close() }
         )
     }
@@ -166,5 +175,67 @@ mod tests {
     fn test_case_insensitive_extension() {
         assert!(Audio::from_url_and_title("song.MP3", "Test").is_some());
         assert!(Audio::from_url_and_title("song.Mp3", "Test").is_some());
+    }
+
+    /// Regression: a link destination containing a double quote must not be
+    /// able to close the `src` attribute and inject new attributes.
+    #[test]
+    fn test_to_html_escapes_hostile_url() {
+        let audio =
+            Audio::from_url_and_title(r#"a"onerror="alert(1)"b.mp3"#, "").expect("audio embed");
+        let html = audio.to_html(false);
+        assert!(
+            html.contains("&quot;"),
+            "double quotes must be escaped: {html}"
+        );
+        // The whole hostile destination must stay inside the src value; the
+        // injected text may appear only as escaped data, never as an attribute.
+        assert!(
+            html.contains(r#"src="a&quot;onerror=&quot;alert(1)&quot;b.mp3""#),
+            "src attribute must be fully escaped: {html}"
+        );
+        assert!(
+            !html.contains(r#""onerror=""#),
+            "must not emit an injected attribute: {html}"
+        );
+    }
+
+    /// Regression: a bare `&` in a filename is invalid in an attribute value
+    /// and must be encoded.
+    #[test]
+    fn test_to_html_escapes_ampersand_in_url() {
+        let audio = Audio::from_url_and_title("/audio/Q&A-interview.mp3", "").expect("audio embed");
+        let html = audio.to_html(false);
+        assert!(
+            html.contains(r#"src="/audio/Q&amp;A-interview.mp3""#),
+            "ampersand must be encoded: {html}"
+        );
+    }
+
+    /// Regression: captions land in element-text context and must be escaped.
+    #[test]
+    fn test_to_html_escapes_caption() {
+        let audio = Audio::from_url_and_title("song.mp3", "<script>alert(1)</script> & more")
+            .expect("audio embed");
+        let html = audio.to_html(false);
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; more"),
+            "caption must be escaped: {html}"
+        );
+        assert!(
+            !html.contains("<script>"),
+            "must not emit a raw script tag: {html}"
+        );
+    }
+
+    /// Escaping must not double-encode ordinary paths, MIME types, or captions.
+    #[test]
+    fn test_to_html_ordinary_values_round_trip_unchanged() {
+        let audio = Audio::from_url_and_title("/audio/my-song_v2.mp3", "My Song").unwrap();
+        let html = audio.to_html(false);
+        assert!(html.contains(r#"src="/audio/my-song_v2.mp3""#));
+        assert!(html.contains(r#"type="audio/mpeg""#));
+        assert!(html.contains("<figcaption>My Song</figcaption>"));
+        assert!(!html.contains("&amp;"), "nothing to escape here: {html}");
     }
 }

@@ -12,9 +12,13 @@
 //!
 //! ## URL Patterns
 //!
+//! The variant URLs are built by *appending* to the original file name, so the
+//! source extension is preserved and the URL round-trips back to exactly one
+//! file. Stripping it would make `interview.mov` and `interview.mp4` collide.
+//!
 //! - `/videos/demo.mp4` - Original video (served directly)
-//! - `/videos/demo-720p.m3u8` - HLS playlist for 720p variant
-//! - `/videos/demo-720p-005.ts` - HLS segment 5 for 720p variant
+//! - `/videos/demo.mp4-720p.m3u8` - HLS playlist for 720p variant
+//! - `/videos/demo.mp4-720p-005.ts` - HLS segment 5 for 720p variant
 
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
@@ -152,56 +156,58 @@ pub enum HlsRequest {
 ///
 /// # URL Patterns
 ///
-/// - `{base}-720p.m3u8` → Playlist for 720p variant
-/// - `{base}-480p.m3u8` → Playlist for 480p variant
-/// - `{base}-720p-{NNN}.ts` → Segment NNN for 720p variant
-/// - `{base}-480p-{NNN}.ts` → Segment NNN for 480p variant
+/// - `{video}-720p.m3u8` → Playlist for 720p variant
+/// - `{video}-480p.m3u8` → Playlist for 480p variant
+/// - `{video}-720p-{NNN}.ts` → Segment NNN for 720p variant
+/// - `{video}-480p-{NNN}.ts` → Segment NNN for 480p variant
+///
+/// `{video}` is the source path *including its extension*, so the returned
+/// `video_path` is the request path with the variant suffix removed and needs
+/// no guessing. An earlier scheme dropped the extension and rebuilt it as
+/// `.mp4`, which served `interview.mp4`'s transcode for an `interview.mov`
+/// embed and 404'd for every non-mp4 video with no mp4 sibling.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// let result = parse_hls_request("videos/demo-720p.m3u8");
+/// let result = parse_hls_request("videos/demo.mp4-720p.m3u8");
 /// assert!(matches!(result, Some(HlsRequest::Playlist { .. })));
 ///
-/// let result = parse_hls_request("videos/demo-720p-005.ts");
+/// let result = parse_hls_request("videos/demo.mov-720p-005.ts");
 /// assert!(matches!(result, Some(HlsRequest::Segment { segment_index: 5, .. })));
 /// ```
 pub fn parse_hls_request(path: &str) -> Option<HlsRequest> {
-    // Check for playlist: {base}-720p.m3u8 or {base}-480p.m3u8
-    if let Some(base) = path.strip_suffix("-720p.m3u8") {
-        let video_path = find_original_video_path(base);
+    // Check for playlist: {video}-720p.m3u8 or {video}-480p.m3u8
+    if let Some(video_path) = path.strip_suffix("-720p.m3u8") {
         return Some(HlsRequest::Playlist {
-            video_path,
+            video_path: video_path.to_string(),
             target: TranscodeTarget::Resolution720p,
         });
     }
-    if let Some(base) = path.strip_suffix("-480p.m3u8") {
-        let video_path = find_original_video_path(base);
+    if let Some(video_path) = path.strip_suffix("-480p.m3u8") {
         return Some(HlsRequest::Playlist {
-            video_path,
+            video_path: video_path.to_string(),
             target: TranscodeTarget::Resolution480p,
         });
     }
 
-    // Check for segment: {base}-720p-{NNN}.ts or {base}-480p-{NNN}.ts
+    // Check for segment: {video}-720p-{NNN}.ts or {video}-480p-{NNN}.ts
     if let Some(rest) = path.strip_suffix(".ts")
         && let Some((base_with_res, segment_str)) = rest.rsplit_once('-')
         && let Ok(segment_index) = segment_str.parse::<u32>()
     {
         // Check for 720p
-        if let Some(base) = base_with_res.strip_suffix("-720p") {
-            let video_path = find_original_video_path(base);
+        if let Some(video_path) = base_with_res.strip_suffix("-720p") {
             return Some(HlsRequest::Segment {
-                video_path,
+                video_path: video_path.to_string(),
                 target: TranscodeTarget::Resolution720p,
                 segment_index,
             });
         }
         // Check for 480p
-        if let Some(base) = base_with_res.strip_suffix("-480p") {
-            let video_path = find_original_video_path(base);
+        if let Some(video_path) = base_with_res.strip_suffix("-480p") {
             return Some(HlsRequest::Segment {
-                video_path,
+                video_path: video_path.to_string(),
                 target: TranscodeTarget::Resolution480p,
                 segment_index,
             });
@@ -209,15 +215,6 @@ pub fn parse_hls_request(path: &str) -> Option<HlsRequest> {
     }
 
     None
-}
-
-/// Find the original video path by appending common video extensions.
-///
-/// Since the HLS URL doesn't include the original extension, we need to
-/// reconstruct it. This returns the base path with .mp4 appended as the
-/// most common case. The server will need to verify the file exists.
-fn find_original_video_path(base: &str) -> String {
-    format!("{base}.mp4")
 }
 
 /// Check if a video file is a supported format for transcoding.
@@ -346,6 +343,19 @@ pub fn find_h264_encoder() -> &'static str {
     "libx264"
 }
 
+/// Base name for the relative segment URIs written into a playlist.
+///
+/// Segment URIs must round-trip through [`parse_hls_request`], so they carry
+/// the source file's full name *including its extension*
+/// (`interview.mov-720p-000.ts`). The source path is the authority for that
+/// name; `fallback` is used only when it has no UTF-8 file name.
+fn playlist_segment_base<'a>(video_path: &'a Path, fallback: &'a str) -> &'a str {
+    video_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(fallback)
+}
+
 /// Generate an HLS playlist for the given video and target resolution.
 ///
 /// The playlist is generated based on the video duration without actually
@@ -355,7 +365,8 @@ pub fn find_h264_encoder() -> &'static str {
 ///
 /// * `video_path` - Path to the source video file
 /// * `target` - Target resolution for transcoding
-/// * `base_name` - Base name for segment URLs (e.g., "demo" for "demo-720p-000.ts")
+/// * `base_name` - Fallback base name for segment URLs, used only when
+///   `video_path` has no UTF-8 file name (see [`playlist_segment_base`])
 pub fn generate_hls_playlist(
     video_path: &Path,
     target: TranscodeTarget,
@@ -375,6 +386,7 @@ pub fn generate_hls_playlist(
     let num_segments = (duration / HLS_SEGMENT_DURATION).ceil() as u32;
     let target_duration = HLS_SEGMENT_DURATION.ceil() as u32;
     let suffix = target.url_suffix(); // "-720p" or "-480p"
+    let segment_base = playlist_segment_base(video_path, base_name);
 
     let mut playlist = String::with_capacity(512);
     playlist.push_str("#EXTM3U\n");
@@ -394,7 +406,7 @@ pub fn generate_hls_playlist(
         };
 
         playlist.push_str(&format!("#EXTINF:{segment_duration:.3},\n"));
-        playlist.push_str(&format!("{base_name}{suffix}-{i:03}.ts\n"));
+        playlist.push_str(&format!("{segment_base}{suffix}-{i:03}.ts\n"));
     }
 
     playlist.push_str("#EXT-X-ENDLIST\n");
@@ -941,7 +953,7 @@ mod tests {
 
     #[test]
     fn test_parse_hls_playlist_720p() {
-        let result = parse_hls_request("videos/demo-720p.m3u8");
+        let result = parse_hls_request("videos/demo.mp4-720p.m3u8");
         assert_eq!(
             result,
             Some(HlsRequest::Playlist {
@@ -953,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_parse_hls_playlist_480p() {
-        let result = parse_hls_request("videos/demo-480p.m3u8");
+        let result = parse_hls_request("videos/demo.mp4-480p.m3u8");
         assert_eq!(
             result,
             Some(HlsRequest::Playlist {
@@ -965,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_parse_hls_segment_720p() {
-        let result = parse_hls_request("videos/demo-720p-005.ts");
+        let result = parse_hls_request("videos/demo.mp4-720p-005.ts");
         assert_eq!(
             result,
             Some(HlsRequest::Segment {
@@ -978,7 +990,7 @@ mod tests {
 
     #[test]
     fn test_parse_hls_segment_480p() {
-        let result = parse_hls_request("videos/demo-480p-000.ts");
+        let result = parse_hls_request("videos/demo.mp4-480p-000.ts");
         assert_eq!(
             result,
             Some(HlsRequest::Segment {
@@ -991,13 +1003,52 @@ mod tests {
 
     #[test]
     fn test_parse_hls_segment_with_path() {
-        let result = parse_hls_request("videos/tutorials/intro-720p-012.ts");
+        let result = parse_hls_request("videos/tutorials/intro.mp4-720p-012.ts");
         assert_eq!(
             result,
             Some(HlsRequest::Segment {
                 video_path: "videos/tutorials/intro.mp4".to_string(),
                 target: TranscodeTarget::Resolution720p,
                 segment_index: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_hls_request_preserves_non_mp4_extension() {
+        // Regression: the base used to be rebuilt as `{base}.mp4`, so an embed
+        // of `interview.mov` resolved to a sibling `interview.mp4` (serving the
+        // wrong file's transcode) and 404'd when no sibling existed.
+        for extension in ["mov", "mkv", "avi", "m4v", "ogv"] {
+            assert_eq!(
+                parse_hls_request(&format!("videos/interview.{extension}-720p.m3u8")),
+                Some(HlsRequest::Playlist {
+                    video_path: format!("videos/interview.{extension}"),
+                    target: TranscodeTarget::Resolution720p,
+                })
+            );
+            assert_eq!(
+                parse_hls_request(&format!("videos/interview.{extension}-480p-003.ts")),
+                Some(HlsRequest::Segment {
+                    video_path: format!("videos/interview.{extension}"),
+                    target: TranscodeTarget::Resolution480p,
+                    segment_index: 3,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_hls_request_distinguishes_same_stem_siblings() {
+        // `interview.mov` and `interview.mp4` must never share a variant URL.
+        let mov = parse_hls_request("videos/interview.mov-720p.m3u8");
+        let mp4 = parse_hls_request("videos/interview.mp4-720p.m3u8");
+        assert_ne!(mov, mp4);
+        assert_eq!(
+            mov,
+            Some(HlsRequest::Playlist {
+                video_path: "videos/interview.mov".to_string(),
+                target: TranscodeTarget::Resolution720p,
             })
         );
     }
@@ -1010,9 +1061,87 @@ mod tests {
     #[test]
     fn test_parse_invalid_segment_not_matched() {
         // Missing resolution
-        assert!(parse_hls_request("videos/demo-005.ts").is_none());
+        assert!(parse_hls_request("videos/demo.mp4-005.ts").is_none());
         // Invalid resolution
-        assert!(parse_hls_request("videos/demo-1080p-005.ts").is_none());
+        assert!(parse_hls_request("videos/demo.mp4-1080p-005.ts").is_none());
+    }
+
+    #[test]
+    fn test_playlist_segment_base_uses_full_file_name() {
+        // Segment URIs must carry the extension so they round-trip; the
+        // caller-supplied stem is only a fallback.
+        assert_eq!(
+            playlist_segment_base(Path::new("/repo/videos/interview.mov"), "interview"),
+            "interview.mov"
+        );
+    }
+
+    #[test]
+    fn test_playlist_segment_base_falls_back_without_file_name() {
+        assert_eq!(
+            playlist_segment_base(Path::new(".."), "fallback"),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn test_hls_urls_emitted_by_vid_round_trip_back_to_the_source() {
+        // The two halves of the scheme must agree: whatever `Vid::to_html`
+        // emits has to parse back to the exact file it was generated from.
+        for (url, ext) in [
+            ("/videos/interview.mov", "mov"),
+            ("/videos/demo.mp4", "mp4"),
+            ("/videos/tutorials/intro.mkv", "mkv"),
+        ] {
+            let vid = crate::vid::Vid {
+                url: url.to_string(),
+                ext: Some(ext.to_string()),
+                start: None,
+                end: None,
+                caption: None,
+            };
+            let html = vid.to_html(false, true, true);
+
+            for (suffix, target) in [
+                ("-720p.m3u8", TranscodeTarget::Resolution720p),
+                ("-480p.m3u8", TranscodeTarget::Resolution480p),
+            ] {
+                let emitted = format!("{url}{suffix}");
+                assert!(
+                    html.contains(&format!("src='{emitted}'")),
+                    "expected {emitted} in {html}"
+                );
+                // The server strips the leading `/` before resolving.
+                assert_eq!(
+                    parse_hls_request(emitted.trim_start_matches('/')),
+                    Some(HlsRequest::Playlist {
+                        video_path: url.trim_start_matches('/').to_string(),
+                        target,
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_playlist_segment_uris_round_trip_back_to_the_source() {
+        // The relative segment URIs a playlist would emit must parse back to
+        // the same source file (mirrors `generate_hls_playlist`'s formatting,
+        // which cannot run here without a real video to probe).
+        let video_path = Path::new("/repo/videos/interview.mov");
+        let segment_base = playlist_segment_base(video_path, "interview");
+        let suffix = TranscodeTarget::Resolution720p.url_suffix();
+
+        let uri = format!("videos/{segment_base}{suffix}-000.ts");
+
+        assert_eq!(
+            parse_hls_request(&uri),
+            Some(HlsRequest::Segment {
+                video_path: "videos/interview.mov".to_string(),
+                target: TranscodeTarget::Resolution720p,
+                segment_index: 0,
+            })
+        );
     }
 
     // Segment count calculation tests

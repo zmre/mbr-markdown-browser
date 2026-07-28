@@ -1,13 +1,17 @@
-//! Conversion of filesystem paths into URL paths.
+//! URL path primitives shared by the link pipeline.
 //!
-//! URL paths are always `/`-separated, but `std::path` uses the platform
-//! separator — `\` on Windows. Stringifying a `Path` with `to_string_lossy()`,
-//! `to_str()` or `display()` and splicing the result into a URL therefore
-//! produces `/docs\guide/` on Windows. Worse, downstream logic that splits on
-//! `/` (index-file collapsing, extension stripping, cache-key matching) then
-//! silently stops matching.
+//! Two concerns live here because every consumer needs both and duplicating
+//! either produces silent, platform- or scheme-specific breakage:
 //!
-//! Everything that turns a path into a URL should go through [`path_to_url`].
+//! 1. [`path_to_url`] — conversion of filesystem paths into URL paths. URL
+//!    paths are always `/`-separated, but `std::path` uses the platform
+//!    separator — `\` on Windows. Stringifying a `Path` with
+//!    `to_string_lossy()`, `to_str()` or `display()` and splicing the result
+//!    into a URL therefore produces `/docs\guide/` on Windows. Worse,
+//!    downstream logic that splits on `/` (index-file collapsing, extension
+//!    stripping, cache-key matching) then silently stops matching.
+//! 2. [`is_external_url`] — the single answer to "does this URL leave the
+//!    site?", used by link transformation, link tracking and link validation.
 
 use std::borrow::Cow;
 use std::path::{Component, Path};
@@ -54,6 +58,84 @@ pub fn path_to_url(relative: &Path) -> String {
     }
 
     url
+}
+
+/// Returns `true` when `url` addresses something outside this site.
+///
+/// This is the one place that answers the question. Link transformation
+/// ([`crate::link_transform::transform_link`]), link tracking
+/// ([`crate::link_index::is_internal_link`]) and link validation
+/// ([`crate::page_errors`]) all call it, so an href can never be rewritten as
+/// a relative path by one and reported as a broken internal link by another.
+///
+/// A URL is external when it is either:
+/// - **protocol-relative** (`//cdn.example.com/x.js`), which inherits the
+///   page's scheme and leaves the site without naming one; or
+/// - **scheme-qualified** — it starts with an RFC 3986 scheme followed by
+///   `:` (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"`).
+///
+/// Testing the *shape* rather than an allowlist of known schemes is
+/// deliberate: enumerating schemes is what made `ftp://`, `ftps://`,
+/// `magnet:`, `sms:`, `callto:` and `blob:` get mangled into relative paths
+/// and reported as broken internal links, one scheme list at a time.
+///
+/// Everything else is site-relative and therefore internal: absolute paths
+/// (`/docs/`), relative paths (`guide.md`), fragment-only (`#top`) and
+/// query-only (`?q=1`) references.
+///
+/// Two shapes are intentionally *not* read as schemes:
+/// - **Windows drive letters** (`C:/notes/x.md`). RFC 3986 permits one-letter
+///   schemes but none exist in practice, so a single letter before the colon
+///   is a drive, matching what every URL parser does.
+/// - **A colon in a later path segment** (`docs/a:b.md`), because `/`, `?`
+///   and `#` are not legal scheme characters and end the scan. A colon in the
+///   *first* segment (`Notes:2024.md`) does look like a scheme; RFC 3986
+///   requires such a reference to be written `./Notes:2024.md`, which this
+///   function correctly reports as internal.
+///
+/// ```
+/// use mbr::url_path::is_external_url;
+///
+/// assert!(is_external_url("magnet:?xt=urn:btih:abc"));
+/// assert!(is_external_url("//cdn.example.com/x.js"));
+/// assert!(!is_external_url("docs/guide.md"));
+/// assert!(!is_external_url("C:/notes/guide.md"));
+/// ```
+pub fn is_external_url(url: &str) -> bool {
+    // Protocol-relative first: it starts with `/` but is not site-relative.
+    if url.starts_with("//") {
+        return true;
+    }
+
+    // Absolute site paths, fragment-only and query-only references can never
+    // carry a scheme, so stop before scanning for a colon.
+    if url.starts_with(['/', '#', '?']) {
+        return false;
+    }
+
+    url_scheme(url).is_some()
+}
+
+/// Returns the RFC 3986 scheme of `url` (without the trailing `:`), if any.
+///
+/// The scheme grammar excludes `/`, `?` and `#`, so a colon that appears after
+/// one of those (`docs/a:b.md`) fails the character check and yields `None`
+/// without a separate delimiter scan.
+fn url_scheme(url: &str) -> Option<&str> {
+    let colon = url.find(':')?;
+    let scheme = &url[..colon];
+
+    // Single letter before the colon is a Windows drive, not a scheme.
+    if scheme.len() < 2 {
+        return None;
+    }
+
+    let mut chars = scheme.chars();
+    let starts_with_alpha = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    let rest_is_scheme_chars =
+        chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+
+    (starts_with_alpha && rest_is_scheme_chars).then_some(scheme)
 }
 
 /// Serde helper: serializes a **relative** path as a `/`-separated string.
@@ -164,5 +246,59 @@ mod tests {
     #[test]
     fn test_unix_backslash_is_a_filename_character() {
         assert_eq!(path_to_url(Path::new(r"weird\name.md")), r"weird\name.md");
+    }
+
+    /// The whole point of the shared predicate: one table, one answer. The
+    /// `ftp*`/`magnet`/`sms`/`callto`/`blob` rows are the regression — each
+    /// was missing from at least one of the four hand-rolled scheme lists this
+    /// function replaced, so those links were rewritten into relative paths
+    /// and reported as broken internal links.
+    #[test]
+    fn test_is_external_url_table() {
+        let cases: &[(&str, bool)] = &[
+            // Schemes that used to be missing from one or more copies.
+            ("ftp://ftp.example.com/pub/file.zip", true),
+            ("ftps://ftp.example.com/pub/file.zip", true),
+            ("magnet:?xt=urn:btih:c12fe1c06bba254a9dc9", true),
+            ("sms:+15555550123", true),
+            ("callto:+15555550123", true),
+            ("blob:http://localhost:5220/550e8400-e29b", true),
+            // Schemes every copy already knew about.
+            ("mailto:test@example.com", true),
+            ("tel:+15555550123", true),
+            ("http://example.com/path", true),
+            ("https://example.com/path", true),
+            ("data:image/png;base64,iVBORw0KGgo", true),
+            ("javascript:void(0)", true),
+            ("file:///etc/hosts", true),
+            // Protocol-relative: no scheme named, still leaves the site.
+            ("//cdn.example.com/script.js", true),
+            // Site-relative shapes.
+            ("/abs/path", false),
+            ("relative/path.md", false),
+            ("./relative/path.md", false),
+            ("../sibling/path.md", false),
+            ("#anchor", false),
+            ("?q=1", false),
+            ("", false),
+            // A Windows drive letter is not a one-letter scheme.
+            ("C:/win/path", false),
+            ("c:/win/path", false),
+            // A colon in a later path segment does not make a scheme.
+            ("docs/a:b.md", false),
+            ("docs/a?x:y", false),
+            // Digits may not start a scheme (`12:30 notes.md` is a filename).
+            ("12:30 notes.md", false),
+            // RFC 3986's escape hatch for a colon in the first segment.
+            ("./Notes:2024.md", false),
+        ];
+
+        for (url, expected) in cases {
+            assert_eq!(
+                is_external_url(url),
+                *expected,
+                "is_external_url({url:?}) should be {expected}"
+            );
+        }
     }
 }

@@ -14,7 +14,21 @@ use crate::errors::ConfigError;
 const DEFAULT_PORT: u16 = 5200;
 const DEFAULT_OEMBED_TIMEOUT_MS: u64 = 500;
 const DEFAULT_OEMBED_CACHE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+/// Default budget for the in-memory media metadata cache: 64 MB.
+///
+/// Deliberately independent of [`DEFAULT_OEMBED_CACHE_SIZE`]: the oembed cache
+/// holds short text metadata, while this one holds full JPEG cover images
+/// (a PDF cover renders up to 1200 px wide). Sharing the 2 MB oembed budget fit
+/// only a couple of dozen covers before FIFO eviction, and setting
+/// `oembed_cache_size = 0` to turn off link previews silently disabled media
+/// caching as well.
+const DEFAULT_MEDIA_CACHE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 const DEFAULT_UPLOAD_MAX_BYTES: usize = 25 * 1024 * 1024; // 25 MiB (26214400)
+
+/// Serde default for [`Config::media_cache_size`].
+fn default_media_cache_size() -> usize {
+    DEFAULT_MEDIA_CACHE_SIZE
+}
 
 /// Configuration for a single sort field in multi-level sorting.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -354,6 +368,16 @@ pub struct Config {
     /// metadata to avoid redundant network requests when rendering multiple files.
     /// Set to 0 to disable caching entirely. Default: 2MB (2097152 bytes).
     pub oembed_cache_size: usize,
+    /// Maximum size in bytes for the media metadata cache (server/GUI mode).
+    ///
+    /// Holds dynamically generated video/PDF metadata: cover images (JPEG
+    /// payloads), chapters and captions. Sized separately from
+    /// `oembed_cache_size` because a single cover can be hundreds of kilobytes,
+    /// so the 2 MB oembed budget evicted covers almost immediately — and
+    /// turning oembed caching off must not turn media caching off with it.
+    /// Set to 0 to disable caching entirely. Default: 64MB (67108864 bytes).
+    #[serde(default = "default_media_cache_size")]
+    pub media_cache_size: usize,
     /// Optional template folder that overrides the default .mbr/ and compiled defaults.
     /// Files found here take precedence; missing files fall back to compiled defaults.
     #[serde(default)]
@@ -533,6 +557,7 @@ impl Default for Config {
                 .collect(),
             oembed_timeout_ms: DEFAULT_OEMBED_TIMEOUT_MS,
             oembed_cache_size: DEFAULT_OEMBED_CACHE_SIZE,
+            media_cache_size: DEFAULT_MEDIA_CACHE_SIZE,
             template_folder: None,
             sort: default_sort_config(),
             build_concurrency: None, // Auto-detect based on CPU cores
@@ -559,15 +584,28 @@ impl Default for Config {
 }
 
 /// Returns true if the given path is the user's home directory.
+///
+/// Compares canonical forms when both sides resolve, because callers do not
+/// agree on path shape: [`find_root_dir`] walks raw ancestors, while
+/// [`Config::validate_static_folder`] compares an already-canonicalized root.
+/// Without this, a `$HOME` reached through a symlink (`/home/me` ->
+/// `/mnt/users/me`) would slip past both guards.
 fn is_home_dir(path: &Path) -> bool {
     // Windows does not set `HOME`; the equivalent is `USERPROFILE`. Without
     // this the guard below never fires there, so a stray `C:\Users\you\.git`
     // or `.obsidian` would silently make the entire home directory the repo
     // root and trigger a scan of everything the user owns.
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(home_var)
-        .map(PathBuf::from)
-        .is_some_and(|home| path == home)
+    let Some(home) = std::env::var_os(home_var).map(PathBuf::from) else {
+        return false;
+    };
+    if path == home {
+        return true;
+    }
+    match (path.canonicalize(), home.canonicalize()) {
+        (Ok(path), Ok(home)) => path == home,
+        _ => false,
+    }
 }
 
 /// Search upward from the given path to find a repository root directory.
@@ -594,8 +632,11 @@ pub fn find_root_dir(start_path: &Path) -> PathBuf {
             .find(|a| a.join(marker).is_dir())
             .map(|p| p.to_path_buf())
         {
+            // `continue`, not `break`: only *this* marker is disqualified. A
+            // dotfiles `~/.git` must not stop the search for the `.obsidian`
+            // that marks the actual vault further down.
             if is_home_dir(&root) {
-                break;
+                continue;
             }
             return root;
         }
@@ -608,7 +649,7 @@ pub fn find_root_dir(start_path: &Path) -> PathBuf {
             .map(|p| p.to_path_buf())
         {
             if is_home_dir(&root) {
-                break;
+                continue;
             }
             return root;
         }
@@ -618,19 +659,89 @@ pub fn find_root_dir(start_path: &Path) -> PathBuf {
 }
 
 impl Config {
+    /// Loads configuration for the repository containing `search_config_from`.
+    ///
+    /// Layers, lowest precedence first (figment's `merge` gives the *later*
+    /// provider precedence):
+    ///
+    /// 1. Compiled-in defaults ([`Config::default`])
+    /// 2. `.mbr/config.toml` in the discovered root
+    /// 3. `MBR_*` environment variables
+    ///
+    /// Environment variables deliberately win over the config file: the file
+    /// ships inside the markdown repository, so an operator serving a repo they
+    /// did not author must be able to override it from the outside.
     pub fn read(search_config_from: &Path) -> Result<Self, crate::MbrError> {
         let default_config = Config::default();
         let root_dir = find_root_dir(search_config_from);
-        let mut config: Config = Figment::new()
+        // Kept rather than discarded: figment is the only thing that knows which
+        // layer supplied each key, and `static_folder` is trusted differently
+        // depending on that (see `reject_repo_supplied_absolute_static_folder`).
+        let figment = Figment::new()
             .merge(Serialized::defaults(default_config))
-            .merge(Env::prefixed("MBR_"))
             .merge(Toml::file(root_dir.join(".mbr/config.toml")))
+            .merge(Env::prefixed("MBR_"));
+        let mut config: Config = figment
             .extract()
             .map_err(|e| ConfigError::ParseFailed(Box::new(e)))?;
         tracing::debug!("Loaded config: {:?}", &config);
         config.root_dir = root_dir;
+        config.reject_repo_supplied_absolute_static_folder(&figment)?;
         config.validate()?;
+        config.log_external_static_folder();
         Ok(config)
+    }
+
+    /// Refuses an absolute `static_folder` that came from the repository's own
+    /// `.mbr/config.toml`.
+    ///
+    /// [`Config::validate`] cannot make this call, and deliberately does not
+    /// try: the identical value is legitimate from `MBR_STATIC_FOLDER`, which
+    /// only whoever runs the server can set, and a `Config` carries no record of
+    /// where its fields came from. Figment does — [`Figment::find_metadata`]
+    /// returns the metadata of the provider that supplied the *winning* value
+    /// for a key, and only the [`Toml`] provider reports a
+    /// [`Source::File`](figment::Source::File). The env provider reports no
+    /// source at all, so "has a file source" is exactly "came from the repo".
+    fn reject_repo_supplied_absolute_static_folder(
+        &self,
+        figment: &Figment,
+    ) -> Result<(), ConfigError> {
+        if !is_rooted(Path::new(&self.static_folder)) {
+            return Ok(());
+        }
+
+        let from_file = figment
+            .find_metadata("static_folder")
+            .and_then(|metadata| metadata.source.as_ref())
+            .and_then(figment::Source::file_path);
+
+        match from_file {
+            Some(source) => Err(invalid_static_folder(
+                &self.static_folder,
+                &format!(
+                    "an absolute path is only honored from the MBR_STATIC_FOLDER environment \
+                     variable, not from a repository config file ({})",
+                    source.display()
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Emits one INFO line when the static overlay lands outside the markdown
+    /// root, so an external static root is never silently in effect.
+    fn log_external_static_folder(&self) {
+        if let Ok(StaticOverlay::External(dir)) =
+            resolve_static_overlay(&self.root_dir, &self.static_folder)
+        {
+            tracing::info!(
+                "static_folder {:?} resolves outside the markdown root ({}): serving and indexing assets from {}",
+                self.static_folder,
+                self.root_dir.display(),
+                dir.display()
+            );
+        }
     }
 
     /// Validates the configuration values.
@@ -640,9 +751,13 @@ impl Config {
     /// - `sidebar_max_items`: Must be > 0
     /// - `graph_depth`: Must be between 1 and 5
     /// - `build_concurrency`: If set, must be > 0
+    /// - `static_folder`: Must stay inside `root_dir` or be a peer of it (see
+    ///   [`Config::validate_static_folder`])
     ///
     /// Note: `oembed_cache_size` of 0 is valid (disables caching).
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_static_folder()?;
+
         // Port 0 means "let OS pick a port" which isn't useful for a server URL
         if self.port == 0 {
             return Err(ConfigError::InvalidPort { port: self.port });
@@ -679,6 +794,167 @@ impl Config {
 
         Ok(())
     }
+
+    /// Rejects a `static_folder` that reaches further than a *peer* of the
+    /// markdown root. See [`resolve_static_overlay`] for the policy itself.
+    fn validate_static_folder(&self) -> Result<(), ConfigError> {
+        resolve_static_overlay(&self.root_dir, &self.static_folder).map(|_| ())
+    }
+}
+
+/// Where the static overlay landed, once the policy has accepted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaticOverlay {
+    /// The overlay is disabled, or it resolves inside the markdown root.
+    WithinRoot,
+    /// The overlay resolves *outside* the markdown root and is permitted there.
+    /// Carries the resolved (canonical, when it exists) directory.
+    External(PathBuf),
+}
+
+/// Applies the `static_folder` policy, returning where the overlay resolved.
+///
+/// `static_folder` is merged from the repository's own `.mbr/config.toml`, so
+/// for an untrusted repo it is attacker-controlled. The path resolver joins it
+/// onto the root and serves files found beneath it, and the repo scanner indexes
+/// it, so an unrestricted value turns the server into an arbitrary-file reader.
+///
+/// The policy, in order:
+/// - **Empty**: the overlay is disabled — [`StaticOverlay::WithinRoot`].
+/// - **Inside the root**: accepted (the `static/` default).
+/// - **Rooted/absolute**: accepted, and rejected earlier by
+///   [`Config::reject_repo_supplied_absolute_static_folder`] when it came from a
+///   repository config file. A value that survives to here was set by the
+///   operator via `MBR_STATIC_FOLDER` and is trusted as given.
+/// - **Outside the root**: accepted only as a strict descendant of the root's
+///   *parent*, which is what makes the common `repo/content` + `repo/static`
+///   layout work. The parent itself is refused — that would expose every sibling
+///   of the root, which is not a peer relationship — and so is any parent that is
+///   `$HOME` or the filesystem root, which is what keeps `~/notes` +
+///   `static_folder = "../.ssh"` from resolving into the home directory.
+///
+/// The resolved directory is canonicalized when it exists, so a `static -> /etc`
+/// symlink is judged by where it actually lands rather than by how innocent it
+/// looks lexically. When it does not exist yet the resolution falls back to
+/// lexical normalization, so an escape whose target has not been created is
+/// caught too.
+///
+/// This is the single definition of the policy on purpose: `Config::validate`
+/// refuses a bad value at startup, and `Repo` uses the *same* call to decide
+/// which second directory the scanner may descend into, so the two cannot drift
+/// into the scanner accepting a root the validator would have refused.
+pub fn resolve_static_overlay(
+    root_dir: &Path,
+    static_folder: &str,
+) -> Result<StaticOverlay, ConfigError> {
+    if static_folder.is_empty() {
+        return Ok(StaticOverlay::WithinRoot);
+    }
+
+    let root = resolve_existing_or_lexical(root_dir);
+    // `join` handles a rooted `static_folder` for us: an absolute path replaces
+    // the base rather than being appended to it.
+    let dir = resolve_existing_or_lexical(&root.join(static_folder));
+
+    if dir.starts_with(&root) {
+        return Ok(StaticOverlay::WithinRoot);
+    }
+    if is_rooted(Path::new(static_folder)) {
+        return Ok(StaticOverlay::External(dir));
+    }
+
+    let Some(parent) = root.parent() else {
+        return Err(invalid_static_folder(
+            static_folder,
+            "resolves outside the markdown root, which has no parent directory",
+        ));
+    };
+    // Reuses `find_root_dir`'s notion of "home" rather than inventing a second
+    // one: `~/notes` with `../.ssh` must not become servable.
+    if is_home_dir(parent) {
+        return Err(invalid_static_folder(
+            static_folder,
+            "resolves outside the markdown root and into the home directory",
+        ));
+    }
+    if parent.parent().is_none() {
+        return Err(invalid_static_folder(
+            static_folder,
+            "resolves outside the markdown root and into the filesystem root",
+        ));
+    }
+    if dir == parent {
+        return Err(invalid_static_folder(
+            static_folder,
+            "resolves to the parent of the markdown root, which would expose every \
+             sibling directory; name a specific sibling instead",
+        ));
+    }
+    if !dir.starts_with(parent) {
+        return Err(invalid_static_folder(
+            static_folder,
+            "reaches past the parent of the markdown root; only a peer of the root is allowed",
+        ));
+    }
+
+    Ok(StaticOverlay::External(dir))
+}
+
+/// True when `path` begins at a filesystem root or a drive prefix.
+///
+/// Not `Path::is_absolute`: on Windows that is false for `/etc`, which is rooted
+/// but prefixless, and a rooted path escapes the root just as thoroughly as a
+/// fully-qualified one.
+fn is_rooted(path: &Path) -> bool {
+    use std::path::Component;
+    matches!(
+        path.components().next(),
+        Some(Component::RootDir | Component::Prefix(_))
+    )
+}
+
+/// Canonicalizes `path`, falling back to lexical normalization when it does not
+/// exist. Never fails, so a not-yet-created path still gets a comparable form.
+fn resolve_existing_or_lexical(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_| lexically_normalize(path))
+}
+
+/// Resolves `.` and `..` components without touching the filesystem.
+///
+/// Only sound for paths that are already canonical up to the missing tail, which
+/// is how [`resolve_existing_or_lexical`] uses it: symlinks earlier in the path
+/// have already been resolved, so popping a component cannot be misled by one.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    path.components()
+        .fold(PathBuf::new(), |mut normalized, component| {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    // `pop` fails both at a filesystem root (where `..` is a
+                    // no-op) and on an empty relative accumulator (where `..`
+                    // must be preserved). Only the latter keeps the component.
+                    if !normalized.pop() && !is_rooted(&normalized) {
+                        normalized.push(Component::ParentDir);
+                    }
+                }
+                other => normalized.push(other),
+            }
+            normalized
+        })
+}
+
+/// Builds the error for a rejected `static_folder` value.
+///
+/// `ConfigError` has no dedicated variant for this, so the message is carried
+/// by a synthetic `figment::Error` inside `ParseFailed` (see the followup note
+/// in the review: a `ConfigError::InvalidStaticFolder` variant belongs in
+/// `errors.rs`).
+fn invalid_static_folder(value: &str, reason: &str) -> ConfigError {
+    ConfigError::ParseFailed(Box::new(figment::Error::from(format!(
+        "Invalid static_folder {value:?}: {reason}"
+    ))))
 }
 
 #[cfg(test)]
@@ -1093,6 +1369,49 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    /// The media metadata cache must have its own budget: it stores JPEG cover
+    /// payloads, not the oembed cache's short text metadata.
+    #[test]
+    fn test_media_cache_size_default_is_independent_of_oembed() {
+        let config = Config::default();
+        assert_eq!(config.media_cache_size, 64 * 1024 * 1024);
+        assert_ne!(
+            config.media_cache_size, config.oembed_cache_size,
+            "media cache must not inherit the oembed text-metadata budget"
+        );
+    }
+
+    /// Disabling the oembed cache (`--oembed-cache-size 0`) must not disable
+    /// media caching as a side effect.
+    #[test]
+    fn test_disabling_oembed_cache_keeps_media_cache_enabled() {
+        let config = Config {
+            oembed_cache_size: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert_eq!(config.media_cache_size, 64 * 1024 * 1024);
+    }
+
+    /// A `.mbr/config.toml` written before this option existed must still load
+    /// (falling back to the default), and an explicit value must win.
+    #[test]
+    fn test_media_cache_size_config_file_layering() {
+        let without: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("port = 5201"))
+            .extract()
+            .expect("config without the key parses");
+        assert_eq!(without.media_cache_size, 64 * 1024 * 1024);
+
+        let with: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("media_cache_size = 1048576"))
+            .extract()
+            .expect("explicit value parses");
+        assert_eq!(with.media_cache_size, 1024 * 1024);
+    }
+
     // ==================== find_root_dir Edge Case Tests ====================
 
     #[test]
@@ -1147,9 +1466,485 @@ mod tests {
 
     #[test]
     fn test_is_home_dir() {
+        // Reads `HOME` twice (here and inside `is_home_dir`), so it must not
+        // interleave with the tests below that swap `HOME` for a temp dir.
+        let _guard = env_lock();
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
             assert!(is_home_dir(&home));
             assert!(!is_home_dir(Path::new("/tmp")));
         }
+    }
+
+    // ==================== static_folder Validation Tests ====================
+
+    /// Builds `<tmp>/project/{content,static}` and returns the temp dir plus the
+    /// markdown root (`content`).
+    ///
+    /// The nesting is deliberate. `Config::default()` uses the *current
+    /// directory* as `root_dir`, which would make every boundary assertion below
+    /// depend on where the checkout happens to live. Here the root's parent is
+    /// `project` (a peer boundary), and `project`'s own parent is the temp dir,
+    /// so neither `$HOME` nor the filesystem root is ever the boundary by
+    /// accident.
+    fn peer_layout() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project/content");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(tmp.path().join("project/static")).unwrap();
+        (tmp, root)
+    }
+
+    fn config_with_static(root: &Path, static_folder: &str) -> Config {
+        Config {
+            root_dir: root.to_path_buf(),
+            static_folder: static_folder.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Retargeted from "any `..` is an escape" to the boundary that actually
+    /// matters. `repo/content` + `repo/static` is a real layout, so climbing one
+    /// level is now legal; the threat this still covers is a hostile
+    /// `.mbr/config.toml` reaching *past* that one level — or grabbing the
+    /// parent wholesale, which would expose every sibling of the root.
+    #[test]
+    fn test_validate_static_folder_parent_escape_fails() {
+        let (_tmp, root) = peer_layout();
+        for value in ["..", "../..", "../../assets", "assets/../../.."] {
+            let err = match config_with_static(&root, value).validate() {
+                Err(err) => err,
+                Ok(()) => panic!("escaping static_folder must be rejected: {value:?}"),
+            };
+            assert!(
+                format!("{err:?}").contains("static_folder"),
+                "error should name static_folder, got: {err:?}"
+            );
+        }
+    }
+
+    /// A `static_folder` that resolves into `$HOME` is refused even though it is
+    /// only one level up, because "one level up from a note directory in your
+    /// home folder" is the whole home folder. This is the case that keeps
+    /// `~/notes` + `static_folder = "../.ssh"` from being servable.
+    #[test]
+    fn test_validate_static_folder_into_home_fails() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        // macOS hands out `/var/...` temp dirs that canonicalize to
+        // `/private/var/...`; `is_home_dir` bridges the two forms, and this
+        // keeps the fixture honest about which form it planted.
+        let home_str = home.path().to_string_lossy().into_owned();
+        let _env = EnvVars::set(&[("HOME", &home_str), ("USERPROFILE", &home_str)]);
+
+        let root = home.path().join("notes");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(home.path().join(".ssh")).unwrap();
+
+        for value in ["..", "../.ssh"] {
+            assert!(
+                config_with_static(&root, value).validate().is_err(),
+                "static_folder {value:?} resolving into $HOME must be rejected"
+            );
+        }
+
+        // The guard is about *leaving* the root, not about living under $HOME:
+        // a normal in-root overlay still works for a vault in the home folder.
+        std::fs::create_dir(root.join("static")).unwrap();
+        assert!(
+            config_with_static(&root, "static").validate().is_ok(),
+            "an in-root static folder must still work under $HOME"
+        );
+    }
+
+    /// A markdown root sitting directly under `/` has no peer boundary that
+    /// isn't the filesystem root itself, so nothing outside it is reachable.
+    #[test]
+    fn test_validate_static_folder_filesystem_root_boundary_fails() {
+        let root = if cfg!(windows) { r"C:\notes" } else { "/notes" };
+        assert!(
+            config_with_static(Path::new(root), "../etc")
+                .validate()
+                .is_err(),
+            "a root whose parent is the filesystem root must not reach outside itself"
+        );
+    }
+
+    /// Retargeted: an absolute `static_folder` is no longer rejected by
+    /// `validate`, because the identical value is legitimate from
+    /// `MBR_STATIC_FOLDER`. The untrusted-repo half of the threat moved to
+    /// load time — see `test_config_read_rejects_absolute_static_folder_from_toml`.
+    /// What is asserted here is the Windows nuance that decision depends on:
+    /// `/etc` is rooted even though `Path::is_absolute` says otherwise there.
+    #[test]
+    fn test_validate_static_folder_absolute_is_deferred_to_provenance() {
+        assert!(is_rooted(Path::new("/etc")), "`/etc` is rooted everywhere");
+        assert!(
+            is_rooted(Path::new(r"C:\etc")) || !cfg!(windows),
+            "a drive-prefixed path is rooted on Windows"
+        );
+        assert!(!is_rooted(Path::new("static")));
+        assert!(!is_rooted(Path::new("../static")));
+
+        let (_tmp, root) = peer_layout();
+        let absolute = if cfg!(windows) { r"C:\etc" } else { "/etc" };
+        for value in [absolute, "/etc"] {
+            assert!(
+                config_with_static(&root, value).validate().is_ok(),
+                "validate must defer an absolute static_folder {value:?} to provenance"
+            );
+        }
+    }
+
+    /// Retargeted: a `static -> ../static` symlink is now the same thing as
+    /// writing `static_folder = "../static"`, so it is allowed. The threat that
+    /// remains — and that this still covers — is a symlink used to reach
+    /// somewhere the literal value could never name, past the peer boundary.
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_static_folder_symlink_escape_fails() {
+        let unrelated = tempfile::tempdir().unwrap();
+        let secrets = unrelated.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+
+        let (_tmp, root) = peer_layout();
+        std::os::unix::fs::symlink(&secrets, root.join("static")).unwrap();
+
+        assert!(
+            config_with_static(&root, "static").validate().is_err(),
+            "a static_folder symlinked past the peer boundary must be rejected"
+        );
+    }
+
+    /// A symlink that lands on a legitimate peer is indistinguishable from
+    /// naming that peer directly, so it must be accepted for the same reason
+    /// `../static` is.
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_static_folder_symlink_to_peer_passes() {
+        let (tmp, root) = peer_layout();
+        std::os::unix::fs::symlink(tmp.path().join("project/static"), root.join("assets")).unwrap();
+
+        assert!(
+            config_with_static(&root, "assets").validate().is_ok(),
+            "a static_folder symlinked to a peer of the root must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_static_folder_relative_passes() {
+        let (_tmp, root) = peer_layout();
+        for value in ["", "static", "assets", "public/assets", "./static"] {
+            assert!(
+                config_with_static(&root, value).validate().is_ok(),
+                "relative static_folder {value:?} must be accepted"
+            );
+        }
+    }
+
+    /// The regression this whole change exists for: `repo/content` holding the
+    /// markdown (and the `.mbr/` folder) with `repo/static` alongside it, named
+    /// as `static_folder = "../static"`.
+    #[test]
+    fn test_validate_static_folder_peer_passes() {
+        let (tmp, root) = peer_layout();
+        std::fs::create_dir_all(tmp.path().join("project/static/videos")).unwrap();
+
+        for value in ["../static", "../static/videos", "./../static"] {
+            assert!(
+                config_with_static(&root, value).validate().is_ok(),
+                "peer static_folder {value:?} must be accepted"
+            );
+        }
+    }
+
+    /// A peer that does not exist yet must be judged the same way an existing
+    /// one is: `canonicalize` fails, so the lexical fallback has to produce the
+    /// same verdict rather than silently passing everything.
+    #[test]
+    fn test_validate_static_folder_nonexistent_paths_use_lexical_fallback() {
+        let (_tmp, root) = peer_layout();
+        assert!(
+            config_with_static(&root, "../not-created-yet")
+                .validate()
+                .is_ok(),
+            "a peer that does not exist yet is still a peer"
+        );
+        assert!(
+            config_with_static(&root, "../../not-created-yet")
+                .validate()
+                .is_err(),
+            "a nonexistent path past the boundary must still be rejected"
+        );
+    }
+
+    // ==================== find_root_dir $HOME Skip Tests ====================
+
+    /// Serializes tests that mutate process-global environment variables.
+    /// Rust runs tests in parallel threads within one process, so `HOME` /
+    /// `MBR_*` mutation would otherwise race.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking test poisons the mutex; the guarded state is only the
+        // environment, which each test sets up for itself.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sets environment variables for the duration of a scope and restores
+    /// their previous values on drop (including on panic).
+    struct EnvVars {
+        saved: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVars {
+        fn set(pairs: &[(&str, &str)]) -> Self {
+            let saved = pairs
+                .iter()
+                .map(|(key, value)| {
+                    let previous = std::env::var_os(key);
+                    // SAFETY: all environment mutation in these tests happens
+                    // under `ENV_LOCK`, and no other thread in the test binary
+                    // reads the environment concurrently.
+                    unsafe { std::env::set_var(key, value) };
+                    ((*key).to_string(), previous)
+                })
+                .collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvVars {
+        fn drop(&mut self) {
+            for (key, previous) in &self.saved {
+                // SAFETY: as above - still holding `ENV_LOCK`.
+                unsafe {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression: a `$HOME` marker match used to `break` out of the whole
+    /// marker loop, so a dotfiles `~/.git` hid the `.obsidian` that marks the
+    /// real vault and the root collapsed to the leaf directory.
+    #[test]
+    fn test_find_root_dir_home_marker_does_not_abort_search() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let _env = EnvVars::set(&[("HOME", &home_str), ("USERPROFILE", &home_str)]);
+
+        // ~/.git (dotfiles repo) plus a real vault at ~/notes.
+        std::fs::create_dir(home.path().join(".git")).unwrap();
+        let vault = home.path().join("notes");
+        std::fs::create_dir(&vault).unwrap();
+        std::fs::create_dir(vault.join(".obsidian")).unwrap();
+        let leaf = vault.join("projects");
+        std::fs::create_dir(&leaf).unwrap();
+        let note = leaf.join("plan.md");
+        std::fs::write(&note, "# Plan").unwrap();
+
+        assert_eq!(
+            find_root_dir(&note),
+            vault,
+            "the `.obsidian` vault must win once the `$HOME` `.git` is skipped"
+        );
+    }
+
+    /// The `$HOME` guard itself still holds: when every marker only matches at
+    /// `$HOME`, the root falls back to the start directory.
+    #[test]
+    fn test_find_root_dir_only_home_marker_falls_back() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let _env = EnvVars::set(&[("HOME", &home_str), ("USERPROFILE", &home_str)]);
+
+        std::fs::create_dir(home.path().join(".git")).unwrap();
+        let leaf = home.path().join("notes/projects");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let note = leaf.join("plan.md");
+        std::fs::write(&note, "# Plan").unwrap();
+
+        assert_eq!(find_root_dir(&note), leaf);
+    }
+
+    // ==================== Config::read Layering Tests ====================
+
+    /// Creates a repo root pinned by a `.mbr/` directory so `find_root_dir`
+    /// cannot wander into whatever markers exist above the temp directory.
+    fn repo_with_mbr_dir(config_toml: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mbr = dir.path().join(".mbr");
+        std::fs::create_dir(&mbr).unwrap();
+        if let Some(contents) = config_toml {
+            std::fs::write(mbr.join("config.toml"), contents).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn test_config_read_defaults_only() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+
+        let config = Config::read(repo.path()).expect("defaults must load");
+
+        assert_eq!(config.theme, Config::default().theme);
+        assert_eq!(config.port, DEFAULT_PORT);
+        assert_eq!(config.root_dir, repo.path());
+    }
+
+    #[test]
+    fn test_config_read_toml_overrides_defaults() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("theme = \"amber\"\nport = 5321\n"));
+
+        let config = Config::read(repo.path()).expect("toml must load");
+
+        assert_eq!(config.theme, "amber");
+        assert_eq!(config.port, 5321);
+    }
+
+    #[test]
+    fn test_config_read_env_overrides_defaults() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+        let _env = EnvVars::set(&[("MBR_THEME", "cyan"), ("MBR_PORT", "5322")]);
+
+        let config = Config::read(repo.path()).expect("env must load");
+
+        assert_eq!(config.theme, "cyan");
+        assert_eq!(config.port, 5322);
+    }
+
+    /// The documented precedence: `MBR_*` beats `.mbr/config.toml` beats
+    /// defaults. This matters for security, not just ergonomics - the toml
+    /// layer ships inside the (possibly untrusted) markdown repository, so an
+    /// operator must be able to override it from outside.
+    #[test]
+    fn test_config_read_env_beats_toml_beats_defaults() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "theme = \"amber\"\nport = 5321\nindex_file = \"home.md\"\n",
+        ));
+        let _env = EnvVars::set(&[("MBR_THEME", "cyan")]);
+
+        let config = Config::read(repo.path()).expect("all three layers must load");
+
+        assert_eq!(config.theme, "cyan", "env must win over the config file");
+        assert_eq!(
+            config.index_file, "home.md",
+            "config file must win over defaults where env is silent"
+        );
+        assert_eq!(
+            config.port, 5321,
+            "config file must win over defaults where env is silent"
+        );
+        assert_eq!(
+            config.markdown_extensions,
+            Config::default().markdown_extensions,
+            "untouched keys keep the compiled-in default"
+        );
+    }
+
+    #[test]
+    fn test_config_read_malformed_toml_returns_parse_failed() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("theme = \nport = [not valid toml\n"));
+
+        let err = Config::read(repo.path()).expect_err("malformed toml must fail");
+
+        assert!(
+            matches!(err, crate::MbrError::Config(ConfigError::ParseFailed(_))),
+            "expected ConfigError::ParseFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_config_read_rejects_escaping_static_folder_from_toml() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("static_folder = \"../..\"\n"));
+
+        assert!(
+            Config::read(repo.path()).is_err(),
+            "a repo-supplied static_folder that escapes the root must be rejected"
+        );
+    }
+
+    /// The untrusted-repo half of the absolute-path rule: whoever cloned the
+    /// repo did not choose this value, so an absolute `static_folder` in the
+    /// repo's own `.mbr/config.toml` is refused no matter where it points.
+    #[test]
+    fn test_config_read_rejects_absolute_static_folder_from_toml() {
+        let _guard = env_lock();
+        let absolute = if cfg!(windows) { r"C:\\etc" } else { "/etc" };
+        let repo = repo_with_mbr_dir(Some(&format!("static_folder = \"{absolute}\"\n")));
+
+        let err = Config::read(repo.path())
+            .expect_err("an absolute static_folder from the repo config must be rejected");
+
+        assert!(
+            format!("{err:?}").contains("static_folder"),
+            "error should name static_folder, got: {err:?}"
+        );
+    }
+
+    /// The operator half of the same rule: `MBR_STATIC_FOLDER` is set by whoever
+    /// runs the server, not by the repository, so an absolute value there is a
+    /// deliberate choice and is honored.
+    #[test]
+    fn test_config_read_accepts_absolute_static_folder_from_env() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+        let assets = tempfile::tempdir().unwrap();
+        let assets_str = assets.path().to_string_lossy().into_owned();
+        let _env = EnvVars::set(&[("MBR_STATIC_FOLDER", &assets_str)]);
+
+        let config = Config::read(repo.path())
+            .expect("an absolute static_folder from the environment must be accepted");
+
+        assert_eq!(config.static_folder, assets_str);
+    }
+
+    /// Env wins over the config file, and provenance follows the winner: the
+    /// operator's absolute value is honored even when the repo also names one.
+    #[test]
+    fn test_config_read_env_absolute_static_folder_overrides_toml() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("static_folder = \"/etc\"\n"));
+        let assets = tempfile::tempdir().unwrap();
+        let assets_str = assets.path().to_string_lossy().into_owned();
+        let _env = EnvVars::set(&[("MBR_STATIC_FOLDER", &assets_str)]);
+
+        let config = Config::read(repo.path())
+            .expect("the operator's absolute static_folder must win over the repo's");
+
+        assert_eq!(config.static_folder, assets_str);
+    }
+
+    /// The user-reported regression, exercised through the real loader: a
+    /// `content/` markdown root holding `.mbr/config.toml` with a `static/`
+    /// directory alongside it must load.
+    #[test]
+    fn test_config_read_accepts_peer_static_folder_from_toml() {
+        let _guard = env_lock();
+        let project = tempfile::tempdir().unwrap();
+        let content = project.path().join("content");
+        std::fs::create_dir_all(content.join(".mbr")).unwrap();
+        std::fs::write(
+            content.join(".mbr/config.toml"),
+            "static_folder = \"../static\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join("static")).unwrap();
+
+        let config = Config::read(&content).expect("a peer static folder must load");
+
+        assert_eq!(config.static_folder, "../static");
+        assert_eq!(config.root_dir, content);
     }
 }

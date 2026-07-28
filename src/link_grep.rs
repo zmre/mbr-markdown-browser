@@ -16,10 +16,17 @@
 //! 3. Build an Aho-Corasick automaton per folder for fast multi-pattern matching
 //! 4. Scan each file using the automaton for its folder
 //! 5. Only when a match is found, extract link details with regex
+//!
+//! Bare `[[Name]]` wiki links do not name a path at all: the renderer resolves
+//! them through [`crate::wikilink_index::WikilinkIndex`] by title, alias, or
+//! filename stem. Those names are therefore added to the pattern set as well
+//! (gate + wiki regex only — never the inline/reference regexes, where a name
+//! is not a URL).
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use papaya::HashMap as ConcurrentHashMap;
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,8 +34,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use crate::link_index::InboundLink;
-use crate::repo::should_ignore;
+use crate::link_index::{InboundLink, sort_inbound_links};
+use crate::repo::{build_markdown_url_path, should_ignore};
 
 /// Result of scanning for inbound links to a page.
 #[derive(Clone)]
@@ -380,8 +387,12 @@ fn build_extraction_regex(patterns: &[String]) -> Option<Regex> {
 }
 
 /// Builds a regex pattern for wiki-style links.
-fn build_wiki_extraction_regex(patterns: &[String]) -> Option<Regex> {
-    if patterns.is_empty() {
+///
+/// `names` holds the target's bare wiki names (title, aliases, filename stem).
+/// They are alternatives here — and in the Aho-Corasick gate — but deliberately
+/// nowhere else: `[text](Some Title)` is not a link to the target.
+fn build_wiki_extraction_regex(patterns: &[String], names: &[String]) -> Option<Regex> {
+    if patterns.is_empty() && names.is_empty() {
         return None;
     }
 
@@ -395,6 +406,7 @@ fn build_wiki_extraction_regex(patterns: &[String]) -> Option<Regex> {
                 .trim_end_matches('#');
             regex::escape(base)
         })
+        .chain(names.iter().map(|n| regex::escape(n)))
         .collect();
 
     let unique_patterns: HashSet<String> = escaped_patterns.into_iter().collect();
@@ -444,12 +456,22 @@ fn build_ref_extraction_regex(patterns: &[String]) -> Option<Regex> {
 /// This scans all markdown files in the repository looking for links that point
 /// to the target URL path. It extracts link text and anchor information.
 ///
+/// Bare `[[Name]]` links to the target (by title, alias, or filename stem) are
+/// found too: the target's own names are read from its frontmatter once and
+/// added to the wiki pattern set, so server-mode backlinks match what the
+/// renderer (and therefore build mode) resolves.
+///
+/// Links written inside fenced code blocks or backtick spans are ignored, as
+/// the parser-derived build-mode index ignores them.
+///
 /// # Arguments
 /// * `target_url_path` - The URL path being linked to (e.g., "/docs/guide/")
 /// * `root_dir` - Root directory of the markdown repository
 /// * `markdown_extensions` - List of valid markdown file extensions
 /// * `ignore_dirs` - Directories to skip during scanning
 /// * `ignore_globs` - Glob patterns for files to ignore
+/// * `index_file` - Configured index file name (e.g., "index.md"), so the
+///   reported `from` URLs are the canonical ones (`docs/index.md` → `/docs/`)
 ///
 /// # Returns
 /// A vector of `InboundLink` structs representing pages that link to the target.
@@ -459,6 +481,7 @@ pub fn find_inbound_links(
     markdown_extensions: &[String],
     ignore_dirs: &[String],
     ignore_globs: &[String],
+    index_file: &str,
 ) -> Vec<InboundLink> {
     let start = Instant::now();
     let mut inbound_links = Vec::new();
@@ -473,6 +496,9 @@ pub fn find_inbound_links(
 
     // First pass: collect all unique folder paths and their files
     let mut folder_files: HashMap<String, Vec<(PathBuf, String)>> = HashMap::new();
+    // The target's own file, located during the walk so its wiki names
+    // (title/aliases/stem) can be read without a second directory scan.
+    let mut target_file: Option<PathBuf> = None;
 
     for entry in WalkDir::new(root_dir)
         .follow_links(true)
@@ -512,11 +538,12 @@ pub fn find_inbound_links(
         }
 
         // Compute folder URL path and source URL path
-        let source_url_path = compute_url_path(path, root_dir, markdown_extensions);
-        let folder_url_path = get_folder_url_path(&source_url_path);
+        let (source_url_path, folder_url_path) =
+            page_and_folder_urls(path, root_dir, markdown_extensions, Some(index_file));
 
         // Skip if this is the target page itself
         if source_url_path.trim_end_matches('/') == target_normalized {
+            target_file = Some(path.to_path_buf());
             continue;
         }
 
@@ -532,18 +559,26 @@ pub fn find_inbound_links(
     // Build patterns for each folder
     let folder_patterns = build_folder_patterns(target_url_path, &all_folders);
 
+    // The bare `[[Name]]` forms that resolve to this target. Folder-independent,
+    // so they are computed once and reused by every folder's gate/wiki regex.
+    let target_names = target_file
+        .as_deref()
+        .map(wikilink_names_for_target)
+        .unwrap_or_default();
+
     // Build Aho-Corasick automatons for each folder (case-insensitive for wiki links)
     let mut folder_automatons: HashMap<String, Option<AhoCorasick>> = HashMap::new();
 
     for (folder, patterns) in &folder_patterns {
-        if patterns.is_empty() {
+        let gate_patterns: Vec<&String> = patterns.iter().chain(target_names.iter()).collect();
+        if gate_patterns.is_empty() {
             folder_automatons.insert(folder.clone(), None);
         } else {
             // Build case-insensitive automaton to match wiki-style [[links]]
             match AhoCorasickBuilder::new()
                 .ascii_case_insensitive(true)
                 .match_kind(MatchKind::LeftmostFirst)
-                .build(patterns)
+                .build(&gate_patterns)
             {
                 Ok(ac) => {
                     folder_automatons.insert(folder.clone(), Some(ac));
@@ -563,7 +598,10 @@ pub fn find_inbound_links(
 
     for (folder, patterns) in &folder_patterns {
         folder_link_regexes.insert(folder.clone(), build_extraction_regex(patterns));
-        folder_wiki_regexes.insert(folder.clone(), build_wiki_extraction_regex(patterns));
+        folder_wiki_regexes.insert(
+            folder.clone(),
+            build_wiki_extraction_regex(patterns, &target_names),
+        );
         folder_ref_regexes.insert(folder.clone(), build_ref_extraction_regex(patterns));
     }
 
@@ -595,6 +633,11 @@ pub fn find_inbound_links(
             if !ac.is_match(&content) {
                 continue;
             }
+
+            // Only candidate files pay for code stripping. Links inside fences
+            // and backtick spans are documentation, not references: the
+            // parser-derived build-mode index never sees them.
+            let content = strip_code_regions(&content);
 
             // Found a potential match - extract details with regex
             let mut found_link = false;
@@ -678,6 +721,15 @@ pub fn find_inbound_links(
         }
     }
 
+    // Sort before deduplicating, not after. The scan above iterated
+    // `folder_files`, a std `HashMap`, so the push order was randomly seeded
+    // per process — which made *both* the order of these links and, because
+    // the dedup keeps the first occurrence per source, *which* link survives
+    // for a page that links here twice depend on that hash order. Sorting
+    // first pins the surviving link to the lowest-sorting one and leaves the
+    // result in the same order the builder emits, so the two modes agree.
+    sort_inbound_links(&mut inbound_links);
+
     // Deduplicate inbound links by source file - if a page links to the target
     // multiple times, we only keep the first occurrence
     let mut seen_sources: HashSet<String> = HashSet::new();
@@ -709,12 +761,42 @@ pub(crate) fn get_folder_url_path(file_url_path: &str) -> String {
     }
 }
 
-/// Computes the URL path for a markdown file.
-pub(crate) fn compute_url_path(
+/// The two URL forms a markdown file needs during a link scan.
+///
+/// Returns `(page_url, folder_url)`:
+/// - `page_url` is the **canonical** site URL — the same value
+///   [`crate::repo::build_markdown_url_path`] puts in `site.json`, so
+///   `docs/index.md` collapses to `/docs/`. This is what gets reported as
+///   `InboundLink::from`. Pass `index_file: None` when the caller has no index
+///   file configured, which keeps the positional form.
+/// - `folder_url` is the folder a *relative* link inside that file resolves
+///   against, and is deliberately derived from the **positional** URL: for
+///   `docs/index.md` that is `/docs/index/` → `/docs/`, whereas the canonical
+///   `/docs/` would wrongly yield `/`.
+pub(crate) fn page_and_folder_urls(
     file_path: &Path,
     root_dir: &Path,
     markdown_extensions: &[String],
-) -> String {
+    index_file: Option<&str>,
+) -> (String, String) {
+    let positional = compute_url_path(file_path, root_dir, markdown_extensions);
+    let folder_url = get_folder_url_path(&positional);
+    let page_url = match index_file {
+        Some(index_file) => build_markdown_url_path(file_path, root_dir, index_file),
+        None => positional,
+    };
+    (page_url, folder_url)
+}
+
+/// Computes the **positional** URL path for a markdown file: every path
+/// component becomes a URL segment and the markdown extension becomes a
+/// trailing slash.
+///
+/// This is not the canonical page URL — it does not collapse the configured
+/// index file — and is only used to derive the folder that a file's relative
+/// links resolve against. Use [`page_and_folder_urls`] rather than calling this
+/// directly.
+fn compute_url_path(file_path: &Path, root_dir: &Path, markdown_extensions: &[String]) -> String {
     let relative = file_path.strip_prefix(root_dir).unwrap_or(file_path);
 
     let mut url_path = String::from("/");
@@ -727,17 +809,170 @@ pub(crate) fn compute_url_path(
         }
     }
 
-    // Remove the file extension and add trailing slash
+    // Remove the file extension and add trailing slash. Extensions are compared
+    // case-insensitively so `NOTES.MD` and `notes.md` behave the same way (the
+    // walk that feeds this function already lowercases the extension it filters
+    // on). A matching tail is pure ASCII, so truncating there is always on a
+    // character boundary.
     for ext in markdown_extensions {
         let suffix = format!(".{}/", ext);
-        if url_path.ends_with(&suffix) {
-            url_path = url_path[..url_path.len() - suffix.len()].to_string();
+        let cut = match url_path.len().checked_sub(suffix.len()) {
+            Some(cut) => cut,
+            None => continue,
+        };
+        if url_path.as_bytes()[cut..].eq_ignore_ascii_case(suffix.as_bytes()) {
+            url_path.truncate(cut);
             url_path.push('/');
             break;
         }
     }
 
     url_path
+}
+
+/// The bare `[[Name]]` forms that resolve to `path`: its frontmatter `title`,
+/// its frontmatter `aliases`, and its filename stem.
+///
+/// Mirrors the note inputs [`crate::wikilink_index::WikilinkIndex`] is built
+/// from (`Repo::collect_note_inputs`), so grep-based backlinks see the same
+/// names the renderer resolves. Names carrying wiki-link syntax (`/`, `[`, `]`,
+/// `|`, `#`) are dropped: path forms are already covered by the path patterns,
+/// and the rest could never appear inside a `[[…]]` target.
+fn wikilink_names_for_target(path: &Path) -> Vec<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let metadata = crate::markdown::extract_metadata_from_file(path)
+        .map(|m| m.metadata)
+        .unwrap_or_default();
+    let title = metadata
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let aliases = metadata
+        .get("aliases")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    std::iter::once(stem)
+        .chain(title)
+        .chain(aliases)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty() && !name.contains(['/', '[', ']', '|', '#']))
+        .filter(|name| seen.insert(name.to_lowercase()))
+        .collect()
+}
+
+/// Blanks out fenced code blocks and inline code spans so link extraction sees
+/// only prose, matching the parser-derived (build-mode) link index.
+///
+/// Single pass over the lines; blanked regions keep their line structure so the
+/// line-anchored reference-definition regex still behaves. Indented code blocks
+/// are deliberately *not* stripped: telling one from a nested list item needs
+/// full block parsing, and a wrong guess would silently drop real backlinks.
+fn strip_code_regions(content: &str) -> Cow<'_, str> {
+    if !content.contains('`') && !content.contains('~') {
+        return Cow::Borrowed(content);
+    }
+
+    let mut out = String::with_capacity(content.len());
+    // The open fence's character and length, while inside a fenced block.
+    let mut fence: Option<(u8, usize)> = None;
+
+    for line in content.lines() {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        // A fence may be indented by at most 3 spaces (CommonMark).
+        let marker = (indent <= 3)
+            .then(|| fence_marker(&line[indent..]))
+            .flatten();
+        match fence {
+            Some((fence_char, fence_len)) => {
+                // A closing fence is the same character, at least as long, and
+                // carries no info string.
+                let closes = marker.is_some_and(|(c, n)| {
+                    c == fence_char && n >= fence_len && line[indent + n..].trim_end().is_empty()
+                });
+                if closes {
+                    fence = None;
+                }
+            }
+            None => match marker {
+                Some((c, n)) => fence = Some((c, n)),
+                None => out.push_str(&strip_inline_code(line)),
+            },
+        }
+        out.push('\n');
+    }
+
+    Cow::Owned(out)
+}
+
+/// The fence character and run length if `line` opens or closes a code fence.
+fn fence_marker(line: &str) -> Option<(u8, usize)> {
+    let first = *line.as_bytes().first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let run = line.bytes().take_while(|b| *b == first).count();
+    (run >= 3).then_some((first, run))
+}
+
+/// Removes inline code spans (`` `code` ``) from a single line.
+///
+/// A run of N backticks opens a span that ends at the next run of exactly N
+/// backticks on the same line; an unclosed run is literal text and is kept.
+fn strip_inline_code(line: &str) -> Cow<'_, str> {
+    if !line.contains('`') {
+        return Cow::Borrowed(line);
+    }
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let open_start = i;
+            i += bytes[i..].iter().take_while(|b| **b == b'`').count();
+            let run = i - open_start;
+            match find_backtick_run(bytes, i, run) {
+                // Drop the span, leaving a space so neighbouring text can't fuse.
+                Some(close_start) => {
+                    out.push(' ');
+                    i = close_start + run;
+                }
+                None => out.push_str(&line[open_start..i]),
+            }
+        } else {
+            let start = i;
+            i += bytes[i..].iter().take_while(|b| **b != b'`').count();
+            out.push_str(&line[start..i]);
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Byte offset of the next run of exactly `run` backticks at or after `from`.
+fn find_backtick_run(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            i += bytes[i..].iter().take_while(|b| **b == b'`').count();
+            if i - start == run {
+                return Some(start);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -881,6 +1116,81 @@ mod tests {
         assert_eq!(url, "/a/b/c/page/");
     }
 
+    #[test]
+    fn compute_url_path_strips_uppercase_extension() {
+        // The walk filters on a lowercased extension, so the URL builder must
+        // treat `.MD` the same as `.md` instead of leaving it in the path.
+        let root = Path::new("/notes");
+        let extensions = vec!["md".to_string()];
+
+        assert_eq!(
+            compute_url_path(Path::new("/notes/NOTES.MD"), root, &extensions),
+            "/NOTES/"
+        );
+    }
+
+    // ========== page_and_folder_urls tests ==========
+
+    #[test]
+    fn page_and_folder_urls_collapses_index_but_keeps_link_base() {
+        // The canonical page URL drops the index file; the folder that the
+        // page's own relative links resolve against must not.
+        let root = Path::new("/notes");
+        let extensions = vec!["md".to_string()];
+
+        let (page, folder) = page_and_folder_urls(
+            Path::new("/notes/docs/index.md"),
+            root,
+            &extensions,
+            Some("index.md"),
+        );
+        assert_eq!(page, "/docs/");
+        assert_eq!(folder, "/docs/");
+
+        let (page, folder) = page_and_folder_urls(
+            Path::new("/notes/docs/guide.md"),
+            root,
+            &extensions,
+            Some("index.md"),
+        );
+        assert_eq!(page, "/docs/guide/");
+        assert_eq!(folder, "/docs/");
+    }
+
+    #[test]
+    fn page_and_folder_urls_without_index_file_keeps_positional_url() {
+        let root = Path::new("/notes");
+        let extensions = vec!["md".to_string()];
+
+        let (page, folder) =
+            page_and_folder_urls(Path::new("/notes/docs/index.md"), root, &extensions, None);
+        assert_eq!(page, "/docs/index/");
+        assert_eq!(folder, "/docs/");
+    }
+
+    #[test]
+    fn page_and_folder_urls_matches_repo_canonical_url() {
+        // The reported `from` must be byte-identical to the `url_path` the repo
+        // scanner puts in site.json, or backlink hrefs need a redirect and the
+        // graph splits one page into two nodes.
+        let root = Path::new("/notes");
+        let extensions = vec!["md".to_string()];
+        for file in [
+            "/notes/docs/index.md",
+            "/notes/docs/guide.md",
+            "/notes/index.md",
+            "/notes/a/b/c/page.md",
+        ] {
+            let (page, _folder) =
+                page_and_folder_urls(Path::new(file), root, &extensions, Some("index.md"));
+            assert_eq!(
+                page,
+                crate::repo::build_markdown_url_path(Path::new(file), root, "index.md"),
+                "canonical URL mismatch for {file}"
+            );
+        }
+    }
+
     // ========== InboundLinkCache tests ==========
 
     #[test]
@@ -997,6 +1307,7 @@ mod tests {
             &extensions,
             &ignore_dirs,
             &ignore_globs,
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
@@ -1018,7 +1329,14 @@ mod tests {
         )
         .unwrap();
 
-        let links = find_inbound_links("/target/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].anchor, Some("#section".to_string()));
@@ -1030,7 +1348,14 @@ mod tests {
         fs::write(temp_dir.path().join("Japan.md"), "# Japan").unwrap();
         fs::write(temp_dir.path().join("source.md"), "See also: [[Japan]]").unwrap();
 
-        let links = find_inbound_links("/Japan/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/Japan/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].from, "/source/");
         assert_eq!(links[0].text, "Japan");
@@ -1046,7 +1371,14 @@ mod tests {
         )
         .unwrap();
 
-        let links = find_inbound_links("/Japan/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/Japan/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].text, "the Land of the Rising Sun");
     }
@@ -1057,7 +1389,14 @@ mod tests {
         fs::write(temp_dir.path().join("Japan.md"), "# Japan").unwrap();
         fs::write(temp_dir.path().join("source.md"), "See [[Japan#History]].").unwrap();
 
-        let links = find_inbound_links("/Japan/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/Japan/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].anchor, Some("#History".to_string()));
     }
@@ -1072,7 +1411,14 @@ mod tests {
         )
         .unwrap();
 
-        let links = find_inbound_links("/Japan/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/Japan/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
         assert_eq!(links.len(), 1);
     }
 
@@ -1088,7 +1434,14 @@ mod tests {
 
         // Even though source.md links to target via both markdown and wiki syntax,
         // we deduplicate by source file - only one inbound link per source page
-        let links = find_inbound_links("/target/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
         assert_eq!(links.len(), 1);
     }
 
@@ -1104,7 +1457,14 @@ mod tests {
         .unwrap();
 
         // Two different source files linking to the same target = two inbound links
-        let links = find_inbound_links("/target/", temp_dir.path(), &["md".to_string()], &[], &[]);
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
         assert_eq!(links.len(), 2);
     }
 
@@ -1133,6 +1493,7 @@ mod tests {
             &["md".to_string()],
             &[],
             &[],
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
@@ -1165,6 +1526,7 @@ mod tests {
             &["md".to_string()],
             &[],
             &[],
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
@@ -1197,6 +1559,7 @@ mod tests {
             &["md".to_string()],
             &[],
             &[],
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
@@ -1228,6 +1591,7 @@ mod tests {
             &["md".to_string()],
             &[],
             &[],
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
@@ -1255,10 +1619,14 @@ mod tests {
             &["md".to_string()],
             &[],
             &[],
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].from, "/coins/index/");
+        // Canonical URL: `coins/index.md` is served at `/coins/`, not
+        // `/coins/index/`. The relative `./tricks/…` link still resolves,
+        // because the folder used for matching stays `/coins/`.
+        assert_eq!(links[0].from, "/coins/");
     }
 
     #[test]
@@ -1282,9 +1650,385 @@ mod tests {
             &["md".to_string()],
             &[],
             &[],
+            "index.md",
         );
 
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].from, "/coins/index/");
+        assert_eq!(links[0].from, "/coins/");
+    }
+
+    // ========== canonical `from` URLs (index files) ==========
+
+    #[test]
+    fn find_inbound_links_reports_index_source_with_canonical_url() {
+        // A backlink from `docs/index.md` must be reported as `/docs/` — the URL
+        // the page is actually served at — not the positional `/docs/index/`.
+        let temp_dir = TempDir::new().unwrap();
+        let docs = temp_dir.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+
+        fs::write(temp_dir.path().join("target.md"), "# Target").unwrap();
+        fs::write(docs.join("index.md"), "See [Target](../target/).").unwrap();
+
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "/docs/");
+    }
+
+    #[test]
+    fn find_inbound_links_skips_index_target_self_link() {
+        // The target page is `docs/index.md`, served at `/docs/`. Its own
+        // self-link must not be reported as an inbound link from itself.
+        let temp_dir = TempDir::new().unwrap();
+        let docs = temp_dir.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+
+        fs::write(docs.join("index.md"), "Back to [me](/docs/).").unwrap();
+        fs::write(
+            temp_dir.path().join("other.md"),
+            "See [Docs](/docs/) for more.",
+        )
+        .unwrap();
+
+        let links = find_inbound_links(
+            "/docs/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "/other/");
+    }
+
+    #[test]
+    fn find_inbound_links_handles_uppercase_markdown_extension() {
+        // `.MD` passes the (lowercased) extension filter, so its URL must be
+        // built the same way `.md` is.
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("target.md"), "# Target").unwrap();
+        fs::write(temp_dir.path().join("SOURCE.MD"), "See [t](target/).").unwrap();
+
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "/SOURCE/");
+    }
+
+    // ========== bare wiki names (title / alias / stem) ==========
+
+    #[test]
+    fn find_inbound_links_matches_title_and_alias_wikilinks() {
+        // `[[Patrick Walsh]]` / `[[PW]]` resolve through the wikilink index by
+        // title and alias; server-mode backlinks must see them too.
+        let temp_dir = TempDir::new().unwrap();
+        let people = temp_dir.path().join("people");
+        let notes = temp_dir.path().join("notes");
+        fs::create_dir_all(&people).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+
+        fs::write(
+            people.join("pw.md"),
+            "---\ntitle: Patrick Walsh\naliases: [PW]\n---\n\n# Patrick Walsh\n",
+        )
+        .unwrap();
+        fs::write(
+            notes.join("family.md"),
+            "See [[Patrick Walsh]] and also [[PW]].",
+        )
+        .unwrap();
+
+        let links = find_inbound_links(
+            "/people/pw/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        // Two matches on one page dedupe to a single inbound link.
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "/notes/family/");
+    }
+
+    #[test]
+    fn find_inbound_links_matches_bare_stem_wikilink_from_another_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let people = temp_dir.path().join("people");
+        let notes = temp_dir.path().join("notes");
+        fs::create_dir_all(&people).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+
+        fs::write(people.join("pw.md"), "# Patrick Walsh\n").unwrap();
+        fs::write(notes.join("family.md"), "See [[pw]] for details.").unwrap();
+
+        let links = find_inbound_links(
+            "/people/pw/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "/notes/family/");
+    }
+
+    #[test]
+    fn find_inbound_links_wiki_names_do_not_match_inline_link_targets() {
+        // A name is a `[[…]]` target, never a URL: `[x](Patrick Walsh)` must not
+        // be reported as a backlink.
+        let temp_dir = TempDir::new().unwrap();
+        let people = temp_dir.path().join("people");
+        let notes = temp_dir.path().join("notes");
+        fs::create_dir_all(&people).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+
+        fs::write(people.join("pw.md"), "---\ntitle: Patrick Walsh\n---\n").unwrap();
+        fs::write(notes.join("family.md"), "See [him](Patrick Walsh).").unwrap();
+
+        let links = find_inbound_links(
+            "/people/pw/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert!(links.is_empty(), "unexpected links: {links:?}");
+    }
+
+    // ========== code blocks / spans ==========
+
+    #[test]
+    fn find_inbound_links_ignores_links_inside_code_blocks() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("target.md"), "# Target").unwrap();
+
+        // Backtick fence.
+        fs::write(
+            temp_dir.path().join("fenced.md"),
+            "How to link:\n\n```markdown\n[example](target/)\n```\n",
+        )
+        .unwrap();
+        // Tilde fence (which may itself contain backticks).
+        fs::write(
+            temp_dir.path().join("tilde.md"),
+            "Example:\n\n~~~\n[example](/target/) and `code`\n~~~\n",
+        )
+        .unwrap();
+        // Inline code span.
+        fs::write(
+            temp_dir.path().join("span.md"),
+            "Write `[example](target/)` to link.",
+        )
+        .unwrap();
+        // Wiki link inside a fence.
+        fs::write(
+            temp_dir.path().join("wiki_fence.md"),
+            "```\n[[target]]\n```\n",
+        )
+        .unwrap();
+
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert!(links.is_empty(), "unexpected links: {links:?}");
+    }
+
+    #[test]
+    fn find_inbound_links_still_finds_links_around_code_blocks() {
+        // Stripping code must not swallow the prose around it.
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("target.md"), "# Target").unwrap();
+        fs::write(
+            temp_dir.path().join("source.md"),
+            "Run `cargo test` first.\n\n```sh\necho hi\n```\n\nThen see [Target](target/).",
+        )
+        .unwrap();
+
+        let links = find_inbound_links(
+            "/target/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "/source/");
+        assert_eq!(links[0].text, "Target");
+    }
+
+    #[test]
+    fn strip_code_regions_blanks_fences_and_spans_only() {
+        let input = "a [x](y) b\n```\n[fenced](y)\n```\nc `[span](y)` d\n~~~\n[tilde](y)\n~~~\ne\n";
+        let out = strip_code_regions(input);
+        assert!(out.contains("[x](y)"));
+        assert!(!out.contains("[fenced](y)"));
+        assert!(!out.contains("[span](y)"));
+        assert!(!out.contains("[tilde](y)"));
+        assert!(out.contains('c') && out.contains('d') && out.contains('e'));
+    }
+
+    #[test]
+    fn strip_code_regions_keeps_unclosed_backticks_literal() {
+        // An unmatched backtick is literal text in CommonMark; dropping the rest
+        // of the line would lose real links.
+        let out = strip_code_regions("a ` b [x](y)\n");
+        assert!(out.contains("[x](y)"));
+    }
+
+    #[test]
+    fn strip_code_regions_leaves_code_free_content_borrowed() {
+        // Fast path: files without fences or spans must not be reallocated.
+        assert!(matches!(
+            strip_code_regions("plain [x](y)\n"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    // ========== cross-check against the build-mode (parser) link index ==========
+
+    /// Inverts parser-derived outbound links exactly the way
+    /// `Builder::write_link_files` does, and returns the inbound set for
+    /// `target_url`, sorted for comparison.
+    fn parser_inbound_links(
+        root: &Path,
+        pages: &[(&str, &str, bool)],
+        target_url: &str,
+    ) -> Vec<(String, String)> {
+        use crate::link_index::resolve_relative_url;
+        use crate::link_transform::LinkTransformConfig;
+
+        let mut inbound: Vec<(String, String)> = Vec::new();
+        for (rel_path, page_url, is_index) in pages {
+            let rendered = crate::markdown::render_sync(
+                root.join(rel_path),
+                root,
+                0,
+                LinkTransformConfig {
+                    markdown_extensions: vec!["md".to_string()],
+                    index_file: "index.md".to_string(),
+                    is_index_file: *is_index,
+                    url_depth: None,
+                    current_page_url: (*page_url).to_string(),
+                },
+                None,
+                true,
+                false,
+                HashSet::new(),
+                false,
+                &[],
+                None,
+            )
+            .expect("render");
+
+            for link in rendered.outbound_links {
+                if !link.internal || link.to.is_empty() {
+                    continue;
+                }
+                if resolve_relative_url(page_url, &link.to, *is_index) == target_url {
+                    inbound.push(((*page_url).to_string(), link.text));
+                }
+            }
+        }
+        inbound.sort();
+        inbound
+    }
+
+    #[test]
+    fn find_inbound_links_agrees_with_parser_derived_index() {
+        // One nested fixture exercising every link shape at once: parent-relative,
+        // `./`-relative, absolute, a wiki link, and a code-fenced decoy. The
+        // grep-based (server) and parser-derived (build) inbound sets must match.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let docs = root.join("docs");
+        let notes = root.join("notes");
+        fs::create_dir_all(docs.join("sub")).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+
+        fs::write(docs.join("guide.md"), "# Guide\n").unwrap();
+        // ../guide/ from a nested folder
+        fs::write(
+            docs.join("sub").join("deep.md"),
+            "Up to [Guide](../guide/).\n",
+        )
+        .unwrap();
+        // ./guide/ from the same folder
+        fs::write(docs.join("intro.md"), "See [Guide](./guide/).\n").unwrap();
+        // absolute
+        fs::write(notes.join("abs.md"), "See [Guide](/docs/guide/).\n").unwrap();
+        // wiki link (same-folder stem)
+        fs::write(docs.join("wiki.md"), "See [[guide]].\n").unwrap();
+        // code-fenced decoy: must be reported by neither implementation
+        fs::write(
+            notes.join("decoy.md"),
+            "Example syntax:\n\n```markdown\n[Guide](/docs/guide/)\n```\n",
+        )
+        .unwrap();
+
+        let grep: Vec<(String, String)> = {
+            let mut v: Vec<(String, String)> = find_inbound_links(
+                "/docs/guide/",
+                root,
+                &["md".to_string()],
+                &[],
+                &[],
+                "index.md",
+            )
+            .into_iter()
+            .map(|l| (l.from, l.text))
+            .collect();
+            v.sort();
+            v
+        };
+
+        let parser = parser_inbound_links(
+            root,
+            &[
+                ("docs/sub/deep.md", "/docs/sub/deep/", false),
+                ("docs/intro.md", "/docs/intro/", false),
+                ("notes/abs.md", "/notes/abs/", false),
+                ("docs/wiki.md", "/docs/wiki/", false),
+                ("notes/decoy.md", "/notes/decoy/", false),
+            ],
+            "/docs/guide/",
+        );
+
+        assert_eq!(grep, parser);
+        assert_eq!(grep.len(), 4, "expected four real backlinks: {grep:?}");
+        assert!(
+            !grep.iter().any(|(from, _)| from == "/notes/decoy/"),
+            "code-fenced link must not be a backlink: {grep:?}"
+        );
     }
 }

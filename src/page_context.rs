@@ -122,8 +122,13 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
 
 /// Serializes tag-source configuration as a JSON string for safe template
 /// rendering in a JavaScript context (used by frontend tag linking).
+///
+/// `_head.html` emits this inside an inline `<script>` with `| safe`, and the
+/// labels come from `.mbr/config.toml`, so the payload is escaped for script
+/// context (see [`crate::templates::escape_json_for_script`]) — otherwise a
+/// label containing `</script>` would terminate the block.
 pub fn tag_sources_json(tag_sources: &[TagSource]) -> String {
-    serde_json::to_string(
+    let json = serde_json::to_string(
         &tag_sources
             .iter()
             .map(|ts| {
@@ -136,7 +141,8 @@ pub fn tag_sources_json(tag_sources: &[TagSource]) -> String {
             })
             .collect::<Vec<_>>(),
     )
-    .unwrap_or_else(|_| "[]".to_string())
+    .unwrap_or_else(|_| "[]".to_string());
+    crate::templates::escape_json_for_script(&json)
 }
 
 /// Converts breadcrumbs to their JSON template representation, rewriting
@@ -485,6 +491,31 @@ mod tests {
     #[test]
     fn test_tag_sources_json_empty() {
         assert_eq!(tag_sources_json(&[]), "[]");
+    }
+
+    /// `_head.html` emits this payload inside an inline `<script>` with
+    /// `| safe`, so a configured label containing `</script>` would otherwise
+    /// terminate the block and wipe out `window.__MBR_CONFIG__`.
+    #[test]
+    fn test_tag_sources_json_is_escaped_for_script_context() {
+        let sources = vec![TagSource {
+            field: "tags".to_string(),
+            label: Some("</script><img src=x>".to_string()),
+            label_plural: None,
+        }];
+        let json_str = tag_sources_json(&sources);
+
+        assert!(
+            !json_str.contains("</script>"),
+            "script terminator must not survive: {json_str}"
+        );
+        assert!(
+            json_str.contains("\\u003c/script\\u003e"),
+            "expected the escaped terminator in: {json_str}"
+        );
+        // Escaping is markup-only: the payload still decodes to the original.
+        let parsed: Vec<Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed[0]["label"], "</script><img src=x>");
     }
 
     #[test]

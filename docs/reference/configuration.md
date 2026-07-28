@@ -11,20 +11,23 @@ mbr uses a layered configuration system:
 ```mermaid
 flowchart BT
     DEFAULTS["Compiled-in Defaults"]
-    ENV["Environment Variables<br/>(MBR_*)"]
     CONFIG[".mbr/config.toml"]
+    ENV["Environment Variables<br/>(MBR_*)"]
     CLI["Command-line Flags"]
     FINAL["Final Configuration"]
 
-    DEFAULTS --> ENV
-    ENV --> CONFIG
-    CONFIG --> CLI
+    DEFAULTS --> CONFIG
+    CONFIG --> ENV
+    ENV --> CLI
     CLI --> FINAL
 
     style FINAL fill:#90EE90
 ```
 
-Later layers override earlier ones.
+Later layers override earlier ones. In particular, `MBR_*` environment
+variables override `.mbr/config.toml`: the config file ships inside the
+markdown repository, so anyone serving a repository they did not author can
+override its settings from the outside.
 
 ## Configuration File
 
@@ -88,7 +91,7 @@ oembed_timeout_ms = 500
 |--------|------|---------|-------------|
 | `markdown_extensions` | array | `["md"]` | File extensions treated as markdown |
 | `index_file` | string | `"index.md"` | Default file for directories |
-| `static_folder` | string | `"static"` | Folder for static file overlay |
+| `static_folder` | string | `"static"` | Folder for static file overlay. Must stay inside the markdown root or be a peer of it (`../static`); values reaching past the root's parent — or into `$HOME` or `/` — are rejected at startup, as are absolute paths from a config file. See [Static Folder](#static-folder) |
 
 ### Ignore Settings
 
@@ -113,7 +116,8 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `oembed_timeout_ms` | number | `500` (server/GUI), `0` (build) | URL metadata fetch timeout (0 to disable) |
-| `oembed_cache_size` | number | `2097152` | Cache size in bytes (0 to disable) |
+| `oembed_cache_size` | number | `2097152` | Oembed cache size in bytes (0 to disable) |
+| `media_cache_size` | number | `67108864` | Media metadata cache size in bytes — video/PDF covers, chapters, captions (0 to disable) |
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking (named frontmatter relationships) |
@@ -317,7 +321,9 @@ schema and a walkthrough.
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
-> **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching.
+> **Note:** The oembed cache stores fetched page metadata to avoid redundant network requests. URLs are fetched in parallel and cached for reuse across files (in build mode) or requests (in server mode). Set `oembed_cache_size` to `0` to disable caching. It does **not** size the media metadata cache — see `media_cache_size` below.
+
+> **Note:** Fetching is bounded: at most 8 requests are in flight at once per page, and a single page fetches metadata for at most 100 distinct bare URLs. Any URLs beyond that cap render as plain links. Bare URLs inside fenced or indented code blocks are never fetched — code samples render verbatim.
 
 > **Security:** Oembed fetching refuses private, loopback, and link-local addresses (including hostnames that resolve to them), follows at most 5 redirects with every hop re-checked against the same rules, and caps response bodies at 512KB.
 
@@ -523,6 +529,26 @@ Example: If you have `videos/demo.mp4`, requesting `/videos/demo.mp4.cover.jpg` 
 
 Generated metadata is cached in memory to avoid repeated ffmpeg operations.
 
+**Cache size:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `media_cache_size` | number | `67108864` (64 MB) | Bytes of generated video/PDF metadata (cover JPEGs, chapters, captions) kept in memory; `0` disables caching |
+
+This budget is separate from `oembed_cache_size`. Cover images are full JPEG
+payloads (a PDF cover renders up to 1200 px wide), so they need far more room
+than the short text metadata the oembed cache holds — and turning oembed
+caching off must not turn media caching off with it. Raise it on repositories
+with large media galleries:
+
+```toml
+# .mbr/config.toml
+media_cache_size = 134217728  # 128 MB
+```
+
+Or `MBR_MEDIA_CACHE_SIZE=134217728`. The cache lives in server/GUI mode only;
+static builds read pre-generated sidecar files instead.
+
 **CLI Mode (Pre-generation):**
 Use `--extract-video-metadata` to extract metadata and save as sidecar files:
 
@@ -686,6 +712,7 @@ MBR_INDEX_FILE=README.md
 # Behavior
 MBR_OEMBED_TIMEOUT_MS=1000
 MBR_OEMBED_CACHE_SIZE=4194304  # 4MB
+MBR_MEDIA_CACHE_SIZE=134217728 # 128MB of video/PDF covers, chapters, captions
 
 # Navigation
 MBR_GRAPH_DEPTH=3
@@ -702,7 +729,8 @@ MBR_EDIT_ENABLED=true
 MBR_UPLOAD_MAX_BYTES=26214400  # 25 MiB cap for editor asset uploads
 ```
 
-Environment variables override config file settings.
+Environment variables override config file settings, which in turn override the
+compiled-in defaults. Command-line flags override everything.
 
 
 ## Root Directory Detection
@@ -759,6 +787,96 @@ To use a different folder, configure it in `.mbr/config.toml`:
 ```toml
 static_folder = "assets"
 ```
+
+### Where the static folder may live
+
+`static_folder` is read from the repository's own `.mbr/config.toml`, which the
+person running mbr may not have written. Left unrestricted it would let a
+repository turn the server into an arbitrary-file reader, so mbr checks it at
+startup and refuses to launch on a value that reaches too far.
+
+**Inside the root** is always fine, including nested paths:
+
+```toml
+static_folder = "assets"
+static_folder = "public/assets"
+```
+
+**A peer of the root** is also allowed, for the common layout where the markdown
+and the media are siblings:
+
+```
+project/
+├── content/              # markdown root (holds .mbr/)
+│   └── .mbr/config.toml  # static_folder = "../static"
+└── static/               # peer — allowed
+    └── videos/
+        └── demo.mp4      # available at /videos/demo.mp4
+```
+
+The boundary is the **parent of the markdown root**, and it is refused when that
+parent is your home directory or the filesystem root. Concretely:
+
+| Value | Markdown root | Result |
+|-------|---------------|--------|
+| `static`, `public/assets` | anywhere | Allowed — inside the root |
+| `../static` | `project/content` | Allowed — a peer of the root |
+| `../static` | `~/notes` | **Refused** — the parent is `$HOME` |
+| `../..`, `../../assets` | anywhere | **Refused** — reaches past the parent |
+| `..` | anywhere | **Refused** — the parent itself, which would expose every sibling |
+| `/etc` (from `.mbr/config.toml`) | anywhere | **Refused** — see below |
+
+A symlink is judged by where it actually lands, not by how it is spelled: a
+`static` symlink pointing at a peer directory is accepted, one pointing past the
+boundary is refused. Within the folder mbr settles on, request paths are still
+contained — a file inside the static folder that symlinks to `/etc/passwd` is
+not served.
+
+### Absolute paths: environment only
+
+An **absolute** `static_folder` is accepted only from the `MBR_STATIC_FOLDER`
+environment variable, never from a config file:
+
+```bash
+MBR_STATIC_FOLDER=/srv/shared-assets mbr -s ~/notes   # allowed
+```
+
+```toml
+# .mbr/config.toml — refused at startup
+static_folder = "/srv/shared-assets"
+```
+
+The distinction is provenance, not the value: the environment variable is set by
+whoever runs the server, while the config file ships inside the repository. An
+absolute path from the environment is a deliberate operator choice and is used as
+given, with no peer-boundary check.
+
+When the static folder resolves outside the markdown root, mbr logs one `INFO`
+line at startup naming the resolved directory, so an external static root is
+never silently in effect. Run with `-v` to see it.
+
+### Indexing an external static folder
+
+An accepted external static folder is a full second scan root, not just a
+serving fallback. Its assets are indexed exactly like assets inside the root, so
+they appear in `site.json` and `/.mbr/media.json` and are available to the media
+browser, the editor's media picker, search, and the background pass that reads
+durations, image dimensions and PDF/video cover images. In a static build they
+are placed inside the output directory at their served paths — `../static/videos/demo.mp4`
+becomes `<output>/videos/demo.mp4`.
+
+**Markdown files inside an external static folder are skipped**, with a warning
+naming the file. A markdown file there has no representable URL: it sits outside
+the markdown root, so its URL would have to contain `..`, which would escape the
+site and, during a build, write the page outside the output directory. Put
+markdown under the markdown root; the static folder is for assets. This applies
+only to an *external* static folder — markdown in a `static/` directory inside
+the root is indexed normally.
+
+No other directory gets this treatment. A directory *symlink* that points out of
+the markdown root is still skipped, whether or not an external static folder is
+configured: the overlay is one specific directory the policy above approved, not
+a general permission to index outside the root.
 
 In `guide.md`:
 ```markdown

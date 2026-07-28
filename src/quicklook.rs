@@ -13,7 +13,6 @@ use crate::link_transform::LinkTransformConfig;
 use crate::markdown;
 use crate::server::DEFAULT_FILES;
 use regex::Regex;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tera::{Context, Tera};
@@ -212,30 +211,74 @@ pub fn find_config_root(file_path: String) -> String {
     config::find_root_dir(&path).to_string_lossy().into_owned()
 }
 
-/// Resolve an asset path, checking the direct path first, then falling back to static folder.
+/// Canonical form of `candidate`, but only if it exists and resolves inside
+/// `canonical_root`.
+///
+/// `canonicalize` resolves `..` and every symlink, so its *result* is the only
+/// trustworthy answer; containment is therefore checked on the resolved path and
+/// never on the input string. `Path::starts_with` compares whole components, so
+/// a sibling root like `/notes-evil` does not count as inside `/notes`.
+///
+/// This mirrors `safe_join` in `path_resolver.rs`, which guards the same class of
+/// traversal for the server. QuickLook only ever rewrites URLs for files that
+/// already exist, so unlike `safe_join` there is no "parent exists, leaf does
+/// not" case to handle.
+fn contained_canonical(canonical_root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let canonical = candidate.canonicalize().ok()?;
+    canonical.starts_with(canonical_root).then_some(canonical)
+}
+
+/// Resolve a root-relative URL path to an on-disk asset, checking the direct path
+/// first, then falling back to the static folder.
 ///
 /// This mirrors the logic in `path_resolver.rs` for consistent behavior between
 /// server mode and QuickLook previews.
-fn resolve_asset_path(root_path: &Path, static_folder: &str, url_path: &str) -> PathBuf {
-    // url_path is like "/images/photo.jpg" - remove leading slash for join
+///
+/// # Security
+///
+/// `url_path` comes from attacker-controlled markdown. The returned path is always
+/// the canonical path of a file that exists *inside* `canonical_root`; `..`
+/// traversal, an absolute path smuggled in after the leading slash, and symlinks
+/// pointing out of the repository all yield `None`. Callers must not emit an
+/// `mbrfile://` URL when this returns `None`.
+fn resolve_asset_path(
+    canonical_root: &Path,
+    static_folder: &str,
+    url_path: &str,
+) -> Option<PathBuf> {
+    // url_path is like "/images/photo.jpg" - remove leading slashes for join
     let relative_path = url_path.trim_start_matches('/');
 
-    // Check direct path first
-    let direct = root_path.join(relative_path);
-    if direct.exists() {
-        return direct;
-    }
-
-    // Fallback to static folder
-    if !static_folder.is_empty() {
-        let static_path = root_path.join(static_folder).join(relative_path);
-        if static_path.exists() {
-            return static_path;
+    // Check direct path first, then fall back to the static folder overlay.
+    contained_canonical(canonical_root, &canonical_root.join(relative_path)).or_else(|| {
+        if static_folder.is_empty() {
+            return None;
         }
-    }
+        contained_canonical(
+            canonical_root,
+            &canonical_root.join(static_folder).join(relative_path),
+        )
+    })
+}
 
-    // Neither exists - return direct path (will 404, but that's expected)
-    direct
+/// Rewrite one matched `src`/`href`/`poster` attribute into an `mbrfile://` URL.
+///
+/// Assets that do not resolve to an existing file inside the repository root keep
+/// their original root-relative URL, which the WebView then simply fails to load.
+fn rewrite_asset_attribute(
+    caps: &regex::Captures<'_>,
+    canonical_root: &Path,
+    static_folder: &str,
+    quote: char,
+) -> String {
+    let attr = &caps[1];
+    let url_path = &caps[2];
+
+    let target = resolve_asset_path(canonical_root, static_folder, url_path)
+        .and_then(|resolved| resolved.to_str().map(|s| format!("mbrfile://{}", s)))
+        .unwrap_or_else(|| url_path.to_string());
+
+    format!("{}={}{}{}", attr, quote, target, quote)
 }
 
 /// Convert root-relative URLs (starting with /) to mbrfile:// URLs.
@@ -245,30 +288,28 @@ fn resolve_asset_path(root_path: &Path, static_folder: &str, url_path: &str) -> 
 ///
 /// Uses the same fallback logic as the server: checks the direct path first,
 /// then falls back to the static folder if configured.
+///
+/// # Security
+///
+/// Only assets that canonically live inside `root_path` are rewritten. If
+/// `root_path` itself cannot be canonicalized there is nothing to contain against,
+/// so the HTML is returned untouched rather than rewritten optimistically.
 fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str) -> String {
+    // Canonicalize the root once: every containment check compares against it,
+    // and per-attribute canonicalization of the root would be wasted syscalls.
+    let Ok(canonical_root) = root_path.canonicalize() else {
+        return html.to_string();
+    };
+
     // First pass: handle double-quoted attributes
     let result = ROOT_RELATIVE_DOUBLE_QUOTED.replace_all(html, |caps: &regex::Captures| {
-        let attr = &caps[1];
-        let url_path = &caps[2];
-
-        // Resolve the path with static folder fallback
-        let resolved = resolve_asset_path(root_path, static_folder, url_path);
-        let resolved_str = resolved.to_str().unwrap_or(url_path);
-
-        format!("{}=\"mbrfile://{}\"", attr, resolved_str)
+        rewrite_asset_attribute(caps, &canonical_root, static_folder, '"')
     });
 
     // Second pass: handle single-quoted attributes
     ROOT_RELATIVE_SINGLE_QUOTED
         .replace_all(&result, |caps: &regex::Captures| {
-            let attr = &caps[1];
-            let url_path = &caps[2];
-
-            // Resolve the path with static folder fallback
-            let resolved = resolve_asset_path(root_path, static_folder, url_path);
-            let resolved_str = resolved.to_str().unwrap_or(url_path);
-
-            format!("{}='mbrfile://{}'", attr, resolved_str)
+            rewrite_asset_attribute(caps, &canonical_root, static_folder, '\'')
         })
         .to_string()
 }
@@ -276,7 +317,7 @@ fn convert_root_relative_urls(html: &str, root_path: &Path, static_folder: &str)
 /// Render the QuickLook HTML template with inlined assets.
 fn render_quicklook_template(
     markdown_html: &str,
-    frontmatter: HashMap<String, serde_json::Value>,
+    frontmatter: markdown::SimpleMetadata,
     headings: Vec<markdown::HeadingInfo>,
     root_path: &Path,
     base_url: &str,
@@ -741,48 +782,90 @@ mod tests {
         assert!(!html.contains("registerLanguage"));
     }
 
+    /// Creates a temp workspace laid out as:
+    ///
+    /// ```text
+    /// <tmp>/          <- "outside" the repo; escape targets live here
+    ///   repo/         <- the previewed repository root
+    ///     <relative_file>
+    /// ```
+    ///
+    /// Returns the tempdir (which must stay alive for the test) and the
+    /// canonical repo root. The canonical root is what the rewriter emits, and
+    /// on macOS it differs from `tempdir.path()`
+    /// (`/var/folders/...` -> `/private/var/folders/...`).
+    fn repo_with_file(relative_file: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file = temp_dir.path().join("repo").join(relative_file);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"asset bytes").unwrap();
+        let canonical_root = temp_dir.path().join("repo").canonicalize().unwrap();
+        (temp_dir, canonical_root)
+    }
+
     #[test]
     fn test_convert_root_relative_urls_double_quotes() {
+        let (_tmp, root) = repo_with_file("images/test.png");
         let html = r#"<img src="/images/test.png" alt="test">"#;
-        let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root, "");
+        let result = convert_root_relative_urls(html, &root, "");
         assert_eq!(
             result,
-            r#"<img src="mbrfile:///Users/test/notes/images/test.png" alt="test">"#
+            format!(
+                r#"<img src="mbrfile://{}/images/test.png" alt="test">"#,
+                root.display()
+            )
         );
     }
 
     #[test]
     fn test_convert_root_relative_urls_single_quotes() {
+        let (_tmp, root) = repo_with_file("videos/test.mp4");
         let html = r#"<source src='/videos/test.mp4' type="video/mp4">"#;
-        let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root, "");
+        let result = convert_root_relative_urls(html, &root, "");
         assert_eq!(
             result,
-            r#"<source src='mbrfile:///Users/test/notes/videos/test.mp4' type="video/mp4">"#
+            format!(
+                r#"<source src='mbrfile://{}/videos/test.mp4' type="video/mp4">"#,
+                root.display()
+            )
         );
     }
 
     #[test]
     fn test_convert_root_relative_urls_href() {
+        let (_tmp, root) = repo_with_file("docs/readme.md");
         let html = r#"<a href="/docs/readme.md">Link</a>"#;
-        let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root, "");
+        let result = convert_root_relative_urls(html, &root, "");
         assert_eq!(
             result,
-            r#"<a href="mbrfile:///Users/test/notes/docs/readme.md">Link</a>"#
+            format!(
+                r#"<a href="mbrfile://{}/docs/readme.md">Link</a>"#,
+                root.display()
+            )
         );
     }
 
     #[test]
     fn test_convert_root_relative_urls_poster() {
+        let (_tmp, root) = repo_with_file("images/thumb.jpg");
         let html = r#"<video poster="/images/thumb.jpg"></video>"#;
-        let root = Path::new("/Users/test/notes");
-        let result = convert_root_relative_urls(html, root, "");
+        let result = convert_root_relative_urls(html, &root, "");
         assert_eq!(
             result,
-            r#"<video poster="mbrfile:///Users/test/notes/images/thumb.jpg"></video>"#
+            format!(
+                r#"<video poster="mbrfile://{}/images/thumb.jpg"></video>"#,
+                root.display()
+            )
         );
+    }
+
+    #[test]
+    fn test_convert_root_relative_urls_unknown_root_rewrites_nothing() {
+        // A root that cannot be canonicalized gives nothing to contain against,
+        // so the HTML must be left alone rather than rewritten optimistically.
+        let html = r#"<img src="/images/test.png">"#;
+        let result = convert_root_relative_urls(html, Path::new("/no/such/root"), "static");
+        assert_eq!(result, html);
     }
 
     #[test]
@@ -816,7 +899,7 @@ mod tests {
         let result = convert_root_relative_urls(html, temp_dir.path(), "static");
 
         // Should resolve to static/images/photo.jpg since /images/photo.jpg doesn't exist
-        let expected_path = temp_dir.path().join("static/images/photo.jpg");
+        let expected_path = static_images.canonicalize().unwrap().join("photo.jpg");
         assert!(
             result.contains(&format!("mbrfile://{}", expected_path.display())),
             "Expected URL to use static folder path. Got: {}",
@@ -843,7 +926,7 @@ mod tests {
         let result = convert_root_relative_urls(html, temp_dir.path(), "static");
 
         // Should resolve to direct path since it exists
-        let expected_path = temp_dir.path().join("images/photo.jpg");
+        let expected_path = direct_images.canonicalize().unwrap().join("photo.jpg");
         assert!(
             result.contains(&format!("mbrfile://{}", expected_path.display())),
             "Expected URL to use direct path. Got: {}",
@@ -858,50 +941,170 @@ mod tests {
 
     #[test]
     fn test_convert_urls_neither_exists() {
-        // Test that direct path is used when file exists in neither location
+        // A URL that resolves to no file anywhere in the repo is left alone: an
+        // mbrfile:// URL is a statement that the target is a contained, existing
+        // asset, so one must not be minted for a path we never verified.
         let temp_dir = tempfile::tempdir().unwrap();
 
         let html = r#"<img src="/images/missing.jpg">"#;
         let result = convert_root_relative_urls(html, temp_dir.path(), "static");
 
-        // Should still use direct path (will 404, but that's expected)
-        let expected_path = temp_dir.path().join("images/missing.jpg");
-        assert!(
-            result.contains(&format!("mbrfile://{}", expected_path.display())),
-            "Expected URL to use direct path even when missing. Got: {}",
-            result
-        );
+        assert_eq!(result, html);
     }
 
     #[test]
     fn test_resolve_asset_path_direct_exists() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let images = temp_dir.path().join("images");
-        std::fs::create_dir_all(&images).unwrap();
-        std::fs::write(images.join("test.png"), b"data").unwrap();
+        let (_tmp, root) = repo_with_file("images/test.png");
 
-        let result = resolve_asset_path(temp_dir.path(), "static", "/images/test.png");
-        assert_eq!(result, temp_dir.path().join("images/test.png"));
+        let result = resolve_asset_path(&root, "static", "/images/test.png");
+        assert_eq!(result, Some(root.join("images/test.png")));
     }
 
     #[test]
     fn test_resolve_asset_path_static_fallback() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let static_images = temp_dir.path().join("static/images");
-        std::fs::create_dir_all(&static_images).unwrap();
-        std::fs::write(static_images.join("test.png"), b"data").unwrap();
+        let (_tmp, root) = repo_with_file("static/images/test.png");
 
-        let result = resolve_asset_path(temp_dir.path(), "static", "/images/test.png");
-        assert_eq!(result, temp_dir.path().join("static/images/test.png"));
+        let result = resolve_asset_path(&root, "static", "/images/test.png");
+        assert_eq!(result, Some(root.join("static/images/test.png")));
     }
 
     #[test]
     fn test_resolve_asset_path_neither_exists() {
         let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
 
-        let result = resolve_asset_path(temp_dir.path(), "static", "/images/missing.png");
-        // Should return direct path
-        assert_eq!(result, temp_dir.path().join("images/missing.png"));
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/images/missing.png"),
+            None
+        );
+    }
+
+    // MARK: containment regression tests
+    //
+    // Every case below is a way for attacker-authored markdown to name a file
+    // outside the previewed repository. None of them may produce a path.
+
+    #[test]
+    fn test_resolve_asset_path_rejects_dotdot_traversal() {
+        let (_tmp, root) = repo_with_file("images/ok.png");
+        // The escape target must exist, or the test would pass for the wrong reason.
+        let outside = root.parent().unwrap().join("outside-secret.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/../outside-secret.txt"),
+            None
+        );
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/images/../../outside-secret.txt"),
+            None
+        );
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/../../../../../../../etc/passwd"),
+            None
+        );
+        assert!(
+            outside.exists(),
+            "escape target must exist for this to prove anything"
+        );
+    }
+
+    #[test]
+    fn test_resolve_asset_path_rejects_absolute_path() {
+        let (_tmp, root) = repo_with_file("images/ok.png");
+
+        // Extra leading slashes are stripped, so an absolute path smuggled in
+        // this way must still be joined onto the root and land outside it.
+        assert_eq!(resolve_asset_path(&root, "static", "//etc/passwd"), None);
+        assert_eq!(resolve_asset_path(&root, "static", "/etc/passwd"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_asset_path_rejects_symlink_escaping_root() {
+        let (_tmp, root) = repo_with_file("images/ok.png");
+
+        // A secret outside the repo, and a symlink inside the repo aimed at it.
+        let outside_dir = tempfile::tempdir().unwrap();
+        let secret = outside_dir.path().join("id_rsa");
+        std::fs::write(&secret, b"PRIVATE KEY").unwrap();
+
+        std::os::unix::fs::symlink(&secret, root.join("images/leak.png")).unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), root.join("escape")).unwrap();
+
+        // Leaf symlink out of the repo.
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/images/leak.png"),
+            None
+        );
+        // Intermediate directory symlink out of the repo.
+        assert_eq!(resolve_asset_path(&root, "static", "/escape/id_rsa"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_asset_path_rejects_sibling_root_prefix() {
+        // `/notes-evil` must not count as inside `/notes` just because the
+        // string starts the same way.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("notes");
+        let sibling = parent.path().join("notes-evil");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("secret.txt"), b"secret").unwrap();
+        let root = root.canonicalize().unwrap();
+
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/../notes-evil/secret.txt"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_asset_path_accepts_legitimate_sibling_image() {
+        // The positive control for the tests above: an ordinary asset next to
+        // the previewed document still resolves.
+        let (_tmp, root) = repo_with_file("notes/diagram.png");
+
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/notes/diagram.png"),
+            Some(root.join("notes/diagram.png"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_asset_path_static_fallback_cannot_escape() {
+        // The static-folder fallback joins the same untrusted path a second
+        // time, so it needs the same containment check as the direct path.
+        // `/../../x` misses on the direct probe (<tmp>/../x) but the static
+        // probe (<root>/static/../../x) lands on a real file outside the root.
+        let (_tmp, root) = repo_with_file("static/images/ok.png");
+        let outside = root.parent().unwrap().join("outside-static.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+
+        assert_eq!(
+            resolve_asset_path(&root, "static", "/../../outside-static.txt"),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_convert_root_relative_urls_does_not_mint_escaping_url() {
+        // End-to-end: rendered HTML naming an escaping symlink keeps its
+        // original URL, so no mbrfile:// URL pointing outside the repo is ever
+        // handed to the WebView.
+        let (_tmp, root) = repo_with_file("images/ok.png");
+        let outside_dir = tempfile::tempdir().unwrap();
+        let secret = outside_dir.path().join("id_rsa");
+        std::fs::write(&secret, b"PRIVATE KEY").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("images/leak.png")).unwrap();
+
+        let html = r#"<img src="/images/leak.png"><img src='/../id_rsa'>"#;
+        let result = convert_root_relative_urls(html, &root, "static");
+
+        assert_eq!(result, html);
+        assert!(!result.contains("mbrfile://"));
     }
 
     #[test]
@@ -976,8 +1179,9 @@ mod tests {
         let path = file_path.to_str().unwrap().to_string();
         let html = render_preview(path, None).unwrap();
 
-        // The image should resolve to static/images/blog/test.png
-        let expected_static_path = temp_dir.path().join("static/images/blog/test.png");
+        // The image should resolve to static/images/blog/test.png (canonicalized:
+        // the rewriter only emits paths it has proven are inside the root)
+        let expected_static_path = static_images.canonicalize().unwrap().join("test.png");
         assert!(
             html.contains(&format!("mbrfile://{}", expected_static_path.display())),
             "Expected image to use static folder path.\nHTML excerpt: {}",
@@ -1008,7 +1212,7 @@ mod tests {
 
         let html = render_preview(file_path.to_str().unwrap().to_string(), None).unwrap();
 
-        let expected = temp_dir.path().join("static/images/photo.jpg");
+        let expected = static_images.canonicalize().unwrap().join("photo.jpg");
         assert!(
             html.contains(&format!("mbrfile://{}", expected.display())),
             "Should find static folder in .git-only repo"

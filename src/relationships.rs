@@ -24,13 +24,16 @@
 //! A [`RelationTypeRegistry`] (config-driven) classifies each `rel_type` as
 //! `symmetric` (spouse, sibling) or one half of an `inverse` pair (parent ↔
 //! child), so an author declares each edge **once** and the reverse is derived
-//! automatically — analogous to mbr's bidirectional backlink derivation.
+//! automatically — analogous to mbr's bidirectional backlink derivation. Only
+//! one half of an inverse pair need be configured: the registry auto-registers
+//! the reciprocal (see [`RelationTypeRegistry::from_types`]).
 //!
 //! Unknown relation types are tolerated: they are tracked directed with no
 //! relabelling. Unresolved endpoints never fail the build — the raw string is
 //! kept for display and a warning is emitted.
 
 use std::borrow::Cow;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use papaya::HashMap as ConcurrentHashMap;
@@ -117,12 +120,27 @@ pub struct RelationTypeRegistry {
 
 impl RelationTypeRegistry {
     /// Builds a registry from the configured relation types.
+    ///
+    /// Configured types are taken verbatim and **always win**. For every
+    /// non-symmetric type that names an `inverse`, the reciprocal half of the
+    /// pair is auto-registered (with the inverse pointing back) when it is not
+    /// itself configured — so declaring only
+    /// `{ name = "employer", inverse = "employee" }` still relabels *both* sides
+    /// of an edge and still collapses reciprocal declarations into one edge.
+    ///
+    /// When the reciprocal *is* configured but disagrees (`employer` claims
+    /// `employee`, while `employee` claims `staff`), both are kept exactly as
+    /// configured and a warning naming both is logged. A type that is at once
+    /// `symmetric` and `inverse` keeps its symmetric meaning (matching
+    /// [`Self::predicate_object`]) and logs a warning.
     pub fn from_types(types: &[RelationType]) -> Self {
-        let by_name = types
+        let configured: BTreeMap<String, RelationType> = types
             .iter()
             .map(|t| (t.name.to_lowercase(), t.clone()))
             .collect();
-        Self { by_name }
+        Self {
+            by_name: derive_reciprocal_types(configured, types),
+        }
     }
 
     /// Looks up a relation type by (case-insensitive) name.
@@ -137,8 +155,17 @@ impl RelationTypeRegistry {
 
     /// Returns the inverse relation-type name for the given type, if any
     /// (e.g. `parent` -> `child`).
+    ///
+    /// The name is trimmed, and a blank `inverse` reads as no inverse at all —
+    /// matching the auto-registration in [`Self::from_types`], which also
+    /// ignores it. Without that filter `predicate_object` would relabel the
+    /// reverse edge to the empty string.
     pub fn inverse_of(&self, name: &str) -> Option<String> {
-        self.get(name).and_then(|t| t.inverse.clone())
+        self.get(name)
+            .and_then(|t| t.inverse.as_deref())
+            .map(str::trim)
+            .filter(|inverse| !inverse.is_empty())
+            .map(str::to_string)
     }
 
     /// Returns the canonical (configured) casing for a relation-type name,
@@ -187,6 +214,85 @@ impl RelationTypeRegistry {
             .collect();
         serde_json::Value::Array(arr)
     }
+}
+
+/// Builds the reciprocal half of an inverse pair, ready for auto-registration.
+///
+/// Returns `None` (with a warning) when the declaration cannot yield a usable
+/// reciprocal: a blank `inverse`, or a type that is both `symmetric` and
+/// `inverse` — symmetric wins there, matching
+/// [`RelationTypeRegistry::predicate_object`] and [`canonical_key`].
+fn reciprocal_type(t: &RelationType) -> Option<RelationType> {
+    let inverse = t.inverse.as_deref()?.trim();
+    if inverse.is_empty() {
+        tracing::warn!(
+            "relation type `{}` declares an empty `inverse`; ignoring it",
+            t.name
+        );
+        return None;
+    }
+    if t.symmetric {
+        tracing::warn!(
+            "relation type `{}` is both `symmetric` and `inverse = \"{inverse}\"`; \
+             ignoring the inverse (symmetric wins)",
+            t.name
+        );
+        return None;
+    }
+    Some(RelationType {
+        name: inverse.to_string(),
+        symmetric: false,
+        inverse: Some(t.name.trim().to_string()),
+        label: None,
+        label_plural: None,
+    })
+}
+
+/// Completes half-declared inverse pairs by auto-registering the reciprocal of
+/// every configured type that names an `inverse`.
+///
+/// Configured types are never overwritten; a reciprocal that already exists and
+/// disagrees is left alone and logged. See [`RelationTypeRegistry::from_types`].
+fn derive_reciprocal_types(
+    configured: BTreeMap<String, RelationType>,
+    types: &[RelationType],
+) -> BTreeMap<String, RelationType> {
+    types
+        .iter()
+        .filter_map(|t| reciprocal_type(t).map(|reciprocal| (t, reciprocal)))
+        .fold(configured, |mut acc, (t, reciprocal)| {
+            let key = reciprocal.name.to_lowercase();
+            let was_configured = types.iter().any(|other| other.name.to_lowercase() == key);
+            match acc.entry(key) {
+                Entry::Vacant(slot) => {
+                    slot.insert(reciprocal);
+                }
+                Entry::Occupied(slot) => {
+                    let existing = slot.get();
+                    let agrees = existing
+                        .inverse
+                        .as_deref()
+                        .is_some_and(|i| normalize_name(i) == normalize_name(&t.name));
+                    if !agrees {
+                        let origin = if was_configured {
+                            "configured"
+                        } else {
+                            "auto-derived"
+                        };
+                        tracing::warn!(
+                            "relation type `{}` declares `inverse = \"{}\"`, but the {origin} \
+                             type `{}` has `inverse = {}`; keeping both as-is — reverse edges \
+                             for one of them will not be relabelled as expected",
+                            t.name,
+                            reciprocal.name,
+                            existing.name,
+                            existing.inverse.as_deref().unwrap_or("none"),
+                        );
+                    }
+                }
+            }
+            acc
+        })
 }
 
 /// Input for building the relationship index: one entry per markdown note.
@@ -808,6 +914,48 @@ mod tests {
         crate::config::default_relationship_types()
     }
 
+    /// A relation type with only `name` + `inverse` set, as a user would write
+    /// `{ name = "employer", inverse = "employee" }` in `.mbr/config.toml`.
+    fn inverse_type(name: &str, inverse: &str) -> RelationType {
+        RelationType {
+            name: name.to_string(),
+            symmetric: false,
+            inverse: Some(inverse.to_string()),
+            label: None,
+            label_plural: None,
+        }
+    }
+
+    /// A symmetric relation type with only `name` + `symmetric` set.
+    fn symmetric_type(name: &str) -> RelationType {
+        RelationType {
+            name: name.to_string(),
+            symmetric: true,
+            inverse: None,
+            label: None,
+            label_plural: None,
+        }
+    }
+
+    /// The half-declared registry from the review: only the `employer` side of
+    /// the pair is configured, plus an unrelated symmetric type.
+    fn half_declared_types() -> Vec<RelationType> {
+        vec![
+            inverse_type("employer", "employee"),
+            symmetric_type("spouse"),
+        ]
+    }
+
+    fn rel_to(rel_type: &str, to: &str) -> RawRelationship {
+        RawRelationship {
+            rel_type: rel_type.to_string(),
+            to: Some(to.to_string()),
+            from: None,
+            label: None,
+            attributes: BTreeMap::new(),
+        }
+    }
+
     fn parse_yaml(s: &str) -> Yaml {
         YamlLoader::load_from_str(s)
             .unwrap()
@@ -928,6 +1076,74 @@ mod tests {
         assert_eq!(reg.predicate_object("child"), "parent");
         assert_eq!(reg.predicate_object("spouse"), "spouse");
         assert_eq!(reg.predicate_subject("parent"), "parent");
+    }
+
+    #[test]
+    fn registry_auto_registers_missing_inverse_half() {
+        // Regression: only the `employer` half of the pair is configured, so
+        // `employee` used to be unknown and `predicate_object("employee")` fell
+        // back to "employee" — labelling the employer's page "Employees".
+        let reg = RelationTypeRegistry::from_types(&half_declared_types());
+        assert_eq!(reg.inverse_of("employee").as_deref(), Some("employer"));
+        assert_eq!(reg.predicate_object("employee"), "employer");
+        assert_eq!(reg.predicate_object("employer"), "employee");
+        assert_eq!(reg.predicate_subject("employee"), "employee");
+        assert!(!reg.is_symmetric("employee"));
+        // The symmetric type is untouched by the derivation.
+        assert!(reg.is_symmetric("spouse"));
+        assert_eq!(reg.predicate_object("spouse"), "spouse");
+        // Derived types are exposed to the frontend with auto-derived labels.
+        let json = reg.to_json();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        let employee = arr.iter().find(|t| t["name"] == "employee").unwrap();
+        assert_eq!(employee["inverse"], "employer");
+        assert_eq!(employee["label"], "Employee");
+        assert_eq!(employee["label_plural"], "Employees");
+        assert_eq!(employee["symmetric"], false);
+    }
+
+    #[test]
+    fn registry_keeps_configured_types_over_derived_ones() {
+        // `employer` claims `employee` as its inverse, but `employee` claims
+        // `staff`. The explicit declarations win (and a warning is logged);
+        // `staff` is auto-registered because nothing declares it.
+        let reg = RelationTypeRegistry::from_types(&[
+            inverse_type("employer", "employee"),
+            inverse_type("employee", "staff"),
+        ]);
+        assert_eq!(reg.inverse_of("employee").as_deref(), Some("staff"));
+        assert_eq!(reg.predicate_object("employee"), "staff");
+        assert_eq!(reg.predicate_object("employer"), "employee");
+        assert_eq!(reg.inverse_of("staff").as_deref(), Some("employee"));
+    }
+
+    #[test]
+    fn registry_symmetric_wins_over_inverse_and_blank_inverse_ignored() {
+        // `symmetric` and `inverse` are mutually exclusive; symmetric wins, so
+        // no reciprocal is derived from the stray `inverse`.
+        let reg = RelationTypeRegistry::from_types(&[
+            RelationType {
+                name: "partner".to_string(),
+                symmetric: true,
+                inverse: Some("partnered-with".to_string()),
+                label: None,
+                label_plural: None,
+            },
+            inverse_type("boss", "   "),
+        ]);
+        assert!(reg.get("partnered-with").is_none());
+        assert_eq!(reg.predicate_object("partner"), "partner");
+        // A blank `inverse` registers nothing and leaves the type directed.
+        assert_eq!(reg.predicate_object("boss"), "boss");
+        assert_eq!(reg.to_json().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn registry_defaults_are_unchanged_by_derivation() {
+        // The genealogy defaults declare both halves, so nothing is derived.
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        assert_eq!(reg.to_json().as_array().unwrap().len(), 4);
     }
 
     #[test]
@@ -1237,6 +1453,76 @@ mod tests {
         // Both declared it, so neither side is "derived".
         assert!(!map.get("/john/").unwrap()[0].derived);
         assert!(!map.get("/alice/").unwrap()[0].derived);
+    }
+
+    #[test]
+    fn half_declared_inverse_labels_the_object_side() {
+        // Regression: with only `{ name = "employer", inverse = "employee" }`
+        // configured, B declaring "A is my employee" left A's page showing B
+        // under *Employees* instead of *Employers*.
+        let notes = vec![
+            note("/a/", "A", "a", vec![]),
+            note("/b/", "B", "b", vec![rel_to("employee", "[[A]]")]),
+        ];
+        let reg = RelationTypeRegistry::from_types(&half_declared_types());
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+
+        let b = map.get("/b/").unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].predicate, "employee");
+        assert_eq!(b[0].neighbor, "/a/");
+        assert!(!b[0].derived);
+
+        let a = map.get("/a/").unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].predicate, "employer");
+        assert_eq!(a[0].neighbor, "/b/");
+        assert!(a[0].derived);
+    }
+
+    #[test]
+    fn half_declared_reciprocal_declarations_collapse_to_one_edge() {
+        // Regression: A says "B is my employer", B says "A is my employee".
+        // With only the `employee` half configured the two declarations used to
+        // land on different canonical keys, so each note carried two entries
+        // for the same logical edge (one of them mislabelled).
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("employer", "[[B]]")]),
+            note("/b/", "B", "b", vec![rel_to("employee", "[[A]]")]),
+        ];
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("employee", "employer")]);
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+
+        let a = map.get("/a/").unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].predicate, "employer");
+        assert_eq!(a[0].neighbor, "/b/");
+        // Both notes declared this edge, so neither side is derived.
+        assert!(!a[0].derived);
+
+        let b = map.get("/b/").unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].predicate, "employee");
+        assert_eq!(b[0].neighbor, "/a/");
+        assert!(!b[0].derived);
+    }
+
+    #[test]
+    fn half_declared_registry_still_handles_symmetric_types() {
+        // The derivation must not disturb symmetric types sharing the registry.
+        let notes = vec![
+            note("/john/", "John", "john", vec![rel_to("spouse", "[[Mary]]")]),
+            note("/mary/", "Mary", "mary", vec![]),
+        ];
+        let reg = RelationTypeRegistry::from_types(&half_declared_types());
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        let john = map.get("/john/").unwrap();
+        assert_eq!(john.len(), 1);
+        assert_eq!(john[0].predicate, "spouse");
+        let mary = map.get("/mary/").unwrap();
+        assert_eq!(mary.len(), 1);
+        assert_eq!(mary[0].predicate, "spouse");
+        assert!(mary[0].derived);
     }
 
     #[test]

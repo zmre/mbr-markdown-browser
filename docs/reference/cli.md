@@ -52,7 +52,7 @@ Supported media types are detected by file extension:
 | `--output <PATH>` | Output directory for static build | `build` |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
-| `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable) | `2097152` (2MB) |
+| `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable). Affects link-preview metadata only — the video/PDF metadata cache is sized by the `media_cache_size` config option / `MBR_MEDIA_CACHE_SIZE`, which has no CLI flag. | `2097152` (2MB) |
 | `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--fail-on-broken-links` | Exit with a non-zero status if the static build (`-b`) finds broken internal links. For CI. No effect with `--skip-link-checks`. | `false` |
