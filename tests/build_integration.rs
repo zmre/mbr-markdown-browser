@@ -1896,6 +1896,7 @@ async fn test_build_with_non_canonical_root_dir() {
 // ============================================================================
 
 /// Collects every path under `dir` (not following symlinks).
+#[cfg(unix)]
 fn walk_paths_shallow_of_symlinks(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
