@@ -118,14 +118,18 @@ impl FileWatcher {
                 // glob. Reuses `repo::should_ignore` for glob matching so the
                 // watcher and the repo scanner stay consistent.
                 let is_ignored = |path: &Path| -> bool {
-                    let under_ignored_dir = path.components().any(|comp| {
+                    // Both checks run against the repo-relative path. Matching
+                    // ignore-dir names against the absolute path would also match
+                    // components *above* the root, so a repo that merely happens to
+                    // live under a directory named `build`/`target`/`.git` would
+                    // discard every event and silently disable live reload — exactly
+                    // what the Nix Linux sandbox does with its `TMPDIR=/build`.
+                    let relative = pathdiff::diff_paths(path, &base_dir_clone)
+                        .unwrap_or_else(|| path.to_path_buf());
+                    let under_ignored_dir = relative.components().any(|comp| {
                         ignore_set.contains(comp.as_os_str().to_string_lossy().as_ref())
                     });
-                    under_ignored_dir || {
-                        let relative = pathdiff::diff_paths(path, &base_dir_clone)
-                            .unwrap_or_else(|| path.to_path_buf());
-                        should_ignore(&relative, &[], &ignore_globs)
-                    }
+                    under_ignored_dir || should_ignore(&relative, &[], &ignore_globs)
                 };
 
                 match res {
@@ -342,6 +346,34 @@ mod tests {
         assert!(
             !saw_ignored_file,
             "Should NOT see ignored.txt from target/ directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watcher_ignores_only_dirs_inside_the_repo() {
+        // Regression: ignore-dir names describe directories *inside* the repo, so
+        // they must be matched against the repo-relative path. Matching the
+        // absolute path meant an ancestor named `build` killed every event for the
+        // whole repo — which is what the Nix sandbox (`TMPDIR=/build`) hits.
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path().join("build").join("notes");
+        fs::create_dir_all(&base_path).unwrap();
+        // notify reports canonical paths, so the base dir has to be canonical too
+        // or `diff_paths` yields a `../..`-prefixed path (macOS temp dirs live
+        // under the /var -> /private/var symlink). `TestRepo` canonicalizes for
+        // the same reason.
+        let base_path = base_path.canonicalize().unwrap();
+
+        let ignore_dirs = vec!["build".to_string()];
+        let (_watcher, mut rx) = FileWatcher::new(&base_path, None, &ignore_dirs, &[]).unwrap();
+
+        let test_file = base_path.join("test.md");
+        fs::write(&test_file, "# Test").unwrap();
+
+        let change = recv_matching(&mut rx, |e| e.relative_path.contains("test.md")).await;
+        assert!(
+            change.is_some(),
+            "Should receive event for test.md even though an ancestor of the root is named 'build'"
         );
     }
 
