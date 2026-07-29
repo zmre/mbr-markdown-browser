@@ -1658,7 +1658,13 @@ impl Server {
 
         // Spawn background task to reload templates when .html files change
         let templates_for_reload = templates.clone();
-        let template_folder_for_reload = template_folder.clone();
+        // Canonicalize once here, not per event: the watcher reports canonical
+        // paths while the configured folder is stored as written, and this
+        // cannot change for the life of the process. Fall back to the path as
+        // given when canonicalization fails (e.g. the folder does not exist).
+        let template_folder_for_reload = template_folder
+            .clone()
+            .map(|tf| tf.canonicalize().unwrap_or(tf));
         let mut template_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             loop {
@@ -1679,20 +1685,7 @@ impl Server {
 
                 // If we have a template folder, only reload for changes in that folder
                 // Otherwise, only reload for changes in .mbr folder
-                let should_reload = if let Some(ref tf) = template_folder_for_reload {
-                    event.path.starts_with(&tf.to_string_lossy().to_string())
-                } else {
-                    // Match `.mbr` as a path component rather than substring
-                    // matching "/.mbr/". The watcher reports native separators,
-                    // so on Windows this string is `...\.mbr\theme.css` and the
-                    // slash form would never match, silently disabling template
-                    // hot reload.
-                    Path::new(&event.path)
-                        .components()
-                        .any(|c| c.as_os_str() == ".mbr")
-                };
-
-                if should_reload {
+                if should_reload_template(&event.path, template_folder_for_reload.as_deref()) {
                     tracing::debug!("Template file changed: {}", event.path);
                     if let Err(e) = templates_for_reload.reload() {
                         tracing::error!("Failed to reload templates: {}", e);
@@ -5935,6 +5928,34 @@ pub fn generate_breadcrumbs(relative_path: &Path) -> Vec<Breadcrumb> {
     breadcrumbs
 }
 
+/// Decides whether a watcher file event should trigger a template reload.
+///
+/// `template_folder` must already be canonicalized by the caller. `notify`
+/// reports canonical absolute paths, but the configured template folder is
+/// stored as written: only the CLI canonicalizes it, while `.mbr/config.toml`
+/// and `MBR_TEMPLATE_FOLDER` deserialize verbatim into a plain `PathBuf`. A
+/// relative value (`mytemplates`) or one reached through a symlink therefore
+/// never matches a canonical event path, which silently disables template hot
+/// reload. Canonicalization belongs in the caller so this stays pure and off
+/// the per-event hot path — the folder cannot change during the process.
+///
+/// Comparison is component-wise via [`Path::starts_with`], not a string prefix
+/// test: `"/x/tmpl-backup/index.html"` textually starts with `"/x/tmpl"` but is
+/// a sibling directory, not a template.
+fn should_reload_template(event_path: &str, template_folder: Option<&Path>) -> bool {
+    match template_folder {
+        Some(tf) => Path::new(event_path).starts_with(tf),
+        // Match `.mbr` as a path component rather than substring
+        // matching "/.mbr/". The watcher reports native separators,
+        // so on Windows this string is `...\.mbr\theme.css` and the
+        // slash form would never match, silently disabling template
+        // hot reload.
+        None => Path::new(event_path)
+            .components()
+            .any(|c| c.as_os_str() == ".mbr"),
+    }
+}
+
 /// Gets the current directory name from a relative path.
 pub fn get_current_dir_name(relative_path: &Path) -> String {
     relative_path
@@ -6591,6 +6612,69 @@ mod tests {
     fn test_get_parent_path_deep() {
         let path = Path::new("a/b/c/d");
         assert_eq!(get_parent_path(path), Some("/a/b/c/".to_string()));
+    }
+
+    #[test]
+    fn test_should_reload_template_inside_template_folder() {
+        let tf = Path::new("/x/tmpl");
+        assert!(should_reload_template("/x/tmpl/index.html", Some(tf)));
+        assert!(should_reload_template(
+            "/x/tmpl/partials/_nav.html",
+            Some(tf)
+        ));
+    }
+
+    #[test]
+    fn test_should_reload_template_rejects_sibling_prefix() {
+        // `str::starts_with` matches this sibling directory; `Path::starts_with`
+        // compares whole components and does not.
+        assert!(!should_reload_template(
+            "/x/tmpl-backup/index.html",
+            Some(Path::new("/x/tmpl"))
+        ));
+    }
+
+    #[test]
+    fn test_should_reload_template_outside_template_folder() {
+        assert!(!should_reload_template(
+            "/other/place/index.html",
+            Some(Path::new("/x/tmpl"))
+        ));
+    }
+
+    #[test]
+    fn test_should_reload_template_without_folder_matches_mbr_component() {
+        assert!(should_reload_template("/repo/.mbr/index.html", None));
+        assert!(!should_reload_template("/repo/docs/index.html", None));
+        // Substring-only matches are not path components.
+        assert!(!should_reload_template("/repo/.mbrx/index.html", None));
+    }
+
+    /// The caller canonicalizes the template folder before handing it to
+    /// `should_reload_template`; without that step a symlinked folder never
+    /// matches the canonical paths the watcher reports.
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reload_template_matches_through_symlinked_folder() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let real = temp.path().join("real-templates");
+        std::fs::create_dir(&real).expect("create real template dir");
+        let link = temp.path().join("link-templates");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        // What the watcher reports: a canonical path under the real directory.
+        let event_path = real
+            .canonicalize()
+            .expect("canonicalize real dir")
+            .join("index.html");
+        let event_path = event_path.to_string_lossy().to_string();
+
+        // Configured as the symlink, used verbatim: no match.
+        assert!(!should_reload_template(&event_path, Some(link.as_path())));
+
+        // Canonicalized once by the caller, as `Server::init` does: match.
+        let canonical = link.canonicalize().unwrap_or(link);
+        assert!(should_reload_template(&event_path, Some(&canonical)));
     }
 
     #[test]
