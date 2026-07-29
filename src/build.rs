@@ -1806,10 +1806,27 @@ impl Builder {
         // (callers create it), and the source is a real file, so both
         // canonicalize; the fallback only matters for unit tests on synthetic
         // paths.
-        let from_dir = from_dir.canonicalize();
-        let from_dir = from_dir.as_deref().unwrap_or(from.parent().unwrap_or(from));
-        let to_canonical = to.canonicalize();
-        let to = to_canonical.as_deref().unwrap_or(to);
+        //
+        // Canonicalize both sides or neither: the component arithmetic below is
+        // only meaningful when the two paths live in the same space. Falling
+        // back per-side lets one succeed while the other fails and silently
+        // mixes spaces — on Windows `Path::new("/").canonicalize()` succeeds
+        // (it resolves to the current drive root, `\\?\C:\`) while a synthetic
+        // `/a/b/target` does not exist and fails, leaving `[Prefix, RootDir]`
+        // against `[RootDir, a, b, target]`. That shares no common prefix, so
+        // the loop below pushes the target's `RootDir` component and
+        // `PathBuf::push` resets the buffer to absolute, yielding `\a\b\target`
+        // instead of the relative `a/b/target`.
+        let canonical = match (from_dir.canonicalize(), to.canonicalize()) {
+            (Ok(from_canonical), Ok(to_canonical)) => Some((from_canonical, to_canonical)),
+            _ => None,
+        };
+        let (from_dir, to) = match canonical.as_ref() {
+            Some((from_canonical, to_canonical)) => {
+                (from_canonical.as_path(), to_canonical.as_path())
+            }
+            None => (from_dir, to),
+        };
 
         // Calculate how many levels up we need to go
         let from_components: Vec<_> = from_dir.components().collect();
@@ -3677,6 +3694,32 @@ mod tests {
         // Unusual: symlink pointing to itself (edge case)
         let result = symlink_helper("/a/b/link", "/a/b/link");
         assert_eq!(result, PathBuf::from("link"));
+    }
+
+    #[test]
+    fn test_symlink_one_sided_canonicalization_falls_back_to_lexical() {
+        // Both-or-neither invariant: `from`'s parent is a real directory and so
+        // canonicalizes, while the target does not exist and cannot. Mixing the
+        // two spaces produces garbage arithmetic (on macOS the temp dir
+        // canonicalizes to /private/var/..., on Windows the 8.3 temp path
+        // expands to a \\?\ verbatim prefix), so both sides must fall back to
+        // the lexical form and yield exactly what lexical arithmetic gives.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let builder = test_builder(root.clone(), root.clone());
+
+        let from = root.join("link");
+        let to = root.join("does-not-exist").join("asset.png");
+        assert!(!to.exists(), "target must not exist for this test");
+
+        let result = builder.calculate_relative_symlink(&from, &to).unwrap();
+
+        assert!(
+            result.is_relative(),
+            "symlink target should be relative, got {}",
+            result.display()
+        );
+        assert_eq!(result, PathBuf::from("does-not-exist/asset.png"));
     }
 
     #[test]
