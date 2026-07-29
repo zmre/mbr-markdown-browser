@@ -5,6 +5,7 @@
 mod fixtures;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use mbr::markdown::SimpleMetadata;
 use mbr::templates::Templates;
 use serde_json::json;
 use std::collections::HashMap;
@@ -50,7 +51,7 @@ fn bench_render_markdown(c: &mut Criterion) {
     ];
 
     for (name, html) in &cases {
-        let frontmatter: HashMap<String, serde_json::Value> = [
+        let frontmatter: SimpleMetadata = [
             ("title".to_string(), json!("Benchmark Page")),
             ("description".to_string(), json!("A page for benchmarking")),
             (

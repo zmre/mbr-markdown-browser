@@ -26,6 +26,14 @@ import {
 /** Minimal markdown-file shape read from site.json. */
 export interface SiteMarkdownFile {
   url_path: string;
+  /**
+   * Repo-relative, `/`-separated source path (`docs/guide/index.md`) as shipped
+   * by site.json (`MarkdownInfo::raw_path`). Authoritative: it keeps the real
+   * extension and the real `index.md` leaf, neither of which is recoverable
+   * from the directory-style `url_path`. Optional only so a stale cached
+   * site.json predating the field still works — see {@link fileFsPath}.
+   */
+  raw_path?: string;
   frontmatter?: { title?: string; [key: string]: unknown };
 }
 
@@ -361,7 +369,15 @@ export function openPathPicker(opts: PathPickerOptions): Promise<PathPickResult 
         if (settled) return;
         const urls = files.map((f) => normalizeUrl(f.url_path));
         existingUrls = new Set(urls);
-        existingFolders = deriveExistingFolders(urls);
+        // A `url_path` alone only pins down a file's *ancestor* folders, while
+        // `raw_path` names the containing folder exactly (`/docs/guide/` could
+        // be `docs/guide.md` or `docs/guide/index.md`). Feeding both in unions
+        // the confident set with the exact one, so an index file's own folder
+        // no longer triggers a spurious "create folder?" prompt.
+        existingFolders = deriveExistingFolders([
+          ...urls,
+          ...files.map((f) => fileFsPath(f, exts)),
+        ]);
         suggestions = buildSuggestions(files, exts);
         renderList();
         validate();
@@ -376,12 +392,28 @@ export function openPathPicker(opts: PathPickerOptions): Promise<PathPickResult 
 }
 
 /**
+ * The repo-relative filesystem path of a markdown file from site.json.
+ *
+ * Prefers the authoritative `raw_path`; only a site.json old enough to predate
+ * the field falls back to reconstructing a path from the directory-style
+ * `url_path`, which cannot distinguish `docs/guide.md` from
+ * `docs/guide/index.md` and has to guess the extension.
+ */
+export function fileFsPath(f: SiteMarkdownFile, exts: readonly string[]): string {
+  const raw = (f.raw_path ?? '').trim().replace(/^\/+/, '');
+  if (raw) return raw;
+  const segs = normalizeUrl(f.url_path)
+    .split('/')
+    .filter((s) => s.length > 0);
+  return (segs.length ? segs.join('/') : 'index') + `.${exts[0] ?? 'md'}`;
+}
+
+/**
  * Builds the folder + file steering suggestions from the markdown files. Files
  * are shown by title/stem; folders are the confident directory set. A trailing
  * slash on a folder value lets the user keep typing the filename after picking.
  */
 function buildSuggestions(files: SiteMarkdownFile[], exts: string[]): Suggestion[] {
-  const ext = exts[0] ?? 'md';
   const folders = new Set<string>();
   const fileSuggestions: Suggestion[] = [];
 
@@ -389,14 +421,16 @@ function buildSuggestions(files: SiteMarkdownFile[], exts: string[]): Suggestion
     const url = normalizeUrl(f.url_path);
     const segs = url.split('/').filter((s) => s.length > 0);
     const stem = segs[segs.length - 1] ?? '';
-    // Accumulate every confident ancestor folder.
+    const fsPath = fileFsPath(f, exts);
+    // Accumulate every folder the file proves exists. With `raw_path` this is
+    // exact (an index file contributes its own folder too); without it, it
+    // degrades to the file's confident URL ancestors.
     let acc = '';
-    for (let i = 0; i < segs.length - 1; i++) {
-      acc = acc ? `${acc}/${segs[i]}` : segs[i];
+    const folderSegs = fsPath.split('/').filter((s) => s.length > 0);
+    for (let i = 0; i < folderSegs.length - 1; i++) {
+      acc = acc ? `${acc}/${folderSegs[i]}` : folderSegs[i];
       folders.add(acc);
     }
-    // Reconstruct a plausible fs path for the file (non-index interpretation).
-    const fsPath = (segs.length ? segs.join('/') : 'index') + `.${ext}`;
     const title = f.frontmatter?.title;
     fileSuggestions.push({
       kind: 'file',

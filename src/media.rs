@@ -6,6 +6,7 @@
 use crate::audio::Audio;
 use crate::vid::Vid;
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 const PDF_EMBED_HEIGHT: &str = "600px";
@@ -141,6 +142,14 @@ impl MediaEmbed {
         EXTENSION_RE.captures(url).map(|cap| cap[1].to_string())
     }
 
+    /// Escape a caption for HTML element-text context (`<figcaption>`).
+    ///
+    /// Captions come from the markdown link title, which pulldown-cmark hands
+    /// over unescaped.
+    fn escaped_caption(caption: Option<&str>) -> Cow<'_, str> {
+        caption.map(html_escape::encode_text).unwrap_or_default()
+    }
+
     fn youtube_to_html(video_id: &str, caption: Option<&str>, open_only: bool) -> String {
         format!(
             r#"
@@ -158,8 +167,8 @@ impl MediaEmbed {
                 <figcaption>{caption}{close}"#,
             yt_width = crate::constants::YOUTUBE_EMBED_WIDTH,
             yt_height = crate::constants::YOUTUBE_EMBED_HEIGHT,
-            video_id = video_id,
-            caption = caption.unwrap_or(""),
+            video_id = html_escape::encode_double_quoted_attribute(video_id),
+            caption = Self::escaped_caption(caption),
             close = if open_only {
                 ""
             } else {
@@ -171,6 +180,12 @@ impl MediaEmbed {
     fn pdf_to_html(url: &str, caption: Option<&str>, open_only: bool) -> String {
         // Graceful degradation: object tag with fallback download link
         // The data-pdf-url attribute allows JavaScript enhancement (e.g., PDF.js)
+        //
+        // The URL is the raw markdown link destination (pulldown-cmark does not
+        // escape it, and neither does link_transform), so it must be escaped for
+        // double-quoted attribute context or an `&` corrupts the output and a
+        // `"` breaks out of the attribute entirely.
+        let escaped_url = html_escape::encode_double_quoted_attribute(url);
         format!(
             r#"
             <figure class="pdf-embed" data-pdf-url="{url}">
@@ -181,9 +196,9 @@ impl MediaEmbed {
                     </p>
                 </object>
                 <figcaption>{caption}{close}"#,
-            url = url,
+            url = escaped_url,
             pdf_height = PDF_EMBED_HEIGHT,
-            caption = caption.unwrap_or(""),
+            caption = Self::escaped_caption(caption),
             close = if open_only {
                 ""
             } else {
@@ -398,6 +413,102 @@ mod tests {
             embed,
             Some(MediaEmbed::YouTube { video_id, .. }) if video_id == "dQw4w9WgXcQ"
         ));
+    }
+
+    /// Regression: a PDF link destination containing a double quote must not be
+    /// able to close `data-pdf-url`/`data`/`href` and inject new attributes.
+    #[test]
+    fn test_pdf_html_escapes_hostile_url() {
+        let embed =
+            MediaEmbed::from_url_and_title(r#"a"onerror="alert(1)"b.pdf"#, "").expect("pdf embed");
+        let html = embed.to_html(false, false, false);
+        assert!(
+            html.contains("&quot;"),
+            "double quotes must be escaped: {html}"
+        );
+        // The hostile destination must stay inside each attribute value; the
+        // injected text may appear only as escaped data, never as an attribute.
+        assert_eq!(
+            html.matches(r#"a&quot;onerror=&quot;alert(1)&quot;b.pdf"#)
+                .count(),
+            3,
+            "data-pdf-url, object data, and href must all be escaped: {html}"
+        );
+        assert!(
+            !html.contains(r#""onerror=""#),
+            "must not emit an injected attribute: {html}"
+        );
+    }
+
+    /// Regression: a bare `&` in a filename is invalid in an attribute value
+    /// and must be encoded in all three places the URL is interpolated.
+    #[test]
+    fn test_pdf_html_escapes_ampersand_in_url() {
+        let embed = MediaEmbed::from_url_and_title("/docs/Q&A-report.pdf", "").expect("pdf embed");
+        let html = embed.to_html(false, false, false);
+        assert!(
+            !html.contains("Q&A-report"),
+            "bare ampersand emitted: {html}"
+        );
+        assert_eq!(
+            html.matches("/docs/Q&amp;A-report.pdf").count(),
+            3,
+            "data-pdf-url, object data, and href must all be encoded: {html}"
+        );
+    }
+
+    /// Regression: captions land in element-text context and must be escaped.
+    #[test]
+    fn test_pdf_html_escapes_caption() {
+        let embed = MediaEmbed::from_url_and_title("doc.pdf", "<script>alert(1)</script> & more")
+            .expect("pdf embed");
+        let html = embed.to_html(false, false, false);
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; more"),
+            "caption must be escaped: {html}"
+        );
+        assert!(
+            !html.contains("<script>"),
+            "must not emit a raw script tag: {html}"
+        );
+    }
+
+    /// Escaping must not double-encode ordinary destinations or captions.
+    #[test]
+    fn test_pdf_html_ordinary_values_round_trip_unchanged() {
+        let embed =
+            MediaEmbed::from_url_and_title("/docs/my_report-v2.pdf", "My PDF").expect("pdf embed");
+        let html = embed.to_html(false, false, false);
+        assert!(html.contains(r#"data-pdf-url="/docs/my_report-v2.pdf""#));
+        assert!(html.contains(r#"data="/docs/my_report-v2.pdf""#));
+        assert!(html.contains(r#"href="/docs/my_report-v2.pdf""#));
+        assert!(html.contains("<figcaption>My PDF</figcaption>"));
+        assert!(!html.contains("&amp;"), "nothing to escape here: {html}");
+    }
+
+    /// Regression: the YouTube video id and caption are interpolated too.
+    #[test]
+    fn test_youtube_html_escapes_video_id_and_caption() {
+        let embed = MediaEmbed::YouTube {
+            video_id: r#"x"onload="alert(1)"#.to_string(),
+            caption: Some("<b>hi</b> & bye".to_string()),
+        };
+        let html = embed.to_html(false, false, false);
+        assert!(
+            html.contains("&quot;"),
+            "double quotes must be escaped: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"src="https://www.youtube-nocookie.com/embed/x&quot;onload=&quot;alert(1)""#
+            ),
+            "iframe src must be fully escaped: {html}"
+        );
+        assert!(
+            !html.contains(r#""onload=""#),
+            "must not emit an injected attribute: {html}"
+        );
+        assert!(html.contains("&lt;b&gt;hi&lt;/b&gt; &amp; bye"));
     }
 
     #[test]

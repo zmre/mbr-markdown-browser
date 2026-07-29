@@ -5,10 +5,11 @@
 //! it falls back to the **first matching file anywhere** in the repo. Only
 //! `404`s when nothing matches. Regular `[text](path.md)` links are unaffected.
 //!
-//! This index provides only the *global-fallback* lookup:
+//! This index provides only the *rewrite* lookup:
 //! [`WikilinkIndex::resolve_wikilink`] returns `Some(url)` **only** when a
-//! rewrite to an absolute URL is needed, so the common same-folder case keeps
-//! the renderer's default relative transform byte-for-byte.
+//! rewrite to an absolute URL is needed, so a same-folder link the author
+//! spelled exactly as the file is named keeps the renderer's default relative
+//! transform byte-for-byte.
 //!
 //! Resolution semantics mirror [`crate::relationships`]: names are matched
 //! case-insensitively (via [`crate::relationships::normalize_name`]) against
@@ -101,12 +102,25 @@ impl WikilinkIndex {
     /// trailing `#anchor` is split off, the base name resolved, and the anchor
     /// re-appended to the returned URL.
     ///
-    /// - **Current-folder-first** — if a file with this stem exists in the
-    ///   current page's folder, returns `None` (the default `../Name/` transform
-    ///   already points at it, so behaviour is unchanged).
+    /// - **Current-folder-first, spelled exactly** — if a file with this stem
+    ///   exists in the current page's folder *and* the wikilink text matches
+    ///   that file's URL segment character for character, returns `None` (the
+    ///   default `../Name/` transform already points at it, so behaviour is
+    ///   unchanged).
+    /// - **Current-folder-first, spelled differently** — stems match
+    ///   case-insensitively, but the default transform emits the author's
+    ///   spelling verbatim, so `[[japan]]` next to `Japan.md` would produce
+    ///   `../japan/`: a 404 on any case-sensitive filesystem and a lost
+    ///   backlink. Those return `Some(absolute_url)` so the href points at the
+    ///   real page.
     /// - **Global fallback** — otherwise resolves `name` against title, then
     ///   alias, then stem, and returns `Some(absolute_url)`.
     /// - **Not found anywhere** — returns `None` (caller keeps default → 404).
+    ///
+    /// Two notes in one folder whose stems differ only by case (`Japan.md` and
+    /// `japan.md`) collide on this index's `(folder, normalized stem)` key, so
+    /// the module-wide ambiguity rule applies: the lexicographically-smallest
+    /// URL wins and *every* spelling resolves to it.
     pub fn resolve_wikilink(
         &self,
         name: &str,
@@ -123,16 +137,15 @@ impl WikilinkIndex {
         let key = normalize_name(base);
 
         // Current-folder-first: a file with this stem in the current page's
-        // folder means the renderer's default relative transform already points
-        // at it, so signal "no rewrite needed" with None.
+        // folder is already the target of the renderer's default relative
+        // transform — but only when the author spelled it the way the URL does,
+        // since that transform passes the raw text straight through.
         let current_folder = page_folder(current_page_url, current_is_index);
-        if self
-            .by_dir_stem
-            .pin()
-            .get(&(current_folder, key.clone()))
-            .is_some()
         {
-            return None;
+            let by_dir_stem = self.by_dir_stem.pin();
+            if let Some(url) = by_dir_stem.get(&(current_folder, key.clone())) {
+                return (last_segment(url) != base).then(|| with_anchor(url.clone(), anchor));
+            }
         }
 
         // Global fallback: title -> alias -> stem.
@@ -147,10 +160,7 @@ impl WikilinkIndex {
                 .cloned()
         }?;
 
-        Some(match anchor {
-            Some(anchor) => format!("{url}#{anchor}"),
-            None => url,
-        })
+        Some(with_anchor(url, anchor))
     }
 
     /// Clears the index.
@@ -181,6 +191,22 @@ where
     guard.clear();
     for (key, value) in source {
         guard.insert(key, value);
+    }
+}
+
+/// The last non-empty segment of a site URL: the text a bare wikilink has to
+/// use for the renderer's default relative transform to reach that page.
+fn last_segment(url: &str) -> &str {
+    url.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("")
+}
+
+/// Re-appends the anchor that [`WikilinkIndex::resolve_wikilink`] split off.
+fn with_anchor(url: String, anchor: Option<&str>) -> String {
+    match anchor {
+        Some(anchor) => format!("{url}#{anchor}"),
+        None => url,
     }
 }
 
@@ -237,6 +263,76 @@ mod tests {
         assert_eq!(
             idx.resolve_wikilink("patrick-walsh", "/notes/family/", false),
             None
+        );
+    }
+
+    #[test]
+    fn same_folder_case_mismatch_rewrites_to_the_real_url() {
+        // `notes/Japan.md` with a sibling writing `[[japan]]`: the default
+        // transform would emit `../japan/`, which 404s on a case-sensitive
+        // filesystem and drops the backlink from the static build.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/notes/Japan/", "Japan", "Japan", false),
+            note("/notes/other/", "Other", "other", false),
+        ]);
+        assert_eq!(
+            idx.resolve_wikilink("japan", "/notes/other/", false),
+            Some("/notes/Japan/".to_string())
+        );
+        // Exact spelling still needs no rewrite.
+        assert_eq!(idx.resolve_wikilink("Japan", "/notes/other/", false), None);
+    }
+
+    #[test]
+    fn same_folder_case_mismatch_preserves_anchor() {
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/notes/Japan/", "Japan", "Japan", false),
+            note("/notes/other/", "Other", "other", false),
+        ]);
+        assert_eq!(
+            idx.resolve_wikilink("japan#food", "/notes/other/", false),
+            Some("/notes/Japan/#food".to_string())
+        );
+    }
+
+    #[test]
+    fn same_folder_case_variants_all_resolve_to_smallest_url() {
+        // Two notes in one folder differing only by case collide on the
+        // (folder, normalized stem) key, so the module-wide ambiguity rule
+        // applies: `/notes/Japan/` sorts first and wins for every spelling.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/notes/japan/", "japan", "japan", false),
+            note("/notes/Japan/", "Japan", "Japan", false),
+            note("/notes/other/", "Other", "other", false),
+        ]);
+        // Exact match on the winner: default relative transform already works.
+        assert_eq!(idx.resolve_wikilink("Japan", "/notes/other/", false), None);
+        // Any other spelling is rewritten to the same winner.
+        assert_eq!(
+            idx.resolve_wikilink("japan", "/notes/other/", false),
+            Some("/notes/Japan/".to_string())
+        );
+        assert_eq!(
+            idx.resolve_wikilink("JAPAN", "/notes/other/", false),
+            Some("/notes/Japan/".to_string())
+        );
+    }
+
+    #[test]
+    fn same_folder_index_note_resolves_to_the_folder_url() {
+        // `notes/index.md` is served at `/notes/`, so `[[index]]` from a
+        // sibling cannot use the default `../index/` transform.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/notes/", "Notes", "index", true),
+            note("/notes/other/", "Other", "other", false),
+        ]);
+        assert_eq!(
+            idx.resolve_wikilink("index", "/notes/other/", false),
+            Some("/notes/".to_string())
         );
     }
 

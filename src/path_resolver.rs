@@ -36,25 +36,27 @@ fn safe_join(
     // if base_dir itself contains symlinks.
     let candidate = canonical_base.join(request_path);
 
-    // Try to canonicalize - this resolves ".." and symlinks
-    // If canonicalize fails (path doesn't exist), try the parent
-    if let Ok(canonical) = candidate.canonicalize()
-        && canonical.starts_with(canonical_base)
-    {
-        return Some(canonical);
-    }
+    // Canonicalizing resolves ".." and symlinks, so its *result* is the only
+    // trustworthy answer for a path that exists.
+    match candidate.canonicalize() {
+        // The path exists. It is safe only if it resolves inside the base.
+        // Returning `None` here is load-bearing: falling through to the
+        // "doesn't exist yet" branch below would validate only the parent and
+        // then hand back the *unresolved* path, so a final component that is a
+        // symlink out of the repo (`passwd -> /etc/passwd`) would be served.
+        Ok(canonical) => canonical.starts_with(canonical_base).then_some(canonical),
 
-    // For paths that don't exist yet (checking markdown extensions),
-    // we need to verify the parent is safe and construct the full path
-    if let Some(parent) = candidate.parent()
-        && let Ok(canonical_parent) = parent.canonicalize()
-        && canonical_parent.starts_with(canonical_base)
-        && let Some(filename) = candidate.file_name()
-    {
-        return Some(canonical_parent.join(filename));
+        // The path does not exist yet (e.g. probing markdown extensions for
+        // `/foo/` -> `foo.md`). Verify the parent is inside the base and
+        // rebuild the full path from the canonical parent.
+        Err(_) => {
+            let canonical_parent = candidate.parent()?.canonicalize().ok()?;
+            if !canonical_parent.starts_with(canonical_base) {
+                return None;
+            }
+            Some(canonical_parent.join(candidate.file_name()?))
+        }
     }
-
-    None
 }
 
 /// The result of resolving a URL path to a resource.
@@ -296,22 +298,37 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 ///
 /// # Security
 ///
-/// This function guards against path traversal attacks by canonicalizing
-/// the resolved path and verifying it remains within the static directory.
+/// Containment is enforced against the **static root** — the canonicalized
+/// static directory itself — not against the repository root. The overlay is
+/// allowed to live outside the repository root (`static_folder = "../static"`
+/// for the common `repo/content` + `repo/static` layout), so requiring every
+/// served file to sit under the repository root would 404 the entire overlay.
+///
+/// *How far* the overlay may reach is decided once, at load time, by
+/// `Config::validate_static_folder`: inside the root, or a peer of it, and never
+/// via a parent that is `$HOME` or the filesystem root. What this function must
+/// still guarantee — and does — is that a *request path* cannot walk out of
+/// whatever directory that policy settled on, including through a symlink inside
+/// the overlay pointing at, say, `/etc/passwd`: the candidate is canonicalized
+/// before the `starts_with` check, so the symlink's target is what gets judged.
 fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Option<PathBuf> {
-    // Build static_dir from canonical base if available, otherwise canonicalize
-    let static_dir = match config.canonical_base_dir {
-        Some(cached) => {
-            let dir = cached.join(config.static_folder);
-            // Still need to verify it exists (canonicalize checks this)
-            dir.canonicalize().ok()?
+    // Use the pre-computed canonical base if available, otherwise canonicalize.
+    let owned_root;
+    let canonical_root = match config.canonical_base_dir {
+        Some(cached) => cached,
+        None => {
+            owned_root = config.base_dir.canonicalize().ok()?;
+            &owned_root
         }
-        None => config
-            .base_dir
-            .join(config.static_folder)
-            .canonicalize()
-            .ok()?,
     };
+
+    // `join` handles a rooted `static_folder` (absolute paths replace the base),
+    // and `canonicalize` both resolves `..`/symlinks and verifies existence.
+    let static_dir = canonical_root
+        .join(config.static_folder)
+        .canonicalize()
+        .ok()?;
+
     let candidate = static_dir.join(request_path);
 
     // Canonicalize to resolve any ".." or symlinks, then verify containment
@@ -1199,6 +1216,209 @@ mod tests {
                 let result = find_in_static_folder(&config, "escape/some_file");
                 assert!(result.is_none(), "Symlink escape should be blocked");
             }
+        }
+    }
+
+    /// Regression: `safe_join` used to fall through to its "path doesn't exist
+    /// yet" branch when `canonicalize()` *succeeded* but resolved outside the
+    /// base. That branch validates only the parent, so it handed back the
+    /// unresolved symlink and the server served the out-of-repo target
+    /// (`GET /passwd` -> `/etc/passwd`).
+    #[cfg(unix)]
+    #[test]
+    fn test_safe_join_blocks_symlink_to_absolute_path_outside_base() {
+        use std::os::unix::fs::symlink;
+
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "top secret").unwrap();
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        symlink(&secret, base.join("passwd")).unwrap();
+
+        assert_eq!(
+            safe_join(base, None, "passwd"),
+            None,
+            "a symlink resolving outside the base must not be joined"
+        );
+    }
+
+    /// The relative form of the same escape: an attacker needs no knowledge of
+    /// the victim's absolute paths.
+    #[cfg(unix)]
+    #[test]
+    fn test_safe_join_blocks_relative_symlink_outside_base() {
+        use std::os::unix::fs::symlink;
+
+        let outer = TempDir::new().unwrap();
+        fs::write(outer.path().join("outside.txt"), "top secret").unwrap();
+        let base = outer.path().join("repo/nested");
+        fs::create_dir_all(&base).unwrap();
+        symlink("../../outside.txt", base.join("escape.txt")).unwrap();
+
+        assert_eq!(
+            safe_join(&base, None, "escape.txt"),
+            None,
+            "a relative symlink resolving outside the base must not be joined"
+        );
+    }
+
+    /// A symlink that stays inside the base is still followed.
+    #[cfg(unix)]
+    #[test]
+    fn test_safe_join_allows_symlink_inside_base() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        fs::write(base.join("real.txt"), "inside").unwrap();
+        symlink("real.txt", base.join("alias.txt")).unwrap();
+
+        let joined = safe_join(base, None, "alias.txt").expect("in-base symlink should resolve");
+        assert_eq!(joined, base.canonicalize().unwrap().join("real.txt"));
+    }
+
+    /// The escape fix must not break the two branches that legitimately return
+    /// `Some`: an existing in-base file, and a not-yet-existing sibling whose
+    /// parent is in-base (how `/foo/` probes for `foo.md`).
+    #[test]
+    fn test_safe_join_existing_file_and_missing_sibling() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let canonical = base.canonicalize().unwrap();
+        fs::create_dir(base.join("docs")).unwrap();
+        fs::write(base.join("docs/guide.md"), "# Guide").unwrap();
+
+        assert_eq!(
+            safe_join(base, None, "docs/guide.md"),
+            Some(canonical.join("docs/guide.md")),
+            "an existing in-base file must resolve"
+        );
+        assert_eq!(
+            safe_join(base, None, "docs/guide"),
+            Some(canonical.join("docs/guide")),
+            "a not-yet-existing name under an in-base parent must resolve"
+        );
+    }
+
+    /// Retargeted. This layer used to insist that the overlay itself sit under
+    /// the repository root, which 404'd the whole `repo/content` +
+    /// `repo/static` layout. Deciding *how far* `static_folder` may reach is
+    /// `Config::validate_static_folder`'s job now (peers only, never via `$HOME`
+    /// or `/`); what this layer owes is that an out-of-root overlay actually
+    /// resolves — the regression — while a request path still cannot walk out
+    /// of it.
+    #[test]
+    fn test_find_in_static_folder_serves_peer_overlay_but_contains_requests() {
+        let outer = TempDir::new().unwrap();
+        let peer = outer.path().join("static");
+        fs::create_dir(&peer).unwrap();
+        fs::write(peer.join("logo.png"), "PNG").unwrap();
+        fs::write(outer.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+
+        let base = outer.path().join("content");
+        fs::create_dir(&base).unwrap();
+        let canonical = base.canonicalize().unwrap();
+
+        let extensions = vec![String::from("md")];
+        let tag_sources: Vec<String> = vec![];
+
+        let peer_overlay = PathResolverConfig {
+            base_dir: &base,
+            canonical_base_dir: Some(&canonical),
+            static_folder: "../static",
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+        };
+        assert_eq!(
+            find_in_static_folder(&peer_overlay, "logo.png"),
+            Some(peer.canonicalize().unwrap().join("logo.png")),
+            "a peer static folder must serve its own files"
+        );
+        assert!(
+            matches!(
+                resolve_request_path(&peer_overlay, "logo.png"),
+                ResolvedPath::StaticFile(_)
+            ),
+            "the resolver must route the peer overlay's files as static files"
+        );
+
+        // Containment is measured against the overlay, so climbing out of it
+        // fails even though the target is readable and nearby.
+        for attack in ["../id_rsa", "../../etc/passwd", "sub/../../id_rsa"] {
+            assert_eq!(
+                find_in_static_folder(&peer_overlay, attack),
+                None,
+                "a request path must not climb out of the static overlay: {attack}"
+            );
+        }
+
+        // An absolute overlay (only reachable via MBR_STATIC_FOLDER) behaves the
+        // same way: it serves its own contents and contains request paths.
+        let absolute = peer.to_string_lossy().into_owned();
+        let absolute_overlay = PathResolverConfig {
+            static_folder: &absolute,
+            ..peer_overlay
+        };
+        assert_eq!(
+            find_in_static_folder(&absolute_overlay, "logo.png"),
+            Some(peer.canonicalize().unwrap().join("logo.png")),
+            "an absolute static folder must serve its own files"
+        );
+        assert_eq!(
+            find_in_static_folder(&absolute_overlay, "../id_rsa"),
+            None,
+            "an absolute static folder must still contain request paths"
+        );
+    }
+
+    /// A symlink *inside* the overlay is the traversal route that survives the
+    /// policy change: the value of `static_folder` is innocent, and only
+    /// canonicalizing the request target reveals that it lands on `/etc/passwd`.
+    #[cfg(unix)]
+    #[test]
+    fn test_find_in_static_folder_blocks_symlink_out_of_overlay() {
+        use std::os::unix::fs::symlink;
+
+        let outer = TempDir::new().unwrap();
+        let secrets = outer.path().join("secrets");
+        fs::create_dir(&secrets).unwrap();
+        fs::write(secrets.join("passwd"), "root:x:0:0").unwrap();
+
+        let base = outer.path().join("content");
+        fs::create_dir(&base).unwrap();
+        let canonical = base.canonicalize().unwrap();
+        let peer = outer.path().join("static");
+        fs::create_dir(&peer).unwrap();
+
+        // A file and a whole directory, each symlinked out of the overlay.
+        symlink(secrets.join("passwd"), peer.join("passwd")).unwrap();
+        symlink(&secrets, peer.join("leak")).unwrap();
+
+        let extensions = vec![String::from("md")];
+        let tag_sources: Vec<String> = vec![];
+        let config = PathResolverConfig {
+            base_dir: &base,
+            canonical_base_dir: Some(&canonical),
+            static_folder: "../static",
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+        };
+
+        for attack in ["passwd", "leak/passwd"] {
+            assert_eq!(
+                find_in_static_folder(&config, attack),
+                None,
+                "a symlink out of the static overlay must not be served: {attack}"
+            );
+            assert_eq!(
+                resolve_request_path(&config, attack),
+                ResolvedPath::NotFound,
+                "the resolver must 404 a symlink out of the static overlay: {attack}"
+            );
         }
     }
 

@@ -136,90 +136,9 @@ async fn main() -> Result<(), MbrError> {
 
     let is_directory = absolute_path.is_dir();
 
-    let mut config = Config::read(&absolute_path)?;
-
-    // Apply CLI overrides
-    if let Some(timeout) = args.oembed_timeout_ms {
-        config.oembed_timeout_ms = timeout;
-    }
-    if let Some(cache_size) = args.oembed_cache_size {
-        config.oembed_cache_size = cache_size;
-    }
-    if let Some(ref template_folder) = args.template_folder {
-        // Canonicalize and validate the template folder path
-        let template_path =
-            template_folder
-                .canonicalize()
-                .map_err(|e| ConfigError::CanonicalizeFailed {
-                    path: template_folder.clone(),
-                    source: e,
-                })?;
-        if !template_path.is_dir() {
-            return Err(ConfigError::TemplateFolderNotDirectory {
-                path: template_path,
-            }
-            .into());
-        }
-        config.template_folder = Some(template_path);
-    }
-    if let Some(port) = args.port {
-        config.port = port;
-    }
-    if let Some(ref host) = args.host {
-        let ip: std::net::IpAddr = host
-            .parse()
-            .map_err(|_| ConfigError::InvalidHost { host: host.clone() })?;
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                config.host = mbr::config::IpArray(v4.octets());
-            }
-            std::net::IpAddr::V6(_) => {
-                return Err(ConfigError::InvalidHost { host: host.clone() }.into());
-            }
-        }
-    }
-    if let Some(ref theme) = args.theme {
-        config.theme = theme.clone();
-    }
-    if let Some(concurrency) = args.build_concurrency {
-        config.build_concurrency = Some(concurrency);
-    }
-    // Apply transcode options from CLI
-    #[cfg(feature = "media-metadata")]
-    if args.transcode {
-        config.transcode = true;
-    }
-    // Apply skip_link_checks from CLI
-    if args.skip_link_checks {
-        config.skip_link_checks = true;
-    }
-    // Apply no_link_tracking from CLI
-    if args.no_link_tracking {
-        config.link_tracking = false;
-    }
-    // Apply no_relationship_tracking from CLI
-    if args.no_relationship_tracking {
-        config.relationship_tracking = false;
-    }
-    // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
-    if args.mark_incomplete {
-        config.mark_incomplete = Some(true);
-    } else if args.no_mark_incomplete {
-        config.mark_incomplete = Some(false);
-    }
-    // Apply title_prefix and title_suffix from CLI
-    if let Some(ref prefix) = args.title_prefix {
-        config.title_prefix = prefix.clone();
-    }
-    if let Some(ref suffix) = args.title_suffix {
-        config.title_suffix = suffix.clone();
-    }
-    // Enable in-browser editing from CLI
-    if args.edit {
-        config.edit_enabled = true;
-        // Re-validate now that editing is enabled (e.g. non-loopback needs a token).
-        config.validate()?;
-    }
+    // Apply CLI overrides (the highest-precedence configuration layer).
+    // Lives in cli::apply_overrides so the wiring is testable.
+    let mut config = cli::apply_overrides(Config::read(&absolute_path)?, &args)?;
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -341,6 +260,23 @@ async fn main() -> Result<(), MbrError> {
         };
 
         tracing::info!("Building static site to: {}", output_dir.display());
+
+        // `--skip-link-checks` short-circuits validation entirely, so
+        // `broken_links` stays 0 and the `--fail-on-broken-links` gate below
+        // can never fire. Asking for both is almost always a mistake in CI —
+        // the build reports success over a repository nobody checked — and
+        // until now it happened silently. Warn before the build rather than
+        // after, so it is visible even when the build takes a while.
+        // `config.skip_link_checks` (not `args`) because the value can also
+        // arrive from `.mbr/config.toml` or `MBR_SKIP_LINK_CHECKS`, which is
+        // the easier case to miss.
+        if config.skip_link_checks && args.fail_on_broken_links {
+            eprintln!(
+                "Warning: --fail-on-broken-links has no effect because link checking is skipped; \
+                 this build cannot fail on broken links. Drop --skip-link-checks (or the \
+                 skip_link_checks config/MBR_SKIP_LINK_CHECKS setting) to enable the check."
+            );
+        }
 
         let builder = Builder::new(config, output_dir)?;
         let stats = builder.build().await?;

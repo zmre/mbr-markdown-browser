@@ -17,7 +17,7 @@ use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::{MbrError, ServerError};
 use crate::link_grep::InboundLinkCache;
-use crate::link_index::{LinkCache, resolve_outbound_links};
+use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
 use crate::oembed_cache::OembedCache;
 use crate::page_context::{self, ModeFlags, PageChrome, UrlMode};
@@ -31,6 +31,7 @@ use crate::video_metadata_cache::VideoMetadataCache;
 #[cfg(feature = "media-metadata")]
 use crate::video_transcode_cache::HlsCache;
 use crate::{markdown, repo::Repo};
+use std::time::Instant;
 use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -60,17 +61,353 @@ enum InflightClaim {
 /// existing in-progress entry. Modeled on `HlsCache::start_generation`, so N
 /// concurrent requests for the same media only trigger one decode. Also used
 /// to single-flight inbound-link greps for links.json requests.
+///
+/// The claim is one atomic `try_insert`: `pin()` is a seize epoch guard
+/// (reclamation only, not mutual exclusion), so a `get`-then-`insert` pair is
+/// two independent lock-free operations and two callers can both observe a
+/// vacant slot and both produce.
+///
+/// The winner must hold the returned slot in an [`InflightSlot`] guard so
+/// cancellation or a panic cannot leave the key claimed forever.
 fn claim_inflight(
     inflight: &papaya::HashMap<String, Arc<tokio::sync::Notify>>,
     key: &str,
 ) -> InflightClaim {
-    let guard = inflight.pin();
-    match guard.get(key) {
-        Some(notify) => InflightClaim::Wait(notify.clone()),
-        None => {
-            let notify = Arc::new(tokio::sync::Notify::new());
-            guard.insert(key.to_string(), notify.clone());
-            InflightClaim::Produce(notify)
+    let notify = Arc::new(tokio::sync::Notify::new());
+    match inflight.pin().try_insert(key.to_string(), notify.clone()) {
+        Ok(_) => InflightClaim::Produce(notify),
+        Err(papaya::OccupiedError { current, .. }) => InflightClaim::Wait(current.clone()),
+    }
+}
+
+/// Releases a single-flight slot claimed by [`claim_inflight`] when dropped.
+///
+/// The producer holds this for the whole produce step so *every* exit path
+/// frees the slot and wakes waiters: normal return, `?`, panic, and — the case
+/// that motivated it — the handler future being dropped at an `await` because
+/// the client disconnected. Releasing only on the success path leaves a
+/// permanent entry that no TTL or eviction can clear, so every later request
+/// for that key waits the full timeout and then 404s until the process
+/// restarts.
+struct InflightSlot {
+    inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>>,
+    key: String,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl InflightSlot {
+    fn new(
+        inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>>,
+        key: String,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            inflight,
+            key,
+            notify,
+        }
+    }
+}
+
+impl Drop for InflightSlot {
+    fn drop(&mut self) {
+        self.inflight.pin().remove(&self.key);
+        // Waiters re-read the result cache after waking; a miss degrades to a
+        // retryable `None` instead of a hang.
+        self.notify.notify_waiters();
+    }
+}
+
+/// Releases an `HlsCache` generation slot claimed by `start_generation` when
+/// dropped, unless the producer already published a terminal state.
+///
+/// Same hazard as [`InflightSlot`], with a worse failure mode: an `InProgress`
+/// entry has no TTL and `evict_until_freed` refuses to evict non-`Complete`
+/// entries, so a slot abandoned by a cancelled request (the handler future is
+/// dropped at the `spawn_blocking` await when the client disconnects) or by a
+/// panicking transcode task blocks every later request for that playlist or
+/// segment for the full `HLS_WAIT_TIMEOUT` and then 404s, for the life of the
+/// process. Recording a failure instead lets waiters wake immediately and
+/// lets the cache's `FAILED_ENTRY_TTL` re-open the key for a retry.
+#[cfg(feature = "media-metadata")]
+struct HlsGenerationSlot<'a> {
+    cache: &'a HlsCache,
+    /// `None` once the producer settled the entry itself (complete or failed).
+    key: Option<crate::video_transcode_cache::HlsCacheKey>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "media-metadata")]
+impl<'a> HlsGenerationSlot<'a> {
+    fn new(
+        cache: &'a HlsCache,
+        key: crate::video_transcode_cache::HlsCacheKey,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            cache,
+            key: Some(key),
+            notify,
+        }
+    }
+
+    /// Disarms the guard after the producer stored a terminal state, so the
+    /// drop does not overwrite a completed entry with a failure.
+    fn settled(&mut self) {
+        self.key = None;
+    }
+}
+
+#[cfg(feature = "media-metadata")]
+impl Drop for HlsGenerationSlot<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            tracing::warn!("HLS generation abandoned for {key:?}; releasing the in-flight slot");
+            self.cache.fail_generation(
+                key,
+                &crate::video_transcode::TranscodeError::TranscodeFailed(
+                    "generation did not finish (request cancelled or worker panicked)".to_string(),
+                ),
+            );
+            self.notify.notify_waiters();
+        }
+    }
+}
+
+/// Drops every cache derived from markdown file *contents* after a batch of
+/// file changes.
+///
+/// The sibling navigation lists, the directory-listing subdirectories, the
+/// serialized site.json body, the outbound `LinkCache` and the inbound link
+/// cache are all recomputed from the files themselves, and none of the readers
+/// re-checks mtimes, so a change that is not followed by this call is served
+/// from the pre-edit snapshot indefinitely (`LinkCache` has no TTL at all).
+/// All of them are rebuilt lazily on the next render / listing / site.json /
+/// links.json request.
+fn invalidate_derived_caches(
+    listing_caches: &ListingCaches,
+    link_cache: &LinkCache,
+    inbound_link_cache: &InboundLinkCache,
+) {
+    listing_caches.invalidate();
+    link_cache.invalidate_all();
+    inbound_link_cache.invalidate_all();
+}
+
+/// Everything [`index_page_links`] needs to reproduce the renderer's link
+/// resolution outside a request.
+///
+/// Cloned once at startup rather than read from `ServerState`, because the
+/// index is built and maintained from background tasks that outlive any
+/// individual request.
+#[derive(Clone)]
+struct LinkIndexConfig {
+    base_dir: PathBuf,
+    index_file: String,
+    markdown_extensions: Vec<String>,
+    valid_tag_sources: HashSet<String>,
+}
+
+/// Parse one markdown file and record its contribution to the backlink index.
+///
+/// Link resolution must match what a real render would produce, or the info
+/// panel would show backlinks the page does not actually contain. That is why
+/// this goes through the same `extract_outbound_links_sync` →
+/// `resolve_outbound_links` pair the request path uses, with the same
+/// `LinkTransformConfig`, rather than re-deriving URLs.
+fn index_page_links(
+    repo: &Repo,
+    index: &InboundIndex,
+    cfg: &LinkIndexConfig,
+    path: &Path,
+    url_path: &str,
+) {
+    let is_index_file = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f == cfg.index_file);
+
+    let link_transform_config = LinkTransformConfig {
+        markdown_extensions: cfg.markdown_extensions.clone(),
+        index_file: cfg.index_file.clone(),
+        is_index_file,
+        url_depth: None,
+        current_page_url: url_path.to_string(),
+    };
+
+    match markdown::extract_outbound_links_sync(
+        path.to_path_buf(),
+        &cfg.base_dir,
+        link_transform_config,
+        true, // server_mode
+        cfg.valid_tag_sources.clone(),
+        Some(repo.wikilink_index.clone()),
+    ) {
+        Ok(links) => {
+            // `OutboundLink.to` is the *raw* markdown destination
+            // (`alpha.md`, `../notes/x.md`) — the renderer records it before
+            // rewriting the href. Resolving that directly against the page URL
+            // yields `/alpha.md/`, which matches no page, so every
+            // extension-style link would silently produce no backlink.
+            // Running it through the same `transform_link` the renderer uses
+            // for the href first gives `../alpha/`, which resolves to the
+            // page's real URL.
+            let resolved: Vec<crate::link_index::OutboundLink> = links
+                .into_iter()
+                .map(|mut link| {
+                    if link.internal && !link.to.is_empty() {
+                        link.to = crate::link_transform::transform_link(
+                            &link.to,
+                            &LinkTransformConfig {
+                                markdown_extensions: cfg.markdown_extensions.clone(),
+                                index_file: cfg.index_file.clone(),
+                                is_index_file,
+                                url_depth: None,
+                                current_page_url: url_path.to_string(),
+                            },
+                        );
+                    }
+                    link
+                })
+                .collect();
+            let resolved = resolve_outbound_links(url_path, resolved, is_index_file);
+            index.set_page_links(url_path, &resolved);
+        }
+        Err(e) => {
+            // A file that cannot be parsed contributes no backlinks. Withdraw
+            // whatever it contributed before so a file that became unreadable
+            // does not leave stale backlinks behind.
+            tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
+            index.remove_page(url_path);
+        }
+    }
+}
+
+/// Build the whole backlink index from the current repository contents.
+///
+/// Blocking and rayon-parallel; call from `spawn_blocking`.
+fn populate_inbound_index(repo: &Repo, index: &InboundIndex, cfg: &LinkIndexConfig) {
+    use rayon::prelude::*;
+
+    let pages: Vec<(PathBuf, String)> = repo
+        .markdown_files
+        .pin()
+        .iter()
+        .map(|(path, info)| (path.clone(), info.url_path.clone()))
+        .collect();
+
+    let page_count = pages.len();
+    let started = Instant::now();
+
+    pages.par_iter().for_each(|(path, url_path)| {
+        index_page_links(repo, index, cfg, path, url_path);
+    });
+
+    index.mark_ready();
+    tracing::info!(
+        "Backlink index built in {:?}: {} pages parsed, {} pages have backlinks",
+        started.elapsed(),
+        page_count,
+        index.target_count(),
+    );
+}
+
+/// The three caches that hold pre-rendered *listings* of the repository: the
+/// per-directory file lists, the per-directory subdirectory lists, and the
+/// serialized `/.mbr/site.json` body.
+///
+/// Grouped so every invalidation site clears all three. They are derived from
+/// the same data, and there are several invalidation sites (the watcher task,
+/// the create handler, the move handler); clearing only some of them serves a
+/// page whose navigation disagrees with its content.
+#[derive(Clone)]
+struct ListingCaches {
+    sibling_nav_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>>,
+    subdir_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>>,
+    site_json_cache: Arc<parking_lot::RwLock<SiteJsonCache>>,
+}
+
+impl ListingCaches {
+    fn invalidate(&self) {
+        self.sibling_nav_cache.pin().clear();
+        self.subdir_cache.pin().clear();
+        self.site_json_cache.write().invalidate();
+    }
+}
+
+/// The memoized `/.mbr/site.json` body plus a generation counter.
+///
+/// The counter closes the fill/invalidate race: a rebuild that started before a
+/// file change would otherwise publish its pre-change snapshot *after* the
+/// invalidation cleared the slot, and that stale body would then be served
+/// until the next change. A builder captures the generation up front and its
+/// store is rejected if the generation moved meanwhile.
+#[derive(Default)]
+pub struct SiteJsonCache {
+    generation: u64,
+    body: Option<axum::body::Bytes>,
+}
+
+impl SiteJsonCache {
+    /// The current generation and body, read together under one lock.
+    fn snapshot(&self) -> (u64, Option<axum::body::Bytes>) {
+        (self.generation, self.body.clone())
+    }
+
+    /// Publishes `body` only if no invalidation happened since `generation` was
+    /// observed.
+    fn store(&mut self, generation: u64, body: axum::body::Bytes) {
+        if self.generation == generation {
+            self.body = Some(body);
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.body = None;
+    }
+}
+
+impl From<&ServerState> for ListingCaches {
+    fn from(state: &ServerState) -> Self {
+        Self {
+            sibling_nav_cache: Arc::clone(&state.sibling_nav_cache),
+            subdir_cache: Arc::clone(&state.subdir_cache),
+            site_json_cache: Arc::clone(&state.site_json_cache),
+        }
+    }
+}
+
+/// What the live-reload WebSocket loop should do with a broadcast receive
+/// result.
+#[derive(Debug)]
+enum LiveReloadAction {
+    /// Serialize and forward this event to the client.
+    Forward(crate::watcher::FileChangeEvent),
+    /// This client fell behind and the channel dropped events; keep listening.
+    Skip,
+    /// The sender is gone (server shutting down); close the socket.
+    Close,
+}
+
+/// Maps a file-change broadcast result to the live-reload loop's next action.
+///
+/// Extracted so the lag path is unit-testable: the loop must keep forwarding
+/// after a `Lagged` error rather than treating it as terminal. Dropped events
+/// only cost this client a missed reload, and the client re-fetches the page
+/// on the next event it does receive.
+fn live_reload_action(
+    result: Result<crate::watcher::FileChangeEvent, broadcast::error::RecvError>,
+) -> LiveReloadAction {
+    match result {
+        Ok(event) => LiveReloadAction::Forward(event),
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            tracing::warn!("Live reload client lagged; {skipped} file change event(s) dropped");
+            LiveReloadAction::Skip
+        }
+        Err(broadcast::error::RecvError::Closed) => {
+            tracing::debug!("File change channel closed; ending live reload stream");
+            LiveReloadAction::Close
         }
     }
 }
@@ -83,9 +420,11 @@ const DEFAULT_LINK_CACHE_SIZE: usize = 2 * 1024 * 1024;
 const DEFAULT_INBOUND_LINK_CACHE_SIZE: usize = 4 * 1024 * 1024;
 
 /// TTL for inbound link cache entries in seconds. The editing endpoints
-/// (`/.mbr/create`, `/.mbr/move`, `/.mbr/mkdir`) and the file watcher invalidate
-/// this cache surgically on changes, but a bounded TTL still guards against any
-/// missed invalidation and keeps mini-graph bursts from re-grepping the repo.
+/// (`/.mbr/create`, `/.mbr/move`, `/.mbr/mkdir`) invalidate this cache when
+/// they mutate the repo, and the file watcher drops it wholesale (together with
+/// the outbound `LinkCache`) after each debounced batch of changes, but a
+/// bounded TTL still guards against any missed invalidation and keeps
+/// mini-graph bursts from re-grepping the repo.
 const INBOUND_LINK_CACHE_TTL_SECS: u64 = 300;
 
 /// Maximum inbound-link greps allowed to run concurrently. Each grep walks
@@ -381,10 +720,209 @@ fn resolve_media_source_file(
     })
 }
 
+/// Name of the per-repository template/configuration folder.
+const MBR_TEMPLATE_DIR: &str = ".mbr";
+
+/// File extensions the `/.mbr/*` route is allowed to serve.
+///
+/// `.mbr/` is a *configuration* directory as much as an asset directory: it
+/// holds `config.toml` with the Argon2 `edit_token_hash`. Serving it required
+/// no credential, so the route is restricted to the asset types the compiled-in
+/// defaults and shipped templates actually reference (stylesheets, scripts,
+/// source maps, templates, images, fonts) and everything else 404s.
+const MBR_ASSET_EXTENSIONS: &[&str] = &[
+    // Documents, styles, scripts and their source maps
+    "css",
+    "js",
+    "mjs",
+    "map",
+    "json",
+    "html",
+    "txt", // Images and fonts
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "svg",
+    "ico",
+    "woff",
+    "woff2",
+    "ttf",
+    "otf",
+    "eot",
+    // Pagefind index shipped inside `.mbr/pagefind/` by a static build
+    "wasm",
+    "pf_meta",
+    "pf_fragment",
+    "pf_index",
+];
+
+/// Whether `asset_path` (a `/`-prefixed path relative to the template folder)
+/// may be served by [`Server::serve_mbr_assets`].
+///
+/// Requires an allowlisted extension ([`MBR_ASSET_EXTENSIONS`]) and rejects any
+/// dot-prefixed component, so neither `config.toml` nor a dotfile such as
+/// `.env` can be read out of the template folder.
+fn is_servable_mbr_asset(asset_path: &str) -> bool {
+    let path = Path::new(asset_path);
+    let has_hidden_component = path.components().any(|component| match component {
+        std::path::Component::Normal(name) => {
+            name.to_str().is_some_and(|name| name.starts_with('.'))
+        }
+        std::path::Component::CurDir | std::path::Component::ParentDir => true,
+        _ => false,
+    });
+    if has_hidden_component {
+        return false;
+    }
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| MBR_ASSET_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// File extensions the `/.mbr/upload` endpoint accepts.
+///
+/// Mirrors the image/audio/video/PDF classification in
+/// `repo::StaticFileMetadata::empty` (plus the `vtt`/`srt` caption sidecars the
+/// video pipeline understands). The uploader must never be able to create a
+/// file the browser or the template engine will *execute* — `.html`, `.js`,
+/// `.css` and `.toml` are deliberately absent, and so is `.svg`, which executes
+/// script when navigated to directly.
+const UPLOAD_ALLOWED_EXTENSIONS: &[&str] = &[
+    // Images
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", // Audio
+    "aiff", "aif", "mp3", "aac", "m4a", "ogg", "oga", "opus", "wma", "flac", "wav",
+    // Video
+    "mp4", "m4v", "mov", "webm", "flv", "mpg", "mpeg", "avi", "3gp", "wmv",
+    // Documents and caption sidecars
+    "pdf", "vtt", "srt",
+];
+
+/// Canonicalizes the deepest existing ancestor of `path` (the path itself when
+/// it already exists), so containment checks also work for files that have not
+/// been created yet.
+fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find_map(|ancestor| ancestor.canonicalize().ok())
+}
+
+/// Whether `target` lands inside mbr's template folder — the repository's
+/// `.mbr/` directory or an explicitly configured `--template-folder`.
+///
+/// Checked both lexically (the caller builds `target` by joining onto the
+/// canonical root, so `dir=.mbr` is caught before the file exists) and against
+/// the canonicalized deepest existing ancestor (so a symlinked `.mbr` or a
+/// template folder given by a non-canonical path is caught too).
+fn is_template_folder_path(
+    target: &Path,
+    base_dir: &Path,
+    canonical_base_dir: Option<&Path>,
+    template_folder: Option<&Path>,
+) -> bool {
+    let canonical_target = canonical_existing_ancestor(target);
+    std::iter::once(base_dir.join(MBR_TEMPLATE_DIR))
+        .chain(canonical_base_dir.map(|base| base.join(MBR_TEMPLATE_DIR)))
+        .chain(template_folder.map(Path::to_path_buf))
+        .any(|root| {
+            target.starts_with(&root)
+                || match (root.canonicalize(), canonical_target.as_deref()) {
+                    (Ok(root), Some(canonical_target)) => canonical_target.starts_with(root),
+                    _ => false,
+                }
+        })
+}
+
+/// Extracts the hostname from a `Host` header value, dropping the port and any
+/// IPv6 brackets: `127.0.0.1:5200` → `127.0.0.1`, `[::1]:5200` → `::1`,
+/// `localhost` → `localhost`.
+fn host_header_hostname(host: &str) -> &str {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal, with or without a port.
+        rest.split(']').next().unwrap_or(rest)
+    } else if host.matches(':').count() > 1 {
+        // Bare IPv6 literal (not RFC-conformant in `Host`, but be lenient).
+        host
+    } else {
+        host.split(':').next().unwrap_or(host)
+    }
+}
+
+/// Whether a `Host` header names an address this server could have been reached
+/// at directly.
+///
+/// Accepts `localhost`, any loopback IP literal (`127.0.0.1`, `127.0.0.53`,
+/// `::1`, `[::1]`) and the configured bind address. Everything else — notably
+/// an attacker-controlled name that DNS-rebinds to 127.0.0.1 — is rejected, as
+/// is a missing `Host` (HTTP/1.1 requires one and every browser sends it).
+///
+/// The port is deliberately ignored: `start_with_port_retry` may bind a
+/// different port than the configured one, and a rebinding attacker controls
+/// the *name*, never the port. A wildcard bind (`0.0.0.0`) is only reachable
+/// under a name this rejects, but `Config::validate` already refuses to enable
+/// editing on a non-loopback bind without a token, and a configured token skips
+/// this check entirely.
+fn host_header_is_allowed(headers: &HeaderMap, bind_ip: [u8; 4]) -> bool {
+    let Some(raw) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let hostname = host_header_hostname(raw);
+    if hostname.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match hostname.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback() || ip == std::net::IpAddr::from(bind_ip),
+        Err(_) => false,
+    }
+}
+
+/// Defense-in-depth containment check for a path the router is about to serve.
+///
+/// Returns `true` only when `path` **canonicalizes** inside the repository root
+/// or inside the `static_folder` overlay (which may legitimately resolve
+/// outside the root, e.g. `static_folder = "../static"`).
+///
+/// `Path::starts_with` on an un-canonicalized path is not enough: a symlink
+/// whose target lives outside the root is lexically inside it, and both
+/// `is_file()` and `ServeFile` follow symlinks. Every resolver in this crate is
+/// supposed to reject that, so this is a second, independent gate rather than
+/// the primary one.
+fn is_within_served_roots(
+    path: &Path,
+    base_dir: &Path,
+    canonical_base_dir: Option<&Path>,
+    static_folder: &str,
+) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let owned_base;
+    let base = match canonical_base_dir {
+        Some(cached) => Some(cached),
+        None => {
+            owned_base = base_dir.canonicalize().ok();
+            owned_base.as_deref()
+        }
+    };
+    if base.is_some_and(|base| canonical.starts_with(base)) {
+        return true;
+    }
+    // Only pay for this canonicalize when the cheap check already failed.
+    base_dir
+        .join(static_folder)
+        .canonicalize()
+        .is_ok_and(|static_root| canonical.starts_with(static_root))
+}
+
 pub struct Server {
     pub router: Router,
     pub port: u16,
     pub ip: [u8; 4],
+    /// True when a native GUI window fronts this server. Only affects how the
+    /// startup banner is announced; see [`Server::announce_listening`].
+    pub gui_mode: bool,
     /// File watcher handle - kept alive for the lifetime of the server.
     /// When Server is dropped, this is dropped, stopping the watcher.
     _watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>,
@@ -420,6 +958,11 @@ pub struct ServerConfig {
     pub index_file: String,
     pub oembed_timeout_ms: u64,
     pub oembed_cache_size: usize,
+    /// Budget in bytes for the video/PDF metadata cache (cover images,
+    /// chapters, captions). Separate from `oembed_cache_size`, which sizes a
+    /// text-metadata cache.
+    #[cfg(feature = "media-metadata")]
+    pub media_cache_size: usize,
     pub template_folder: Option<std::path::PathBuf>,
     pub sort: Vec<SortField>,
     pub gui_mode: bool,
@@ -483,6 +1026,8 @@ impl From<&crate::config::Config> for ServerConfig {
             index_file: config.index_file.clone(),
             oembed_timeout_ms: config.oembed_timeout_ms,
             oembed_cache_size: config.oembed_cache_size,
+            #[cfg(feature = "media-metadata")]
+            media_cache_size: config.media_cache_size,
             template_folder: config.template_folder.clone(),
             sort: config.sort.clone(),
             gui_mode: false, // Default to server mode
@@ -512,6 +1057,9 @@ impl From<&crate::config::Config> for ServerConfig {
 
 #[derive(Clone)]
 pub struct ServerState {
+    /// IPv4 address the server was configured to bind. Used to validate the
+    /// `Host` header on editing requests (anti DNS-rebinding).
+    pub bind_ip: [u8; 4],
     pub base_dir: std::path::PathBuf,
     /// Pre-computed canonical base directory for path resolution (avoids per-request canonicalize)
     pub canonical_base_dir: Option<std::path::PathBuf>,
@@ -555,7 +1103,21 @@ pub struct ServerState {
         Arc<papaya::HashMap<String, crate::video_transcode::VideoResolution>>,
     /// Per-directory memoized sibling navigation lists (prev/next). Avoids an
     /// O(repo) scan on every markdown render; invalidated when files change.
+    ///
+    /// Doubles as the *file* half of a directory listing: the listing for a
+    /// directory is exactly the sorted sibling list of the files it contains.
     pub sibling_nav_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>>,
+    /// Per-directory memoized immediate-subdirectory lists, the other half of a
+    /// directory listing. Invalidated alongside `sibling_nav_cache`.
+    pub subdir_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>>,
+    /// Fully rendered `/.mbr/site.json` body.
+    ///
+    /// The payload is a pure function of the repository index, but mbr is a
+    /// multi-page app: `shared.ts` fetches it on *every* navigation, and
+    /// rebuilding it re-serializes every markdown file's frontmatter each time.
+    /// Cleared whenever the repo changes (alongside `sibling_nav_cache`) and
+    /// rebuilt lazily on the next request.
+    pub site_json_cache: Arc<parking_lot::RwLock<SiteJsonCache>>,
     /// Whether bidirectional link tracking is enabled
     pub link_tracking: bool,
     /// Whether typed relationship tracking is enabled
@@ -566,6 +1128,10 @@ pub struct ServerState {
     pub link_cache: Arc<LinkCache>,
     /// Cache for inbound links discovered via grep
     pub inbound_link_cache: Arc<InboundLinkCache>,
+    /// Repository-wide backlink index, built once in the background after the
+    /// initial scan and maintained incrementally by the watcher. Until it
+    /// reports ready, `links.json` falls back to the per-page grep below.
+    pub inbound_index: Arc<InboundIndex>,
     /// Bounds concurrent inbound-link greps: each cache miss walks the whole
     /// repository, and the sidebar mini graph fans out many links.json
     /// requests at once, so at most two full-repo walks run at a time.
@@ -699,9 +1265,13 @@ enum FileOpError {
     /// The destination lacks a configured markdown extension → `400`.
     NotMarkdown,
     /// An uploaded filename was empty, contained path separators / `..`, lacked
-    /// an extension, or carried a markdown extension (markdown goes through
-    /// `/.mbr/create`) → `400`.
+    /// an extension, carried a markdown extension (markdown goes through
+    /// `/.mbr/create`), or was not an allowed media type → `400`.
     InvalidUploadName,
+    /// The upload destination is inside the template folder (`.mbr/` or
+    /// `--template-folder`), where a file would be executed as a template or
+    /// served as site JavaScript → `400`.
+    ForbiddenUploadDir,
     /// The move source is not an existing markdown file → `404`.
     SourceNotFound,
     /// The path escaped the repository root (traversal/symlink) → `400`.
@@ -724,7 +1294,11 @@ impl IntoResponse for FileOpError {
             ),
             FileOpError::InvalidUploadName => (
                 StatusCode::BAD_REQUEST,
-                "Invalid upload filename (must be a basename with a non-markdown extension)",
+                "Invalid upload filename (must be a basename with an allowed media extension)",
+            ),
+            FileOpError::ForbiddenUploadDir => (
+                StatusCode::BAD_REQUEST,
+                "Uploads into the template folder are not allowed",
             ),
             FileOpError::SourceNotFound => {
                 (StatusCode::NOT_FOUND, "Source markdown file not found")
@@ -800,8 +1374,15 @@ const UPLOAD_URL_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
 /// - is empty or whitespace-only,
 /// - contains a path separator (`/` or `\`) or a `..` sequence,
 /// - is not a pure basename (has directory components),
-/// - lacks a non-empty stem or a non-empty extension, or
-/// - carries a configured markdown extension (those go through `/.mbr/create`).
+/// - lacks a non-empty stem or a non-empty extension,
+/// - carries a configured markdown extension (those go through `/.mbr/create`),
+///   or
+/// - carries an extension outside [`UPLOAD_ALLOWED_EXTENSIONS`].
+///
+/// The allowlist is the important half: rejecting only separators and markdown
+/// left the media uploader able to write `index.html` or
+/// `components/mbr-components.min.js`, which the watcher hot-reloads into every
+/// rendered page.
 ///
 /// On success returns the trimmed, validated basename unchanged.
 fn sanitize_upload_name(name: &str, markdown_extensions: &[String]) -> Option<String> {
@@ -829,8 +1410,13 @@ fn sanitize_upload_name(name: &str, markdown_extensions: &[String]) -> Option<St
     if stem.is_empty() {
         return None;
     }
+    let ext_lower = ext.to_ascii_lowercase();
     // Markdown files must be created via `/.mbr/create`, not uploaded.
-    if crate::repo::is_markdown_extension(&ext.to_lowercase(), markdown_extensions) {
+    if crate::repo::is_markdown_extension(&ext_lower, markdown_extensions) {
+        return None;
+    }
+    // Only media types the rest of mbr already understands may be uploaded.
+    if !UPLOAD_ALLOWED_EXTENSIONS.contains(&ext_lower.as_str()) {
         return None;
     }
     Some(name.to_string())
@@ -849,6 +1435,58 @@ fn dedupe_name(dir: &Path, stem: &str, ext: &str, exists: impl Fn(&Path) -> bool
         .expect("candidate sequence is infinite, so a free path always exists")
 }
 
+/// Serializable view of the repository for `/.mbr/site.json`.
+///
+/// Deliberately *not* `serde_json::to_value(&*repo)`: that materializes the
+/// whole `other_files` subtree — one `Value` per asset, tens of thousands on a
+/// media-heavy repo — only for the handler to delete the key again one
+/// statement later. Naming the fields that actually ship means the media
+/// catalog is never built here; it is served by `/.mbr/media.json`.
+#[derive(serde::Serialize)]
+struct SiteJson<'a> {
+    index_file: &'a str,
+    markdown_files: &'a crate::repo::MarkdownFiles,
+    sort: &'a [SortField],
+    sidebar_style: &'a str,
+    sidebar_max_items: usize,
+}
+
+/// The non-repo values that appear in `/.mbr/site.json`.
+///
+/// Owned (not borrowed from `ServerState`) so the body can be rendered on the
+/// blocking pool.
+struct SiteJsonParams {
+    sort: Vec<SortField>,
+    sidebar_style: String,
+    sidebar_max_items: usize,
+    relationship_tracking: bool,
+}
+
+/// Renders the `/.mbr/site.json` body for the current repository snapshot.
+///
+/// Pure with respect to the caches: the caller decides whether to memoize.
+/// Relationship injection still walks a `serde_json::Value`, because it
+/// decorates each markdown entry, but that DOM now contains only what ships.
+fn render_site_json(
+    repo: &Repo,
+    params: &SiteJsonParams,
+) -> Result<axum::body::Bytes, serde_json::Error> {
+    let mut value = serde_json::to_value(SiteJson {
+        index_file: &repo.index_file,
+        markdown_files: &repo.markdown_files,
+        sort: &params.sort,
+        sidebar_style: &params.sidebar_style,
+        sidebar_max_items: params.sidebar_max_items,
+    })?;
+
+    // Add relationship_types + per-note resolved relationships (if enabled).
+    if params.relationship_tracking {
+        repo.relationship_index.inject_into_site_json(&mut value);
+    }
+
+    Ok(axum::body::Bytes::from(serde_json::to_vec(&value)?))
+}
+
 impl Server {
     /// Initialize a new server instance with the given configuration.
     pub fn init(config: ServerConfig) -> Result<Self, ServerError> {
@@ -864,6 +1502,8 @@ impl Server {
             index_file,
             oembed_timeout_ms,
             oembed_cache_size,
+            #[cfg(feature = "media-metadata")]
+            media_cache_size,
             template_folder,
             sort,
             gui_mode,
@@ -890,9 +1530,12 @@ impl Server {
 
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
 
-        // Initialize video metadata cache with same size as oembed cache
+        // Media metadata (cover JPEGs, chapters, captions) gets its own budget:
+        // it used to borrow the oembed *text* cache size, so a couple of dozen
+        // covers filled it and `--oembed-cache-size 0` silently disabled media
+        // caching too.
         #[cfg(feature = "media-metadata")]
-        let video_metadata_cache = Arc::new(VideoMetadataCache::new(oembed_cache_size));
+        let video_metadata_cache = Arc::new(VideoMetadataCache::new(media_cache_size));
 
         #[cfg(feature = "media-metadata")]
         let hls_cache = Arc::new(HlsCache::new(DEFAULT_HLS_CACHE_SIZE));
@@ -906,10 +1549,14 @@ impl Server {
             papaya::HashMap<String, crate::video_transcode::VideoResolution>,
         > = Arc::new(papaya::HashMap::new());
 
-        // Per-directory sibling navigation cache. Created before the file-change
-        // invalidation task so that task can clear it when files change.
-        let sibling_nav_cache: Arc<papaya::HashMap<PathBuf, Arc<Vec<serde_json::Value>>>> =
-            Arc::new(papaya::HashMap::new());
+        // Listing caches (per-directory files, per-directory subdirectories and
+        // the serialized site.json body). Created before the file-change
+        // invalidation task so that task can clear them when files change.
+        let listing_caches = ListingCaches {
+            sibling_nav_cache: Arc::new(papaya::HashMap::new()),
+            subdir_cache: Arc::new(papaya::HashMap::new()),
+            site_json_cache: Arc::new(parking_lot::RwLock::new(SiteJsonCache::default())),
+        };
 
         // Use try_init to allow multiple server instances in tests
         // RUST_LOG env var takes precedence, then CLI flag, then default (warn)
@@ -1011,10 +1658,26 @@ impl Server {
 
         // Spawn background task to reload templates when .html files change
         let templates_for_reload = templates.clone();
-        let template_folder_for_reload = template_folder.clone();
+        // Canonicalize once here, not per event: the watcher reports canonical
+        // paths while the configured folder is stored as written, and this
+        // cannot change for the life of the process. Fall back to the path as
+        // given when canonicalization fails (e.g. the folder does not exist).
+        let template_folder_for_reload = template_folder
+            .clone()
+            .map(|tf| tf.canonicalize().unwrap_or(tf));
         let mut template_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
-            while let Ok(event) = template_change_rx.recv().await {
+            loop {
+                // `while let Ok(..)` here treated a `Lagged` error as the end of
+                // the stream, so one burst of file changes silently disabled
+                // template hot reload for the life of the process — the same
+                // defect as the live-reload WebSocket loop.
+                let event = match live_reload_action(template_change_rx.recv().await) {
+                    LiveReloadAction::Forward(event) => event,
+                    LiveReloadAction::Skip => continue,
+                    LiveReloadAction::Close => break,
+                };
+
                 // Only reload for .html files
                 if !event.path.ends_with(".html") {
                     continue;
@@ -1022,20 +1685,7 @@ impl Server {
 
                 // If we have a template folder, only reload for changes in that folder
                 // Otherwise, only reload for changes in .mbr folder
-                let should_reload = if let Some(ref tf) = template_folder_for_reload {
-                    event.path.starts_with(&tf.to_string_lossy().to_string())
-                } else {
-                    // Match `.mbr` as a path component rather than substring
-                    // matching "/.mbr/". The watcher reports native separators,
-                    // so on Windows this string is `...\.mbr\theme.css` and the
-                    // slash form would never match, silently disabling template
-                    // hot reload.
-                    Path::new(&event.path)
-                        .components()
-                        .any(|c| c.as_os_str() == ".mbr")
-                };
-
-                if should_reload {
+                if should_reload_template(&event.path, template_folder_for_reload.as_deref()) {
                     tracing::debug!("Template file changed: {}", event.path);
                     if let Err(e) = templates_for_reload.reload() {
                         tracing::error!("Failed to reload templates: {}", e);
@@ -1044,6 +1694,49 @@ impl Server {
             }
         });
 
+        // Link caches. Created before the file-change invalidation task so that
+        // task can drop them when files change: both are derived from file
+        // contents and neither the outbound `LinkCache` nor a served links.json
+        // response re-checks mtimes, so a missed invalidation serves pre-edit
+        // links until the process restarts.
+        let link_cache = Arc::new(LinkCache::new(DEFAULT_LINK_CACHE_SIZE));
+        let inbound_link_cache = Arc::new(InboundLinkCache::new(
+            DEFAULT_INBOUND_LINK_CACHE_SIZE,
+            INBOUND_LINK_CACHE_TTL_SECS,
+        ));
+
+        // Repository-wide backlink index. Built once, in the background, after
+        // the initial scan (which is what makes the wikilink index — and so
+        // link resolution — trustworthy). Until it is ready, links.json falls
+        // back to the per-page grep, so startup is not blocked on it.
+        let inbound_index = Arc::new(InboundIndex::new());
+        // Serializes the initial full build against the watcher's incremental
+        // updates. Both mutate the same index, and an update that interleaves
+        // with the build can be silently undone by it.
+        let index_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let link_index_config = LinkIndexConfig {
+            base_dir: base_dir.clone(),
+            index_file: index_file.clone(),
+            markdown_extensions: markdown_extensions.clone(),
+            valid_tag_sources: crate::config::tag_sources_to_set(&tag_sources),
+        };
+        if link_tracking {
+            let repo_for_index = Arc::clone(&repo);
+            let index_for_build = Arc::clone(&inbound_index);
+            let cfg_for_build = link_index_config.clone();
+            let index_lock_for_build = Arc::clone(&index_lock);
+            tokio::spawn(async move {
+                repo_for_index.wait_for_scan().await;
+                let _guard = index_lock_for_build.lock().await;
+                let repo = Arc::clone(&repo_for_index);
+                tokio::task::spawn_blocking(move || {
+                    populate_inbound_index(&repo, &index_for_build, &cfg_for_build);
+                })
+                .await
+                .unwrap_or_else(|e| tracing::error!("Backlink index build task failed: {e}"));
+            });
+        }
+
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
         // For small batches (<=50 files): surgical per-file invalidation.
@@ -1051,7 +1744,12 @@ impl Server {
         let repo_for_invalidation = Arc::clone(&repo);
         let base_dir_for_invalidation = base_dir.clone();
         let markdown_extensions_for_invalidation = markdown_extensions.clone();
-        let sibling_cache_for_invalidation = Arc::clone(&sibling_nav_cache);
+        let listing_caches_for_invalidation = listing_caches.clone();
+        let link_cache_for_invalidation = Arc::clone(&link_cache);
+        let inbound_link_cache_for_invalidation = Arc::clone(&inbound_link_cache);
+        let inbound_index_for_invalidation = Arc::clone(&inbound_index);
+        let link_index_config_for_invalidation = link_index_config.clone();
+        let index_lock_for_invalidation = Arc::clone(&index_lock);
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1119,6 +1817,9 @@ impl Server {
 
                 let repo = Arc::clone(&repo_for_invalidation);
                 let base_dir = base_dir_for_invalidation.clone();
+                let inbound_index = Arc::clone(&inbound_index_for_invalidation);
+                let link_index_cfg = link_index_config_for_invalidation.clone();
+                let index_lock = Arc::clone(&index_lock_for_invalidation);
 
                 if relevant_events.len() <= SURGICAL_THRESHOLD {
                     // Surgical invalidation: update individual files
@@ -1134,13 +1835,36 @@ impl Server {
                         )
                     });
 
+                    // Serialized against the initial index build; see the
+                    // `is_ready()` comment below.
+                    let _index_guard = index_lock.lock().await;
                     tokio::task::spawn_blocking(move || {
+                        let mut index_targets: Vec<(PathBuf, Option<String>, bool)> = Vec::new();
                         for event in &relevant_events {
                             let abs_path = if event.path.is_empty() {
                                 continue;
                             } else {
                                 PathBuf::from(&event.path)
                             };
+                            index_targets.push((
+                                abs_path.clone(),
+                                // Take the URL from the repository's own map
+                                // rather than recomputing it. `base_dir` is the
+                                // path as configured, while the scanner keys
+                                // everything by the *canonical* root, and on
+                                // macOS a temp dir differs (`/var` vs
+                                // `/private/var`). A recomputed URL would not
+                                // match the key the initial build inserted
+                                // under, so the edit would write a second entry
+                                // and never withdraw the stale one. Captured
+                                // before `invalidate_file` because a deletion
+                                // removes the entry it is read from.
+                                repo.markdown_files
+                                    .pin()
+                                    .get(&abs_path)
+                                    .map(|info| info.url_path.clone()),
+                                matches!(event.event, crate::watcher::ChangeEventType::Deleted),
+                            ));
                             repo.invalidate_file(&abs_path, &event.event);
                         }
                         // Rebuild tag index if any files were deleted or modified
@@ -1153,6 +1877,53 @@ impl Server {
                         repo.build_relationship_index();
                         // The global wikilink index must track the same changes.
                         repo.build_wikilink_index();
+
+                        // Re-index only the pages that changed. This runs after
+                        // build_wikilink_index() on purpose: `[[Name]]` links
+                        // resolve through that index, so re-extracting first
+                        // would record links against the pre-edit name table.
+                        //
+                        // `is_ready()` gates it because the initial build is
+                        // still filling the index otherwise. That is safe only
+                        // because the caller holds `index_lock` across this
+                        // whole task: without it, an edit arriving mid-build
+                        // would be skipped here and then overwritten by the
+                        // build's pre-edit contents, leaving links.json stale
+                        // until the next full rescan.
+                        if inbound_index.is_ready() {
+                            for (abs_path, known_url, is_delete) in &index_targets {
+                                if !link_index_cfg.markdown_extensions.iter().any(|ext| {
+                                    abs_path
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+                                }) {
+                                    continue;
+                                }
+                                let url_path = match known_url {
+                                    Some(url) => url.clone(),
+                                    // Only reachable for a file the scan never
+                                    // saw (created inside this batch, or
+                                    // deleted before it was ever indexed).
+                                    None => crate::repo::build_markdown_url_path(
+                                        abs_path,
+                                        &link_index_cfg.base_dir,
+                                        &link_index_cfg.index_file,
+                                    ),
+                                };
+                                if *is_delete {
+                                    inbound_index.remove_page(&url_path);
+                                } else {
+                                    index_page_links(
+                                        &repo,
+                                        &inbound_index,
+                                        &link_index_cfg,
+                                        abs_path,
+                                        &url_path,
+                                    );
+                                }
+                            }
+                        }
                     })
                     .await
                     .ok();
@@ -1163,38 +1934,32 @@ impl Server {
                         relevant_events.len()
                     );
                     tokio::task::spawn_blocking(move || {
-                        repo.clear();
-                        if let Err(e) = repo.scan_all() {
-                            tracing::error!("Background rescan failed: {e}");
-                            return;
+                        repo.full_rescan();
+                        // Every page may have changed, so rebuild rather than
+                        // patch. `populate_inbound_index` re-marks it ready; the
+                        // stale index stays queryable in the meantime, which is
+                        // better than falling back to a full-repo grep per page.
+                        if inbound_index.is_ready() {
+                            populate_inbound_index(&repo, &inbound_index, &link_index_cfg);
                         }
-                        repo.build_relationship_index();
-                        repo.build_wikilink_index();
-                        if let Err(e) = repo.scan_static_folder() {
-                            tracing::error!("Background static rescan failed: {e}");
-                        }
-                        repo.populate_basic_metadata();
-                        repo.populate_media_metadata();
-                        repo.notify_media_populated();
-                        repo.ensure_text_extracted();
                         let _ = base_dir; // keep alive for potential future use
                     })
                     .await
                     .ok();
                 }
 
-                // The repository changed, so any memoized sibling navigation
-                // lists may be stale. Drop them all; they are rebuilt lazily on
-                // the next render from the freshly invalidated repo.
-                sibling_cache_for_invalidation.pin().clear();
+                // The repository changed, so every cache derived from file
+                // contents may be stale. Drop them all; they are rebuilt lazily
+                // on the next render/links.json from the freshly invalidated
+                // repo.
+                invalidate_derived_caches(
+                    &listing_caches_for_invalidation,
+                    &link_cache_for_invalidation,
+                    &inbound_link_cache_for_invalidation,
+                );
             }
         });
 
-        let link_cache = Arc::new(LinkCache::new(DEFAULT_LINK_CACHE_SIZE));
-        let inbound_link_cache = Arc::new(InboundLinkCache::new(
-            DEFAULT_INBOUND_LINK_CACHE_SIZE,
-            INBOUND_LINK_CACHE_TTL_SECS,
-        ));
         let inbound_grep_semaphore =
             Arc::new(tokio::sync::Semaphore::new(INBOUND_GREP_MAX_CONCURRENCY));
         let inbound_grep_inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
@@ -1202,6 +1967,7 @@ impl Server {
 
         let canonical_base_dir = base_dir.canonicalize().ok();
         let state = ServerState {
+            bind_ip: ip,
             base_dir,
             canonical_base_dir,
             static_folder,
@@ -1228,12 +1994,15 @@ impl Server {
             metadata_inflight,
             #[cfg(feature = "media-metadata")]
             video_resolution_cache,
-            sibling_nav_cache,
+            sibling_nav_cache: listing_caches.sibling_nav_cache,
+            subdir_cache: listing_caches.subdir_cache,
+            site_json_cache: listing_caches.site_json_cache,
             link_tracking,
             relationship_tracking,
             relationship_types,
             link_cache,
             inbound_link_cache,
+            inbound_index,
             inbound_grep_semaphore,
             inbound_grep_inflight,
             tag_sources,
@@ -1295,8 +2064,32 @@ impl Server {
             router,
             ip,
             port,
+            gui_mode,
             _watcher_handle: watcher_handle,
         })
+    }
+
+    /// Announces the bound address once the listener is up.
+    ///
+    /// In server mode (`-s`) the URL is the whole point of the command and the
+    /// user is watching that terminal, so it goes to stdout unchanged. In GUI
+    /// mode the window is the affordance and the banner is noise: on Windows a
+    /// console-subsystem binary launched from Explorer gets a console window,
+    /// and the line lands there, behind the webview the user is actually
+    /// looking at. It becomes a `tracing::info!` instead, so `-v` still
+    /// surfaces it while the default `warn` level keeps it hidden.
+    ///
+    /// The decision reads `self.gui_mode` rather than relying on which start
+    /// method was called. `start_with_port_retry` happens to be GUI-only today,
+    /// but that is incidental and would rot silently the first time a
+    /// non-GUI caller wanted port retry.
+    fn announce_listening(&self, local_addr: SocketAddr) {
+        tracing::debug!("listening on {}", local_addr);
+        if self.gui_mode {
+            tracing::info!("Server running at http://{}/", local_addr);
+        } else {
+            println!("Server running at http://{}/", local_addr);
+        }
     }
 
     pub async fn start(&self) -> Result<(), ServerError> {
@@ -1320,8 +2113,7 @@ impl Server {
         let local_addr = listener
             .local_addr()
             .map_err(ServerError::LocalAddrFailed)?;
-        tracing::debug!("listening on {}", local_addr);
-        println!("Server running at http://{}/", local_addr);
+        self.announce_listening(local_addr);
 
         // Signal that server is ready before starting to serve
         if let Some(tx) = ready_tx
@@ -1363,8 +2155,7 @@ impl Server {
                     let local_addr = listener
                         .local_addr()
                         .map_err(ServerError::LocalAddrFailed)?;
-                    tracing::debug!("listening on {}", local_addr);
-                    println!("Server running at http://{}/", local_addr);
+                    self.announce_listening(local_addr);
 
                     // Signal that server is ready with the actual port
                     if let Some(tx) = ready_tx
@@ -1415,11 +2206,30 @@ impl Server {
     }
 
     /// WebSocket handler for live reload file change notifications.
+    ///
+    /// # Security
+    ///
+    /// WebSocket handshakes are exempt from the same-origin policy, so without
+    /// this check any page the user happens to visit could open
+    /// `ws://127.0.0.1:<port>/.mbr/ws/changes` and watch the private
+    /// file-change feed in real time. Upgrades must therefore be same-origin,
+    /// and a handshake with **no** `Origin` is rejected as well (browsers
+    /// always send one on a WebSocket upgrade).
     pub async fn websocket_handler(
         ws: WebSocketUpgrade,
         State(config): State<ServerState>,
-    ) -> impl IntoResponse {
+        headers: HeaderMap,
+    ) -> Response {
+        if !headers.contains_key(header::ORIGIN) || !Self::is_same_origin(&headers) {
+            tracing::warn!("Blocked cross-origin live-reload WebSocket upgrade");
+            return (
+                StatusCode::FORBIDDEN,
+                "Cross-origin WebSocket upgrade blocked",
+            )
+                .into_response();
+        }
         ws.on_upgrade(|socket| Self::handle_websocket(socket, config))
+            .into_response()
     }
 
     async fn handle_websocket(socket: axum::extract::ws::WebSocket, config: ServerState) {
@@ -1458,8 +2268,18 @@ impl Server {
         // Handle bidirectional communication
         loop {
             tokio::select! {
-                // Forward file change events to the client
-                Ok(change_event) = rx.recv() => {
+                // Forward file change events to the client. The whole result is
+                // bound (never matched with a refutable `Ok(..)` pattern): a
+                // pattern mismatch permanently disables the branch for that
+                // `select!`, so a single `Lagged` would silently kill live
+                // reload for this tab with the socket still open.
+                result = rx.recv() => {
+                    let change_event = match live_reload_action(result) {
+                        LiveReloadAction::Forward(event) => event,
+                        LiveReloadAction::Skip => continue,
+                        LiveReloadAction::Close => break,
+                    };
+
                     let json = match serde_json::to_string(&change_event) {
                         Ok(j) => j,
                         Err(e) => {
@@ -1510,6 +2330,12 @@ impl Server {
         }
     }
 
+    /// Serves `/.mbr/site.json` from a cached body.
+    ///
+    /// The body only changes when the repository does, so it is built once and
+    /// reused until `invalidate_derived_caches` drops it. Building it is
+    /// blocking CPU work on a large repo, so the (rare) rebuild runs on the
+    /// blocking pool rather than stalling an async worker.
     pub async fn get_site_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
@@ -1519,55 +2345,49 @@ impl Server {
             config.repo.wait_for_scan().await;
         }
 
-        // Build combined response with repo data and config
-        let json_start = std::time::Instant::now();
-        let mut response = serde_json::to_value(&*config.repo)
-            .inspect_err(|e| tracing::error!("Error creating json: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let (generation, cached) = config.site_json_cache.read().snapshot();
+        let body = match cached {
+            Some(body) => body,
+            None => {
+                let json_start = std::time::Instant::now();
+                let repo = Arc::clone(&config.repo);
+                let params = SiteJsonParams {
+                    sort: config.sort.clone(),
+                    sidebar_style: config.sidebar_style.clone(),
+                    sidebar_max_items: config.sidebar_max_items,
+                    relationship_tracking: config.relationship_tracking,
+                };
+                let built = tokio::task::spawn_blocking(move || render_site_json(&repo, &params))
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("site.json render task failed: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+                    .inspect_err(|e| tracing::error!("Error serializing site json: {e}"))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                // Publish only if the repository did not change while we built
+                // (a concurrent request storing an equivalent body is harmless:
+                // both were built from the same generation). This response
+                // still carries the snapshot the request was answered from.
+                config
+                    .site_json_cache
+                    .write()
+                    .store(generation, built.clone());
+                tracing::debug!(
+                    "get_site_info JSON serialization: {:?}",
+                    json_start.elapsed()
+                );
+                built
+            }
+        };
 
-        // Add sort config to the response and remove other_files (served via media.json)
-        if let Some(obj) = response.as_object_mut() {
-            // Remove other_files from site.json - media data is served separately via media.json
-            obj.remove("other_files");
-
-            obj.insert(
-                "sort".to_string(),
-                serde_json::to_value(&config.sort).unwrap_or(serde_json::Value::Array(vec![])),
-            );
-            // Add sidebar navigation configuration
-            obj.insert(
-                "sidebar_style".to_string(),
-                serde_json::Value::String(config.sidebar_style.clone()),
-            );
-            obj.insert(
-                "sidebar_max_items".to_string(),
-                serde_json::json!(config.sidebar_max_items),
-            );
-        }
-
-        // Add relationship_types + per-note resolved relationships (if enabled).
-        if config.relationship_tracking {
-            config
-                .repo
-                .relationship_index
-                .inject_into_site_json(&mut response);
-        }
-
-        let resp = Response::builder()
+        Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(
-                serde_json::to_string(&response)
-                    .inspect_err(|e| tracing::error!("Error serializing json: {e}"))
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            )
+            .body(Body::from(body))
             .inspect_err(|e| tracing::error!("Error rendering site file: {e}"))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        tracing::debug!(
-            "get_site_info JSON serialization: {:?}",
-            json_start.elapsed()
-        );
-        Ok(resp.into_response())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            .map(IntoResponse::into_response)
     }
 
     /// Returns media metadata (other_files) as JSON.
@@ -1751,11 +2571,22 @@ impl Server {
     /// Policy:
     /// 1. Editing must be enabled (`403` otherwise).
     /// 2. CSRF: the request must carry `X-MBR-Edit: 1` and be same-origin
-    ///    (`403` otherwise). This defeats cross-origin/DNS-rebinding writes even
-    ///    for loopback callers.
-    /// 3. Token: required for non-loopback callers (or always, when
-    ///    `edit_require_token_on_loopback`). Verified against `edit_token_hash`
-    ///    as a bearer token (`401` otherwise).
+    ///    (`403` otherwise).
+    /// 3. Host: when **no** token is configured, the `Host` header must name a
+    ///    loopback address or the bound address (`403` otherwise). Same-origin
+    ///    alone does not stop DNS rebinding — a rebound attacker page *is*
+    ///    genuinely same-origin — so the `Host` name is the only thing that
+    ///    distinguishes it. This check is skipped once a token is configured,
+    ///    because then the token is the authority and the server may
+    ///    legitimately sit behind a reverse proxy presenting any `Host`.
+    /// 4. Token: required whenever a token is configured, for any non-loopback
+    ///    caller, or when `edit_require_token_on_loopback` is set. Verified
+    ///    against `edit_token_hash` as a bearer token (`401` otherwise).
+    ///
+    /// Deriving (4) from the peer IP alone was a bypass: behind the
+    /// TLS-terminating reverse proxy that `docs/modes/editing.md` recommends,
+    /// every request arrives from 127.0.0.1, so a configured `edit_token_hash`
+    /// was never checked. A configured token is now *always* enforced.
     fn check_edit_access(
         config: &ServerState,
         headers: &HeaderMap,
@@ -1783,8 +2614,19 @@ impl Server {
             return Err((StatusCode::FORBIDDEN, "Cross-origin edit request blocked"));
         }
 
+        // Without a token, the only thing separating a DNS-rebound attacker
+        // page from the real local UI is the name it used to reach us.
+        let token_configured = config.edit_token_hash.is_some();
+        if !token_configured && !host_header_is_allowed(headers, config.bind_ip) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Host header does not name this server",
+            ));
+        }
+
         let caller_is_loopback = peer_ip.is_loopback();
-        let require_token = !caller_is_loopback || config.edit_require_token_on_loopback;
+        let require_token =
+            token_configured || !caller_is_loopback || config.edit_require_token_on_loopback;
         if require_token {
             let provided = headers
                 .get(header::AUTHORIZATION)
@@ -2109,7 +2951,7 @@ impl Server {
             .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
-        config.sibling_nav_cache.pin().clear();
+        ListingCaches::from(config).invalidate();
         config.inbound_link_cache.invalidate_all();
 
         Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
@@ -2207,6 +3049,19 @@ impl Server {
             format!("{dir_clean}/{safe_name}")
         };
         let target = Self::resolve_new_target(config, &rel)?;
+
+        // `.mbr` is an ordinary path component to the resolver, so without this
+        // the uploader could drop a file into the template folder — where the
+        // watcher hot-reloads `*.html` as Tera templates and `components/*.js`
+        // shadows the compiled-in bundle in every page.
+        if is_template_folder_path(
+            &target,
+            config.base_dir.as_path(),
+            config.canonical_base_dir.as_deref(),
+            config.template_folder.as_deref(),
+        ) {
+            return Err(FileOpError::ForbiddenUploadDir);
+        }
 
         // The destination is normally the note's own (existing) folder; create
         // it defensively if missing. `safe_name` is a pure basename, so the
@@ -2448,7 +3303,7 @@ impl Server {
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
         config.repo.rebuild_tag_index();
-        config.sibling_nav_cache.pin().clear();
+        ListingCaches::from(config).invalidate();
         config.inbound_link_cache.invalidate_all();
         config.link_cache.invalidate_all();
 
@@ -2722,7 +3577,10 @@ impl Server {
     /// # Security
     ///
     /// Path traversal attacks are blocked by `safe_join_asset` which validates
-    /// that resolved paths remain within the intended directory.
+    /// that resolved paths remain within the intended directory, and
+    /// [`is_servable_mbr_asset`] restricts what may be read out of that
+    /// directory at all — the template folder also holds `config.toml`, which
+    /// carries the Argon2 `edit_token_hash` and must never be served.
     pub async fn serve_mbr_assets(
         extract::Path(path): extract::Path<String>,
         State(config): State<ServerState>,
@@ -2735,6 +3593,13 @@ impl Server {
         } else {
             format!("/{}", path)
         };
+
+        // Asset allowlist: `.mbr/` is a config directory as much as an asset
+        // directory, so only recognized asset types are ever served from it.
+        if !is_servable_mbr_asset(&asset_path) {
+            tracing::debug!("serve_mbr_assets: not a servable asset: {}", asset_path);
+            return Err(StatusCode::NOT_FOUND);
+        }
 
         // Try template_folder first if set (with path traversal protection)
         if let Some(ref template_folder) = config.template_folder {
@@ -2756,7 +3621,7 @@ impl Server {
         }
 
         // Try .mbr/ directory in base_dir (with path traversal protection)
-        let mbr_dir = config.base_dir.join(".mbr");
+        let mbr_dir = config.base_dir.join(MBR_TEMPLATE_DIR);
         tracing::trace!("Checking .mbr dir for: {}", asset_path);
 
         if let Some(file_path) = safe_join_asset(&mbr_dir, &asset_path) {
@@ -2971,7 +3836,31 @@ impl Server {
             tag_sources: &tag_url_sources,
         };
 
-        match resolve_request_path(&resolver_config, &path) {
+        // Defense in depth: never serve a resolved filesystem path that escapes
+        // the repository root (or the static-folder overlay). A symlink inside
+        // the repo pointing outside it is lexically contained, so the check has
+        // to be made on the canonicalized path, right before serving.
+        let resolved = match resolve_request_path(&resolver_config, &path) {
+            ResolvedPath::StaticFile(resolved_path)
+            | ResolvedPath::MarkdownFile(resolved_path)
+            | ResolvedPath::DirectoryListing(resolved_path)
+                if !is_within_served_roots(
+                    &resolved_path,
+                    config.base_dir.as_path(),
+                    config.canonical_base_dir.as_deref(),
+                    &config.static_folder,
+                ) =>
+            {
+                tracing::warn!(
+                    "Blocked request for a path outside the repository root: {}",
+                    resolved_path.display()
+                );
+                ResolvedPath::NotFound
+            }
+            other => other,
+        };
+
+        match resolved {
             ResolvedPath::StaticFile(file_path) => {
                 // Check if this is a PDF cover sidecar file that might be stale
                 #[cfg(feature = "media-metadata")]
@@ -3218,18 +4107,22 @@ impl Server {
                     cache_type_str,
                     video_file.display()
                 );
-                let response = Self::extract_video_metadata_and_cache(
+                // Hold the slot in a drop guard: a client disconnect drops this
+                // future at the await below, and a release that only runs on the
+                // success path would leave `key` claimed forever, wedging every
+                // later request for it into a full `METADATA_WAIT_TIMEOUT` wait
+                // followed by a 404. The guard releases the slot and wakes any
+                // waiters (who then read the freshly-populated cache entry) on
+                // every exit path.
+                let _slot =
+                    InflightSlot::new(Arc::clone(&config.metadata_inflight), key.clone(), notify);
+                Self::extract_video_metadata_and_cache(
                     video_file,
                     metadata_type,
                     key.clone(),
                     config,
                 )
-                .await;
-                // Release the in-flight slot and wake any waiters, who then read
-                // the freshly-populated cache entry.
-                config.metadata_inflight.pin().remove(&key);
-                notify.notify_waiters();
-                response
+                .await
             }
             InflightClaim::Wait(notify) => {
                 // Register interest before re-checking so a completion that lands
@@ -3545,13 +4438,19 @@ impl Server {
         }
 
         // Extract the page URL path from the request
-        // e.g., "docs/guide/links.json" -> "/docs/guide/"
+        // e.g., "docs/guide/links.json" -> "/docs/guide/". The axum catch-all
+        // delivers `path` without a leading slash, so add one explicitly (as
+        // `try_serve_errors_json` does): this is the shared `link_cache` /
+        // `inbound_link_cache` key, and the site-absolute form is what
+        // `markdown_to_html` and `try_serve_errors_json` write. Keying it
+        // `docs/guide/` here instead made every render's back-fill invisible to
+        // this handler, so an edited page kept serving its first-seen links.
         let page_path = path.strip_suffix("links.json")?;
         let page_url_path = if page_path.is_empty() || page_path == "/" {
             "/".to_string()
         } else {
-            let normalized = page_path.trim_end_matches('/');
-            format!("{}/", normalized)
+            let normalized = page_path.trim_end_matches('/').trim_start_matches('/');
+            format!("/{}/", normalized)
         };
 
         tracing::debug!("links.json request for page: {}", page_url_path);
@@ -3662,11 +4561,26 @@ impl Server {
         // mini graph fans out many links.json requests at once, so a burst
         // must not stampede the filesystem. Mirrors the race-free video
         // metadata pattern (register interest before re-checking).
-        let inbound = if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
+        let inbound = if config.inbound_index.is_ready() {
+            // The repository-wide index is authoritative once built: it was
+            // produced by inverting every page's resolved links, the same way
+            // static builds do, so no grep and no per-page cache is involved.
+            config.inbound_index.get(&page_url_path)
+        } else if let Some(cached) = config.inbound_link_cache.get(&page_url_path) {
             cached
         } else {
             match claim_inflight(&config.inbound_grep_inflight, &page_url_path) {
                 InflightClaim::Produce(notify) => {
+                    // Release the slot and wake waiters on every exit path —
+                    // failure, `?`, panic, and a client disconnect that drops
+                    // this future at the grep await — so waiters degrade to a
+                    // retryable miss instead of hanging and the key is never
+                    // left permanently claimed.
+                    let _slot = InflightSlot::new(
+                        Arc::clone(&config.inbound_grep_inflight),
+                        page_url_path.clone(),
+                        notify,
+                    );
                     // Re-check the cache after winning the slot: a previous
                     // producer may have populated it between our miss and the
                     // claim.
@@ -3674,10 +4588,6 @@ impl Server {
                         Some(cached) => Some(cached),
                         None => Self::grep_inbound_links_bounded(&page_url_path, config).await,
                     };
-                    // Release the slot and wake waiters even on failure so
-                    // they degrade to a retryable miss instead of hanging.
-                    config.inbound_grep_inflight.pin().remove(&page_url_path);
-                    notify.notify_waiters();
                     links?
                 }
                 InflightClaim::Wait(notify) => {
@@ -3757,6 +4667,7 @@ impl Server {
         let markdown_extensions = config.markdown_extensions.clone();
         let ignore_dirs = config.ignore_dirs.clone();
         let ignore_globs = config.ignore_globs.clone();
+        let index_file = config.index_file.clone();
         let links = tokio::task::spawn_blocking(move || {
             find_inbound_links(
                 &target,
@@ -3764,6 +4675,7 @@ impl Server {
                 &markdown_extensions,
                 &ignore_dirs,
                 &ignore_globs,
+                &index_file,
             )
         })
         .await
@@ -4161,6 +5073,16 @@ impl Server {
                     HlsCacheStartResult::Started(notify) => {
                         tracing::debug!("Generating HLS playlist for {:?}", video_file);
 
+                        // Guard the claimed slot: if this future is dropped at
+                        // the await below (client disconnect) or the worker
+                        // panics, the guard records a failure so the key is not
+                        // stuck `InProgress` forever.
+                        let mut slot = HlsGenerationSlot::new(
+                            &config.hls_cache,
+                            cache_key.clone(),
+                            Arc::clone(&notify),
+                        );
+
                         let video_file_clone = video_file.clone();
                         let base_name = base_name.to_string();
                         let result = tokio::task::spawn_blocking(move || {
@@ -4173,6 +5095,7 @@ impl Server {
                                 config
                                     .hls_cache
                                     .complete_generation(cache_key.clone(), playlist.into_bytes());
+                                slot.settled();
                                 notify.notify_waiters();
 
                                 if let Some(HlsCacheState::Complete(data)) =
@@ -4184,6 +5107,7 @@ impl Server {
                             Ok(Err(e)) => {
                                 tracing::warn!("Playlist generation failed: {}", e);
                                 config.hls_cache.fail_generation(cache_key, &e);
+                                slot.settled();
                                 notify.notify_waiters();
                                 // Return meaningful error response for known error types
                                 if let Some(response) = build_transcode_error_response(&e) {
@@ -4192,6 +5116,7 @@ impl Server {
                                 return None;
                             }
                             Err(e) => {
+                                // `slot` releases the wedged entry on the way out.
                                 tracing::warn!("Playlist generation task panicked: {}", e);
                                 return None;
                             }
@@ -4266,6 +5191,15 @@ impl Server {
                             target
                         );
 
+                        // See the playlist arm: the guard frees the claimed
+                        // slot if this future is cancelled mid-transcode or the
+                        // worker panics.
+                        let mut slot = HlsGenerationSlot::new(
+                            &config.hls_cache,
+                            cache_key.clone(),
+                            Arc::clone(&notify),
+                        );
+
                         let video_file_clone = video_file.clone();
                         let result = tokio::task::spawn_blocking(move || {
                             transcode_segment(&video_file_clone, target, segment_index)
@@ -4277,6 +5211,7 @@ impl Server {
                                 config
                                     .hls_cache
                                     .complete_generation(cache_key.clone(), data);
+                                slot.settled();
                                 notify.notify_waiters();
 
                                 if let Some(HlsCacheState::Complete(data)) =
@@ -4288,6 +5223,7 @@ impl Server {
                             Ok(Err(e)) => {
                                 tracing::warn!("Segment transcode failed: {}", e);
                                 config.hls_cache.fail_generation(cache_key, &e);
+                                slot.settled();
                                 notify.notify_waiters();
                                 // Return meaningful error response for known error types
                                 if let Some(response) = build_transcode_error_response(&e) {
@@ -4296,6 +5232,7 @@ impl Server {
                                 return None;
                             }
                             Err(e) => {
+                                // `slot` releases the wedged entry on the way out.
                                 tracing::warn!("Segment transcode task panicked: {}", e);
                                 return None;
                             }
@@ -4469,8 +5406,11 @@ impl Server {
         let current_url =
             format!("/{}/", crate::url_path::path_to_url(&url_path_buf)).replace("//", "/");
 
-        // Cache outbound links for links.json endpoint if link tracking is enabled
-        if config.link_tracking && !outbound_links.is_empty() {
+        // Cache outbound links for links.json endpoint if link tracking is
+        // enabled. An empty list is cached too: skipping the insert would leave
+        // a page that just lost its last link serving its stale pre-edit entry
+        // (`LinkCache` has no TTL and nothing else overwrites it).
+        if config.link_tracking {
             // Resolve relative URLs to absolute before caching
             let resolved_links =
                 resolve_outbound_links(&current_url, outbound_links, is_index_file);
@@ -4493,34 +5433,8 @@ impl Server {
 
         // Get sibling markdown files in the same directory. The sorted list is
         // memoized per parent directory so we avoid an O(repo) scan on every
-        // render; the cache is cleared whenever files change. We only populate
-        // the cache once the initial scan is complete, so a partially-populated
-        // early result is never frozen (it falls back to a live scan instead).
-        let parent_key = parent_dir.to_path_buf();
-        let siblings: Arc<Vec<serde_json::Value>> = {
-            let cached = config.sibling_nav_cache.pin().get(&parent_key).cloned();
-            if let Some(cached) = cached {
-                cached
-            } else {
-                let computed = Arc::new(compute_sibling_files(
-                    config
-                        .repo
-                        .markdown_files
-                        .pin()
-                        .iter()
-                        .map(|(_, info)| info),
-                    parent_dir,
-                    &config.sort,
-                ));
-                if config.repo.is_scan_complete() {
-                    config
-                        .sibling_nav_cache
-                        .pin()
-                        .insert(parent_key, Arc::clone(&computed));
-                }
-                computed
-            }
-        };
+        // render; the cache is cleared whenever files change.
+        let siblings: Arc<Vec<serde_json::Value>> = cached_dir_files(config, parent_dir);
 
         // Build the extra context (navigation, TOC, readability, chrome) via
         // the shared builder; server mode uses absolute URLs.
@@ -4579,6 +5493,103 @@ impl Server {
             .map_err(MbrError::from)
     }
 
+    /// Scans `dir_path` from disk to produce a directory listing's files and
+    /// subdirectories.
+    ///
+    /// Only used before the background scan finishes — see
+    /// [`Self::directory_to_html`]. Scanning is blocking filesystem work (and
+    /// re-parses the YAML frontmatter of every file in the directory), so it
+    /// runs on a blocking thread. All captured data is owned/`Send`.
+    async fn scan_directory_children(
+        dir_path: &Path,
+        root_path: &Path,
+        relative_path: &Path,
+        config: &ServerState,
+    ) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), MbrError> {
+        use serde_json::json;
+
+        let root_path = root_path.to_path_buf();
+        let dir_path = dir_path.to_path_buf();
+        let relative_path = relative_path.to_path_buf();
+        let static_folder = config.static_folder.clone();
+        let markdown_extensions = config.markdown_extensions.clone();
+        let ignore_dirs = config.ignore_dirs.clone();
+        let ignore_globs = config.ignore_globs.clone();
+        let index_file = config.index_file.clone();
+        let tag_sources = config.tag_sources.clone();
+        let relationship_types = config.relationship_types.clone();
+        let sort = config.sort.clone();
+
+        let scan_result = tokio::task::spawn_blocking(move || {
+            // Create a temporary repo instance to scan this directory
+            let temp_repo = Repo::init(
+                &root_path,
+                &static_folder,
+                &markdown_extensions,
+                &ignore_dirs,
+                &ignore_globs,
+                &index_file,
+                &tag_sources,
+                &relationship_types,
+            );
+
+            // Scan this directory only (non-recursive)
+            temp_repo.scan_folder(&relative_path).inspect_err(|e| {
+                tracing::error!("Error scanning directory: {e}");
+            })?;
+
+            // Extract markdown files and transform to JSON using helper
+            let mut files: Vec<serde_json::Value> = temp_repo
+                .markdown_files
+                .pin()
+                .iter()
+                .map(|(_, file_info)| markdown_file_to_json(file_info))
+                .collect();
+
+            // Sort files using configurable sort order
+            sort_files(&mut files, &sort);
+
+            // Extract subdirectories
+            let subdirs: Vec<serde_json::Value> = temp_repo
+                .queued_folders
+                .pin()
+                .iter()
+                .filter_map(|(abs_path, rel_path)| {
+                    // Only include immediate children
+                    let parent = abs_path.parent()?;
+                    if parent == dir_path.as_path() {
+                        let name = abs_path.file_name()?.to_str()?.to_string();
+                        let mut url_path = crate::url_path::path_to_url(rel_path);
+                        if !url_path.starts_with('/') {
+                            url_path = "/".to_string() + &url_path;
+                        }
+                        if !url_path.ends_with('/') {
+                            url_path.push('/');
+                        }
+                        Some(json!({
+                            "name": name,
+                            "url_path": url_path,
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            Ok::<_, crate::errors::RepoError>((files, subdirs))
+        })
+        .await;
+
+        match scan_result {
+            Ok(Ok(pair)) => Ok(pair),
+            Ok(Err(e)) => Err(e.into()),
+            Err(e) => {
+                tracing::error!("directory scan task failed: {e}");
+                Err(e.into())
+            }
+        }
+    }
+
     async fn directory_to_html(
         dir_path: &Path,
         templates: &crate::templates::Templates,
@@ -4591,90 +5602,24 @@ impl Server {
         let relative_path = pathdiff::diff_paths(dir_path, root_path)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Scanning a directory from disk is blocking filesystem work. Run the
-        // scan and JSON extraction on a blocking thread so the async worker is
-        // not stalled. All captured data is owned/`Send`.
-        let (files, subdirs) = {
-            let root_path = root_path.to_path_buf();
-            let dir_path = dir_path.to_path_buf();
-            let relative_path = relative_path.clone();
-            let static_folder = config.static_folder.clone();
-            let markdown_extensions = config.markdown_extensions.clone();
-            let ignore_dirs = config.ignore_dirs.clone();
-            let ignore_globs = config.ignore_globs.clone();
-            let index_file = config.index_file.clone();
-            let tag_sources = config.tag_sources.clone();
-            let relationship_types = config.relationship_types.clone();
-            let sort = config.sort.clone();
-
-            let scan_result = tokio::task::spawn_blocking(move || {
-                // Create a temporary repo instance to scan this directory
-                let temp_repo = Repo::init(
-                    &root_path,
-                    &static_folder,
-                    &markdown_extensions,
-                    &ignore_dirs,
-                    &ignore_globs,
-                    &index_file,
-                    &tag_sources,
-                    &relationship_types,
-                );
-
-                // Scan this directory only (non-recursive)
-                temp_repo.scan_folder(&relative_path).inspect_err(|e| {
-                    tracing::error!("Error scanning directory: {e}");
-                })?;
-
-                // Extract markdown files and transform to JSON using helper
-                let mut files: Vec<serde_json::Value> = temp_repo
-                    .markdown_files
-                    .pin()
-                    .iter()
-                    .map(|(_, file_info)| markdown_file_to_json(file_info))
-                    .collect();
-
-                // Sort files using configurable sort order
-                sort_files(&mut files, &sort);
-
-                // Extract subdirectories
-                let subdirs: Vec<serde_json::Value> = temp_repo
-                    .queued_folders
-                    .pin()
-                    .iter()
-                    .filter_map(|(abs_path, rel_path)| {
-                        // Only include immediate children
-                        let parent = abs_path.parent()?;
-                        if parent == dir_path.as_path() {
-                            let name = abs_path.file_name()?.to_str()?.to_string();
-                            let mut url_path = crate::url_path::path_to_url(rel_path);
-                            if !url_path.starts_with('/') {
-                                url_path = "/".to_string() + &url_path;
-                            }
-                            if !url_path.ends_with('/') {
-                                url_path.push('/');
-                            }
-                            Some(json!({
-                                "name": name,
-                                "url_path": url_path,
-                            }))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                Ok::<_, crate::errors::RepoError>((files, subdirs))
-            })
-            .await;
-
-            match scan_result {
-                Ok(Ok(pair)) => pair,
-                Ok(Err(e)) => return Err(e.into()),
-                Err(e) => {
-                    tracing::error!("directory scan task failed: {e}");
-                    return Err(e.into());
-                }
-            }
+        // Serve the listing from the in-memory repository index, memoized per
+        // directory. The previous implementation built a throwaway `Repo` and
+        // re-parsed the YAML frontmatter of every file in the directory on
+        // *every* request — data already resident in `repo.markdown_files`.
+        // While the initial scan is still running that index is incomplete, so
+        // a per-request disk scan remains the fallback.
+        // The memoized lists are shared between requests, so this page takes its
+        // own copy to hand to the template engine.
+        let (files, subdirs) = if config.repo.is_scan_complete() {
+            let dir_key = listing_dir_key(&relative_path);
+            (
+                cached_dir_files(config, &dir_key).as_ref().clone(),
+                cached_dir_subdirs(config, &dir_key, root_path)
+                    .as_ref()
+                    .clone(),
+            )
+        } else {
+            Self::scan_directory_children(dir_path, root_path, &relative_path, config).await?
         };
 
         // Use helper functions for navigation elements
@@ -4686,8 +5631,10 @@ impl Server {
 
         // Build context
         let mut context = std::collections::HashMap::new();
-        context.insert("files".to_string(), json!(files));
-        context.insert("subdirs".to_string(), json!(subdirs));
+        // `Value::Array`, not `json!`: the lists are already `Value`s, and the
+        // macro would deep-clone every entry a second time.
+        context.insert("files".to_string(), serde_json::Value::Array(files));
+        context.insert("subdirs".to_string(), serde_json::Value::Array(subdirs));
         context.insert("breadcrumbs".to_string(), json!(breadcrumbs_json));
         context.insert("current_dir_name".to_string(), json!(current_dir_name));
         context.insert(
@@ -4981,6 +5928,34 @@ pub fn generate_breadcrumbs(relative_path: &Path) -> Vec<Breadcrumb> {
     breadcrumbs
 }
 
+/// Decides whether a watcher file event should trigger a template reload.
+///
+/// `template_folder` must already be canonicalized by the caller. `notify`
+/// reports canonical absolute paths, but the configured template folder is
+/// stored as written: only the CLI canonicalizes it, while `.mbr/config.toml`
+/// and `MBR_TEMPLATE_FOLDER` deserialize verbatim into a plain `PathBuf`. A
+/// relative value (`mytemplates`) or one reached through a symlink therefore
+/// never matches a canonical event path, which silently disables template hot
+/// reload. Canonicalization belongs in the caller so this stays pure and off
+/// the per-event hot path — the folder cannot change during the process.
+///
+/// Comparison is component-wise via [`Path::starts_with`], not a string prefix
+/// test: `"/x/tmpl-backup/index.html"` textually starts with `"/x/tmpl"` but is
+/// a sibling directory, not a template.
+fn should_reload_template(event_path: &str, template_folder: Option<&Path>) -> bool {
+    match template_folder {
+        Some(tf) => Path::new(event_path).starts_with(tf),
+        // Match `.mbr` as a path component rather than substring
+        // matching "/.mbr/". The watcher reports native separators,
+        // so on Windows this string is `...\.mbr\theme.css` and the
+        // slash form would never match, silently disabling template
+        // hot reload.
+        None => Path::new(event_path)
+            .components()
+            .any(|c| c.as_os_str() == ".mbr"),
+    }
+}
+
 /// Gets the current directory name from a relative path.
 pub fn get_current_dir_name(relative_path: &Path) -> String {
     relative_path
@@ -5035,6 +6010,134 @@ fn compute_sibling_files<'a>(
         .collect();
     sort_files(&mut siblings, sort);
     siblings
+}
+
+/// Normalizes a repo-relative directory path into the key used by the listing
+/// caches and by `MarkdownInfo::raw_path.parent()`.
+///
+/// `pathdiff` yields an empty path for the repo root, but the callers that go
+/// through `home_page`'s fallback branch can produce `.`; both must map to the
+/// same key, and it must be the empty path because that is what
+/// `Path::new("root.md").parent()` returns.
+fn listing_dir_key(relative_dir: &Path) -> PathBuf {
+    if relative_dir == Path::new(".") {
+        PathBuf::new()
+    } else {
+        relative_dir.to_path_buf()
+    }
+}
+
+/// Returns the immediate subdirectory name of `dir` on the way to `file_path`,
+/// or `None` if `file_path` is not below a subdirectory of `dir`.
+///
+/// Both paths are repo-relative. A direct child *file* of `dir` yields `None`
+/// (its first remaining component is the file itself, not a directory).
+fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std::ffi::OsStr> {
+    let rest = if dir.as_os_str().is_empty() {
+        file_path
+    } else {
+        file_path.strip_prefix(dir).ok()?
+    };
+    let mut components = rest.components();
+    let first = components.next()?;
+    // There must be at least one more component (the file name), otherwise
+    // `first` is the file, not a directory.
+    components.next()?;
+    match first {
+        std::path::Component::Normal(name) => Some(name),
+        _ => None,
+    }
+}
+
+/// Builds the deduplicated, name-sorted list of immediate subdirectories of
+/// `dir` from the repo-relative paths of every indexed file.
+///
+/// Derived from the file index rather than from a disk walk so it can be
+/// memoized and refreshed by the same invalidation that refreshes the file
+/// lists. Like the static builder's section pages
+/// (`build::build_dir_children_index`), a directory that contains no files at
+/// any depth is not listed.
+fn compute_subdir_entries<'a>(
+    file_paths: impl Iterator<Item = &'a Path>,
+    dir: &Path,
+) -> Vec<serde_json::Value> {
+    file_paths
+        .filter_map(|path| immediate_subdir_name(path, dir))
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<String>>()
+        .into_iter()
+        .map(|name| {
+            let url_path = format!("/{}/", crate::url_path::path_to_url(&dir.join(&name)));
+            serde_json::json!({
+                "name": name,
+                "url_path": url_path,
+            })
+        })
+        .collect()
+}
+
+/// Returns the sorted markdown-file list for `dir`, memoized per directory.
+///
+/// Shared by prev/next sibling navigation and by directory listings: both need
+/// exactly "the files whose parent directory is `dir`, in sort order". Only
+/// memoized once the initial scan is complete, so a partially populated result
+/// is never frozen into the cache.
+fn cached_dir_files(config: &ServerState, dir: &Path) -> Arc<Vec<serde_json::Value>> {
+    if let Some(cached) = config.sibling_nav_cache.pin().get(dir).cloned() {
+        return cached;
+    }
+    let computed = Arc::new(compute_sibling_files(
+        config
+            .repo
+            .markdown_files
+            .pin()
+            .iter()
+            .map(|(_, info)| info),
+        dir,
+        &config.sort,
+    ));
+    if config.repo.is_scan_complete() {
+        config
+            .sibling_nav_cache
+            .pin()
+            .insert(dir.to_path_buf(), Arc::clone(&computed));
+    }
+    computed
+}
+
+/// Returns the immediate subdirectories of `dir`, memoized per directory.
+///
+/// Non-markdown files are keyed by absolute path in the repo index, so they
+/// are relativized against `root_path` here; anything that does not sit under
+/// the root is skipped rather than emitting a `../` entry.
+fn cached_dir_subdirs(
+    config: &ServerState,
+    dir: &Path,
+    root_path: &Path,
+) -> Arc<Vec<serde_json::Value>> {
+    if let Some(cached) = config.subdir_cache.pin().get(dir).cloned() {
+        return cached;
+    }
+    let markdown_guard = config.repo.markdown_files.pin();
+    let other_guard = config.repo.other_files.pin();
+    let computed = Arc::new(compute_subdir_entries(
+        markdown_guard
+            .iter()
+            .map(|(_, info)| info.raw_path.as_path())
+            .chain(
+                other_guard
+                    .iter()
+                    .filter_map(|(abs_path, _)| abs_path.strip_prefix(root_path).ok()),
+            ),
+        dir,
+    ));
+    if config.repo.is_scan_complete() {
+        config
+            .subdir_cache
+            .pin()
+            .insert(dir.to_path_buf(), Arc::clone(&computed));
+    }
+    computed
 }
 
 /// Transforms markdown file info into a JSON value for template rendering.
@@ -5404,7 +6507,6 @@ fn build_tag_index_outbound_links(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::path::PathBuf;
 
     #[test]
@@ -5513,8 +6615,71 @@ mod tests {
     }
 
     #[test]
+    fn test_should_reload_template_inside_template_folder() {
+        let tf = Path::new("/x/tmpl");
+        assert!(should_reload_template("/x/tmpl/index.html", Some(tf)));
+        assert!(should_reload_template(
+            "/x/tmpl/partials/_nav.html",
+            Some(tf)
+        ));
+    }
+
+    #[test]
+    fn test_should_reload_template_rejects_sibling_prefix() {
+        // `str::starts_with` matches this sibling directory; `Path::starts_with`
+        // compares whole components and does not.
+        assert!(!should_reload_template(
+            "/x/tmpl-backup/index.html",
+            Some(Path::new("/x/tmpl"))
+        ));
+    }
+
+    #[test]
+    fn test_should_reload_template_outside_template_folder() {
+        assert!(!should_reload_template(
+            "/other/place/index.html",
+            Some(Path::new("/x/tmpl"))
+        ));
+    }
+
+    #[test]
+    fn test_should_reload_template_without_folder_matches_mbr_component() {
+        assert!(should_reload_template("/repo/.mbr/index.html", None));
+        assert!(!should_reload_template("/repo/docs/index.html", None));
+        // Substring-only matches are not path components.
+        assert!(!should_reload_template("/repo/.mbrx/index.html", None));
+    }
+
+    /// The caller canonicalizes the template folder before handing it to
+    /// `should_reload_template`; without that step a symlinked folder never
+    /// matches the canonical paths the watcher reports.
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reload_template_matches_through_symlinked_folder() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let real = temp.path().join("real-templates");
+        std::fs::create_dir(&real).expect("create real template dir");
+        let link = temp.path().join("link-templates");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        // What the watcher reports: a canonical path under the real directory.
+        let event_path = real
+            .canonicalize()
+            .expect("canonicalize real dir")
+            .join("index.html");
+        let event_path = event_path.to_string_lossy().to_string();
+
+        // Configured as the symlink, used verbatim: no match.
+        assert!(!should_reload_template(&event_path, Some(link.as_path())));
+
+        // Canonicalized once by the caller, as `Server::init` does: match.
+        let canonical = link.canonicalize().unwrap_or(link);
+        assert!(should_reload_template(&event_path, Some(&canonical)));
+    }
+
+    #[test]
     fn test_markdown_file_to_json_with_frontmatter() {
-        let mut frontmatter = HashMap::new();
+        let mut frontmatter = crate::markdown::SimpleMetadata::new();
         frontmatter.insert(
             "title".to_string(),
             serde_json::Value::String("My Title".to_string()),
@@ -5566,7 +6731,7 @@ mod tests {
 
     #[test]
     fn test_markdown_file_to_json_partial_frontmatter() {
-        let mut frontmatter = HashMap::new();
+        let mut frontmatter = crate::markdown::SimpleMetadata::new();
         frontmatter.insert(
             "title".to_string(),
             serde_json::Value::String("Only Title".to_string()),
@@ -6094,7 +7259,7 @@ mod tests {
     }
 
     fn mk_markdown_info(raw: &str, url: &str, title: &str) -> MarkdownInfo {
-        let mut frontmatter = HashMap::new();
+        let mut frontmatter = crate::markdown::SimpleMetadata::new();
         frontmatter.insert(
             "title".to_string(),
             serde_json::Value::String(title.to_string()),
@@ -6155,6 +7320,328 @@ mod tests {
         let files = [mk_markdown_info("docs/a.md", "/docs/a/", "Alpha")];
         let got = compute_sibling_files(files.iter(), Path::new("empty"), &title_sort());
         assert!(got.is_empty());
+    }
+
+    // ===== directory listings served from the in-memory index =====
+
+    /// Only a file that lives *below* a subdirectory of `dir` contributes a
+    /// subdirectory name; a direct child file contributes nothing.
+    #[test]
+    fn test_immediate_subdir_name_rules() {
+        let root = Path::new("");
+        assert_eq!(
+            immediate_subdir_name(Path::new("docs/guide.md"), root)
+                .map(|n| n.to_string_lossy().into_owned()),
+            Some("docs".to_string())
+        );
+        assert_eq!(immediate_subdir_name(Path::new("readme.md"), root), None);
+        assert_eq!(
+            immediate_subdir_name(Path::new("docs/deep/x.md"), Path::new("docs"))
+                .map(|n| n.to_string_lossy().into_owned()),
+            Some("deep".to_string())
+        );
+        // Not below `dir` at all.
+        assert_eq!(
+            immediate_subdir_name(Path::new("other/x.md"), Path::new("docs")),
+            None
+        );
+        // A direct child file of a non-root directory.
+        assert_eq!(
+            immediate_subdir_name(Path::new("docs/guide.md"), Path::new("docs")),
+            None
+        );
+    }
+
+    /// Subdirectory entries are deduplicated and name-sorted, and their URLs
+    /// are `/`-separated regardless of the host separator.
+    #[test]
+    fn test_compute_subdir_entries_dedupes_and_sorts() {
+        let paths = [
+            Path::new("docs/zeta/a.md"),
+            Path::new("docs/alpha/b.md"),
+            Path::new("docs/alpha/c.md"),
+            Path::new("docs/readme.md"),
+            Path::new("elsewhere/d.md"),
+        ];
+        let got = compute_subdir_entries(paths.into_iter(), Path::new("docs"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0]["name"], "alpha");
+        assert_eq!(got[0]["url_path"], "/docs/alpha/");
+        assert_eq!(got[1]["name"], "zeta");
+        assert_eq!(got[1]["url_path"], "/docs/zeta/");
+    }
+
+    /// `.` and the empty path both name the repository root, because that is
+    /// the key `raw_path.parent()` produces for a root-level file.
+    #[test]
+    fn test_listing_dir_key_normalizes_dot_to_root() {
+        assert_eq!(listing_dir_key(Path::new(".")), PathBuf::new());
+        assert_eq!(listing_dir_key(Path::new("")), PathBuf::new());
+        assert_eq!(listing_dir_key(Path::new("docs")), PathBuf::from("docs"));
+    }
+
+    /// Builds a small on-disk fixture and returns its canonical root.
+    fn listing_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs/deep")).unwrap();
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("beta.md"), "---\ntitle: Beta\n---\n\nB\n").unwrap();
+        std::fs::write(root.join("alpha.md"), "---\ntitle: Alpha\n---\n\nA\n").unwrap();
+        std::fs::write(root.join("docs/guide.md"), "---\ntitle: Guide\n---\n\nG\n").unwrap();
+        std::fs::write(root.join("docs/deep/x.md"), "# X\n").unwrap();
+        std::fs::write(root.join("assets/pic.png"), b"not-really-a-png").unwrap();
+        tmp
+    }
+
+    fn fixture_repo(root: &Path) -> Repo {
+        Repo::init(
+            root,
+            "static",
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+            &[],
+            &[],
+        )
+    }
+
+    /// The backlink index must report exactly what the full-repository grep it
+    /// replaces reported.
+    ///
+    /// These are two independent implementations of the same question — the
+    /// grep matches path spellings inside each file, the index inverts the
+    /// renderer's own resolved links — and the server answered `links.json`
+    /// with the grep until this index landed. Any disagreement is a
+    /// user-visible change in the info panel and the mini graph, so it has to
+    /// be asserted rather than assumed.
+    #[test]
+    fn test_inbound_index_agrees_with_grep_backlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntitle: Alpha\n---\n\nSee [the guide](docs/guide.md) and [beta](beta.md).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("beta.md"),
+            "---\ntitle: Beta\n---\n\nBack to [alpha](alpha.md).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/guide.md"),
+            "---\ntitle: Guide\n---\n\nUp to [alpha](../alpha.md); also [beta](../beta.md).\n",
+        )
+        .unwrap();
+        // A page nobody links to: both implementations must report empty.
+        std::fs::write(
+            root.join("orphan.md"),
+            "---\ntitle: Orphan\n---\n\nAlone.\n",
+        )
+        .unwrap();
+
+        let repo = Arc::new(fixture_repo(&root));
+        repo.scan_all().unwrap();
+        repo.build_wikilink_index();
+
+        let cfg = LinkIndexConfig {
+            base_dir: root.clone(),
+            index_file: "index.md".to_string(),
+            markdown_extensions: vec!["md".to_string()],
+            valid_tag_sources: HashSet::new(),
+        };
+        let index = InboundIndex::new();
+        populate_inbound_index(&repo, &index, &cfg);
+        assert!(index.is_ready());
+
+        for page in ["/alpha/", "/beta/", "/docs/guide/", "/orphan/"] {
+            let indexed: Vec<String> = index.get(page).into_iter().map(|l| l.from).collect();
+
+            let mut grepped = crate::link_grep::find_inbound_links(
+                page,
+                &root,
+                &["md".to_string()],
+                &[],
+                &[],
+                "index.md",
+            );
+            crate::link_index::sort_inbound_links(&mut grepped);
+            let grepped: Vec<String> = grepped.into_iter().map(|l| l.from).collect();
+
+            assert_eq!(
+                indexed, grepped,
+                "backlink sources for {page} disagree: index={indexed:?} grep={grepped:?}"
+            );
+        }
+
+        // Sanity-check the fixture actually exercises the comparison, so a
+        // future edit that silently stops producing backlinks still fails.
+        assert_eq!(
+            index.get("/alpha/").len(),
+            2,
+            "alpha should be linked from beta and the guide"
+        );
+        assert!(index.get("/orphan/").is_empty());
+    }
+
+    /// The in-memory listing must reproduce what the per-request disk scan
+    /// produced: same files (order included) and same subdirectories (the old
+    /// implementation read them out of a concurrent map, so order was
+    /// arbitrary — compare as sets).
+    #[test]
+    fn test_directory_listing_from_index_matches_disk_scan() {
+        let tmp = listing_fixture();
+        let root = tmp.path().canonicalize().unwrap();
+        let sort = title_sort();
+
+        let indexed = fixture_repo(&root);
+        indexed.scan_all().unwrap();
+
+        for dir in [Path::new(""), Path::new("docs")] {
+            // Reference: the previous per-request implementation.
+            let scan_dir = if dir.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                dir.to_path_buf()
+            };
+            let temp_repo = fixture_repo(&root);
+            temp_repo.scan_folder(&scan_dir).unwrap();
+            let mut expected_files: Vec<serde_json::Value> = temp_repo
+                .markdown_files
+                .pin()
+                .iter()
+                .map(|(_, info)| markdown_file_to_json(info))
+                .collect();
+            sort_files(&mut expected_files, &sort);
+            let abs_dir = root.join(dir);
+            let expected_subdirs: std::collections::BTreeSet<String> = temp_repo
+                .queued_folders
+                .pin()
+                .iter()
+                .filter_map(|(abs_path, _)| {
+                    (abs_path.parent()? == abs_dir.as_path())
+                        .then(|| abs_path.file_name()?.to_str().map(|s| s.to_string()))?
+                })
+                .collect();
+
+            // New: served straight from the repository index.
+            let got_files = compute_sibling_files(
+                indexed.markdown_files.pin().iter().map(|(_, info)| info),
+                dir,
+                &sort,
+            );
+            let markdown_guard = indexed.markdown_files.pin();
+            let other_guard = indexed.other_files.pin();
+            let got_subdir_entries = compute_subdir_entries(
+                markdown_guard
+                    .iter()
+                    .map(|(_, info)| info.raw_path.as_path())
+                    .chain(
+                        other_guard
+                            .iter()
+                            .filter_map(|(abs, _)| abs.strip_prefix(&root).ok()),
+                    ),
+                dir,
+            );
+            let got_subdirs: std::collections::BTreeSet<String> = got_subdir_entries
+                .iter()
+                .filter_map(|entry| entry["name"].as_str().map(|s| s.to_string()))
+                .collect();
+
+            assert_eq!(got_files, expected_files, "files mismatch for {dir:?}");
+            assert_eq!(
+                got_subdirs, expected_subdirs,
+                "subdirs mismatch for {dir:?}"
+            );
+            assert!(
+                !got_files.is_empty(),
+                "fixture should have files in {dir:?}"
+            );
+            assert!(
+                !got_subdirs.is_empty(),
+                "fixture should have subdirs in {dir:?}"
+            );
+        }
+    }
+
+    /// A directory holding only assets (no markdown at any depth) still shows
+    /// up in its parent's listing, exactly as the disk scan reported it.
+    #[test]
+    fn test_subdirs_include_asset_only_directories() {
+        let tmp = listing_fixture();
+        let root = tmp.path().canonicalize().unwrap();
+        let repo = fixture_repo(&root);
+        repo.scan_all().unwrap();
+
+        let markdown_guard = repo.markdown_files.pin();
+        let other_guard = repo.other_files.pin();
+        let entries = compute_subdir_entries(
+            markdown_guard
+                .iter()
+                .map(|(_, info)| info.raw_path.as_path())
+                .chain(
+                    other_guard
+                        .iter()
+                        .filter_map(|(abs, _)| abs.strip_prefix(&root).ok()),
+                ),
+            Path::new(""),
+        );
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"assets"),
+            "asset-only directory must still be listed: {names:?}"
+        );
+    }
+
+    // ===== site.json payload =====
+
+    /// The site.json body must contain the markdown index and the sort/sidebar
+    /// config, and must never materialize the media catalog (`other_files`),
+    /// which is served by `/.mbr/media.json`.
+    #[test]
+    fn test_render_site_json_omits_other_files() {
+        let tmp = listing_fixture();
+        let root = tmp.path().canonicalize().unwrap();
+        let repo = fixture_repo(&root);
+        repo.scan_all().unwrap();
+        repo.scan_static_folder().unwrap();
+        assert!(
+            !repo.other_files.pin().is_empty(),
+            "fixture must contain at least one non-markdown file"
+        );
+
+        let params = SiteJsonParams {
+            sort: title_sort(),
+            sidebar_style: "panel".to_string(),
+            sidebar_max_items: 42,
+            relationship_tracking: false,
+        };
+        let bytes = render_site_json(&repo, &params).expect("site.json renders");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+
+        assert!(
+            value.get("other_files").is_none(),
+            "site.json must not include the media catalog"
+        );
+        let files = value["markdown_files"]
+            .as_array()
+            .expect("markdown_files array");
+        assert_eq!(files.len(), 4);
+        assert_eq!(value["index_file"], "index.md");
+        assert_eq!(value["sidebar_style"], "panel");
+        assert_eq!(value["sidebar_max_items"], 42);
+        assert_eq!(value["sort"][0]["field"], "title");
+
+        // Deterministic: same snapshot, byte-identical body.
+        let again = render_site_json(&repo, &params).expect("site.json renders");
+        assert_eq!(bytes, again);
     }
 
     /// Finding #20: N concurrent requests for the same (path, type) must trigger
@@ -6225,6 +7712,383 @@ mod tests {
             1,
             "only the producer should have decoded"
         );
+    }
+
+    // ===== single-flight slot release (cancellation safety) =====
+
+    /// A producer whose future is dropped mid-flight (client disconnect) must
+    /// release its single-flight slot, so the next request becomes the new
+    /// producer instead of waiting on a claim nobody will ever settle.
+    #[tokio::test]
+    async fn test_inflight_slot_released_when_producer_future_dropped() {
+        let inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
+            Arc::new(papaya::HashMap::new());
+        let key = "videos/clip.mp4::cover::mtime=1";
+
+        {
+            let inflight = Arc::clone(&inflight);
+            let producing = async {
+                let notify = match claim_inflight(&inflight, key) {
+                    InflightClaim::Produce(notify) => notify,
+                    InflightClaim::Wait(_) => panic!("first claim must produce"),
+                };
+                let _slot = InflightSlot::new(Arc::clone(&inflight), key.to_string(), notify);
+                // Stands in for the `spawn_blocking` await the handler is
+                // parked on when the client goes away.
+                std::future::pending::<()>().await;
+            };
+            // `timeout` polls the inner future once, then drops it — exactly
+            // what axum does to a handler whose connection died.
+            assert!(
+                tokio::time::timeout(std::time::Duration::ZERO, producing)
+                    .await
+                    .is_err()
+            );
+        }
+
+        assert!(
+            inflight.pin().get(key).is_none(),
+            "cancelled producer must not leave its claim behind"
+        );
+        assert!(
+            matches!(claim_inflight(&inflight, key), InflightClaim::Produce(_)),
+            "next request must be able to produce, not wedge on a stale claim"
+        );
+    }
+
+    /// Waiters parked on a cancelled producer's notify are woken rather than
+    /// left to burn the full wait timeout.
+    #[tokio::test]
+    async fn test_inflight_slot_wakes_waiters_when_dropped() {
+        let inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
+            Arc::new(papaya::HashMap::new());
+        let key = "videos/clip.mp4::chapters::mtime=1";
+
+        let producer_notify = match claim_inflight(&inflight, key) {
+            InflightClaim::Produce(notify) => notify,
+            InflightClaim::Wait(_) => panic!("first claim must produce"),
+        };
+        let waiter_notify = match claim_inflight(&inflight, key) {
+            InflightClaim::Wait(notify) => notify,
+            InflightClaim::Produce(_) => panic!("second claim must wait"),
+        };
+        let notified = waiter_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        drop(InflightSlot::new(
+            Arc::clone(&inflight),
+            key.to_string(),
+            producer_notify,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("waiter must be woken when the producer releases the slot");
+    }
+
+    /// `claim_inflight` must admit exactly one producer per key even when many
+    /// threads claim it at the same instant: `pin()` is only an epoch guard, so
+    /// a `get`-then-`insert` pair can hand `Produce` to two callers.
+    #[test]
+    fn test_claim_inflight_admits_one_producer_under_concurrent_claims() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 8;
+        const KEYS: usize = 400;
+
+        let inflight: Arc<papaya::HashMap<String, Arc<tokio::sync::Notify>>> =
+            Arc::new(papaya::HashMap::new());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let producers = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let inflight = Arc::clone(&inflight);
+                let barrier = Arc::clone(&barrier);
+                let producers = Arc::clone(&producers);
+                scope.spawn(move || {
+                    for i in 0..KEYS {
+                        let key = format!("key-{i}");
+                        // All threads race on the same key at the same moment.
+                        barrier.wait();
+                        if let InflightClaim::Produce(_) = claim_inflight(&inflight, &key) {
+                            producers.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            producers.load(Ordering::Relaxed),
+            KEYS,
+            "each key must be claimed by exactly one producer"
+        );
+    }
+
+    /// An abandoned HLS generation must not leave the key stuck `InProgress`:
+    /// that state has no TTL and is never evicted, so every later request would
+    /// block for `HLS_WAIT_TIMEOUT` and then 404 until restart.
+    #[cfg(feature = "media-metadata")]
+    #[tokio::test]
+    async fn test_hls_generation_slot_released_when_future_dropped() {
+        use crate::video_transcode::TranscodeTarget;
+        use crate::video_transcode_cache::{HlsCacheKey, HlsCacheStartResult};
+
+        let cache = HlsCache::new(1024 * 1024);
+        let key = HlsCacheKey::segment(
+            PathBuf::from("/videos/clip.mp4"),
+            TranscodeTarget::Resolution720p,
+            3,
+        );
+
+        {
+            let key = key.clone();
+            let producing = async {
+                let notify = match cache.start_generation(key.clone()) {
+                    HlsCacheStartResult::Started(notify) => notify,
+                    _ => panic!("first start_generation must start"),
+                };
+                let _slot = HlsGenerationSlot::new(&cache, key, notify);
+                std::future::pending::<()>().await;
+            };
+            assert!(
+                tokio::time::timeout(std::time::Duration::ZERO, producing)
+                    .await
+                    .is_err()
+            );
+        }
+
+        // The slot is settled (not `InProgress`), so the next request gets an
+        // immediate answer instead of waiting on a generation nobody is running.
+        assert!(
+            !matches!(
+                cache.start_generation(key),
+                HlsCacheStartResult::AlreadyInProgress(_)
+            ),
+            "cancelled generation must not leave the key wedged in progress"
+        );
+    }
+
+    // ===== live reload broadcast handling =====
+
+    /// A lagging live-reload client must keep receiving events. Consuming the
+    /// broadcast with a refutable `Ok(..)` pattern inside `select!` disables the
+    /// branch permanently on the first `Lagged`, silently killing live reload
+    /// for that tab.
+    #[tokio::test]
+    async fn test_live_reload_action_keeps_forwarding_after_lag() {
+        use crate::watcher::{ChangeEventType, FileChangeEvent};
+
+        let event = |name: &str| FileChangeEvent {
+            path: format!("/repo/{name}"),
+            relative_path: name.to_string(),
+            event: ChangeEventType::Modified,
+        };
+
+        let (tx, mut rx) = broadcast::channel::<FileChangeEvent>(2);
+        // Overflow the channel so the receiver falls behind.
+        for i in 0..5 {
+            tx.send(event(&format!("a{i}.md"))).unwrap();
+        }
+
+        assert!(
+            matches!(live_reload_action(rx.recv().await), LiveReloadAction::Skip),
+            "an overflowed receiver must report lag, not terminate"
+        );
+
+        // Everything still queued, and everything sent afterwards, is forwarded.
+        assert!(matches!(
+            live_reload_action(rx.recv().await),
+            LiveReloadAction::Forward(_)
+        ));
+        tx.send(event("after-lag.md")).unwrap();
+        while let LiveReloadAction::Forward(forwarded) = live_reload_action(rx.recv().await) {
+            if forwarded.relative_path == "after-lag.md" {
+                return;
+            }
+        }
+        panic!("event sent after the lag was never forwarded");
+    }
+
+    /// When the sender is dropped (server shutting down) the loop closes.
+    #[tokio::test]
+    async fn test_live_reload_action_closes_when_sender_dropped() {
+        let (tx, mut rx) = broadcast::channel::<crate::watcher::FileChangeEvent>(2);
+        drop(tx);
+        assert!(matches!(
+            live_reload_action(rx.recv().await),
+            LiveReloadAction::Close
+        ));
+    }
+
+    // ===== derived cache invalidation =====
+
+    /// A file change must drop the link caches too, not just sibling nav:
+    /// `LinkCache` has no TTL, so a survivor serves pre-edit links forever.
+    /// The directory-listing subdirectories and the serialized site.json body
+    /// are derived from the same data and must go with them.
+    #[test]
+    fn test_invalidate_derived_caches_clears_link_caches() {
+        use crate::link_index::{InboundLink, OutboundLink};
+
+        let listing_caches = ListingCaches {
+            sibling_nav_cache: Arc::new(papaya::HashMap::new()),
+            subdir_cache: Arc::new(papaya::HashMap::new()),
+            site_json_cache: Arc::new(parking_lot::RwLock::new(SiteJsonCache {
+                generation: 0,
+                body: Some(axum::body::Bytes::from_static(b"{\"markdown_files\":[]}")),
+            })),
+        };
+        listing_caches
+            .sibling_nav_cache
+            .pin()
+            .insert(PathBuf::from("docs"), Arc::new(vec![serde_json::json!({})]));
+        listing_caches
+            .subdir_cache
+            .pin()
+            .insert(PathBuf::new(), Arc::new(vec![serde_json::json!({})]));
+
+        let link_cache = LinkCache::new(1024 * 1024);
+        link_cache.insert(
+            "/docs/guide/".to_string(),
+            vec![OutboundLink {
+                to: "/docs/other/".to_string(),
+                text: "Other".to_string(),
+                anchor: None,
+                internal: true,
+            }],
+        );
+
+        let inbound_link_cache = InboundLinkCache::new(1024 * 1024, 300);
+        inbound_link_cache.insert(
+            "/docs/other/".to_string(),
+            vec![InboundLink {
+                from: "/docs/guide/".to_string(),
+                text: "Other".to_string(),
+                anchor: None,
+            }],
+        );
+
+        invalidate_derived_caches(&listing_caches, &link_cache, &inbound_link_cache);
+
+        assert!(listing_caches.sibling_nav_cache.pin().is_empty());
+        assert!(
+            listing_caches.subdir_cache.pin().is_empty(),
+            "directory subdirectory lists must be dropped on file change"
+        );
+        assert!(
+            listing_caches.site_json_cache.read().body.is_none(),
+            "the cached site.json body must be dropped on file change"
+        );
+        assert!(
+            link_cache.get("/docs/guide/").is_none(),
+            "outbound link cache must be dropped on file change"
+        );
+        assert!(
+            inbound_link_cache.get("/docs/other/").is_none(),
+            "inbound link cache must be dropped on file change"
+        );
+    }
+
+    /// A site.json rebuild that started before a file change must not publish
+    /// its pre-change snapshot afterwards: the invalidation already ran, so the
+    /// stale body would be served until the *next* change.
+    #[test]
+    fn test_site_json_cache_rejects_store_from_a_raced_rebuild() {
+        let cache = parking_lot::RwLock::new(SiteJsonCache::default());
+
+        // A request finds the slot empty and starts rebuilding.
+        let (generation, cached) = cache.read().snapshot();
+        assert!(cached.is_none());
+
+        // A file change lands while that rebuild is in flight.
+        cache.write().invalidate();
+
+        // The rebuild finishes and tries to publish its stale snapshot.
+        cache
+            .write()
+            .store(generation, axum::body::Bytes::from_static(b"stale"));
+        assert!(
+            cache.read().body.is_none(),
+            "a body built before the invalidation must not be published"
+        );
+
+        // A rebuild started after the change publishes normally.
+        let (generation, _) = cache.read().snapshot();
+        cache
+            .write()
+            .store(generation, axum::body::Bytes::from_static(b"fresh"));
+        assert_eq!(cache.read().body.as_deref(), Some(&b"fresh"[..]));
+    }
+
+    /// The media metadata cache must not inherit the oembed *text* cache
+    /// budget: disabling link previews with `--oembed-cache-size 0` used to
+    /// disable cover/chapter/caption caching along with it.
+    #[cfg(feature = "media-metadata")]
+    #[test]
+    fn test_media_cache_size_is_independent_of_oembed_cache_size() {
+        use crate::video_metadata_cache::{CachedMetadata, VideoMetadataCache};
+
+        let config = crate::config::Config {
+            oembed_cache_size: 0,
+            ..Default::default()
+        };
+        let server_config = ServerConfig::from(&config);
+        assert_eq!(server_config.oembed_cache_size, 0);
+        assert_eq!(server_config.media_cache_size, 64 * 1024 * 1024);
+
+        // The cache built from that budget still caches a cover payload.
+        let cache = VideoMetadataCache::new(server_config.media_cache_size);
+        let key = "videos/clip.mp4::cover::mtime=1".to_string();
+        cache.insert(key.clone(), CachedMetadata::Cover(vec![0u8; 256 * 1024]));
+        assert!(
+            cache.get(&key).is_some(),
+            "media caching must stay enabled when the oembed cache is disabled"
+        );
+
+        // And the default budget holds many covers, not a couple of dozen.
+        let cache = VideoMetadataCache::new(server_config.media_cache_size);
+        for i in 0..100 {
+            cache.insert(
+                format!("videos/clip-{i}.mp4::cover::mtime=1"),
+                CachedMetadata::Cover(vec![0u8; 256 * 1024]),
+            );
+        }
+        assert_eq!(
+            cache.len(),
+            100,
+            "100 covers of 256 KB must fit in the default media cache"
+        );
+    }
+
+    /// `announce_listening` routes the startup banner on `Server.gui_mode`:
+    /// stdout in server mode, `tracing::info!` in GUI mode. That only works if
+    /// `init` actually carries the flag off `ServerConfig` onto `Server` — if
+    /// it were dropped and defaulted to `false`, the GUI would silently go back
+    /// to printing to the console window it is trying to stay out of, and every
+    /// existing test would still pass.
+    #[tokio::test]
+    async fn test_server_init_carries_gui_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("index.md"), "# Test").unwrap();
+
+        for gui_mode in [true, false] {
+            let config = crate::config::Config {
+                root_dir: temp.path().to_path_buf(),
+                ..Default::default()
+            };
+            let server = Server::init(ServerConfig::from(&config).with_gui_mode(gui_mode))
+                .expect("server init should succeed over a temp repo");
+
+            assert_eq!(
+                server.gui_mode, gui_mode,
+                "Server::init must carry gui_mode through to Server; \
+                 announce_listening reads it to decide stdout vs tracing"
+            );
+        }
     }
 
     /// Call-site smoke test for the metadata cache path: a cached cover produces
@@ -6316,9 +8180,38 @@ mod tests {
         );
         // Multiple dots: only the final segment is the extension.
         assert_eq!(
-            sanitize_upload_name("archive.tar.gz", &md_exts()).as_deref(),
-            Some("archive.tar.gz")
+            sanitize_upload_name("clip.final.cut.mp4", &md_exts()).as_deref(),
+            Some("clip.final.cut.mp4")
         );
+    }
+
+    #[test]
+    fn test_sanitize_upload_name_enforces_media_allowlist() {
+        // Executable/site-controlling types must never be uploadable: these are
+        // what turned the media uploader into a page-hijacking primitive.
+        for name in [
+            "index.html",
+            "mbr-components.min.js",
+            "theme.css",
+            "config.toml",
+            "evil.svg",
+            "archive.tar.gz",
+            "payload.sh",
+        ] {
+            assert_eq!(
+                sanitize_upload_name(name, &md_exts()),
+                None,
+                "{name} must not be uploadable"
+            );
+        }
+        // Media stays uploadable, extension case-insensitively.
+        for name in ["pic.png", "PIC.PNG", "clip.mp4", "song.mp3", "doc.pdf"] {
+            assert_eq!(
+                sanitize_upload_name(name, &md_exts()).as_deref(),
+                Some(name),
+                "{name} must be uploadable"
+            );
+        }
     }
 
     #[test]
@@ -6356,6 +8249,213 @@ mod tests {
             sanitize_upload_name("note.pdf", &md_exts()).as_deref(),
             Some("note.pdf")
         );
+    }
+
+    // ===== Host header validation (DNS-rebinding defense) =====
+
+    fn host_headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn test_host_header_hostname_strips_port_and_brackets() {
+        assert_eq!(host_header_hostname("127.0.0.1:5200"), "127.0.0.1");
+        assert_eq!(host_header_hostname("localhost:5200"), "localhost");
+        assert_eq!(host_header_hostname("localhost"), "localhost");
+        assert_eq!(host_header_hostname("[::1]:5200"), "::1");
+        assert_eq!(host_header_hostname("[::1]"), "::1");
+        assert_eq!(host_header_hostname("::1"), "::1");
+        assert_eq!(
+            host_header_hostname(" evil.example.com "),
+            "evil.example.com"
+        );
+    }
+
+    #[test]
+    fn test_host_header_is_allowed_accepts_local_names() {
+        let loopback = [127, 0, 0, 1];
+        for value in [
+            "localhost",
+            "LocalHost:5200",
+            "127.0.0.1:5200",
+            "127.0.0.53",
+            "[::1]:5200",
+        ] {
+            assert!(
+                host_header_is_allowed(&host_headers(value), loopback),
+                "{value} should be an allowed Host"
+            );
+        }
+        // A non-loopback bind address is allowed under its own IP literal.
+        assert!(host_header_is_allowed(
+            &host_headers("192.168.1.5:5200"),
+            [192, 168, 1, 5]
+        ));
+    }
+
+    #[test]
+    fn test_host_header_is_allowed_rejects_rebinding_names() {
+        let loopback = [127, 0, 0, 1];
+        // A DNS-rebinding host resolves to 127.0.0.1 but must not be trusted,
+        // and neither may a name that merely embeds an allowed one.
+        for value in [
+            "evil.example.com",
+            "evil.example.com:5200",
+            "localhost.evil.example.com",
+            "127.0.0.1.evil.example.com",
+            "192.168.1.5",
+        ] {
+            assert!(
+                !host_header_is_allowed(&host_headers(value), loopback),
+                "{value} must be rejected"
+            );
+        }
+        // A missing Host header is rejected (HTTP/1.1 requires one).
+        assert!(!host_header_is_allowed(&HeaderMap::new(), loopback));
+    }
+
+    // ===== /.mbr asset allowlist =====
+
+    #[test]
+    fn test_is_servable_mbr_asset_allows_known_asset_types() {
+        for path in [
+            "/theme.css",
+            "/components/mbr-components.min.js",
+            "/components/mbr-graph.min.js.map",
+            "/favicon.png",
+            "/fonts/KaTeX_Main-Bold.woff2",
+            "/index.html",
+        ] {
+            assert!(is_servable_mbr_asset(path), "{path} should be servable");
+        }
+    }
+
+    #[test]
+    fn test_is_servable_mbr_asset_rejects_config_and_dotfiles() {
+        // config.toml carries the Argon2 edit_token_hash.
+        for path in [
+            "/config.toml",
+            "/config.TOML",
+            "/.env",
+            "/secrets/.env.local",
+            "/notes.md",
+            "/id_rsa",
+            "/",
+        ] {
+            assert!(!is_servable_mbr_asset(path), "{path} must not be servable");
+        }
+    }
+
+    // ===== upload destination guard =====
+
+    #[test]
+    fn test_is_template_folder_path_blocks_mbr_and_template_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join(".mbr/components")).unwrap();
+        let template_folder = base.join("custom-templates");
+        std::fs::create_dir_all(&template_folder).unwrap();
+
+        // Targets inside .mbr/ (which do not exist yet) are rejected.
+        for rel in [".mbr/index.html", ".mbr/components/mbr-components.min.js"] {
+            assert!(
+                is_template_folder_path(&base.join(rel), &base, Some(&base), None),
+                "{rel} must be blocked"
+            );
+        }
+        // So are targets inside an explicit --template-folder.
+        assert!(is_template_folder_path(
+            &template_folder.join("index.html"),
+            &base,
+            Some(&base),
+            Some(&template_folder)
+        ));
+        // Ordinary note folders are unaffected.
+        assert!(!is_template_folder_path(
+            &base.join("notes/pic.png"),
+            &base,
+            Some(&base),
+            Some(&template_folder)
+        ));
+        // A folder that merely starts with the same characters is not `.mbr`.
+        assert!(!is_template_folder_path(
+            &base.join(".mbrx/pic.png"),
+            &base,
+            Some(&base),
+            None
+        ));
+    }
+
+    // ===== served-path containment (symlink escape defense in depth) =====
+
+    #[test]
+    fn test_is_within_served_roots_accepts_repo_and_static_overlay() {
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join("content");
+        let static_dir = parent.path().join("static");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&static_dir).unwrap();
+        let inside = repo.join("note.md");
+        std::fs::write(&inside, "# hi").unwrap();
+        let overlay = static_dir.join("logo.png");
+        std::fs::write(&overlay, "png").unwrap();
+        let canonical_repo = repo.canonicalize().unwrap();
+
+        assert!(is_within_served_roots(
+            &inside,
+            &repo,
+            Some(&canonical_repo),
+            "static"
+        ));
+        assert!(is_within_served_roots(
+            &repo,
+            &repo,
+            Some(&canonical_repo),
+            ""
+        ));
+        // The static_folder overlay may legitimately live outside the root.
+        assert!(is_within_served_roots(
+            &overlay,
+            &repo,
+            Some(&canonical_repo),
+            "../static"
+        ));
+    }
+
+    #[test]
+    fn test_is_within_served_roots_rejects_symlink_escape() {
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join("content");
+        std::fs::create_dir_all(&repo).unwrap();
+        let outside = parent.path().join("secret.txt");
+        std::fs::write(&outside, "top secret").unwrap();
+        let canonical_repo = repo.canonicalize().unwrap();
+
+        // A path that is lexically inside the repo but canonicalizes outside it
+        // (a symlink) must be rejected.
+        let link = repo.join("secret.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_file(&outside, &link);
+
+        if link.exists() {
+            assert!(!is_within_served_roots(
+                &link,
+                &repo,
+                Some(&canonical_repo),
+                "static"
+            ));
+        }
+        // A path that does not exist at all is never servable.
+        assert!(!is_within_served_roots(
+            &repo.join("missing.txt"),
+            &repo,
+            Some(&canonical_repo),
+            "static"
+        ));
     }
 
     // ===== dedupe_name (collision suffixing) =====

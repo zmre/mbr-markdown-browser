@@ -1890,3 +1890,656 @@ async fn test_build_with_non_canonical_root_dir() {
         "url_path values must be short and repo-relative"
     );
 }
+
+// ============================================================================
+// Build output containment / cleanliness / determinism
+// ============================================================================
+
+/// Collects every path under `dir` (not following symlinks).
+#[cfg(unix)]
+fn walk_paths_shallow_of_symlinks(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(path.clone());
+            }
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// A directory symlink pointing outside the repository root makes
+/// `repo::scan_folder` canonicalize the target, `pathdiff` produce `../…`, and
+/// `url_path::path_to_url` keep the `..`. Joining that onto `--output` used to
+/// write pages, links.json and assets outside the requested output directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_does_not_write_outside_output_dir_for_escaping_url_paths() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = tmp.path().canonicalize().expect("canonicalize");
+
+    // Content that lives outside the repository root.
+    let outside = base.join("outside").join("docs");
+    fs::create_dir_all(&outside).expect("outside dir");
+    fs::write(outside.join("a.md"), "# Escaped\n\n[home](/)\n").expect("write a.md");
+    fs::write(outside.join("pic.png"), b"\x89PNG\r\n\x1a\nfake").expect("write pic.png");
+
+    // Repository root with a directory symlink pointing at it.
+    let root = base.join("repo");
+    fs::create_dir_all(root.join(".mbr")).expect("repo/.mbr");
+    fs::write(root.join("index.md"), "# Home").expect("write index.md");
+    std::os::unix::fs::symlink(&outside, root.join("work")).expect("symlink work");
+
+    // Output nested two levels deep so a `../..` escape has room to land.
+    let output_dir = base.join("deep").join("out");
+
+    let config = mbr::Config {
+        root_dir: root.clone(),
+        oembed_timeout_ms: 0,
+        ..Default::default()
+    };
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+
+    // The build must still succeed: escaping entries are skipped, not fatal.
+    builder.build().await.expect("Build failed");
+
+    // Nothing may have been written next to (rather than inside) the output.
+    let deep = base.join("deep");
+    let stray: Vec<String> = walk_paths_shallow_of_symlinks(&deep)
+        .into_iter()
+        .filter(|p| !p.starts_with(&output_dir))
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "build wrote outside {}:\n  {}",
+        output_dir.display(),
+        stray.join("\n  ")
+    );
+
+    // And the ordinary page still built.
+    assert!(
+        output_dir.join("index.html").exists(),
+        "the in-root home page must still be generated"
+    );
+}
+
+/// Build mode for the `repo/content` + `repo/static` layout: the peer overlay's
+/// assets must land *inside* the output directory at their served URLs, and the
+/// build must write nothing beside it.
+///
+/// This is the build-mode half of the peer-overlay regression. Once the scanner
+/// started indexing the overlay, two passes placed the same files —
+/// `place_assets` from `other_files` and `handle_static_folder` from its own
+/// walk — so this also pins that they cooperate instead of colliding.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_places_peer_static_folder_assets_inside_output() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = tmp.path().canonicalize().expect("canonicalize");
+
+    let content = base.join("project").join("content");
+    fs::create_dir_all(content.join(".mbr")).expect("content/.mbr");
+    fs::write(content.join("index.md"), "# Home").expect("write index.md");
+
+    let static_dir = base.join("project").join("static");
+    fs::create_dir_all(static_dir.join("videos")).expect("static/videos");
+    let video_bytes: &[u8] = b"\x00\x00\x00\x20ftypisom fake mp4";
+    fs::write(static_dir.join("videos/demo.mp4"), video_bytes).expect("write video");
+    fs::write(static_dir.join("pic.png"), b"\x89PNG\r\n\x1a\nfake").expect("write pic");
+
+    // Nested so a `../..` escape would have somewhere visible to land.
+    let output_dir = base.join("deep").join("out");
+
+    let config = mbr::Config {
+        root_dir: content.clone(),
+        static_folder: "../static".to_string(),
+        oembed_timeout_ms: 0,
+        ..Default::default()
+    };
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+
+    // The assets landed at their served URLs, inside the output, and readable —
+    // reading through the placed entry proves a symlink actually resolves.
+    let video = output_dir.join("videos/demo.mp4");
+    assert!(
+        video.exists(),
+        "the peer static folder's video must be placed at videos/demo.mp4"
+    );
+    assert_eq!(
+        fs::read(&video).expect("read placed video"),
+        video_bytes,
+        "the placed asset must resolve to the original bytes"
+    );
+    assert!(
+        output_dir.join("pic.png").exists(),
+        "the peer static folder's image must be placed at pic.png"
+    );
+
+    // Nothing beside the output directory.
+    let deep = base.join("deep");
+    let stray: Vec<String> = walk_paths_shallow_of_symlinks(&deep)
+        .into_iter()
+        .filter(|p| !p.starts_with(&output_dir))
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "build wrote outside {}:\n  {}",
+        output_dir.display(),
+        stray.join("\n  ")
+    );
+
+    // And nothing was written back into the source project either.
+    assert!(
+        !base.join("project").join("content").join("videos").exists(),
+        "the build must not write assets back into the markdown root"
+    );
+
+    // site.json must not carry an escaping URL for anything.
+    let site_json = fs::read_to_string(output_dir.join(".mbr/site.json")).expect("read site.json");
+    assert!(
+        !site_json.contains("\"../"),
+        "site.json must not contain an escaping path"
+    );
+}
+
+/// A markdown file inside an external static overlay is skipped, so the build
+/// never gets a `../static/…` URL to join onto `--output`.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_skips_markdown_in_peer_static_folder() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = tmp.path().canonicalize().expect("canonicalize");
+
+    let content = base.join("project").join("content");
+    fs::create_dir_all(content.join(".mbr")).expect("content/.mbr");
+    fs::write(content.join("index.md"), "# Home").expect("write index.md");
+
+    let static_dir = base.join("project").join("static");
+    fs::create_dir_all(&static_dir).expect("static dir");
+    fs::write(static_dir.join("stray.md"), "# Stray").expect("write stray.md");
+    fs::write(static_dir.join("pic.png"), b"\x89PNG\r\n\x1a\nfake").expect("write pic");
+
+    let output_dir = base.join("deep").join("out");
+
+    let config = mbr::Config {
+        root_dir: content.clone(),
+        static_folder: "../static".to_string(),
+        oembed_timeout_ms: 0,
+        ..Default::default()
+    };
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+
+    assert!(
+        !output_dir.join("stray").exists(),
+        "markdown in the external static overlay must not be rendered"
+    );
+    let stray: Vec<String> = walk_paths_shallow_of_symlinks(&base.join("deep"))
+        .into_iter()
+        .filter(|p| !p.starts_with(&output_dir))
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "build wrote outside {}:\n  {}",
+        output_dir.display(),
+        stray.join("\n  ")
+    );
+    assert!(
+        output_dir.join("pic.png").exists(),
+        "the assets alongside it must still be placed"
+    );
+}
+
+/// A leftover "old output" directory from an interrupted run must be swept
+/// before the repository scan, otherwise its contents are indexed as real
+/// content (every asset listed twice) and recreated inside the new output.
+#[tokio::test]
+async fn test_build_sweeps_orphaned_old_output_directory() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
+
+    // Leftover from a previous (interrupted) build, in the legacy PID shape.
+    let orphan = repo.path().join("build.old.88888");
+    fs::create_dir_all(orphan.join("images")).expect("orphan dir");
+    fs::write(orphan.join("images/pic.png"), b"\x89PNG\r\n\x1a\nfake").expect("orphan asset");
+
+    let output = build_site(&repo).await;
+
+    assert!(
+        !orphan.exists(),
+        "orphaned {} should have been swept before scanning",
+        orphan.display()
+    );
+
+    let site = fs::read_to_string(output.join(".mbr").join("site.json")).expect("site.json");
+    let media = fs::read_to_string(output.join(".mbr").join("media.json")).expect("media.json");
+    assert!(
+        !site.contains("build.old."),
+        "site.json must not index the orphaned build directory"
+    );
+    assert!(
+        !media.contains("build.old."),
+        "media.json must not index the orphaned build directory"
+    );
+
+    // The orphan must not be recreated inside the new output either.
+    assert!(
+        !output.join("build.old.88888").exists(),
+        "place_assets must not recreate the orphan inside the output"
+    );
+
+    // The real asset is still there exactly once.
+    let media_json: serde_json::Value = serde_json::from_str(&media).expect("valid media.json");
+    let urls: Vec<&str> = media_json["other_files"]
+        .as_array()
+        .expect("other_files")
+        .iter()
+        .filter_map(|f| f["url_path"].as_str())
+        .collect();
+    assert_eq!(
+        urls.iter().filter(|u| u.ends_with("pic.png")).count(),
+        1,
+        "pic.png should be indexed once, got {urls:?}"
+    );
+}
+
+/// A completed build must not leave its own "old output" directory behind.
+#[tokio::test]
+async fn test_rebuild_leaves_no_old_output_directory() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+
+    build_site(&repo).await;
+    build_site(&repo).await;
+
+    let leftovers: Vec<String> = fs::read_dir(repo.path())
+        .expect("read repo dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".mbr-old") || n.contains("build.old."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a normal rebuild must clean up after itself, found: {leftovers:?}"
+    );
+}
+
+/// Every way of writing an internal link must produce a backlink.
+///
+/// `OutboundLink.to` holds the raw markdown destination, so inverting it
+/// directly turned `[beta](beta.md)` into a backlink on `/beta.md/` — a URL no
+/// page has — and the link vanished from the target's `links.json`. Only the
+/// trailing-slash and `[[wikilink]]` spellings survived, which made the bug
+/// easy to miss: the two forms this project's own docs favour both worked,
+/// while the plainest markdown link, the one every other renderer accepts,
+/// silently did not.
+#[tokio::test]
+async fn test_build_backlinks_cover_every_internal_link_style() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "alpha.md",
+        "---\ntitle: Alpha\n---\n\nExtension [b1](beta.md), slash [b2](beta/), wiki [[Beta]].\n",
+    );
+    repo.create_markdown("beta.md", "---\ntitle: Beta\n---\n\nTarget.\n");
+
+    let output = build_site(&repo).await;
+
+    let links: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join("beta").join("links.json")).expect("beta links.json"),
+    )
+    .expect("valid links.json");
+
+    let texts: Vec<&str> = links["inbound"]
+        .as_array()
+        .expect("inbound array")
+        .iter()
+        .map(|l| l["text"].as_str().expect("link text"))
+        .collect();
+
+    assert!(
+        texts.contains(&"b1"),
+        "an extension-style [text](beta.md) link must produce a backlink: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"b2"),
+        "a trailing-slash link must produce a backlink: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"Beta"),
+        "a [[wikilink]] must produce a backlink: {texts:?}"
+    );
+    for link in links["inbound"].as_array().expect("inbound array") {
+        assert_eq!(
+            link["from"].as_str(),
+            Some("/alpha/"),
+            "every backlink here comes from /alpha/"
+        );
+    }
+}
+
+/// `site.json` must not carry the media catalog: it ships in `media.json`, and
+/// duplicating it makes site.json overwhelmingly media on asset-heavy repos.
+/// Mirrors the server-mode assertion in `tests/server_integration.rs`.
+#[tokio::test]
+async fn test_build_site_json_excludes_other_files() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
+    repo.create_static_file("docs/report.pdf", b"%PDF-1.4 fake");
+
+    let output = build_site(&repo).await;
+
+    let site: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join(".mbr").join("site.json")).expect("site.json"),
+    )
+    .expect("valid site.json");
+    assert!(
+        site["other_files"].is_null(),
+        "site.json should NOT contain other_files in build mode"
+    );
+    assert!(
+        site["markdown_files"].is_array(),
+        "site.json must still list markdown_files"
+    );
+
+    // media.json remains the media catalog.
+    let media: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join(".mbr").join("media.json")).expect("media.json"),
+    )
+    .expect("valid media.json");
+    let entries = media["other_files"].as_array().expect("other_files");
+    assert_eq!(
+        entries.len(),
+        2,
+        "media.json should still list both assets, got {entries:?}"
+    );
+}
+
+/// Two builds of an identical repository must produce identical JSON, so
+/// committed output does not churn in `git diff` and content-hash caches are
+/// not invalidated by a no-op rebuild.
+///
+/// Every map that reaches the generated JSON used to be hash-ordered, and
+/// tera's `preserve_order` feature makes serde_json object key order equal
+/// *insertion* order — so a randomly-seeded `HashMap` reshuffled the output on
+/// each run. Four sources had to be fixed, and this test covers all four:
+///   * `MarkdownFiles`/`OtherFiles` (`src/repo.rs`) serialized by iterating a
+///     randomly-seeded `papaya::HashMap`; they now sort by `url_path`.
+///   * `tags_data` (`src/build.rs`) was a std `HashMap`; it is now a `BTreeMap`.
+///   * `SimpleMetadata` (`src/markdown.rs`) was a std `HashMap`, so each page's
+///     `frontmatter` object reordered its keys per build; it is now a
+///     `BTreeMap`.
+///   * every page's `links.json` `inbound` list (`src/build.rs`
+///     `write_link_files`) was built by inverting the papaya `build_link_index`;
+///     it is now run through `link_index::sort_inbound_links`.
+///
+/// The fixture therefore needs *several* files, *several* assets, *several*
+/// frontmatter keys and a page with *several distinct backlink sources* — with
+/// one of anything there is no order to get wrong. Byte equality across two runs
+/// is on its own a weak test for randomness (two draws can coincide), so the
+/// sortedness of each key sequence is asserted explicitly as well: that is
+/// deterministic by construction rather than by luck.
+#[tokio::test]
+async fn test_build_is_byte_deterministic() {
+    fn assert_sorted<T: Ord + Clone + std::fmt::Debug>(label: &str, keys: Vec<T>) {
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "{label} must be emitted in sorted order");
+    }
+
+    let tag_fields = ["topics", "people", "places", "projects", "sources", "tags"];
+
+    let repo = TestRepo::new();
+    let tag_frontmatter: String = tag_fields
+        .iter()
+        .map(|f| format!("{f}:\n  - alpha\n  - beta\n"))
+        .collect();
+    // Frontmatter keys are deliberately not written in alphabetical order.
+    repo.create_markdown(
+        "note.md",
+        &format!(
+            "---\ntitle: Note\ntype: reference\ndate: 2026-07-25\n\
+             description: A note with several frontmatter keys\n\
+             {tag_frontmatter}---\n\nBody text.\n"
+        ),
+    );
+    // Three distinct pages link to note.md, so its backlink list has an order
+    // to get wrong. Links use the trailing-slash directory form, which is what
+    // `resolve_relative_url` resolves against the page URL.
+    repo.create_markdown(
+        "zeta.md",
+        "---\ntitle: Zeta\ntype: note\n---\n\n[The Note](note/)\n",
+    );
+    repo.create_markdown(
+        "docs/alpha.md",
+        "---\ntitle: Alpha\ntags:\n  - alpha\n---\n\n[Note From Alpha](../note/)\n",
+    );
+    repo.create_markdown(
+        "docs/beta.md",
+        "---\ntitle: Beta\ntags:\n  - beta\n---\n\n[Note From Beta](../note/)\n",
+    );
+    repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
+    repo.create_static_file("images/other.png", b"\x89PNG\r\n\x1a\nfake2");
+    repo.create_static_file("docs/report.pdf", b"%PDF-1.4 fake");
+
+    // Build outside the repository so the first output is not scanned by the second.
+    let out_dir = tempfile::TempDir::new().expect("temp output dir");
+
+    let build_once = async |name: &str| -> std::path::PathBuf {
+        let output_dir = out_dir.path().join(name);
+        let config = mbr::Config {
+            root_dir: repo.path().to_path_buf(),
+            oembed_timeout_ms: 0,
+            build_tag_pages: true,
+            tag_sources: tag_fields
+                .iter()
+                .map(|f| mbr::config::TagSource {
+                    field: f.to_string(),
+                    label: None,
+                    label_plural: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let builder =
+            mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+        builder.build().await.expect("Build failed");
+        output_dir
+    };
+
+    let dir_a = build_once("a").await;
+    let dir_b = build_once("b").await;
+
+    let read_mbr = |dir: &Path, name: &str| {
+        fs::read(dir.join(".mbr").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    let (site_a, site_b) = (read_mbr(&dir_a, "site.json"), read_mbr(&dir_b, "site.json"));
+    let (media_a, media_b) = (
+        read_mbr(&dir_a, "media.json"),
+        read_mbr(&dir_b, "media.json"),
+    );
+
+    let assert_same_bytes = |label: &str, a: &[u8], b: &[u8]| {
+        assert!(
+            a == b,
+            "{label} must be byte-identical across two builds of the same repo\n\
+             build a:\n{}\n\nbuild b:\n{}",
+            String::from_utf8_lossy(a),
+            String::from_utf8_lossy(b),
+        );
+    };
+    assert_same_bytes("site.json", &site_a, &site_b);
+    assert_same_bytes("media.json", &media_a, &media_b);
+
+    // Every generated links.json, not just the two .mbr files: the backlink
+    // lists live there, one file per page.
+    let links_a = collect_links_files(&dir_a);
+    let links_b = collect_links_files(&dir_b);
+    assert!(
+        !links_a.is_empty(),
+        "the fixture must generate links.json files"
+    );
+    assert_eq!(
+        links_a.keys().collect::<Vec<_>>(),
+        links_b.keys().collect::<Vec<_>>(),
+        "both builds must generate the same set of links.json files"
+    );
+    for (rel, bytes_a) in &links_a {
+        assert_same_bytes(rel, bytes_a, &links_b[rel]);
+    }
+
+    let site: serde_json::Value = serde_json::from_slice(&site_a).expect("valid site.json");
+
+    // Sortedness is what makes the equality above deterministic rather than
+    // lucky. Assert it for each formerly hash-ordered sequence.
+
+    // 1. tag_sources object keys (src/build.rs `tags_data`).
+    let tag_source_keys: Vec<&str> = site["tag_sources"]
+        .as_object()
+        .expect("tag_sources object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(tag_source_keys.len(), tag_fields.len());
+    assert_sorted("tag_sources keys", tag_source_keys);
+
+    // 2. markdown_files order (src/repo.rs `MarkdownFiles::serialize`).
+    let markdown_files = site["markdown_files"]
+        .as_array()
+        .expect("markdown_files array");
+    assert_eq!(
+        markdown_files.len(),
+        4,
+        "expected the four fixture markdown files, got {markdown_files:?}"
+    );
+    assert_sorted(
+        "markdown_files url_paths",
+        markdown_files
+            .iter()
+            .map(|f| f["url_path"].as_str().expect("url_path"))
+            .collect(),
+    );
+
+    // 3. Per-page frontmatter keys (src/markdown.rs `SimpleMetadata`).
+    let note = markdown_files
+        .iter()
+        .find(|f| f["url_path"] == "/note/")
+        .expect("note.md in site.json");
+    let frontmatter_keys: Vec<&str> = note["frontmatter"]
+        .as_object()
+        .expect("note frontmatter object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    // title/type/date/description plus one key per tag field.
+    assert_eq!(
+        frontmatter_keys.len(),
+        4 + tag_fields.len(),
+        "unexpected frontmatter keys: {frontmatter_keys:?}"
+    );
+    assert_sorted("frontmatter keys", frontmatter_keys);
+
+    // media.json lists the assets, also in sorted order.
+    let media: serde_json::Value = serde_json::from_slice(&media_a).expect("valid media.json");
+    let other_files = media["other_files"].as_array().expect("other_files array");
+    assert_eq!(
+        other_files.len(),
+        3,
+        "expected the three fixture assets, got {other_files:?}"
+    );
+    assert_sorted(
+        "other_files url_paths",
+        other_files
+            .iter()
+            .map(|f| f["url_path"].as_str().expect("url_path"))
+            .collect(),
+    );
+
+    // 4. Per-page inbound backlinks (src/build.rs `write_link_files`).
+    let note_links: serde_json::Value = serde_json::from_slice(
+        links_a
+            .get("note/links.json")
+            .expect("note/links.json in build output"),
+    )
+    .expect("valid note links.json");
+    let inbound = note_links["inbound"].as_array().expect("inbound array");
+    // Guard the fixture: with one backlink there is no order to get wrong, so
+    // the byte comparison above would prove nothing about backlink ordering.
+    // Note each source contributes exactly one entry — `finalize_render`
+    // dedups outbound links by target, so a page cannot backlink twice.
+    let distinct_sources: std::collections::BTreeSet<&str> = inbound
+        .iter()
+        .map(|l| l["from"].as_str().expect("from"))
+        .collect();
+    assert_eq!(
+        distinct_sources.len(),
+        3,
+        "fixture must give /note/ three distinct inbound sources, got {inbound:?}"
+    );
+    assert_sorted(
+        "note inbound backlinks",
+        inbound
+            .iter()
+            .map(|l| {
+                (
+                    l["from"].as_str().expect("from"),
+                    l["text"].as_str().expect("text"),
+                    l["anchor"].as_str(),
+                )
+            })
+            .collect(),
+    );
+}
+
+/// Collects every generated `links.json` under `output_dir`, keyed by its path
+/// relative to that root (with `/` separators so the key is the same on
+/// Windows).
+///
+/// Symlinks are skipped: the builder symlinks asset directories on Unix, and
+/// those point outside the output tree.
+fn collect_links_files(output_dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let file_type = entry.file_type().expect("file type");
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
+                walk(&path, root, out);
+            } else if entry.file_name() == "links.json" {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("path under output root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, fs::read(&path).expect("read links.json"));
+            }
+        }
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    walk(output_dir, output_dir, &mut out);
+    out
+}

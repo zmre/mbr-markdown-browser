@@ -198,6 +198,38 @@ relationship_types = [
 Add your own domain types (e.g. `{ name = "manager", inverse = "report" }`) in
 `.mbr/config.toml`.
 
+> **Note:** setting `relationship_types` replaces the defaults wholesale — the
+> genealogy types above are *not* merged in. Copy the ones you still want.
+
+### Declaring one half of an inverse pair
+
+You only need to declare **one** half of an inverse pair. Given
+
+```toml
+relationship_types = [
+    { name = "manager", inverse = "report" },
+]
+```
+
+mbr auto-registers the missing `report` type with `inverse = "manager"` and an
+auto-derived label ("Report" / "Reports"), so both sides relabel correctly and
+reciprocal declarations still collapse to a single edge. Declare the other half
+explicitly only when you want custom labels or an irregular plural:
+
+```toml
+relationship_types = [
+    { name = "manager", inverse = "report", label_plural = "Managers" },
+    { name = "report", inverse = "manager", label = "Direct report" },
+]
+```
+
+Explicit declarations always win over auto-registration. If the two halves
+disagree (`manager` names `report` as its inverse, but `report` names something
+else), both are kept exactly as written and a warning is logged naming both —
+one direction will not be relabelled as you expect. A type declared as both
+`symmetric` and `inverse` keeps its symmetric meaning; the `inverse` is ignored
+with a warning.
+
 ## Genealogy walkthrough
 
 A three-generation family, one note per person, each edge declared once:

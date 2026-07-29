@@ -14,7 +14,7 @@ use pulldown_cmark::{
 };
 use regex::Regex;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -37,6 +37,41 @@ use yaml_rust2::{Yaml, YamlLoader};
 /// - Preserve standard wikilink behavior for plain `[[page]]` links
 pub(crate) fn markdown_options() -> Options {
     Options::all()
+}
+
+/// UTF-8 byte-order mark. Some editors (notably on Windows) prepend it to
+/// markdown files. pulldown-cmark treats it as ordinary content, so a BOM in
+/// front of `---` suppresses the YAML metadata block entirely: frontmatter is
+/// dropped from site.json, search, and the relationship graph, while the page
+/// visibly renders the frontmatter as an em-dash heading. Every entry point
+/// that hands text to the parser strips it first.
+const BOM: char = '\u{feff}';
+
+/// Returns `input` without a leading [`BOM`].
+fn strip_bom(input: &str) -> &str {
+    input.strip_prefix(BOM).unwrap_or(input)
+}
+
+/// Owned counterpart of [`strip_bom`]: removes a leading [`BOM`] in place.
+///
+/// Uses `drain` rather than reallocating, and touches nothing at all for the
+/// overwhelmingly common BOM-less case.
+fn strip_bom_in_place(input: &mut String) {
+    if strip_bom(input).len() != input.len() {
+        input.drain(..BOM.len_utf8());
+    }
+}
+
+/// Loads the first YAML document from `text`, returning `None` when the text
+/// fails to parse *or* contains no document at all.
+///
+/// yaml-rust2 returns `Ok(vec![])` for a metadata block whose body is only
+/// comments (`# tags: [draft]`), so indexing `[0]` on the result panics — and
+/// release builds abort (`panic = 'abort'`). Always go through this helper.
+fn load_first_yaml_doc(text: &str) -> Option<Yaml> {
+    YamlLoader::load_from_str(text)
+        .ok()
+        .and_then(|docs| docs.into_iter().next())
 }
 
 /// Result of parsing a markdown file without rendering to HTML.
@@ -78,10 +113,11 @@ impl ParsedDocument {
 /// Wikilink transforms are not applied (no tag sources configured in this path).
 pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
     let file = file.as_ref();
-    let markdown_input = fs::read_to_string(file).map_err(|e| MarkdownError::ReadFailed {
+    let mut markdown_input = fs::read_to_string(file).map_err(|e| MarkdownError::ReadFailed {
         path: file.to_path_buf(),
         source: e,
     })?;
+    strip_bom_in_place(&mut markdown_input);
 
     let (events, headings, _section_attrs) = collect_events_and_headings(&markdown_input);
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -103,7 +139,7 @@ pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
                 in_metadata_block = false;
             }
             Event::Text(text) if in_yaml => {
-                let metadata_parsed = YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
+                let metadata_parsed = load_first_yaml_doc(text);
                 frontmatter = yaml_frontmatter_simplified(&metadata_parsed);
                 in_yaml = false;
             }
@@ -227,7 +263,16 @@ struct EventState {
     frontmatter_error: Option<String>,
 }
 
-pub type SimpleMetadata = HashMap<String, serde_json::Value>;
+/// Frontmatter metadata as a flat key/value map.
+///
+/// This is a [`BTreeMap`] rather than a `HashMap` so that serialization is
+/// deterministic. `tera`'s `preserve_order` feature turns on
+/// `serde_json/indexmap`, which makes JSON object key order equal *insertion*
+/// order — with a randomly-seeded `HashMap` that made `window.frontmatter` and
+/// every `frontmatter` object in `.mbr/site.json` reshuffle on each run, so two
+/// builds of an identical repository produced different bytes. Ordering was
+/// never YAML source order, so alphabetical is a strict improvement.
+pub type SimpleMetadata = BTreeMap<String, serde_json::Value>;
 
 /// Scan a slice of text for sentence-terminating punctuation (`.!?`).
 ///
@@ -294,7 +339,9 @@ pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
             }) => {
                 in_h1 = true;
             }
-            Event::Text(text) if in_h1 => {
+            // Inline code spans are part of the visible heading text, so a
+            // title like "# The `main` function" must not lose the code word.
+            Event::Text(text) | Event::Code(text) if in_h1 => {
                 h1_text.push_str(&text);
             }
             Event::End(TagEnd::Heading(HeadingLevel::H1)) => {
@@ -419,7 +466,18 @@ fn collect_events_and_headings(
                 in_heading_text = Some(String::new());
                 events.push(event);
             }
-            Event::Text(text) if in_heading_text.is_some() => {
+            // Heading label accumulation. `Event::Code` (inline code spans) and
+            // `Event::InlineMath` carry visible heading text and must be
+            // included, otherwise "The `main` function" yields the label
+            // "The  function" and the anchor id `the--function`.
+            //
+            // Deliberately NOT accumulated: `Event::InlineHtml` (its payload is
+            // raw markup like `<kbd>`, whose inner text already arrives as a
+            // separate `Event::Text`) and `Event::FootnoteReference` (the label
+            // is a citation marker, not part of the heading's name).
+            Event::Text(text) | Event::Code(text) | Event::InlineMath(text)
+                if in_heading_text.is_some() =>
+            {
                 if let Some(ref mut heading_text) = in_heading_text {
                     heading_text.push_str(text);
                 }
@@ -607,13 +665,14 @@ pub async fn render_with_cache(
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input. Use tokio's async filesystem API so this (potentially
     // slow) read does not block a tokio worker thread in the async render path.
-    let raw_markdown_input =
+    let mut raw_markdown_input =
         tokio::fs::read_to_string(&file)
             .await
             .map_err(|e| MarkdownError::ReadFailed {
                 path: file.clone(),
                 source: e,
             })?;
+    strip_bom_in_place(&mut raw_markdown_input);
 
     // Transform [[Source:value]] wikilinks to standard markdown links before parsing
     let markdown_input = if valid_tag_sources.is_empty() {
@@ -630,14 +689,21 @@ pub async fn render_with_cache(
     // Detect if the first heading is an H1 (used for conditional title rendering in templates)
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
-    // Collect bare URLs and fetch oembed data in parallel (only when oembed is enabled).
-    // When oembed_timeout_ms == 0 (default in build mode), skip entirely — process_event
-    // handles missing oembed data gracefully by rendering bare URLs as plain links.
-    let prefetched_oembed = if oembed_timeout_ms > 0 {
-        prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await
-    } else {
-        HashMap::new()
-    };
+    // No-network embeds (YouTube/Giphy/gist/bare media) are pure CPU and require
+    // no I/O, so they are produced regardless of `oembed_timeout_ms` — the docs
+    // promise they keep working when oembed is disabled. Only network OpenGraph
+    // enrichment is gated by the timeout; `prefetch_oembed_urls` must stay behind
+    // that gate because calling it at timeout 0 would fill the cache with empty
+    // `PageInfo`s. Keep this block in sync with `render_sync`, which duplicates
+    // the same pipeline for the rayon/build path.
+    let mut prefetched_oembed = collect_local_embeds(&events_with_ids);
+    if oembed_timeout_ms > 0 {
+        for (url, info) in
+            prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await
+        {
+            prefetched_oembed.entry(url).or_insert(info);
+        }
+    }
 
     // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
     let (processed_events, state) = process_all_events(
@@ -888,10 +954,12 @@ pub fn render_sync(
     wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input
-    let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
-        path: file.clone(),
-        source: e,
-    })?;
+    let mut raw_markdown_input =
+        fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+            path: file.clone(),
+            source: e,
+        })?;
+    strip_bom_in_place(&mut raw_markdown_input);
 
     // Transform [[Source:value]] wikilinks to standard markdown links before parsing
     let markdown_input = if valid_tag_sources.is_empty() {
@@ -911,6 +979,8 @@ pub fn render_sync(
     // compute them even in the sync/build path (they work regardless of
     // oembed_timeout_ms). Network OpenGraph results are only pulled from cache
     // here (the sync path never performs network fetches).
+    // Mirrors the equivalent block in `render_with_cache`; the two entry points
+    // duplicate the whole pipeline and must be changed together.
     let mut prefetched_oembed = collect_local_embeds(&events_with_ids);
     if oembed_timeout_ms > 0
         && let Some(ref cache) = oembed_cache
@@ -954,6 +1024,67 @@ pub fn render_sync(
     )
 }
 
+/// Extract only the outbound links of a markdown file.
+///
+/// Runs the same sync pipeline as [`render_sync`] — BOM strip, tag-wikilink
+/// substitution, event collection, `process_all_events` (which is where link
+/// transformation and `[[wikilink]]` resolution happen) — and then stops,
+/// skipping HTML generation and frontmatter extraction. Callers that need the
+/// rendered page should use [`render_sync`]; this exists for the server's
+/// repository-wide backlink index, which parses every markdown file once and
+/// only ever looks at the collected links.
+///
+/// Links are deduplicated by target exactly as [`finalize_render`] does, so a
+/// page's link list is identical whichever entry point produced it.
+///
+/// Network oembed is not consulted (the sync pipeline never fetches anyway).
+/// That can change which *external* links are collected — a bare URL that
+/// would have become an embed stays an autolink — but never the internal ones,
+/// which are all the backlink index inverts.
+pub fn extract_outbound_links_sync(
+    file: PathBuf,
+    root_path: &Path,
+    link_transform_config: LinkTransformConfig,
+    server_mode: bool,
+    valid_tag_sources: HashSet<String>,
+    wikilink_index: Option<Arc<WikilinkIndex>>,
+) -> Result<Vec<OutboundLink>, MarkdownError> {
+    let mut raw_markdown_input =
+        fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+            path: file.clone(),
+            source: e,
+        })?;
+    strip_bom_in_place(&mut raw_markdown_input);
+
+    let markdown_input = if valid_tag_sources.is_empty() {
+        raw_markdown_input
+    } else {
+        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
+    };
+
+    let (events_with_ids, _headings, _section_attrs) = collect_events_and_headings(&markdown_input);
+
+    let prefetched_oembed = collect_local_embeds(&events_with_ids);
+
+    let (_processed_events, state) = process_all_events(
+        events_with_ids,
+        root_path,
+        link_transform_config,
+        prefetched_oembed,
+        server_mode,
+        false, // transcode_enabled: irrelevant to link collection
+        valid_tag_sources,
+        wikilink_index,
+    );
+
+    let mut seen_targets: HashSet<String> = HashSet::new();
+    Ok(state
+        .collected_links
+        .into_iter()
+        .filter(|link| seen_targets.insert(link.to.clone()))
+        .collect())
+}
+
 /// Compute no-network oembed results (Giphy, gist, bare-URL media) for all
 /// bare URLs in `events`. Pure/synchronous — safe for the build (rayon) path.
 fn collect_local_embeds(events: &[Event<'_>]) -> HashMap<String, PageInfo> {
@@ -982,10 +1113,15 @@ fn collect_cached_oembed(events: &[Event<'_>], cache: &OembedCache) -> HashMap<S
 /// This identifies text events that look like bare URLs (start with "http", no spaces,
 /// and not inside a link element). These URLs are then fetched in parallel for better
 /// performance.
+///
+/// Code blocks are skipped: a URL that only appears in a code sample is content,
+/// not a link, and fetching it would make mbr issue an outbound request for text
+/// the author never intended to embed.
 fn collect_bare_urls(events: &[Event<'_>]) -> HashSet<String> {
     let mut urls = HashSet::new();
     let mut in_link = false;
     let mut in_metadata = false;
+    let mut in_code_block = false;
 
     for event in events {
         match event {
@@ -993,9 +1129,12 @@ fn collect_bare_urls(events: &[Event<'_>]) -> HashSet<String> {
             Event::End(TagEnd::Link) => in_link = false,
             Event::Start(Tag::MetadataBlock(_)) => in_metadata = true,
             Event::End(TagEnd::MetadataBlock(_)) => in_metadata = false,
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
             Event::Text(text)
                 if !in_link
                     && !in_metadata
+                    && !in_code_block
                     && text.starts_with("http")
                     && !text.contains(' ')
                     && !text.trim_start().starts_with("{{") =>
@@ -1009,10 +1148,45 @@ fn collect_bare_urls(events: &[Event<'_>]) -> HashSet<String> {
     urls
 }
 
+/// Maximum number of oembed URLs fetched concurrently for a single document.
+///
+/// Small on purpose: unbounded fan-out (one in-flight request per distinct bare
+/// URL) pressures the file-descriptor limit and turns a single markdown file
+/// into a traffic amplifier against whatever host it names.
+const OEMBED_FETCH_CONCURRENCY: usize = 8;
+
+/// Maximum number of distinct bare URLs a single document fetches oembed
+/// metadata for. URLs beyond the cap render as plain links.
+const MAX_OEMBED_FETCHES_PER_DOC: usize = 100;
+
+/// Applies [`MAX_OEMBED_FETCHES_PER_DOC`] to the list of URLs still needing a
+/// network fetch.
+///
+/// Sorts before truncating so the surviving subset is deterministic:
+/// `collect_bare_urls` returns a `HashSet`, whose iteration order varies from
+/// process to process, which would otherwise make static builds irreproducible.
+/// The sort is skipped entirely when the document is under the cap.
+fn cap_fetch_list(mut urls: Vec<String>) -> Vec<String> {
+    if urls.len() > MAX_OEMBED_FETCHES_PER_DOC {
+        tracing::warn!(
+            "oembed prefetch: {} bare URLs exceeds the per-document cap of {}; \
+             the remainder will render as plain links",
+            urls.len(),
+            MAX_OEMBED_FETCHES_PER_DOC
+        );
+        urls.sort_unstable();
+        urls.truncate(MAX_OEMBED_FETCHES_PER_DOC);
+    }
+    urls
+}
+
 /// Fetches oembed data for a collection of URLs in parallel.
 ///
 /// Uses the cache when available to avoid redundant network requests.
 /// New results are stored in the cache for future use.
+///
+/// Concurrency is bounded by [`OEMBED_FETCH_CONCURRENCY`] and the number of
+/// fetches per document by [`MAX_OEMBED_FETCHES_PER_DOC`].
 async fn prefetch_oembed_urls(
     events: &[Event<'_>],
     oembed_timeout_ms: u64,
@@ -1042,16 +1216,18 @@ async fn prefetch_oembed_urls(
         }
     }
 
-    // Fetch uncached URLs in parallel
-    if !uncached.is_empty() {
+    // Fetch uncached URLs with bounded concurrency
+    let to_fetch = cap_fetch_list(uncached);
+    if !to_fetch.is_empty() {
+        use futures::stream::StreamExt;
+
         tracing::debug!(
             "oembed prefetch: {} cached, {} to fetch",
             results.len(),
-            uncached.len()
+            to_fetch.len()
         );
 
-        let fetch_futures: Vec<_> = uncached
-            .into_iter()
+        let fetched: Vec<_> = futures::stream::iter(to_fetch)
             .map(|url| async move {
                 tracing::debug!("oembed fetch start: {}", url);
                 let result = PageInfo::new_from_url(&url, oembed_timeout_ms)
@@ -1063,9 +1239,9 @@ async fn prefetch_oembed_urls(
                 tracing::debug!("oembed fetch complete: {}", url);
                 (url, result)
             })
-            .collect();
-
-        let fetched: Vec<_> = futures::future::join_all(fetch_futures).await;
+            .buffer_unordered(OEMBED_FETCH_CONCURRENCY)
+            .collect()
+            .await;
 
         // Store results and cache them
         for (url, info) in fetched {
@@ -1082,13 +1258,13 @@ async fn prefetch_oembed_urls(
 fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
     match y.as_ref().and_then(|yaml| yaml.as_hash()) {
         Some(hash) => yaml_hash_to_metadata(hash),
-        None => HashMap::new(),
+        None => SimpleMetadata::new(),
     }
 }
 
 /// Converts a YAML hash to simplified metadata, borrowing instead of cloning.
 fn yaml_hash_to_metadata(hash: &yaml_rust2::yaml::Hash) -> SimpleMetadata {
-    let mut hm = HashMap::with_capacity(hash.len());
+    let mut hm = SimpleMetadata::new();
     for (k, v) in hash.iter() {
         match (k, v) {
             (Yaml::String(key), Yaml::String(value)) => {
@@ -1171,11 +1347,12 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
             path: path.to_path_buf(),
             source: e,
         })?;
-    let markdown_input = String::from_utf8_lossy(&buffer);
-    let parser = MDParser::new_ext(&markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    let decoded = String::from_utf8_lossy(&buffer);
+    let markdown_input = strip_bom(&decoded);
+    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
     let mut in_metadata = false;
-    let mut hm = HashMap::new();
+    let mut hm = SimpleMetadata::new();
     let mut relationships = Vec::new();
     for event in parser.take(4) {
         match &event {
@@ -1186,7 +1363,7 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
                 break;
             }
             Event::Text(text) if in_metadata => {
-                let metadata_parsed = YamlLoader::load_from_str(text).map(|ys| ys[0].clone()).ok();
+                let metadata_parsed = load_first_yaml_doc(text);
 
                 if let Some(ref yaml) = metadata_parsed {
                     relationships = crate::relationships::parse_relationships(yaml);
@@ -1200,7 +1377,7 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
 
     // If no frontmatter title, try to extract the first H1 from the content
     if !hm.contains_key("title")
-        && let Some(h1_text) = extract_first_h1(&markdown_input)
+        && let Some(h1_text) = extract_first_h1(markdown_input)
     {
         hm.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
@@ -1212,7 +1389,13 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
 }
 
 /// Generates a URL-safe anchor ID from heading text.
-/// Handles duplicates by appending -2, -3, etc.
+///
+/// Handles duplicates by appending `-2`, `-3`, … and guarantees the emitted id
+/// is unique across the whole document. `anchor_ids` therefore doubles as the
+/// set of already-issued ids: a bare per-base counter is not sufficient, because
+/// the composed suffix can collide with a *different* heading whose own slug
+/// happens to match it (`["Step 1", "Step 1", "Step 1-2"]` would otherwise hand
+/// out `step-1-2` twice).
 fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> String {
     // Convert to lowercase and replace spaces and special chars with dashes
     let base_id = text
@@ -1240,15 +1423,25 @@ fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> St
         base_id
     };
 
-    // Check for duplicates and increment counter
-    let count = anchor_ids.entry(base_id.clone()).or_insert(0);
-    *count += 1;
+    // Walk the suffix upward until the composed candidate is genuinely unused.
+    let mut count = anchor_ids.get(&base_id).copied().unwrap_or(0);
+    let candidate = loop {
+        count += 1;
+        let candidate = if count == 1 {
+            base_id.clone()
+        } else {
+            format!("{}-{}", base_id, count)
+        };
+        if !anchor_ids.contains_key(&candidate) {
+            break candidate;
+        }
+    };
 
-    if *count == 1 {
-        base_id
-    } else {
-        format!("{}-{}", base_id, count)
-    }
+    anchor_ids.insert(base_id, count);
+    // Reserve the emitted id itself so a later heading that slugifies straight
+    // to it is pushed onto a different suffix instead of colliding.
+    anchor_ids.entry(candidate.clone()).or_insert(0);
+    candidate
 }
 
 /// Processes a single markdown event, transforming it as needed.
@@ -1434,6 +1627,12 @@ fn process_event(
                         state.frontmatter_error = Some(e.to_string());
                     }
                 }
+                (event, state)
+            } else if state.in_code_block {
+                // Code blocks are verbatim: the vid shortcode, bare-URL oembed,
+                // and `[-] ` checkbox rewrites below must never fire on sample
+                // code. Checked after `in_metadata` (not folded into it) so we
+                // never run the YAML loader over code text.
                 (event, state)
             } else if let Some(remaining_text) = text.strip_prefix("[-] ") {
                 // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`
@@ -3201,5 +3400,391 @@ mod tests {
         assert!(html.contains("fn main"));
         assert!(html.contains("foo bar"));
         assert!(html.contains("print(1)"));
+    }
+
+    // ==================== Comment-only YAML frontmatter ====================
+
+    #[test]
+    fn yaml_loader_yields_no_documents_for_comment_only_frontmatter() {
+        // Precondition for the two regressions below: yaml-rust2 parses a
+        // comment-only block *successfully* but returns zero documents, so the
+        // old `.map(|ys| ys[0].clone()).ok()` indexed out of bounds — and `.ok()`
+        // cannot catch a panic. Release builds set `panic = 'abort'`, so one
+        // user file with commented-out frontmatter SIGABRTed the process.
+        assert!(
+            YamlLoader::load_from_str("# tags: [draft]")
+                .expect("comment-only YAML parses")
+                .is_empty()
+        );
+        assert!(load_first_yaml_doc("# tags: [draft]").is_none());
+    }
+
+    #[test]
+    fn parse_survives_comment_only_frontmatter() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"---\n# tags: [draft]\n---\n\nBody text.\n")
+            .unwrap();
+        let doc = parse(file.path()).expect("parse must not panic");
+        assert!(
+            doc.frontmatter.is_empty(),
+            "comment-only frontmatter yields no metadata, got: {:?}",
+            doc.frontmatter
+        );
+    }
+
+    #[test]
+    fn extract_metadata_survives_comment_only_frontmatter() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"---\n# tags: [draft]\n---\n\nBody text.\n")
+            .unwrap();
+        let meta = extract_metadata_from_file(file.path()).expect("must not panic");
+        assert!(
+            meta.metadata.is_empty(),
+            "comment-only frontmatter yields no metadata, got: {:?}",
+            meta.metadata
+        );
+        assert!(meta.relationships.is_empty());
+    }
+
+    // ==================== UTF-8 BOM handling ====================
+
+    const BOM_DOC: &str = "\u{feff}---\ntitle: My Page\ntags:\n  - alpha\n---\n\nBody text.\n";
+
+    #[tokio::test]
+    async fn bom_prefixed_frontmatter_still_renders_as_metadata() {
+        let result = render_result(BOM_DOC).await;
+        assert_eq!(
+            result.frontmatter.get("title"),
+            Some(&serde_json::Value::String("My Page".to_string())),
+            "BOM suppressed the metadata block"
+        );
+        assert!(result.frontmatter.contains_key("tags"));
+        assert!(
+            !result.html.contains(EM_DASH),
+            "frontmatter leaked into the body as an em-dash heading: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn bom_prefixed_frontmatter_extracts_metadata() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(BOM_DOC.as_bytes()).unwrap();
+        let meta = extract_metadata_from_file(file.path()).unwrap();
+        assert_eq!(
+            meta.metadata.get("title"),
+            Some(&serde_json::Value::String("My Page".to_string()))
+        );
+        assert!(meta.metadata.contains_key("tags"));
+    }
+
+    #[test]
+    fn bom_prefixed_frontmatter_parses() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(BOM_DOC.as_bytes()).unwrap();
+        let doc = parse(file.path()).unwrap();
+        assert_eq!(
+            doc.frontmatter.get("title"),
+            Some(&serde_json::Value::String("My Page".to_string()))
+        );
+    }
+
+    #[test]
+    fn strip_bom_leaves_bom_less_input_alone() {
+        assert_eq!(strip_bom("# Heading"), "# Heading");
+        assert_eq!(strip_bom("\u{feff}# Heading"), "# Heading");
+        let mut owned = String::from("\u{feff}---\n");
+        strip_bom_in_place(&mut owned);
+        assert_eq!(owned, "---\n");
+        let mut untouched = String::from("plain");
+        strip_bom_in_place(&mut untouched);
+        assert_eq!(untouched, "plain");
+    }
+
+    // ==================== Code-block text transforms ====================
+
+    #[tokio::test]
+    async fn vid_shortcode_inside_code_fence_is_not_expanded() {
+        let html = render_result("```\n{{ vid(path=\"demo.mp4\") }}\n```\n")
+            .await
+            .html;
+        assert!(
+            !html.contains("<video"),
+            "vid shortcode expanded inside a fence: {html}"
+        );
+        assert!(
+            html.contains("vid(path="),
+            "shortcode should render literally: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_url_inside_code_fence_is_not_embedded() {
+        let html = render_result("```\nhttps://example.com/in-code\n```\n")
+            .await
+            .html;
+        // Assert on `<a href=` rather than the exact URL: the buggy path fed the
+        // code text (trailing newline included) into `PageInfo::html()`, so the
+        // emitted href was escaped and would not match the literal URL.
+        assert!(
+            !html.contains("<a href="),
+            "bare URL linkified inside a fence: {html}"
+        );
+        assert!(
+            html.contains("https://example.com/in-code"),
+            "URL should render literally: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_checkbox_marker_inside_code_fence_is_not_transformed() {
+        let html = render_result("```\n[-] not a checkbox\n```\n").await.html;
+        assert!(
+            !html.contains("canceled-checkbox"),
+            "checkbox transform fired inside a fence: {html}"
+        );
+        assert!(
+            html.contains("[-] not a checkbox"),
+            "line should render literally: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_transforms_still_apply_outside_code_fences() {
+        let vid_html = render_result("{{ vid(path=\"demo.mp4\") }}").await.html;
+        assert!(
+            vid_html.contains("<video"),
+            "vid shortcode outside a fence must expand: {vid_html}"
+        );
+
+        let url_html = render_result("https://example.com/outside").await.html;
+        assert!(
+            url_html.contains("<a href=\"https://example.com/outside\""),
+            "bare URL outside a fence must still be linkified: {url_html}"
+        );
+
+        let todo_html = render_result("- [-] canceled task").await.html;
+        assert!(
+            todo_html.contains("canceled-checkbox"),
+            "checkbox transform must still work outside a fence: {todo_html}"
+        );
+    }
+
+    #[test]
+    fn collect_bare_urls_skips_code_blocks() {
+        // A URL that only appears in a code sample must never trigger an
+        // outbound HTTP request.
+        let (fenced, _, _) = collect_events_and_headings("```\nhttps://example.com/in-code\n```\n");
+        assert!(
+            collect_bare_urls(&fenced).is_empty(),
+            "code-block URLs must not be queued for fetching"
+        );
+
+        let (prose, _, _) = collect_events_and_headings("https://example.com/outside\n");
+        assert_eq!(
+            collect_bare_urls(&prose).len(),
+            1,
+            "prose URLs must still be queued"
+        );
+    }
+
+    // ==================== Async/sync embed parity ====================
+
+    #[tokio::test]
+    async fn local_embeds_render_at_timeout_zero_in_both_paths() {
+        // No-network embeds (YouTube here) must survive `oembed_timeout_ms = 0`;
+        // QuickLook hardcodes 0 into the async path and builds default to it.
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"https://youtu.be/dQw4w9WgXcQ\n").unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+            current_page_url: String::new(),
+        };
+
+        let async_result = render_with_cache(
+            path.clone(),
+            &root,
+            0,
+            config.clone(),
+            None,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        let sync_result = render_sync(
+            path,
+            &root,
+            0,
+            config,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            async_result.html.contains("youtube-embed"),
+            "async path dropped the no-network embed: {}",
+            async_result.html
+        );
+        assert_eq!(
+            async_result.html, sync_result.html,
+            "async and sync render paths must agree at oembed_timeout_ms = 0"
+        );
+    }
+
+    // ==================== Heading text extraction ====================
+
+    #[tokio::test]
+    async fn heading_text_and_anchor_include_inline_code() {
+        let result = render_result("## The `main` function\n").await;
+        assert_eq!(result.headings[0].text, "The main function");
+        assert_eq!(result.headings[0].id, "the-main-function");
+    }
+
+    #[test]
+    fn extract_first_h1_includes_inline_code() {
+        assert_eq!(
+            extract_first_h1("# The `main` function\n"),
+            Some("The main function".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn heading_text_excludes_raw_inline_html() {
+        // Deliberate: the raw `<kbd>` markup is not readable heading text, and
+        // its inner text already arrives as a separate Text event.
+        let result = render_result("## Press <kbd>Ctrl</kbd> now\n").await;
+        assert_eq!(result.headings[0].text, "Press Ctrl now");
+        assert_eq!(result.headings[0].id, "press-ctrl-now");
+    }
+
+    // ==================== Anchor id generation ====================
+
+    #[test]
+    fn generate_anchor_id_basic_slugification() {
+        let mut anchor_ids = HashMap::new();
+        assert_eq!(
+            generate_anchor_id("Hello World", &mut anchor_ids),
+            "hello-world"
+        );
+        assert_eq!(
+            generate_anchor_id("Ünïcode Heading", &mut anchor_ids),
+            "ünïcode-heading"
+        );
+        // Punctuation is dropped and can leave a doubled separator. Recorded as
+        // the slugifier's current behavior, not endorsed as a good slug —
+        // changing it would break every existing hand-written `#anchor` link.
+        assert_eq!(
+            generate_anchor_id("Hello, World!", &mut anchor_ids),
+            "hello--world"
+        );
+    }
+
+    #[test]
+    fn generate_anchor_id_never_collides() {
+        // Regression: the old per-base counter emitted `step-1-2` for both the
+        // second "Step 1" and for "Step 1-2".
+        let mut anchor_ids = HashMap::new();
+        let headings = ["Step 1", "Step 1", "Step 1-2", "", "", "Ünïcode Ünïcode"];
+        let ids: Vec<String> = headings
+            .iter()
+            .map(|h| generate_anchor_id(h, &mut anchor_ids))
+            .collect();
+
+        assert_eq!(
+            ids.iter().collect::<HashSet<_>>().len(),
+            ids.len(),
+            "duplicate anchor ids: {ids:?}"
+        );
+        assert_eq!(ids[0], "step-1");
+        assert_eq!(ids[1], "step-1-2");
+        assert_eq!(ids[3], "heading");
+        assert_eq!(ids[4], "heading-2");
+    }
+
+    // ==================== Bounded oembed fan-out ====================
+
+    #[test]
+    fn cap_fetch_list_limits_and_is_deterministic() {
+        let urls: Vec<String> = (0..150)
+            .map(|i| format!("https://example.com/{i:03}"))
+            .collect();
+
+        let mut expected = urls.clone();
+        expected.sort_unstable();
+        expected.truncate(MAX_OEMBED_FETCHES_PER_DOC);
+
+        assert_eq!(
+            cap_fetch_list(urls.clone()).len(),
+            MAX_OEMBED_FETCHES_PER_DOC
+        );
+        assert_eq!(cap_fetch_list(urls.clone()), expected);
+
+        // Truncation must not depend on iteration order (collect_bare_urls
+        // returns a HashSet, whose order varies per process).
+        let reversed: Vec<String> = urls.into_iter().rev().collect();
+        assert_eq!(cap_fetch_list(reversed), expected);
+    }
+
+    #[test]
+    fn cap_fetch_list_leaves_small_lists_untouched() {
+        let urls = vec![
+            "https://b.example".to_string(),
+            "https://a.example".to_string(),
+        ];
+        assert_eq!(
+            cap_fetch_list(urls.clone()),
+            urls,
+            "lists under the cap must be passed through unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn prefetch_oembed_urls_resolves_local_embeds_without_network() {
+        // Every URL here short-circuits in `PageInfo::new_from_url` via the
+        // no-network embed path, so this exercises the bounded stream with no I/O.
+        let md = "https://youtu.be/aaaaaaaaaaa\n\nhttps://youtu.be/bbbbbbbbbbb\n\nhttps://youtu.be/ccccccccccc\n";
+        let (events, _, _) = collect_events_and_headings(md);
+        let results = prefetch_oembed_urls(&events, 500, &None).await;
+        assert_eq!(results.len(), 3);
+        assert!(results.values().all(|info| info.embed_html.is_some()));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Anchor ids must be unique for any sequence of heading texts —
+        /// duplicates silently break in-page TOC links and permalinks.
+        #[test]
+        fn anchor_ids_are_always_unique(
+            headings in proptest::collection::vec(any::<String>(), 0..30)
+        ) {
+            let mut anchor_ids = HashMap::new();
+            let ids: Vec<String> = headings
+                .iter()
+                .map(|h| generate_anchor_id(h, &mut anchor_ids))
+                .collect();
+            let unique: HashSet<&String> = ids.iter().collect();
+            prop_assert_eq!(unique.len(), ids.len());
+        }
     }
 }

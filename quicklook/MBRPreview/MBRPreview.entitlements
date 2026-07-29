@@ -1,5 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	Why this grant is as broad as it is, and what actually constrains it.
+
+	QuickLook hands the extension a sandbox extension for the user-selected
+	document only. Everything else a preview needs - sibling images, videos and
+	PDFs referenced from the markdown, plus .mbr/theme.css, .mbr/user.css and
+	.mbr/config.toml at the repository root - is not covered by that grant, and
+	there is no entitlement scoped to "the folder this document lives in".
+
+	The narrower alternative, com.apple.security.temporary-exception.files
+	.home-relative-path.read-only = "/", would cover repositories under $HOME but
+	silently break assets and custom themes for repositories on external volumes
+	(/Volumes/...) or anywhere else off the home directory. mbr's premise is that
+	it works against any markdown repository, so that trade was not taken.
+
+	The real constraint is therefore enforced in code, not by this file:
+	MBRFileSchemeHandler (PreviewViewController.swift) serves an mbrfile:// URL
+	only when the requested path, fully resolved with realpath(3), lies inside
+	the previewed document's repository root, and refuses everything until that
+	root is established. Without that check this entitlement lets a <script> in
+	an untrusted .md read any file the user can read.
+
+	If this grant is ever widened to read-write, or the handler's containment
+	check is removed, revisit both halves together.
+-->
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>

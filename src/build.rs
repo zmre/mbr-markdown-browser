@@ -3,7 +3,7 @@
 //! Generates static HTML files from markdown, creating a deployable site.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -24,7 +24,7 @@ use crate::{
     config::Config,
     embedded_katex, embedded_pico,
     errors::BuildError,
-    link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url},
+    link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url, sort_inbound_links},
     link_transform::{LinkTransformConfig, make_relative_url},
     markdown,
     oembed_cache::OembedCache,
@@ -37,6 +37,12 @@ use crate::{
     sorting::sort_files,
     templates::Templates,
 };
+
+/// The repository's config file, relative to `.mbr/`.
+///
+/// Never copied into the static output: it holds `edit_token_hash` and every
+/// other operator-side setting, and the generated site is world-readable.
+const MBR_PRIVATE_CONFIG_FILE: &str = "config.toml";
 
 /// Maps each directory (relative path) to its direct child markdown files (as
 /// template JSON with absolute `url_path`) and the set of immediate
@@ -197,6 +203,32 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     components.iter().collect()
+}
+
+/// Returns true when `path` is `base` itself or lies strictly underneath it.
+///
+/// `Path::starts_with` is **not** a containment check: it compares components
+/// without ever collapsing `..`, so `Path::new("build/../../evil")
+/// .starts_with("build")` is `true`. Backslashes make that exploitable — on
+/// Windows `\` is a real separator, so a frontmatter tag like
+/// `..\..\..\Users\victim\pwned` joins into a genuine traversal that the
+/// lexical guard waves through.
+///
+/// This instead strips the prefix and rejects the remainder if it contains any
+/// component that can leave `base`: `ParentDir`, `RootDir` or a Windows
+/// `Prefix`. `CurDir` (`.`) is harmless and allowed.
+fn is_contained_in(base: &Path, path: &Path) -> bool {
+    use std::path::Component;
+    match path.strip_prefix(base) {
+        Ok(suffix) => !suffix.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }),
+        // Not under `base` at all (e.g. an absolute join replaced the base).
+        Err(_) => false,
+    }
 }
 
 /// Checks if a link target exists using a pre-built set of valid file paths.
@@ -369,10 +401,41 @@ impl Builder {
         })
     }
 
+    /// Joins a repo-derived relative path onto the output directory, rejecting
+    /// anything that would land outside it.
+    ///
+    /// The relative part comes from data the repository controls — `url_path`
+    /// values (which keep `..` when `repo::scan_folder` canonicalizes a
+    /// directory symlink pointing out of the root) and frontmatter tag values —
+    /// so it cannot be trusted to stay inside `output_dir`.
+    ///
+    /// Returns `None` after logging a warning; callers skip that one file
+    /// rather than failing the whole build.
+    fn safe_output_path(&self, relative: impl AsRef<Path>) -> Option<PathBuf> {
+        let relative = relative.as_ref();
+        let joined = self.output_dir.join(relative);
+        if is_contained_in(&self.output_dir, &joined) {
+            Some(joined)
+        } else {
+            tracing::warn!(
+                "Skipping {}: it escapes the output directory {}",
+                relative.display(),
+                self.output_dir.display()
+            );
+            None
+        }
+    }
+
     /// Builds the static site.
     pub async fn build(&self) -> Result<BuildStats, BuildError> {
         let start = Instant::now();
         let mut stats = BuildStats::default();
+
+        // Remove leftovers from an interrupted previous build *before* scanning:
+        // an orphan that survives into the scan is indexed as real content, so
+        // every asset inside it is listed a second time in site.json/media.json
+        // and `place_assets` recreates the whole orphan inside the new output.
+        self.sweep_stale_output_dirs();
 
         // Scan repository for all files
         let stage_start = Instant::now();
@@ -393,10 +456,12 @@ impl Builder {
             Some(stage_start.elapsed()),
         );
 
-        // Prepare output directory
+        // Prepare output directory. The previous output is renamed aside and
+        // deleted on a background thread; the handle is joined at the end of
+        // the build so a completed run never leaves an orphan behind.
         let stage_start = Instant::now();
         print_stage("Cleaning output directory...");
-        self.prepare_output_dir()?;
+        let cleanup = self.prepare_output_dir()?;
         print_done("Cleaning output directory", Some(stage_start.elapsed()));
 
         // Render all markdown files
@@ -496,8 +561,66 @@ impl Builder {
             println!("\r\x1b[KBuilding search index ... skipped");
         }
 
+        // Make sure the previous output directory is really gone. The delete ran
+        // in the background for the whole build, so this is normally instant.
+        self.finish_output_cleanup(cleanup);
+
         stats.duration = start.elapsed();
         Ok(stats)
+    }
+
+    /// Path the previous output directory is renamed to before deletion.
+    ///
+    /// Hidden (leading dot) so `repo::should_ignore` skips it if a build is
+    /// interrupted before the delete finishes, and PID-independent so the next
+    /// run recognizes and sweeps it. Returns `None` only for paths with no file
+    /// name (e.g. `/`), which cannot be a build output anyway.
+    fn stale_output_dir(&self) -> Option<PathBuf> {
+        let name = self.output_dir.file_name()?.to_string_lossy().into_owned();
+        let parent = self.output_dir.parent().unwrap_or(Path::new(""));
+        Some(parent.join(format!(".{name}.mbr-old")))
+    }
+
+    /// Removes leftover "old output" directories from earlier interrupted builds.
+    ///
+    /// Sweeps both the current hidden `.<name>.mbr-old` shape and the legacy
+    /// `<name>.old.<pid>` one (visible, so the scanner used to index it). The
+    /// legacy match requires an all-digit PID suffix so a user directory such as
+    /// `build.old.backup` is never touched.
+    fn sweep_stale_output_dirs(&self) {
+        let Some(name) = self.output_dir.file_name() else {
+            return;
+        };
+        let name = name.to_string_lossy();
+        let parent = match self.output_dir.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let hidden = format!(".{name}.mbr-old");
+        let legacy_prefix = format!("{name}.old.");
+
+        let Ok(entries) = fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let entry_name = entry.file_name();
+            let entry_name = entry_name.to_string_lossy();
+            let is_stale = entry_name == hidden
+                || entry_name
+                    .strip_prefix(&legacy_prefix)
+                    .is_some_and(|pid| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()));
+            if !is_stale || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let path = entry.path();
+            match fs::remove_dir_all(&path) {
+                Ok(()) => tracing::debug!("Removed stale build directory {}", path.display()),
+                Err(e) => tracing::warn!(
+                    "Failed to remove stale build directory {}: {e}",
+                    path.display()
+                ),
+            }
+        }
     }
 
     /// Creates or cleans the output directory.
@@ -505,12 +628,20 @@ impl Builder {
     /// Uses an atomic rename to move the old directory aside, then deletes it in a background
     /// thread. This lets the build start immediately instead of waiting for recursive removal,
     /// which is O(n) on the number of filesystem entries.
-    fn prepare_output_dir(&self) -> Result<(), BuildError> {
-        if self.output_dir.exists() {
+    ///
+    /// Returns the deletion thread's handle plus the directory it is removing,
+    /// so [`Builder::finish_output_cleanup`] can guarantee nothing is left over.
+    fn prepare_output_dir(
+        &self,
+    ) -> Result<Option<(std::thread::JoinHandle<()>, PathBuf)>, BuildError> {
+        let cleanup = if self.output_dir.exists() {
             // Rename old dir aside (O(1) atomic operation), then delete in background.
             let tmp_dir = self
-                .output_dir
-                .with_extension(format!("old.{}", std::process::id()));
+                .stale_output_dir()
+                .ok_or_else(|| BuildError::CreateDirFailed {
+                    path: self.output_dir.clone(),
+                    source: std::io::Error::other("output directory has no file name"),
+                })?;
             // If a stale temp dir exists from a previous interrupted build, remove it first
             if tmp_dir.exists() {
                 let _ = fs::remove_dir_all(&tmp_dir);
@@ -520,15 +651,39 @@ impl Builder {
                 source: e,
             })?;
             // Spawn background thread to delete the old directory
-            std::thread::spawn(move || {
-                let _ = fs::remove_dir_all(&tmp_dir);
+            let to_delete = tmp_dir.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = fs::remove_dir_all(&to_delete);
             });
-        }
+            Some((handle, tmp_dir))
+        } else {
+            None
+        };
         fs::create_dir_all(&self.output_dir).map_err(|e| BuildError::CreateDirFailed {
             path: self.output_dir.clone(),
             source: e,
         })?;
-        Ok(())
+        Ok(cleanup)
+    }
+
+    /// Waits for the background deletion of the previous output to finish and
+    /// removes anything it left behind, so a successful build never leaves an
+    /// orphan directory for the next scan to trip over.
+    fn finish_output_cleanup(&self, cleanup: Option<(std::thread::JoinHandle<()>, PathBuf)>) {
+        let Some((handle, tmp_dir)) = cleanup else {
+            return;
+        };
+        if handle.join().is_err() {
+            tracing::warn!("Background cleanup of the previous build output panicked");
+        }
+        if tmp_dir.exists()
+            && let Err(e) = fs::remove_dir_all(&tmp_dir)
+        {
+            tracing::warn!(
+                "Failed to remove previous build output {}: {e}",
+                tmp_dir.display()
+            );
+        }
     }
 
     /// Returns the effective build concurrency based on config or auto-detection.
@@ -646,17 +801,45 @@ impl Builder {
         let mut outbound_index: HashMap<String, Vec<OutboundLink>> = HashMap::new();
 
         for (source_url, (is_index_file, outbound_links)) in outbound_guard.iter() {
-            // Copy outbound links to our local HashMap
-            outbound_index.insert(source_url.clone(), outbound_links.clone());
+            // An anchor-only link (`[Top](#top)`) reaches here as
+            // `OutboundLink { to: "", anchor: Some("#top") }`, because the
+            // renderer splits the fragment off before storing. It targets the
+            // current page, not another one, so resolving `""` against the
+            // source URL would name the parent directory and invent both an
+            // outbound link and — once inverted below — a backlink on a page
+            // the author never linked to. Dropping it here mirrors
+            // `link_index::resolve_outbound_links`, which does the same for
+            // server mode, so the two modes agree.
+            let outbound_links: Vec<OutboundLink> = outbound_links
+                .iter()
+                .filter(|link| !link.to.is_empty())
+                .cloned()
+                .collect();
 
-            for link in outbound_links {
-                // Only track internal links for inbound
-                if !link.internal {
-                    continue;
-                }
-
+            // Only internal links produce backlinks on their target.
+            for link in outbound_links.iter().filter(|link| link.internal) {
+                // `link.to` is the *raw* markdown destination — the renderer
+                // records it before rewriting the href — so an ordinary
+                // `[beta](beta.md)` arrives as `beta.md` and resolves to
+                // `/beta.md/`, a URL no page has. Every extension-style link,
+                // the most common form there is, silently produced no backlink
+                // at all, while `[beta](beta/)` and `[[Beta]]` worked. Running
+                // it through the same `transform_link` the renderer applies to
+                // the href yields `../beta/`, which resolves to the real page
+                // URL. The server's inbound index does the same, so both modes
+                // now agree.
+                let transformed = crate::link_transform::transform_link(
+                    &link.to,
+                    &LinkTransformConfig {
+                        markdown_extensions: self.config.markdown_extensions.clone(),
+                        index_file: self.config.index_file.clone(),
+                        is_index_file: *is_index_file,
+                        url_depth: None,
+                        current_page_url: source_url.clone(),
+                    },
+                );
                 // Resolve the relative URL to an absolute URL based on the source page
-                let target_url = resolve_relative_url(source_url, &link.to, *is_index_file);
+                let target_url = resolve_relative_url(source_url, &transformed, *is_index_file);
 
                 let inbound_link = InboundLink {
                     from: source_url.clone(),
@@ -669,6 +852,19 @@ impl Builder {
                     .or_default()
                     .push(inbound_link);
             }
+
+            // Copy outbound links to our local HashMap
+            outbound_index.insert(source_url.clone(), outbound_links);
+        }
+
+        // The loop above iterated `build_link_index`, a papaya map with a
+        // randomly-seeded hasher, so every target's backlinks arrived in a
+        // different order on each run and each page's links.json churned
+        // between two builds of an unchanged repository. Outbound lists are
+        // left alone: they come off the parser event stream in document order,
+        // which is already stable and is more useful to a reader than sorting.
+        for links in inbound_index.values_mut() {
+            sort_inbound_links(links);
         }
 
         // Step 2: Collect all known page URLs that can actually render backlinks.
@@ -772,10 +968,13 @@ impl Builder {
 
         // Determine output path: url_path → build/{url_path}/links.json
         let url_path_stripped = url_path.trim_start_matches('/');
-        let output_path = if url_path_stripped.is_empty() || url_path == "/" {
-            self.output_dir.join("links.json")
+        let relative = if url_path_stripped.is_empty() || url_path == "/" {
+            PathBuf::from("links.json")
         } else {
-            self.output_dir.join(url_path_stripped).join("links.json")
+            Path::new(url_path_stripped).join("links.json")
+        };
+        let Some(output_path) = self.safe_output_path(&relative) else {
+            return Ok(());
         };
 
         // Create parent directories
@@ -949,10 +1148,13 @@ impl Builder {
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');
-        let output_path = if url_path.is_empty() || url_path == "/" {
-            self.output_dir.join("index.html")
+        let relative = if url_path.is_empty() || url_path == "/" {
+            PathBuf::from("index.html")
         } else {
-            self.output_dir.join(url_path).join("index.html")
+            Path::new(url_path).join("index.html")
+        };
+        let Some(output_path) = self.safe_output_path(&relative) else {
+            return Ok(());
         };
 
         // Create parent directories
@@ -1192,10 +1394,13 @@ impl Builder {
         let html_output = Templates::render_template_with_tera(tera, template_name, context)?;
 
         // Determine output path
-        let output_path = if is_root {
-            self.output_dir.join("index.html")
+        let relative = if is_root {
+            PathBuf::from("index.html")
         } else {
-            self.output_dir.join(relative_dir).join("index.html")
+            relative_dir.join("index.html")
+        };
+        let Some(output_path) = self.safe_output_path(&relative) else {
+            return Ok(());
         };
 
         // Only write if file doesn't exist (markdown files take precedence)
@@ -1438,18 +1643,8 @@ impl Builder {
             return None;
         }
 
-        let output_path = self
-            .output_dir
-            .join(&safe_source)
-            .join(&safe_value)
-            .join("index.html");
-
-        if !output_path.starts_with(&self.output_dir) {
-            tracing::warn!(
-                "Tag page path escaped output directory: source={source:?} value={value:?}"
-            );
-            return None;
-        }
+        let relative = Path::new(&safe_source).join(&safe_value).join("index.html");
+        let output_path = self.safe_output_path(&relative)?;
 
         Some((context, output_path))
     }
@@ -1507,14 +1702,21 @@ impl Builder {
             return None;
         }
 
-        let output_path = self.output_dir.join(&safe_source).join("index.html");
-
-        if !output_path.starts_with(&self.output_dir) {
-            tracing::warn!("Tag source index path escaped output directory: source={source:?}");
-            return None;
-        }
+        let relative = Path::new(&safe_source).join("index.html");
+        let output_path = self.safe_output_path(&relative)?;
 
         Some((context, output_path))
+    }
+
+    /// True when *anything* already occupies `path` — including a symlink whose
+    /// target does not resolve.
+    ///
+    /// `Path::exists` follows symlinks, so it reports `false` for a dangling one
+    /// and the caller then tries to create it again and fails with
+    /// `AlreadyExists`. For "has this output path already been placed?" the
+    /// question is about the directory entry, not about what it points at.
+    fn path_entry_exists(path: &Path) -> bool {
+        path.symlink_metadata().is_ok()
     }
 
     /// Places static assets (images, PDFs, videos) into the build output.
@@ -1532,7 +1734,9 @@ impl Builder {
 
         for file_info in other_files {
             let url_path = file_info.url_path.trim_start_matches('/');
-            let output_path = self.output_dir.join(url_path);
+            let Some(output_path) = self.safe_output_path(url_path) else {
+                continue;
+            };
 
             // Create parent directories
             if let Some(parent) = output_path.parent() {
@@ -1543,7 +1747,7 @@ impl Builder {
             }
 
             // Skip if already present (an earlier asset wins)
-            if !output_path.exists() {
+            if !Self::path_entry_exists(&output_path) {
                 self.place_asset(&file_info.raw_path, &output_path, placement)?;
             }
         }
@@ -1588,6 +1792,41 @@ impl Builder {
     fn calculate_relative_symlink(&self, from: &Path, to: &Path) -> Result<PathBuf, BuildError> {
         // Get the directory containing the symlink
         let from_dir = from.parent().unwrap_or(from);
+
+        // Both sides must be expressed in the same *physical* space, because
+        // that is where the kernel resolves the link from: a relative target is
+        // walked from the real directory the link lives in, not from the
+        // lexical path used to create it. Mixing the two produces a link that
+        // is arithmetically correct and still dangling — on macOS `/tmp` is a
+        // symlink to `/private/tmp`, so an output dir given as `/tmp/site` with
+        // a canonical source under `/private/tmp` shares no common prefix and
+        // the emitted `../../..` climbs one level too few.
+        //
+        // The parent directory always exists by the time `place_asset` runs
+        // (callers create it), and the source is a real file, so both
+        // canonicalize; the fallback only matters for unit tests on synthetic
+        // paths.
+        //
+        // Canonicalize both sides or neither: the component arithmetic below is
+        // only meaningful when the two paths live in the same space. Falling
+        // back per-side lets one succeed while the other fails and silently
+        // mixes spaces — on Windows `Path::new("/").canonicalize()` succeeds
+        // (it resolves to the current drive root, `\\?\C:\`) while a synthetic
+        // `/a/b/target` does not exist and fails, leaving `[Prefix, RootDir]`
+        // against `[RootDir, a, b, target]`. That shares no common prefix, so
+        // the loop below pushes the target's `RootDir` component and
+        // `PathBuf::push` resets the buffer to absolute, yielding `\a\b\target`
+        // instead of the relative `a/b/target`.
+        let canonical = match (from_dir.canonicalize(), to.canonicalize()) {
+            (Ok(from_canonical), Ok(to_canonical)) => Some((from_canonical, to_canonical)),
+            _ => None,
+        };
+        let (from_dir, to) = match canonical.as_ref() {
+            Some((from_canonical, to_canonical)) => {
+                (from_canonical.as_path(), to_canonical.as_path())
+            }
+            None => (from_dir, to),
+        };
 
         // Calculate how many levels up we need to go
         let from_components: Vec<_> = from_dir.components().collect();
@@ -1642,8 +1881,13 @@ impl Builder {
 
                 let output_path = self.output_dir.join(relative);
 
-                // Only place if path doesn't already exist (asset wins over static)
-                if !output_path.exists() {
+                // Only place if path doesn't already exist (asset wins over static).
+                //
+                // This pass and `place_assets` now overlap for an external
+                // static overlay: its files are indexed in `other_files`, so
+                // `place_assets` has already placed them and this walk finds
+                // the same paths again.
+                if !Self::path_entry_exists(&output_path) {
                     if let Some(parent) = output_path.parent() {
                         fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
                             path: parent.to_path_buf(),
@@ -1764,13 +2008,23 @@ impl Builder {
 
         // Add sort config and tags to the response
         if let Some(obj) = response.as_object_mut() {
+            // Media data ships separately in media.json (step 4b), exactly as
+            // server mode does (`src/server.rs` `get_site_info`). Leaving it
+            // here duplicated the entire media catalog — on asset-heavy repos
+            // it is the overwhelming majority of site.json, refetched and
+            // reparsed on every page view, and no consumer reads it.
+            obj.remove("other_files");
+
             obj.insert(
                 "sort".to_string(),
                 serde_json::to_value(&self.config.sort).unwrap_or(serde_json::Value::Array(vec![])),
             );
 
-            // Add tag sources with their tags
-            let mut tags_data: HashMap<String, serde_json::Value> = HashMap::new();
+            // Add tag sources with their tags. `BTreeMap`, not `HashMap`: tera's
+            // `preserve_order` feature makes serde_json object key order equal
+            // insertion order, so a randomly seeded `HashMap` would reshuffle
+            // site.json on every rebuild of an unchanged repo.
+            let mut tags_data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
             for tag_source in &self.config.tag_sources {
                 let source = tag_source.url_source();
                 if self.repo.tag_index.has_source(&source) {
@@ -2054,9 +2308,11 @@ impl Builder {
 
     /// Validates internal links in all generated HTML files.
     ///
-    /// Scans all HTML files for `<a href="...">` links, filters to internal links
-    /// (excluding external URLs, mailto:, tel:, etc.), and checks if each link
-    /// resolves to an existing file or directory in the output.
+    /// Scans all HTML files for `<a href="...">` links, filters to internal
+    /// links with [`crate::url_path::is_external_url`] (the same predicate the
+    /// renderer and the link tracker use, so a href can never be rewritten by
+    /// one and reported broken by another), and checks that each one resolves
+    /// to an existing file or directory in the output.
     ///
     /// Returns a list of broken links found.
     fn validate_links(&self) -> Vec<BrokenLink> {
@@ -2107,15 +2363,15 @@ impl Builder {
 
                 for element in document.select(&selector) {
                     if let Some(href) = element.value().attr("href") {
-                        if href.starts_with("http://")
-                            || href.starts_with("https://")
-                            || href.starts_with("//")
-                            || href.starts_with("mailto:")
-                            || href.starts_with("tel:")
-                            || href.starts_with("javascript:")
-                            || href.starts_with("data:")
-                            || href.starts_with("#")
-                        {
+                        // Anchor-only links address the current page, so there
+                        // is no target file to look for. Everything else that
+                        // leaves the site is answered by the one shared
+                        // predicate: the hand-rolled scheme list this replaced
+                        // omitted `ftp://`, `magnet:`, `sms:`, `callto:` and
+                        // `blob:`, so those valid hrefs were joined onto the
+                        // source directory and reported as broken internal
+                        // links (fatal under `--fail-on-broken-links`).
+                        if href.starts_with('#') || crate::url_path::is_external_url(href) {
                             continue;
                         }
 
@@ -2166,7 +2422,14 @@ impl Builder {
         }
     }
 
-    /// Recursively copies a directory.
+    /// Recursively copies the repository's `.mbr/` folder into the output.
+    ///
+    /// `config.toml` is deliberately left behind. It is the repository's own
+    /// configuration and carries `edit_token_hash` (an Argon2id hash of the
+    /// editing credential), which `docs/reference/configuration.md` promises is
+    /// never sent to the frontend. The build writes `.nojekyll` specifically so
+    /// hosts like GitHub Pages serve `.mbr/` verbatim, so anything copied here
+    /// is published to every visitor of the generated site.
     fn copy_dir_recursive(&self, from: &Path, to: &Path) -> Result<(), BuildError> {
         for entry in WalkDir::new(from)
             .follow_links(true)
@@ -2182,6 +2445,16 @@ impl Builder {
                     to: to.to_path_buf(),
                     source: std::io::Error::other("strip prefix failed"),
                 })?;
+
+            // The one file the build must never publish. Matched on the exact
+            // relative path, since that is the only `config.toml` the config
+            // loader reads (`root_dir/.mbr/config.toml`).
+            // The one file the build must never publish. Matched on the exact
+            // relative path, since that is the only `config.toml` the config
+            // loader reads (`root_dir/.mbr/config.toml`).
+            if relative == Path::new(MBR_PRIVATE_CONFIG_FILE) {
+                continue;
+            }
 
             let dest = to.join(relative);
 
@@ -2552,6 +2825,154 @@ mod tests {
         }
     }
 
+    // ---------------------- links.json tests ----------------------
+
+    /// Reads the `links.json` a build wrote for `url_path`.
+    fn read_links_json(output_dir: &Path, url_path: &str) -> serde_json::Value {
+        let path = output_dir
+            .join(url_path.trim_matches('/'))
+            .join("links.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("no links.json at {}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("links.json is not valid JSON")
+    }
+
+    /// An anchor-only link (`[Top](#top)`) arrives with `to: ""` because the
+    /// renderer splits the fragment off. Inverting it used to resolve `""`
+    /// against the source URL, naming the parent page and inventing a backlink
+    /// there that the author never wrote.
+    #[tokio::test]
+    async fn test_write_link_files_anchor_only_link_creates_no_backlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("build");
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+
+        let builder = test_builder(output.clone(), root);
+
+        // Both pages exist, so a phantom backlink on either would be written.
+        builder
+            .repo
+            .markdown_files
+            .pin()
+            .insert(PathBuf::from("docs/index.md"), mk_info("/docs/"));
+        builder
+            .repo
+            .markdown_files
+            .pin()
+            .insert(PathBuf::from("docs/guide.md"), mk_info("/docs/guide/"));
+
+        // /docs/guide/ links to itself via `#top` and genuinely links to /docs/.
+        builder.build_link_index.pin().insert(
+            "/docs/guide/".to_string(),
+            (
+                false,
+                vec![
+                    OutboundLink {
+                        to: String::new(),
+                        text: "Top".to_string(),
+                        anchor: Some("#top".to_string()),
+                        internal: true,
+                    },
+                    OutboundLink {
+                        to: "/docs/".to_string(),
+                        text: "Docs".to_string(),
+                        anchor: None,
+                        internal: true,
+                    },
+                ],
+            ),
+        );
+
+        builder.write_link_files().await.unwrap();
+
+        // /docs/ keeps the one real backlink and gains no phantom.
+        let docs = read_links_json(&output, "/docs/");
+        let inbound = docs["inbound"].as_array().expect("inbound array");
+        assert_eq!(
+            inbound.len(),
+            1,
+            "anchor-only link must not add a backlink, got {inbound:?}"
+        );
+        assert_eq!(inbound[0]["text"], "Docs");
+        assert!(
+            inbound
+                .iter()
+                .all(|link| link["anchor"] != serde_json::json!("#top")),
+            "phantom backlink from the `#top` anchor leaked into {inbound:?}"
+        );
+
+        // The source page keeps only the real outbound link, matching what
+        // `link_index::resolve_outbound_links` serves in server mode.
+        let guide = read_links_json(&output, "/docs/guide/");
+        let outbound = guide["outbound"].as_array().expect("outbound array");
+        assert_eq!(
+            outbound.len(),
+            1,
+            "empty-target link must not be published, got {outbound:?}"
+        );
+        assert_eq!(outbound[0]["to"], "/docs/");
+        assert!(
+            guide["inbound"]
+                .as_array()
+                .expect("inbound array")
+                .is_empty(),
+            "the page must not link to itself, got {:?}",
+            guide["inbound"]
+        );
+    }
+
+    // ---------------------- .mbr copy tests ----------------------
+
+    /// `.mbr/config.toml` holds `edit_token_hash`; the build writes `.nojekyll`
+    /// so `.mbr/` is served verbatim, which published that hash to every
+    /// visitor. Everything else in the folder must still be copied.
+    #[test]
+    fn test_copy_dir_recursive_omits_config_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("build");
+        let root = temp.path().join("root");
+        let mbr_source = root.join(".mbr");
+        std::fs::create_dir_all(mbr_source.join("components")).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+
+        std::fs::write(
+            mbr_source.join("config.toml"),
+            "edit_token_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA\"\n",
+        )
+        .unwrap();
+        std::fs::write(mbr_source.join("theme.css"), ":root { --x: 1; }").unwrap();
+        std::fs::write(mbr_source.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(
+            mbr_source.join("components").join("mbr-components.min.js"),
+            "export const x = 1;",
+        )
+        .unwrap();
+
+        let builder = test_builder(output.clone(), root);
+        let mbr_output = output.join(".mbr");
+        std::fs::create_dir_all(&mbr_output).unwrap();
+        builder
+            .copy_dir_recursive(&mbr_source, &mbr_output)
+            .expect("copy failed");
+
+        assert!(
+            !mbr_output.join("config.toml").exists(),
+            "config.toml (with edit_token_hash) must never be published"
+        );
+        for still_copied in [
+            "theme.css",
+            "index.html",
+            "components/mbr-components.min.js",
+        ] {
+            assert!(
+                mbr_output.join(still_copied).exists(),
+                "{still_copied} must still be copied into the output"
+            );
+        }
+    }
+
     // ---------------------- resolve_link tests ----------------------
 
     #[test]
@@ -2757,7 +3178,10 @@ mod tests {
         let root = temp.path().join("root");
         std::fs::create_dir_all(root.join(".mbr")).unwrap();
 
-        // Create HTML with external links
+        // Create HTML with external links. The ftp/ftps/magnet/sms/callto/blob
+        // rows are the regression: the hand-rolled scheme list this check used
+        // to carry did not know them, so each was resolved against the source
+        // directory and reported as a broken internal link.
         let html_path = temp_path.join("test.html");
         std::fs::write(
             &html_path,
@@ -2769,6 +3193,12 @@ mod tests {
             <a href="tel:+1234567890">Phone</a>
             <a href="javascript:void(0)">JavaScript</a>
             <a href="data:text/html,Hello">Data URI</a>
+            <a href="ftp://ftp.example.com/pub/file.zip">FTP</a>
+            <a href="ftps://ftp.example.com/pub/file.zip">FTPS</a>
+            <a href="magnet:?xt=urn:btih:c12fe1c06bba254a9dc9">Magnet</a>
+            <a href="sms:+15555550123">SMS</a>
+            <a href="callto:+15555550123">Callto</a>
+            <a href="blob:http://localhost:5220/550e8400-e29b">Blob</a>
             <a href="#section">Anchor</a>
         </body></html>"##,
         )
@@ -2895,6 +3325,198 @@ mod tests {
 
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0].link_url, "missing/");
+    }
+
+    // ---------------------- output containment tests ----------------------
+
+    /// The guard this replaced used `Path::starts_with`, which compares
+    /// components without ever collapsing `..`. This pins the exact
+    /// counterexample so the lexical check cannot come back.
+    #[test]
+    fn test_lexical_starts_with_guard_accepts_traversal_component_check_rejects() {
+        let base = Path::new("/tmp/out");
+        let escaped = base.join("tags").join("..").join("..").join("evil");
+
+        assert!(
+            escaped.starts_with(base),
+            "precondition: the old lexical guard accepted this path"
+        );
+        assert!(
+            !is_contained_in(base, &escaped),
+            "component-wise containment must reject a ParentDir traversal"
+        );
+    }
+
+    #[test]
+    fn test_is_contained_in_accepts_normal_suffixes() {
+        let base = Path::new("/tmp/out");
+        assert!(is_contained_in(base, base));
+        assert!(is_contained_in(base, &base.join("tags/rust/index.html")));
+        assert!(is_contained_in(base, &base.join("./tags/rust")));
+    }
+
+    #[test]
+    fn test_is_contained_in_rejects_paths_outside_base() {
+        let base = Path::new("/tmp/out");
+        assert!(!is_contained_in(base, Path::new("/tmp/other/index.html")));
+        assert!(!is_contained_in(base, Path::new("/etc/passwd")));
+        // A sibling that merely shares a name prefix is not contained.
+        assert!(!is_contained_in(base, Path::new("/tmp/outside/x")));
+    }
+
+    /// Helper: a `Builder` whose output dir exists, for path-guard tests.
+    fn guard_builder(temp: &tempfile::TempDir) -> (Builder, PathBuf) {
+        let root = temp.path().join("root");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        (test_builder(output.clone(), root), output)
+    }
+
+    #[test]
+    fn test_safe_output_path_allows_normal_relative_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, output) = guard_builder(&temp);
+
+        assert_eq!(
+            builder.safe_output_path("docs/guide/index.html"),
+            Some(output.join("docs/guide/index.html"))
+        );
+    }
+
+    /// A `url_path` carrying `..` (produced when `repo::scan_folder`
+    /// canonicalizes a directory symlink that points out of the root) must not
+    /// write outside `--output`.
+    #[test]
+    fn test_safe_output_path_rejects_parent_dir_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, _output) = guard_builder(&temp);
+
+        assert_eq!(builder.safe_output_path("../../evil/index.html"), None);
+        assert_eq!(builder.safe_output_path("tags/../../evil/index.html"), None);
+    }
+
+    #[test]
+    fn test_safe_output_path_rejects_absolute_relative_argument() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, _output) = guard_builder(&temp);
+
+        // `Path::join` with an absolute path discards the base entirely.
+        let absolute = if cfg!(windows) {
+            r"C:\Users\victim\pwned"
+        } else {
+            "/etc/pwned"
+        };
+        assert_eq!(builder.safe_output_path(absolute), None);
+    }
+
+    /// On Windows `\` is a real path separator, so a tag value such as
+    /// `..\..\..\Users\victim\pwned` is a genuine traversal.
+    #[cfg(windows)]
+    #[test]
+    fn test_safe_output_path_rejects_backslash_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, _output) = guard_builder(&temp);
+
+        assert_eq!(
+            builder.safe_output_path(r"..\..\..\Users\victim\pwned"),
+            None
+        );
+        assert_eq!(
+            builder.safe_output_path(r"tags\..\..\evil\index.html"),
+            None
+        );
+    }
+
+    /// End-to-end for the tag-page half: whatever the tag sanitizer does with a
+    /// backslash payload, the resulting output path must stay inside `--output`.
+    #[cfg(windows)]
+    #[test]
+    fn test_tag_page_context_never_escapes_output_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let (builder, output) = guard_builder(&temp);
+
+        let result = builder.build_single_tag_page_context("tags", r"..\..\..\Users\victim\pwned");
+        if let Some((_, path)) = result {
+            assert!(
+                is_contained_in(&output, &path),
+                "tag page path {} escaped {}",
+                path.display(),
+                output.display()
+            );
+        }
+
+        let result = builder.build_tag_source_index_context(r"..\..\evil");
+        if let Some((_, path)) = result {
+            assert!(
+                is_contained_in(&output, &path),
+                "tag index path {} escaped {}",
+                path.display(),
+                output.display()
+            );
+        }
+    }
+
+    // ---------------------- stale output directory tests ----------------------
+
+    #[test]
+    fn test_stale_output_dir_is_hidden_and_pid_independent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+        let output = temp.path().join("build");
+        let builder = test_builder(output, root);
+
+        let stale = builder.stale_output_dir().expect("stale name");
+        assert_eq!(stale, temp.path().join(".build.mbr-old"));
+        // Hidden, so `repo::should_ignore` skips it if a build is interrupted.
+        assert!(
+            stale
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with('.'),
+            "stale directory must be hidden so the repo scanner ignores it"
+        );
+        // Stable across runs — a second process must find and sweep it.
+        assert!(
+            !stale
+                .to_string_lossy()
+                .contains(&std::process::id().to_string())
+        );
+    }
+
+    #[test]
+    fn test_sweep_removes_orphans_and_keeps_unrelated_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+        let output = temp.path().join("build");
+
+        // Orphans: the current hidden shape and the legacy `<name>.old.<pid>`.
+        let hidden = temp.path().join(".build.mbr-old");
+        let legacy = temp.path().join("build.old.88888");
+        std::fs::create_dir_all(hidden.join("images")).unwrap();
+        std::fs::create_dir_all(legacy.join("images")).unwrap();
+        std::fs::write(legacy.join("images/pic.png"), b"x").unwrap();
+
+        // Must survive: real user data with a similar name, and another output
+        // directory's orphan.
+        let user_dir = temp.path().join("build.old.backup");
+        let other_output_orphan = temp.path().join(".public.mbr-old");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&other_output_orphan).unwrap();
+
+        let builder = test_builder(output, root);
+        builder.sweep_stale_output_dirs();
+
+        assert!(!hidden.exists(), "hidden orphan should be swept");
+        assert!(!legacy.exists(), "legacy pid-named orphan should be swept");
+        assert!(user_dir.exists(), "user directory must not be deleted");
+        assert!(
+            other_output_orphan.exists(),
+            "another output directory's orphan must not be deleted"
+        );
     }
 
     // ---------------------- asset placement tests ----------------------
@@ -3072,6 +3694,32 @@ mod tests {
         // Unusual: symlink pointing to itself (edge case)
         let result = symlink_helper("/a/b/link", "/a/b/link");
         assert_eq!(result, PathBuf::from("link"));
+    }
+
+    #[test]
+    fn test_symlink_one_sided_canonicalization_falls_back_to_lexical() {
+        // Both-or-neither invariant: `from`'s parent is a real directory and so
+        // canonicalizes, while the target does not exist and cannot. Mixing the
+        // two spaces produces garbage arithmetic (on macOS the temp dir
+        // canonicalizes to /private/var/..., on Windows the 8.3 temp path
+        // expands to a \\?\ verbatim prefix), so both sides must fall back to
+        // the lexical form and yield exactly what lexical arithmetic gives.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let builder = test_builder(root.clone(), root.clone());
+
+        let from = root.join("link");
+        let to = root.join("does-not-exist").join("asset.png");
+        assert!(!to.exists(), "target must not exist for this test");
+
+        let result = builder.calculate_relative_symlink(&from, &to).unwrap();
+
+        assert!(
+            result.is_relative(),
+            "symlink target should be relative, got {}",
+            result.display()
+        );
+        assert_eq!(result, PathBuf::from("does-not-exist/asset.png"));
     }
 
     #[test]

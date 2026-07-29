@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import './mbr-editor.js'
+// Registers <mbr-search> so the modal-open test below drives a REAL element
+// through its public MbrOverlay contract; an un-upgraded element reports
+// nothing to isModalOpen().
+import './mbr-search.js'
 
 /**
  * Tests for the "e" keyboard shortcut guard in <mbr-editor>.
@@ -81,7 +85,8 @@ describe('MbrEditorElement keyboard shortcut', () => {
 
   it('does not trigger while a search modal is open (even with focus outside its input)', () => {
     const search = document.body.appendChild(document.createElement('mbr-search'))
-    ;(search as any)._isOpen = true
+    search.open()
+    expect(search.isOpen).toBe(true)
 
     // Target is the body (e.g. arrow-keying through results), not an input:
     // the modal check alone must block the shortcut.

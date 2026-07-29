@@ -1,6 +1,6 @@
 use std::{
     ops::Deref,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -45,6 +45,18 @@ pub struct Repo {
     canonical_root: PathBuf,
     #[serde(skip)]
     static_folder: String,
+    /// The static overlay's own directory, when it legitimately resolves
+    /// *outside* `canonical_root` (`static_folder = "../static"` for the
+    /// `repo/content` + `repo/static` layout).
+    ///
+    /// `None` when the overlay is disabled, resolves inside the root, or was
+    /// refused by the policy — so this is the only directory besides
+    /// `canonical_root` that the scanner may descend into. Computed once, from
+    /// [`crate::config::resolve_static_overlay`], which is the same call
+    /// `Config::validate` makes: the scanner must never accept a root the
+    /// validator would have refused.
+    #[serde(skip)]
+    canonical_static_root: Option<PathBuf>,
     #[serde(skip)]
     markdown_extensions: Vec<String>,
     /// The configured index file name (e.g., "index.md" or "_index.md").
@@ -79,9 +91,21 @@ pub struct Repo {
     /// Whether text extraction has been performed for searchable files.
     #[serde(skip)]
     text_extracted: Arc<AtomicBool>,
-    /// Whether media metadata has been populated (phase 2 of scan).
+    /// Whether media metadata population has *finished* (phase 2 of scan).
+    ///
+    /// Readers (`is_media_populated`, `wait_for_media`, the `media.json`
+    /// handler) treat this as "the metadata is there", so it is published only
+    /// once every entry has been probed.
     #[serde(skip)]
     media_populated: Arc<AtomicBool>,
+    /// Whether media metadata population has *started* (run-once guard).
+    ///
+    /// Deliberately separate from `media_populated`: using one flag for both
+    /// meant the very first instruction of `populate_media_metadata` announced
+    /// completion, so a `media.json` request arriving during the probing window
+    /// skipped the wait and returned entries with no duration or dimensions.
+    #[serde(skip)]
+    media_population_started: Arc<AtomicBool>,
     /// Whether initial scan_all has completed.
     #[serde(skip)]
     scan_complete: Arc<AtomicBool>,
@@ -102,13 +126,29 @@ impl Deref for MarkdownFiles {
     }
 }
 
+/// Serializes in `url_path` order rather than map order.
+///
+/// `papaya::HashMap` uses a randomly seeded `RandomState`, so iteration order
+/// differs between processes: two builds of the same repository produced
+/// byte-different `site.json`/`media.json`, which churns committed `build/`
+/// directories and invalidates content-hash/ETag caches on a no-op rebuild.
+/// `raw_path` breaks ties, because distinct files can share a `url_path`
+/// (`docs/index.md` and `docs.md` both render at `/docs/`).
 impl Serialize for MarkdownFiles {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut s = serializer.serialize_seq(Some(self.len()))?;
-        for (_, v) in self.pin().iter() {
+        let pin = self.pin();
+        let mut entries: Vec<&MarkdownInfo> = pin.iter().map(|(_, v)| v).collect();
+        entries.sort_unstable_by(|a, b| {
+            a.url_path
+                .cmp(&b.url_path)
+                .then_with(|| a.raw_path.cmp(&b.raw_path))
+        });
+
+        let mut s = serializer.serialize_seq(Some(entries.len()))?;
+        for v in entries {
             s.serialize_element(v)?;
         }
         s.end()
@@ -123,13 +163,22 @@ impl Deref for OtherFiles {
         &self.0
     }
 }
+/// Serializes in `url_path` order — see [`MarkdownFiles`]'s impl for why.
 impl Serialize for OtherFiles {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut s = serializer.serialize_seq(Some(self.len()))?;
-        for (_, v) in self.pin().iter() {
+        let pin = self.pin();
+        let mut entries: Vec<&OtherFileInfo> = pin.iter().map(|(_, v)| v).collect();
+        entries.sort_unstable_by(|a, b| {
+            a.url_path
+                .cmp(&b.url_path)
+                .then_with(|| a.raw_path.cmp(&b.raw_path))
+        });
+
+        let mut s = serializer.serialize_seq(Some(entries.len()))?;
+        for v in entries {
             s.serialize_element(v)?;
         }
         s.end()
@@ -565,9 +614,27 @@ impl Repo {
             })
             .collect();
 
+        let canonical_root = canonicalize_root(root_dir.into());
+        let static_folder = static_folder.into();
+        // Ask the config policy, rather than re-deriving containment here, so a
+        // refused overlay is never scannable. A policy error is not re-reported:
+        // `Config::validate` already aborted startup on it, and the only callers
+        // that reach here with a bad value are tests constructing a `Repo`
+        // directly.
+        let canonical_static_root =
+            match crate::config::resolve_static_overlay(&canonical_root, &static_folder) {
+                Ok(crate::config::StaticOverlay::External(dir)) => Some(dir),
+                Ok(crate::config::StaticOverlay::WithinRoot) => None,
+                Err(e) => {
+                    tracing::warn!("Not indexing static_folder {static_folder:?}: {e}");
+                    None
+                }
+            };
+
         Self {
-            canonical_root: canonicalize_root(root_dir.into()),
-            static_folder: static_folder.into(),
+            canonical_root,
+            static_folder,
+            canonical_static_root,
             markdown_extensions: markdown_extensions.to_vec(),
             ignore_dirs: ignore_dirs.to_vec(),
             ignore_globs: ignore_globs.to_vec(),
@@ -585,6 +652,7 @@ impl Repo {
             tag_sources: tag_sources.to_vec(),
             text_extracted: Arc::new(AtomicBool::new(false)),
             media_populated: Arc::new(AtomicBool::new(false)),
+            media_population_started: Arc::new(AtomicBool::new(false)),
             scan_complete: Arc::new(AtomicBool::new(false)),
             scan_notify: Arc::new(tokio::sync::Notify::new()),
             media_notify: Arc::new(tokio::sync::Notify::new()),
@@ -604,6 +672,30 @@ impl Repo {
             .unwrap_or_else(|| abs_path.to_path_buf())
     }
 
+    /// Decides whether the scanner may descend into `abs_path`, and says which
+    /// of the two legitimate roots it belongs to.
+    ///
+    /// Returns the path's *root-relative* form alongside, because that is what
+    /// `scan_folder` re-joins onto `canonical_root` on the next hop. For the
+    /// overlay that form keeps its `../static/…` shape, which round-trips
+    /// through `join` correctly and which `build_static_url_path` strips back
+    /// off when it builds the URL.
+    ///
+    /// `None` means "outside everything the scanner may walk" — the escaping
+    /// directory symlink case, which must stay refused.
+    fn scannable(&self, abs_path: &Path) -> Option<(ScanLocation, PathBuf)> {
+        if let Some(relative) = repo_relative_within_root(&self.canonical_root, abs_path) {
+            return Some((ScanLocation::WithinRoot, relative));
+        }
+
+        let overlay = self.canonical_static_root.as_deref()?;
+        if !abs_path.starts_with(overlay) {
+            return None;
+        }
+        let relative = pathdiff::diff_paths(abs_path, &self.canonical_root)?;
+        Some((ScanLocation::StaticOverlay, relative))
+    }
+
     pub fn scan_folder<P: AsRef<Path>>(&self, relative_folder_path: &P) -> Result<(), RepoError> {
         let relative_folder_path_ref = relative_folder_path.as_ref();
         let joined = self.canonical_root.join(relative_folder_path_ref);
@@ -614,6 +706,26 @@ impl Repo {
                     path: joined.clone(),
                     source,
                 })?;
+
+        // A directory symlink can resolve outside the repository root, and the
+        // `canonicalize` above re-roots the walk at its target. Every file found
+        // below it would then relativize to `../…`, which `url_path::path_to_url`
+        // deliberately preserves — so the URL escapes the site and, in build
+        // mode, `output_dir.join(url_path)` writes pages outside `--output`.
+        // Refuse to descend instead.
+        //
+        // The validated static overlay is the one exception, and a narrow one:
+        // it is a specific directory the config policy already approved, not a
+        // general loosening. Every other out-of-root path is still refused.
+        let Some((location, _)) = self.scannable(&start_folder) else {
+            tracing::warn!(
+                "Skipping {:?}: it resolves to {}, outside the repository root {}",
+                relative_folder_path_ref,
+                start_folder.display(),
+                self.canonical_root.display()
+            );
+            return Ok(());
+        };
 
         // Skip if already scanned
         if self.scanned_folders.pin().contains(&start_folder) {
@@ -641,12 +753,38 @@ impl Repo {
             let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
 
             if path.is_dir() {
-                // Queue subdirectory for later scanning
-                let relative_entry =
-                    pathdiff::diff_paths(path, &self.canonical_root).unwrap_or(path.to_path_buf());
-                self.queued_folders
-                    .pin()
-                    .insert(path.to_path_buf(), relative_entry);
+                // Queue subdirectory for later scanning. Anything outside both
+                // the root and the validated static overlay must not be walked
+                // (the recursive call would re-root the walk there).
+                match self.scannable(path) {
+                    Some((_, relative_entry)) => {
+                        self.queued_folders
+                            .pin()
+                            .insert(path.to_path_buf(), relative_entry);
+                    }
+                    None => tracing::debug!(
+                        "Not queueing {}: outside the repository root {}",
+                        path.display(),
+                        self.canonical_root.display()
+                    ),
+                }
+            } else if location == ScanLocation::StaticOverlay
+                && is_markdown_extension(extension, &self.markdown_extensions)
+            {
+                // Markdown inside an *external* static overlay has no
+                // representable URL: `build_markdown_url_path` relativizes it to
+                // `../static/…`, `url_path::path_to_url` preserves the `..` on
+                // purpose, and build mode then joins that onto `output_dir` —
+                // writing the page outside `--output`. That escape is exactly
+                // what this pass fixed in `build.rs`, so the file is skipped
+                // rather than indexed with a broken URL. Static assets are
+                // unaffected: `build_static_url_path` strips the overlay prefix.
+                tracing::warn!(
+                    "Skipping markdown file {} in the external static folder {:?}: \
+                     markdown outside the repository root has no valid URL",
+                    path.display(),
+                    self.static_folder
+                );
             } else if is_markdown_extension(extension, &self.markdown_extensions) {
                 // Process markdown file
                 if let Ok((_filesize, created, modified)) = file_details_from_path(path) {
@@ -867,6 +1005,33 @@ impl Repo {
         self.scan_notify.notify_waiters();
     }
 
+    /// Drop every cached view of the repository and rebuild it from disk.
+    ///
+    /// Used by the watcher when a change batch is too large to invalidate file
+    /// by file. Blocking; call from `spawn_blocking`.
+    ///
+    /// **No step may return early.** `clear()` resets `media_populated`, so any
+    /// path that skips [`Repo::notify_media_populated`] leaves every later
+    /// [`Repo::wait_for_media`] — that is, `/.mbr/media.json` — blocked for the
+    /// life of the process. A failed scan is logged and the pass continues on
+    /// whatever was indexed: `clear()` already discarded the previous contents,
+    /// so the real choice is between serving partial data and hanging.
+    pub fn full_rescan(&self) {
+        self.clear();
+        if let Err(e) = self.scan_all() {
+            tracing::error!("Rescan failed, continuing with partial repository state: {e}");
+        }
+        self.build_relationship_index();
+        self.build_wikilink_index();
+        if let Err(e) = self.scan_static_folder() {
+            tracing::error!("Static folder rescan failed: {e}");
+        }
+        self.populate_basic_metadata();
+        self.populate_media_metadata();
+        self.notify_media_populated();
+        self.ensure_text_extracted();
+    }
+
     /// Populate basic file metadata (size, timestamps) for all other files.
     /// Deferred from scan_folder() to avoid blocking scan_all() completion,
     /// so search (which only needs markdown files) can proceed sooner.
@@ -906,16 +1071,25 @@ impl Repo {
     }
 
     /// Wait for the initial scan to complete. Returns immediately if already done.
+    ///
+    /// `mark_scan_complete()` fires exactly once and `Notify::notify_waiters()`
+    /// stores no permit, so a notification observed between a flag check and the
+    /// registration of the waiter would be lost forever — and `/.mbr/site.json`
+    /// would block for the life of the process. Registering interest *before*
+    /// re-checking closes that window (same pattern as the in-flight waits in
+    /// `server.rs`).
     pub async fn wait_for_scan(&self) {
-        if self.is_scan_complete() {
-            return;
-        }
-        // Wait for notification, then re-check in case of spurious wakeup
         loop {
-            self.scan_notify.notified().await;
+            let notified = self.scan_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             if self.is_scan_complete() {
                 return;
             }
+
+            // Re-checked by the loop: `notified()` also returns on spurious wakeups.
+            notified.await;
         }
     }
 
@@ -930,15 +1104,20 @@ impl Repo {
     }
 
     /// Wait for media metadata to be populated. Returns immediately if already done.
+    ///
+    /// Registers interest before re-checking the flag, for the same reason as
+    /// [`Repo::wait_for_scan`].
     pub async fn wait_for_media(&self) {
-        if self.is_media_populated() {
-            return;
-        }
         loop {
-            self.media_notify.notified().await;
+            let notified = self.media_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             if self.is_media_populated() {
                 return;
             }
+
+            notified.await;
         }
     }
 
@@ -949,8 +1128,8 @@ impl Repo {
     /// Populate media metadata (ffmpeg/lopdf) for all static files.
     /// This is deferred from initial scan to avoid blocking the first site.json response.
     pub fn populate_media_metadata(&self) {
-        if self.media_populated.swap(true, Ordering::SeqCst) {
-            return; // Already populated
+        if self.media_population_started.swap(true, Ordering::SeqCst) {
+            return; // Already running, or already finished
         }
         let start = Instant::now();
         let pin = self.other_files.pin();
@@ -969,6 +1148,12 @@ impl Repo {
         }
         #[cfg(not(feature = "media-metadata"))]
         let _ = entries;
+
+        // Publish "finished" only now that every entry carries its metadata.
+        // Callers invoke `notify_media_populated()` immediately after this
+        // returns; waiters re-read the flag after being woken, so the store must
+        // happen first.
+        self.media_populated.store(true, Ordering::Release);
 
         tracing::info!("populate_media_metadata completed in {:?}", start.elapsed());
     }
@@ -1010,6 +1195,10 @@ impl Repo {
         self.wikilink_index.clear();
         self.text_extracted.store(false, Ordering::SeqCst);
         self.media_populated.store(false, Ordering::SeqCst);
+        // Must be reset too, or the run-once guard would make the rescan's
+        // `populate_media_metadata()` a no-op and leave `media_populated` false
+        // forever, hanging every later `wait_for_media()`.
+        self.media_population_started.store(false, Ordering::SeqCst);
         // Note: scan_complete is NOT reset here. It tracks whether the initial background
         // scan finished. After clear(), scan_all() will re-scan synchronously in handlers.
     }
@@ -1306,6 +1495,43 @@ pub fn file_details_from_path<P: AsRef<Path>>(path: P) -> Result<(u64, u64, u64)
 // ============================================================================
 // Pure helper functions for repo scanning (extracted for testability)
 // ============================================================================
+
+/// Returns the repo-relative form of `abs_path`, or `None` when it resolves
+/// *outside* `root`.
+///
+/// Containment is decided component-wise, not with `Path::starts_with`: the
+/// relative path is what the rest of the pipeline consumes, and a single
+/// `ParentDir` in it means the file is not in the repository at all. A
+/// `RootDir`/`Prefix` component means [`pathdiff::diff_paths`] could not
+/// relativize the two at all (mixed absolute/relative inputs, or different
+/// Windows drives) and handed back something absolute.
+///
+/// This is the scan-side half of the containment guard: `url_path::path_to_url`
+/// preserves `..` on purpose, so an escaping path stays escaped all the way into
+/// `site.json` URLs and into `output_dir.join(url_path)` during a static build.
+/// Which of the scanner's two legitimate roots a path belongs to.
+///
+/// There are exactly two: the repository root, and the validated external static
+/// overlay. Anything else is not scannable at all, so this enum has no third
+/// variant by design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanLocation {
+    WithinRoot,
+    StaticOverlay,
+}
+
+pub fn repo_relative_within_root(root: &Path, abs_path: &Path) -> Option<PathBuf> {
+    let relative = pathdiff::diff_paths(abs_path, root)?;
+
+    let escapes = relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    });
+
+    (!escapes).then_some(relative)
+}
 
 /// Checks if a path should be ignored based on the given rules.
 ///
@@ -1709,7 +1935,7 @@ mod tests {
 
     #[test]
     fn test_get_page_title_from_frontmatter() {
-        let mut frontmatter = std::collections::HashMap::new();
+        let mut frontmatter = crate::markdown::SimpleMetadata::new();
         frontmatter.insert(
             "title".to_string(),
             serde_json::Value::String("My Page Title".to_string()),
@@ -1720,14 +1946,14 @@ mod tests {
 
     #[test]
     fn test_get_page_title_from_filename() {
-        let frontmatter = std::collections::HashMap::new();
+        let frontmatter = crate::markdown::SimpleMetadata::new();
         let path = Path::new("/docs/rust-guide.md");
         assert_eq!(get_page_title(&frontmatter, path), "rust-guide");
     }
 
     #[test]
     fn test_get_page_title_fallback() {
-        let frontmatter = std::collections::HashMap::new();
+        let frontmatter = crate::markdown::SimpleMetadata::new();
         let path = Path::new("/");
         assert_eq!(get_page_title(&frontmatter, path), "Untitled");
     }
@@ -1758,6 +1984,545 @@ mod tests {
         let val = serde_json::json!(42);
         let tags = extract_tag_values(&val);
         assert!(tags.is_empty());
+    }
+
+    // ==================== Root containment ====================
+
+    /// Builds a `Repo` rooted at `root` with the defaults these tests need.
+    fn test_repo(root: &Path) -> Repo {
+        Repo::init(
+            root.to_path_buf(),
+            "static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        )
+    }
+
+    #[test]
+    fn test_repo_relative_within_root_accepts_contained_paths() {
+        let root = Path::new("/repo");
+
+        assert_eq!(
+            repo_relative_within_root(root, &root.join("docs").join("guide.md")),
+            Some(PathBuf::from("docs").join("guide.md"))
+        );
+        // The root itself relativizes to the empty path, which is contained.
+        assert_eq!(repo_relative_within_root(root, root), Some(PathBuf::new()));
+    }
+
+    #[test]
+    fn test_repo_relative_within_root_rejects_escapes() {
+        let root = Path::new("/repo");
+
+        // A sibling directory: relativizes to `../elsewhere/secret.md`.
+        assert_eq!(
+            repo_relative_within_root(root, Path::new("/elsewhere/secret.md")),
+            None
+        );
+        // An unresolved upward traversal.
+        assert_eq!(
+            repo_relative_within_root(root, &root.join("..").join("secret.md")),
+            None
+        );
+        // Mixed absolute/relative inputs: `diff_paths` hands back something
+        // absolute, which must not be mistaken for a repo-relative path.
+        assert_eq!(
+            repo_relative_within_root(Path::new("repo"), Path::new("/repo/a.md")),
+            None
+        );
+    }
+
+    /// A directory symlinked out of the repository must contribute nothing.
+    ///
+    /// `scan_folder` canonicalizes each queued directory and `WalkDir` follows
+    /// links, so the walk used to be re-rooted at the symlink target: every file
+    /// underneath relativized to `../…`, `path_to_url` preserved that, and the
+    /// static builder joined it onto `--output` — writing pages outside the
+    /// requested output directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_folder_skips_directory_symlinked_outside_root() {
+        let outside = tempfile::tempdir().expect("temp dir");
+        let outside_docs = outside.path().join("docs");
+        std::fs::create_dir_all(&outside_docs).expect("create outside dir");
+        std::fs::write(outside_docs.join("secret.md"), "# Secret").expect("write secret");
+        std::fs::write(outside_docs.join("secret.png"), b"not really a png").expect("write asset");
+
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::write(root.path().join("index.md"), "# Home").expect("write index");
+        std::os::unix::fs::symlink(&outside_docs, root.path().join("work")).expect("symlink");
+
+        let repo = test_repo(root.path());
+        repo.scan_all().expect("scan must succeed");
+
+        let markdown = repo.markdown_files.pin();
+        for (_, info) in markdown.iter() {
+            assert!(
+                !info.url_path.contains(".."),
+                "markdown url_path escaped the root: {}",
+                info.url_path
+            );
+            assert!(
+                !info
+                    .raw_path
+                    .components()
+                    .any(|c| matches!(c, Component::ParentDir)),
+                "markdown raw_path escaped the root: {}",
+                info.raw_path.display()
+            );
+        }
+        assert!(
+            markdown.iter().all(|(_, i)| !i.url_path.contains("secret")),
+            "a file outside the root must not be indexed at all"
+        );
+        assert!(
+            markdown.iter().any(|(_, i)| i.url_path == "/"),
+            "the in-root index.md must still be scanned"
+        );
+
+        let other = repo.other_files.pin();
+        for (_, info) in other.iter() {
+            assert!(
+                !info.url_path.contains(".."),
+                "static url_path escaped the root: {}",
+                info.url_path
+            );
+        }
+        assert!(
+            other.iter().all(|(_, i)| !i.url_path.contains("secret")),
+            "a static file outside the root must not be indexed at all"
+        );
+    }
+
+    // ==================== External static overlay ====================
+
+    /// Builds `<tmp>/project/{content,static}` and a `Repo` rooted at `content`
+    /// with `static_folder = "../static"` — the `repo/content` + `repo/static`
+    /// layout. Returns the temp dir (kept alive), the project dir and the repo.
+    fn peer_overlay_repo() -> (tempfile::TempDir, PathBuf, Repo) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let project = tmp.path().to_path_buf();
+        let content = project.join("content");
+        std::fs::create_dir_all(content.join(".mbr")).expect("create content");
+        std::fs::write(content.join("README.md"), "# Home").expect("write readme");
+        std::fs::create_dir_all(project.join("static/videos")).expect("create static");
+        std::fs::write(project.join("static/pic.png"), b"PNG bytes").expect("write pic");
+        std::fs::write(project.join("static/videos/demo.mp4"), b"MP4 bytes").expect("write video");
+
+        let repo = Repo::init(
+            content,
+            "../static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        );
+        (tmp, project, repo)
+    }
+
+    /// The regression: a peer static folder serves over HTTP but used to index
+    /// nothing, so its assets were invisible to `media.json`, the media browser,
+    /// the editor's media picker, search, and the media-metadata pass.
+    #[test]
+    fn test_scan_indexes_assets_in_external_static_overlay() {
+        let (_tmp, _project, repo) = peer_overlay_repo();
+
+        repo.scan_all().expect("scan must succeed");
+        repo.scan_static_folder().expect("static scan must succeed");
+
+        let other = repo.other_files.pin();
+        let mut urls: Vec<_> = other.iter().map(|(_, i)| i.url_path.clone()).collect();
+        urls.sort();
+        assert_eq!(
+            urls,
+            vec!["/pic.png".to_string(), "/videos/demo.mp4".to_string()],
+            "a peer static folder's assets must be indexed, with the overlay prefix stripped"
+        );
+    }
+
+    /// Markdown inside an external overlay has no representable URL — it would
+    /// relativize to `../static/…`, which `path_to_url` preserves and the static
+    /// builder joins onto `--output`. It is skipped rather than indexed with a
+    /// broken URL, so no `..` can reach `site.json`.
+    #[test]
+    fn test_scan_skips_markdown_in_external_static_overlay() {
+        let (_tmp, project, repo) = peer_overlay_repo();
+        std::fs::write(project.join("static/stray.md"), "# Stray").expect("write stray");
+
+        repo.scan_all().expect("scan must succeed");
+        repo.scan_static_folder().expect("static scan must succeed");
+
+        let markdown = repo.markdown_files.pin();
+        assert!(
+            markdown.iter().all(|(_, i)| !i.url_path.contains("stray")),
+            "markdown in an external static overlay must not be indexed"
+        );
+        for (_, info) in markdown.iter() {
+            assert!(
+                !info.url_path.contains(".."),
+                "markdown url_path escaped the root: {}",
+                info.url_path
+            );
+            assert!(
+                !info
+                    .raw_path
+                    .components()
+                    .any(|c| matches!(c, Component::ParentDir)),
+                "markdown raw_path escaped the root: {}",
+                info.raw_path.display()
+            );
+        }
+        assert!(
+            markdown.iter().any(|(_, i)| i.url_path == "/README/"),
+            "the in-root markdown must still be indexed"
+        );
+
+        // The assets alongside it are still indexed, with clean URLs.
+        let other = repo.other_files.pin();
+        for (_, info) in other.iter() {
+            assert!(
+                !info.url_path.contains(".."),
+                "static url_path escaped: {}",
+                info.url_path
+            );
+        }
+    }
+
+    /// The overlay exception must stay an exception. A directory symlinked out
+    /// of the root is still refused even when an external overlay is configured,
+    /// so the "build writes pages outside --output" fix cannot regress through
+    /// the new second scan root.
+    #[cfg(unix)]
+    #[test]
+    fn test_external_overlay_does_not_admit_other_escaping_directories() {
+        let (_tmp, project, repo) = peer_overlay_repo();
+
+        let elsewhere = tempfile::tempdir().expect("temp dir");
+        std::fs::write(elsewhere.path().join("secret.md"), "# Secret").expect("write secret");
+        std::fs::write(elsewhere.path().join("secret.png"), b"secret").expect("write asset");
+        // One escape from inside the root, one from inside the overlay itself.
+        std::os::unix::fs::symlink(elsewhere.path(), project.join("content/work"))
+            .expect("symlink into root");
+        std::os::unix::fs::symlink(elsewhere.path(), project.join("static/leak"))
+            .expect("symlink into overlay");
+
+        repo.scan_all().expect("scan must succeed");
+        repo.scan_static_folder().expect("static scan must succeed");
+
+        let markdown = repo.markdown_files.pin();
+        assert!(
+            markdown.iter().all(|(_, i)| !i.url_path.contains("secret")),
+            "a directory symlinked out of the repo must contribute no markdown"
+        );
+        let other = repo.other_files.pin();
+        assert!(
+            other.iter().all(|(_, i)| !i.url_path.contains("secret")),
+            "a directory symlinked out of the repo (or out of the overlay) must contribute no assets"
+        );
+        for (_, info) in other.iter() {
+            assert!(
+                !info.url_path.contains(".."),
+                "static url_path escaped: {}",
+                info.url_path
+            );
+        }
+    }
+
+    /// A `static_folder` the config policy would refuse must not become a scan
+    /// root either — the scanner and the validator share one decision.
+    #[test]
+    fn test_refused_static_folder_is_not_scannable() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let content = tmp.path().join("project/content");
+        std::fs::create_dir_all(&content).expect("create content");
+
+        let repo = Repo::init(
+            content,
+            // Climbs past the root's parent: refused by `resolve_static_overlay`.
+            "../../..".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        );
+
+        assert_eq!(
+            repo.canonical_static_root, None,
+            "a static_folder the validator refuses must not be a scan root"
+        );
+    }
+
+    // ==================== Media metadata flags ====================
+
+    /// Claiming the run-once guard must not announce completion.
+    ///
+    /// `media_populated` is what `is_media_populated()`/`wait_for_media()` and
+    /// the `media.json` handler read as "the metadata is there". While it
+    /// doubled as the "already started" guard, a request arriving during the
+    /// probing window skipped the wait and got entries with no duration or
+    /// dimensions.
+    #[test]
+    fn test_in_flight_media_population_does_not_report_as_complete() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = test_repo(dir.path());
+
+        // Exactly the state a reader sees mid-population: guard claimed, work
+        // not finished.
+        repo.media_population_started.store(true, Ordering::SeqCst);
+
+        assert!(
+            !repo.is_media_populated(),
+            "population in flight must not be reported as complete"
+        );
+    }
+
+    #[test]
+    fn test_media_populated_is_published_after_population_and_reset_by_clear() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("index.md"), "# Home").expect("write index");
+        std::fs::write(dir.path().join("paper.pdf"), b"not really a pdf").expect("write paper");
+
+        let repo = test_repo(dir.path());
+        repo.scan_all().expect("scan must succeed");
+
+        assert!(!repo.is_media_populated());
+        assert!(!repo.media_population_started.load(Ordering::SeqCst));
+
+        repo.populate_media_metadata();
+        assert!(repo.media_population_started.load(Ordering::SeqCst));
+        assert!(
+            repo.is_media_populated(),
+            "flag must be published once population finished"
+        );
+
+        // Run-once guard: a repeat call is a no-op and must not unset "finished".
+        repo.populate_media_metadata();
+        assert!(repo.is_media_populated());
+
+        // `clear()` must reset both flags, otherwise the full-rescan path would
+        // skip population and leave every later `wait_for_media()` blocked.
+        repo.clear();
+        assert!(!repo.is_media_populated());
+        assert!(!repo.media_population_started.load(Ordering::SeqCst));
+
+        repo.populate_media_metadata();
+        assert!(
+            repo.is_media_populated(),
+            "a rescan must be able to re-populate media metadata"
+        );
+    }
+
+    // ==================== Scan/media waiters ====================
+
+    /// `Notify::notify_waiters()` stores no permit, so a waiter created after the
+    /// single completion notification has already fired must still return.
+    #[tokio::test]
+    async fn test_wait_for_scan_returns_immediately_when_already_complete() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = test_repo(dir.path());
+        repo.mark_scan_complete();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), repo.wait_for_scan())
+            .await
+            .expect("a waiter started after completion must not block");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_scan_is_woken_by_later_completion() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = Arc::new(test_repo(dir.path()));
+
+        let waiting = Arc::clone(&repo);
+        let waiter = tokio::spawn(async move { waiting.wait_for_scan().await });
+        // Let the waiter register its interest before completion fires.
+        tokio::task::yield_now().await;
+
+        repo.mark_scan_complete();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must be woken by mark_scan_complete")
+            .expect("waiter task panicked");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_media_returns_immediately_when_already_populated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = test_repo(dir.path());
+        repo.populate_media_metadata();
+        repo.notify_media_populated();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), repo.wait_for_media())
+            .await
+            .expect("a waiter started after population must not block");
+    }
+
+    /// A notification that arrives with the flag still unset is spurious: the
+    /// waiter must go back to waiting rather than report populated metadata.
+    #[tokio::test]
+    async fn test_wait_for_media_ignores_spurious_notify_then_wakes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = Arc::new(test_repo(dir.path()));
+
+        let waiting = Arc::clone(&repo);
+        let mut waiter = tokio::spawn(async move { waiting.wait_for_media().await });
+        tokio::task::yield_now().await;
+
+        // Notification without population: must not release the waiter.
+        repo.notify_media_populated();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiter)
+                .await
+                .is_err(),
+            "a notification with the flag unset must not release the waiter"
+        );
+
+        repo.populate_media_metadata();
+        repo.notify_media_populated();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must be woken once media metadata is populated")
+            .expect("waiter task panicked");
+    }
+
+    /// A rescan whose scan step fails must still release `wait_for_media()`.
+    ///
+    /// `full_rescan()` calls `clear()` first, which resets `media_populated`.
+    /// When the scan error caused an early return, `notify_media_populated()`
+    /// never ran and `/.mbr/media.json` blocked for the life of the process —
+    /// one unreadable repository root wedged the endpoint permanently.
+    #[tokio::test]
+    async fn test_full_rescan_releases_media_waiters_even_when_scan_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = Arc::new(test_repo(dir.path()));
+
+        // Populate once so the flag starts set, as it would on a live server.
+        repo.populate_media_metadata();
+        repo.notify_media_populated();
+        assert!(repo.is_media_populated());
+
+        // Delete the root out from under the repo so `scan_all()` errors. The
+        // canonical root was resolved at construction, so it still points here.
+        dir.close().expect("remove repo root");
+
+        let rescanning = Arc::clone(&repo);
+        let rescan = tokio::task::spawn_blocking(move || rescanning.full_rescan());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), rescan)
+            .await
+            .expect("rescan must not hang")
+            .expect("rescan task panicked");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), repo.wait_for_media())
+            .await
+            .expect("a failed rescan must still release media waiters");
+    }
+
+    // ==================== Deterministic serialization ====================
+
+    /// Two builds of an unchanged repository must serialize to identical bytes.
+    ///
+    /// `papaya::HashMap` seeds its `RandomState` per instance, so iteration
+    /// order differs between processes: `site.json` churned in `git diff` and
+    /// content-hash/ETag caches invalidated on no-op rebuilds. Two
+    /// independently built maps stand in for two builds.
+    #[test]
+    fn test_markdown_files_serialize_deterministically_in_url_path_order() {
+        let build_files = || {
+            let files = MarkdownFiles(HashMap::new());
+            let pin = files.pin();
+            for i in 0..64 {
+                pin.insert(
+                    PathBuf::from(format!("/repo/notes/note{i:02}.md")),
+                    MarkdownInfo {
+                        raw_path: PathBuf::from(format!("notes/note{i:02}.md")),
+                        url_path: format!("/notes/note{i:02}/"),
+                        created: 1,
+                        modified: 2,
+                        frontmatter: None,
+                        relationships: Vec::new(),
+                    },
+                );
+            }
+            drop(pin);
+            files
+        };
+
+        let first = serde_json::to_string(&build_files()).expect("serialize");
+        let second = serde_json::to_string(&build_files()).expect("serialize");
+        assert_eq!(
+            first, second,
+            "serialized bytes must not depend on map iteration order"
+        );
+
+        assert_eq!(
+            url_paths_of(&first),
+            sorted(url_paths_of(&first)),
+            "entries must be emitted in url_path order"
+        );
+    }
+
+    #[test]
+    fn test_other_files_serialize_deterministically_in_url_path_order() {
+        let build_files = || {
+            let files = OtherFiles(HashMap::new());
+            let pin = files.pin();
+            for i in 0..64 {
+                let raw_path = PathBuf::from(format!("/repo/images/img{i:02}.png"));
+                pin.insert(
+                    raw_path.clone(),
+                    OtherFileInfo {
+                        url_path: format!("/images/img{i:02}.png"),
+                        metadata: StaticFileMetadata::empty(&raw_path),
+                        raw_path,
+                        extracted_text: None,
+                    },
+                );
+            }
+            drop(pin);
+            files
+        };
+
+        let first = serde_json::to_string(&build_files()).expect("serialize");
+        let second = serde_json::to_string(&build_files()).expect("serialize");
+        assert_eq!(
+            first, second,
+            "serialized bytes must not depend on map iteration order"
+        );
+
+        assert_eq!(
+            url_paths_of(&first),
+            sorted(url_paths_of(&first)),
+            "entries must be emitted in url_path order"
+        );
+    }
+
+    /// Extracts the `url_path` of every entry in a serialized file sequence.
+    fn url_paths_of(json: &str) -> Vec<String> {
+        serde_json::from_str::<Vec<serde_json::Value>>(json)
+            .expect("serialized files must be a JSON array")
+            .iter()
+            .map(|entry| {
+                entry["url_path"]
+                    .as_str()
+                    .expect("every entry has a url_path")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn sorted(mut values: Vec<String>) -> Vec<String> {
+        values.sort();
+        values
     }
 }
 

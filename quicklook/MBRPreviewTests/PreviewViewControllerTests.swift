@@ -242,6 +242,120 @@ class PreviewViewControllerTests: XCTestCase {
         XCTAssertNotNil(self.viewController.view, "View should still exist after loading error HTML")
     }
 
+    // MARK: - Scheme Handler Containment Tests
+
+    /// Creates a workspace laid out as:
+    ///
+    /// ```text
+    /// <tmp>/          <- "outside" the repo; escape targets live here
+    ///   repo/         <- the previewed repository root
+    ///     note.md
+    ///   secret.txt
+    /// ```
+    ///
+    /// Returns (tempDir, resolved repo root). Caller must remove tempDir.
+    private func makeContainmentFixture() throws -> (URL, String) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mbr-test-contain-\(UUID().uuidString)")
+        let repo = tempDir.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try "# Note".write(to: repo.appendingPathComponent("note.md"), atomically: true, encoding: .utf8)
+        try "secret".write(to: tempDir.appendingPathComponent("secret.txt"), atomically: true, encoding: .utf8)
+
+        let root = try XCTUnwrap(MBRFileSchemeHandler.realPath(repo.path))
+        return (tempDir, root)
+    }
+
+    func testIsContained_acceptsFileInsideRoot() throws {
+        let (tempDir, root) = try makeContainmentFixture()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let inside = try XCTUnwrap(MBRFileSchemeHandler.realPath(root + "/note.md"))
+        XCTAssertTrue(MBRFileSchemeHandler.isContained(inside, in: root))
+    }
+
+    func testIsContained_rejectsDotDotTraversal() throws {
+        let (tempDir, root) = try makeContainmentFixture()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // realPath collapses the `..`, which is exactly why containment must be
+        // checked on the resolved path and never on the requested string.
+        let escaped = try XCTUnwrap(MBRFileSchemeHandler.realPath(root + "/../secret.txt"))
+        XCTAssertFalse(MBRFileSchemeHandler.isContained(escaped, in: root))
+    }
+
+    func testIsContained_rejectsUnrelatedAbsolutePath() throws {
+        let (tempDir, root) = try makeContainmentFixture()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let passwd = try XCTUnwrap(MBRFileSchemeHandler.realPath("/etc/passwd"))
+        XCTAssertFalse(MBRFileSchemeHandler.isContained(passwd, in: root))
+    }
+
+    func testIsContained_rejectsSymlinkEscapingRoot() throws {
+        let (tempDir, root) = try makeContainmentFixture()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // A symlink inside the repo pointing at a file outside it.
+        try FileManager.default.createSymbolicLink(
+            atPath: root + "/leak.png",
+            withDestinationPath: tempDir.appendingPathComponent("secret.txt").path
+        )
+
+        let resolved = try XCTUnwrap(MBRFileSchemeHandler.realPath(root + "/leak.png"))
+        XCTAssertFalse(MBRFileSchemeHandler.isContained(resolved, in: root))
+    }
+
+    func testIsContained_rejectsSiblingRootWithSharedPrefix() {
+        // Plain string prefixing would wrongly accept this.
+        XCTAssertFalse(MBRFileSchemeHandler.isContained("/notes-evil/secret", in: "/notes"))
+        XCTAssertTrue(MBRFileSchemeHandler.isContained("/notes/ok.png", in: "/notes"))
+    }
+
+    func testIsContained_rejectsRootItself() {
+        // The root is a directory, never a servable asset.
+        XCTAssertFalse(MBRFileSchemeHandler.isContained("/notes", in: "/notes"))
+    }
+
+    func testRealPath_returnsNilForMissingPath() {
+        XCTAssertNil(MBRFileSchemeHandler.realPath("/nonexistent-\(UUID().uuidString)/file.png"))
+    }
+
+    func testSchemeHandler_startsWithNoAllowedRoot() {
+        // Fail closed: until preparePreviewOfFile establishes a root, the
+        // handler must not be willing to serve anything.
+        XCTAssertNil(MBRFileSchemeHandler().allowedRoot)
+    }
+
+    func testPreparePreview_confinesSchemeHandlerToRepositoryRoot() throws {
+        // Given
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mbr-test-confine-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let mbrDir = tempDir.appendingPathComponent(".mbr")
+        try FileManager.default.createDirectory(at: mbrDir, withIntermediateDirectories: true)
+
+        let testFile = tempDir.appendingPathComponent("test.md")
+        try "# Test".write(to: testFile, atomically: true, encoding: .utf8)
+
+        // When
+        self.viewController.loadView()
+        let expectation = self.expectation(description: "Preview should render")
+        self.viewController.preparePreviewOfFile(at: testFile) { _ in expectation.fulfill() }
+        waitForExpectations(timeout: 5.0)
+
+        // Then - the handler is pinned to the repo root, and nothing above it
+        // can be read.
+        let root = try XCTUnwrap(self.viewController.fileSchemeHandler.allowedRoot)
+        XCTAssertEqual(root, MBRFileSchemeHandler.realPath(tempDir.path))
+        XCTAssertTrue(MBRFileSchemeHandler.isContained(root + "/test.md", in: root))
+
+        let outside = try XCTUnwrap(MBRFileSchemeHandler.realPath("/etc/passwd"))
+        XCTAssertFalse(MBRFileSchemeHandler.isContained(outside, in: root))
+    }
+
     func testRenderPreview_withNonexistentFile_completesWithoutCrashing() {
         // Given
         let nonexistentFile = URL(fileURLWithPath: "/nonexistent/path/to/file.md")

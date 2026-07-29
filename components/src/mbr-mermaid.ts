@@ -11,10 +11,14 @@ import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { waitForDom, loadScript, getMbrAssetBase } from './dynamic-loader.ts'
 
+/** Mermaid sanitizer levels, strictest last-resort first. */
+type MermaidSecurityLevel = 'strict' | 'antiscript' | 'loose' | 'sandbox'
+
 /** Mermaid initialization options type */
 interface MermaidConfig {
   startOnLoad: boolean
   theme: string
+  securityLevel: MermaidSecurityLevel
 }
 
 /** Options for mermaid.run() */
@@ -63,6 +67,18 @@ export class MbrMermaidElement extends LitElement {
     mermaid?.initialize({
       startOnLoad: false,
       theme: prefersDark ? 'dark' : 'default',
+      // Diagram source is whatever markdown the repo happens to contain, so pin
+      // the sanitizer level rather than inheriting mermaid's implicit default
+      // (currently 'strict', but that is a config default that could change in
+      // a future major version).
+      //
+      // 'strict' runs every label through DOMPurify and disables `click`/
+      // callback directives, while still allowing the `<br/>` line breaks the
+      // diagrams in docs/ rely on. The one stricter level, 'sandbox', re-hosts
+      // each diagram in a `data:` URL iframe: that HTML-escapes label markup,
+      // drops the page theme/CSS and breaks in-diagram links, so it is not
+      // usable here.
+      securityLevel: 'strict',
     })
 
     // Manually render the diagrams we found

@@ -1,7 +1,8 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { subscribeSiteNav, resolveUrl } from './shared.js'
+import { subscribeSiteNav, resolveUrl, getCanonicalPath } from './shared.js'
 import { isInputTarget } from './mbr-keys.js'
+import type { MbrOverlay } from './overlay.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -42,6 +43,27 @@ const MAX_RECENT = 30;
 const RECENT_VIEWED_LIMIT = 15;
 
 /**
+ * Number of file cards rendered per page in the middle pane.
+ * Mirrors `DEFAULT_MAX_ITEMS` in mbr-browse-single.ts.
+ */
+const DEFAULT_MAX_ITEMS = 100;
+
+/** Section key used for the middle pane's pagination state. */
+const MIDDLE_PANE_KEY = 'middle-pane';
+
+/**
+ * Percent-decode a stored URL path, falling back to the raw string on a
+ * malformed escape sequence (e.g. a lone `%`) so a bad entry never throws.
+ */
+function safeDecodePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * Three-pane navigator component for MBR.
  *
  * When opened, displays:
@@ -52,7 +74,7 @@ const RECENT_VIEWED_LIMIT = 15;
  * Keyboard: - to open, Escape to close, arrows to navigate
  */
 @customElement('mbr-browse')
-export class MbrBrowseElement extends LitElement {
+export class MbrBrowseElement extends LitElement implements MbrOverlay {
   // === Visibility State ===
   @state()
   private _isOpen = false;
@@ -77,8 +99,9 @@ export class MbrBrowseElement extends LitElement {
   @state()
   private _folderTree: FolderNode | null = null;
 
+  /** field name -> (value -> number of files carrying that value) */
   @state()
-  private _dynamicFields: Map<string, Set<string>> = new Map();
+  private _dynamicFields: Map<string, Map<string, number>> = new Map();
 
   // === Selection State ===
   @state()
@@ -100,6 +123,13 @@ export class MbrBrowseElement extends LitElement {
   @state()
   private _activePaneIndex = 0;  // 0 = left, 1 = middle
 
+  /** Pages revealed per paginated section (see `_getPageItems`). */
+  @state()
+  private _paginationState = new Map<string, number>();
+
+  /** Items rendered per page in the middle pane. */
+  private _maxItems = DEFAULT_MAX_ITEMS;
+
   /** The configured index file name from site.json */
   private _indexFile: string = 'index.md';
 
@@ -117,8 +147,10 @@ export class MbrBrowseElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
 
-    // Track current page as recently viewed
-    const currentPath = window.location.pathname;
+    // Track current page as recently viewed. `getCanonicalPath()` decodes the
+    // pathname and strips any static-deployment prefix so the stored value
+    // matches the `url_path` values in site.json.
+    const currentPath = getCanonicalPath();
     if (currentPath && currentPath !== '/') {
       this._addToRecent(currentPath);
     }
@@ -204,8 +236,13 @@ export class MbrBrowseElement extends LitElement {
   }
 
   // ========================================
-  // Public Methods
+  // Public Methods (the MbrOverlay contract, called from mbr-keys)
   // ========================================
+
+  /** True while the navigator panel is showing. */
+  public get isOpen(): boolean {
+    return this._isOpen;
+  }
 
   public open() {
     this._isOpen = true;
@@ -232,7 +269,18 @@ export class MbrBrowseElement extends LitElement {
   private _getRecentViewed(): string[] {
     try {
       const stored = localStorage.getItem(RECENT_KEY);
-      return stored ? JSON.parse(stored) : [];
+      if (!stored) return [];
+      const parsed: unknown = JSON.parse(stored);
+      if (!Array.isArray(parsed)) return [];
+      // Older builds stored the raw (percent-encoded) pathname. Decode on read
+      // so those entries still resolve against site.json's decoded url_paths;
+      // the next `_addToRecent` write persists the canonical form.
+      const decoded = parsed
+        .filter((p): p is string => typeof p === 'string')
+        .map(safeDecodePath);
+      // Decoding can collapse an encoded and a decoded entry into one; keep the
+      // most recent (first) occurrence.
+      return [...new Set(decoded)];
     } catch {
       return [];
     }
@@ -311,8 +359,11 @@ export class MbrBrowseElement extends LitElement {
 
   /**
    * Detect frontmatter fields that appear commonly with enumerable values.
+   *
+   * Returns each field's value -> file-count map so the render pass can read
+   * the counts instead of rescanning every file per value.
    */
-  private _detectDynamicFields(files: MarkdownFile[]): Map<string, Set<string>> {
+  private _detectDynamicFields(files: MarkdownFile[]): Map<string, Map<string, number>> {
     const fieldStats = new Map<string, { count: number; values: Map<string, number> }>();
     const skipFields = new Set(['title', 'description', 'summary', 'tags', 'tag', 'keywords',
       'date', 'created', 'modified', 'draft', 'published', 'aliases', 'slug', 'weight']);
@@ -339,7 +390,7 @@ export class MbrBrowseElement extends LitElement {
     }
 
     // Filter: count >= 10, 2 <= unique values < 50
-    const result = new Map<string, Set<string>>();
+    const result = new Map<string, Map<string, number>>();
 
     for (const [field, stats] of fieldStats) {
       if (stats.count < 10) continue;
@@ -349,7 +400,7 @@ export class MbrBrowseElement extends LitElement {
       const avgLength = [...stats.values.keys()].reduce((sum, v) => sum + v.length, 0) / stats.values.size;
       if (avgLength > 50) continue;
 
-      result.set(field, new Set(stats.values.keys()));
+      result.set(field, stats.values);
     }
 
     return result;
@@ -428,9 +479,13 @@ export class MbrBrowseElement extends LitElement {
     this._showMiddlePane = false;
     this._selectedFiles = [];
     this._activePaneIndex = 0;
+    this._paginationState = new Map();
   }
 
   private _updateSelectedFiles() {
+    // A new selection starts back at the first page of file cards.
+    this._paginationState = new Map();
+
     if (!this._currentSelection) {
       this._selectedFiles = [];
       return;
@@ -528,6 +583,28 @@ export class MbrBrowseElement extends LitElement {
   }
 
   // ========================================
+  // Pagination
+  // ========================================
+
+  private _getPageItems<T>(items: T[], sectionKey: string): T[] {
+    const page = this._paginationState.get(sectionKey) || 0;
+    const limit = (page + 1) * this._maxItems;
+    return items.slice(0, limit);
+  }
+
+  private _hasMoreItems<T>(items: T[], sectionKey: string): boolean {
+    const page = this._paginationState.get(sectionKey) || 0;
+    const limit = (page + 1) * this._maxItems;
+    return items.length > limit;
+  }
+
+  private _showMore(sectionKey: string) {
+    const current = this._paginationState.get(sectionKey) || 0;
+    this._paginationState.set(sectionKey, current + 1);
+    this._paginationState = new Map(this._paginationState);
+  }
+
+  // ========================================
   // Utility Methods
   // ========================================
 
@@ -555,36 +632,49 @@ export class MbrBrowseElement extends LitElement {
     const parts = path.split('/').filter(p => p.length > 0);
     let accumulated = '';
 
-    // Expand all parent folders
+    // Expand all parent folders. `buildFolderTree` mints every node path with a
+    // trailing slash ("/docs/"), so the keys written here must match that shape
+    // or `_renderFolderTree`'s `_expandedFolders.has(node.path)` never hits.
     for (const part of parts) {
       accumulated += '/' + part;
-      this._expandedFolders.add(accumulated);
+      this._expandedFolders.add(accumulated + '/');
     }
 
     this._expandedFolders.add('/');
     this._expandedFolders = new Set(this._expandedFolders);
 
-    // Auto-select the current folder (path already ends with / for folders)
+    // Auto-select the current folder (path already ends with / for folders).
     const folderPath = path.endsWith('/') ? path : path + '/';
-
-    // Find the folder node to get its title
+    let selectedPath = folderPath;
     let folderTitle = 'Home';
+
     if (this._folderTree) {
-      if (folderPath === '/') {
-        folderTitle = this._folderTree.title || 'Home';
-      } else {
-        const node = this._findFolderNode(this._folderTree, folderPath);
-        if (node) {
-          folderTitle = node.title || node.name;
-        }
+      // A markdown page and a folder index share the same trailing-slash URL
+      // shape, so a page path matches no FolderNode. Fall back to the
+      // containing folder so the tree highlights a row that exists.
+      const node = this._findFolderNode(this._folderTree, folderPath)
+        ?? this._findFolderNode(this._folderTree, this._parentFolderPath(folderPath));
+      if (node) {
+        selectedPath = node.path;
+        folderTitle = node.title || node.name || 'Home';
       }
     }
 
     this._currentSelection = {
       type: 'folder',
-      value: folderPath,
+      value: selectedPath,
       label: folderTitle,
     };
+  }
+
+  /**
+   * Parent folder path for a trailing-slash folder/file path.
+   * "/docs/guide/" -> "/docs/", "/guide/" -> "/".
+   */
+  private _parentFolderPath(path: string): string {
+    const trimmed = path.endsWith('/') ? path.slice(0, -1) : path;
+    const lastSlash = trimmed.lastIndexOf('/');
+    return lastSlash <= 0 ? '/' : trimmed.slice(0, lastSlash + 1);
   }
 
   private _findFolderNode(node: FolderNode, path: string): FolderNode | null {
@@ -629,7 +719,9 @@ export class MbrBrowseElement extends LitElement {
   }
 
   private _isCurrentPath(path: string): boolean {
-    const currentPath = window.location.pathname;
+    // Use the canonical path so percent-encoded pathnames (and static builds
+    // deployed under a subdirectory) still match site.json url_paths.
+    const currentPath = getCanonicalPath();
     const normalizedCurrent = currentPath.endsWith('/') ? currentPath : currentPath + '/';
     const normalizedPath = path.endsWith('/') ? path : path + '/';
     return normalizedCurrent === normalizedPath;
@@ -974,7 +1066,7 @@ export class MbrBrowseElement extends LitElement {
       ${[...this._dynamicFields.entries()].map(([fieldName, values]) => {
       const sectionKey = `fm_${fieldName}`;
       const isExpanded = this._expandedSections.has(sectionKey);
-      const sortedValues = [...values].sort();
+      const sortedValues = [...values.keys()].sort();
 
       return html`
           <div class="nav-section">
@@ -989,9 +1081,9 @@ export class MbrBrowseElement extends LitElement {
             ${isExpanded ? html`
               <div class="section-content">
                 ${sortedValues.map(value => {
-        const count = this._allFiles.filter(f =>
-          f.frontmatter && String(f.frontmatter[fieldName]) === value
-        ).length;
+        // Counts come from `_detectDynamicFields`; no per-value rescan of
+        // `_allFiles` inside render.
+        const count = values.get(value) ?? 0;
         const isSelected = this._currentSelection?.type === 'frontmatter' &&
           this._currentSelection?.value === `${fieldName}:${value}`;
         return html`
@@ -1024,10 +1116,16 @@ export class MbrBrowseElement extends LitElement {
   }
 
   private _renderMiddlePane(): TemplateResult {
+    // Only a page of cards is materialized - a common tag in a large vault can
+    // match thousands of files, and the pane shows ~8 at a time.
+    const pagedFiles = this._getPageItems(this._selectedFiles, MIDDLE_PANE_KEY);
+    const hasMore = this._hasMoreItems(this._selectedFiles, MIDDLE_PANE_KEY);
+
     return html`
       <div class="middle-pane">
         <div class="pane-header">
           <h3>${this._currentSelection?.label || 'Files'}</h3>
+          <span class="pane-count">${this._selectedFiles.length}</span>
           <button class="close-button" @click=${() => this._clearSelection()} aria-label="Close">
             ✕
           </button>
@@ -1036,7 +1134,12 @@ export class MbrBrowseElement extends LitElement {
         <div class="pane-content file-list">
           ${this._selectedFiles.length === 0 ? html`
             <div class="no-results">No files found</div>
-          ` : this._selectedFiles.map(file => this._renderFileCard(file))}
+          ` : pagedFiles.map(file => this._renderFileCard(file))}
+          ${hasMore ? html`
+            <button class="show-more" @click=${() => this._showMore(MIDDLE_PANE_KEY)}>
+              Show more (${pagedFiles.length} of ${this._selectedFiles.length})...
+            </button>
+          ` : nothing}
         </div>
       </div>
     `;
@@ -1223,6 +1326,16 @@ export class MbrBrowseElement extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .pane-count {
+      font-size: 0.75rem;
+      color: var(--pico-muted-color, #666);
+      background: var(--pico-muted-border-color, #e0e0e0);
+      padding: 0.1rem 0.4rem;
+      border-radius: 10px;
+      margin-right: 0.5rem;
+      flex-shrink: 0;
     }
 
     .close-button {

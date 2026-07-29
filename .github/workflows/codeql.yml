@@ -72,11 +72,11 @@ jobs:
     # Builds the Rust static library via Nix so swiftc can link against it.
     - name: Install Nix
       if: matrix.language == 'swift'
-      uses: DeterminateSystems/determinate-nix-action@main
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb # v3.21.8
 
     - name: Setup Cachix
       if: matrix.language == 'swift'
-      uses: cachix/cachix-action@v17
+      uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
       with:
         name: zmre
         authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}

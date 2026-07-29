@@ -1,6 +1,28 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-browse.js'
 import type { MbrBrowseElement } from './mbr-browse.js'
+import { buildFolderTree, type MarkdownFile } from './sorting.js'
+
+/**
+ * The element reads site data through shared.ts's module-level subscription.
+ * Only `subscribeSiteNav` is mocked so each test can inject its own site.json
+ * payload; `getCanonicalPath`/`resolveUrl` stay real so the percent-encoding
+ * and base-path handling under test is the shipped implementation.
+ */
+const mocks = vi.hoisted(() => ({
+  state: { isLoading: true, data: null as unknown, error: null as string | null },
+}))
+
+vi.mock('./shared.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./shared.js')>()
+  return {
+    ...actual,
+    subscribeSiteNav: (cb: (s: unknown) => void) => {
+      cb({ ...mocks.state })
+      return () => { }
+    },
+  }
+})
 
 describe('MbrBrowseElement', () => {
   let element: MbrBrowseElement
@@ -407,4 +429,256 @@ describe('Folder Sorting Logic', () => {
       expect(sorted[2].title).toBe('Cherry');
     });
   });
+})
+
+/**
+ * Behavioural tests that mount the element against injected site data.
+ */
+describe('MbrBrowseElement with site data', () => {
+  let element: MbrBrowseElement | null = null
+  const originalConfig = window.__MBR_CONFIG__
+
+  beforeEach(() => {
+    localStorage.clear()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+  })
+
+  afterEach(() => {
+    element?.remove()
+    element = null
+    mocks.state = { isLoading: true, data: null, error: null }
+    window.__MBR_CONFIG__ = originalConfig
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+
+  function makeFile(
+    urlPath: string,
+    rawPath: string,
+    frontmatter: Record<string, any> | null = null,
+    modified = 1000,
+  ): MarkdownFile {
+    return { url_path: urlPath, raw_path: rawPath, created: 1000, modified, frontmatter }
+  }
+
+  /** Mount an open <mbr-browse> for `pathname` with `files` as the site index. */
+  async function mount(files: MarkdownFile[], pathname: string): Promise<MbrBrowseElement> {
+    vi.stubGlobal('location', { pathname })
+    mocks.state = {
+      isLoading: false,
+      data: { index_file: 'index.md', markdown_files: files },
+      error: null,
+    }
+    const el = document.createElement('mbr-browse') as MbrBrowseElement
+    document.body.appendChild(el)
+    element = el
+    el.open()
+    await el.updateComplete
+    return el
+  }
+
+  function root(el: MbrBrowseElement): ShadowRoot {
+    return el.shadowRoot as ShadowRoot
+  }
+
+  function texts(el: MbrBrowseElement, selector: string): string[] {
+    return [...root(el).querySelectorAll(selector)].map(n => n.textContent?.trim() ?? '')
+  }
+
+  /** Click the left-pane section header whose title matches `title`. */
+  async function expandSection(el: MbrBrowseElement, title: string): Promise<void> {
+    const header = [...root(el).querySelectorAll('.section-header')].find(
+      b => b.querySelector('.section-title')?.textContent?.trim() === title
+    ) as HTMLElement | undefined
+    expect(header, `section "${title}" not rendered`).toBeDefined()
+    header!.click()
+    await el.updateComplete
+  }
+
+  function tagLabel(el: MbrBrowseElement, name: string): HTMLElement | undefined {
+    return [...root(el).querySelectorAll('.tag-item .tree-label')].find(
+      b => b.querySelector('.label-text')?.textContent?.trim() === name
+    ) as HTMLElement | undefined
+  }
+
+  /** Expand the Tags section if needed, then click the tag named `name`. */
+  async function selectTag(el: MbrBrowseElement, name: string): Promise<void> {
+    if (!tagLabel(el, name)) {
+      await expandSection(el, 'Tags')
+    }
+    const label = tagLabel(el, name)
+    expect(label, `tag "${name}" not rendered`).toBeDefined()
+    label!.click()
+    await el.updateComplete
+  }
+
+  describe('canonical paths (percent-encoded pathnames)', () => {
+    const idea = () => makeFile('/My Notes/Idea/', 'My Notes/Idea.md', { tags: ['note'] }, 1000)
+    const other = () => makeFile('/other/', 'other.md', { tags: ['note'] }, 9000)
+
+    it('stores the decoded canonical path in the recent list', async () => {
+      await mount([idea(), other()], '/My%20Notes/Idea/')
+
+      expect(JSON.parse(localStorage.getItem('mbr_recent_files') ?? '[]')).toEqual([
+        '/My Notes/Idea/',
+      ])
+    })
+
+    it('surfaces a visited percent-encoded page in Recent ahead of newer files', async () => {
+      const el = await mount([idea(), other()], '/My%20Notes/Idea/')
+      await expandSection(el, 'Recent')
+
+      // "other" has the newer mtime, so the visited page can only come first if
+      // its stored path resolved against site.json.
+      expect(texts(el, '.compact-file .compact-title')).toEqual(['Idea', 'other'])
+    })
+
+    it('recovers a previously stored percent-encoded entry', async () => {
+      localStorage.setItem('mbr_recent_files', JSON.stringify(['/My%20Notes/Idea/']))
+
+      const el = await mount([idea(), other()], '/')
+      await expandSection(el, 'Recent')
+
+      expect(texts(el, '.compact-file .compact-title')).toEqual(['Idea', 'other'])
+    })
+
+    it('marks the current page card as current', async () => {
+      const el = await mount([idea(), other()], '/My%20Notes/Idea/')
+      await selectTag(el, 'note')
+
+      const current = [...root(el).querySelectorAll('.file-card.current')]
+      expect(current).toHaveLength(1)
+      expect(current[0].querySelector('.file-title')?.textContent?.trim()).toBe('Idea')
+    })
+  })
+
+  describe('auto-expanding the current folder path', () => {
+    const files = (): MarkdownFile[] => [
+      makeFile('/docs/', 'docs/index.md', { title: 'Docs' }),
+      makeFile('/docs/guide/', 'docs/guide/index.md', { title: 'Guide' }),
+      makeFile('/docs/guide/setup/', 'docs/guide/setup.md', { title: 'Setup' }),
+    ]
+
+    it('expands folders using the key shape buildFolderTree mints', async () => {
+      const el = await mount(files(), '/docs/guide/setup/')
+
+      const tree = buildFolderTree(files(), 'index.md')
+      const docs = tree.children.get('docs')!
+      const guide = docs.children.get('guide')!
+      const expanded = (el as any)._expandedFolders as Set<string>
+
+      expect(expanded.has(docs.path)).toBe(true)
+      expect(expanded.has(guide.path)).toBe(true)
+    })
+
+    it('renders nested folders expanded down to the current page', async () => {
+      const el = await mount(files(), '/docs/guide/setup/')
+
+      // "Guide" only renders when the "/docs/" node is expanded.
+      expect(texts(el, '.folder-item .label-text')).toContain('Docs')
+      expect(texts(el, '.folder-item .label-text')).toContain('Guide')
+    })
+
+    it('selects the containing folder when the page URL is a file', async () => {
+      const el = await mount(files(), '/docs/guide/setup/')
+
+      expect(texts(el, '.tree-row.selected .label-text')).toEqual(['Guide'])
+    })
+
+    it('selects the folder itself when the page URL is a folder index', async () => {
+      const el = await mount(files(), '/docs/guide/')
+
+      expect(texts(el, '.tree-row.selected .label-text')).toEqual(['Guide'])
+    })
+  })
+
+  describe('middle pane paging', () => {
+    function taggedFiles(count: number): MarkdownFile[] {
+      return Array.from({ length: count }, (_, i) =>
+        makeFile(
+          `/notes/n${String(i).padStart(4, '0')}/`,
+          `notes/n${String(i).padStart(4, '0')}.md`,
+          { tags: ['note'], title: `Note ${String(i).padStart(4, '0')}` },
+        )
+      )
+    }
+
+    it('renders at most one page of cards for a large tag match', async () => {
+      const el = await mount(taggedFiles(500), '/')
+      await selectTag(el, 'note')
+
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(100)
+      expect(root(el).querySelector('.pane-count')?.textContent?.trim()).toBe('500')
+    })
+
+    it('reveals the next page when show more is clicked', async () => {
+      const el = await mount(taggedFiles(500), '/')
+      await selectTag(el, 'note')
+
+      const showMore = root(el).querySelector('.middle-pane .show-more') as HTMLElement
+      expect(showMore).not.toBeNull()
+      showMore.click()
+      await el.updateComplete
+
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(200)
+      // The count label keeps reporting the true total, not the page size.
+      expect(root(el).querySelector('.pane-count')?.textContent?.trim()).toBe('500')
+    })
+
+    it('does not page a result set that fits in one page', async () => {
+      const el = await mount(taggedFiles(20), '/')
+      await selectTag(el, 'note')
+
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(20)
+      expect(root(el).querySelector('.middle-pane .show-more')).toBeNull()
+    })
+
+    it('resets paging when a new selection is made', async () => {
+      const el = await mount(taggedFiles(500), '/')
+      await selectTag(el, 'note')
+      ;(root(el).querySelector('.middle-pane .show-more') as HTMLElement).click()
+      await el.updateComplete
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(200)
+
+      await selectTag(el, 'note')
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(100)
+    })
+  })
+
+  describe('frontmatter value counts', () => {
+    function statusFiles(): MarkdownFile[] {
+      return [
+        ...Array.from({ length: 7 }, (_, i) =>
+          makeFile(`/d${i}/`, `d${i}.md`, { status: 'draft' })),
+        ...Array.from({ length: 5 }, (_, i) =>
+          makeFile(`/f${i}/`, `f${i}.md`, { status: 'final' })),
+      ]
+    }
+
+    function valueRows(el: MbrBrowseElement): Array<[string, string]> {
+      return [...root(el).querySelectorAll('.frontmatter-value')].map(b => [
+        b.querySelector('.value-name')?.textContent?.trim() ?? '',
+        b.querySelector('.value-count')?.textContent?.trim() ?? '',
+      ])
+    }
+
+    it('shows the counts computed during field detection', async () => {
+      const el = await mount(statusFiles(), '/')
+      await expandSection(el, 'Status')
+
+      expect(valueRows(el)).toEqual([['draft', '7'], ['final', '5']])
+    })
+
+    it('does not rescan the file list while rendering', async () => {
+      const el = await mount(statusFiles(), '/')
+      await expandSection(el, 'Status')
+
+      // Counts are cached by the detector, so dropping the file list must not
+      // change them - render no longer scans _allFiles per value.
+      ;(el as any)._allFiles = []
+      await el.updateComplete
+
+      expect(valueRows(el)).toEqual([['draft', '7'], ['final', '5']])
+    })
+  })
 })

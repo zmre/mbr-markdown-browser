@@ -49,8 +49,15 @@
 //! Key differences from upstream:
 //! - Added [`HtmlConfig`] for extension configuration
 //! - Added `section_started` field for section tracking
+//! - Added `container_depth` field so section boundaries are only emitted at
+//!   top level (a `</section>` inside a blockquote or list mis-nests)
 //! - Added `codeblock_state` field for mermaid closing tag handling
+//! - Link and image destinations with a script-capable scheme (`javascript:`,
+//!   `vbscript:`, non-image `data:`) are replaced with an inert value
+//! - Images are emitted with `loading="lazy" decoding="async"`
 //! - Removed `ContainerBlock` handling (not used in MBR)
+//!
+//! Output is pinned by a golden corpus in `tests/render_golden.rs`.
 
 use std::collections::HashMap;
 
@@ -79,7 +86,11 @@ pub struct HtmlConfig {
     ///
     /// When enabled:
     /// - Output starts with `<section>\n`
-    /// - Each `---` (Rule) becomes `</section>\n<hr />\n<section>\n`
+    /// - Each **top-level** `---` (Rule) becomes `</section>\n<hr />\n<section>\n`
+    /// - A `---` nested inside a blockquote, list item, footnote definition,
+    ///   table cell, or definition renders as a plain `<hr />`: splitting the
+    ///   section there would close it outside its container and eject the
+    ///   remaining content from the quote/list on reparse
     /// - Output ends with `</section>\n`
     pub enable_sections: bool,
 
@@ -154,6 +165,116 @@ struct HtmlWriter<'a, I, W> {
 
     // MBR EXTENSION: Section attributes - tracks current section index (0-based)
     current_section: usize,
+
+    // MBR EXTENSION: Section wrapping - how many block containers (blockquote,
+    // list, list item, table cell, footnote definition, definition list) are
+    // currently open. A `<section>` boundary may only be emitted at depth 0.
+    container_depth: usize,
+}
+
+/// Block containers that a `<section>` boundary must never be emitted inside.
+///
+/// Splitting a section in the middle of one of these emits `</section>` before
+/// the container's own closing tag, which a browser resolves by hoisting the
+/// remaining content out of the quote/list entirely.
+fn is_block_container(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::BlockQuote(_)
+            | Tag::List(_)
+            | Tag::Item
+            | Tag::TableCell
+            | Tag::FootnoteDefinition(_)
+            | Tag::DefinitionList
+            | Tag::DefinitionListDefinition
+    )
+}
+
+/// [`is_block_container`] for the closing half of the event stream.
+fn is_block_container_end(tag: &TagEnd) -> bool {
+    matches!(
+        tag,
+        TagEnd::BlockQuote(_)
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::TableCell
+            | TagEnd::FootnoteDefinition
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListDefinition
+    )
+}
+
+// ============================================================================
+// MBR EXTENSION: Destination scheme filtering
+// ============================================================================
+
+/// Written in place of a link or image destination whose URL scheme can execute
+/// script. The element and its text survive; only the navigation is made inert.
+const BLOCKED_DESTINATION: &str = "about:blank#blocked";
+
+/// Length of the longest scheme [`is_blocked_destination`] rejects (`javascript`).
+const MAX_BLOCKED_SCHEME_LEN: usize = 10;
+
+/// True when `dest` carries a URL scheme that can execute script.
+///
+/// Markdown is routinely authored by someone other than the person serving it,
+/// so `[click me](javascript:…)` must not become a live href. `data:` is rejected
+/// too, except for `data:image/*` — inline images are legitimate (and preserved
+/// verbatim by `link_transform`), whereas `data:text/html` is a script vector.
+///
+/// The scheme is normalized the way a browser normalizes one before resolving a
+/// URL: leading C0 control characters and spaces are ignored, and embedded tab,
+/// line feed, and carriage return characters are removed anywhere they appear.
+/// Without that, `" java\tscript:alert(1)"` would slip through while still
+/// navigating.
+fn is_blocked_destination(dest: &str) -> bool {
+    let mut scheme = [0u8; MAX_BLOCKED_SCHEME_LEN];
+    let mut len = 0usize;
+    let mut found_colon = false;
+
+    for c in dest.trim_start_matches(|c: char| c <= ' ').chars() {
+        match c {
+            '\t' | '\n' | '\r' => continue,
+            ':' => {
+                found_colon = true;
+                break;
+            }
+            _ if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') => {
+                if len == MAX_BLOCKED_SCHEME_LEN {
+                    // Longer than every scheme we reject, so it cannot match.
+                    return false;
+                }
+                scheme[len] = c.to_ascii_lowercase() as u8;
+                len += 1;
+            }
+            // Not a scheme character: the destination is relative or malformed.
+            _ => return false,
+        }
+    }
+
+    if !found_colon {
+        return false;
+    }
+
+    match &scheme[..len] {
+        b"javascript" | b"vbscript" => true,
+        b"data" => !is_inline_image_data_url(dest),
+        _ => false,
+    }
+}
+
+/// True for `data:image/…` destinations, the only `data:` shape MBR allows.
+fn is_inline_image_data_url(dest: &str) -> bool {
+    let Some((_, payload)) = dest.split_once(':') else {
+        return false;
+    };
+    let mut actual = payload
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .map(|c| c.to_ascii_lowercase());
+    "image/"
+        .chars()
+        .all(|expected| actual.next() == Some(expected))
 }
 
 impl<'a, I, W> HtmlWriter<'a, I, W>
@@ -179,6 +300,7 @@ where
             config,
             section_started: false,
             current_section: 0,
+            container_depth: 0,
         }
     }
 
@@ -198,6 +320,17 @@ where
             self.end_newline = s.ends_with('\n');
         }
         Ok(())
+    }
+
+    /// MBR EXTENSION: Writes an `href`/`src` value, substituting
+    /// [`BLOCKED_DESTINATION`] for schemes that can execute script.
+    #[inline]
+    fn write_destination(&mut self, dest: &str) -> Result<(), W::Error> {
+        if is_blocked_destination(dest) {
+            self.write(BLOCKED_DESTINATION)
+        } else {
+            escape_href(&mut self.writer, dest)
+        }
     }
 
     fn run(mut self) -> Result<(), W::Error> {
@@ -253,9 +386,14 @@ where
                 }
                 // MBR EXTENSION: Section dividers with optional attrs
                 Rule => {
+                    // The section index advances for every rule, nested or not, so
+                    // that it stays aligned with the attribute map that
+                    // `markdown.rs` builds by counting `Event::Rule` the same way.
                     if self.config.enable_sections {
-                        // Increment section index before opening the next section
                         self.current_section += 1;
+                    }
+
+                    if self.config.enable_sections && self.container_depth == 0 {
                         let attrs_str = self
                             .config
                             .section_attrs
@@ -264,7 +402,10 @@ where
                             .unwrap_or_default();
                         self.write(&format!("</section>\n<hr />\n<section{}>\n", attrs_str))?;
                     } else {
-                        // Standard pulldown-cmark behavior
+                        // Standard pulldown-cmark behavior. Also used for rules
+                        // nested inside a blockquote/list/footnote: closing the
+                        // section there would close outside the container and
+                        // eject everything after the rule from it.
                         if self.end_newline {
                             self.write("<hr />\n")?;
                         } else {
@@ -300,6 +441,10 @@ where
 
     /// Writes the start of an HTML tag.
     fn start_tag(&mut self, tag: Tag<'a>) -> Result<(), W::Error> {
+        // MBR EXTENSION: Section wrapping - track open block containers.
+        if is_block_container(&tag) {
+            self.container_depth += 1;
+        }
         match tag {
             Tag::HtmlBlock => Ok(()),
             Tag::Paragraph => {
@@ -495,7 +640,7 @@ where
                 id: _,
             } => {
                 self.write("<a href=\"")?;
-                escape_href(&mut self.writer, &dest_url)?;
+                self.write_destination(&dest_url)?;
                 if !title.is_empty() {
                     self.write("\" title=\"")?;
                     escape_html(&mut self.writer, &title)?;
@@ -509,14 +654,16 @@ where
                 id: _,
             } => {
                 self.write("<img src=\"")?;
-                escape_href(&mut self.writer, &dest_url)?;
+                self.write_destination(&dest_url)?;
                 self.write("\" alt=\"")?;
                 self.raw_text()?;
                 if !title.is_empty() {
                     self.write("\" title=\"")?;
                     escape_html(&mut self.writer, &title)?;
                 }
-                self.write("\" />")
+                // MBR EXTENSION: notes are often image-heavy; defer off-screen
+                // requests and keep decoding off the main thread.
+                self.write("\" loading=\"lazy\" decoding=\"async\" />")
             }
             Tag::FootnoteDefinition(name) => {
                 if self.end_newline {
@@ -539,6 +686,11 @@ where
     }
 
     fn end_tag(&mut self, tag: TagEnd) -> Result<(), W::Error> {
+        // MBR EXTENSION: Section wrapping - track open block containers.
+        // `saturating_sub` keeps a malformed event stream from panicking.
+        if is_block_container_end(&tag) {
+            self.container_depth = self.container_depth.saturating_sub(1);
+        }
         match tag {
             TagEnd::HtmlBlock => {}
             TagEnd::Paragraph => {
@@ -894,7 +1046,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulldown_cmark::Parser;
+    use pulldown_cmark::{Options, Parser};
 
     /// Helper to render markdown with custom config
     fn render_with_config(markdown: &str, config: HtmlConfig) -> String {
@@ -902,6 +1054,32 @@ mod tests {
         let mut html = String::new();
         push_html_with_config(&mut html, parser, config);
         html
+    }
+
+    /// Renders with the same options the application uses (`Options::all()`),
+    /// which is what enables tables, footnotes, task lists and math.
+    fn render_mbr(markdown: &str) -> String {
+        let parser = Parser::new_ext(markdown, Options::all());
+        let mut html = String::new();
+        push_html_mbr(&mut html, parser);
+        html
+    }
+
+    /// Returns the slice strictly between the first `open` tag and the first
+    /// `close` tag that follows it.
+    ///
+    /// Substring *counts* of `<section>`/`</section>` stay balanced even when the
+    /// tags are mis-nested, so container nesting has to be inspected directly.
+    fn between<'a>(html: &'a str, open: &str, close: &str) -> &'a str {
+        let start = html
+            .find(open)
+            .unwrap_or_else(|| panic!("expected {open} in output:\n{html}"))
+            + open.len();
+        let end = html[start..]
+            .find(close)
+            .unwrap_or_else(|| panic!("expected {close} after {open} in output:\n{html}"))
+            + start;
+        &html[start..end]
     }
 
     #[test]
@@ -1010,5 +1188,306 @@ mod tests {
             "Mermaid should not have code wrapper. Got: {}",
             html
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Section wrapping must not tear open block containers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_rule_inside_blockquote_does_not_close_section() {
+        let html = render_mbr("> before\n>\n> ---\n>\n> after");
+        let inside = between(&html, "<blockquote>", "</blockquote>");
+
+        assert!(
+            !inside.contains("</section>"),
+            "A rule inside a blockquote must not close the surrounding section \
+             (the browser would hoist everything after it out of the quote). Got: {html}"
+        );
+        assert!(
+            !inside.contains("<section"),
+            "A rule inside a blockquote must not open a section. Got: {html}"
+        );
+        assert!(
+            inside.contains("<hr />"),
+            "The rule should still render as a plain <hr />. Got: {html}"
+        );
+        assert!(
+            inside.contains("after"),
+            "Content after the rule must stay inside the blockquote. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_rule_inside_list_item_does_not_close_section() {
+        let html = render_mbr("- a\n\n  ---\n\n- b");
+        let inside = between(&html, "<li>", "</li>");
+
+        assert!(
+            !inside.contains("</section>"),
+            "A rule inside a list item must not close the surrounding section. Got: {html}"
+        );
+        assert!(
+            !inside.contains("<section"),
+            "A rule inside a list item must not open a section. Got: {html}"
+        );
+        assert!(
+            inside.contains("<hr />"),
+            "The rule should still render as a plain <hr />. Got: {html}"
+        );
+        // The <ul> must also survive intact.
+        let list = between(&html, "<ul>", "</ul>");
+        assert!(
+            !list.contains("section"),
+            "The list must not be split by a section boundary. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_rule_inside_definition_list_does_not_close_section() {
+        let html = render_mbr("Term\n\n: def\n\n  ---\n\n  more\n");
+        let inside = between(&html, "<dd>", "</dd>");
+
+        assert!(
+            !inside.contains("</section>"),
+            "A rule inside a definition must not close the surrounding section. Got: {html}"
+        );
+        assert!(
+            inside.contains("more"),
+            "Content after the rule must stay inside the definition. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_top_level_rule_still_splits_sections() {
+        let html = render_mbr("Hello\n\n---\n\nWorld");
+
+        assert!(
+            html.contains("</section>\n<hr />\n<section>"),
+            "A top-level rule must still split sections. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_nested_rule_does_not_shift_section_attr_indices() {
+        // markdown.rs numbers sections by counting every Event::Rule, nested or
+        // not, so html.rs must advance its index for the nested rule too or the
+        // attrs land on the wrong section.
+        let mut section_attrs = HashMap::new();
+        section_attrs.insert(
+            2,
+            ParsedAttrs {
+                id: Some("third".to_string()),
+                classes: vec![],
+                attrs: vec![],
+            },
+        );
+        let config = HtmlConfig::mbr_with_section_attrs(section_attrs);
+        let parser = Parser::new_ext("> ---\n\n---\n\ntail", Options::all());
+        let mut html = String::new();
+        push_html_with_config(&mut html, parser, config);
+
+        assert!(
+            html.contains(r#"<section id="third">"#),
+            "Section index must count the nested rule. Got: {html}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Script-capable destinations are neutralized
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_javascript_link_destination_is_neutralized() {
+        let html = render_mbr("[click me](javascript:alert(1))");
+
+        assert!(
+            !html.contains("javascript:"),
+            "javascript: href must not survive. Got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="about:blank#blocked">"#),
+            "Blocked link should get an inert href. Got: {html}"
+        );
+        assert!(
+            html.contains("click me"),
+            "Link text must be preserved. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_javascript_scheme_obfuscation_is_neutralized() {
+        // Browsers strip leading control characters/spaces and every embedded
+        // tab/newline/CR before resolving the URL, so these all still navigate.
+        for dest in [
+            "JaVaScRiPt:alert(1)",
+            "  javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "\u{1}javascript:alert(1)",
+        ] {
+            let html = render_mbr(&format!("[x](<{dest}>)"));
+            assert!(
+                html.contains(r#"href="about:blank#blocked""#),
+                "{dest:?} should have been neutralized. Got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vbscript_link_destination_is_neutralized() {
+        let html = render_mbr("[x](vbscript:msgbox(1))");
+        assert!(
+            html.contains(r#"href="about:blank#blocked""#),
+            "vbscript: href must be neutralized. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_non_image_data_url_is_neutralized() {
+        let html = render_mbr("[x](data:text/html;base64,PHNjcmlwdD4=)");
+        assert!(
+            html.contains(r#"href="about:blank#blocked""#),
+            "data:text/html href must be neutralized. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_inline_image_data_url_is_preserved() {
+        // link_transform.rs deliberately passes data: through for inline images,
+        // so data:image/* must keep working in both links and images.
+        let html = render_mbr("![alt](data:image/png;base64,iVBORw0KGgo=)");
+        assert!(
+            html.contains(r#"src="data:image/png;base64,iVBORw0KGgo=""#),
+            "data:image/* src must be preserved. Got: {html}"
+        );
+
+        let html = render_mbr("[x](data:image/png;base64,iVBORw0KGgo=)");
+        assert!(
+            html.contains(r#"href="data:image/png;base64,iVBORw0KGgo=""#),
+            "data:image/* href must be preserved. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_javascript_image_destination_is_neutralized() {
+        let html = render_mbr("![alt](javascript:alert(1))");
+        assert!(
+            !html.contains("javascript:"),
+            "javascript: src must not survive. Got: {html}"
+        );
+        assert!(
+            html.contains(r#"<img src="about:blank#blocked""#),
+            "Blocked image should get an inert src. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_ordinary_destinations_are_untouched() {
+        let cases = [
+            (
+                "[a](https://example.com/p?q=1)",
+                "https://example.com/p?q=1",
+            ),
+            ("[a](http://example.com/)", "http://example.com/"),
+            ("[a](../notes/other/)", "../notes/other/"),
+            ("[a](/images/pic.png)", "/images/pic.png"),
+            ("[a](#anchor)", "#anchor"),
+            ("[a](mailto:me@example.com)", "mailto:me@example.com"),
+            ("[a](tel:+15551234)", "tel:+15551234"),
+            // A relative file that merely looks like a scheme name.
+            ("[a](javascript)", "javascript"),
+        ];
+        for (markdown, expected_href) in cases {
+            let html = render_mbr(markdown);
+            assert!(
+                html.contains(&format!(r#"href="{expected_href}""#)),
+                "{markdown} should render href={expected_href:?}. Got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_autolink_email_is_untouched() {
+        let html = render_mbr("<me@example.com>");
+        assert!(
+            html.contains(r#"href="mailto:me@example.com""#),
+            "Email autolinks must keep working. Got: {html}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Image loading hints
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_images_get_lazy_loading_and_async_decoding() {
+        let html = render_mbr("![alt text](/images/pic.png)");
+
+        assert!(
+            html.contains(r#"loading="lazy""#),
+            "Images should be lazily loaded. Got: {html}"
+        );
+        assert!(
+            html.contains(r#"decoding="async""#),
+            "Images should decode asynchronously. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_image_with_title_keeps_loading_hints() {
+        let html = render_mbr(r#"![alt](/images/pic.png "A title")"#);
+
+        assert!(
+            html.contains(r#"title="A title" loading="lazy" decoding="async" />"#),
+            "Title and loading hints should both be emitted. Got: {html}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Scheme normalization unit coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_is_blocked_destination() {
+        for dest in [
+            "javascript:alert(1)",
+            "JAVASCRIPT:alert(1)",
+            " \u{c}javascript:alert(1)",
+            "v\rbscript:x", // still `vbscript:` once CRs are removed
+            "vbscript:x",
+            "data:text/html,<script>",
+            "data:,plain",
+            "data:image",     // no slash: not `image/`
+            "data:imag",      // truncated payload
+            "javascript:",    // empty body still navigates
+            "jAvAsCrIpT\n:x", // newline before the colon
+        ] {
+            assert!(is_blocked_destination(dest), "{dest:?} should be blocked");
+        }
+
+        for dest in [
+            "",
+            ":",
+            "https://example.com",
+            "HTTPS://example.com",
+            "mailto:me@example.com",
+            "../a/b",
+            "/a/b",
+            "#frag",
+            "?q=1",
+            "javascript",            // no colon: a relative path
+            "a javascript:alert(1)", // space is not stripped mid-URL
+            "not-javascript:x",
+            "data:image/png;base64,AAAA",
+            "DATA:IMAGE/PNG;base64,AAAA",
+            "data:image/svg+xml,%3Csvg%3E",
+            "blob:https://example.com/uuid",
+            "verylongschemename:x",
+        ] {
+            assert!(
+                !is_blocked_destination(dest),
+                "{dest:?} should not be blocked"
+            );
+        }
     }
 }

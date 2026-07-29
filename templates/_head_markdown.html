@@ -24,28 +24,34 @@
     <meta name="keywords" content="{{taxonomy.tags | join(sep=', ')}}" data-pagefind-filter="tag[content]" />
         {% endif %}
     {% endif %}
-    <title>{{title_prefix | default(value="")}}{{title | default(value="") | safe}}{{title_suffix | default(value="")}}</title>
-    <meta name="title" content="{{title | default(value="") | escape}}" data-pagefind-meta="title[content]" />
-    <meta name="description" content="{{description | default(value="") | escape}}" data-pagefind-meta="description[content]" />
-    <meta http-equiv="last-modified" content="{{date | default(value="") | safe}}" data-pagefind-sort="date[content]" />
+    {# No `| safe` on frontmatter values below: Tera autoescapes `.html`
+       templates, and `| safe` would let a title like `</title><img …>` emit
+       live markup. An explicit `| escape` is equally wrong — autoescape runs
+       after it, producing double-escaped `&amp;lt;`. #}
+    <title>{{title_prefix | default(value="")}}{{title | default(value="")}}{{title_suffix | default(value="")}}</title>
+    <meta name="title" content="{{title | default(value="")}}" data-pagefind-meta="title[content]" />
+    <meta name="description" content="{{description | default(value="")}}" data-pagefind-meta="description[content]" />
+    <meta http-equiv="last-modified" content="{{date | default(value="")}}" data-pagefind-sort="date[content]" />
+    {# Every value below is JSON serialized and `<`/`>`/`&`-escaped server-side
+       (see templates.rs::escape_json_for_script), so no frontmatter value,
+       heading, file path or sibling URL can terminate this script block or
+       break out of a string literal. `| safe` is required *because* the values
+       are already script-safe — HTML entity escaping would corrupt them, since
+       entities are not decoded inside <script>. #}
     <script>
       // Frontmatter available to page scripts (excludes rendered markdown for efficiency)
       window.frontmatter = {{ frontmatter_json | safe }};
       // Headings for table of contents
-      window.headings = [
-        {% for heading in headings %}
-        { level: {{ heading.level }}, id: "{{ heading.id }}", text: "{{ heading.text | escape }}" }{% if not loop.last %},{% endif %}
-        {% endfor %}
-      ];
+      window.headings = {{ headings_json | default(value="[]") | safe }};
       // Extended metadata
       window.extendedMeta = {
         wordCount: {{ word_count | default(value=0) }},
         readingTimeMinutes: {{ reading_time_minutes | default(value=0) }},
         fleschReadingEase: {{ flesch_reading_ease | default(value="null") }},
         fleschKincaidGrade: {{ flesch_kincaid_grade | default(value="null") }},
-        filePath: "{{ file_path | default(value='') | safe }}",
+        filePath: {{ file_path_json | default(value='""') | safe }},
         modifiedTimestamp: {{ modified_timestamp | default(value=0) }},
-        {% if prev_page %}prevPage: { url: "{{ prev_page.url | safe }}", title: "{{ prev_page.title | escape }}" },{% endif %}
-        {% if next_page %}nextPage: { url: "{{ next_page.url | safe }}", title: "{{ next_page.title | escape }}" }{% endif %}
+        {% if prev_page %}prevPage: {{ prev_page_json | default(value="null") | safe }},{% endif %}
+        {% if next_page %}nextPage: {{ next_page_json | default(value="null") | safe }}{% endif %}
       };
     </script>

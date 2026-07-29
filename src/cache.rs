@@ -19,7 +19,7 @@
 //! bookkeeping and is also reused by the mutex-guarded LRU oembed cache,
 //! which shares the weighing/accounting conventions but not the storage.
 
-use papaya::HashMap;
+use papaya::{Compute, HashMap, Operation};
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,6 +51,15 @@ impl<V> Entry<V> {
     pub fn weigh(value_size: usize, key_len: usize) -> usize {
         value_size + key_len + std::mem::size_of::<Self>()
     }
+}
+
+/// Outcome of [`SizeBoundedMap::claim_or`].
+pub enum Claim<R> {
+    /// The caller's value now occupies the slot.
+    Claimed,
+    /// An existing entry was kept; carries the value the decision closure
+    /// produced for it.
+    Retained(R),
 }
 
 /// Statistics from an eviction pass.
@@ -105,6 +114,21 @@ where
     /// Returns the current approximate accounted size in bytes.
     pub fn current_size(&self) -> usize {
         self.current_size.load(Ordering::Relaxed)
+    }
+
+    /// Subtracts `bytes` from the running total, saturating at zero.
+    ///
+    /// The total is maintained by several independent lock-free operations, so
+    /// a duplicated or stale subtraction is possible under contention. A plain
+    /// `fetch_sub` would wrap to a near-`usize::MAX` total and leave the cache
+    /// permanently "over budget", evicting on every insert; saturating keeps
+    /// the drift bounded and self-correcting.
+    fn sub_current_size(&self, bytes: usize) {
+        let _ = self
+            .current_size
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(bytes))
+            });
     }
 
     /// Returns the number of entries in the map.
@@ -175,10 +199,73 @@ where
         let (replaced_value, replaced_size) = guard
             .insert(key, entry)
             .map_or((None, 0), |old| (Some(old.value.clone()), old.size_bytes));
-        self.current_size
-            .fetch_sub(replaced_size, Ordering::Relaxed);
+        self.sub_current_size(replaced_size);
         let new_total = self.current_size.fetch_add(size_bytes, Ordering::Relaxed) + size_bytes;
         (replaced_value, new_total)
+    }
+
+    /// Atomically installs `value` for `key` unless an existing entry is kept.
+    ///
+    /// `decide` is consulted for an entry that is already present: it returns
+    /// `Some(reason)` to keep that entry (nothing is written, `reason` is
+    /// handed back) or `None` to replace it. A vacant slot is always claimed.
+    ///
+    /// The read-modify-write is a single papaya compare-and-swap, so of many
+    /// concurrent callers exactly one claims a given slot. A `get` followed by
+    /// an `insert` cannot promise that: every caller can observe the vacancy
+    /// and every caller then claims it, which is how single-flight guards leak
+    /// duplicate producers.
+    ///
+    /// `decide` may run more than once (the CAS retries when the entry changes
+    /// underneath it), so it must be free of side effects.
+    ///
+    /// When the cache is disabled nothing is stored and every caller is told it
+    /// claimed the slot — with no storage there is nothing to deduplicate on.
+    pub fn claim_or<R>(
+        &self,
+        key: K,
+        value: V,
+        size_bytes: usize,
+        decide: impl Fn(&Entry<V>) -> Option<R>,
+    ) -> Claim<R>
+    where
+        V: Clone,
+    {
+        if self.is_disabled() {
+            return Claim::Claimed;
+        }
+
+        let guard = self.map.pin();
+        let outcome = guard.compute(key, |existing| {
+            let keep = existing.and_then(|(_, entry)| decide(entry));
+            match keep {
+                Some(reason) => Operation::Abort(reason),
+                None => Operation::Insert(Entry::new(value.clone(), size_bytes)),
+            }
+        });
+
+        match outcome {
+            Compute::Aborted(reason) => Claim::Retained(reason),
+            Compute::Inserted(_, _) => {
+                self.current_size.fetch_add(size_bytes, Ordering::Relaxed);
+                Claim::Claimed
+            }
+            Compute::Updated {
+                old: (_, replaced), ..
+            } => {
+                self.sub_current_size(replaced.size_bytes);
+                self.current_size.fetch_add(size_bytes, Ordering::Relaxed);
+                Claim::Claimed
+            }
+            // `Operation::Remove` is never produced above, so the map cannot
+            // report a removal. Keep the accounting honest and treat the now
+            // vacant slot as claimed rather than panicking on an unreachable
+            // state.
+            Compute::Removed(_, removed) => {
+                self.sub_current_size(removed.size_bytes);
+                Claim::Claimed
+            }
+        }
     }
 
     /// Removes evictable entries in ascending `priority` order until at least
@@ -192,24 +279,29 @@ where
         priority: impl Fn(&K, &Entry<V>) -> Option<P>,
     ) -> EvictionStats {
         let guard = self.map.pin();
-        let mut candidates: Vec<(K, P, usize)> = guard
+        let mut candidates: Vec<(K, P)> = guard
             .iter()
-            .filter_map(|(k, e)| priority(k, e).map(|p| (k.clone(), p, e.size_bytes)))
+            .filter_map(|(k, e)| priority(k, e).map(|p| (k.clone(), p)))
             .collect();
 
         // Evict in ascending priority order (e.g. oldest first).
-        candidates.sort_by(|(_, a, _), (_, b, _)| a.cmp(b));
+        candidates.sort_by(|(_, a), (_, b)| a.cmp(b));
 
         let mut freed = 0usize;
         let mut evicted = 0usize;
-        for (key, _, size) in candidates {
+        for (key, _) in candidates {
             if freed >= target_bytes {
                 break;
             }
-            if guard.remove(&key).is_some() {
-                freed += size;
+            // Account the entry that was *actually* removed rather than the one
+            // observed while iterating: a concurrent overwrite between the
+            // snapshot and this removal replaces the entry, and subtracting the
+            // stale size would leave `current_size` permanently drifted from
+            // the map's real contents.
+            if let Some(removed) = guard.remove(&key) {
+                freed += removed.size_bytes;
                 evicted += 1;
-                self.current_size.fetch_sub(size, Ordering::Relaxed);
+                self.sub_current_size(removed.size_bytes);
             }
         }
 
@@ -300,6 +392,135 @@ mod tests {
         assert_eq!(stats.freed, 100);
         assert!(map.with_entry("keep", |_| ()).is_some());
         assert!(map.with_entry("evictable", |_| ()).is_none());
+    }
+
+    #[test]
+    fn test_evict_accounts_the_entry_actually_removed() {
+        // Regression: the eviction pass used to subtract the size it snapshotted
+        // while iterating. Replacing the entry between that snapshot and the
+        // removal (what a concurrent insert does) then left `current_size`
+        // permanently above the map's real contents.
+        let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(1024);
+        map.insert_weighted("k".to_string(), 1, 100);
+        assert_eq!(map.current_size(), 100);
+
+        // The priority closure runs during the snapshot pass, so overwriting
+        // from inside it reproduces the interleaving deterministically.
+        let stats = map.evict_until_freed(50, |_, entry| {
+            map.insert_weighted("k".to_string(), 2, 900);
+            Some(entry.inserted_at)
+        });
+
+        assert_eq!(stats.evicted, 1);
+        assert_eq!(
+            stats.freed, 900,
+            "freed bytes must reflect the removed entry, not the stale snapshot"
+        );
+        assert!(map.is_empty());
+        assert_eq!(
+            map.current_size(),
+            0,
+            "an emptied map must account exactly zero bytes"
+        );
+    }
+
+    #[test]
+    fn test_current_size_subtraction_saturates_at_zero() {
+        // Defence in depth: an over-subtraction must clamp instead of wrapping
+        // to ~usize::MAX, which would make the cache look permanently over
+        // budget and evict on every insert.
+        let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(1024);
+        map.insert_weighted("k".to_string(), 1, 10);
+
+        map.sub_current_size(usize::MAX);
+
+        assert_eq!(map.current_size(), 0);
+    }
+
+    #[test]
+    fn test_claim_or_claims_vacant_slot_and_accounts_size() {
+        let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(1024);
+
+        let claim = map.claim_or("k".to_string(), 7, 40, |_| Some("occupied"));
+
+        assert!(matches!(claim, Claim::Claimed));
+        assert_eq!(map.with_entry("k", |e| e.value), Some(7));
+        assert_eq!(map.current_size(), 40);
+    }
+
+    #[test]
+    fn test_claim_or_retains_existing_entry() {
+        let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(1024);
+        map.insert_weighted("k".to_string(), 7, 40);
+
+        let claim = map.claim_or("k".to_string(), 9, 40, |entry| Some(entry.value));
+
+        assert!(matches!(claim, Claim::Retained(7)));
+        assert_eq!(map.with_entry("k", |e| e.value), Some(7));
+        assert_eq!(
+            map.current_size(),
+            40,
+            "a retained slot must not be charged"
+        );
+    }
+
+    #[test]
+    fn test_claim_or_replaces_when_decision_declines_to_keep() {
+        let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(1024);
+        map.insert_weighted("k".to_string(), 7, 40);
+
+        let claim = map.claim_or("k".to_string(), 9, 10, |_| None::<()>);
+
+        assert!(matches!(claim, Claim::Claimed));
+        assert_eq!(map.with_entry("k", |e| e.value), Some(9));
+        assert_eq!(
+            map.current_size(),
+            10,
+            "replacement must subtract the old size and add the new one"
+        );
+    }
+
+    #[test]
+    fn test_claim_or_on_disabled_map_stores_nothing() {
+        let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(0);
+
+        let claim = map.claim_or("k".to_string(), 7, 40, |_| Some("occupied"));
+
+        assert!(matches!(claim, Claim::Claimed));
+        assert!(map.is_empty());
+        assert_eq!(map.current_size(), 0);
+    }
+
+    #[test]
+    fn test_claim_or_admits_exactly_one_of_many_concurrent_claimants() {
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 64;
+
+        for round in 0..ROUNDS {
+            let map: SizeBoundedMap<String, u32> = SizeBoundedMap::new(1024 * 1024);
+            let key = format!("race-{round}");
+            let barrier = Barrier::new(THREADS);
+            let claims = AtomicUsize::new(0);
+
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        if let Claim::Claimed = map.claim_or(key.clone(), 1, 0, |_| Some(())) {
+                            claims.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
+
+            assert_eq!(
+                claims.load(Ordering::Relaxed),
+                1,
+                "exactly one claimant may win a slot"
+            );
+        }
     }
 
     #[test]

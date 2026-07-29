@@ -20,9 +20,18 @@ use tracing::{debug, error, info, trace};
 pub(crate) const BROADCAST_CAPACITY: usize = 100;
 
 /// Represents a file system change event.
+///
+/// Only `relative_path` and `event` cross the wire: this struct is broadcast to
+/// every live-reload WebSocket client, and an absolute path would leak the OS
+/// username, the home directory layout, and private note filenames.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FileChangeEvent {
     /// The absolute path to the changed file.
+    ///
+    /// **Server-side only** (`#[serde(skip)]`): consumed in-process by the
+    /// template hot-reload and repo-invalidation tasks. It is never serialized
+    /// to WebSocket clients — see the struct docs.
+    #[serde(skip)]
     pub path: String,
     /// The path relative to the repository root.
     pub relative_path: String,
@@ -90,7 +99,23 @@ impl FileWatcher {
         sender: broadcast::Sender<FileChangeEvent>,
     ) -> Result<Self, WatcherError> {
         let tx = sender;
-        let base_dir = base_dir.to_path_buf();
+        // notify reports canonical paths — FSEvents and inotify both hand back
+        // the resolved inode's path — so the diff base has to be canonical too
+        // or every `diff_paths` below climbs *out* of the repo instead of
+        // staying inside it. With the root configured as `/tmp/notes`, an event
+        // for `/private/tmp/notes/x.md` diffs to `../../private/tmp/notes/x.md`,
+        // which breaks two things at once. The ignore checks would see the
+        // ancestors of the root again — the very components the repo-relative
+        // matching in the callback exists to exclude — and `relative_path` would
+        // carry the absolute path in disguise to every live-reload client,
+        // leaking exactly the username, home layout, and private filenames the
+        // struct docs promise it never does. Canonicalize once, here, so the
+        // watched path and the diff base cannot drift apart. Falling back to the
+        // path as given covers a root that does not exist yet; the `watch()`
+        // call below then surfaces that as a proper `WatchFailed`.
+        let base_dir = base_dir
+            .canonicalize()
+            .unwrap_or_else(|_| base_dir.to_path_buf());
 
         // Use configured ignore directories (defaults are set in Config)
         let ignore_set: HashSet<String> = ignore_dirs.iter().cloned().collect();
@@ -109,14 +134,18 @@ impl FileWatcher {
                 // glob. Reuses `repo::should_ignore` for glob matching so the
                 // watcher and the repo scanner stay consistent.
                 let is_ignored = |path: &Path| -> bool {
-                    let under_ignored_dir = path.components().any(|comp| {
+                    // Both checks run against the repo-relative path. Matching
+                    // ignore-dir names against the absolute path would also match
+                    // components *above* the root, so a repo that merely happens to
+                    // live under a directory named `build`/`target`/`.git` would
+                    // discard every event and silently disable live reload — exactly
+                    // what the Nix Linux sandbox does with its `TMPDIR=/build`.
+                    let relative = pathdiff::diff_paths(path, &base_dir_clone)
+                        .unwrap_or_else(|| path.to_path_buf());
+                    let under_ignored_dir = relative.components().any(|comp| {
                         ignore_set.contains(comp.as_os_str().to_string_lossy().as_ref())
                     });
-                    under_ignored_dir || {
-                        let relative = pathdiff::diff_paths(path, &base_dir_clone)
-                            .unwrap_or_else(|| path.to_path_buf());
-                        should_ignore(&relative, &[], &ignore_globs)
-                    }
+                    under_ignored_dir || should_ignore(&relative, &[], &ignore_globs)
                 };
 
                 match res {
@@ -245,6 +274,30 @@ mod tests {
         None
     }
 
+    #[test]
+    fn test_serialized_event_omits_absolute_path() {
+        // The live-reload WebSocket broadcasts this struct to any client that
+        // completes a handshake, so the absolute path must never be on the
+        // wire: it leaks the OS username, home layout, and private filenames.
+        let event = FileChangeEvent {
+            path: "/Users/someone/private notes/secret.md".to_string(),
+            relative_path: "private notes/secret.md".to_string(),
+            event: ChangeEventType::Modified,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            !json.contains("/Users/someone"),
+            "absolute path leaked into the broadcast payload: {json}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed.get("path").is_none(),
+            "`path` must not be serialized: {json}"
+        );
+        assert_eq!(parsed["relative_path"], "private notes/secret.md");
+        assert_eq!(parsed["event"], "modified");
+    }
+
     #[tokio::test]
     async fn test_watcher_creates_and_receives_events() {
         let temp_dir = TempDir::new().unwrap();
@@ -310,6 +363,73 @@ mod tests {
             !saw_ignored_file,
             "Should NOT see ignored.txt from target/ directory"
         );
+    }
+
+    #[tokio::test]
+    async fn test_watcher_ignores_only_dirs_inside_the_repo() {
+        // Regression: ignore-dir names describe directories *inside* the repo, so
+        // they must be matched against the repo-relative path. Matching the
+        // absolute path meant an ancestor named `build` killed every event for the
+        // whole repo — which is what the Nix sandbox (`TMPDIR=/build`) hits.
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path().join("build").join("notes");
+        fs::create_dir_all(&base_path).unwrap();
+        // notify reports canonical paths, so the base dir has to be canonical too
+        // or `diff_paths` yields a `../..`-prefixed path (macOS temp dirs live
+        // under the /var -> /private/var symlink). `TestRepo` canonicalizes for
+        // the same reason.
+        let base_path = base_path.canonicalize().unwrap();
+
+        let ignore_dirs = vec!["build".to_string()];
+        let (_watcher, mut rx) = FileWatcher::new(&base_path, None, &ignore_dirs, &[]).unwrap();
+
+        let test_file = base_path.join("test.md");
+        fs::write(&test_file, "# Test").unwrap();
+
+        let change = recv_matching(&mut rx, |e| e.relative_path.contains("test.md")).await;
+        assert!(
+            change.is_some(),
+            "Should receive event for test.md even though an ancestor of the root is named 'build'"
+        );
+    }
+
+    // Symlink creation on Windows needs Developer Mode or elevation, so this is
+    // unix-only like the symlink walk helper in repo.rs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_watcher_relative_paths_stay_inside_a_symlinked_root() {
+        // Regression: notify reports canonical paths, so a root configured
+        // through a symlink (macOS `/tmp` -> `/private/tmp`, or any symlinked
+        // checkout) made `diff_paths` climb out of the repo and produce
+        // `../../private/tmp/...`. `relative_path` is broadcast to every
+        // live-reload client, so such a value hands out the absolute path in
+        // disguise — the username, home layout, and private note filenames the
+        // struct docs say must never cross the wire.
+        let temp_dir = TempDir::new().unwrap();
+        let real_root = temp_dir.path().join("real");
+        let real_notes = real_root.join("notes");
+        fs::create_dir_all(&real_notes).unwrap();
+        let link_root = temp_dir.path().join("link");
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        // Watch through the symlink: the path an operator configured, not the
+        // canonical one notify will report events for.
+        let link_notes = link_root.join("notes");
+        let (_watcher, mut rx) = FileWatcher::new(&link_notes, None, &[], &[]).unwrap();
+
+        fs::write(link_notes.join("test.md"), "# Test").unwrap();
+
+        // Match on the suffix so a climbing path still satisfies the predicate —
+        // the assertions below, not the filter, are what fail before the fix.
+        let change = recv_matching(&mut rx, |e| e.relative_path.ends_with("test.md"))
+            .await
+            .expect("should receive event for test.md through a symlinked root");
+        assert!(
+            !change.relative_path.contains(".."),
+            "relative_path escaped the repo root and leaks absolute path segments: {}",
+            change.relative_path
+        );
+        assert_eq!(change.relative_path, "test.md");
     }
 
     #[tokio::test]

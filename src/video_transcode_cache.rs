@@ -4,7 +4,7 @@
 //! video segments to avoid redundant transcoding operations. Handles concurrent
 //! requests by ensuring only one transcode runs per segment.
 
-use crate::cache::SizeBoundedMap;
+use crate::cache::{Claim, SizeBoundedMap};
 use crate::video_transcode::{TranscodeError, TranscodeTarget};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,45 +101,48 @@ impl HlsCache {
     ///
     /// If generation is already in progress or complete, returns the existing state.
     /// This ensures only one generation runs per key.
+    ///
+    /// The slot is claimed with a single compare-and-swap
+    /// ([`SizeBoundedMap::claim_or`]). A `get` followed by an `insert` would
+    /// not hold: papaya's pin guard is an epoch guard, not a lock, so racing
+    /// callers could all observe a vacant slot, all be told to `Started`, and
+    /// all transcode the same segment — with every loser's `Notify` orphaned
+    /// when the winner later overwrites the entry.
     pub fn start_generation(&self, key: HlsCacheKey) -> HlsCacheStartResult {
         if self.cache.is_disabled() {
             return HlsCacheStartResult::CacheDisabled;
         }
 
-        // Check if already exists
-        let existing = self
-            .cache
-            .with_entry(&key, |entry| match &entry.value {
-                HlsCacheState::InProgress(notify) => {
-                    Some(HlsCacheStartResult::AlreadyInProgress(notify.clone()))
+        // Weightless: only Complete entries are counted against the budget.
+        let notify = Arc::new(Notify::new());
+        let claim = self.cache.claim_or(
+            key.clone(),
+            HlsCacheState::InProgress(notify.clone()),
+            0,
+            |entry| match &entry.value {
+                HlsCacheState::InProgress(existing) => {
+                    Some(HlsCacheStartResult::AlreadyInProgress(existing.clone()))
                 }
                 HlsCacheState::Complete(data) => {
                     Some(HlsCacheStartResult::AlreadyComplete(data.clone()))
                 }
-                HlsCacheState::Failed(msg) => {
-                    // Only honor the failure while it is still fresh. Once the
-                    // TTL elapses, fall through to start a new generation so a
-                    // transient error can be retried.
-                    if entry.inserted_at.elapsed() < FAILED_ENTRY_TTL {
-                        Some(HlsCacheStartResult::PreviouslyFailed(msg.clone()))
-                    } else {
-                        tracing::debug!("Failed entry for {:?} expired; allowing retry", key);
-                        None
-                    }
+                // Only honor a failure while it is still fresh. Once the TTL
+                // elapses the entry is replaced so a transient error can be
+                // retried — by exactly one caller.
+                HlsCacheState::Failed(msg) if entry.inserted_at.elapsed() < FAILED_ENTRY_TTL => {
+                    Some(HlsCacheStartResult::PreviouslyFailed(msg.clone()))
                 }
-            })
-            .flatten();
-        if let Some(result) = existing {
-            return result;
+                HlsCacheState::Failed(_) => None,
+            },
+        );
+
+        match claim {
+            Claim::Retained(existing) => existing,
+            Claim::Claimed => {
+                tracing::debug!("Started generation for {:?}", key);
+                HlsCacheStartResult::Started(notify)
+            }
         }
-
-        // Start new generation (weightless: only Complete entries are counted)
-        let notify = Arc::new(Notify::new());
-        self.cache
-            .insert_weighted(key.clone(), HlsCacheState::InProgress(notify.clone()), 0);
-        tracing::debug!("Started generation for {:?}", key);
-
-        HlsCacheStartResult::Started(notify)
     }
 
     /// Marks content generation as complete and stores the result.
@@ -371,6 +374,97 @@ mod tests {
         // Second start should return AlreadyInProgress
         let result2 = cache.start_generation(key.clone());
         assert!(matches!(result2, HlsCacheStartResult::AlreadyInProgress(_)));
+    }
+
+    #[test]
+    fn test_concurrent_start_generation_admits_one_producer() {
+        // Regression: `start_generation` used to `get` then `insert`, two
+        // independent lock-free operations. Racing callers could all observe a
+        // vacant slot and all become producers, so the same segment was
+        // transcoded several times and every loser's `Notify` was orphaned.
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 64;
+
+        for round in 0..ROUNDS {
+            let cache = HlsCache::new(1024 * 1024);
+            let key = make_segment_key(
+                &format!("/videos/race{round}.mp4"),
+                TranscodeTarget::Resolution720p,
+                0,
+            );
+            let barrier = Barrier::new(THREADS);
+            let started = AtomicUsize::new(0);
+
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        if matches!(
+                            cache.start_generation(key.clone()),
+                            HlsCacheStartResult::Started(_)
+                        ) {
+                            started.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
+
+            assert_eq!(
+                started.load(Ordering::Relaxed),
+                1,
+                "exactly one caller may be told to generate a given key"
+            );
+        }
+    }
+
+    #[test]
+    fn test_concurrent_start_generation_after_expired_failure_admits_one_producer() {
+        // The expired-`Failed` path also replaces the entry, so it needs the
+        // same atomicity: only one retry may become the producer.
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 64;
+
+        for round in 0..ROUNDS {
+            let cache = HlsCache::new(1024 * 1024);
+            let key = make_segment_key(
+                &format!("/videos/retry{round}.mp4"),
+                TranscodeTarget::Resolution720p,
+                0,
+            );
+            let stale = Instant::now()
+                .checked_sub(FAILED_ENTRY_TTL + Duration::from_secs(1))
+                .expect("clock far enough from epoch");
+            cache.insert_failed_for_test(key.clone(), "stale failure", stale);
+
+            let barrier = Barrier::new(THREADS);
+            let started = AtomicUsize::new(0);
+
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        if matches!(
+                            cache.start_generation(key.clone()),
+                            HlsCacheStartResult::Started(_)
+                        ) {
+                            started.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
+
+            assert_eq!(
+                started.load(Ordering::Relaxed),
+                1,
+                "an expired failure may be retried by exactly one caller"
+            );
+        }
     }
 
     #[test]

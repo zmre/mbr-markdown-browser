@@ -32,8 +32,9 @@ edit_enabled = true
 ```
 
 On loopback (127.0.0.1), that's all you need — local edits require no token
-(they are still CSRF-protected). For remote access, see
-[Remote editing](#remote-editing).
+(they are still CSRF- and Host-checked). Note that as soon as an
+`edit_token_hash` is configured it is required for **every** request, loopback
+included. For remote access, see [Remote editing](#remote-editing).
 
 ## Using the editor
 
@@ -58,8 +59,8 @@ current target it reads **Edit media** instead of **Insert media**.
 
 | Result | Meaning |
 |--------|---------|
-| Authentication required | A token is required (remote, or `edit_require_token_on_loopback`). Enter it and retry. |
-| Editing is disabled or blocked | Editing is off, or the request failed the CSRF/same-origin check. |
+| Authentication required | A token is required (an `edit_token_hash` is configured, the caller is remote, or `edit_require_token_on_loopback`). Enter it and retry. |
+| Editing is disabled or blocked | Editing is off, or the request failed the CSRF/same-origin/`Host` check. |
 | File changed on disk | The file was modified since you loaded it (e.g. by the watcher or another editor). Reload the page before saving. |
 
 ## Creating, renaming, and moving files
@@ -135,17 +136,36 @@ every request, so for any non-loopback use you should put mbr behind a
 refuses to enable editing on a non-loopback host (`--host` other than a
 loopback address) unless an `edit_token_hash` is configured.
 
+Behind such a proxy every request reaches mbr from 127.0.0.1, so peer-address
+trust would silently disable authentication. A configured `edit_token_hash` is
+therefore enforced for **all** callers regardless of the peer address — you do
+not need `edit_require_token_on_loopback` to make the proxied deployment safe.
+Because the proxy presents its own public `Host`, the `Host` check below is
+skipped once a token is configured: the token is then the authority.
+
 ## Security model
 
-- **CSRF / DNS-rebinding protection (always on):** every editing request must
-  carry an `X-MBR-Edit: 1` header and be same-origin. Browsers won't send that
-  custom header cross-origin without a CORS preflight (which mbr never grants),
-  so a malicious web page cannot silently write to a localhost mbr.
-- **Loopback trust:** requests from 127.0.0.1 need no token unless
-  `edit_require_token_on_loopback = true`.
-- **Token auth (remote):** non-loopback requests must present
-  `Authorization: Bearer <token>`, verified against the Argon2
-  `edit_token_hash`.
+- **CSRF protection (always on):** every editing request must carry an
+  `X-MBR-Edit: 1` header and be same-origin. Browsers won't send that custom
+  header cross-origin without a CORS preflight (which mbr never grants), so a
+  malicious web page cannot silently write to a localhost mbr.
+- **DNS-rebinding protection (when no token is configured):** the request's
+  `Host` header must name `localhost`, a loopback IP, or the configured bind
+  address; anything else is rejected with `403`. Same-origin alone does not stop
+  rebinding — a rebound attacker page genuinely *is* same-origin — so the name
+  used to reach the server is the deciding signal. This check is skipped when an
+  `edit_token_hash` is configured, so a reverse proxy may present any `Host`.
+- **Loopback trust (only without a token):** requests from 127.0.0.1 need no
+  token *when no `edit_token_hash` is configured*. Set
+  `edit_require_token_on_loopback = true` only if you want the token prompt in
+  the local GUI as well — a configured token is enforced either way.
+- **Token auth:** a request must present `Authorization: Bearer <token>`,
+  verified against the Argon2 `edit_token_hash`, whenever a token is configured,
+  the caller is non-loopback, or `edit_require_token_on_loopback` is set.
+- **Upload restrictions:** `/.mbr/upload` accepts only image/audio/video/PDF (and
+  `.vtt`/`.srt`) files, and refuses any destination inside the `.mbr/` template
+  folder — the uploader can never create an HTML template, a script, or a
+  stylesheet that later runs in the site.
 - **Optimistic concurrency:** saves send a hash of the loaded content and are
   rejected with `409 Conflict` if the on-disk file changed, preventing silent
   lost updates.

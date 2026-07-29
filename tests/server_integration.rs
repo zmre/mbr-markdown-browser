@@ -27,6 +27,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         index_file: "index.md".to_string(),
         oembed_timeout_ms: 100,
         oembed_cache_size: 2 * 1024 * 1024,
+        #[cfg(feature = "media-metadata")]
+        media_cache_size: 64 * 1024 * 1024,
         template_folder: None,
         sort: mbr::config::default_sort_config(),
         gui_mode: false,
@@ -418,6 +420,76 @@ async fn test_static_folder_with_spaces_in_path() {
     assert_eq!(response.status(), 200);
     let bytes = response.bytes().await.unwrap();
     assert_eq!(bytes.as_ref(), b"spaced content");
+}
+
+/// End-to-end cover for the `repo/content` + `repo/static` layout: the markdown
+/// root holds `.mbr/`, and the assets live in a *peer* directory named as
+/// `static_folder = "../static"`.
+///
+/// Regression. Tightening `static_folder` to "no `..` ever" made this layout
+/// fail to boot at all, which surfaced to the user as "video media doesn't seem
+/// to play in gui mode". The range request is the interesting half: that is how
+/// a webview actually streams video, and it goes down the same static-overlay
+/// resolution path as a plain GET.
+#[tokio::test]
+async fn test_peer_static_folder_serves_assets_and_ranges() {
+    let project = tempfile::tempdir().unwrap();
+    let content = project.path().join("content");
+    std::fs::create_dir_all(content.join(".mbr")).unwrap();
+    std::fs::write(content.join("readme.md"), "# Peer layout").unwrap();
+
+    let videos = project.path().join("static/videos");
+    std::fs::create_dir_all(&videos).unwrap();
+    let video_bytes: &[u8] = b"\x00\x00\x00\x20ftypisom fake mp4 payload";
+    std::fs::write(videos.join("demo.mp4"), video_bytes).unwrap();
+    std::fs::write(project.path().join("static/pic.png"), b"PNG bytes").unwrap();
+    std::fs::write(project.path().join("secret.txt"), b"not servable").unwrap();
+
+    let server = TestServer::start_at_path_with(content, |config| {
+        config.static_folder = "../static".to_string();
+    })
+    .await;
+
+    let response = server.get("/videos/demo.mp4").await;
+    assert_eq!(
+        response.status(),
+        200,
+        "a video in a peer static folder must be served"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), video_bytes);
+
+    let response = server.get("/pic.png").await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"PNG bytes");
+
+    let response = server
+        .client
+        .get(server.url("/videos/demo.mp4"))
+        .header("Range", "bytes=0-3")
+        .send()
+        .await
+        .expect("range request failed");
+    assert_eq!(
+        response.status(),
+        206,
+        "a peer static folder must support the range requests a webview streams with"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &video_bytes[0..4]);
+
+    assert_eq!(server.get("/").await.status(), 200);
+
+    // Containment still holds: widening the overlay to a peer did not widen it
+    // to the peer's *parent*. `project/secret.txt` sits next to both `content`
+    // and `static`, so it is under neither served root and must 404. Asserted
+    // with a plain name rather than a `..` path on purpose — reqwest normalizes
+    // `..` (and `%2e%2e`) out of the URL before it is ever sent, so a `..`
+    // assertion here would pass without testing anything. Request-path traversal
+    // is covered directly in `path_resolver`'s unit tests.
+    assert_eq!(
+        server.get("/secret.txt").await.status(),
+        404,
+        "a file beside the peer static folder must not be served"
+    );
 }
 
 // Only the macOS and Linux canonicalize() behaviors are asserted below, so the
@@ -2465,6 +2537,90 @@ async fn test_links_json_empty_for_page_with_no_links() {
     );
 }
 
+/// Rendering a page refreshes its cached outbound links, including when the
+/// edit removed the last link. `LinkCache` has no TTL and nothing else
+/// overwrites an entry, so skipping the insert for an empty list left
+/// links.json serving the pre-edit links for the life of the process.
+#[tokio::test]
+async fn test_links_json_reflects_removed_links_after_edit() {
+    let repo = TestRepo::new();
+    let source = repo.create_markdown("source.md", "# Source\n\n[Link to Target](target/)");
+    repo.create_markdown("target.md", "# Target Page");
+
+    let server = TestServer::start(&repo).await;
+
+    let before: serde_json::Value = server.get("/source/links.json").await.json().await.unwrap();
+    assert!(
+        before["outbound"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["to"].as_str().unwrap().contains("target")),
+        "precondition: the link must be cached first: {:?}",
+        before["outbound"]
+    );
+
+    // Drop the only link, then re-render the page (as a browser reload would).
+    std::fs::write(&source, "# Source\n\nThe link is gone.").expect("rewrite source");
+    assert_eq!(server.get("/source/").await.status(), 200);
+
+    let after: serde_json::Value = server.get("/source/links.json").await.json().await.unwrap();
+    assert!(
+        after["outbound"].as_array().unwrap().is_empty(),
+        "links.json must not keep serving the removed link: {:?}",
+        after["outbound"]
+    );
+}
+
+/// An externally edited file must eventually be reflected in *other* pages'
+/// links.json. The mini-graph BFS fetches links.json for neighbour pages, and
+/// neither link cache re-checks mtimes, so a watcher batch that does not drop
+/// them serves pre-edit links until the 300 s inbound TTL (never, for the
+/// outbound cache, which has no TTL at all).
+#[tokio::test]
+async fn test_links_json_refreshes_after_watcher_sees_external_edit() {
+    let repo = TestRepo::new();
+    let source = repo.create_markdown("source.md", "# Source\n\n[See the Target](target/)");
+    repo.create_markdown("target.md", "# Target Page");
+
+    let server = TestServer::start(&repo).await;
+    // The watcher is initialized on a background thread; an edit that lands
+    // before it is listening is simply never seen.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    let before: serde_json::Value = server.get("/target/links.json").await.json().await.unwrap();
+    assert!(
+        before["inbound"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["from"].as_str().unwrap().contains("source")),
+        "precondition: the backlink must be cached first: {:?}",
+        before["inbound"]
+    );
+
+    // Edit outside the server (as an editor or `git pull` would).
+    let edited = "# Source\n\nThe link is gone.";
+    std::fs::write(&source, edited).expect("rewrite source");
+
+    // Watcher event + 2 s debounce + rescan; poll rather than sleeping blind,
+    // re-touching the file so a dropped first event cannot hang the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let body: serde_json::Value = server.get("/target/links.json").await.json().await.unwrap();
+        if body["inbound"].as_array().unwrap().is_empty() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "links.json still served the stale backlink: {:?}",
+            body["inbound"]
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::write(&source, edited).expect("re-touch source");
+    }
+}
+
 /// Helper to start a server with link tracking disabled
 struct TestServerNoLinkTracking {
     port: u16,
@@ -4093,6 +4249,151 @@ async fn test_edit_token_required_and_accepted() {
     assert_eq!(ok.status(), 200, "valid token must be accepted");
 }
 
+#[tokio::test]
+async fn test_edit_token_enforced_for_loopback_callers_when_configured() {
+    let repo = TestRepo::new();
+    let original = "# Note\n\nbody";
+    let file = repo.create_markdown("note.md", original);
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    // `edit_require_token_on_loopback` stays FALSE on purpose: this is the
+    // reverse-proxy deployment documented in docs/modes/editing.md, where every
+    // proxied request reaches mbr from 127.0.0.1. A configured token must still
+    // be enforced, or the proxy silently disables authentication entirely.
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let no_token = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        no_token.status(),
+        401,
+        "a configured token must be required even from loopback"
+    );
+
+    // Writes are gated too, and the file is untouched.
+    let save = server
+        .client
+        .post(server.url("/.mbr/edit/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "content": "pwned",
+                "base_hash": mbr::edit_auth::content_hash(original.as_bytes()),
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), 401, "unauthenticated save must be 401");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+
+    // The token holder still gets through.
+    let ok = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Authorization", "Bearer s3cret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200, "valid token must be accepted");
+}
+
+#[tokio::test]
+async fn test_edit_rejects_dns_rebinding_host_header() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // A DNS-rebound page is genuinely same-origin, so only the Host name gives
+    // it away. No token is configured, so the Host must name this server.
+    for host in ["evil.example.com", "localhost.evil.example.com"] {
+        let rebound = server
+            .client
+            .get(server.url("/.mbr/raw/note.md"))
+            .header("X-MBR-Edit", "1")
+            .header("Host", host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            rebound.status(),
+            403,
+            "Host {host} must be rejected, got {}",
+            rebound.status()
+        );
+    }
+
+    // The names the local UI actually uses keep working.
+    for host in [
+        format!("localhost:{}", server.port),
+        format!("127.0.0.1:{}", server.port),
+    ] {
+        let allowed = server
+            .client
+            .get(server.url("/.mbr/raw/note.md"))
+            .header("X-MBR-Edit", "1")
+            .header("Host", &host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), 200, "Host {host} must be allowed");
+    }
+}
+
+#[tokio::test]
+async fn test_edit_allows_any_host_when_token_configured() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    // Behind a reverse proxy the Host is the public name, so the token — not
+    // the Host — is the authority.
+    let proxied = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Host", "notes.example.com")
+        .header("Authorization", "Bearer s3cret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        proxied.status(),
+        200,
+        "a valid token must work behind a proxy with any Host"
+    );
+
+    // ...but the token is still the gate.
+    let no_token = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Host", "notes.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_token.status(), 401);
+}
+
 // ==================== File-management editing endpoints ====================
 
 /// POST helper carrying the CSRF header + JSON body for the file endpoints.
@@ -4702,6 +5003,209 @@ async fn test_upload_body_limit_rejects_oversize() {
     assert!(!repo.path().join("big.bin").exists());
 }
 
+#[tokio::test]
+async fn test_upload_into_template_folder_rejected() {
+    let repo = TestRepo::new();
+    std::fs::create_dir_all(repo.path().join(".mbr/components")).unwrap();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Even with an allowed media extension, `.mbr/` is off limits: the watcher
+    // hot-reloads templates and components from there into every page.
+    for (dir, name) in [
+        (".mbr", "pic.png"),
+        (".mbr/components", "logo.png"),
+        ("./.mbr", "pic.png"),
+    ] {
+        let resp = upload_post(&server, dir, name, b"x".to_vec()).await;
+        assert!(
+            resp.status().is_client_error(),
+            "upload into {dir} must be rejected, got {}",
+            resp.status()
+        );
+    }
+    assert!(!repo.path().join(".mbr/pic.png").exists());
+    assert!(!repo.path().join(".mbr/components/logo.png").exists());
+}
+
+#[tokio::test]
+async fn test_upload_executable_extensions_rejected() {
+    let repo = TestRepo::new();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // The asset uploader must never create a file that the template engine
+    // executes or the browser runs as script/style.
+    for name in [
+        "index.html",
+        "mbr-components.min.js",
+        "theme.css",
+        "config.toml",
+        "evil.svg",
+    ] {
+        let resp = upload_post(&server, "notes", name, b"x".to_vec()).await;
+        assert_eq!(
+            resp.status(),
+            400,
+            "upload of {name} must be rejected with 400"
+        );
+        assert!(!repo.path().join("notes").join(name).exists());
+    }
+
+    // Real media still uploads (no regression to the editor's image picker).
+    let ok = upload_post(&server, "notes", "pic.png", b"png-bytes".to_vec()).await;
+    assert_eq!(ok.status(), 200);
+    assert_eq!(
+        std::fs::read(repo.path().join("notes/pic.png")).unwrap(),
+        b"png-bytes"
+    );
+}
+
+// ==================== /.mbr asset allowlist ====================
+
+#[tokio::test]
+async fn test_mbr_config_toml_is_not_served() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    // A real repo config: this file holds the Argon2 edit_token_hash.
+    std::fs::write(
+        repo.path().join(".mbr/config.toml"),
+        "edit_enabled = true\nedit_token_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.path().join(".mbr/theme.css"), "body { color: red; }").unwrap();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let leaked = server.get("/.mbr/config.toml").await;
+    assert_eq!(leaked.status(), 404, "config.toml must never be served");
+
+    // Non-asset files under .mbr/ are equally invisible.
+    std::fs::write(repo.path().join(".mbr/.env"), "SECRET=1").unwrap();
+    assert_eq!(server.get("/.mbr/.env").await.status(), 404);
+
+    // ...while real assets still come from the repo's .mbr/ folder.
+    let css = server.get("/.mbr/theme.css").await;
+    assert_eq!(css.status(), 200, "theme.css must still be served");
+    assert_eq!(css.text().await.unwrap(), "body { color: red; }");
+    assert_eq!(server.get("/.mbr/pico.min.css").await.status(), 200);
+    assert_eq!(
+        server
+            .get("/.mbr/components/mbr-components.min.js")
+            .await
+            .status(),
+        200
+    );
+}
+
+// ==================== Symlink containment ====================
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_symlink_escaping_repo_root_is_not_served() {
+    let outside = tempfile::TempDir::new().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "top secret").unwrap();
+
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    // A symlink whose target lives outside the repository root.
+    std::os::unix::fs::symlink(&secret, repo.path().join("secret.txt")).unwrap();
+    // ...and one reachable through a directory listing request.
+    std::os::unix::fs::symlink(outside.path(), repo.path().join("outside")).unwrap();
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let resp = server.get("/secret.txt").await;
+    assert_eq!(
+        resp.status(),
+        404,
+        "a symlink pointing outside the repo must not be served"
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        !body.contains("top secret"),
+        "file contents outside the repo leaked: {body}"
+    );
+    assert_eq!(
+        server.get("/outside/secret.txt").await.status(),
+        404,
+        "a symlinked directory outside the repo must not be served"
+    );
+}
+
+// ==================== Live-reload WebSocket handshake ====================
+
+/// Performs a raw WebSocket handshake and returns the HTTP status line.
+///
+/// Done over a bare TCP socket because the handshake response is what we are
+/// asserting on (101 vs 403), and no WebSocket client crate is available.
+async fn ws_handshake_status_line(port: u16, origin: Option<&str>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect failed");
+    let origin_header = origin
+        .map(|o| format!("Origin: {o}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "GET /.mbr/ws/changes HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         {origin_header}\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write failed");
+
+    let mut buf = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("handshake timed out")
+        .expect("read failed");
+    String::from_utf8_lossy(&buf[..n])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_websocket_upgrade_requires_same_origin() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Same-origin handshake succeeds.
+    let same_origin = format!("http://127.0.0.1:{}", server.port);
+    let ok = ws_handshake_status_line(server.port, Some(&same_origin)).await;
+    assert!(
+        ok.contains("101"),
+        "same-origin WebSocket upgrade should succeed, got: {ok}"
+    );
+
+    // A page on any other origin must not be able to watch the file feed.
+    let cross = ws_handshake_status_line(server.port, Some("http://evil.example.com")).await;
+    assert!(
+        cross.contains("403"),
+        "cross-origin WebSocket upgrade must be 403, got: {cross}"
+    );
+
+    // Browsers always send Origin on a WS upgrade; a missing one is rejected.
+    let no_origin = ws_handshake_status_line(server.port, None).await;
+    assert!(
+        no_origin.contains("403"),
+        "WebSocket upgrade without Origin must be 403, got: {no_origin}"
+    );
+}
+
 // ============================================================================
 // Typed relationships (genealogy fixture)
 // ============================================================================
@@ -5008,4 +5512,325 @@ async fn test_body_wikilink_resolves_globally_across_folders() {
                 .contains("Totally Missing")),
         "unresolved [[Totally Missing]] must be reported broken: {errors:?}"
     );
+}
+
+// ============================================================================
+// Cached site.json + memoized directory listings
+// ============================================================================
+
+/// Tera escapes `/` as `&#x2F;` inside attribute values; normalize the markup
+/// so listing tests can assert on plain URLs.
+fn with_plain_slashes(html: &str) -> String {
+    html.replace("&#x2F;", "/")
+}
+
+/// The site.json body is cached, so consecutive requests must return the exact
+/// same bytes (and still carry the whole markdown index).
+#[tokio::test]
+async fn test_site_json_body_is_byte_stable_across_requests() {
+    let repo = TestRepo::new();
+    repo.create_markdown("alpha.md", "---\ntitle: Alpha\n---\n\nA");
+    repo.create_markdown("docs/beta.md", "---\ntitle: Beta\n---\n\nB");
+    repo.create_static_file("images/photo.jpg", b"fake jpg data");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let first = server.get_text("/.mbr/site.json").await;
+    let second = server.get_text("/.mbr/site.json").await;
+    assert_eq!(
+        first, second,
+        "consecutive site.json responses must be identical"
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&first).expect("site.json is valid JSON");
+    assert!(
+        parsed["other_files"].is_null(),
+        "site.json must not carry the media catalog"
+    );
+    let files = parsed["markdown_files"]
+        .as_array()
+        .expect("markdown_files array");
+    assert_eq!(files.len(), 2, "both markdown files must be indexed");
+    assert!(parsed["sort"].is_array(), "sort config must be present");
+    assert_eq!(parsed["sidebar_style"], "panel");
+
+    // Payload shape: exactly the keys the frontend consumes, no media catalog.
+    let mut keys: Vec<&str> = parsed
+        .as_object()
+        .expect("site.json is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "index_file",
+            "markdown_files",
+            "relationship_types",
+            "sidebar_max_items",
+            "sidebar_style",
+            "sort",
+        ]
+    );
+    // Relationship data is injected per entry.
+    assert!(files.iter().all(|f| f["relationships"].is_array()));
+}
+
+/// Creating a file must invalidate the cached site.json body — a stale cache
+/// would hide the new page from every navigation component until restart.
+#[tokio::test]
+async fn test_site_json_cache_invalidated_when_file_created() {
+    let repo = TestRepo::new();
+    repo.create_markdown("alpha.md", "---\ntitle: Alpha\n---\n\nA");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let before: serde_json::Value = serde_json::from_str(&server.get_text("/.mbr/site.json").await)
+        .expect("site.json is valid JSON");
+    assert_eq!(before["markdown_files"].as_array().unwrap().len(), 1);
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/gamma.md",
+        serde_json::json!({ "content": "---\ntitle: Gamma\n---\n\nG" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let after: serde_json::Value = serde_json::from_str(&server.get_text("/.mbr/site.json").await)
+        .expect("site.json is valid JSON");
+    let urls: Vec<&str> = after["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["url_path"].as_str())
+        .collect();
+    assert!(
+        urls.contains(&"/gamma/"),
+        "site.json must include the newly created page: {urls:?}"
+    );
+}
+
+/// An edit made outside the server (an external editor, `git pull`) must also
+/// drop the cached site.json body, via the watcher's debounced invalidation.
+#[tokio::test]
+async fn test_site_json_cache_invalidated_by_watcher_edit() {
+    let repo = TestRepo::new();
+    let note = repo.create_markdown("alpha.md", "---\ntitle: Alpha\n---\n\nA");
+
+    let server = TestServer::start(&repo).await;
+    // The watcher is initialized on a background thread; an edit that lands
+    // before it is listening is simply never seen.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    // Populate the cache with the pre-edit title.
+    let before: serde_json::Value = serde_json::from_str(&server.get_text("/.mbr/site.json").await)
+        .expect("site.json is valid JSON");
+    assert_eq!(before["markdown_files"][0]["frontmatter"]["title"], "Alpha");
+
+    let edited = "---\ntitle: Renamed\n---\n\nA";
+    std::fs::write(&note, edited).expect("rewrite note");
+
+    // Watcher event + 2 s debounce; poll rather than sleeping blind, re-touching
+    // the file so a dropped first event cannot hang the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let body: serde_json::Value =
+            serde_json::from_str(&server.get_text("/.mbr/site.json").await)
+                .expect("site.json is valid JSON");
+        if body["markdown_files"][0]["frontmatter"]["title"] == "Renamed" {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "site.json still served the pre-edit body: {:?}",
+            body["markdown_files"]
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::write(&note, edited).expect("re-touch note");
+    }
+}
+
+/// A directory listing served from the in-memory index must show every direct
+/// child file and every immediate subdirectory, including one that holds only
+/// assets.
+#[tokio::test]
+async fn test_directory_listing_from_index_lists_files_and_subdirs() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "---\ntitle: Guide\n---\n\nG");
+    repo.create_markdown("docs/deep/inner.md", "---\ntitle: Inner\n---\n\nI");
+    repo.create_static_file("docs/media/photo.jpg", b"fake jpg data");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let html = with_plain_slashes(&server.get_text("/docs/").await);
+    assert_html_contains(&html, "href=\"/docs/guide/\"");
+    assert_html_contains(&html, "href=\"/docs/deep/\"");
+    assert_html_contains(&html, "href=\"/docs/media/\"");
+    // The nested page is not a direct child, so it must not be listed as a file.
+    assert_html_not_contains(&html, "href=\"/docs/deep/inner/\"");
+}
+
+/// The memoized listing must be dropped when a file is created, otherwise the
+/// directory keeps serving its pre-create snapshot.
+#[tokio::test]
+async fn test_directory_listing_updates_after_file_created() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "---\ntitle: Guide\n---\n\nG");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Populate the cache.
+    let before = with_plain_slashes(&server.get_text("/docs/").await);
+    assert_html_not_contains(&before, "href=\"/docs/extra/\"");
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/create/docs/extra.md",
+        serde_json::json!({ "content": "---\ntitle: Extra\n---\n\nE" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let after = with_plain_slashes(&server.get_text("/docs/").await);
+    assert_html_contains(&after, "href=\"/docs/extra/\"");
+    assert_html_contains(&after, "href=\"/docs/guide/\"");
+}
+
+/// Proves the listing is served from the in-memory index instead of a live
+/// per-request disk scan: a file written straight to disk (bypassing the
+/// editing endpoints) is not visible until the watcher's 2 s debounce window
+/// closes and drops the listing caches. Listings are therefore eventually
+/// consistent with disk, like every other derived cache in this server.
+#[tokio::test]
+async fn test_directory_listing_served_from_index_not_rescanned() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "---\ntitle: Guide\n---\n\nG");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Populate the memoized listing.
+    let before = with_plain_slashes(&server.get_text("/docs/").await);
+    assert_html_contains(&before, "href=\"/docs/guide/\"");
+
+    // Write directly to disk; nothing tells the repo index about it yet.
+    repo.create_markdown("docs/sneaky.md", "---\ntitle: Sneaky\n---\n\nS");
+
+    let after = with_plain_slashes(&server.get_text("/docs/").await);
+    assert_html_not_contains(&after, "href=\"/docs/sneaky/\"");
+}
+
+/// The listing must still work before the background scan finishes: that path
+/// falls back to a live disk scan because the in-memory index is incomplete.
+/// Deliberately does not call `wait_for_scan()`.
+#[tokio::test]
+async fn test_directory_listing_before_scan_completes() {
+    let repo = TestRepo::new();
+    for i in 0..400 {
+        repo.create_markdown(
+            &format!("bulk/note-{i:04}.md"),
+            &format!("---\ntitle: Note {i}\n---\n\nBody"),
+        );
+    }
+    repo.create_dir("bulk/nested");
+    repo.create_markdown("bulk/nested/inner.md", "---\ntitle: Inner\n---\n\nI");
+
+    let server = TestServer::start(&repo).await;
+
+    let html = with_plain_slashes(&server.get_text("/bulk/").await);
+    assert_html_contains(&html, "href=\"/bulk/note-0000/\"");
+    assert_html_contains(&html, "href=\"/bulk/nested/\"");
+}
+
+// ============================================================================
+// Performance measurement harnesses (ignored by default)
+//
+// These are not assertions about wall-clock time (CI machines vary); they
+// exist so the directory-listing and site.json costs can be measured on
+// demand with `cargo test --release --test server_integration -- --ignored
+// --nocapture perf_`.
+// ============================================================================
+
+/// Measures repeated directory-listing latency on a 5,000-file directory.
+#[tokio::test]
+#[ignore = "performance measurement; run manually with --release --ignored"]
+async fn perf_directory_listing_latency() {
+    let repo = TestRepo::new();
+    for i in 0..5000 {
+        repo.create_markdown(
+            &format!("bulk/note-{i:05}.md"),
+            &format!(
+                "---\ntitle: Note {i}\ntags: [alpha, beta]\n---\n\n# Note {i}\n\nBody text.\n"
+            ),
+        );
+    }
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    for round in 0..5 {
+        let start = std::time::Instant::now();
+        let body = server.get_text("/bulk/").await;
+        println!(
+            "perf directory listing round {round}: {:?} ({} bytes)",
+            start.elapsed(),
+            body.len()
+        );
+    }
+}
+
+/// Measures repeated `/.mbr/site.json` latency on a large mixed repo.
+#[tokio::test]
+#[ignore = "performance measurement; run manually with --release --ignored"]
+async fn perf_site_json_latency() {
+    let repo = TestRepo::new();
+    for i in 0..5000 {
+        repo.create_markdown(
+            &format!("notes/dir-{}/note-{i:05}.md", i % 50),
+            &format!("---\ntitle: Note {i}\ntags: [alpha, beta]\n---\n\n# Note {i}\n\nBody.\n"),
+        );
+    }
+    for i in 0..10000 {
+        repo.create_static_file(
+            &format!("assets/dir-{}/img-{i:05}.png", i % 50),
+            b"not-a-png",
+        );
+    }
+
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for round in 0..5 {
+        let start = std::time::Instant::now();
+        let body = server.get_text("/.mbr/site.json").await;
+        println!(
+            "perf site.json round {round}: {:?} ({} bytes)",
+            start.elapsed(),
+            body.len()
+        );
+    }
+
+    // Cold rounds: creating a file drops the cached body, so each request pays
+    // the full rebuild (this is the cost the `SiteJson` view struct reduces).
+    for round in 0..3 {
+        let created = edit_post(
+            &server,
+            &format!("/.mbr/create/perf-{round}.md"),
+            serde_json::json!({ "content": "# Perf" }),
+        )
+        .await;
+        assert_eq!(created.status(), 200);
+
+        let start = std::time::Instant::now();
+        let body = server.get_text("/.mbr/site.json").await;
+        println!(
+            "perf site.json rebuild round {round}: {:?} ({} bytes)",
+            start.elapsed(),
+            body.len()
+        );
+    }
 }

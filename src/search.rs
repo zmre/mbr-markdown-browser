@@ -119,7 +119,7 @@ pub fn parse_query(q: &str) -> ParsedQuery {
 /// Check if a frontmatter field value contains the facet value (case-insensitive).
 /// Handles both string values and array values (for array tags).
 fn facet_matches(
-    frontmatter: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    frontmatter: Option<&crate::markdown::SimpleMetadata>,
     field: &str,
     value: &str,
 ) -> bool {
@@ -132,6 +132,24 @@ fn facet_matches(
         }),
         _ => false,
     }
+}
+
+/// Build a `"Line {n}: {text}"` snippet for a content match, truncating the
+/// matched line to [`MAX_SNIPPET_LENGTH`] bytes when it is longer.
+///
+/// Truncation is clamped with `floor_char_boundary`, so a multi-byte character
+/// straddling the cut is dropped whole rather than sliced in half (a naive
+/// `&line[..MAX_SNIPPET_LENGTH]` would panic on such a line).
+fn build_snippet(line_num: u64, line: &str) -> String {
+    let mut s = format!("Line {}: ", line_num);
+    if line.len() > MAX_SNIPPET_LENGTH {
+        let end = line.floor_char_boundary(MAX_SNIPPET_LENGTH);
+        s.push_str(&line[..end]);
+        s.push_str("...");
+    } else {
+        s.push_str(line);
+    }
+    s
 }
 
 /// Get the scoring weight for a frontmatter field.
@@ -255,7 +273,8 @@ pub struct SearchResponse {
 /// Search engine that combines metadata and content search.
 pub struct SearchEngine {
     repo: Arc<Repo>,
-    #[allow(dead_code)] // Reserved for future use (e.g., relative path resolution)
+    /// Repo root used to rejoin the repo-relative `MarkdownInfo::raw_path`
+    /// before any filesystem access (see [`SearchEngine::search_file_content`]).
     root_dir: std::path::PathBuf,
 }
 
@@ -340,31 +359,29 @@ impl SearchEngine {
             ))
         };
 
-        // Collect files to search, applying folder filter and facet pre-filtering
-        let files: Vec<_> =
-            self.repo
-                .markdown_files
-                .pin()
-                .iter()
-                .filter(|(_, info)| {
-                    self.matches_folder_filter(info, &query.folder, &query.folder_scope)
-                })
-                .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
-                // Apply facet filters - all facets must match
-                .filter(|(_, info)| {
-                    parsed.facets.iter().all(|(field, value)| {
-                        facet_matches(info.frontmatter.as_ref(), field, value)
-                    })
-                })
-                .map(|(_, info)| info.clone())
-                .collect();
-
         // Intentionally sequential: par_iter causes 30s stalls from rayon thread pool contention
         // when multiple per-keystroke searches run concurrently.
         let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-        let results: Vec<SearchResult> = files
-            .into_iter()
-            .filter_map(|info| self.match_metadata(pattern.as_ref(), &info, &mut matcher))
+
+        // Match straight off the pin guard: metadata matching is pure in-memory
+        // CPU work, so borrowing `&MarkdownInfo` avoids deep-cloning the whole
+        // candidate set (PathBuf + Strings + relationships + frontmatter map)
+        // just to iterate it once. Unlike `search_content` there is no file I/O
+        // here, so the guard is not held across a blocking call.
+        let guard = self.repo.markdown_files.pin();
+        let results: Vec<SearchResult> = guard
+            .iter()
+            .map(|(_, info)| info)
+            .filter(|info| self.matches_folder_filter(info, &query.folder, &query.folder_scope))
+            .filter(|info| self.matches_filetype_filter(info, &query.filetype, true))
+            // Apply facet filters - all facets must match
+            .filter(|info| {
+                parsed
+                    .facets
+                    .iter()
+                    .all(|(field, value)| facet_matches(info.frontmatter.as_ref(), field, value))
+            })
+            .filter_map(|info| self.match_metadata(pattern.as_ref(), info, &mut matcher))
             .collect();
 
         Ok(results)
@@ -481,9 +498,7 @@ impl SearchEngine {
         matcher: &mut Matcher,
     ) -> Option<SearchResult> {
         // Helper to extract string from frontmatter value
-        let extract_string = |fm: &std::collections::HashMap<String, serde_json::Value>,
-                              key: &str|
-         -> Option<String> {
+        let extract_string = |fm: &crate::markdown::SimpleMetadata, key: &str| -> Option<String> {
             fm.get(key).and_then(|v| match v {
                 serde_json::Value::String(s) => Some(s.clone()),
                 serde_json::Value::Array(arr) => {
@@ -629,21 +644,40 @@ impl SearchEngine {
                 .map(|(_, info)| info.clone())
                 .collect();
 
+        // One `Searcher` for the whole query, reused across files. Building one
+        // allocates ~72 KB of zero-filled decode/line buffers, so constructing
+        // it per file dominated the scan cost on large repos. `Searcher` is
+        // explicitly designed for reuse across `search_path` calls.
+        let mut searcher = SearcherBuilder::new()
+            .binary_detection(BinaryDetection::quit(0x00))
+            .line_number(true)
+            .before_context(CONTENT_CONTEXT_LINES)
+            .after_context(CONTENT_CONTEXT_LINES)
+            .build();
+
         // Sequential content search.
         // Same rationale as metadata: concurrent par_iter calls from rapid
         // keystroke searches cause 30s rayon thread pool contention. Sequential
         // grep over 276 files takes ~13ms.
         let results: Vec<SearchResult> = files
             .into_iter()
-            .filter_map(|info| self.search_file_content(&matcher, &info).ok().flatten())
+            .filter_map(|info| {
+                self.search_file_content(&mut searcher, &matcher, &info)
+                    .ok()
+                    .flatten()
+            })
             .collect();
 
         Ok(results)
     }
 
     /// Search a single file's content.
+    ///
+    /// `searcher` is owned by the caller and reused across every file in a
+    /// query — see [`SearchEngine::search_content`].
     fn search_file_content(
         &self,
+        searcher: &mut grep_searcher::Searcher,
         matcher: &grep_regex::RegexMatcher,
         info: &MarkdownInfo,
     ) -> Result<Option<SearchResult>, SearchError> {
@@ -660,13 +694,6 @@ impl SearchEngine {
 
         let mut matches: Vec<(u64, String)> = Vec::new();
         let mut match_count = 0u32;
-
-        let mut searcher = SearcherBuilder::new()
-            .binary_detection(BinaryDetection::quit(0x00))
-            .line_number(true)
-            .before_context(CONTENT_CONTEXT_LINES)
-            .after_context(CONTENT_CONTEXT_LINES)
-            .build();
 
         // Search the file
         let search_result = searcher.search_path(
@@ -689,25 +716,16 @@ impl SearchEngine {
 
         if match_count > 0 {
             // Build snippet from first match
-            let snippet = matches.first().map(|(line_num, line)| {
-                let mut s = format!("Line {}: ", line_num);
-                if line.len() > MAX_SNIPPET_LENGTH {
-                    // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
-                    let end = line.floor_char_boundary(MAX_SNIPPET_LENGTH);
-                    s.push_str(&line[..end]);
-                    s.push_str("...");
-                } else {
-                    s.push_str(line);
-                }
-                s
-            });
+            let snippet = matches
+                .first()
+                .map(|(line_num, line)| build_snippet(*line_num, line));
 
             // Score based on match count (more matches = higher score)
             // Content matches are weighted lower than metadata matches
             let score = match_count.min(MAX_CONTENT_MATCH_SCORE);
 
             // Helper to extract string from frontmatter value
-            let extract_string = |fm: &std::collections::HashMap<String, serde_json::Value>,
+            let extract_string = |fm: &crate::markdown::SimpleMetadata,
                                   key: &str|
              -> Option<String> {
                 fm.get(key).and_then(|v| match v {
@@ -1245,7 +1263,7 @@ mod tests {
 
     #[test]
     fn test_facet_matches_exact() {
-        let mut fm = std::collections::HashMap::new();
+        let mut fm = crate::markdown::SimpleMetadata::new();
         fm.insert(
             "category".to_string(),
             serde_json::Value::String("programming".to_string()),
@@ -1256,7 +1274,7 @@ mod tests {
 
     #[test]
     fn test_facet_matches_contains() {
-        let mut fm = std::collections::HashMap::new();
+        let mut fm = crate::markdown::SimpleMetadata::new();
         fm.insert(
             "category".to_string(),
             serde_json::Value::String("systems programming".to_string()),
@@ -1268,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_facet_matches_case_insensitive() {
-        let mut fm = std::collections::HashMap::new();
+        let mut fm = crate::markdown::SimpleMetadata::new();
         fm.insert(
             "category".to_string(),
             serde_json::Value::String("Systems Programming".to_string()),
@@ -1280,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_facet_matches_missing_field() {
-        let mut fm = std::collections::HashMap::new();
+        let mut fm = crate::markdown::SimpleMetadata::new();
         fm.insert(
             "title".to_string(),
             serde_json::Value::String("test".to_string()),
@@ -1296,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_facet_matches_no_match() {
-        let mut fm = std::collections::HashMap::new();
+        let mut fm = crate::markdown::SimpleMetadata::new();
         fm.insert(
             "category".to_string(),
             serde_json::Value::String("web development".to_string()),
@@ -1307,7 +1325,7 @@ mod tests {
 
     #[test]
     fn test_facet_matches_array_value() {
-        let mut fm = std::collections::HashMap::new();
+        let mut fm = crate::markdown::SimpleMetadata::new();
         fm.insert("tags".to_string(), serde_json::json!(["rust", "python"]));
 
         assert!(facet_matches(Some(&fm), "tags", "rust"));
@@ -1360,6 +1378,222 @@ mod tests {
         let query: SearchQuery = serde_json::from_str(json).unwrap();
 
         assert_eq!(query.folder_scope, FolderScope::Everywhere);
+    }
+
+    // ==================== Snippet Truncation Tests ====================
+
+    #[test]
+    fn test_build_snippet_short_line_not_truncated() {
+        let snippet = build_snippet(9, "A distinctive brownfox appears here.");
+        assert_eq!(snippet, "Line 9: A distinctive brownfox appears here.");
+        assert!(!snippet.ends_with("..."));
+    }
+
+    #[test]
+    fn test_build_snippet_ascii_line_truncated_at_limit() {
+        let line = "a".repeat(MAX_SNIPPET_LENGTH + 50);
+        let snippet = build_snippet(1, &line);
+        assert_eq!(
+            snippet,
+            format!("Line 1: {}...", "a".repeat(MAX_SNIPPET_LENGTH))
+        );
+    }
+
+    #[test]
+    fn test_build_snippet_two_byte_char_straddling_cut() {
+        // One ASCII byte then 2-byte chars puts every char boundary on an odd
+        // byte offset, so MAX_SNIPPET_LENGTH (200, even) lands *inside* a
+        // character. A naive `&line[..200]` would panic here.
+        let line = format!("x{}", "é".repeat(150));
+        assert_eq!(line.len(), 301);
+        assert!(!line.is_char_boundary(MAX_SNIPPET_LENGTH));
+
+        let expected_body = format!("x{}", "é".repeat(99));
+        assert_eq!(expected_body.len(), MAX_SNIPPET_LENGTH - 1);
+        assert_eq!(
+            build_snippet(7, &line),
+            format!("Line 7: {}...", expected_body)
+        );
+    }
+
+    #[test]
+    fn test_build_snippet_four_byte_char_straddling_cut() {
+        // Two ASCII bytes then 4-byte chars: boundaries at 2, 6, 10, ...
+        // so byte 200 is mid-character (2 + 4k == 200 has no integer solution).
+        let line = format!("ab{}", "\u{1F98A}".repeat(100));
+        assert_eq!(line.len(), 402);
+        assert!(!line.is_char_boundary(MAX_SNIPPET_LENGTH));
+
+        let expected_body = format!("ab{}", "\u{1F98A}".repeat(49));
+        assert_eq!(expected_body.len(), MAX_SNIPPET_LENGTH - 2);
+        assert_eq!(
+            build_snippet(3, &line),
+            format!("Line 3: {}...", expected_body)
+        );
+    }
+
+    // ==================== Content Search Tests ====================
+
+    /// Build a `SearchEngine` over a temp repo of `(relative path, contents)`
+    /// pairs. The returned `TempDir` must stay alive for the whole test.
+    fn engine_over(files: &[(&str, &str)]) -> (SearchEngine, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        for (rel, contents) in files {
+            let path = dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dir");
+            }
+            std::fs::write(&path, contents).expect("write fixture file");
+        }
+
+        let repo = Repo::init(
+            dir.path().to_path_buf(),
+            "static",
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+            &[],
+            &[],
+        );
+        repo.scan_all().expect("scan repo");
+
+        let engine = SearchEngine::new(Arc::new(repo), dir.path().to_path_buf());
+        (engine, dir)
+    }
+
+    fn content_query(q: &str) -> SearchQuery {
+        SearchQuery {
+            q: q.to_string(),
+            limit: DEFAULT_RESULT_LIMIT,
+            scope: SearchScope::Content,
+            filetype: None,
+            folder: None,
+            folder_scope: FolderScope::Everywhere,
+        }
+    }
+
+    #[test]
+    fn test_search_content_finds_body_only_term() {
+        // `brownfox` appears ONLY in the body of notes.md — not in its file
+        // name, not in its frontmatter — so metadata search cannot satisfy
+        // this assertion. If `search_file_content` silently returns None (for
+        // example because `root_dir.join(raw_path)` no longer exists) this
+        // fails instead of passing vacuously.
+        let body = concat!(
+            "---\n",
+            "title: Ordinary Title\n",
+            "---\n",
+            "\n",
+            "# Heading\n",
+            "\n",
+            "The quick tan animal jumped over the lazy dog.\n",
+            "\n",
+            "A distinctive brownfox appears here.\n",
+        );
+        let (engine, _dir) = engine_over(&[
+            ("notes.md", body),
+            (
+                "other.md",
+                "---\ntitle: Unrelated\n---\n\nNothing to see.\n",
+            ),
+        ]);
+
+        let response = engine.search(&content_query("brownfox")).expect("search");
+
+        assert_eq!(
+            response.results.len(),
+            1,
+            "expected exactly one content hit, got {:?}",
+            response.results
+        );
+        let hit = &response.results[0];
+        assert_eq!(hit.url_path, "/notes/");
+        assert!(hit.is_content_match, "hit must be flagged as content match");
+        assert_eq!(hit.filetype, "markdown");
+        assert_eq!(hit.score, 1, "one matching line => score 1");
+
+        let snippet = hit.snippet.as_deref().expect("content match has a snippet");
+        assert!(!snippet.is_empty());
+        assert!(
+            snippet.starts_with("Line 9: "),
+            "brownfox is on line 9; snippet was {snippet:?}"
+        );
+        assert!(snippet.contains("brownfox"), "snippet was {snippet:?}");
+    }
+
+    #[test]
+    fn test_search_content_scans_every_candidate_file() {
+        // Guards the single hoisted `Searcher` reused across files: if reuse
+        // left stale state behind, only the first file would report a hit.
+        let (engine, _dir) = engine_over(&[
+            ("a.md", "intro line\nbrownfox here\n"),
+            ("nested/b.md", "other line\nanother line\nbrownfox there\n"),
+            ("c.md", "no match in this file\n"),
+        ]);
+
+        let response = engine.search(&content_query("brownfox")).expect("search");
+
+        let mut paths: Vec<&str> = response.results.iter().map(|r| &*r.url_path).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["/a/", "/nested/b/"]);
+        assert!(response.results.iter().all(|r| r.is_content_match));
+
+        let snippets: std::collections::HashMap<&str, &str> = response
+            .results
+            .iter()
+            .map(|r| (&*r.url_path, r.snippet.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(snippets["/a/"], "Line 2: brownfox here");
+        assert_eq!(snippets["/nested/b/"], "Line 3: brownfox there");
+    }
+
+    #[test]
+    fn test_search_content_scores_by_match_count() {
+        let (engine, _dir) =
+            engine_over(&[("many.md", "brownfox\nfiller\nbrownfox\nfiller\nbrownfox\n")]);
+
+        let response = engine.search(&content_query("brownfox")).expect("search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].score, 3, "three matching lines");
+        assert_eq!(
+            response.results[0].snippet.as_deref(),
+            Some("Line 1: brownfox")
+        );
+    }
+
+    #[test]
+    fn test_search_metadata_matches_without_cloning_candidates() {
+        // Metadata search now iterates borrowed `&MarkdownInfo` off the pin
+        // guard; assert it still resolves title/tags out of frontmatter.
+        let (engine, _dir) = engine_over(&[
+            (
+                "guide.md",
+                "---\ntitle: Widget Guide\ntags:\n  - rust\n---\n\nbrownfox body only\n",
+            ),
+            ("misc.md", "---\ntitle: Something Else\n---\n\nfiller\n"),
+        ]);
+
+        let query = SearchQuery {
+            q: "Widget".to_string(),
+            limit: DEFAULT_RESULT_LIMIT,
+            scope: SearchScope::Metadata,
+            filetype: None,
+            folder: None,
+            folder_scope: FolderScope::Everywhere,
+        };
+
+        let response = engine.search(&query).expect("search");
+        let hit = response
+            .results
+            .iter()
+            .find(|r| r.url_path == "/guide/")
+            .expect("guide.md matches on its frontmatter title");
+        assert_eq!(hit.title.as_deref(), Some("Widget Guide"));
+        assert_eq!(hit.tags.as_deref(), Some("rust"));
+        assert!(!hit.is_content_match);
+        assert!(hit.score > 0);
     }
 
     // ==================== SearchResponse Serialization Tests ====================

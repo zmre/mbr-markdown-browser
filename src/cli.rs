@@ -1,3 +1,5 @@
+use crate::config::{Config, IpArray};
+use crate::errors::ConfigError;
 use clap::{ArgGroup, Parser};
 use std::path::PathBuf;
 
@@ -187,6 +189,108 @@ impl Args {
             level
         )
     }
+}
+
+/// Folds command-line flags into a `Config` already loaded from disk.
+///
+/// This is the last (highest precedence) layer of the configuration hierarchy
+/// described in the README: compiled-in defaults, then `.mbr/config.toml`, then
+/// `MBR_*` environment variables, then these flags.
+///
+/// It lives here rather than inline in `main()` so the wiring — including the
+/// two error branches, which are otherwise only constructible from a real
+/// process invocation — is reachable from tests.
+///
+/// # Errors
+///
+/// - `ConfigError::CanonicalizeFailed` if `--template-folder` does not exist.
+/// - `ConfigError::TemplateFolderNotDirectory` if `--template-folder` is not a directory.
+/// - `ConfigError::InvalidHost` if `--host` is unparseable or is IPv6 (only IPv4
+///   binds are supported, since `Config::host` is a 4-octet array).
+/// - Whatever `Config::validate` returns when `--edit` re-validates the config.
+pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, ConfigError> {
+    if let Some(timeout) = args.oembed_timeout_ms {
+        config.oembed_timeout_ms = timeout;
+    }
+    if let Some(cache_size) = args.oembed_cache_size {
+        config.oembed_cache_size = cache_size;
+    }
+    if let Some(ref template_folder) = args.template_folder {
+        // Canonicalize and validate the template folder path
+        let template_path =
+            template_folder
+                .canonicalize()
+                .map_err(|e| ConfigError::CanonicalizeFailed {
+                    path: template_folder.clone(),
+                    source: e,
+                })?;
+        if !template_path.is_dir() {
+            return Err(ConfigError::TemplateFolderNotDirectory {
+                path: template_path,
+            });
+        }
+        config.template_folder = Some(template_path);
+    }
+    if let Some(port) = args.port {
+        config.port = port;
+    }
+    if let Some(ref host) = args.host {
+        let ip: std::net::IpAddr = host
+            .parse()
+            .map_err(|_| ConfigError::InvalidHost { host: host.clone() })?;
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                config.host = IpArray(v4.octets());
+            }
+            std::net::IpAddr::V6(_) => {
+                return Err(ConfigError::InvalidHost { host: host.clone() });
+            }
+        }
+    }
+    if let Some(ref theme) = args.theme {
+        config.theme = theme.clone();
+    }
+    if let Some(concurrency) = args.build_concurrency {
+        config.build_concurrency = Some(concurrency);
+    }
+    // Apply transcode options from CLI
+    #[cfg(feature = "media-metadata")]
+    if args.transcode {
+        config.transcode = true;
+    }
+    // Apply skip_link_checks from CLI
+    if args.skip_link_checks {
+        config.skip_link_checks = true;
+    }
+    // Apply no_link_tracking from CLI
+    if args.no_link_tracking {
+        config.link_tracking = false;
+    }
+    // Apply no_relationship_tracking from CLI
+    if args.no_relationship_tracking {
+        config.relationship_tracking = false;
+    }
+    // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
+    if args.mark_incomplete {
+        config.mark_incomplete = Some(true);
+    } else if args.no_mark_incomplete {
+        config.mark_incomplete = Some(false);
+    }
+    // Apply title_prefix and title_suffix from CLI
+    if let Some(ref prefix) = args.title_prefix {
+        config.title_prefix = prefix.clone();
+    }
+    if let Some(ref suffix) = args.title_suffix {
+        config.title_suffix = suffix.clone();
+    }
+    // Enable in-browser editing from CLI
+    if args.edit {
+        config.edit_enabled = true;
+        // Re-validate now that editing is enabled (e.g. non-loopback needs a token).
+        config.validate()?;
+    }
+
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -529,5 +633,172 @@ mod tests {
     fn test_parse_title_suffix() {
         let args = Args::parse_from(["mbr", "--title-suffix", " | My Site"]);
         assert_eq!(args.title_suffix, Some(" | My Site".to_string()));
+    }
+
+    // ---- apply_overrides ----------------------------------------------------
+    //
+    // These drive the real clap parser so the tests pin the whole flag → config
+    // path, not just the assignment. Before this block the override wiring was
+    // inline in `main()` and unreachable: deleting the `--theme` assignment left
+    // fmt/clippy/test green while `mbr -s --theme amber` served the default.
+
+    /// Parses `argv` and applies it to a default `Config`, panicking on error.
+    fn overridden(argv: &[&str]) -> Config {
+        apply_overrides(Config::default(), &Args::parse_from(argv)).expect("overrides should apply")
+    }
+
+    #[test]
+    fn test_apply_overrides_no_flags_changes_nothing() {
+        let base = Config::default();
+        let config = overridden(&["mbr"]);
+        assert_eq!(config.port, base.port);
+        assert_eq!(config.theme, base.theme);
+        assert_eq!(config.host, base.host);
+        assert_eq!(config.title_prefix, base.title_prefix);
+        assert_eq!(config.title_suffix, base.title_suffix);
+        assert_eq!(config.template_folder, base.template_folder);
+        assert_eq!(config.build_concurrency, base.build_concurrency);
+        assert_eq!(config.mark_incomplete, base.mark_incomplete);
+        assert_eq!(config.skip_link_checks, base.skip_link_checks);
+        assert_eq!(config.link_tracking, base.link_tracking);
+        assert_eq!(config.relationship_tracking, base.relationship_tracking);
+        assert_eq!(config.edit_enabled, base.edit_enabled);
+    }
+
+    #[test]
+    fn test_apply_overrides_sets_port() {
+        assert_eq!(overridden(&["mbr", "-s", "-p", "5299"]).port, 5299);
+    }
+
+    #[test]
+    fn test_apply_overrides_sets_theme() {
+        assert_eq!(
+            overridden(&["mbr", "-s", "--theme", "amber"]).theme,
+            "amber"
+        );
+    }
+
+    #[test]
+    fn test_apply_overrides_sets_title_prefix_and_suffix() {
+        let config = overridden(&[
+            "mbr",
+            "--title-prefix",
+            "My Site: ",
+            "--title-suffix",
+            " | Docs",
+        ]);
+        assert_eq!(config.title_prefix, "My Site: ");
+        assert_eq!(config.title_suffix, " | Docs");
+    }
+
+    #[test]
+    fn test_apply_overrides_sets_ipv4_host() {
+        let config = overridden(&["mbr", "-s", "--host", "0.0.0.0"]);
+        assert_eq!(config.host, IpArray([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn test_apply_overrides_sets_oembed_and_build_concurrency() {
+        let config = overridden(&[
+            "mbr",
+            "--oembed-timeout-ms",
+            "1234",
+            "--oembed-cache-size",
+            "4096",
+            "--build-concurrency",
+            "8",
+        ]);
+        assert_eq!(config.oembed_timeout_ms, 1234);
+        assert_eq!(config.oembed_cache_size, 4096);
+        assert_eq!(config.build_concurrency, Some(8));
+    }
+
+    #[test]
+    fn test_apply_overrides_toggle_flags() {
+        assert!(overridden(&["mbr", "-b", "--skip-link-checks"]).skip_link_checks);
+        assert!(!overridden(&["mbr", "--no-link-tracking"]).link_tracking);
+        assert!(!overridden(&["mbr", "--no-relationship-tracking"]).relationship_tracking);
+        assert_eq!(
+            overridden(&["mbr", "--mark-incomplete"]).mark_incomplete,
+            Some(true)
+        );
+        assert_eq!(
+            overridden(&["mbr", "--no-mark-incomplete"]).mark_incomplete,
+            Some(false)
+        );
+    }
+
+    /// `--host ::1` parses as an IP but has no place to live: `Config::host` is
+    /// four octets, so IPv6 is rejected rather than silently truncated.
+    #[test]
+    fn test_apply_overrides_rejects_ipv6_host() {
+        let result = apply_overrides(
+            Config::default(),
+            &Args::parse_from(["mbr", "--host", "::1"]),
+        );
+        assert!(
+            matches!(&result, Err(ConfigError::InvalidHost { host }) if host == "::1"),
+            "expected InvalidHost, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_overrides_rejects_unparseable_host() {
+        let result = apply_overrides(
+            Config::default(),
+            &Args::parse_from(["mbr", "--host", "not-an-ip"]),
+        );
+        assert!(
+            matches!(&result, Err(ConfigError::InvalidHost { host }) if host == "not-an-ip"),
+            "expected InvalidHost, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_overrides_accepts_template_folder_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expected = dir.path().canonicalize().expect("canonicalize");
+        let config = apply_overrides(
+            Config::default(),
+            &Args::parse_from(["mbr", "--template-folder", dir.path().to_str().unwrap()]),
+        )
+        .expect("a real directory should be accepted");
+        assert_eq!(config.template_folder, Some(expected));
+    }
+
+    #[test]
+    fn test_apply_overrides_rejects_template_folder_that_is_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("index.html");
+        std::fs::write(&file, "<html></html>").expect("write");
+        let result = apply_overrides(
+            Config::default(),
+            &Args::parse_from(["mbr", "--template-folder", file.to_str().unwrap()]),
+        );
+        assert!(
+            matches!(&result, Err(ConfigError::TemplateFolderNotDirectory { .. })),
+            "expected TemplateFolderNotDirectory, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_overrides_rejects_missing_template_folder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist");
+        let result = apply_overrides(
+            Config::default(),
+            &Args::parse_from(["mbr", "--template-folder", missing.to_str().unwrap()]),
+        );
+        assert!(
+            matches!(&result, Err(ConfigError::CanonicalizeFailed { .. })),
+            "expected CanonicalizeFailed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_overrides_edit_flag_enables_editing() {
+        // The default host is loopback, so enabling editing needs no token and
+        // the re-`validate()` at the end of the override block succeeds.
+        assert!(overridden(&["mbr", "-s", "--edit"]).edit_enabled);
     }
 }

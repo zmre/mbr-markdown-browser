@@ -27,6 +27,7 @@ use crate::link_index::{OutboundLink, resolve_relative_url};
 use crate::path_resolver::{
     PathResolverConfig, ResolvedPath, normalize_link_target, resolve_request_path,
 };
+use crate::url_path::is_external_url;
 
 /// Type of media element whose `src` attribute is broken.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,20 +70,6 @@ pub struct PageErrors {
     pub errors: Vec<PageError>,
 }
 
-/// Returns `true` if a URL looks external / non-resolvable via the local site.
-fn is_external_url(url: &str) -> bool {
-    url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("//")
-        || url.starts_with("mailto:")
-        || url.starts_with("tel:")
-        || url.starts_with("javascript:")
-        || url.starts_with("data:")
-        || url.starts_with("ftp://")
-        || url.starts_with("ftps://")
-        || url.starts_with("magnet:")
-}
-
 /// Validates the internal outbound links for a single page.
 ///
 /// Returns a `BrokenInternalLink` for each `OutboundLink` whose target is
@@ -102,6 +89,14 @@ pub fn validate_internal_links(
         // Fragment-only links (e.g. "#section") cannot be validated without
         // target-page parsing. v1 skips them to avoid false positives.
         if link.to.starts_with('#') || link.to.is_empty() {
+            continue;
+        }
+
+        // Off-site targets are not ours to resolve. `link.internal` is the
+        // primary gate, but it is derived at render time and an href reaching
+        // here with a scheme (`ftp://…`, `magnet:…`) would otherwise be joined
+        // onto the base directory and reported as a false broken link.
+        if is_external_url(&link.to) {
             continue;
         }
 
@@ -365,6 +360,37 @@ mod tests {
 
         let errs = validate_internal_links(&outbound, &cfg);
         assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn external_scheme_link_marked_internal_is_ignored() {
+        // Regression: `is_internal_link` did not know these schemes, so the
+        // renderer stored them with `internal: true`; this validator then ran
+        // them through the path resolver, got `NotFound`, and showed a false
+        // "broken internal link" in the page-errors panel.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let outbound = [
+            "ftp://example.com/data.zip",
+            "magnet:?xt=urn:btih:abc",
+            "sms:+15555550123",
+        ]
+        .iter()
+        .map(|to| OutboundLink {
+            to: (*to).to_string(),
+            text: "ext".to_string(),
+            anchor: None,
+            // Deliberately mislabelled, as the old renderer did.
+            internal: true,
+        })
+        .collect::<Vec<_>>();
+
+        let errs = validate_internal_links(&outbound, &cfg);
+        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs);
     }
 
     #[test]

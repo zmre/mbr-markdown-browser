@@ -55,12 +55,13 @@ impl Default for LinkTransformConfig {
 ///
 /// # Rules
 ///
-/// 1. Absolute URLs (`http://`, `https://`, `//`) → unchanged
-/// 2. Root-relative URLs (starts with `/`) → unchanged
-/// 3. Anchor-only links (`#...`) → unchanged
-/// 4. Data/blob/javascript URLs → unchanged
-/// 5. Relative markdown links → prepend `../` (if not index file), replace extension with `/`
-/// 6. Relative static files → prepend `../` (if not index file)
+/// 1. Anchor-only links (`#...`) → unchanged
+/// 2. External URLs — anything with a scheme (`https:`, `mailto:`, `magnet:`,
+///    `blob:`, …) or protocol-relative (`//host`) → unchanged, as decided by
+///    [`crate::url_path::is_external_url`]
+/// 3. Root-relative URLs (starts with `/`) → unchanged
+/// 4. Relative markdown links → prepend `../` (if not index file), replace extension with `/`
+/// 5. Relative static files → prepend `../` (if not index file)
 ///
 /// # Examples
 ///
@@ -96,8 +97,13 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
         return url.to_string();
     }
 
-    // Absolute URLs (http://, https://, //)
-    if is_absolute_url(url) {
+    // Anything that leaves the site is opaque to us: absolute and
+    // protocol-relative URLs, but equally `mailto:`, `tel:`, `sms:`,
+    // `magnet:`, `data:`, `javascript:` and `blob:` (what the Crepe editor
+    // mints for a freshly pasted image before upload — a bogus `../` prefix
+    // would break the in-editor preview). One predicate covers them all, so a
+    // scheme can no longer be handled here but missed by link tracking.
+    if crate::url_path::is_external_url(url) {
         return url.to_string();
     }
 
@@ -107,22 +113,6 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
             Some(depth) => make_relative_url(url, depth),
             None => url.to_string(),
         };
-    }
-
-    // Data, blob, and javascript URLs — inline/opaque resources, never rewritten.
-    // (`blob:` is what the Crepe editor mints for a freshly pasted image before
-    // it is uploaded; without this it would get a bogus `../` prepended.)
-    if url.starts_with("data:") || url.starts_with("blob:") || url.starts_with("javascript:") {
-        return url.to_string();
-    }
-
-    // Special protocol links (mailto, tel, sms, etc.) - leave unchanged
-    if url.starts_with("mailto:")
-        || url.starts_with("tel:")
-        || url.starts_with("sms:")
-        || url.starts_with("callto:")
-    {
-        return url.to_string();
     }
 
     // Split into path and suffix (anchor/query)
@@ -158,7 +148,15 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
             .or_else(|| config.index_file.strip_suffix(".markdown"))
             .unwrap_or(&config.index_file);
 
-        let final_path = if base_path.ends_with(index_stem) {
+        // The link targets an index file only when the *final path segment* is
+        // exactly the index stem — mirroring `repo::build_markdown_url_path`.
+        // A plain `ends_with` also matched "site-index", "myindex" and
+        // "subindex", rewriting them to "../site-/", "../my/" and "../sub/":
+        // dead links, or worse, a live link to a different page.
+        let is_index_target =
+            base_path == index_stem || base_path.ends_with(&format!("/{}", index_stem));
+
+        let final_path = if is_index_target {
             // Collapse index file to directory
             let stripped = base_path
                 .strip_suffix(index_stem)
@@ -197,15 +195,6 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
     };
 
     format!("{}{}{}", prefix, remaining_path, suffix)
-}
-
-/// Check if a URL is absolute (has protocol or is protocol-relative).
-fn is_absolute_url(url: &str) -> bool {
-    url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("//")
-        || url.starts_with("ftp://")
-        || url.starts_with("file://")
 }
 
 /// Split a URL into path and suffix (anchor # or query ?).
@@ -348,6 +337,39 @@ mod tests {
     fn test_just_index_md() {
         // Link to index.md in same directory
         assert_eq!(transform_link("index.md", &regular_config()), "../");
+    }
+
+    /// Regression (mirrors `repo::test_build_markdown_url_path_myindex_not_
+    /// treated_as_index`): only a *whole* final segment equal to the index
+    /// stem collapses to a directory. `ends_with` used to mangle these into
+    /// `../site-/`, `../my/`, `../re/` and `../sub/` — the last of which can
+    /// silently point at a real but different page.
+    #[test]
+    fn test_index_lookalike_stems_keep_their_own_url() {
+        let cases = [
+            ("site-index.md", "../site-index/"),
+            ("myindex.md", "../myindex/"),
+            ("reindex.md", "../reindex/"),
+            ("subindex.md", "../subindex/"),
+            ("docs/site-index.md", "../docs/site-index/"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(transform_link(input, &regular_config()), expected);
+        }
+
+        // Index files themselves still collapse to the folder URL.
+        assert_eq!(
+            transform_link("docs/index.md", &regular_config()),
+            "../docs/"
+        );
+        assert_eq!(transform_link("index.md", &regular_config()), "../");
+    }
+
+    #[test]
+    fn test_index_lookalike_stems_from_index_page() {
+        assert_eq!(transform_link("subindex.md", &index_config()), "subindex/");
+        assert_eq!(transform_link("docs/index.md", &index_config()), "docs/");
     }
 
     #[test]
@@ -560,6 +582,32 @@ mod tests {
     fn test_ftp_url() {
         let url = "ftp://ftp.example.com/file.txt";
         assert_eq!(transform_link(url, &regular_config()), url);
+    }
+
+    #[test]
+    fn test_scheme_urls_unchanged() {
+        // Regression: `magnet:` was rewritten to `../magnet:?…` and `ftps:`
+        // to `../ftps:/…` because each scheme had to be enumerated by hand.
+        for url in [
+            "ftps://ftp.example.com/file.txt",
+            "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9",
+            "sms:+15555550123",
+            "callto:+15555550123",
+            "ssh://git@example.com/repo.git",
+        ] {
+            assert_eq!(transform_link(url, &regular_config()), url);
+            assert_eq!(transform_link(url, &index_config()), url);
+        }
+    }
+
+    #[test]
+    fn test_colon_in_relative_path_is_still_transformed() {
+        // A colon after a slash is not a scheme, so the link must still be
+        // rewritten for the trailing-slash URL convention.
+        assert_eq!(
+            transform_link("docs/a:b.md", &regular_config()),
+            "../docs/a:b/"
+        );
     }
 
     // =========================================================================

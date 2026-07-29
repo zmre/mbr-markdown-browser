@@ -2,6 +2,7 @@ import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
 import { isInputTarget } from './mbr-keys.js'
+import type { MbrOverlay } from './overlay.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -52,7 +53,7 @@ const DEFAULT_MAX_ITEMS = 100;
  * - Enter: Navigate to item
  */
 @customElement('mbr-browse-single')
-export class MbrBrowseSingleElement extends LitElement {
+export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
   // === Mode State ===
   @state()
   private _isOverlayMode = false;
@@ -196,8 +197,16 @@ export class MbrBrowseSingleElement extends LitElement {
   }
 
   // ========================================
-  // Public Methods
+  // Public Methods (the MbrOverlay contract, called from mbr-keys)
   // ========================================
+
+  /**
+   * True while the drawer is showing. Only meaningful in overlay mode; the
+   * docked sidebar keeps the drawer closed and never owns the keyboard.
+   */
+  public get isOpen(): boolean {
+    return this._isDrawerOpen;
+  }
 
   public open() {
     this._isDrawerOpen = true;

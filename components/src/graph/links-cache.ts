@@ -19,7 +19,18 @@ import type { PageLinks } from './relationship-graph.js'
 
 export type { FetchPageLinks }
 
-const cache = new Map<string, Promise<PageLinks | null>>()
+/**
+ * Outcome of a `links.json` fetch, for callers that need to tell "this page
+ * has no links.json" (link tracking disabled — an empty, non-error state) from
+ * "the request failed" (worth surfacing to the user and worth retrying).
+ * `fetchPageLinks` collapses both into `null`.
+ */
+export type LinksResult =
+  | { status: 'ok'; links: PageLinks }
+  | { status: 'unavailable' }
+  | { status: 'error'; message: string }
+
+const cache = new Map<string, Promise<LinksResult>>()
 
 /**
  * Build the `links.json` URL for a canonical note path. Paths are stored
@@ -32,31 +43,39 @@ function linksJsonUrl(canonicalPath: string): string {
 }
 
 /**
- * Fetch a page's `links.json`, de-duplicated per canonical path. Never
- * rejects: resolves `null` when the payload is unavailable.
+ * Fetch a page's `links.json`, de-duplicated per canonical path, reporting the
+ * failure mode. Never rejects. This is the shared entry point: every consumer
+ * on a page hits the same in-flight promise, so `links.json` is fetched once.
  */
-export const fetchPageLinks: FetchPageLinks = (path) => {
+export function fetchPageLinksResult(path: string): Promise<LinksResult> {
   const key = canonicalizeNotePath(path)
   const cached = cache.get(key)
   if (cached) return cached
 
-  const promise = (async (): Promise<PageLinks | null> => {
+  const promise = (async (): Promise<LinksResult> => {
     try {
       const response = await fetch(linksJsonUrl(key))
       if (response.status === 404) {
-        // Link tracking disabled for this page: a permanent null (kept cached).
-        return null
+        // Link tracking disabled for this page: permanent, and kept cached.
+        return { status: 'unavailable' }
       }
       if (!response.ok) {
         throw new Error(`links.json failed: ${response.status}`)
       }
-      return (await response.json()) as PageLinks
-    } catch {
+      return { status: 'ok', links: (await response.json()) as PageLinks }
+    } catch (err) {
       // Transient failure: evict so a later call can retry.
       cache.delete(key)
-      return null
+      return { status: 'error', message: err instanceof Error ? err.message : 'Unknown error' }
     }
   })()
   cache.set(key, promise)
   return promise
 }
+
+/**
+ * Fetch a page's `links.json`, de-duplicated per canonical path. Never
+ * rejects: resolves `null` when the payload is unavailable (404 or failure).
+ */
+export const fetchPageLinks: FetchPageLinks = (path) =>
+  fetchPageLinksResult(path).then((result) => (result.status === 'ok' ? result.links : null))

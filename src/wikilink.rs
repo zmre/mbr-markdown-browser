@@ -81,9 +81,13 @@ impl ParsedWikilink {
 /// Removes characters and patterns that could cause path traversal or other
 /// filesystem safety issues:
 /// - Strips null bytes and control characters
-/// - Removes `..` path segments
-/// - Strips leading `/` characters
-/// - Collapses multiple `/` into single `/`
+/// - Splits on **both** `/` and `\`, so a Windows-style traversal cannot
+///   survive as a single opaque segment (the result always uses `/`, so output
+///   is byte-identical on every platform)
+/// - Removes `.` and `..` segments
+/// - Removes drive-prefixed segments (`C:`, `C:evil`), which `Path::join`
+///   treats as absolute or drive-relative on Windows
+/// - Strips leading separators and collapses repeated ones
 ///
 /// # Examples
 ///
@@ -94,6 +98,8 @@ impl ParsedWikilink {
 /// assert_eq!(sanitize_path_component("/etc/passwd"), "etc/passwd");
 /// assert_eq!(sanitize_path_component("../../secret"), "secret");
 /// assert_eq!(sanitize_path_component("foo/../bar"), "foo/bar");
+/// assert_eq!(sanitize_path_component(r"..\..\Users\victim"), "Users/victim");
+/// assert_eq!(sanitize_path_component(r"C:\Windows\evil"), "Windows/evil");
 /// ```
 pub fn sanitize_path_component(value: &str) -> String {
     value
@@ -101,11 +107,21 @@ pub fn sanitize_path_component(value: &str) -> String {
         .chars()
         .filter(|c| !c.is_control())
         .collect::<String>()
-        // Split on `/`, remove empty and `..` segments, rejoin
-        .split('/')
-        .filter(|seg| !seg.is_empty() && *seg != ".." && *seg != ".")
+        // Split on both separators, drop empty/relative/drive segments, rejoin
+        .split(['/', '\\'])
+        .filter(|seg| !seg.is_empty() && *seg != ".." && *seg != "." && !has_drive_prefix(seg))
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// True when a path segment starts with a Windows drive prefix (`C:`).
+///
+/// Such a segment must be dropped rather than kept: `Path::join` on Windows
+/// treats both `C:\x` (absolute) and `C:x` (drive-relative) as replacing the
+/// base path, which would let a tag value escape the build output directory.
+fn has_drive_prefix(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// Normalizes a tag value for use in URLs.
@@ -165,6 +181,27 @@ fn is_url_scheme(source: &str) -> bool {
 ///
 /// The transformed markdown text with wikilinks converted to standard links.
 ///
+/// # Code regions are left alone
+///
+/// This is a raw-text prepass that runs *before* pulldown-cmark parses the
+/// document, so it has to recognise code itself. Wikilinks are left verbatim
+/// inside:
+///
+/// - fenced code blocks — backtick and tilde fences, any fence length, with or
+///   without an info string, including fences written inside a blockquote;
+/// - indented code blocks — four or more columns of indentation opening a block
+///   outside a list;
+/// - inline code spans — including multi-backtick spans and spans that wrap
+///   onto the following line.
+///
+/// An unclosed fence runs to the end of the input, which is what CommonMark
+/// (and therefore pulldown-cmark) does too: the remainder of the file really is
+/// code, so leaving its wikilinks literal keeps this pass and the parser in
+/// agreement.
+///
+/// Detection is a single left-to-right line scan with no regexes; documents
+/// containing no `[[` at all skip it entirely.
+///
 /// # Examples
 ///
 /// ```
@@ -175,41 +212,258 @@ fn is_url_scheme(source: &str) -> bool {
 /// let input = "Check out [[Tags:rust]] and [[Tags:programming]]!";
 /// let output = transform_wikilinks(input, &sources);
 /// assert_eq!(output, "Check out [rust](/tags/rust/) and [programming](/tags/programming/)!");
+///
+/// // Code samples are documentation, not links.
+/// let input = "```\n[[Tags:rust]]\n```";
+/// assert_eq!(transform_wikilinks(input, &sources), input);
 /// ```
 pub fn transform_wikilinks(input: &str, valid_sources: &HashSet<String>) -> String {
-    // Regex pattern for [[Source:value]] where value can contain spaces
-    // Match [[Source:value]] but NOT [[Source:value|display]] (Obsidian style)
+    // Fast path: most documents contain no wikilink at all, so skip the block
+    // scan entirely and pay only one substring search.
+    if !input.contains("[[") {
+        return input.to_string();
+    }
+
     let mut result = String::with_capacity(input.len());
-    let mut remaining = input;
+    let mut blocks = BlockScanner::new();
+    // Start of the pending run of consecutive non-code lines. Runs are
+    // transformed as a unit so inline code spans that wrap across lines are
+    // still recognised.
+    let mut text_start = 0;
+    let mut pos = 0;
 
-    while let Some(start) = remaining.find("[[") {
-        // Add text before the wikilink
-        result.push_str(&remaining[..start]);
+    while pos < input.len() {
+        let line_len = input[pos..]
+            .find('\n')
+            .map_or(input.len() - pos, |idx| idx + 1);
+        let line_end = pos + line_len;
+        if blocks.classify(&input[pos..line_end]) == LineKind::Code {
+            push_transformed(&mut result, &input[text_start..pos], valid_sources);
+            result.push_str(&input[pos..line_end]);
+            text_start = line_end;
+        }
+        pos = line_end;
+    }
+    push_transformed(&mut result, &input[text_start..], valid_sources);
+    result
+}
 
-        // Find the closing ]]
-        let after_open = &remaining[start + 2..];
-        if let Some(end) = after_open.find("]]") {
-            let inner = &after_open[..end];
+/// Whether a source line belongs to a code block (copied verbatim) or to
+/// ordinary text (scanned for wikilinks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    Text,
+    Code,
+}
 
-            // Try to parse as Source:value
-            if let Some(wikilink) = parse_wikilink_inner(inner, valid_sources) {
-                result.push_str(&wikilink.to_markdown_link());
-            } else {
-                // Not a valid tag wikilink, keep original
-                result.push_str(&remaining[start..start + 4 + end]);
-            }
+/// Line-at-a-time scanner for the block-level code regions that
+/// [`transform_wikilinks`] must not rewrite inside.
+struct BlockScanner {
+    /// Open fence as (marker byte, marker run length), if any.
+    fence: Option<(u8, usize)>,
+    /// Previous line was blank; the start of the input counts as blank.
+    after_blank: bool,
+    /// Currently inside an indented code block.
+    indented: bool,
+    /// Inside a list, where four-column indentation is item content rather than
+    /// code. Approximated from the last unindented line, which keeps loose list
+    /// items (`- a`, blank, four-space continuation paragraph) rewritable.
+    in_list: bool,
+}
 
-            remaining = &after_open[end + 2..];
-        } else {
-            // No closing ]], keep original and move past [[
-            result.push_str("[[");
-            remaining = after_open;
+impl BlockScanner {
+    const fn new() -> Self {
+        Self {
+            fence: None,
+            after_blank: true,
+            indented: false,
+            in_list: false,
         }
     }
 
-    // Add any remaining text
-    result.push_str(remaining);
-    result
+    /// Classifies one line (trailing newline included) and advances the state.
+    fn classify(&mut self, line: &str) -> LineKind {
+        let content = line.trim_end_matches(['\n', '\r']);
+
+        if let Some((marker, len)) = self.fence {
+            if is_fence_close(content, marker, len) {
+                self.fence = None;
+            }
+            return LineKind::Code;
+        }
+
+        if content.trim().is_empty() {
+            self.after_blank = true;
+            self.indented = false;
+            return LineKind::Text;
+        }
+
+        let indent = indent_width(content);
+        if indent >= 4 && !self.in_list && (self.after_blank || self.indented) {
+            self.indented = true;
+            self.after_blank = false;
+            return LineKind::Code;
+        }
+        self.indented = false;
+        self.after_blank = false;
+
+        let bare = strip_block_markers(content);
+        if indent == 0 {
+            self.in_list = starts_list_item(bare);
+        }
+        match fence_open(bare) {
+            Some(fence) => {
+                self.fence = Some(fence);
+                LineKind::Code
+            }
+            None => LineKind::Text,
+        }
+    }
+}
+
+/// Columns of leading indentation, counting a tab as four columns.
+fn indent_width(line: &str) -> usize {
+    line.bytes()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .map(|b| if b == b'\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// Strips leading indentation and any blockquote markers, so a fence written
+/// inside a blockquote is still recognised as a fence.
+fn strip_block_markers(line: &str) -> &str {
+    let mut rest = line.trim_start_matches([' ', '\t']);
+    while let Some(after) = rest.strip_prefix('>') {
+        rest = after.trim_start_matches([' ', '\t']);
+    }
+    rest
+}
+
+/// Length of the leading run of `marker` bytes.
+fn marker_run(text: &str, marker: u8) -> usize {
+    text.bytes().take_while(|b| *b == marker).count()
+}
+
+/// Returns the fence marker and run length when `line` (block markers already
+/// stripped) opens a fenced code block.
+fn fence_open(line: &str) -> Option<(u8, usize)> {
+    let marker = *line.as_bytes().first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let len = marker_run(line, marker);
+    // A backtick info string may not contain a backtick (CommonMark), which is
+    // what keeps ``code`` spans from being mistaken for fences.
+    if len < 3 || (marker == b'`' && line[len..].contains('`')) {
+        return None;
+    }
+    Some((marker, len))
+}
+
+/// True when `line` closes an open fence of `marker` repeated at least `len`
+/// times, with nothing but whitespace after the run.
+fn is_fence_close(line: &str, marker: u8, len: usize) -> bool {
+    let bare = strip_block_markers(line);
+    let run = marker_run(bare, marker);
+    run >= len && bare[run..].trim().is_empty()
+}
+
+/// True when `line` (block markers stripped) starts a list item.
+fn starts_list_item(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    match bytes.first() {
+        Some(b'-' | b'*' | b'+') => matches!(bytes.get(1), None | Some(b' ' | b'\t')),
+        Some(b'0'..=b'9') => {
+            let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+            matches!(bytes.get(digits), Some(b'.' | b')'))
+                && matches!(bytes.get(digits + 1), None | Some(b' ' | b'\t'))
+        }
+        _ => false,
+    }
+}
+
+/// Rewrites the wikilinks in a run of non-code lines, stepping over inline code
+/// spans. Untransformed stretches are copied in one slice each, so a run with
+/// no wikilink costs a single substring search and one `push_str`.
+fn push_transformed(result: &mut String, text: &str, valid_sources: &HashSet<String>) {
+    if !text.contains("[[") {
+        result.push_str(text);
+        return;
+    }
+
+    let bytes = text.as_bytes();
+    // Everything before `copied` has already been written to `result`.
+    let mut copied = 0;
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'`' => {
+                let run = marker_run(&text[pos..], b'`');
+                pos += run;
+                // Unclosed backticks are literal text, so scanning simply
+                // continues after them.
+                if let Some(end) = code_span_end(&text[pos..], run) {
+                    pos += end;
+                }
+            }
+            b'[' if bytes.get(pos + 1) == Some(&b'[') => {
+                let inner_start = pos + 2;
+                // With no `]]` left in the run, no later wikilink can close
+                // either, so the rest is copied verbatim.
+                let Some(offset) = text[inner_start..].find("]]") else {
+                    break;
+                };
+                let inner = &text[inner_start..inner_start + offset];
+                if let Some(wikilink) = parse_wikilink_inner(inner, valid_sources) {
+                    result.push_str(&text[copied..pos]);
+                    result.push_str(&wikilink.to_markdown_link());
+                    copied = inner_start + offset + 2;
+                }
+                pos = inner_start + offset + 2;
+            }
+            _ => pos += 1,
+        }
+    }
+
+    result.push_str(&text[copied..]);
+}
+
+/// Byte offset just past the closing backtick run of a code span opened with
+/// `open` backticks, or `None` when the span never closes.
+///
+/// A code span cannot contain a blank line (it lives inside one paragraph), so
+/// a blank line ends the search and the opening backticks stay literal text.
+fn code_span_end(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'`' => {
+                // Only an exactly equal run closes the span; longer or shorter
+                // runs are span content.
+                let run = marker_run(&text[pos..], b'`');
+                pos += run;
+                if run == open {
+                    return Some(pos);
+                }
+            }
+            b'\n' => {
+                let next = pos + 1;
+                let blank = text[next..]
+                    .bytes()
+                    .take_while(|b| *b != b'\n')
+                    .all(|b| b.is_ascii_whitespace());
+                if blank {
+                    return None;
+                }
+                pos = next;
+            }
+            _ => pos += 1,
+        }
+    }
+    None
 }
 
 /// Parses the inner content of a wikilink (`Source:value`).
@@ -462,6 +716,192 @@ mod tests {
         assert_eq!(output, "[[Tags:]]"); // Unchanged (empty value)
     }
 
+    // transform_wikilinks code-region tests
+    //
+    // These run as a raw-text prepass before pulldown-cmark, so every code
+    // construct the parser recognises has to be recognised here too, else the
+    // documentation of the wikilink syntax rewrites itself.
+
+    #[test]
+    fn test_transform_wikilinks_skips_fenced_code_block() {
+        let sources = make_sources(&["tags"]);
+        let input =
+            "Before [[Tags:rust]].\n\n```markdown\n[[Tags:rust]]\n```\n\nAfter [[Tags:rust]].";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "Before [rust](/tags/rust/).\n\n```markdown\n[[Tags:rust]]\n```\n\nAfter [rust](/tags/rust/)."
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_tilde_fence() {
+        let sources = make_sources(&["tags"]);
+        let input = "~~~\n[[Tags:rust]]\n~~~\n[[Tags:rust]]";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "~~~\n[[Tags:rust]]\n~~~\n[rust](/tags/rust/)");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_longer_fence_containing_shorter_one() {
+        // A four-backtick fence is only closed by four backticks, so the inner
+        // three-backtick lines are content.
+        let sources = make_sources(&["tags"]);
+        let input = "````\n```\n[[Tags:rust]]\n```\n````\n[[Tags:rust]]";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "````\n```\n[[Tags:rust]]\n```\n````\n[rust](/tags/rust/)"
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_fence_inside_blockquote() {
+        let sources = make_sources(&["tags"]);
+        let input = "> ```\n> [[Tags:rust]]\n> ```\n\n[[Tags:rust]]";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "> ```\n> [[Tags:rust]]\n> ```\n\n[rust](/tags/rust/)"
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_unclosed_fence_runs_to_end_of_input() {
+        // Documented behaviour: CommonMark treats everything after an unclosed
+        // fence as code, so this pass does too — staying consistent with the
+        // parser matters more than rewriting text the reader sees as code.
+        let sources = make_sources(&["tags"]);
+        let input = "[[Tags:rust]]\n\n```\n[[Tags:rust]]\nstill code\n[[Tags:rust]]";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "[rust](/tags/rust/)\n\n```\n[[Tags:rust]]\nstill code\n[[Tags:rust]]"
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_inline_code_span() {
+        let sources = make_sources(&["tags"]);
+        let input = "Write `[[Tags:rust]]` to link [[Tags:rust]].";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "Write `[[Tags:rust]]` to link [rust](/tags/rust/).");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_multi_backtick_span() {
+        let sources = make_sources(&["tags"]);
+        let input = "Use ``[[Tags:rust]] and `x` `` then [[Tags:rust]].";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "Use ``[[Tags:rust]] and `x` `` then [rust](/tags/rust/)."
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_span_wrapping_to_next_line() {
+        let sources = make_sources(&["tags"]);
+        let input = "Use `code\n[[Tags:rust]]` here, but [[Tags:rust]] links.";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "Use `code\n[[Tags:rust]]` here, but [rust](/tags/rust/) links."
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_unmatched_backtick_is_literal() {
+        // A stray backtick must not suppress the rest of the document: a code
+        // span cannot cross a blank line, so the paragraph after it is text.
+        let sources = make_sources(&["tags"]);
+        let input = "A stray ` tick [[Tags:rust]].\n\n[[Tags:rust]] again.";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "A stray ` tick [rust](/tags/rust/).\n\n[rust](/tags/rust/) again."
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_skips_indented_code_block() {
+        let sources = make_sources(&["tags"]);
+        let input = "Example:\n\n    [[Tags:rust]]\n    more code\n\nBack to [[Tags:rust]].";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "Example:\n\n    [[Tags:rust]]\n    more code\n\nBack to [rust](/tags/rust/)."
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_tab_indented_code_block() {
+        let sources = make_sources(&["tags"]);
+        let input = "Example:\n\n\t[[Tags:rust]]\n\nText [[Tags:rust]].";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "Example:\n\n\t[[Tags:rust]]\n\nText [rust](/tags/rust/)."
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_indented_paragraph_continuation_is_text() {
+        // Four-space indentation directly under a paragraph line is a lazy
+        // continuation, not a code block.
+        let sources = make_sources(&["tags"]);
+        let input = "A paragraph\n    with [[Tags:rust]] wrapped.";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "A paragraph\n    with [rust](/tags/rust/) wrapped.");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_indented_list_continuation_is_text() {
+        // Inside a list, four-space indentation is item content.
+        let sources = make_sources(&["tags"]);
+        let input = "- item\n\n    Continued [[Tags:rust]] text.";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "- item\n\n    Continued [rust](/tags/rust/) text.");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_indented_code_after_list_ends() {
+        // A top-level paragraph closes the list, so indentation is code again.
+        let sources = make_sources(&["tags"]);
+        let input = "- item\n\ntext\n\n    [[Tags:rust]]\n";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "- item\n\ntext\n\n    [[Tags:rust]]\n");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_indented_first_line_is_code() {
+        // The start of the document behaves like the line after a blank line.
+        let sources = make_sources(&["tags"]);
+        let input = "    [[Tags:rust]]\n";
+        assert_eq!(transform_wikilinks(input, &sources), input);
+    }
+
+    #[test]
+    fn test_transform_wikilinks_crlf_fence() {
+        let sources = make_sources(&["tags"]);
+        let input = "```\r\n[[Tags:rust]]\r\n```\r\n[[Tags:rust]]\r\n";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output,
+            "```\r\n[[Tags:rust]]\r\n```\r\n[rust](/tags/rust/)\r\n"
+        );
+    }
+
+    #[test]
+    fn test_transform_wikilinks_inline_code_in_fence_info_is_not_a_fence() {
+        // ``x`` is a code span, not a fence: an info string may not contain a
+        // backtick, so the line stays text and the later wikilink is rewritten.
+        let sources = make_sources(&["tags"]);
+        let input = "``x`` starts a line\n[[Tags:rust]]";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "``x`` starts a line\n[rust](/tags/rust/)");
+    }
+
     // parse_tag_link tests
 
     #[test]
@@ -589,6 +1029,67 @@ mod tests {
         assert_eq!(sanitize_path_component("//"), "");
     }
 
+    #[test]
+    fn test_sanitize_path_component_backslash_separators() {
+        // `\` is a separator on Windows, so a backslash traversal must not
+        // survive as one opaque segment that the build joins onto --output.
+        assert_eq!(
+            sanitize_path_component(r"..\..\..\Users\victim\pwned"),
+            "Users/victim/pwned"
+        );
+        assert_eq!(sanitize_path_component(r"foo\bar"), "foo/bar");
+        assert_eq!(sanitize_path_component(r"\absolute"), "absolute");
+        assert_eq!(sanitize_path_component(r"a\..\b"), "a/b");
+        assert_eq!(
+            sanitize_path_component(r"mixed/back\slash"),
+            "mixed/back/slash"
+        );
+        // UNC prefixes collapse to plain relative segments.
+        assert_eq!(
+            sanitize_path_component(r"\\server\share\evil"),
+            "server/share/evil"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_path_component_drops_drive_prefix() {
+        assert_eq!(sanitize_path_component(r"C:\Windows\evil"), "Windows/evil");
+        // Drive-relative (`C:evil`) also replaces the base path on Windows.
+        assert_eq!(sanitize_path_component("C:evil"), "");
+        assert_eq!(sanitize_path_component("z:"), "");
+        // Only a single-letter drive letter counts; ordinary values keep colons.
+        assert_eq!(sanitize_path_component("ab:cd"), "ab:cd");
+        assert_eq!(sanitize_path_component("9:30"), "9:30");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_sanitize_path_component_join_stays_inside_output_dir() {
+        use std::path::{Component, Path};
+
+        let output = Path::new(r"C:\build");
+        for payload in [
+            r"..\..\..\Users\victim\pwned",
+            r"C:\Windows\System32\evil",
+            r"C:evil",
+            r"\\server\share\evil",
+        ] {
+            let sanitized = sanitize_path_component(payload);
+            assert!(
+                !Path::new(&sanitized).components().any(|component| matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )),
+                "{payload} kept an escaping component: {sanitized}"
+            );
+            let joined = output.join(&sanitized);
+            assert!(
+                joined.starts_with(output),
+                "{payload} escaped --output: {joined:?}"
+            );
+        }
+    }
+
     // normalize_tag_value with path traversal
 
     #[test]
@@ -596,5 +1097,15 @@ mod tests {
         assert_eq!(normalize_tag_value("/etc/passwd"), "etc/passwd");
         assert_eq!(normalize_tag_value("../../secret"), "secret");
         assert_eq!(normalize_tag_value("/pol/_phenomena"), "pol/_phenomena");
+    }
+
+    #[test]
+    fn test_normalize_tag_value_sanitizes_windows_paths() {
+        // The frontmatter payload from the tag-page build path.
+        assert_eq!(
+            normalize_tag_value(r"..\..\..\Users\victim\pwned"),
+            "users/victim/pwned"
+        );
+        assert_eq!(normalize_tag_value(r"C:\Windows\Temp"), "windows/temp");
     }
 }

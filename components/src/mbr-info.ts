@@ -21,6 +21,7 @@ import {
 } from './graph/relationship-graph.js';
 import { fetchPageLinks } from './graph/links-cache.js';
 import { getMbrAssetBase } from './dynamic-loader.js';
+import { safeHref } from './safe-href.js';
 
 interface Heading {
   level: number;
@@ -132,17 +133,22 @@ export class MbrInfoElement extends LitElement {
   @state()
   private _relationTypes: RelationTypeConfig[] = [];
 
-  /** Canonical url_path → title/description, from site.json frontmatter. */
+  /**
+   * Canonical url_path → title/description, from site.json frontmatter.
+   * Reactive: site.json can resolve AFTER the panel opened, and the graph
+   * section must re-render with the rebuilt lookups when it does.
+   */
+  @state()
   private _noteMeta = new Map<string, NoteMeta>();
 
   private _unsubscribeSiteNav?: () => void;
 
   /** Injected into <mbr-mini-graph>: whether a path is a known note. */
-  private _isKnownNote = (path: string): boolean =>
+  private _isKnownNote: (path: string) => boolean = (path) =>
     this._noteMeta.has(canonicalizeNotePath(path));
 
   /** Injected into <mbr-mini-graph>: hover-card metadata for a note. */
-  private _getMeta = (path: string): NoteMeta | undefined =>
+  private _getMeta: (path: string) => NoteMeta | undefined = (path) =>
     this._noteMeta.get(canonicalizeNotePath(path));
 
   // Keys to skip (internal/technical fields)
@@ -184,6 +190,13 @@ export class MbrInfoElement extends LitElement {
           });
         }
         this._noteMeta = map;
+        // Rebuild the injected lookups as NEW closures. `<mbr-mini-graph>`
+        // restarts its BFS only when the `isKnownNote` property identity
+        // changes; without this a site.json that resolves after the panel
+        // opened would leave the graph permanently empty (every neighbor is
+        // rejected as "unknown") until the panel is closed and reopened.
+        this._isKnownNote = (path) => map.has(canonicalizeNotePath(path));
+        this._getMeta = (path) => map.get(canonicalizeNotePath(path));
       }
     });
   }
@@ -640,7 +653,7 @@ export class MbrInfoElement extends LitElement {
               <ul class="links-list">
                 ${internalLinks.map(link => html`
                   <li class="link-item">
-                    <a href="${link.to}${link.anchor || ''}" class="link-url" @click=${() => this._close()}>
+                    <a href="${safeHref(`${link.to}${link.anchor || ''}`)}" class="link-url" @click=${() => this._close()}>
                       ${link.text || link.to}
                     </a>
                     ${link.anchor ? html`<span class="link-anchor">${link.anchor}</span>` : nothing}
@@ -655,7 +668,7 @@ export class MbrInfoElement extends LitElement {
               <ul class="links-list">
                 ${externalLinks.map(link => html`
                   <li class="link-item">
-                    <a href="${link.to}" class="link-url external" target="_blank" rel="noopener">
+                    <a href="${safeHref(link.to)}" class="link-url external" target="_blank" rel="noopener">
                       ${link.text || link.to}
                       <span class="external-icon" aria-label="Opens in new tab">↗</span>
                     </a>
