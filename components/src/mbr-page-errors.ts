@@ -1,5 +1,16 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import {
+  MEDIA_ERROR_EVENT,
+  describeMediaError,
+  mergeRuntimeMediaErrors,
+  normalizeMediaSrc,
+  publishPageErrors,
+  type MediaErrorEventDetail,
+  type MediaKind,
+  type RuntimeMediaError,
+  type UnplayableMediaError,
+} from './media-errors.js';
 
 /**
  * The tagged variants emitted by `src/page_errors.rs`. Extending this union
@@ -15,7 +26,7 @@ interface BrokenInternalLinkError {
 interface BrokenMediaReferenceError {
   type: 'broken_media_reference';
   src: string;
-  kind: 'image' | 'video' | 'audio' | 'source';
+  kind: MediaKind;
 }
 
 interface UnresolvedWikilinkError {
@@ -69,17 +80,26 @@ type AmbiguousNameError =
   | AmbiguousRelationshipEndpointError
   | AmbiguousWikilinkError;
 
-type PageErrorEntry =
+/** Variants that can appear in `errors.json`. */
+type ServerPageError =
   | BrokenInternalLinkError
   | BrokenMediaReferenceError
   | UnresolvedWikilinkError
   | FrontmatterParseError
+  | UnplayableMediaError
   | RelationshipCycleError
   | AmbiguousNameError;
 
+/**
+ * Everything the drawer can display. `runtime_media_error` never comes from the
+ * server — only the browser can know that a decode actually failed, so media
+ * elements report those over the `mbr-media-error` event.
+ */
+export type PageErrorEntry = ServerPageError | RuntimeMediaError;
+
 interface PageErrorsResponse {
   page_url: string;
-  errors: PageErrorEntry[];
+  errors: ServerPageError[];
 }
 
 /**
@@ -100,6 +120,12 @@ const ERROR_LABELS: ReadonlyArray<
     'frontmatter_parse_error',
     'frontmatter parse error',
     'frontmatter parse errors',
+  ],
+  ['unplayable_media', 'unplayable media file', 'unplayable media files'],
+  [
+    'runtime_media_error',
+    'media file that failed to play here',
+    'media files that failed to play here',
   ],
   ['relationship_cycle', 'relationship cycle', 'relationship cycles'],
   [
@@ -145,8 +171,10 @@ declare global {
 
 /**
  * Per-page error indicator. Appears only in server / GUI mode, and only when
- * the current page has at least one detected problem (broken link, broken
- * media, unresolved wikilink).
+ * the current page has at least one detected problem: server-side ones from
+ * `errors.json` (broken link, broken media, unresolved wikilink, unplayable
+ * media) plus failures this browser hit while playing media, which only the
+ * client can observe (see `mbr-media-error` in `media-errors.ts`).
  *
  * Static-site guarantee: the template wraps this element in
  * `{% if server_mode %}`, the endpoint is only registered in `src/server.rs`,
@@ -160,10 +188,14 @@ export class MbrPageErrorsElement extends LitElement {
   private _isOpen = false;
 
   @state()
-  private _errors: PageErrorEntry[] = [];
+  private _errors: ServerPageError[] = [];
 
+  /**
+   * Failures observed in this browser (reported by media elements). Kept apart
+   * from the server list so a reload can't duplicate them.
+   */
   @state()
-  private _loaded = false;
+  private _runtimeErrors: RuntimeMediaError[] = [];
 
   override connectedCallback() {
     super.connectedCallback();
@@ -176,12 +208,14 @@ export class MbrPageErrorsElement extends LitElement {
     }
 
     document.addEventListener('keydown', this._handleKeydown);
+    document.addEventListener(MEDIA_ERROR_EVENT, this._handleMediaError);
     void this._loadErrors();
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this._handleKeydown);
+    document.removeEventListener(MEDIA_ERROR_EVENT, this._handleMediaError);
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
@@ -190,6 +224,44 @@ export class MbrPageErrorsElement extends LitElement {
       this._close();
     }
   };
+
+  /**
+   * A media element failed to play. Fold it in; `_allErrors` dedupes by src,
+   * defers to the server's richer `unplayable_media` entry when there is one,
+   * and is what makes that entry visible in the first place.
+   */
+  private _handleMediaError = (e: CustomEvent<MediaErrorEventDetail>) => {
+    const detail = e.detail;
+    if (!detail?.src) return;
+
+    // Dedupe on arrival: a media element can fire `error` repeatedly (retries,
+    // source switches), and an unbounded list would re-render on every one.
+    const key = normalizeMediaSrc(detail.src);
+    if (this._runtimeErrors.some((r) => normalizeMediaSrc(r.src) === key)) return;
+
+    this._runtimeErrors = [
+      ...this._runtimeErrors,
+      {
+        type: 'runtime_media_error',
+        src: detail.src,
+        kind: detail.kind ?? 'video',
+        code: detail.code ?? 0,
+        message: detail.message ?? '',
+      },
+    ];
+  };
+
+  /**
+   * Server-reported problems plus any client-observed media failures.
+   *
+   * Always goes through {@link mergeRuntimeMediaErrors}, even with no runtime
+   * errors: that function is also what withholds advisory `unplayable_media`
+   * hints, so short-circuiting here would leak a heuristic warning onto videos
+   * that play perfectly well.
+   */
+  private get _allErrors(): PageErrorEntry[] {
+    return mergeRuntimeMediaErrors(this._errors, this._runtimeErrors);
+  }
 
   private async _loadErrors() {
     try {
@@ -209,7 +281,8 @@ export class MbrPageErrorsElement extends LitElement {
 
       const data = (await response.json()) as PageErrorsResponse;
       this._errors = Array.isArray(data.errors) ? data.errors : [];
-      this._loaded = true;
+      // Let media elements pick up the server's diagnosis of their own src.
+      publishPageErrors(this._errors);
     } catch (err) {
       // Graceful degradation: swallow network / parse errors. The indicator
       // is informational; failing to load should not break the page.
@@ -231,7 +304,7 @@ export class MbrPageErrorsElement extends LitElement {
   }
 
   private _renderLinkGroup(): TemplateResult | typeof nothing {
-    const items = this._errors.filter(
+    const items = this._allErrors.filter(
       (e): e is BrokenInternalLinkError => e.type === 'broken_internal_link'
     );
     if (items.length === 0) return nothing;
@@ -254,7 +327,7 @@ export class MbrPageErrorsElement extends LitElement {
   }
 
   private _renderMediaGroup(): TemplateResult | typeof nothing {
-    const items = this._errors.filter(
+    const items = this._allErrors.filter(
       (e): e is BrokenMediaReferenceError => e.type === 'broken_media_reference'
     );
     if (items.length === 0) return nothing;
@@ -277,7 +350,7 @@ export class MbrPageErrorsElement extends LitElement {
   }
 
   private _renderWikilinkGroup(): TemplateResult | typeof nothing {
-    const items = this._errors.filter(
+    const items = this._allErrors.filter(
       (e): e is UnresolvedWikilinkError => e.type === 'unresolved_wikilink'
     );
     if (items.length === 0) return nothing;
@@ -295,7 +368,7 @@ export class MbrPageErrorsElement extends LitElement {
   }
 
   private _renderFrontmatterGroup(): TemplateResult | typeof nothing {
-    const items = this._errors.filter(
+    const items = this._allErrors.filter(
       (e): e is FrontmatterParseError => e.type === 'frontmatter_parse_error'
     );
     if (items.length === 0) return nothing;
@@ -392,8 +465,73 @@ export class MbrPageErrorsElement extends LitElement {
     );
   }
 
+  /**
+   * Server-diagnosed unplayable media: the file is served fine, but is known to
+   * break this class of browser. Shows the reason and a copyable fix.
+   */
+  private _renderUnplayableMediaGroup(): TemplateResult | typeof nothing {
+    const items = this._allErrors.filter(
+      (e): e is UnplayableMediaError => e.type === 'unplayable_media'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Unplayable media (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`
+              <li>
+                <span class="kind">[${e.kind}]</span>
+                <code class="target">${e.src}</code>
+                <div class="reason">${e.reason}</div>
+                ${e.remedy
+                  ? html`<div class="remedy">
+                      Fix with <code class="target">${e.remedy}</code>
+                    </div>`
+                  : nothing}
+              </li>
+            `
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
+  /**
+   * Failures this browser actually hit during playback, reported by the media
+   * elements themselves. The server cannot detect these.
+   */
+  private _renderRuntimeMediaGroup(): TemplateResult | typeof nothing {
+    const items = this._allErrors.filter(
+      (e): e is RuntimeMediaError => e.type === 'runtime_media_error'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Failed to play in this browser (${items.length})</h3>
+        <ul>
+          ${items.map((e) => {
+            const notice = describeMediaError(e.code, e.message, e.kind);
+            return html`
+              <li>
+                <span class="kind">[${e.kind}]</span>
+                <code class="target">${e.src}</code>
+                <div class="reason">${notice.headline}</div>
+                ${notice.detail
+                  ? html`<div class="reason">${notice.detail}</div>`
+                  : nothing}
+              </li>
+            `;
+          })}
+        </ul>
+      </section>
+    `;
+  }
+
   private _renderTrigger(): TemplateResult {
-    const count = this._errors.length;
+    const count = this._allErrors.length;
     const label = `This page has ${count} problem${count === 1 ? '' : 's'}`;
 
     return html`
@@ -423,11 +561,16 @@ export class MbrPageErrorsElement extends LitElement {
           </button>
           <h2>
             Page Problems
-            <span class="total-count">(${this._errors.length})</span>
+            <span class="total-count">(${this._allErrors.length})</span>
           </h2>
-          <p class="summary">${summarizePageErrors(this._errors)}</p>
+          <!-- Counts the gated list, not the raw server list: advisory
+               unplayable-media hints stay hidden until playback actually fails,
+               so summarizing _errors would name a problem the panel never shows. -->
+          <p class="summary">${summarizePageErrors(this._allErrors)}</p>
           ${this._renderLinkGroup()}
           ${this._renderMediaGroup()}
+          ${this._renderUnplayableMediaGroup()}
+          ${this._renderRuntimeMediaGroup()}
           ${this._renderWikilinkGroup()}
           ${this._renderFrontmatterGroup()}
           ${this._renderRelationshipCycleGroup()}
@@ -439,8 +582,9 @@ export class MbrPageErrorsElement extends LitElement {
   }
 
   override render() {
-    // Hidden unless we have loaded and found at least one problem.
-    if (!this._loaded || this._errors.length === 0) {
+    // Hidden until at least one problem is known — from errors.json or from a
+    // media element that failed here.
+    if (this._allErrors.length === 0) {
       return nothing;
     }
     return html`
@@ -639,6 +783,23 @@ export class MbrPageErrorsElement extends LitElement {
       align-items: center;
       gap: 0.25rem;
       font-size: 0.85em;
+    }
+
+    .reason {
+      margin-top: 0.25rem;
+      color: var(--pico-muted-color, #666);
+      font-size: 0.9em;
+      line-height: 1.4;
+    }
+
+    .remedy {
+      margin-top: 0.25rem;
+      font-size: 0.9em;
+      line-height: 1.4;
+    }
+
+    .remedy code {
+      user-select: all;
     }
 
     @media (min-width: 768px) {

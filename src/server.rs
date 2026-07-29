@@ -45,6 +45,12 @@ const DEFAULT_HLS_CACHE_SIZE: usize = 200 * 1024 * 1024;
 #[cfg(feature = "media-metadata")]
 const METADATA_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Maximum playback-compatibility probes run concurrently for one page. Each
+/// probe occupies a blocking thread while ffmpeg parses container headers, so
+/// a gallery page with dozens of clips must not saturate the blocking pool.
+#[cfg(feature = "media-metadata")]
+const MEDIA_COMPAT_PROBE_CONCURRENCY: usize = 4;
+
 /// Outcome of trying to claim an in-flight single-flight slot for a cache key.
 enum InflightClaim {
     /// This caller won the slot and must produce the result, then release it.
@@ -435,6 +441,79 @@ const INBOUND_GREP_MAX_CONCURRENCY: usize = 2;
 /// Maximum time a request waits for an in-progress inbound-link grep before
 /// giving up (degrades a lost wakeup into a retryable `None`).
 const INBOUND_GREP_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `content-type` prefixes whose payloads must never be gzipped.
+///
+/// Two independent reasons, either of which is disqualifying:
+///
+/// 1. **Correctness.** tower-http drops `content-length` and `accept-ranges`
+///    and switches to `transfer-encoding: chunked` on any response it
+///    compresses. For `video/*` and `audio/*` that destroys seeking and
+///    duration detection in every client that negotiates gzip — verified
+///    against WebKit, which is the engine behind mbr's own GUI window. (Range
+///    requests are unaffected because tower-http skips compression when
+///    `content-range` is present, so the bug only bites the initial plain
+///    `GET`.)
+/// 2. **Waste.** These formats are already entropy-coded, so gzip burns CPU on
+///    every byte of a potentially multi-gigabyte file to save nothing.
+///
+/// Matched as a prefix against the response's `content-type`, mirroring
+/// tower-http's own [`NotForContentType`] semantics.
+///
+/// [`NotForContentType`]: tower_http::compression::predicate::NotForContentType
+const INCOMPRESSIBLE_CONTENT_TYPE_PREFIXES: &[&str] = &[
+    "video/",
+    "audio/",
+    "application/pdf",
+    "application/zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/octet-stream",
+];
+
+/// Returns `true` when the response's `content-type` names an already-compressed
+/// or range-critical payload that must bypass the compression layer.
+///
+/// Absent or non-ASCII `content-type` headers compare against the empty string
+/// and therefore match nothing, preserving tower-http's compress-by-default
+/// behaviour for everything not explicitly listed.
+fn is_incompressible_content_type(headers: &HeaderMap) -> bool {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+
+    INCOMPRESSIBLE_CONTENT_TYPE_PREFIXES
+        .iter()
+        .any(|prefix| content_type.starts_with(prefix))
+}
+
+/// tower-http compression predicate: compress unless the payload is one of the
+/// [`INCOMPRESSIBLE_CONTENT_TYPE_PREFIXES`].
+///
+/// Written as a free function rather than a closure so it coerces cleanly into
+/// tower-http's blanket `Predicate` impl for
+/// `Fn(StatusCode, Version, &HeaderMap, &Extensions) -> bool`.
+fn compress_by_content_type(
+    _status: StatusCode,
+    _version: axum::http::Version,
+    headers: &HeaderMap,
+    _extensions: &axum::http::Extensions,
+) -> bool {
+    !is_incompressible_content_type(headers)
+}
+
+/// Builds the compression predicate for the router.
+///
+/// Keeps every [`DefaultPredicate`] exclusion (gRPC, images, SSE, tiny bodies)
+/// and adds [`INCOMPRESSIBLE_CONTENT_TYPE_PREFIXES`] on top.
+///
+/// [`DefaultPredicate`]: tower_http::compression::predicate::DefaultPredicate
+fn compression_predicate() -> impl tower_http::compression::Predicate {
+    use tower_http::compression::predicate::{DefaultPredicate, Predicate};
+
+    DefaultPredicate::new().and(compress_by_content_type)
+}
 
 /// Type of media for the viewer page.
 ///
@@ -1101,6 +1180,12 @@ pub struct ServerState {
     #[cfg(feature = "media-metadata")]
     pub video_resolution_cache:
         Arc<papaya::HashMap<String, crate::video_transcode::VideoResolution>>,
+    /// Cache of playback-compatibility probes keyed by path+mtime. Both
+    /// outcomes are cached, so a page reload never re-opens an unchanged file,
+    /// and an edited file is transparently re-probed.
+    #[cfg(feature = "media-metadata")]
+    pub media_compat_cache:
+        Arc<papaya::HashMap<String, crate::video_metadata::PlaybackCompatibility>>,
     /// Per-directory memoized sibling navigation lists (prev/next). Avoids an
     /// O(repo) scan on every markdown render; invalidated when files change.
     ///
@@ -1548,6 +1633,10 @@ impl Server {
         let video_resolution_cache: Arc<
             papaya::HashMap<String, crate::video_transcode::VideoResolution>,
         > = Arc::new(papaya::HashMap::new());
+        #[cfg(feature = "media-metadata")]
+        let media_compat_cache: Arc<
+            papaya::HashMap<String, crate::video_metadata::PlaybackCompatibility>,
+        > = Arc::new(papaya::HashMap::new());
 
         // Listing caches (per-directory files, per-directory subdirectories and
         // the serialized site.json body). Created before the file-change
@@ -1994,6 +2083,8 @@ impl Server {
             metadata_inflight,
             #[cfg(feature = "media-metadata")]
             video_resolution_cache,
+            #[cfg(feature = "media-metadata")]
+            media_compat_cache,
             sibling_nav_cache: listing_caches.sibling_nav_cache,
             subdir_cache: listing_caches.subdir_cache,
             site_json_cache: listing_caches.site_json_cache,
@@ -2056,7 +2147,7 @@ impl Server {
             .route("/.mbr/images/", get(Self::serve_media_viewer))
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
-            .layer(CompressionLayer::new())
+            .layer(CompressionLayer::new().compress_when(compression_predicate()))
             .layer(TraceLayer::new_for_http())
             .with_state(state);
 
@@ -4846,6 +4937,16 @@ impl Server {
                 &page_url_path,
             ));
             errors.extend(detect_unresolved_wikilinks(&html_for_scan));
+            #[cfg(feature = "media-metadata")]
+            errors.extend(
+                Self::detect_unplayable_media(
+                    &html_for_scan,
+                    &resolver_config,
+                    &page_url_path,
+                    config,
+                )
+                .await,
+            );
         }
         errors.extend(ambiguous_wikilink_errors(&ambiguous_wikilinks));
 
@@ -4881,6 +4982,113 @@ impl Server {
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .body(Body::from(json)),
         ))
+    }
+
+    /// Probes a media file for tracks that break browser playback, memoized by
+    /// path+mtime.
+    ///
+    /// `probe_playback_compatibility` opens the container (blocking work), so a
+    /// cache miss runs on a blocking thread. Both outcomes are cached, so a
+    /// page with fine videos costs one probe per file for the lifetime of the
+    /// server rather than one per `errors.json` request.
+    #[cfg(feature = "media-metadata")]
+    async fn probe_playback_compat_cached(
+        media_file: &std::path::Path,
+        config: &ServerState,
+    ) -> Option<crate::video_metadata::PlaybackCompatibility> {
+        use crate::video_metadata::probe_playback_compatibility;
+        use crate::video_metadata_cache::cache_key_with_mtime;
+
+        let key = cache_key_with_mtime(media_file, "playback-compat");
+        if let Some(compat) = config.media_compat_cache.pin().get(&key).cloned() {
+            return Some(compat);
+        }
+
+        let path = media_file.to_path_buf();
+        let probed = tokio::task::spawn_blocking(move || probe_playback_compatibility(&path))
+            .await
+            .inspect_err(|e| tracing::warn!("playback-compat probe task failed: {e}"))
+            .ok()?
+            .inspect_err(|e| tracing::debug!("playback-compat probe of {media_file:?}: {e}"))
+            .ok()?;
+
+        config.media_compat_cache.pin().insert(key, probed.clone());
+        Some(probed)
+    }
+
+    /// Detects videos on the page that resolve and serve correctly but that
+    /// the browser cannot decode.
+    ///
+    /// Deliberately lives here rather than in `vid.rs` / `markdown.rs`: this
+    /// opens every referenced video with ffmpeg, which must never sit on the
+    /// markdown render path. `errors.json` is fetched lazily in the background
+    /// by `<mbr-page-errors>`, so the cost is off the critical path, bounded by
+    /// [`MEDIA_COMPAT_PROBE_CONCURRENCY`], and paid at most once per
+    /// file+mtime.
+    #[cfg(feature = "media-metadata")]
+    async fn detect_unplayable_media(
+        html: &str,
+        resolver_config: &PathResolverConfig<'_>,
+        page_url: &str,
+        config: &ServerState,
+    ) -> Vec<crate::page_errors::PageError> {
+        use crate::page_errors::{MediaKind, PageError, collect_media_references};
+        use crate::video_metadata::{PlaybackCompatibility, has_video_extension};
+        use futures::stream::StreamExt;
+        use itertools::Itertools;
+
+        // `collect_media_references` already dedupes by src; filtering to video
+        // extensions keeps images and PDFs out of the ffmpeg path entirely.
+        let references: Vec<_> = collect_media_references(html, resolver_config, page_url)
+            .into_iter()
+            .filter(|reference| has_video_extension(&reference.path.to_string_lossy()))
+            .collect();
+
+        if references.is_empty() {
+            return Vec::new();
+        }
+
+        // One probe per distinct file. A page can reference the same clip under
+        // several spellings (the reported repro embeds it both percent-encoded
+        // and angle-bracketed), and each spelling needs its own error so the
+        // frontend can match every element — but the bytes are read once.
+        //
+        // `buffered` (not `buffer_unordered`) bounds concurrency without making
+        // the result order depend on probe timing.
+        let unique_paths: Vec<PathBuf> = references
+            .iter()
+            .map(|reference| reference.path.clone())
+            .unique()
+            .collect();
+
+        let probes: std::collections::HashMap<PathBuf, PlaybackCompatibility> =
+            futures::stream::iter(unique_paths)
+                .map(|path| async move {
+                    let compat = Self::probe_playback_compat_cached(&path, config).await?;
+                    Some((path, compat))
+                })
+                .buffered(MEDIA_COMPAT_PROBE_CONCURRENCY)
+                .filter_map(|probe| async move { probe })
+                .collect()
+                .await;
+
+        references
+            .into_iter()
+            .filter_map(|reference| {
+                let compat = probes.get(&reference.path)?;
+                let reason = compat.reason()?;
+                Some(PageError::UnplayableMedia {
+                    src: reference.src,
+                    // The diagnosis is about the file, not the element, so the
+                    // media type is reported rather than `source`.
+                    kind: MediaKind::Video,
+                    reason,
+                    remedy: compat.remedy(),
+                    // Heuristic hint, never a verdict — see the variant docs.
+                    advisory: true,
+                })
+            })
+            .collect()
     }
 
     /// Build a JPEG image response.
@@ -8503,6 +8711,83 @@ mod tests {
         .collect();
         let chosen = dedupe_name(dir, "pic", "png", |p| taken.contains(p));
         assert_eq!(chosen, dir.join("pic-3.png"));
+    }
+
+    // --- Compression predicate --------------------------------------------
+
+    fn headers_with_content_type(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    /// Builds a response big enough to clear tower-http's 32-byte `SizeAbove`
+    /// floor, so the content-type rule is what decides the outcome.
+    fn response_with_content_type(value: &str) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, value)
+            .header(header::CONTENT_LENGTH, 1_000_000)
+            .body(Body::from(vec![0u8; 64]))
+            .unwrap()
+    }
+
+    #[test]
+    fn video_and_audio_content_types_are_incompressible() {
+        // Regression: gzipping video makes tower-http drop `content-length`
+        // and `accept-ranges`, which breaks seeking and duration in WebKit.
+        for content_type in [
+            "video/mp4",
+            "video/quicktime",
+            "video/mp4; charset=binary",
+            "audio/mpeg",
+            "application/pdf",
+            "application/zip",
+            "application/gzip",
+            "application/x-gzip",
+            "application/octet-stream",
+        ] {
+            assert!(
+                is_incompressible_content_type(&headers_with_content_type(content_type)),
+                "{content_type} must bypass compression"
+            );
+        }
+    }
+
+    #[test]
+    fn text_content_types_stay_compressible() {
+        for content_type in [
+            "text/html; charset=utf-8",
+            "text/css",
+            "application/json",
+            "application/javascript",
+            "image/svg+xml",
+        ] {
+            assert!(
+                !is_incompressible_content_type(&headers_with_content_type(content_type)),
+                "{content_type} should still be compressed"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_content_type_stays_compressible() {
+        assert!(!is_incompressible_content_type(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn compression_predicate_skips_media_and_keeps_defaults() {
+        use tower_http::compression::predicate::Predicate;
+
+        let predicate = compression_predicate();
+
+        assert!(!predicate.should_compress(&response_with_content_type("video/mp4")));
+        assert!(!predicate.should_compress(&response_with_content_type("audio/mpeg")));
+        // DefaultPredicate exclusions must survive the composition.
+        assert!(!predicate.should_compress(&response_with_content_type("image/png")));
+        assert!(!predicate.should_compress(&response_with_content_type("text/event-stream")));
+        // ...and normal text still compresses.
+        assert!(predicate.should_compress(&response_with_content_type("text/html")));
     }
 }
 

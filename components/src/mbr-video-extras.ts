@@ -1,5 +1,16 @@
 import { LitElement, html, svg, css, nothing, type CSSResultGroup } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import {
+  PAGE_ERRORS_LOADED_EVENT,
+  buildMediaErrorNotice,
+  findUnplayableMedia,
+  mediaErrorStyles,
+  normalizeMediaSrc,
+  renderMediaErrorNotice,
+  reportMediaError,
+  type PageErrorsLoadedEventDetail,
+  type UnplayableMediaError,
+} from './media-errors.js';
 
 /**
  * Parsed cue from VTT file (used for both chapters and captions).
@@ -111,18 +122,10 @@ function parseVtt(vttContent: string): VttCue[] {
  * Decodes the pathname to canonicalize URLs with different encoding styles.
  */
 function getProgressKey(src: string): string {
-  try {
-    const url = new URL(src, window.location.href);
-    // Decode to canonicalize: both "Rubik%27s" and "Rubik's" become "Rubik's"
-    return `mbr-video-progress:${decodeURIComponent(url.pathname)}`;
-  } catch {
-    // Fallback for malformed URLs - also try to decode
-    try {
-      return `mbr-video-progress:${decodeURIComponent(src.split(/[?#]/)[0])}`;
-    } catch {
-      return `mbr-video-progress:${src.split(/[?#]/)[0]}`;
-    }
-  }
+  // normalizeMediaSrc is the single canonicalization used across components
+  // (progress keys, page-error matching): both "Rubik%27s" and "Rubik's"
+  // resolve to the same key.
+  return `mbr-video-progress:${normalizeMediaSrc(src)}`;
 }
 
 /**
@@ -164,7 +167,9 @@ function loadProgress(key: string): number | null {
  */
 @customElement('mbr-video-extras')
 export class MbrVideoExtrasElement extends LitElement {
-  static override styles: CSSResultGroup = css`
+  static override styles: CSSResultGroup = [
+    mediaErrorStyles,
+    css`
     :host {
       display: block;
       font-size: 0.85em;
@@ -398,13 +403,22 @@ export class MbrVideoExtrasElement extends LitElement {
       width: 1.2em;
       height: 1.2em;
     }
-  `;
+  `,
+  ];
 
   /**
    * The video source URL.
    */
   @property({ type: String })
   src = '';
+
+  /**
+   * Set by a host component that renders its own media-error notice for the
+   * same `<video>` (currently `<mbr-media-viewer>`). Suppresses both the inline
+   * notice and the `mbr-media-error` dispatch so a failure is reported once.
+   */
+  @property({ type: Boolean, attribute: 'suppress-error' })
+  suppressError = false;
 
   /**
    * Start time for video playback.
@@ -466,6 +480,25 @@ export class MbrVideoExtrasElement extends LitElement {
   @state()
   private _chapters: VttCue[] = [];
 
+  /**
+   * `MediaError.code` from the last playback failure (null if none yet).
+   */
+  @state()
+  private _mediaErrorCode: number | null = null;
+
+  /**
+   * The browser's own message for that failure, if it supplied one.
+   */
+  @state()
+  private _mediaErrorMessage = '';
+
+  /**
+   * Server-side diagnosis for this exact file, if `errors.json` had one.
+   * Turns a generic "could not decode" into a concrete reason plus remedy.
+   */
+  @state()
+  private _serverDiagnosis: UnplayableMediaError | null = null;
+
   @state()
   private _videoElement: HTMLVideoElement | null = null;
   private _chaptersTrack: TextTrack | null = null;
@@ -474,17 +507,23 @@ export class MbrVideoExtrasElement extends LitElement {
   private _boundPlay = this._onPlay.bind(this);
   private _boundPause = this._onPause.bind(this);
   private _boundEscapeHandler = this._onEscapeKey.bind(this);
+  private _boundMediaError = this._onMediaError.bind(this);
+  private _boundPageErrorsLoaded = this._onPageErrorsLoaded.bind(this);
   private _lastSaveTime = 0;
   private _hasPlayed = false;
 
   override connectedCallback() {
     super.connectedCallback();
+    // Listen before setup: the drawer may publish errors.json at any point, and
+    // it can land before or after the video itself fails.
+    document.addEventListener(PAGE_ERRORS_LOADED_EVENT, this._boundPageErrorsLoaded);
     // Defer setup to ensure DOM is ready
     requestAnimationFrame(() => this._setupVideoListener());
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
+    document.removeEventListener(PAGE_ERRORS_LOADED_EVENT, this._boundPageErrorsLoaded);
     this._cleanup();
   }
 
@@ -496,6 +535,7 @@ export class MbrVideoExtrasElement extends LitElement {
       this._videoElement.removeEventListener('timeupdate', this._boundTimeUpdate);
       this._videoElement.removeEventListener('play', this._boundPlay);
       this._videoElement.removeEventListener('pause', this._boundPause);
+      this._videoElement.removeEventListener('error', this._boundMediaError);
     }
     if (this._chaptersTrack) {
       this._chaptersTrack.removeEventListener('cuechange', this._boundCueChange);
@@ -523,6 +563,18 @@ export class MbrVideoExtrasElement extends LitElement {
     // Add play and pause listeners for progress tracking
     video.addEventListener('play', this._boundPlay);
     video.addEventListener('pause', this._boundPause);
+
+    // Surface playback failures instead of letting them fail silently.
+    if (!this.suppressError) {
+      video.addEventListener('error', this._boundMediaError);
+      // Pick up a diagnosis that arrived before this element connected, and an
+      // error that fired before this listener was attached (setup is deferred a
+      // frame, and `preload="metadata"` can fail in that window).
+      this._serverDiagnosis = this._serverDiagnosis ?? findUnplayableMedia(this.src);
+      if (video.error) {
+        this._onMediaError();
+      }
+    }
 
     // Restore saved position if within bounds
     this._restoreSavedPosition();
@@ -687,6 +739,30 @@ export class MbrVideoExtrasElement extends LitElement {
     this._hasPlayed = true;
     const key = getProgressKey(this.src);
     saveProgress(key, this._videoElement.currentTime);
+  }
+
+  /**
+   * Handle a `<video>` error: show it in the caption and tell the rest of the
+   * page. Without this the element goes blank with no feedback anywhere.
+   */
+  private _onMediaError() {
+    const error = this._videoElement?.error ?? null;
+    this._mediaErrorCode = error?.code ?? 0;
+    this._mediaErrorMessage = error?.message ?? '';
+    // The server may have already explained *why* this file is unplayable.
+    this._serverDiagnosis = this._serverDiagnosis ?? findUnplayableMedia(this.src);
+    reportMediaError(this.src, 'video', error);
+  }
+
+  /**
+   * `errors.json` finished loading: adopt the server's diagnosis for this file
+   * if there is one. Safe whether it arrives before or after the failure.
+   */
+  private _onPageErrorsLoaded(event: CustomEvent<PageErrorsLoadedEventDetail>) {
+    const match = findUnplayableMedia(this.src, event.detail?.errors ?? []);
+    if (match) {
+      this._serverDiagnosis = match;
+    }
   }
 
   /**
@@ -938,13 +1014,25 @@ export class MbrVideoExtrasElement extends LitElement {
     const hasChapters = this._chapters.length > 0;
     const hasCurrentChapter = this._currentChapter.length > 0;
     const hasCaptions = this._captionsLoaded && this._captions.length > 0;
+    const hasMediaError = this._mediaErrorCode !== null;
 
     // If nothing to show, render nothing (always show if video exists for theater button)
-    if (!hasTimeRange && !hasCurrentChapter && !hasCaptions && !this._videoElement) {
+    if (!hasTimeRange && !hasCurrentChapter && !hasCaptions && !this._videoElement && !hasMediaError) {
       return nothing;
     }
 
     return html`
+      ${hasMediaError
+        ? renderMediaErrorNotice(
+          buildMediaErrorNotice({
+            code: this._mediaErrorCode,
+            message: this._mediaErrorMessage,
+            kind: 'video',
+            diagnosis: this._serverDiagnosis,
+          })
+        )
+        : nothing
+      }
       <div class="info-line">
         ${hasTimeRange
         ? html`

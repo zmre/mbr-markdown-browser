@@ -37,11 +37,215 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 ];
 
 /// Check if a path has a video file extension.
-fn has_video_extension(path: &str) -> bool {
+pub fn has_video_extension(path: &str) -> bool {
     let path_lower = path.to_lowercase();
     VIDEO_EXTENSIONS
         .iter()
         .any(|ext| path_lower.ends_with(&format!(".{}", ext)))
+}
+
+/// FourCC codec tags on data (`bin_data`) tracks implicated in Safari/WebKit
+/// decode failures — but only *in combination with* a subtitle track carrying
+/// one of [`WEBKIT_RISKY_SUBTITLE_TAGS`].
+///
+/// Bisected empirically against real Safari (the same WebKit engine that backs
+/// mbr's wry/WKWebView GUI window), serving bytes straight from mbr. A 4K
+/// H.264 + AAC MP4 failed with `MediaError.code === 3` ("media failed to
+/// decode") *after* `loadedmetadata` had already reported the correct
+/// duration. A controlled 2x2 over 60s stream-copy cuts of that file, holding
+/// everything else constant, isolated the trigger:
+///
+/// | `gpmd`  | `tx3g`  | result |
+/// |---------|---------|--------|
+/// | absent  | absent  | plays  |
+/// | absent  | present | plays  |
+/// | present | absent  | plays  |
+/// | present | present | fails  |
+///
+/// Neither track type does harm on its own; it is the interaction. Ruled out
+/// along the way: track count (files with 6-9 tracks play), 4K resolution,
+/// H.264 level 5.1, `text` data tracks, and PNG cover-art video tracks.
+///
+/// IMPORTANT — this combination is *necessary but not sufficient*. A minimal
+/// synthetic MP4 carrying both a `gpmd` and a `tx3g` track plays fine in the
+/// same Safari build (see `tests/videos/gpmd-and-tx3g.mp4`), so some further
+/// property of the real file is involved that cannot be read off the stream
+/// table. A positive result is therefore a *likely cause* used to explain a
+/// failure the browser has already reported — never proof that a file is
+/// broken. The browser's own `MediaError` is the only ground truth.
+const WEBKIT_RISKY_DATA_TAGS: &[&str] = &["gpmd"];
+
+/// Subtitle FourCC tags that participate in the interaction documented on
+/// [`WEBKIT_RISKY_DATA_TAGS`].
+const WEBKIT_RISKY_SUBTITLE_TAGS: &[&str] = &["tx3g"];
+
+/// The ffmpeg invocation that drops every data track while stream-copying
+/// video, audio and subtitles (no re-encode).
+///
+/// Verified end to end on the reproducing 1.2 GB file: the output plays in
+/// Safari and keeps its subtitles. Dropping the subtitle tracks instead also
+/// resolves the conflict, but costs the reader more.
+pub const REMUX_REMEDY: &str = "ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4";
+
+/// The container-level role of a track, reduced to what the heuristic reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    /// An ffmpeg `Data` stream (`bin_data`).
+    Data,
+    /// An ffmpeg `Subtitle` stream.
+    Subtitle,
+    /// Anything else — video, audio, attachment.
+    Other,
+}
+
+/// One container track, reduced to the two facts the heuristic reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackDescriptor {
+    pub kind: TrackKind,
+    /// Printable FourCC, or `None` for codecs ffmpeg leaves untagged.
+    pub codec_tag: Option<String>,
+}
+
+/// Outcome of a playback-compatibility probe.
+///
+/// A risk is only reported when *both* collections are non-empty, because the
+/// evidence implicates the combination rather than either track type alone —
+/// see [`WEBKIT_RISKY_DATA_TAGS`]. Even then the result is advisory: it names a
+/// plausible cause, and cannot establish that a file fails to play.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaybackCompatibility {
+    /// Distinct FourCC tags of risky data tracks, in stream order.
+    pub risky_data_tags: Vec<String>,
+    /// Distinct FourCC tags of risky subtitle tracks, in stream order.
+    pub risky_subtitle_tags: Vec<String>,
+}
+
+/// Renders a tag list as prose: `a 'gpmd' timed-metadata track`, or
+/// `'gpmd', 'fdsc' timed-metadata tracks`.
+fn describe_tags(tags: &[String], noun: &str) -> String {
+    match tags {
+        [tag] => format!("a '{tag}' {noun}"),
+        tags => format!("'{}' {noun}s", tags.join("', '")),
+    }
+}
+
+impl PlaybackCompatibility {
+    /// `true` when the file carries the full risky combination.
+    ///
+    /// Deliberately *not* named `is_unplayable`: this is a heuristic with a
+    /// known false positive, so it can only say "matches a suspicious shape".
+    #[must_use]
+    pub fn has_known_risk(&self) -> bool {
+        !self.risky_data_tags.is_empty() && !self.risky_subtitle_tags.is_empty()
+    }
+
+    /// Reader-facing explanation of the likely cause, or `None` when the file
+    /// does not match the risky combination.
+    #[must_use]
+    pub fn reason(&self) -> Option<String> {
+        self.has_known_risk().then(|| {
+            format!(
+                "This file carries both {} and {}. Safari/WebKit sometimes fails to decode \
+                 that combination, so it is the most likely cause. Files with this \
+                 combination do not always fail, and other browsers are usually unaffected.",
+                describe_tags(&self.risky_data_tags, "timed-metadata track"),
+                describe_tags(&self.risky_subtitle_tags, "subtitle track"),
+            )
+        })
+    }
+
+    /// Copy-pasteable fix, or `None` when the file does not match.
+    #[must_use]
+    pub fn remedy(&self) -> Option<String> {
+        self.has_known_risk().then(|| REMUX_REMEDY.to_string())
+    }
+}
+
+/// Evaluate the risky-combination heuristic over a container's track table.
+///
+/// Pure and side-effect free so every quadrant of the 2x2 documented on
+/// [`WEBKIT_RISKY_DATA_TAGS`] is testable without touching the filesystem or
+/// ffmpeg.
+#[must_use]
+pub fn assess_playback_compatibility(tracks: &[TrackDescriptor]) -> PlaybackCompatibility {
+    use itertools::Itertools;
+
+    let tags_of = |kind: TrackKind, allowed: &[&str]| -> Vec<String> {
+        tracks
+            .iter()
+            .filter(|track| track.kind == kind)
+            .filter_map(|track| track.codec_tag.clone())
+            .filter(|tag| allowed.contains(&tag.as_str()))
+            .unique()
+            .collect()
+    };
+
+    PlaybackCompatibility {
+        risky_data_tags: tags_of(TrackKind::Data, WEBKIT_RISKY_DATA_TAGS),
+        risky_subtitle_tags: tags_of(TrackKind::Subtitle, WEBKIT_RISKY_SUBTITLE_TAGS),
+    }
+}
+
+/// Decodes an ffmpeg `codec_tag` (a packed little-endian FourCC) into its
+/// printable four-character form.
+///
+/// Returns `None` for an unset tag (`0`) or any tag containing a
+/// non-printable byte, which is how ffmpeg represents "no FourCC" for codecs
+/// that are not container-tagged (e.g. the PNG cover-art stream in the
+/// reproducing file reports `0x00000000`).
+fn fourcc_to_string(tag: u32) -> Option<String> {
+    let bytes = tag.to_le_bytes();
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_graphic())
+        .then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Reads the container FourCC of a stream.
+///
+/// ffmpeg-next exposes no safe accessor for `AVCodecParameters::codec_tag`, so
+/// this is the one place we reach through to the C struct.
+fn stream_codec_tag(parameters: &ffmpeg::codec::Parameters) -> Option<String> {
+    // SAFETY: `as_ptr` hands back the non-null `AVCodecParameters` owned by the
+    // still-borrowed input context, and we only read one plain `u32` field from
+    // it. No aliasing, no mutation, no lifetime escape.
+    let tag = unsafe { (*parameters.as_ptr()).codec_tag };
+    fourcc_to_string(tag)
+}
+
+/// Probe a media file for tracks known to break browser playback.
+///
+/// Header-only: [`ffmpeg::format::input`] parses the container's stream table
+/// without decoding frames, so cost is bounded by header size rather than file
+/// length. Callers should still treat this as blocking work and cache the
+/// result — see `Server::probe_playback_compat_cached`.
+///
+/// This never runs during static builds and is deliberately kept off the
+/// markdown render path.
+pub fn probe_playback_compatibility(
+    video_path: &Path,
+) -> Result<PlaybackCompatibility, MetadataError> {
+    let input = ffmpeg::format::input(video_path).map_err(|e| MetadataError::OpenFailed {
+        path: video_path.to_path_buf(),
+        source: e,
+    })?;
+
+    let tracks: Vec<TrackDescriptor> = input
+        .streams()
+        .map(|stream| {
+            let parameters = stream.parameters();
+            TrackDescriptor {
+                kind: match parameters.medium() {
+                    ffmpeg::media::Type::Data => TrackKind::Data,
+                    ffmpeg::media::Type::Subtitle => TrackKind::Subtitle,
+                    _ => TrackKind::Other,
+                },
+                codec_tag: stream_codec_tag(&parameters),
+            }
+        })
+        .collect();
+
+    Ok(assess_playback_compatibility(&tracks))
 }
 
 /// Parse a request path to determine if it's a video metadata request.
@@ -687,5 +891,167 @@ mod tests {
     #[test]
     fn test_format_vtt_time_large() {
         assert_eq!(format_vtt_time(7384.567), "02:03:04.567");
+    }
+
+    // --- Playback compatibility -------------------------------------------
+
+    /// Packs a FourCC the way ffmpeg's `MKTAG` does, so the test fixtures use
+    /// the same byte order as a real `AVCodecParameters::codec_tag`.
+    fn mktag(fourcc: &str) -> u32 {
+        let bytes = fourcc.as_bytes();
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+
+    #[test]
+    fn test_fourcc_roundtrips_through_mktag() {
+        // 0x646d7067 is the literal codec_tag ffprobe reports for the gpmd
+        // tracks in the reproducing file.
+        assert_eq!(mktag("gpmd"), 0x646d_7067);
+        assert_eq!(fourcc_to_string(0x646d_7067).as_deref(), Some("gpmd"));
+        assert_eq!(fourcc_to_string(mktag("tx3g")).as_deref(), Some("tx3g"));
+        assert_eq!(fourcc_to_string(mktag("avc1")).as_deref(), Some("avc1"));
+    }
+
+    #[test]
+    fn test_fourcc_rejects_unset_and_nonprintable_tags() {
+        // The PNG cover-art stream in the reproducing file reports 0x00000000.
+        assert_eq!(fourcc_to_string(0), None);
+        assert_eq!(fourcc_to_string(0x0000_0161), None);
+    }
+
+    fn track(kind: TrackKind, tag: &str) -> TrackDescriptor {
+        TrackDescriptor {
+            kind,
+            codec_tag: Some(tag.to_string()),
+        }
+    }
+
+    /// The four quadrants of the bisected 2x2. Only the both-present case may
+    /// be flagged; the three others were measured playing in Safari.
+    #[test]
+    fn test_risky_combination_requires_both_track_types() {
+        let video = track(TrackKind::Other, "avc1");
+        let gpmd = track(TrackKind::Data, "gpmd");
+        let tx3g = track(TrackKind::Subtitle, "tx3g");
+
+        let neither = assess_playback_compatibility(std::slice::from_ref(&video));
+        let data_only = assess_playback_compatibility(&[video.clone(), gpmd.clone()]);
+        let subtitle_only = assess_playback_compatibility(&[video.clone(), tx3g.clone()]);
+        let both = assess_playback_compatibility(&[video, gpmd, tx3g]);
+
+        assert!(!neither.has_known_risk(), "no risky tracks must not flag");
+        assert!(
+            !data_only.has_known_risk(),
+            "a gpmd track alone plays fine in Safari and must not be flagged"
+        );
+        assert!(
+            !subtitle_only.has_known_risk(),
+            "a tx3g track alone plays fine in Safari and must not be flagged"
+        );
+        assert!(
+            both.has_known_risk(),
+            "the gpmd + tx3g combination is the measured discriminator"
+        );
+    }
+
+    #[test]
+    fn test_non_risky_combination_has_no_reason_or_remedy() {
+        for tracks in [
+            vec![],
+            vec![track(TrackKind::Data, "gpmd")],
+            vec![track(TrackKind::Subtitle, "tx3g")],
+            // Harmless tags proven playing during bisection.
+            vec![
+                track(TrackKind::Data, "text"),
+                track(TrackKind::Subtitle, "tx3g"),
+            ],
+        ] {
+            let compat = assess_playback_compatibility(&tracks);
+            assert!(!compat.has_known_risk(), "unexpected flag for {tracks:?}");
+            assert_eq!(compat.reason(), None);
+            assert_eq!(compat.remedy(), None);
+        }
+    }
+
+    #[test]
+    fn test_risky_tags_are_matched_against_the_right_track_kind() {
+        // A `gpmd` tag on a subtitle track (or `tx3g` on a data track) is not
+        // the measured combination, so kind matching must be strict.
+        let crossed = assess_playback_compatibility(&[
+            track(TrackKind::Subtitle, "gpmd"),
+            track(TrackKind::Data, "tx3g"),
+        ]);
+        assert!(!crossed.has_known_risk());
+    }
+
+    #[test]
+    fn test_reason_is_hedged_and_names_both_tracks() {
+        let compat = assess_playback_compatibility(&[
+            track(TrackKind::Data, "gpmd"),
+            track(TrackKind::Subtitle, "tx3g"),
+        ]);
+        let reason = compat.reason().expect("combination must produce a reason");
+
+        assert!(reason.contains("'gpmd'"), "names the data track: {reason}");
+        assert!(
+            reason.contains("'tx3g'"),
+            "names the subtitle track: {reason}"
+        );
+        // The heuristic has a known false positive, so the wording must not
+        // assert that the file is broken.
+        assert!(
+            reason.contains("most likely cause") && reason.contains("do not always fail"),
+            "reason must stay advisory: {reason}"
+        );
+        assert!(!reason.contains("cannot decode"), "too absolute: {reason}");
+        assert_eq!(compat.remedy().as_deref(), Some(REMUX_REMEDY));
+    }
+
+    #[test]
+    fn test_duplicate_risky_tags_are_deduplicated() {
+        let compat = assess_playback_compatibility(&[
+            track(TrackKind::Data, "gpmd"),
+            track(TrackKind::Data, "gpmd"),
+            track(TrackKind::Data, "gpmd"),
+            track(TrackKind::Subtitle, "tx3g"),
+            track(TrackKind::Subtitle, "tx3g"),
+        ]);
+        assert_eq!(compat.risky_data_tags, vec!["gpmd".to_string()]);
+        assert_eq!(compat.risky_subtitle_tags, vec!["tx3g".to_string()]);
+    }
+
+    #[test]
+    fn test_describe_tags_singular_and_plural() {
+        assert_eq!(
+            describe_tags(&["gpmd".to_string()], "timed-metadata track"),
+            "a 'gpmd' timed-metadata track"
+        );
+        assert_eq!(
+            describe_tags(
+                &["gpmd".to_string(), "fdsc".to_string()],
+                "timed-metadata track"
+            ),
+            "'gpmd', 'fdsc' timed-metadata tracks"
+        );
+    }
+
+    #[test]
+    fn test_remux_remedy_strips_data_tracks_but_keeps_subtitles() {
+        // The remedy is a user-facing contract, verified end to end on the
+        // reproducing file: stream-copy only (never re-encode a multi-gigabyte
+        // file) and `-dn` so subtitles survive.
+        assert!(REMUX_REMEDY.contains("-map 0"));
+        assert!(REMUX_REMEDY.contains("-c copy"));
+        assert!(REMUX_REMEDY.contains("-dn"));
+        assert!(REMUX_REMEDY.contains("+faststart"));
+    }
+
+    #[test]
+    fn test_probe_playback_compatibility_rejects_non_media_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bogus = dir.path().join("not-a-video.mp4");
+        std::fs::write(&bogus, b"definitely not an mp4").unwrap();
+
+        assert!(probe_playback_compatibility(&bogus).is_err());
     }
 }

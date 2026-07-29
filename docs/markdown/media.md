@@ -354,6 +354,77 @@ Both work for all media types (images, video, audio, PDFs).
 3. Check browser console for codec errors
 4. Try a different format (MP4/H.264 is safest)
 
+#### "Media failed to decode" on a file that looks fine
+
+A distinctive symptom: the player shows the *correct duration*, then breaks the
+moment you hit play, with `MediaError.code === 3` ("media failed to decode").
+Because the duration was right, the file downloaded fine and its container
+parsed fine — the failure is in setting up decoding.
+
+This is a Safari/WebKit behaviour, which matters for mbr specifically because
+the `-g` GUI window *is* WebKit. The same file will often play in Firefox.
+
+One known trigger is a **`gpmd` timed-metadata track alongside a `tx3g`
+subtitle track**. `gpmd` tracks carry GoPro GPMF telemetry (GPS, gyro,
+accelerometer) and survive many editing and download workflows. Bisecting a
+reported file in Safari isolated the interaction:
+
+| `gpmd` | `tx3g` | Result |
+| ------ | ------ | ------ |
+| absent | absent | plays |
+| absent | present | plays |
+| present | absent | plays |
+| present | present | fails |
+
+Neither track type causes trouble on its own — it is the combination. Also
+ruled out, so don't chase them: 4K resolution, H.264 level 5.1, total track
+count, `text` data tracks, and embedded PNG cover art all played fine.
+
+Be aware this combination is **necessary but not sufficient**: some files
+carrying both play without complaint, so matching it does not mean a file is
+broken. mbr therefore treats it as a *likely cause* rather than a verdict — see
+[Playback diagnostics](#playback-diagnostics) below.
+
+To inspect a file yourself, look for a `data` stream tagged `gpmd` and a
+`subtitle` stream tagged `tx3g`:
+
+```bash
+ffprobe -v error -show_entries stream=codec_type,codec_tag_string \
+  -of csv=p=0 video.mp4
+```
+
+The fix is to remux, dropping the data tracks. `-c copy` copies the streams
+as-is — no re-encode, no quality loss, and it finishes in seconds even for
+multi-gigabyte files. `-dn` drops data tracks while **keeping your subtitles**:
+
+```bash
+ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4
+```
+
+Dropping the subtitle tracks instead also resolves the conflict, if you would
+rather keep the telemetry. Either way, don't re-encode to a lower resolution
+hoping to fix this.
+
+#### Playback diagnostics
+
+When a video actually fails to play, mbr tells you about it in two places:
+
+- **Under the video**, as a message in the caption area explaining what the
+  browser reported.
+- **In the ⚠ indicator** in the navbar, alongside broken links and other page
+  problems.
+
+Both are driven by the browser's own error, which is the only reliable signal
+that a file did not play. If mbr also recognises a suspicious track combination
+in that file, it adds the likely cause and a copy-pasteable `ffmpeg` remedy to
+the message.
+
+Because the track heuristic can match files that play perfectly well, mbr never
+warns about a video *before* it fails. A clean page stays clean, and the ⚠
+count is not inflated by guesses. This diagnosis needs the `media-metadata`
+feature and runs in server/GUI mode only — static builds (`-b`) have no
+`errors.json`, so only the in-caption browser error appears there.
+
 ### Media Renders as Plain Text
 
 If `![caption](path)` shows up as literal text instead of media, the path likely contains spaces. Wrap it in angle brackets or percent-encode it — see [Paths with Spaces](#paths-with-spaces).

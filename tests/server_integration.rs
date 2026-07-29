@@ -1818,6 +1818,93 @@ async fn test_range_request_accept_ranges_header() {
     );
 }
 
+/// Regression: `CompressionLayer::new()`'s default predicate only excludes
+/// gRPC, images and SSE, so a plain `GET` of an `.mp4` with
+/// `Accept-Encoding: gzip` used to come back `content-encoding: gzip` +
+/// `transfer-encoding: chunked` with **no** `content-length` and **no**
+/// `accept-ranges` (tower-http strips both when it compresses). That destroys
+/// seeking and duration detection in any client that negotiates gzip — and
+/// burns CPU gzipping already-compressed H.264.
+#[tokio::test]
+async fn test_video_is_never_gzipped() {
+    let repo = TestRepo::new();
+    // Well above the 32-byte SizeAbove floor so compression is genuinely on
+    // the table for this response.
+    repo.create_static_file("clip.mp4", &vec![b'A'; 64 * 1024]);
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .client
+        .get(server.url("/clip.mp4"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers().get("content-encoding"),
+        None,
+        "video must not be gzipped, got headers: {:?}",
+        response.headers()
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok()),
+        Some("bytes"),
+        "compression strips accept-ranges, which breaks seeking"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("65536"),
+        "compression strips content-length, which breaks duration detection"
+    );
+
+    let body = response.bytes().await.unwrap();
+    assert_eq!(
+        body.len(),
+        64 * 1024,
+        "body must be the raw, unmodified file"
+    );
+}
+
+/// The exclusion must be narrow: HTML still gets compressed.
+#[tokio::test]
+async fn test_html_is_still_gzipped() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "page.md",
+        &format!("# Page\n\n{}", "lorem ipsum ".repeat(500)),
+    );
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .client
+        .get(server.url("/page/"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+        "markdown pages should still be compressed, got headers: {:?}",
+        response.headers()
+    );
+}
+
 #[tokio::test]
 async fn test_range_request_invalid_range() {
     let repo = TestRepo::new();
@@ -4238,6 +4325,159 @@ async fn test_errors_json_clean_relationship_data_reports_nothing() {
         let errors = json["errors"].as_array().unwrap();
         assert!(errors.is_empty(), "{page} should be clean, got: {errors:?}");
     }
+}
+
+// ============================================================================
+// Unplayable-media detection (errors.json)
+// ============================================================================
+//
+// Fixtures in `tests/videos/` are 2-3 KB each and form the 2x2 that bisection
+// isolated in real Safari: only a `gpmd` data track *combined with* a `tx3g`
+// subtitle track discriminated failing cuts from playing ones. Either track
+// type alone measured as playing, so three of the four must never be flagged.
+//
+// - `gpmd-and-tx3g.mp4` — both tracks. The only fixture the heuristic flags.
+// - `gpmd-only.mp4`     — data track without subtitles. False-positive guard.
+// - `tx3g-only.mp4`     — subtitles without a risky data track. Same.
+// - `neither.mp4`       — a harmless `text` data track. Same.
+//
+// NOTE: the heuristic is advisory, not an oracle. `gpmd-and-tx3g.mp4` itself
+// *plays fine* in Safari despite matching, so the combination is necessary but
+// not sufficient. These tests therefore assert only what the predicate
+// computes, never that a flagged file fails or an unflagged one plays.
+
+/// Copies a checked-in video fixture into the test repo.
+#[cfg(feature = "media-metadata")]
+fn copy_video_fixture(repo: &TestRepo, fixture: &str, dest: &str) {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/videos")
+        .join(fixture);
+    let bytes = std::fs::read(&source)
+        .unwrap_or_else(|e| panic!("missing fixture {}: {e}", source.display()));
+    repo.create_static_file(dest, &bytes);
+}
+
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_errors_json_reports_unplayable_gpmd_and_tx3g_video() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "Foo Bar.mp4");
+    repo.create_markdown("note.md", "# Note\n\n![clip](<Foo Bar.mp4>)");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/note/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    let unplayable: Vec<_> = errors
+        .iter()
+        .filter(|e| e["type"] == "unplayable_media")
+        .collect();
+    assert_eq!(
+        unplayable.len(),
+        1,
+        "expected exactly one unplayable_media error in {:?}",
+        errors
+    );
+
+    // This shape is a contract with the frontend component.
+    let error = unplayable[0];
+    assert_eq!(error["kind"], "video");
+    assert_eq!(
+        error["remedy"],
+        "ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4"
+    );
+    // Marks the entry as a hint so the frontend keeps it out of the error
+    // badge until the browser actually reports a failure for this src.
+    assert_eq!(error["advisory"], true);
+
+    // The heuristic has a known false positive, so the prose must name both
+    // implicated tracks and must not claim the file is broken.
+    let reason = error["reason"].as_str().expect("reason must be a string");
+    assert!(reason.contains("'gpmd'"), "{reason}");
+    assert!(reason.contains("'tx3g'"), "{reason}");
+    assert!(reason.contains("most likely cause"), "{reason}");
+    assert!(!reason.contains("cannot decode"), "too absolute: {reason}");
+
+    // `src` must match the attribute the browser sees so the component can
+    // join an error to a specific <video>.
+    let src = error["src"].as_str().expect("src must be a string");
+    let page_html = server.get_text("/note/").await;
+    assert!(
+        page_html.contains(&format!("src='{src}'"))
+            || page_html.contains(&format!("src=\"{src}\"")),
+        "errors.json src {src:?} does not appear as an attribute in the rendered page"
+    );
+}
+
+/// The offending file resolves and serves fine — the diagnosis must not be
+/// confused with the pre-existing "file is missing" check.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_unplayable_video_is_not_reported_as_broken_reference() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "clip.mp4");
+    repo.create_markdown("note.md", "# Note\n\n![clip](clip.mp4)");
+
+    let server = TestServer::start(&repo).await;
+    let json: serde_json::Value = server.get("/note/errors.json").await.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    assert!(
+        !errors.iter().any(|e| e["type"] == "broken_media_reference"),
+        "a servable file must not be reported broken: {:?}",
+        errors
+    );
+    assert!(errors.iter().any(|e| e["type"] == "unplayable_media"));
+}
+
+/// The three non-flagging quadrants of the bisected 2x2. Each of these
+/// measured as *playing* in Safari, so flagging any of them would put a scary
+/// notice on a working video — the exact failure mode this heuristic must
+/// avoid.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_errors_json_does_not_flag_incomplete_risky_combinations() {
+    for fixture in ["gpmd-only.mp4", "tx3g-only.mp4", "neither.mp4"] {
+        let repo = TestRepo::new();
+        copy_video_fixture(&repo, fixture, "fine.mp4");
+        repo.create_markdown("note.md", "# Note\n\n![clip](fine.mp4)");
+
+        let server = TestServer::start(&repo).await;
+        let json: serde_json::Value = server.get("/note/errors.json").await.json().await.unwrap();
+        let errors = json["errors"].as_array().unwrap();
+
+        assert!(
+            !errors.iter().any(|e| e["type"] == "unplayable_media"),
+            "{fixture} plays in Safari and must not be flagged: {errors:?}"
+        );
+    }
+}
+
+/// The same clip embedded twice yields one diagnosis, so the endpoint never
+/// probes the same bytes more than once per page.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_errors_json_dedupes_repeated_unplayable_embeds() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "clip.mp4");
+    repo.create_markdown("note.md", "# Note\n\n![a](clip.mp4)\n\n![b](clip.mp4)");
+
+    let server = TestServer::start(&repo).await;
+    let json: serde_json::Value = server.get("/note/errors.json").await.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e["type"] == "unplayable_media")
+            .count(),
+        1,
+        "{:?}",
+        errors
+    );
 }
 
 // ==================== HLS Transcoding Security Tests ====================
