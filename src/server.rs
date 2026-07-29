@@ -920,6 +920,9 @@ pub struct Server {
     pub router: Router,
     pub port: u16,
     pub ip: [u8; 4],
+    /// True when a native GUI window fronts this server. Only affects how the
+    /// startup banner is announced; see [`Server::announce_listening`].
+    pub gui_mode: bool,
     /// File watcher handle - kept alive for the lifetime of the server.
     /// When Server is dropped, this is dropped, stopping the watcher.
     _watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>,
@@ -2068,8 +2071,32 @@ impl Server {
             router,
             ip,
             port,
+            gui_mode,
             _watcher_handle: watcher_handle,
         })
+    }
+
+    /// Announces the bound address once the listener is up.
+    ///
+    /// In server mode (`-s`) the URL is the whole point of the command and the
+    /// user is watching that terminal, so it goes to stdout unchanged. In GUI
+    /// mode the window is the affordance and the banner is noise: on Windows a
+    /// console-subsystem binary launched from Explorer gets a console window,
+    /// and the line lands there, behind the webview the user is actually
+    /// looking at. It becomes a `tracing::info!` instead, so `-v` still
+    /// surfaces it while the default `warn` level keeps it hidden.
+    ///
+    /// The decision reads `self.gui_mode` rather than relying on which start
+    /// method was called. `start_with_port_retry` happens to be GUI-only today,
+    /// but that is incidental and would rot silently the first time a
+    /// non-GUI caller wanted port retry.
+    fn announce_listening(&self, local_addr: SocketAddr) {
+        tracing::debug!("listening on {}", local_addr);
+        if self.gui_mode {
+            tracing::info!("Server running at http://{}/", local_addr);
+        } else {
+            println!("Server running at http://{}/", local_addr);
+        }
     }
 
     pub async fn start(&self) -> Result<(), ServerError> {
@@ -2093,8 +2120,7 @@ impl Server {
         let local_addr = listener
             .local_addr()
             .map_err(ServerError::LocalAddrFailed)?;
-        tracing::debug!("listening on {}", local_addr);
-        println!("Server running at http://{}/", local_addr);
+        self.announce_listening(local_addr);
 
         // Signal that server is ready before starting to serve
         if let Some(tx) = ready_tx
@@ -2136,8 +2162,7 @@ impl Server {
                     let local_addr = listener
                         .local_addr()
                         .map_err(ServerError::LocalAddrFailed)?;
-                    tracing::debug!("listening on {}", local_addr);
-                    println!("Server running at http://{}/", local_addr);
+                    self.announce_listening(local_addr);
 
                     // Signal that server is ready with the actual port
                     if let Some(tx) = ready_tx
@@ -7953,6 +7978,33 @@ mod tests {
             100,
             "100 covers of 256 KB must fit in the default media cache"
         );
+    }
+
+    /// `announce_listening` routes the startup banner on `Server.gui_mode`:
+    /// stdout in server mode, `tracing::info!` in GUI mode. That only works if
+    /// `init` actually carries the flag off `ServerConfig` onto `Server` — if
+    /// it were dropped and defaulted to `false`, the GUI would silently go back
+    /// to printing to the console window it is trying to stay out of, and every
+    /// existing test would still pass.
+    #[tokio::test]
+    async fn test_server_init_carries_gui_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("index.md"), "# Test").unwrap();
+
+        for gui_mode in [true, false] {
+            let config = crate::config::Config {
+                root_dir: temp.path().to_path_buf(),
+                ..Default::default()
+            };
+            let server = Server::init(ServerConfig::from(&config).with_gui_mode(gui_mode))
+                .expect("server init should succeed over a temp repo");
+
+            assert_eq!(
+                server.gui_mode, gui_mode,
+                "Server::init must carry gui_mode through to Server; \
+                 announce_listening reads it to decide stdout vs tracing"
+            );
+        }
     }
 
     /// Call-site smoke test for the metadata cache path: a cached cover produces
