@@ -99,7 +99,23 @@ impl FileWatcher {
         sender: broadcast::Sender<FileChangeEvent>,
     ) -> Result<Self, WatcherError> {
         let tx = sender;
-        let base_dir = base_dir.to_path_buf();
+        // notify reports canonical paths — FSEvents and inotify both hand back
+        // the resolved inode's path — so the diff base has to be canonical too
+        // or every `diff_paths` below climbs *out* of the repo instead of
+        // staying inside it. With the root configured as `/tmp/notes`, an event
+        // for `/private/tmp/notes/x.md` diffs to `../../private/tmp/notes/x.md`,
+        // which breaks two things at once. The ignore checks would see the
+        // ancestors of the root again — the very components the repo-relative
+        // matching in the callback exists to exclude — and `relative_path` would
+        // carry the absolute path in disguise to every live-reload client,
+        // leaking exactly the username, home layout, and private filenames the
+        // struct docs promise it never does. Canonicalize once, here, so the
+        // watched path and the diff base cannot drift apart. Falling back to the
+        // path as given covers a root that does not exist yet; the `watch()`
+        // call below then surfaces that as a proper `WatchFailed`.
+        let base_dir = base_dir
+            .canonicalize()
+            .unwrap_or_else(|_| base_dir.to_path_buf());
 
         // Use configured ignore directories (defaults are set in Config)
         let ignore_set: HashSet<String> = ignore_dirs.iter().cloned().collect();
@@ -375,6 +391,45 @@ mod tests {
             change.is_some(),
             "Should receive event for test.md even though an ancestor of the root is named 'build'"
         );
+    }
+
+    // Symlink creation on Windows needs Developer Mode or elevation, so this is
+    // unix-only like the symlink walk helper in repo.rs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_watcher_relative_paths_stay_inside_a_symlinked_root() {
+        // Regression: notify reports canonical paths, so a root configured
+        // through a symlink (macOS `/tmp` -> `/private/tmp`, or any symlinked
+        // checkout) made `diff_paths` climb out of the repo and produce
+        // `../../private/tmp/...`. `relative_path` is broadcast to every
+        // live-reload client, so such a value hands out the absolute path in
+        // disguise — the username, home layout, and private note filenames the
+        // struct docs say must never cross the wire.
+        let temp_dir = TempDir::new().unwrap();
+        let real_root = temp_dir.path().join("real");
+        let real_notes = real_root.join("notes");
+        fs::create_dir_all(&real_notes).unwrap();
+        let link_root = temp_dir.path().join("link");
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        // Watch through the symlink: the path an operator configured, not the
+        // canonical one notify will report events for.
+        let link_notes = link_root.join("notes");
+        let (_watcher, mut rx) = FileWatcher::new(&link_notes, None, &[], &[]).unwrap();
+
+        fs::write(link_notes.join("test.md"), "# Test").unwrap();
+
+        // Match on the suffix so a climbing path still satisfies the predicate —
+        // the assertions below, not the filter, are what fail before the fix.
+        let change = recv_matching(&mut rx, |e| e.relative_path.ends_with("test.md"))
+            .await
+            .expect("should receive event for test.md through a symlinked root");
+        assert!(
+            !change.relative_path.contains(".."),
+            "relative_path escaped the repo root and leaks absolute path segments: {}",
+            change.relative_path
+        );
+        assert_eq!(change.relative_path, "test.md");
     }
 
     #[tokio::test]
