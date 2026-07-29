@@ -104,9 +104,10 @@ entirely, since command-line tools do not set it.
 ### Windows
 
 Unzip the archive matching your machine — `mbr-windows-x86_64.zip` on Intel and
-AMD, `mbr-windows-aarch64.zip` on ARM64 — and run `mbr.exe`. GUI mode needs the
-Microsoft Edge WebView2 runtime, which ships with Windows 11 and current
-Windows 10.
+AMD, `mbr-windows-aarch64.zip` on ARM64 — and run `mbr.exe`. The binary is
+self-contained and does not need the Visual C++ Redistributable, because the C
+runtime is linked statically. GUI mode needs the Microsoft Edge WebView2
+runtime, which ships with Windows 11 and current Windows 10.
 
 Two features are missing from Windows builds because their dependencies do not
 build on `windows-msvc` without a prebuilt ffmpeg SDK:

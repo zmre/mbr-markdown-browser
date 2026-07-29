@@ -301,6 +301,15 @@ jobs:
         with:
           # Reads channel and components from rust-toolchain.toml.
           cache-workspaces: "."
+          # This action exports RUSTFLAGS=-D warnings unless told otherwise, and
+          # cargo treats its four flag sources as mutually exclusive — first
+          # match wins — so a set RUSTFLAGS makes it ignore
+          # target.<cfg>.rustflags from .cargo/config.toml outright. That would
+          # silently drop the static-CRT flag and put the VCRUNTIME140.dll
+          # dependency straight back into the binary. Clearing it leaves the
+          # config file authoritative. Nothing is weakened: the clippy step below
+          # already passes -D warnings on the command line.
+          rustflags: ""
 
       - name: Clippy lint
         run: cargo clippy --all-targets --no-default-features --features gui -- -D warnings
@@ -310,6 +319,26 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --no-default-features --features gui
+
+      # The runners ship Visual Studio and therefore the Visual C++
+      # Redistributable, so a dynamically-linked CRT loads fine here and every
+      # other step in this job passes while the binary users download refuses to
+      # start. Nothing else in CI notices, hence this check.
+      - name: Assert no VC++ redistributable dependency
+        shell: pwsh
+        run: |
+          # dumpbin is not on PATH without a Visual Studio developer shell, so
+          # scan the raw bytes instead — imported DLL names sit in .rdata as
+          # plain ASCII. api-ms-win-crt-*.dll and ucrtbase.dll are deliberately
+          # not flagged: the UCRT is an inbox Windows 10+ component.
+          $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/mbr.exe"))
+          foreach ($dll in @('VCRUNTIME140','MSVCP140')) {
+            if ($ascii -match $dll) {
+              Write-Host "::error::mbr.exe imports $dll - the static CRT rustflags in .cargo/config.toml are not taking effect"
+              exit 1
+            }
+          }
+          Write-Host "OK: no Visual C++ Redistributable dependency"
 
       - name: Smoke test the binary
         run: |
