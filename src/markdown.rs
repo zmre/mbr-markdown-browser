@@ -213,11 +213,24 @@ pub struct MarkdownRenderResult {
     /// Computed via [`crate::readability::count_syllables`] for each
     /// whitespace-delimited word during rendering.
     pub syllable_count: usize,
+    /// Bare body wikilinks whose name is shared by several notes, deduped.
+    ///
+    /// Resolution is unchanged (first-wins); these are surfaced to the reader
+    /// via the per-page errors endpoint so an accidental namesake link can be
+    /// spotted. Always empty when the render had no wikilink index (CLI /
+    /// QuickLook paths).
+    pub ambiguous_wikilinks: Vec<crate::wikilink_index::AmbiguousWikilink>,
 }
 
 struct EventState {
     #[allow(dead_code)] // Reserved for future use (resolving relative paths)
     root_path: PathBuf,
+    /// Path of the file being processed, used to name the file in diagnostics.
+    ///
+    /// Without it a YAML frontmatter warning is unactionable: the reader is told
+    /// *that* a metadata block failed to parse but not *which* of their thousands
+    /// of notes to open.
+    file_path: PathBuf,
     /// Track the current media embed type (if any) for proper closing tags
     current_media: Option<MediaEmbed>,
     in_metadata: bool,
@@ -261,6 +274,10 @@ struct EventState {
     /// valid fields like `style` are lost); surfaced to the user via the
     /// per-page error reporting and a build-mode summary.
     frontmatter_error: Option<String>,
+    /// Bare body wikilinks on this page whose name is shared by several notes,
+    /// deduped. Resolution is unaffected; these are reported so the author knows
+    /// mbr picked one arbitrarily.
+    ambiguous_wikilinks: Vec<crate::wikilink_index::AmbiguousWikilink>,
 }
 
 /// Frontmatter metadata as a flat key/value map.
@@ -709,6 +726,7 @@ pub async fn render_with_cache(
     let (processed_events, state) = process_all_events(
         events_with_ids,
         root_path,
+        &file,
         link_transform_config,
         prefetched_oembed,
         server_mode,
@@ -744,10 +762,14 @@ pub async fn render_with_cache(
 /// This is the shared event processing pass used by both `render_with_cache` (async)
 /// and `render_sync`. It handles link transforms, media embeds, YAML frontmatter,
 /// vid shortcodes, bare URL oembed lookups, and word counting.
+///
+/// `file_path` is only used to name the file in diagnostics (e.g. a YAML
+/// frontmatter parse warning); it is never read from.
 #[allow(clippy::too_many_arguments)]
 fn process_all_events<'a>(
     events: Vec<Event<'a>>,
     root_path: &Path,
+    file_path: &Path,
     link_transform_config: LinkTransformConfig,
     prefetched_oembed: HashMap<String, PageInfo>,
     server_mode: bool,
@@ -757,6 +779,7 @@ fn process_all_events<'a>(
 ) -> (Vec<Event<'a>>, EventState) {
     let mut state = EventState {
         root_path: root_path.to_path_buf(),
+        file_path: file_path.to_path_buf(),
         current_media: None,
         in_metadata: false,
         in_link: false,
@@ -777,6 +800,7 @@ fn process_all_events<'a>(
         syllable_count: 0,
         block_needs_sentence_bump: false,
         frontmatter_error: None,
+        ambiguous_wikilinks: Vec::new(),
     };
     let mut processed_events = Vec::with_capacity(events.len());
 
@@ -925,6 +949,7 @@ fn finalize_render(
         word_count: state.word_count,
         sentence_count: state.sentence_count,
         syllable_count: state.syllable_count,
+        ambiguous_wikilinks: state.ambiguous_wikilinks,
     })
 }
 
@@ -994,6 +1019,7 @@ pub fn render_sync(
     let (processed_events, state) = process_all_events(
         events_with_ids,
         root_path,
+        &file,
         link_transform_config,
         prefetched_oembed,
         server_mode,
@@ -1069,6 +1095,7 @@ pub fn extract_outbound_links_sync(
     let (_processed_events, state) = process_all_events(
         events_with_ids,
         root_path,
+        &file,
         link_transform_config,
         prefetched_oembed,
         server_mode,
@@ -1363,7 +1390,25 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
                 break;
             }
             Event::Text(text) if in_metadata => {
-                let metadata_parsed = load_first_yaml_doc(text);
+                // A parse failure discards the *entire* frontmatter: `type`,
+                // `aliases`, `relationships` and all. This is the scan path that
+                // feeds the relationship index, so a silent drop here shows up
+                // as a flood of "unresolved relationship endpoint" warnings from
+                // other notes that referenced this one by an alias that never
+                // made it into the index. Log it, naming the file, then fall
+                // back to empty metadata exactly as before so the scan continues.
+                let metadata_parsed = match YamlLoader::load_from_str(text) {
+                    Ok(docs) => docs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "Failed to parse YAML frontmatter: {e}; the whole \
+                             frontmatter block (including any `aliases` and \
+                             `relationships`) is ignored for this note"
+                        );
+                        None
+                    }
+                };
 
                 if let Some(ref yaml) = metadata_parsed {
                     relationships = crate::relationships::parse_relationships(yaml);
@@ -1514,18 +1559,18 @@ fn process_event(
 
             // First check if this is a tag link (e.g., Tags:rust, performers:Joshua Jay)
             // If so, transform to the tag URL path (/tags/rust/, /performers/joshua_jay/)
-            let transformed_url = if let Some(wikilink) =
-                parse_tag_link(dest_url, &state.valid_tag_sources)
-            {
-                transform_link(&wikilink.url_path(), &state.link_transform_config)
-            } else {
-                // Not a tag link. For bare-name body wikilinks (`[[Name]]`),
-                // apply Obsidian-style global resolution: current folder first,
-                // else the first matching file anywhere. `resolve_wikilink`
-                // returns Some only for the global-fallback case, so same-folder
-                // links keep the default relative transform byte-for-byte.
-                let global =
-                    if matches!(link_type, LinkType::WikiLink { .. }) && !dest_url.contains('/') {
+            let transformed_url =
+                if let Some(wikilink) = parse_tag_link(dest_url, &state.valid_tag_sources) {
+                    transform_link(&wikilink.url_path(), &state.link_transform_config)
+                } else {
+                    // Not a tag link. For bare-name body wikilinks (`[[Name]]`),
+                    // apply Obsidian-style global resolution: current folder first,
+                    // else the first matching file anywhere. `resolve_wikilink`
+                    // returns Some only for the global-fallback case, so same-folder
+                    // links keep the default relative transform byte-for-byte.
+                    let is_bare_wikilink =
+                        matches!(link_type, LinkType::WikiLink { .. }) && !dest_url.contains('/');
+                    let global = if is_bare_wikilink {
                         state.wikilink_index.as_ref().and_then(|idx| {
                             idx.resolve_wikilink(
                                 dest_url,
@@ -1536,18 +1581,39 @@ fn process_event(
                     } else {
                         None
                     };
-                match global {
-                    Some(abs) => {
-                        // Override the recorded outbound target with the absolute
-                        // URL so link validation and backlinks resolve correctly
-                        // (its leading `/` makes `resolve_outbound_links` leave it
-                        // untouched, and the path resolver then finds it).
-                        state.current_link_dest = Some(abs.clone());
-                        transform_link(&abs, &state.link_transform_config)
+                    // Record namesake ambiguity separately from `global`: a
+                    // same-folder link needs no rewrite (`global` is None) yet can
+                    // still have resolved arbitrarily between two case-variant
+                    // files, and a global-fallback link that *did* rewrite may have
+                    // had several candidates to choose from.
+                    let ambiguous = if is_bare_wikilink {
+                        state.wikilink_index.as_ref().and_then(|idx| {
+                            idx.ambiguity_for(
+                                dest_url,
+                                &state.link_transform_config.current_page_url,
+                                state.link_transform_config.is_index_file,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(found) = ambiguous
+                        && !state.ambiguous_wikilinks.contains(&found)
+                    {
+                        state.ambiguous_wikilinks.push(found);
                     }
-                    None => transform_link(dest_url, &state.link_transform_config),
-                }
-            };
+                    match global {
+                        Some(abs) => {
+                            // Override the recorded outbound target with the absolute
+                            // URL so link validation and backlinks resolve correctly
+                            // (its leading `/` makes `resolve_outbound_links` leave it
+                            // untouched, and the path resolver then finds it).
+                            state.current_link_dest = Some(abs.clone());
+                            transform_link(&abs, &state.link_transform_config)
+                        }
+                        None => transform_link(dest_url, &state.link_transform_config),
+                    }
+                };
 
             let new_event = Event::Start(Tag::Link {
                 link_type: *link_type,
@@ -1622,8 +1688,13 @@ fn process_event(
                         // Invalid YAML aborts the whole frontmatter block, so
                         // otherwise-valid fields (e.g. `style: slides`) are
                         // silently lost. Capture the error so it can be
-                        // surfaced to the user instead of disappearing.
-                        tracing::warn!("Failed to parse YAML frontmatter: {e}");
+                        // surfaced to the user instead of disappearing, and name
+                        // the file — the error alone does not identify which of
+                        // a repository's notes to go and fix.
+                        tracing::warn!(
+                            path = %state.file_path.display(),
+                            "Failed to parse YAML frontmatter: {e}"
+                        );
                         state.frontmatter_error = Some(e.to_string());
                     }
                 }
@@ -1921,6 +1992,155 @@ mod tests {
         let result = render_result(content).await;
         assert!(result.frontmatter_error.is_none());
         assert!(result.frontmatter.contains_key("style"));
+    }
+
+    /// Frontmatter with two `to:` keys in one `relationships:` entry — the exact
+    /// shape that cost a user their whole `person` frontmatter.
+    const DUPLICATE_KEY_FRONTMATTER: &str = concat!(
+        "---\n",
+        "type: person\n",
+        "aliases:\n",
+        "  - Johnny Doe\n",
+        "relationships:\n",
+        "  - type: parent\n",
+        "    to: \"[[Mary Doe]]\"\n",
+        "    to: \"[[Sam Doe]]\"\n",
+        "---\n",
+        "# John Doe\n",
+    );
+
+    #[test]
+    fn duplicate_frontmatter_key_warning_names_the_file() {
+        // Regression: the repo-scan path discarded the parse error with `.ok()`
+        // and logged nothing at all, so the note lost `type`, `aliases` and every
+        // relationship with no way to tell which of hundreds of files was at
+        // fault. The dropped `aliases` then produced a flood of "unresolved
+        // relationship endpoint" warnings from *other* notes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("john-doe.md");
+        std::fs::write(&path, DUPLICATE_KEY_FRONTMATTER).unwrap();
+
+        let (result, logs) =
+            crate::test_support::capture_tracing(|| extract_metadata_from_file(&path));
+
+        // Fallback behaviour is unchanged: still `Ok`, with empty metadata, so
+        // the repo scan carries on.
+        let meta = result.expect("extraction must still succeed");
+        assert!(meta.relationships.is_empty());
+        assert!(!meta.metadata.contains_key("type"));
+        assert!(!meta.metadata.contains_key("aliases"));
+
+        assert!(
+            logs.contains("Failed to parse YAML frontmatter"),
+            "expected a frontmatter warning, got: {logs}"
+        );
+        assert!(
+            logs.contains("john-doe.md"),
+            "the warning must name the file, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn render_frontmatter_warning_names_the_file() {
+        // The render path captured the error but logged it without the path, so
+        // a page-load warning still could not be traced to a file. Driven on this
+        // thread so `capture_tracing`'s thread-local subscriber sees it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken-note.md");
+        std::fs::write(&path, DUPLICATE_KEY_FRONTMATTER).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (result, logs) = crate::test_support::capture_tracing(|| {
+            runtime.block_on(render(
+                path.clone(),
+                dir.path(),
+                0,
+                LinkTransformConfig {
+                    markdown_extensions: vec!["md".to_string()],
+                    index_file: "index.md".to_string(),
+                    is_index_file: false,
+                    url_depth: None,
+                    current_page_url: "/broken-note/".to_string(),
+                },
+                true,
+                false,
+                HashSet::new(),
+                false,
+                &[],
+                None,
+            ))
+        });
+
+        let result = result.expect("render must still succeed");
+        assert!(result.frontmatter_error.is_some());
+        assert!(
+            logs.contains("Failed to parse YAML frontmatter"),
+            "expected a frontmatter warning, got: {logs}"
+        );
+        assert!(
+            logs.contains("broken-note.md"),
+            "the warning must name the file, got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_body_wikilink_is_reported_without_changing_resolution() {
+        // Two notes titled "John Doe": the `[[John Doe]]` in the body resolves to
+        // the smaller URL as always, and the arbitrary choice is now reported.
+        let index = Arc::new(WikilinkIndex::new());
+        index.rebuild(&[
+            wikilink_note("/people/john-jr/", "John Doe", "john-jr"),
+            wikilink_note("/people/john-sr/", "John Doe", "john-sr"),
+        ]);
+
+        let result = render_with_wikilinks(
+            "His father was [[John Doe]], and also [[John Doe]] again.",
+            "/notes/family/",
+            None,
+            Some(index),
+        )
+        .await;
+
+        // Resolution unchanged.
+        assert!(
+            result.html.contains(r#"href="/people/john-jr/""#),
+            "expected the first-wins target, got: {}",
+            result.html
+        );
+        // Reported once, deduped across the two occurrences.
+        assert_eq!(result.ambiguous_wikilinks.len(), 1);
+        let found = &result.ambiguous_wikilinks[0];
+        assert_eq!(found.raw, "[[John Doe]]");
+        assert_eq!(found.resolved_to, "/people/john-jr/");
+        assert_eq!(found.candidates, vec!["/people/john-sr/".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn unambiguous_body_wikilink_reports_nothing() {
+        let index = Arc::new(WikilinkIndex::new());
+        index.rebuild(&[
+            wikilink_note("/people/john/", "John Doe", "john"),
+            wikilink_note("/notes/family/", "Family", "family"),
+        ]);
+
+        let result = render_with_wikilinks(
+            "See [[John Doe]] here.",
+            "/notes/family/",
+            None,
+            Some(index),
+        )
+        .await;
+        assert!(result.ambiguous_wikilinks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wikilink_ambiguity_is_empty_without_an_index() {
+        // CLI / QuickLook renders have no repo context at all.
+        let result = render_result("See [[Anyone]] here.").await;
+        assert!(result.ambiguous_wikilinks.is_empty());
     }
 
     #[test]

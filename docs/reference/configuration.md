@@ -289,7 +289,7 @@ See the [Tags feature documentation](tags/) for complete details.
 Each relation type can specify:
 - `name` (required): The relation predicate (e.g., `parent`, `spouse`)
 - `symmetric`: `true` when the reverse reads the same (spouse, sibling)
-- `inverse`: The inverse relation-type name, if it's one half of an inverse pair (parent ↔ child). Mutually exclusive with `symmetric`.
+- `inverse`: The inverse relation-type name, if it's one half of an inverse pair (parent ↔ child). Mutually exclusive with `symmetric`, and must name a *different* type — see below.
 - `label` / `label_plural`: Display labels (auto-derived from `name` when unset; set `label_plural` explicitly for irregular plurals such as "Children")
 
 The default `relationship_types` provide genealogy semantics:
@@ -309,6 +309,25 @@ Relation types not listed here are still tracked, but as directed edges with no
 automatic reverse relabelling. See the
 [Relationships & Genealogy documentation](../markdown/relationships/) for the frontmatter
 schema and a walkthrough.
+
+**Self-inverse types are coerced to symmetric.** `inverse` names the *other* half
+of a pair, so a type naming itself is self-contradictory:
+
+```toml
+# Wrong: a type cannot be its own inverse.
+{ name = "sponsor", inverse = "sponsor" }
+# Right: "the reverse reads the same" is what symmetric means.
+{ name = "sponsor", symmetric = true }
+```
+
+mbr treats the first form as the second and warns once, naming the type
+(matching is case-insensitive, so `inverse = "Sponsor"` counts). Without the
+coercion both halves of such a pair would be indistinguishable, and every edge
+using it would look like a two-note `parent`/`child`-style cycle — dropping half
+of each relationship in the genealogy chart and reporting a
+[`relationship_cycle`](#per-page-error-indicator-server--gui-only) against notes
+whose data was fine. Declare `symmetric = true` explicitly to silence the
+warning.
 
 > **Note:** `relationship_tracking` rides on the same `links.json` fetch as
 > backlinks (no extra request). Disabling it omits relationship data from
@@ -471,13 +490,24 @@ per-page diagnostics endpoint at `/{page}/errors.json` and a matching
 `<mbr-page-errors>` navbar indicator that lights up with a ⚠ icon when the
 current page has problems.
 
-The endpoint detects three issue types in v1:
+The endpoint detects these issue types:
 
 | Type | Trigger |
 |------|---------|
 | `broken_internal_link` | An outbound internal link whose target does not resolve (via `path_resolver`). Mirrors the existing build-time link validation, but runs live and non-fatally. |
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
+| `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
+| `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
+| `ambiguous_relationship_endpoint` | A relationship endpoint named a title/alias shared by several notes; mbr resolved it to one of them. Reported on the note that declared the endpoint. |
+| `ambiguous_wikilink` | A body `[[Wikilink]]` named a title/stem shared by several notes. Reported on the page containing the link. |
+
+The last three come from the relationship index and are additionally gated on
+`relationship_tracking` (`ambiguous_wikilink` excepted — wikilink resolution is
+always on). See
+[Relationships → Data problems mbr reports](../markdown/relationships/#data-problems-mbr-reports)
+for what each one means and how to fix it; all of them are also logged as `WARN`
+lines at startup, in both server and build mode.
 
 The response is JSON with a stable, tagged shape:
 
@@ -487,7 +517,21 @@ The response is JSON with a stable, tagged shape:
   "errors": [
     { "type": "broken_internal_link", "target": "/nonexistent/", "text": "bad" },
     { "type": "broken_media_reference", "src": "./missing.png", "kind": "image" },
-    { "type": "unresolved_wikilink", "raw": "[[never-a-real-page]]" }
+    { "type": "unresolved_wikilink", "raw": "[[never-a-real-page]]" },
+    { "type": "frontmatter_parse_error", "message": "duplicated key in mapping" },
+    { "type": "relationship_cycle", "members": ["/people/ada/", "/people/bob/"], "rel_type": "child" },
+    {
+      "type": "ambiguous_relationship_endpoint",
+      "raw": "[[John Doe]]",
+      "resolved_to": "/people/john-jr/",
+      "candidates": ["/people/john-sr/"]
+    },
+    {
+      "type": "ambiguous_wikilink",
+      "raw": "[[John Doe]]",
+      "resolved_to": "/people/john-jr/",
+      "candidates": ["/people/john-sr/"]
+    }
   ]
 }
 ```

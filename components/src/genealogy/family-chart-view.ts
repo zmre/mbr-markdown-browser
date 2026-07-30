@@ -22,7 +22,7 @@ import type { Data, Datum, TreeDatum } from 'family-chart'
 import familyChartCss from 'family-chart/styles/family-chart.css?inline'
 import { formatLifespan } from '../graph/relationship-graph.js'
 import { DRAG_THRESHOLD_PX } from '../graph/viewport.js'
-import { toFamilyChartData } from './family-chart-data.js'
+import { findParentChildCycle, toFamilyChartData } from './family-chart-data.js'
 import { computeInitialViewBox } from './timeline-layout.js'
 import {
   injectStylesOnce,
@@ -85,6 +85,25 @@ function mountFamilyChart(container: HTMLElement, ctx: GenealogyContext): Geneal
   container.appendChild(cont)
 
   const { data, mainId } = toFamilyChartData(ctx.graph)
+
+  // HARD PRECONDITION for createChart(): the parent/child rels must be acyclic.
+  // `calculateTree()` walks them with `d3.hierarchy()`, which has no cycle
+  // detection and allocates a node per step forever — a two-person loop pins the
+  // main thread and kills the tab (setAncestryDepth/setProgenyDepth do NOT help;
+  // the tree is trimmed only after the hierarchy is fully materialized).
+  // `buildRelationshipGraph` already guarantees acyclicity, so this only fires on
+  // a regression — and turns a frozen tab into a message someone can act on.
+  const cycle = findParentChildCycle(data)
+  if (cycle) {
+    console.warn('[mbr-genealogy] family chart skipped: parent/child loop between', cycle)
+    cont.appendChild(buildCycleErrorCard(cycle))
+    return {
+      destroy() {
+        cont.remove()
+      },
+    }
+  }
+
   // The pure converter keeps raw frontmatter image paths; resolve them for the
   // current page (server absolute vs static relative) here at the view edge.
   const resolved = data.map((d) =>
@@ -260,6 +279,35 @@ function mountFamilyChart(container: HTMLElement, ctx: GenealogyContext): Geneal
   }
 }
 
+/**
+ * Inline card rendered instead of the chart when the data still contains a
+ * parent/child loop. Built with DOM APIs and `textContent` only, so a note path
+ * can never inject markup.
+ */
+function buildCycleErrorCard(cycle: string[]): HTMLElement {
+  const card = document.createElement('div')
+  card.className = 'mbr-f3-error'
+  card.setAttribute('role', 'alert')
+
+  const heading = document.createElement('strong')
+  heading.textContent = 'Family chart unavailable'
+  card.appendChild(heading)
+
+  const explanation = document.createElement('p')
+  explanation.textContent =
+    'These notes each claim to be an ancestor of the next, which cannot all be true, so no family tree can be drawn. Correct the parent/child relationships in one of them:'
+  card.appendChild(explanation)
+
+  const list = document.createElement('ol')
+  for (const id of cycle) {
+    const item = document.createElement('li')
+    item.textContent = id
+    list.appendChild(item)
+  }
+  card.appendChild(list)
+  return card
+}
+
 export const familyChartType: GenealogyChart = {
   id: 'family-chart',
   label: 'Family chart',
@@ -288,6 +336,31 @@ const F3_THEME_CSS = `
   --male-color: var(--mbr-gen-male-fill, #d7e3f8);
   --female-color: var(--mbr-gen-female-fill, #f8d7e3);
   --genderless-color: var(--pico-muted-border-color, lightgray);
+}
+
+/* Inconsistent-data card shown in place of the chart (see buildCycleErrorCard).
+   Muted and scrollable so a long loop cannot overflow the fixed-height figure. */
+.f3.mbr-f3 .mbr-f3-error {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1rem;
+  font-size: 0.9rem;
+  color: var(--pico-color, #333);
+}
+
+.f3.mbr-f3 .mbr-f3-error p {
+  margin: 0.5rem 0;
+  color: var(--pico-muted-color, #666);
+}
+
+.f3.mbr-f3 .mbr-f3-error ol {
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.f3.mbr-f3 .mbr-f3-error li {
+  font-family: var(--pico-font-family-monospace, monospace);
+  word-break: break-all;
 }
 
 /* Cursor affordances. The pan/zoom surface is the #f3Canvas div (d3-zoom is

@@ -34,7 +34,7 @@
 
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use papaya::HashMap as ConcurrentHashMap;
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,86 @@ pub struct ResolvedRelationship {
     pub derived: bool,
 }
 
+/// A cycle detected over the **hierarchical** relationship edges.
+///
+/// Only inverse-pair types (`parent` ↔ `child`, `employer` ↔ `employee`)
+/// participate: they describe a hierarchy, so a cycle is data that cannot be
+/// true — and it is what makes `family-chart`'s `d3.hierarchy()` allocate
+/// forever on a person page. Symmetric types (`spouse`, `sibling`) and plain
+/// directed types cycle legitimately and are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationshipCycle {
+    /// Note URLs forming the cycle, in traversal order: each entry is the
+    /// [`Self::rel_type`] of the entry before it, and the last closes back onto
+    /// the first.
+    pub members: Vec<String>,
+    /// The canonical relation type whose edges close the cycle (e.g. "child").
+    pub rel_type: String,
+}
+
+/// A relationship endpoint that resolved through a name owned by more than one
+/// note.
+///
+/// Resolution itself is unchanged (first-wins, lexicographically-smallest URL);
+/// this only records that the choice was arbitrary so the author can be told.
+/// In a genealogy repository a John Doe Sr/Jr pair makes this the likeliest way
+/// to accidentally close a [`RelationshipCycle`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmbiguousEndpoint {
+    /// The endpoint exactly as authored, e.g. "[[John Doe]]".
+    pub raw: String,
+    /// The note URL mbr resolved it to.
+    pub resolved_to: String,
+    /// The other notes sharing that name.
+    pub candidates: Vec<String>,
+}
+
+/// Maximum number of individual ambiguous-name warnings logged per index build.
+///
+/// The user repository that motivated this is 585 genealogy notes where
+/// namesakes are the norm, so the ambiguous-name count can run to dozens. One
+/// log line each would scroll every other startup warning off the screen.
+const AMBIGUOUS_WARN_CAP: usize = 20;
+
+/// One ambiguous name, ready for logging.
+pub(crate) struct AmbiguousNameReport<'a> {
+    /// The (normalised) name several notes answer to.
+    pub name: &'a str,
+    /// The note URL that wins resolution.
+    pub winner: &'a str,
+    /// The other note URLs sharing the name.
+    pub others: Vec<&'a str>,
+}
+
+/// Logs ambiguous-name warnings, capped at [`AMBIGUOUS_WARN_CAP`] individual
+/// lines plus one summary line for the remainder.
+///
+/// `kind` names the thing that was ambiguous ("relationship endpoint",
+/// "wikilink") and is interpolated into the message. Shared with
+/// [`crate::wikilink_index`], which has its own index but the identical
+/// first-wins behaviour to report on. The per-page `errors.json` payload is
+/// deliberately *not* capped — a reader only ever sees their own page's
+/// problems, so there is nothing to bury there.
+pub(crate) fn warn_ambiguous_names(kind: &str, reports: &[AmbiguousNameReport<'_>]) {
+    for report in reports.iter().take(AMBIGUOUS_WARN_CAP) {
+        tracing::warn!(
+            "ambiguous {kind} name `{}`: resolved to {}; also matched by {}. \
+             mbr always picks the first — rename a note, give it a distinguishing \
+             `aliases:` entry, or name the file explicitly to choose",
+            report.name,
+            report.winner,
+            report.others.join(", "),
+        );
+    }
+    let extra = reports.len().saturating_sub(AMBIGUOUS_WARN_CAP);
+    if extra > 0 {
+        tracing::warn!(
+            "... and {extra} more ambiguous {kind} names; each affected page lists \
+             its own in the page-problems panel"
+        );
+    }
+}
+
 /// Classifies relation types (symmetric / inverse pair / directed) and supplies
 /// display labels. Built from the configured [`RelationType`]s.
 #[derive(Debug, Clone)]
@@ -133,13 +213,21 @@ impl RelationTypeRegistry {
     /// configured and a warning naming both is logged. A type that is at once
     /// `symmetric` and `inverse` keeps its symmetric meaning (matching
     /// [`Self::predicate_object`]) and logs a warning.
+    ///
+    /// A type naming *itself* as its `inverse` is self-contradictory and is
+    /// coerced to symmetric — see [`coerce_self_inverse`].
     pub fn from_types(types: &[RelationType]) -> Self {
+        // Repair self-contradictory declarations before anything reads them, so
+        // every consumer sees one coherent definition: this registry,
+        // `canonical_key`, cycle detection, and — via the `symmetric` flag in
+        // `to_json` — the frontend's own relationship classifier.
+        let types: Vec<RelationType> = types.iter().map(coerce_self_inverse).collect();
         let configured: BTreeMap<String, RelationType> = types
             .iter()
             .map(|t| (t.name.to_lowercase(), t.clone()))
             .collect();
         Self {
-            by_name: derive_reciprocal_types(configured, types),
+            by_name: derive_reciprocal_types(configured, &types),
         }
     }
 
@@ -213,6 +301,46 @@ impl RelationTypeRegistry {
             })
             .collect();
         serde_json::Value::Array(arr)
+    }
+}
+
+/// Repairs a type that names *itself* as its `inverse`, returning the symmetric
+/// type its author meant. Any other type is returned unchanged.
+///
+/// `inverse` names the **other** half of a pair, so a self-inverse declaration is
+/// self-contradictory. Both endpoints of such an edge derive the *same*
+/// predicate, which is exactly what `symmetric = true` means — so "mutual" is
+/// almost certainly the intent.
+///
+/// Coercing (rather than tolerating) matters because a nominal inverse pair whose
+/// two halves are indistinguishable looks like a **2-cycle** to anything that
+/// orients hierarchical edges by predicate. That includes the frontend's
+/// `classifyRelationship`, which tests `symmetric` before `inverse`: left
+/// uncoerced it would take the hierarchical branch, emit two dedup keys for one
+/// logical edge, drop half of every such relationship, and tell the reader their
+/// notes each claim to be the other's ancestor — blaming their data for a config
+/// mistake. Fixing it here propagates automatically, because `symmetric` is
+/// serialised into `relationship_types` in `site.json`.
+fn coerce_self_inverse(t: &RelationType) -> RelationType {
+    let is_self_inverse = t
+        .inverse
+        .as_deref()
+        .is_some_and(|inverse| normalize_name(inverse) == normalize_name(&t.name));
+    if !is_self_inverse {
+        return t.clone();
+    }
+    tracing::warn!(
+        "relation type `{}` names itself as its own `inverse`; a type cannot be \
+         its own inverse (`inverse` names the *other* half of a pair) and both \
+         ends of such an edge mean the same thing, so it is being treated as \
+         `symmetric = true`. Declare `symmetric = true` and drop `inverse` to \
+         silence this.",
+        t.name,
+    );
+    RelationType {
+        symmetric: true,
+        inverse: None,
+        ..t.clone()
     }
 }
 
@@ -321,6 +449,16 @@ pub struct RelationshipIndex {
     by_note: ConcurrentHashMap<String, Vec<ResolvedRelationship>>,
     /// The relation-type registry (types + labels).
     registry: RelationTypeRegistry,
+    /// Member note url_path -> every hierarchical cycle it participates in.
+    ///
+    /// Keyed by *member* (not by declarer): a cycle is a property of the notes
+    /// caught in it, and those are the notes whose data has to change.
+    /// Recomputed by [`Self::rebuild`], so it always matches `by_note`.
+    cycles_by_note: ConcurrentHashMap<String, Vec<RelationshipCycle>>,
+    /// Declaring note url_path -> its own endpoints that resolved through a name
+    /// shared by several notes. Keyed by *declarer*, because that note's
+    /// frontmatter is what needs disambiguating.
+    ambiguous_by_note: ConcurrentHashMap<String, Vec<AmbiguousEndpoint>>,
 }
 
 impl RelationshipIndex {
@@ -329,6 +467,8 @@ impl RelationshipIndex {
         Self {
             by_note: ConcurrentHashMap::new(),
             registry,
+            cycles_by_note: ConcurrentHashMap::new(),
+            ambiguous_by_note: ConcurrentHashMap::new(),
         }
     }
 
@@ -356,12 +496,38 @@ impl RelationshipIndex {
     /// Resolves endpoints, attributes each edge to both endpoints, applies the
     /// registry for inverse/symmetric predicates and reverse materialisation,
     /// and dedupes reciprocal declarations.
+    /// Also detects and stores the data problems the build found (hierarchical
+    /// cycles, ambiguous endpoint names) so they can be queried per note without
+    /// re-walking the graph on the request path.
     pub fn rebuild(&self, notes: &[NoteRelInput], markdown_extensions: &[String]) {
-        let map = build_relationship_map(notes, &self.registry, markdown_extensions);
+        let built = build_relationships(notes, &self.registry, markdown_extensions);
+
         let guard = self.by_note.pin();
         guard.clear();
-        for (url, rels) in map {
+        for (url, rels) in built.by_note {
             guard.insert(Self::normalize_url_key(&url), rels);
+        }
+
+        // Invert cycles onto their members so a page lookup is a single hit.
+        let mut cycles_by_member: BTreeMap<String, Vec<RelationshipCycle>> = BTreeMap::new();
+        for cycle in &built.cycles {
+            for member in &cycle.members {
+                cycles_by_member
+                    .entry(Self::normalize_url_key(member))
+                    .or_default()
+                    .push(cycle.clone());
+            }
+        }
+        let cycles = self.cycles_by_note.pin();
+        cycles.clear();
+        for (url, member_cycles) in cycles_by_member {
+            cycles.insert(url, member_cycles);
+        }
+
+        let ambiguous = self.ambiguous_by_note.pin();
+        ambiguous.clear();
+        for (url, endpoints) in built.ambiguous_by_note {
+            ambiguous.insert(Self::normalize_url_key(&url), endpoints);
         }
     }
 
@@ -374,9 +540,42 @@ impl RelationshipIndex {
             .unwrap_or_default()
     }
 
-    /// Clears the index.
+    /// Returns the hierarchical cycles this note is a member of (empty when it
+    /// is not caught in one).
+    pub fn cycles_for(&self, url: &str) -> Vec<RelationshipCycle> {
+        self.cycles_by_note
+            .pin()
+            .get(&Self::normalize_url_key(url))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether this note is a member of a hierarchical relationship cycle.
+    ///
+    /// Cheaper than [`Self::cycles_for`] (no clone) for callers that only need
+    /// to know whether to warn.
+    pub fn is_in_cycle(&self, url: &str) -> bool {
+        self.cycles_by_note
+            .pin()
+            .get(&Self::normalize_url_key(url))
+            .is_some_and(|cycles| !cycles.is_empty())
+    }
+
+    /// Returns the endpoints *this* note declared that resolved through a name
+    /// shared by several notes (empty when none).
+    pub fn ambiguous_endpoints_for(&self, url: &str) -> Vec<AmbiguousEndpoint> {
+        self.ambiguous_by_note
+            .pin()
+            .get(&Self::normalize_url_key(url))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Clears the index, including the detected data problems.
     pub fn clear(&self) {
         self.by_note.pin().clear();
+        self.cycles_by_note.pin().clear();
+        self.ambiguous_by_note.pin().clear();
     }
 
     /// Returns the number of notes with at least one relationship.
@@ -573,6 +772,14 @@ struct NameIndex {
     by_stem: HashMap<String, String>,
     urls: HashSet<String>,
     title_by_url: HashMap<String, String>,
+    /// Normalised name -> every note URL answering to it (sorted), for names
+    /// owned by **more than one** note. Unambiguous names are absent, so the
+    /// map is empty for the overwhelmingly common case and reporting costs one
+    /// miss per endpoint.
+    ///
+    /// Detection only: resolution still goes through `by_title` / `by_alias` /
+    /// `by_stem` above, so first-wins behaviour is untouched.
+    ambiguous: HashMap<String, Vec<String>>,
 }
 
 impl NameIndex {
@@ -585,6 +792,10 @@ impl NameIndex {
         let mut by_stem = HashMap::new();
         let mut urls = HashSet::new();
         let mut title_by_url = HashMap::new();
+        // Every note answering to each name, deduped by URL so a note whose
+        // title and filename stem normalise alike is not "ambiguous" with
+        // itself. `notes` arrives sorted by URL, so each list is sorted too.
+        let mut owners: HashMap<String, Vec<String>> = HashMap::new();
         for note in notes {
             urls.insert(note.url.clone());
             title_by_url.insert(note.url.clone(), note.title.clone());
@@ -599,13 +810,34 @@ impl NameIndex {
             by_stem
                 .entry(normalize_name(&note.stem))
                 .or_insert_with(|| note.url.clone());
+
+            // An index note's stem is a filename artifact ("index"), not a name
+            // anyone means, and every repository with several `index.md` files
+            // has one per folder — counting them would report "index" as
+            // ambiguous in almost every repo. The title still participates, and
+            // resolution is untouched (`by_stem` above indexes every note).
+            let stem_as_name = (!note.is_index).then_some(&note.stem);
+            let names = std::iter::once(&note.title)
+                .chain(&note.aliases)
+                .chain(stem_as_name);
+            for name in names {
+                let entry = owners.entry(normalize_name(name)).or_default();
+                if !entry.contains(&note.url) {
+                    entry.push(note.url.clone());
+                }
+            }
         }
+        let ambiguous = owners
+            .into_iter()
+            .filter(|(_, urls)| urls.len() > 1)
+            .collect();
         Self {
             by_title,
             by_alias,
             by_stem,
             urls,
             title_by_url,
+            ambiguous,
         }
     }
 
@@ -618,29 +850,54 @@ impl NameIndex {
     ) -> ResolvedEndpoint {
         let trimmed = raw.trim();
 
-        // 1. Wikilink `[[Name]]` (supports `[[Target|Alias]]`).
-        if let Some(inner) = strip_wikilink(trimmed) {
-            let target = inner.split('|').next().unwrap_or(inner).trim();
-            return self.resolve_by_name(target, raw);
+        // Name-shaped endpoints (wikilink or bare name) go through the name
+        // index; path-shaped ones resolve through the URL space instead.
+        if let Some(name) = lookup_name(trimmed, markdown_extensions) {
+            return self.resolve_by_name(name, raw);
         }
 
-        // 2. Path-like endpoints (relative or absolute file paths).
-        if looks_like_path(trimmed, markdown_extensions) {
-            let url = path_to_url(trimmed, source_url, source_is_index, markdown_extensions);
-            if self.urls.contains(&url) {
-                let title = self
-                    .title_by_url
-                    .get(&url)
-                    .cloned()
-                    .unwrap_or_else(|| url.clone());
-                return ResolvedEndpoint::resolved(url, title, raw);
-            }
-            tracing::warn!("unresolved relationship endpoint path: {raw}");
-            return ResolvedEndpoint::unresolved(trimmed.to_string(), raw);
+        let url = path_to_url(trimmed, source_url, source_is_index, markdown_extensions);
+        if self.urls.contains(&url) {
+            let title = self
+                .title_by_url
+                .get(&url)
+                .cloned()
+                .unwrap_or_else(|| url.clone());
+            return ResolvedEndpoint::resolved(url, title, raw);
         }
+        tracing::warn!("unresolved relationship endpoint path: {raw}");
+        ResolvedEndpoint::unresolved(trimmed.to_string(), raw)
+    }
 
-        // 3. Bare name -> title then filename stem.
-        self.resolve_by_name(trimmed, raw)
+    /// The ambiguity record for an endpoint that resolved through a name owned
+    /// by more than one note, or `None` when the name is unique, the endpoint
+    /// did not resolve, or it was path-shaped (paths never consult the name
+    /// index, so they are never ambiguous).
+    ///
+    /// Derives the looked-up name with the very same [`lookup_name`] that
+    /// [`Self::resolve`] uses, so the two can never disagree about which name
+    /// was consulted.
+    fn ambiguity_for(
+        &self,
+        raw: &str,
+        resolved: &ResolvedEndpoint,
+        markdown_extensions: &[String],
+    ) -> Option<AmbiguousEndpoint> {
+        if !resolved.resolved || self.ambiguous.is_empty() {
+            return None;
+        }
+        let name = lookup_name(raw.trim(), markdown_extensions)?;
+        let owners = self.ambiguous.get(&normalize_name(name))?;
+        let candidates: Vec<String> = owners
+            .iter()
+            .filter(|url| **url != resolved.url)
+            .cloned()
+            .collect();
+        (!candidates.is_empty()).then(|| AmbiguousEndpoint {
+            raw: raw.trim().to_string(),
+            resolved_to: resolved.url.clone(),
+            candidates,
+        })
     }
 
     fn resolve_by_name(&self, name: &str, raw: &str) -> ResolvedEndpoint {
@@ -665,6 +922,22 @@ impl NameIndex {
     }
 }
 
+/// The name [`NameIndex::resolve`] looks up for an endpoint, or `None` when the
+/// endpoint is path-shaped (relative/absolute file path), which resolves through
+/// the URL space instead of the name index.
+///
+/// Handles `[[Name]]` and `[[Target|Alias]]` (the target before the pipe wins),
+/// falling through to the bare string.
+fn lookup_name<'a>(trimmed: &'a str, markdown_extensions: &[String]) -> Option<&'a str> {
+    if let Some(inner) = strip_wikilink(trimmed) {
+        return Some(inner.split('|').next().unwrap_or(inner).trim());
+    }
+    if looks_like_path(trimmed, markdown_extensions) {
+        return None;
+    }
+    Some(trimmed)
+}
+
 /// An aggregated (deduped) logical edge.
 struct AggregatedEdge {
     rel_type: String,
@@ -676,16 +949,55 @@ struct AggregatedEdge {
     declarers: HashSet<String>,
 }
 
+/// Everything a relationship build produces: the per-note map plus the
+/// data-quality findings mbr reports back to the author.
+///
+/// The findings are computed here rather than on the request path because a
+/// rebuild already has the whole graph in hand and happens once per scan.
+pub struct RelationshipBuild {
+    /// url -> resolved relationships (declared + derived), deduped.
+    pub by_note: BTreeMap<String, Vec<ResolvedRelationship>>,
+    /// Hierarchical cycles, one entry per cycle.
+    pub cycles: Vec<RelationshipCycle>,
+    /// Declaring note url -> the endpoints it declared that resolved through a
+    /// name shared by several notes.
+    pub ambiguous_by_note: BTreeMap<String, Vec<AmbiguousEndpoint>>,
+}
+
 /// Builds the full relationship map (url -> resolved relationships) from notes.
 ///
 /// Modelled on the build-mode inbound-link inversion: each declared edge is
 /// attributed to both endpoints, with the reverse materialised via the
 /// registry. Reciprocal declarations are deduped by a canonical edge key.
+///
+/// Convenience wrapper over [`build_relationships`] for callers that only need
+/// the map.
 pub fn build_relationship_map(
     notes: &[NoteRelInput],
     registry: &RelationTypeRegistry,
     markdown_extensions: &[String],
 ) -> BTreeMap<String, Vec<ResolvedRelationship>> {
+    build_relationships(notes, registry, markdown_extensions).by_note
+}
+
+/// Builds the relationship map *and* the data-quality findings, warning about
+/// each finding once.
+///
+/// See [`build_relationship_map`] for how the map itself is derived. On top of
+/// that this reports the two ways relationship data goes quietly wrong:
+///
+/// - **Hierarchical cycles** ([`detect_relationship_cycles`]) — impossible data
+///   that hangs the genealogy chart.
+/// - **Ambiguous endpoint names** — an endpoint that named a title/alias/stem
+///   shared by several notes and was resolved arbitrarily.
+///
+/// Runs once per index rebuild (server scan / file change / static build), never
+/// on the request path.
+pub fn build_relationships(
+    notes: &[NoteRelInput],
+    registry: &RelationTypeRegistry,
+    markdown_extensions: &[String],
+) -> RelationshipBuild {
     // Sort notes by URL for deterministic ambiguous-name resolution and stable
     // canonical-edge orientation.
     let mut sorted: Vec<&NoteRelInput> = notes.iter().collect();
@@ -694,6 +1006,11 @@ pub fn build_relationship_map(
     let name_index = NameIndex::build(&sorted);
 
     let mut edges: BTreeMap<(String, String, String), AggregatedEdge> = BTreeMap::new();
+    // Ambiguity findings, collected twice over: per declaring note (for
+    // `errors.json`) and per name (to warn once regardless of how many notes
+    // referenced it). Both are `BTreeMap`s so the output order is stable.
+    let mut ambiguous_by_note: BTreeMap<String, Vec<AmbiguousEndpoint>> = BTreeMap::new();
+    let mut ambiguous_by_name: BTreeMap<String, AmbiguousEndpoint> = BTreeMap::new();
 
     for note in &sorted {
         for rel in &note.relationships {
@@ -712,12 +1029,30 @@ pub fn build_relationship_map(
             let self_ep =
                 || ResolvedEndpoint::resolved(note.url.clone(), note.title.clone(), &note.title);
 
+            // Only *authored* endpoints can be ambiguous: an omitted `to`/`from`
+            // means "this note", which is never a name lookup.
+            let mut resolve_authored = |authored: &str| {
+                let endpoint =
+                    name_index.resolve(authored, &note.url, note.is_index, markdown_extensions);
+                if let Some(found) =
+                    name_index.ambiguity_for(authored, &endpoint, markdown_extensions)
+                {
+                    record_ambiguity(
+                        &mut ambiguous_by_note,
+                        &mut ambiguous_by_name,
+                        &note.url,
+                        found,
+                    );
+                }
+                endpoint
+            };
+
             let subject = match &rel.from {
-                Some(s) => name_index.resolve(s, &note.url, note.is_index, markdown_extensions),
+                Some(s) => resolve_authored(s),
                 None => self_ep(),
             };
             let object = match &rel.to {
-                Some(s) => name_index.resolve(s, &note.url, note.is_index, markdown_extensions),
+                Some(s) => resolve_authored(s),
                 None => self_ep(),
             };
 
@@ -810,7 +1145,321 @@ pub fn build_relationship_map(
         });
     }
 
-    result
+    let cycles = detect_relationship_cycles(&result, registry);
+    warn_relationship_cycles(&cycles);
+    warn_ambiguous_names(
+        "relationship endpoint",
+        &ambiguous_by_name
+            .iter()
+            .map(|(name, found)| AmbiguousNameReport {
+                name,
+                winner: &found.resolved_to,
+                others: found.candidates.iter().map(String::as_str).collect(),
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    RelationshipBuild {
+        by_note: result,
+        cycles,
+        ambiguous_by_note,
+    }
+}
+
+/// Records an ambiguous endpoint against the note that declared it *and* against
+/// the per-name table used for the capped warning summary.
+///
+/// Per-note entries are deduped so a note declaring the same ambiguous endpoint
+/// twice (e.g. as both a `parent` and a `spouse`) reports it once.
+fn record_ambiguity(
+    per_note: &mut BTreeMap<String, Vec<AmbiguousEndpoint>>,
+    per_name: &mut BTreeMap<String, AmbiguousEndpoint>,
+    declarer: &str,
+    found: AmbiguousEndpoint,
+) {
+    per_name
+        .entry(normalize_name(&found.raw))
+        .or_insert_with(|| found.clone());
+    let entries = per_note.entry(declarer.to_string()).or_default();
+    if !entries.contains(&found) {
+        entries.push(found);
+    }
+}
+
+/// Logs one warning per detected cycle, naming every member so the author knows
+/// exactly which notes to open.
+fn warn_relationship_cycles(cycles: &[RelationshipCycle]) {
+    for cycle in cycles {
+        // Repeat the first member at the end so the chain visibly closes.
+        let chain: Vec<&str> = cycle
+            .members
+            .iter()
+            .chain(cycle.members.first())
+            .map(String::as_str)
+            .collect();
+        tracing::warn!(
+            "relationship cycle over `{}`: {} — each note is the previous note's \
+             `{}`, which cannot be true in a hierarchy (nobody is their own \
+             ancestor). The genealogy chart cannot be drawn for these notes until \
+             one of those `{}` relationships is removed or corrected.",
+            cycle.rel_type,
+            chain.join(" -> "),
+            cycle.rel_type,
+            cycle.rel_type,
+        );
+    }
+}
+
+/// Detects cycles over the **hierarchical** (inverse-pair) edges of a built
+/// relationship map.
+///
+/// Symmetric types (`spouse`, `sibling`) and plain directed/unknown types are
+/// excluded: a spouse "cycle" is just a married couple, and an untyped edge
+/// carries no hierarchy promise. Only inverse pairs describe an ordering that a
+/// cycle can contradict.
+///
+/// Runs iterative Tarjan SCC per canonical relation type, then reduces each
+/// component to one concrete simple cycle. O(V+E) in the hierarchical edge set,
+/// with no recursion — a deep ancestor chain in a large repository must not be
+/// able to blow the stack of a server worker thread.
+///
+/// Output is deterministic: edges are collected into `BTreeMap`/`BTreeSet`, so
+/// node numbering, traversal order, and the reported cycle are stable across
+/// runs.
+pub fn detect_relationship_cycles(
+    map: &BTreeMap<String, Vec<ResolvedRelationship>>,
+    registry: &RelationTypeRegistry,
+) -> Vec<RelationshipCycle> {
+    let mut cycles = Vec::new();
+    for (rel_type, edges) in hierarchical_edges(map, registry) {
+        let graph = NodeGraph::from_edges(&edges);
+        for component in strongly_connected_components(&graph.adjacency) {
+            // A component is cyclic when it has several members, or when a lone
+            // member points at itself. Self-edges should be impossible (the
+            // build skips self-referential relationships) but cost nothing to
+            // handle and would otherwise be reported as "no cycle".
+            let self_looped = component.len() == 1
+                && component
+                    .first()
+                    .is_some_and(|&node| graph.adjacency[node].contains(&node));
+            if component.len() < 2 && !self_looped {
+                continue;
+            }
+            let members = simple_cycle_in(&component, &graph.adjacency)
+                .into_iter()
+                .map(|node| graph.nodes[node].to_string())
+                .collect();
+            cycles.push(RelationshipCycle {
+                members,
+                rel_type: rel_type.clone(),
+            });
+        }
+    }
+    cycles
+}
+
+/// Extracts the hierarchical edge set of a built relationship map, grouped by
+/// canonical relation type.
+///
+/// An edge `(subject, object)` reads "object is subject's `<canonical type>`" —
+/// the same orientation [`canonical_key`] picks. Because both endpoints of one
+/// logical edge carry a materialised entry, and their viewpoint predicates are
+/// exact inverses, the two entries always yield the *identical* directed edge and
+/// collapse in the `BTreeSet`.
+fn hierarchical_edges(
+    map: &BTreeMap<String, Vec<ResolvedRelationship>>,
+    registry: &RelationTypeRegistry,
+) -> BTreeMap<String, BTreeSet<(String, String)>> {
+    let mut by_type: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    for (url, rels) in map {
+        for rel in rels {
+            if !rel.resolved || rel.neighbor.is_empty() {
+                continue;
+            }
+            // The viewpoint predicate already names the neighbour's role, so it
+            // is the right label to classify: for a declared `parent` edge the
+            // object side sees `child` and vice versa.
+            let predicate = rel.predicate.to_lowercase();
+            if registry.is_symmetric(&predicate) {
+                continue;
+            }
+            let Some(inverse) = registry.inverse_of(&predicate) else {
+                continue;
+            };
+            let inverse = inverse.to_lowercase();
+            // `inverse != predicate` is guaranteed here: a self-inverse type is
+            // coerced to symmetric by `coerce_self_inverse` and so was already
+            // skipped above. That matters, because such a pair's two halves are
+            // indistinguishable and would otherwise look like a 2-cycle.
+            let (canon, edge) = if predicate <= inverse {
+                (predicate, (url.clone(), rel.neighbor.clone()))
+            } else {
+                (inverse, (rel.neighbor.clone(), url.clone()))
+            };
+            by_type
+                .entry(registry.canonical_name(&canon))
+                .or_default()
+                .insert(edge);
+        }
+    }
+    by_type
+}
+
+/// A directed graph over note URLs, interned to `usize` node ids so traversal
+/// works on flat `Vec`s instead of hashing strings.
+struct NodeGraph<'a> {
+    /// Node id -> note URL.
+    nodes: Vec<&'a str>,
+    /// Node id -> outgoing neighbour ids.
+    adjacency: Vec<Vec<usize>>,
+}
+
+impl<'a> NodeGraph<'a> {
+    /// Interns the endpoints of `edges` in iteration order. `edges` is a
+    /// `BTreeSet`, so ids (and therefore every traversal below) are assigned
+    /// deterministically.
+    fn from_edges(edges: &'a BTreeSet<(String, String)>) -> Self {
+        let mut ids: HashMap<&str, usize> = HashMap::new();
+        let mut nodes: Vec<&str> = Vec::new();
+        for (from, to) in edges {
+            for endpoint in [from.as_str(), to.as_str()] {
+                if let std::collections::hash_map::Entry::Vacant(slot) = ids.entry(endpoint) {
+                    slot.insert(nodes.len());
+                    nodes.push(endpoint);
+                }
+            }
+        }
+        let mut adjacency = vec![Vec::new(); nodes.len()];
+        for (from, to) in edges {
+            adjacency[ids[from.as_str()]].push(ids[to.as_str()]);
+        }
+        Self { nodes, adjacency }
+    }
+}
+
+/// Iterative Tarjan strongly-connected components.
+///
+/// Iterative on purpose: this runs on the server's index-rebuild path, and a
+/// recursive version's stack depth is bounded by the longest ancestor chain in
+/// the repository, which is user data.
+fn strongly_connected_components(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
+    let node_count = adjacency.len();
+    let mut index = vec![UNVISITED; node_count];
+    let mut lowlink = vec![UNVISITED; node_count];
+    let mut on_stack = vec![false; node_count];
+    let mut component_stack: Vec<usize> = Vec::new();
+    // (node, index of the next outgoing edge to visit) — the explicit call stack.
+    let mut call_stack: Vec<(usize, usize)> = Vec::new();
+    let mut next_index = 0usize;
+    let mut components: Vec<Vec<usize>> = Vec::new();
+
+    for root in 0..node_count {
+        if index[root] != UNVISITED {
+            continue;
+        }
+        index[root] = next_index;
+        lowlink[root] = next_index;
+        next_index += 1;
+        component_stack.push(root);
+        on_stack[root] = true;
+        call_stack.push((root, 0));
+
+        while let Some(&(node, edge_cursor)) = call_stack.last() {
+            if edge_cursor < adjacency[node].len() {
+                if let Some(frame) = call_stack.last_mut() {
+                    frame.1 += 1;
+                }
+                let next = adjacency[node][edge_cursor];
+                if index[next] == UNVISITED {
+                    index[next] = next_index;
+                    lowlink[next] = next_index;
+                    next_index += 1;
+                    component_stack.push(next);
+                    on_stack[next] = true;
+                    call_stack.push((next, 0));
+                } else if on_stack[next] {
+                    lowlink[node] = lowlink[node].min(index[next]);
+                }
+                continue;
+            }
+
+            // Every edge explored: `node` is a component root when nothing
+            // below it reached an earlier node.
+            call_stack.pop();
+            if lowlink[node] == index[node] {
+                let mut component = Vec::new();
+                while let Some(member) = component_stack.pop() {
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+            if let Some(&(parent, _)) = call_stack.last() {
+                lowlink[parent] = lowlink[parent].min(lowlink[node]);
+            }
+        }
+    }
+
+    components
+}
+
+/// Reduces a strongly-connected component to one concrete simple cycle.
+///
+/// Reporting the whole component would hand a genealogy author a list of every
+/// note tangled in the knot; `A -> B -> C -> A` is what they can actually go and
+/// fix. Iterative depth-first walk restricted to the component, started from its
+/// smallest node id so the result is deterministic.
+///
+/// A strongly-connected component of two or more nodes always contains a cycle,
+/// so the walk is guaranteed to find a back edge; the component itself is
+/// returned as a defensive fallback rather than reporting nothing.
+fn simple_cycle_in(component: &[usize], adjacency: &[Vec<usize>]) -> Vec<usize> {
+    let members: HashSet<usize> = component.iter().copied().collect();
+    let Some(&start) = component.iter().min() else {
+        return Vec::new();
+    };
+
+    let mut path: Vec<usize> = vec![start];
+    // node -> its position in `path` (the "grey" set of classic cycle detection).
+    let mut position_on_path: HashMap<usize, usize> = HashMap::from([(start, 0)]);
+    // Next outgoing edge to try, one entry per `path` entry.
+    let mut cursors: Vec<usize> = vec![0];
+    // Nodes already expanded; skipping them keeps the walk O(V+E).
+    let mut visited: HashSet<usize> = HashSet::from([start]);
+
+    while let Some(&node) = path.last() {
+        let Some(&cursor) = cursors.last() else {
+            break;
+        };
+        if cursor >= adjacency[node].len() {
+            path.pop();
+            cursors.pop();
+            position_on_path.remove(&node);
+            continue;
+        }
+        if let Some(slot) = cursors.last_mut() {
+            *slot += 1;
+        }
+        let next = adjacency[node][cursor];
+        if !members.contains(&next) {
+            continue;
+        }
+        if let Some(&position) = position_on_path.get(&next) {
+            return path[position..].to_vec();
+        }
+        if !visited.insert(next) {
+            continue;
+        }
+        position_on_path.insert(next, path.len());
+        path.push(next);
+        cursors.push(0);
+    }
+
+    component.to_vec()
 }
 
 /// Computes a canonical dedup key for an edge so reciprocal declarations
@@ -1137,6 +1786,90 @@ mod tests {
         // A blank `inverse` registers nothing and leaves the type directed.
         assert_eq!(reg.predicate_object("boss"), "boss");
         assert_eq!(reg.to_json().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn registry_coerces_self_inverse_type_to_symmetric() {
+        // `inverse` names the *other* half of a pair, so naming yourself is
+        // self-contradictory. Treat it as the symmetric type it describes.
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("sponsor", "sponsor")]);
+        assert!(reg.is_symmetric("sponsor"));
+        assert_eq!(reg.inverse_of("sponsor"), None);
+        // Both viewpoints now agree, which is what stops the false 2-cycle.
+        assert_eq!(reg.predicate_subject("sponsor"), "sponsor");
+        assert_eq!(reg.predicate_object("sponsor"), "sponsor");
+        // No phantom reciprocal was auto-registered from the stray `inverse`.
+        assert_eq!(reg.to_json().as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn registry_self_inverse_coercion_reaches_site_json() {
+        // This is the propagation path that fixes the frontend without any TS
+        // change: `classifyRelationship` tests `symmetric` before `inverse`, so
+        // the coerced flag makes it take the symmetric branch.
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("sponsor", "sponsor")]);
+        let json = reg.to_json();
+        let sponsor = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "sponsor")
+            .expect("type should be present");
+        assert_eq!(sponsor["symmetric"], true);
+        assert_eq!(sponsor["inverse"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn registry_self_inverse_coercion_is_case_insensitive() {
+        // `inverse = "Sponsor"` for `name = "sponsor"` is the same declaration;
+        // relation-type lookup is case-insensitive everywhere else too.
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("sponsor", "Sponsor")]);
+        assert!(reg.is_symmetric("sponsor"));
+        assert_eq!(reg.inverse_of("sponsor"), None);
+
+        // Also with surrounding whitespace and the casing reversed.
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("Peer", "  peer  ")]);
+        assert!(reg.is_symmetric("peer"));
+        assert_eq!(reg.inverse_of("peer"), None);
+    }
+
+    #[test]
+    fn registry_self_inverse_coercion_warns_naming_the_type() {
+        let (_reg, logs) = crate::test_support::capture_tracing(|| {
+            RelationTypeRegistry::from_types(&[inverse_type("sponsor", "sponsor")])
+        });
+        assert!(
+            logs.contains("`sponsor` names itself as its own `inverse`"),
+            "the warning must name the offending type, got: {logs}"
+        );
+        assert!(
+            logs.contains("symmetric = true"),
+            "the warning must say what to do instead, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn registry_normal_inverse_pair_is_untouched_by_coercion() {
+        // The genealogy defaults and half-declared pairs must be completely
+        // unaffected: only a *self*-naming inverse is coerced.
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        assert!(!reg.is_symmetric("parent"));
+        assert!(!reg.is_symmetric("child"));
+        assert_eq!(reg.inverse_of("parent").as_deref(), Some("child"));
+        assert_eq!(reg.inverse_of("child").as_deref(), Some("parent"));
+
+        let reg = RelationTypeRegistry::from_types(&half_declared_types());
+        assert!(!reg.is_symmetric("employer"));
+        assert_eq!(reg.inverse_of("employer").as_deref(), Some("employee"));
+        assert_eq!(reg.inverse_of("employee").as_deref(), Some("employer"));
+
+        // And a self-inverse type alongside normal ones only affects itself.
+        let mut types = genealogy_types();
+        types.push(inverse_type("sponsor", "sponsor"));
+        let reg = RelationTypeRegistry::from_types(&types);
+        assert!(reg.is_symmetric("sponsor"));
+        assert_eq!(reg.inverse_of("parent").as_deref(), Some("child"));
+        assert!(!reg.is_symmetric("parent"));
     }
 
     #[test]
@@ -1596,6 +2329,463 @@ mod tests {
         let reg = RelationTypeRegistry::from_types(&genealogy_types());
         let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
         assert!(map.is_empty());
+    }
+
+    // ----- cycle detection -----
+
+    /// Builds with the default genealogy types and returns the findings.
+    fn build_genealogy(notes: &[NoteRelInput]) -> RelationshipBuild {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        build_relationships(notes, &reg, &["md".to_string()])
+    }
+
+    #[test]
+    fn cycle_detection_finds_two_note_cycle() {
+        // A says B is its parent and B says A is its parent. Canonically both
+        // orient onto `child`, giving B -> A and A -> B: each is the other's
+        // ancestor, which cannot be.
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("parent", "[[B]]")]),
+            note("/b/", "B", "b", vec![rel_to("parent", "[[A]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert_eq!(built.cycles.len(), 1, "{:?}", built.cycles);
+        let cycle = &built.cycles[0];
+        assert_eq!(cycle.rel_type, "child");
+        assert_eq!(cycle.members.len(), 2, "{:?}", cycle.members);
+        assert!(cycle.members.contains(&"/a/".to_string()), "{:?}", cycle);
+        assert!(cycle.members.contains(&"/b/".to_string()), "{:?}", cycle);
+    }
+
+    #[test]
+    fn cycle_detection_finds_three_note_cycle() {
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("parent", "[[B]]")]),
+            note("/b/", "B", "b", vec![rel_to("parent", "[[C]]")]),
+            note("/c/", "C", "c", vec![rel_to("parent", "[[A]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert_eq!(built.cycles.len(), 1, "{:?}", built.cycles);
+        let mut members = built.cycles[0].members.clone();
+        members.sort();
+        assert_eq!(members, vec!["/a/", "/b/", "/c/"]);
+    }
+
+    #[test]
+    fn cycle_detection_ignores_acyclic_tree() {
+        // A textbook family: one parent, two children, one grandchild.
+        let notes = vec![
+            note(
+                "/root/",
+                "Root",
+                "root",
+                vec![rel_to("child", "[[Kid1]]"), rel_to("child", "[[Kid2]]")],
+            ),
+            note("/kid1/", "Kid1", "kid1", vec![rel_to("child", "[[Grand]]")]),
+            note("/kid2/", "Kid2", "kid2", vec![]),
+            note("/grand/", "Grand", "grand", vec![]),
+        ];
+        let built = build_genealogy(&notes);
+        assert!(built.cycles.is_empty(), "{:?}", built.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_ignores_symmetric_only_cycle() {
+        // Spouses and siblings reference each other by design; a "cycle" over
+        // symmetric edges is just a family, not bad data.
+        let notes = vec![
+            note(
+                "/a/",
+                "A",
+                "a",
+                vec![rel_to("spouse", "[[B]]"), rel_to("sibling", "[[C]]")],
+            ),
+            note("/b/", "B", "b", vec![rel_to("spouse", "[[A]]")]),
+            note("/c/", "C", "c", vec![rel_to("sibling", "[[A]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert!(built.cycles.is_empty(), "{:?}", built.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_ignores_self_inverse_type() {
+        // `{ name = "rival", inverse = "rival" }` is self-contradictory. It is
+        // coerced to symmetric at registry construction, so the symmetric check
+        // excludes it and no special case is needed here — but left uncoerced its
+        // two indistinguishable halves would look like a 2-cycle for every pair.
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("rival", "rival")]);
+        assert!(reg.is_symmetric("rival"), "coercion is what prevents this");
+
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("rival", "[[B]]")]),
+            note("/b/", "B", "b", vec![]),
+        ];
+        let built = build_relationships(&notes, &reg, &["md".to_string()]);
+        // The edge itself is still tracked, once on each note...
+        assert_eq!(built.by_note.get("/a/").unwrap().len(), 1);
+        assert_eq!(built.by_note.get("/b/").unwrap().len(), 1);
+        // ...but it is not reported as a cycle.
+        assert!(built.cycles.is_empty(), "{:?}", built.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_ignores_mutually_declared_self_inverse_type() {
+        // The shape the coordinator reproduced: both notes declare the type, so
+        // *both* viewpoints exist. Uncoerced this produced two dedup keys and a
+        // false "each is the other's ancestor" for every such pair.
+        let reg = RelationTypeRegistry::from_types(&[inverse_type("sponsor", "sponsor")]);
+        let notes = vec![
+            note(
+                "/people/one/",
+                "One",
+                "one",
+                vec![rel_to("sponsor", "[[Two]]")],
+            ),
+            note(
+                "/people/two/",
+                "Two",
+                "two",
+                vec![rel_to("sponsor", "[[One]]")],
+            ),
+        ];
+        let built = build_relationships(&notes, &reg, &["md".to_string()]);
+        assert!(built.cycles.is_empty(), "{:?}", built.cycles);
+        // Symmetric handling also collapses the reciprocal declarations into a
+        // single edge per note, rather than keeping two half-edges.
+        assert_eq!(built.by_note.get("/people/one/").unwrap().len(), 1);
+        assert_eq!(built.by_note.get("/people/two/").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cycle_detection_ignores_unknown_directed_type() {
+        // An unregistered type promises no hierarchy, so mutual `mentor` edges
+        // are not an error.
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("mentor", "[[B]]")]),
+            note("/b/", "B", "b", vec![rel_to("mentor", "[[A]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert!(built.cycles.is_empty(), "{:?}", built.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_reports_one_cycle_per_component() {
+        // Two loops sharing note A form a single strongly-connected component,
+        // so the author gets one actionable report rather than one per loop.
+        let notes = vec![
+            note(
+                "/a/",
+                "A",
+                "a",
+                vec![rel_to("child", "[[B]]"), rel_to("child", "[[C]]")],
+            ),
+            note("/b/", "B", "b", vec![rel_to("child", "[[A]]")]),
+            note("/c/", "C", "c", vec![rel_to("child", "[[A]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert_eq!(built.cycles.len(), 1, "{:?}", built.cycles);
+        // The report is a concrete simple cycle, not the whole component.
+        assert_eq!(built.cycles[0].members.len(), 2, "{:?}", built.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_is_deterministic() {
+        // Same input, byte-identical findings — the warning text and the
+        // errors.json payload must not reshuffle between runs.
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("parent", "[[B]]")]),
+            note("/b/", "B", "b", vec![rel_to("parent", "[[C]]")]),
+            note("/c/", "C", "c", vec![rel_to("parent", "[[A]]")]),
+            note("/x/", "X", "x", vec![rel_to("parent", "[[Y]]")]),
+            note("/y/", "Y", "y", vec![rel_to("parent", "[[X]]")]),
+        ];
+        let first = build_genealogy(&notes);
+        for _ in 0..5 {
+            let again = build_genealogy(&notes);
+            assert_eq!(first.cycles, again.cycles);
+        }
+        assert_eq!(first.cycles.len(), 2, "{:?}", first.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_ignores_unresolved_endpoints() {
+        // An endpoint that resolved to nothing has no node to close a loop with.
+        let notes = vec![note("/a/", "A", "a", vec![rel_to("parent", "[[Nobody]]")])];
+        let built = build_genealogy(&notes);
+        assert!(built.cycles.is_empty(), "{:?}", built.cycles);
+    }
+
+    #[test]
+    fn cycle_detection_separates_distinct_relation_types() {
+        // A `child` loop and an `employer` loop are independent findings.
+        let mut types = genealogy_types();
+        types.push(inverse_type("employer", "employee"));
+        let reg = RelationTypeRegistry::from_types(&types);
+        let notes = vec![
+            note(
+                "/a/",
+                "A",
+                "a",
+                vec![rel_to("child", "[[B]]"), rel_to("employer", "[[B]]")],
+            ),
+            note(
+                "/b/",
+                "B",
+                "b",
+                vec![rel_to("child", "[[A]]"), rel_to("employer", "[[A]]")],
+            ),
+        ];
+        let built = build_relationships(&notes, &reg, &["md".to_string()]);
+        let mut kinds: Vec<&str> = built
+            .cycles
+            .iter()
+            .map(|cycle| cycle.rel_type.as_str())
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["child", "employee"], "{:?}", built.cycles);
+    }
+
+    // ----- ambiguous endpoint names -----
+
+    #[test]
+    fn ambiguous_endpoint_is_recorded_against_the_declaring_note() {
+        // The classic genealogy trap: a John Doe Sr and a John Doe Jr.
+        let notes = vec![
+            note("/people/john-jr/", "John Doe", "john-jr", vec![]),
+            note("/people/john-sr/", "John Doe", "john-sr", vec![]),
+            note("/z/", "Zeb", "zeb", vec![rel_to("parent", "[[John Doe]]")]),
+        ];
+        let built = build_genealogy(&notes);
+
+        let found = built
+            .ambiguous_by_note
+            .get("/z/")
+            .expect("declaring note should carry the finding");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].raw, "[[John Doe]]");
+        assert_eq!(found[0].resolved_to, "/people/john-jr/");
+        assert_eq!(found[0].candidates, vec!["/people/john-sr/".to_string()]);
+
+        // Resolution behaviour is unchanged: the smallest URL still wins.
+        assert_eq!(
+            built.by_note.get("/z/").unwrap()[0].neighbor,
+            "/people/john-jr/"
+        );
+        // The namesakes themselves declared nothing, so nothing is attached to
+        // them.
+        assert!(!built.ambiguous_by_note.contains_key("/people/john-sr/"));
+        assert!(!built.ambiguous_by_note.contains_key("/people/john-jr/"));
+    }
+
+    #[test]
+    fn unambiguous_endpoint_records_nothing() {
+        let notes = vec![
+            note("/people/mary/", "Mary Doe", "mary", vec![]),
+            note("/z/", "Zeb", "zeb", vec![rel_to("spouse", "[[Mary Doe]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert!(
+            built.ambiguous_by_note.is_empty(),
+            "{:?}",
+            built.ambiguous_by_note
+        );
+    }
+
+    #[test]
+    fn note_answering_to_a_name_twice_is_not_ambiguous_with_itself() {
+        // "alpha" is both the title and the filename stem of the *same* note:
+        // one owner, not two.
+        let notes = vec![
+            note("/a/", "alpha", "alpha", vec![]),
+            note("/z/", "Zeb", "zeb", vec![rel_to("parent", "[[alpha]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        assert!(
+            built.ambiguous_by_note.is_empty(),
+            "{:?}",
+            built.ambiguous_by_note
+        );
+    }
+
+    #[test]
+    fn path_endpoint_is_never_reported_as_ambiguous() {
+        // Naming the file explicitly is precisely the fix the warning suggests,
+        // so a path endpoint must never itself be flagged.
+        let notes = vec![
+            note("/other/mary/", "Mary", "mary-other", vec![]),
+            note(
+                "/people/john/",
+                "John",
+                "john",
+                vec![rel_to("parent", "mary.md")],
+            ),
+            note("/people/mary/", "Mary", "mary", vec![]),
+        ];
+        let built = build_genealogy(&notes);
+        assert_eq!(
+            built.by_note.get("/people/john/").unwrap()[0].neighbor,
+            "/people/mary/"
+        );
+        assert!(
+            built.ambiguous_by_note.is_empty(),
+            "{:?}",
+            built.ambiguous_by_note
+        );
+    }
+
+    #[test]
+    fn ambiguous_endpoint_via_alias_is_reported() {
+        // "Mary Doe" is one note's title and another's maiden-name alias.
+        let mut alias_holder = note("/people/b-mary/", "Mary Smith", "b-mary", vec![]);
+        alias_holder.aliases = vec!["Mary Doe".into()];
+        let notes = vec![
+            note("/people/a-mary/", "Mary Doe", "a-mary", vec![]),
+            alias_holder,
+            note("/z/", "Zeb", "zeb", vec![rel_to("spouse", "[[Mary Doe]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        let found = built.ambiguous_by_note.get("/z/").expect("finding");
+        assert_eq!(found[0].resolved_to, "/people/a-mary/");
+        assert_eq!(found[0].candidates, vec!["/people/b-mary/".to_string()]);
+    }
+
+    #[test]
+    fn index_note_stems_are_not_reported_as_ambiguous() {
+        // Same rationale as the wikilink index: "index" is a filename artifact
+        // shared by every folder's index note, so it must not be treated as an
+        // ambiguous name. Resolution is unchanged.
+        let mut docs = note("/docs/", "Docs", "index", vec![]);
+        docs.is_index = true;
+        let mut guide = note("/guide/", "Guide", "index", vec![]);
+        guide.is_index = true;
+        let notes = vec![
+            docs,
+            guide,
+            note("/z/", "Zeb", "zeb", vec![rel_to("parent", "[[index]]")]),
+        ];
+        let built = build_genealogy(&notes);
+        // Still resolves first-wins...
+        assert_eq!(built.by_note.get("/z/").unwrap()[0].neighbor, "/docs/");
+        // ...but is not reported.
+        assert!(
+            built.ambiguous_by_note.is_empty(),
+            "{:?}",
+            built.ambiguous_by_note
+        );
+    }
+
+    #[test]
+    fn ambiguous_name_warnings_are_capped_with_a_summary() {
+        // A genealogy repo can have dozens of namesakes; the log must stay
+        // readable while errors.json stays complete.
+        let ambiguous_count = AMBIGUOUS_WARN_CAP + 5;
+        let mut notes = Vec::new();
+        for i in 0..ambiguous_count {
+            // Two notes share each title, and a third references it.
+            notes.push(note(
+                &format!("/a{i:02}/"),
+                &format!("Dup {i:02}"),
+                &format!("a{i:02}"),
+                vec![],
+            ));
+            notes.push(note(
+                &format!("/b{i:02}/"),
+                &format!("Dup {i:02}"),
+                &format!("b{i:02}"),
+                vec![],
+            ));
+            notes.push(note(
+                &format!("/ref{i:02}/"),
+                &format!("Ref {i:02}"),
+                &format!("ref{i:02}"),
+                vec![rel_to("parent", &format!("[[Dup {i:02}]]"))],
+            ));
+        }
+
+        let (built, logs) = crate::test_support::capture_tracing(|| build_genealogy(&notes));
+
+        // Every affected page still gets its own complete finding.
+        assert_eq!(built.ambiguous_by_note.len(), ambiguous_count);
+
+        let individual = logs
+            .matches("ambiguous relationship endpoint name `")
+            .count();
+        assert_eq!(individual, AMBIGUOUS_WARN_CAP, "{logs}");
+        assert!(
+            logs.contains("and 5 more ambiguous relationship endpoint names"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn cycle_warning_names_every_member_and_the_relation_type() {
+        let notes = vec![
+            note("/a/", "A", "a", vec![rel_to("parent", "[[B]]")]),
+            note("/b/", "B", "b", vec![rel_to("parent", "[[A]]")]),
+        ];
+        let (_built, logs) = crate::test_support::capture_tracing(|| build_genealogy(&notes));
+        assert!(logs.contains("relationship cycle over `child`"), "{logs}");
+        assert!(logs.contains("/a/"), "{logs}");
+        assert!(logs.contains("/b/"), "{logs}");
+    }
+
+    // ----- index-level queries -----
+
+    #[test]
+    fn index_exposes_cycles_per_member_note() {
+        let index = RelationshipIndex::from_relation_types(&genealogy_types());
+        index.rebuild(
+            &[
+                note("/a/", "A", "a", vec![rel_to("parent", "[[B]]")]),
+                note("/b/", "B", "b", vec![rel_to("parent", "[[A]]")]),
+                note("/c/", "C", "c", vec![rel_to("parent", "[[A]]")]),
+            ],
+            &["md".to_string()],
+        );
+
+        assert!(index.is_in_cycle("/a/"));
+        assert!(index.is_in_cycle("/b/"));
+        // C points into the cycle but is not caught in it.
+        assert!(!index.is_in_cycle("/c/"));
+        assert_eq!(index.cycles_for("/a/").len(), 1);
+        assert_eq!(index.cycles_for("/a/")[0].rel_type, "child");
+        assert!(index.cycles_for("/c/").is_empty());
+        // Lookups normalise the leading slash like `get` does.
+        assert_eq!(index.cycles_for("a/").len(), 1);
+
+        // A rebuild with corrected data clears the finding.
+        index.rebuild(
+            &[
+                note("/a/", "A", "a", vec![rel_to("parent", "[[B]]")]),
+                note("/b/", "B", "b", vec![]),
+            ],
+            &["md".to_string()],
+        );
+        assert!(!index.is_in_cycle("/a/"));
+        assert!(!index.is_in_cycle("/b/"));
+    }
+
+    #[test]
+    fn index_exposes_ambiguous_endpoints_per_declaring_note() {
+        let index = RelationshipIndex::from_relation_types(&genealogy_types());
+        index.rebuild(
+            &[
+                note("/people/john-jr/", "John Doe", "john-jr", vec![]),
+                note("/people/john-sr/", "John Doe", "john-sr", vec![]),
+                note("/z/", "Zeb", "zeb", vec![rel_to("parent", "[[John Doe]]")]),
+            ],
+            &["md".to_string()],
+        );
+
+        let found = index.ambiguous_endpoints_for("/z/");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].resolved_to, "/people/john-jr/");
+        assert_eq!(found[0].candidates, vec!["/people/john-sr/".to_string()]);
+        assert!(index.ambiguous_endpoints_for("/people/john-sr/").is_empty());
+
+        index.clear();
+        assert!(index.ambiguous_endpoints_for("/z/").is_empty());
+        assert!(!index.is_in_cycle("/z/"));
     }
 
     #[test]

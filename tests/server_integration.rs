@@ -3977,6 +3977,269 @@ async fn test_errors_json_reports_frontmatter_parse_error() {
     );
 }
 
+// ============================================================================
+// errors.json: relationship data problems (cycles, ambiguous names)
+// ============================================================================
+
+/// Two notes each claiming the other as a parent. Impossible in a real family
+/// tree, and the reason `family-chart`'s `d3.hierarchy()` allocated forever and
+/// froze the browser on the affected person pages.
+fn parent_child_cycle_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/ada.md",
+        "---\ntype: person\nrelationships:\n  - type: parent\n    to: \"[[Bob]]\"\n---\n# Ada\n",
+    );
+    repo.create_markdown(
+        "people/bob.md",
+        "---\ntype: person\nrelationships:\n  - type: parent\n    to: \"[[Ada]]\"\n---\n# Bob\n",
+    );
+    // A third note outside the loop, to prove the report is scoped to members.
+    repo.create_markdown("people/cleo.md", "---\ntype: person\n---\n# Cleo\n");
+    repo
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_relationship_cycle() {
+    let repo = parent_child_cycle_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/people/ada/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    let cycle = errors
+        .iter()
+        .find(|e| e["type"] == "relationship_cycle")
+        .unwrap_or_else(|| panic!("expected relationship_cycle in {errors:?}"));
+    assert_eq!(cycle["rel_type"], "child");
+    let members: Vec<&str> = cycle["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert!(
+        members.contains(&"/people/ada/") && members.contains(&"/people/bob/"),
+        "both cycle members should be named: {members:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_cycle_is_reported_on_every_member_but_not_others() {
+    let repo = parent_child_cycle_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    for page in ["/people/ada/", "/people/bob/"] {
+        let json: serde_json::Value = server
+            .get(&format!("{page}errors.json"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            json["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["type"] == "relationship_cycle"),
+            "{page} is a cycle member and must report it: {json:?}"
+        );
+    }
+
+    // Cleo declares nothing and is in no cycle.
+    let json: serde_json::Value = server
+        .get("/people/cleo/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !json["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "relationship_cycle"),
+        "a note outside the cycle must not be flagged: {json:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_no_cycle_when_relationship_tracking_disabled() {
+    let repo = parent_child_cycle_repo();
+    let server = TestServer::start_with_config_fn(&repo, |cfg| {
+        cfg.relationship_tracking = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/people/ada/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !json["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "relationship_cycle"),
+        "--no-relationship-tracking must report no relationship problems: {json:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_ambiguous_relationship_endpoint() {
+    // A John Doe Sr and a John Doe Jr: `to: "[[John Doe]]"` silently landed on
+    // whichever sorted first, which is how a cycle gets closed by accident.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/john-jr.md",
+        "---\ntype: person\ntitle: John Doe\n---\n# John Doe Jr\n",
+    );
+    repo.create_markdown(
+        "people/john-sr.md",
+        "---\ntype: person\ntitle: John Doe\n---\n# John Doe Sr\n",
+    );
+    repo.create_markdown(
+        "people/zeb.md",
+        "---\ntype: person\nrelationships:\n  - type: parent\n    to: \"[[John Doe]]\"\n---\n# Zeb\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/people/zeb/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    let found = errors
+        .iter()
+        .find(|e| e["type"] == "ambiguous_relationship_endpoint")
+        .unwrap_or_else(|| panic!("expected ambiguous_relationship_endpoint in {errors:?}"));
+    assert_eq!(found["raw"], "[[John Doe]]");
+    assert_eq!(found["resolved_to"], "/people/john-jr/");
+    assert_eq!(
+        found["candidates"].as_array().unwrap(),
+        &vec![serde_json::json!("/people/john-sr/")]
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_ambiguous_body_wikilink() {
+    // Same namesake problem, reached through a `[[wikilink]]` in prose rather
+    // than through frontmatter.
+    let repo = TestRepo::new();
+    repo.create_markdown("people/a-sam.md", "---\ntitle: Sam\n---\n# Sam (a)\n");
+    repo.create_markdown("people/z-sam.md", "---\ntitle: Sam\n---\n# Sam (z)\n");
+    repo.create_markdown("notes/story.md", "# Story\n\nWe met [[Sam]] that day.");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/notes/story/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    let found = errors
+        .iter()
+        .find(|e| e["type"] == "ambiguous_wikilink")
+        .unwrap_or_else(|| panic!("expected ambiguous_wikilink in {errors:?}"));
+    assert_eq!(found["raw"], "[[Sam]]");
+    assert_eq!(found["resolved_to"], "/people/a-sam/");
+    assert_eq!(
+        found["candidates"].as_array().unwrap(),
+        &vec![serde_json::json!("/people/z-sam/")]
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_frontmatter_parse_error_for_duplicate_key() {
+    // Two `to:` keys in one `relationships:` entry. yaml-rust2 aborts the whole
+    // document, so `type: person`, `born`, `aliases` and every relationship are
+    // discarded — the failure mode that made a user's notes lose their identity
+    // with nothing but an unattributed warning to show for it.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/john.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "born: 1901-05-02\n",
+            "aliases:\n",
+            "  - Johnny Doe\n",
+            "relationships:\n",
+            "  - type: parent\n",
+            "    to: \"[[Mary Doe]]\"\n",
+            "    to: \"[[Sam Doe]]\"\n",
+            "---\n",
+            "# John Doe\n",
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/people/john/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "frontmatter_parse_error"
+            && e["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("duplicated key"))),
+        "expected a duplicate-key frontmatter_parse_error in {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_errors_json_clean_relationship_data_reports_nothing() {
+    // A correct little family must stay silent — no false cycle from the
+    // reciprocal derivation, and no ambiguity from distinct names.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/parent.md",
+        "---\ntype: person\nrelationships:\n  - type: child\n    to: \"[[Kid]]\"\n---\n# Parent\n",
+    );
+    repo.create_markdown(
+        "people/kid.md",
+        "---\ntype: person\ntitle: Kid\nrelationships:\n  - type: parent\n    to: \"[[Parent]]\"\n---\n# Kid\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    for page in ["/people/parent/", "/people/kid/"] {
+        let json: serde_json::Value = server
+            .get(&format!("{page}errors.json"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let errors = json["errors"].as_array().unwrap();
+        assert!(errors.is_empty(), "{page} should be clean, got: {errors:?}");
+    }
+}
+
 // ==================== HLS Transcoding Security Tests ====================
 
 /// HLS requests must not be able to reach files outside the served root via

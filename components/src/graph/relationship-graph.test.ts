@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  breakHierarchicalCycles,
   buildRegistry,
   classifyRelationship,
   buildRelationshipGraph,
@@ -17,6 +18,7 @@ import {
   formatLifespan,
   yearOf,
   normalizeGender,
+  type GraphEdge,
   type SiteNote,
 } from './relationship-graph.js'
 import { GENEALOGY_TYPES, rel, genealogyNotes } from './test-fixtures.js'
@@ -338,6 +340,228 @@ describe('sibling exclusion', () => {
     expect(graph.edges).toHaveLength(1)
     expect(graph.edges[0].kind).toBe('symmetric')
     expect(graph.edges.some((e) => e.relType === 'sibling')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hierarchical cycle breaking
+// ---------------------------------------------------------------------------
+
+const hier = (from: string, to: string, relType = 'child'): GraphEdge => ({
+  from,
+  to,
+  kind: 'hierarchical',
+  relType,
+  label: '',
+})
+
+const directed = (from: string, to: string): GraphEdge => ({
+  from,
+  to,
+  kind: 'directed',
+  relType: 'depends_on',
+  label: 'Depends on',
+})
+
+/**
+ * Independent acyclicity check over the hierarchical edges, by Kahn's algorithm:
+ * a topological sort consumes every node exactly when the graph is acyclic.
+ * Deliberately NOT the DFS the implementation uses, so the same mistake cannot
+ * hide in both.
+ */
+function hierarchyIsAcyclic(edges: GraphEdge[]): boolean {
+  const inDegree = new Map<string, number>()
+  const outgoing = new Map<string, string[]>()
+  for (const edge of edges) {
+    if (edge.kind !== 'hierarchical') continue
+    inDegree.set(edge.from, inDegree.get(edge.from) ?? 0)
+    inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1)
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to])
+  }
+  const queue = [...inDegree].filter(([, degree]) => degree === 0).map(([node]) => node)
+  let sorted = 0
+  while (queue.length > 0) {
+    const node = queue.shift()!
+    sorted++
+    for (const next of outgoing.get(node) ?? []) {
+      const degree = (inDegree.get(next) ?? 0) - 1
+      inDegree.set(next, degree)
+      if (degree === 0) queue.push(next)
+    }
+  }
+  return sorted === inDegree.size
+}
+
+/**
+ * Notes with contradictory frontmatter: each declares the NEXT note in `chain`
+ * as its own parent, so the last one closes the loop back to the first.
+ * `classifyRelationship` canonicalizes each declaration onto `hier|child|…` with
+ * swapped endpoints, so every one of them survives de-duplication as a distinct
+ * edge — the exact shape that hangs family-chart's `d3.hierarchy()` walk.
+ */
+function parentLoop(chain: string[]): Map<string, SiteNote> {
+  const notes: SiteNote[] = chain.map((path, i) => ({
+    url_path: path,
+    frontmatter: { type: 'person', title: path },
+    relationships: [
+      rel({
+        rel_type: 'child',
+        predicate: 'parent',
+        neighbor: chain[(i + 1) % chain.length],
+        direction: 'incoming',
+      }),
+    ],
+  }))
+  return new Map(notes.map((n) => [n.url_path, n]))
+}
+
+describe('breakHierarchicalCycles', () => {
+  it('drops the back edge of a 2-cycle and keeps the rest', () => {
+    const { edges, droppedEdges } = breakHierarchicalCycles(
+      [hier('/a/', '/b/'), hier('/b/', '/a/')],
+      '/a/'
+    )
+    expect(droppedEdges).toEqual([hier('/b/', '/a/')])
+    expect(edges).toEqual([hier('/a/', '/b/')])
+    expect(hierarchyIsAcyclic(edges)).toBe(true)
+  })
+
+  it('leaves non-hierarchical cycles alone', () => {
+    // Directed/symmetric cycles are harmless (and meaningful): never touched.
+    const input = [directed('/a/', '/b/'), directed('/b/', '/a/')]
+    const { edges, droppedEdges } = breakHierarchicalCycles(input, '/a/')
+    expect(droppedEdges).toEqual([])
+    expect(edges).toEqual(input)
+  })
+
+  it('drops a self-loop', () => {
+    const { edges, droppedEdges } = breakHierarchicalCycles([hier('/a/', '/a/')], '/a/')
+    expect(droppedEdges).toEqual([hier('/a/', '/a/')])
+    expect(edges).toEqual([])
+  })
+
+  it('keeps forward and cross edges (a diamond is not a cycle)', () => {
+    const input = [hier('/a/', '/b/'), hier('/a/', '/c/'), hier('/b/', '/d/'), hier('/c/', '/d/')]
+    const { edges, droppedEdges } = breakHierarchicalCycles(input, '/a/')
+    expect(droppedEdges).toEqual([])
+    expect(edges).toEqual(input)
+    expect(hierarchyIsAcyclic(edges)).toBe(true)
+  })
+
+  it('is deterministic regardless of the input edge order', () => {
+    const cycle = [hier('/a/', '/b/'), hier('/b/', '/c/'), hier('/c/', '/a/')]
+    const forward = breakHierarchicalCycles(cycle, '/a/')
+    const reversed = breakHierarchicalCycles([...cycle].reverse(), '/a/')
+    expect(reversed.droppedEdges).toEqual(forward.droppedEdges)
+    // The focus is the first DFS root, so its own subtree survives and the edge
+    // closing back onto it is the one dropped.
+    expect(forward.droppedEdges).toEqual([hier('/c/', '/a/')])
+  })
+
+  it('handles a lineage deeper than the JS call stack (no recursion)', () => {
+    // A recursive DFS would blow the stack well before 20k frames.
+    const depth = 20_000
+    const chain: GraphEdge[] = []
+    for (let i = 0; i < depth; i++) chain.push(hier(`/n/${i}/`, `/n/${i + 1}/`))
+    chain.push(hier(`/n/${depth}/`, '/n/0/')) // closes the whole chain into a loop
+    const { edges, droppedEdges } = breakHierarchicalCycles(chain, '/n/0/')
+    expect(droppedEdges).toHaveLength(1)
+    expect(edges).toHaveLength(depth)
+    expect(hierarchyIsAcyclic(edges)).toBe(true)
+  })
+})
+
+describe('buildRelationshipGraph acyclic-hierarchy invariant', () => {
+  it('breaks a 2-cycle of mutually-declared parents', () => {
+    const graph = buildRelationshipGraph('/p/a/', parentLoop(['/p/a/', '/p/b/']), registry, 3)
+    expect(graph.nodes).toHaveLength(2)
+    expect(hierarchyIsAcyclic(graph.edges)).toBe(true)
+    expect(graph.edges.filter((e) => e.kind === 'hierarchical')).toHaveLength(1)
+    // The focus is the first DFS root, so the edge out of the focus survives.
+    expect(graph.droppedEdges).toEqual([hier('/p/b/', '/p/a/')])
+    expect(graph.edges).toEqual([hier('/p/a/', '/p/b/')])
+  })
+
+  it('breaks a 3-cycle of mutually-declared parents', () => {
+    const graph = buildRelationshipGraph(
+      '/p/a/',
+      parentLoop(['/p/a/', '/p/b/', '/p/c/']),
+      registry,
+      3
+    )
+    expect(graph.nodes).toHaveLength(3)
+    expect(hierarchyIsAcyclic(graph.edges)).toBe(true)
+    expect(graph.edges.filter((e) => e.kind === 'hierarchical')).toHaveLength(2)
+    expect(graph.droppedEdges).toEqual([hier('/p/b/', '/p/a/')])
+  })
+
+  it('drops the same edges on every build, whatever the note order', () => {
+    const chain = ['/p/a/', '/p/b/', '/p/c/']
+    const first = buildRelationshipGraph('/p/a/', parentLoop(chain), registry, 3)
+    const second = buildRelationshipGraph('/p/a/', parentLoop(chain), registry, 3)
+    // Reversed insertion order changes Map iteration order, which must not
+    // change which edge is dropped.
+    const shuffled = new Map([...parentLoop(chain)].reverse())
+    const third = buildRelationshipGraph('/p/a/', shuffled, registry, 3)
+
+    expect(second.droppedEdges).toEqual(first.droppedEdges)
+    expect(third.droppedEdges).toEqual(first.droppedEdges)
+    expect(third.edges.filter((e) => e.kind === 'hierarchical')).toEqual(
+      first.edges.filter((e) => e.kind === 'hierarchical')
+    )
+  })
+
+  it('leaves an acyclic family tree untouched', () => {
+    const graph = buildRelationshipGraph('/people/john/', genealogyNotes(), registry, 3)
+    expect(graph.droppedEdges).toEqual([])
+    expect(graph.edges).toHaveLength(10)
+    expect(hierarchyIsAcyclic(graph.edges)).toBe(true)
+  })
+
+  it('does not flag a properly reciprocal parent/child declaration', () => {
+    // The parent says "C is my child" and the child says "P is my parent". Both
+    // canonicalize to the SAME key, so they collapse into one edge — a correctly
+    // authored pair must never look like a contradiction.
+    const notes = new Map<string, SiteNote>([
+      [
+        '/p/parent/',
+        {
+          url_path: '/p/parent/',
+          frontmatter: { title: 'Parent' },
+          relationships: [
+            rel({
+              rel_type: 'child',
+              predicate: 'child',
+              neighbor: '/p/child/',
+              direction: 'outgoing',
+            }),
+          ],
+        },
+      ],
+      [
+        '/p/child/',
+        {
+          url_path: '/p/child/',
+          frontmatter: { title: 'Child' },
+          relationships: [
+            rel({
+              rel_type: 'child',
+              predicate: 'parent',
+              neighbor: '/p/parent/',
+              direction: 'incoming',
+            }),
+          ],
+        },
+      ],
+    ])
+    const graph = buildRelationshipGraph('/p/parent/', notes, registry, 2)
+    expect(graph.edges).toEqual([hier('/p/parent/', '/p/child/')])
+    expect(graph.droppedEdges).toEqual([])
+  })
+
+  it('reports no dropped edges for an unknown focus', () => {
+    expect(buildRelationshipGraph('/people/nobody/', genealogyNotes(), registry, 3).droppedEdges)
+      .toEqual([])
   })
 })
 

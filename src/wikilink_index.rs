@@ -21,11 +21,31 @@
 //! scan (and on live file changes in server mode), held behind an `Arc` on
 //! [`crate::repo::Repo`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use papaya::HashMap as ConcurrentHashMap;
 
-use crate::relationships::{NoteRelInput, normalize_name};
+use crate::relationships::{
+    AmbiguousNameReport, NoteRelInput, normalize_name, warn_ambiguous_names,
+};
+
+/// A bare body wikilink whose name is shared by several notes.
+///
+/// Resolution is unchanged (first-wins, lexicographically-smallest URL); this
+/// only records that the choice was arbitrary. Reported per page via
+/// `errors.json`, because the page containing the `[[link]]` is the one whose
+/// author has to disambiguate it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousWikilink {
+    /// The wikilink as authored, e.g. "[[John Doe]]". Reconstructed from the
+    /// link target, so a piped `[[Target|Display]]` reports as `[[Target]]` —
+    /// the target is the part that was ambiguous.
+    pub raw: String,
+    /// The note URL it resolved to.
+    pub resolved_to: String,
+    /// The other notes sharing that name.
+    pub candidates: Vec<String>,
+}
 
 /// Thread-safe global name index for `[[Name]]` body-wikilink resolution.
 pub struct WikilinkIndex {
@@ -37,6 +57,18 @@ pub struct WikilinkIndex {
     by_stem: ConcurrentHashMap<String, String>,
     /// (normalized folder, normalized stem) -> url, for current-folder-first.
     by_dir_stem: ConcurrentHashMap<(String, String), String>,
+    /// Normalized name -> every note URL answering to it (sorted), for names
+    /// owned by **more than one** note across the global title/alias/stem tiers.
+    ///
+    /// Unambiguous names are absent, so this is empty for most repositories and
+    /// [`WikilinkIndex::ambiguity_for`] short-circuits on the first lookup.
+    ambiguous_names: ConcurrentHashMap<String, Vec<String>>,
+    /// (normalized folder, normalized stem) -> every note URL in that folder
+    /// answering to the stem, when more than one does (`Japan.md` next to
+    /// `japan.md`). Needed separately because a same-folder hit wins outright:
+    /// without this, that unambiguous win would be judged against the whole-repo
+    /// name table and falsely reported.
+    ambiguous_dir_stems: ConcurrentHashMap<(String, String), Vec<String>>,
 }
 
 impl Default for WikilinkIndex {
@@ -53,6 +85,8 @@ impl WikilinkIndex {
             by_alias: ConcurrentHashMap::new(),
             by_stem: ConcurrentHashMap::new(),
             by_dir_stem: ConcurrentHashMap::new(),
+            ambiguous_names: ConcurrentHashMap::new(),
+            ambiguous_dir_stems: ConcurrentHashMap::new(),
         }
     }
 
@@ -61,6 +95,10 @@ impl WikilinkIndex {
     /// Notes are visited in sorted-URL order so ambiguous names resolve
     /// deterministically to the lexicographically-smallest URL (first insertion
     /// wins), matching [`crate::relationships`]' name resolution.
+    ///
+    /// Also records which names *are* ambiguous and warns about them (capped —
+    /// see [`warn_ambiguous_names`]). Detection only: the resolution tables above
+    /// are built exactly as before.
     pub fn rebuild(&self, notes: &[NoteRelInput]) {
         let mut sorted: Vec<&NoteRelInput> = notes.iter().collect();
         sorted.sort_by(|a, b| a.url.cmp(&b.url));
@@ -69,6 +107,10 @@ impl WikilinkIndex {
         let mut by_alias: HashMap<String, String> = HashMap::new();
         let mut by_stem: HashMap<String, String> = HashMap::new();
         let mut by_dir_stem: HashMap<(String, String), String> = HashMap::new();
+        // Owner lists for ambiguity detection. `BTreeMap` so the warning order
+        // is stable; each list stays in sorted-URL order because `sorted` is.
+        let mut name_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut dir_stem_owners: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
 
         for note in &sorted {
             by_title
@@ -83,15 +125,133 @@ impl WikilinkIndex {
             by_stem
                 .entry(stem_key.clone())
                 .or_insert_with(|| note.url.clone());
+            let dir_stem_key = (page_folder(&note.url, note.is_index), stem_key);
             by_dir_stem
-                .entry((page_folder(&note.url, note.is_index), stem_key))
+                .entry(dir_stem_key.clone())
                 .or_insert_with(|| note.url.clone());
+
+            // A note answering to the same name through two tiers (title ==
+            // stem, the common case) is not ambiguous with itself, so dedupe by
+            // URL.
+            //
+            // An index note's stem is a filename artifact, not a name anyone
+            // means: every repository with more than one `index.md` would
+            // otherwise warn that "index" is ambiguous on every single startup.
+            // Its title still participates, and resolution is untouched —
+            // `by_stem`/`by_dir_stem` above are built from every note.
+            let stem_as_name = (!note.is_index).then_some(&note.stem);
+            let names = std::iter::once(&note.title)
+                .chain(&note.aliases)
+                .chain(stem_as_name);
+            for name in names {
+                add_owner(
+                    name_owners.entry(normalize_name(name)).or_default(),
+                    &note.url,
+                );
+            }
+            add_owner(dir_stem_owners.entry(dir_stem_key).or_default(), &note.url);
         }
 
         swap_in(&self.by_title, by_title);
         swap_in(&self.by_alias, by_alias);
         swap_in(&self.by_stem, by_stem);
         swap_in(&self.by_dir_stem, by_dir_stem);
+
+        let ambiguous_names = retain_ambiguous(name_owners);
+        let ambiguous_dir_stems = retain_ambiguous(dir_stem_owners);
+        // A same-folder stem collision is also a global stem collision, so
+        // warning from the global table alone covers both without duplicating.
+        warn_ambiguous_names(
+            "wikilink",
+            &ambiguous_names
+                .iter()
+                .filter_map(|(name, urls)| {
+                    let (winner, others) = urls.split_first()?;
+                    Some(AmbiguousNameReport {
+                        name,
+                        winner,
+                        others: others.iter().map(String::as_str).collect(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        swap_in_values(&self.ambiguous_names, ambiguous_names);
+        swap_in_values(&self.ambiguous_dir_stems, ambiguous_dir_stems);
+    }
+
+    /// Reports whether a bare body wikilink resolves through a name owned by
+    /// more than one note, judged the way [`Self::resolve_wikilink`] actually
+    /// resolves.
+    ///
+    /// `name` is the raw wikilink target, exactly as passed to
+    /// [`Self::resolve_wikilink`]. Returns `None` when the name is unique, when
+    /// nothing matches, or — importantly — when a **single** same-folder note
+    /// owns the stem: that note wins outright, so however many namesakes exist
+    /// elsewhere in the repository the link is not ambiguous.
+    pub fn ambiguity_for(
+        &self,
+        name: &str,
+        current_page_url: &str,
+        current_is_index: bool,
+    ) -> Option<AmbiguousWikilink> {
+        // Almost every repository has no ambiguous names at all; keep the cost
+        // for those at one empty-map check per wikilink.
+        if self.ambiguous_names.pin().is_empty() && self.ambiguous_dir_stems.pin().is_empty() {
+            return None;
+        }
+
+        let base = match name.split_once('#') {
+            Some((base, _anchor)) => base.trim(),
+            None => name.trim(),
+        };
+        if base.is_empty() {
+            return None;
+        }
+        let key = normalize_name(base);
+
+        // Tier 1 — current folder, mirroring `resolve_wikilink`.
+        let dir_stem_key = (page_folder(current_page_url, current_is_index), key.clone());
+        if let Some(winner) = self.by_dir_stem.pin().get(&dir_stem_key).cloned() {
+            let candidates = self
+                .ambiguous_dir_stems
+                .pin()
+                .get(&dir_stem_key)
+                .map(|urls| other_candidates(urls, &winner))
+                .unwrap_or_default();
+            return Self::ambiguous(base, winner, candidates);
+        }
+
+        // Tier 2 — global fallback: title -> alias -> stem.
+        let winner = {
+            let title = self.by_title.pin();
+            let alias = self.by_alias.pin();
+            let stem = self.by_stem.pin();
+            title
+                .get(&key)
+                .or_else(|| alias.get(&key))
+                .or_else(|| stem.get(&key))
+                .cloned()
+        }?;
+        let candidates = self
+            .ambiguous_names
+            .pin()
+            .get(&key)
+            .map(|urls| other_candidates(urls, &winner))
+            .unwrap_or_default();
+        Self::ambiguous(base, winner, candidates)
+    }
+
+    /// Builds the finding, or `None` when no other note shares the name.
+    fn ambiguous(
+        base: &str,
+        resolved_to: String,
+        candidates: Vec<String>,
+    ) -> Option<AmbiguousWikilink> {
+        (!candidates.is_empty()).then(|| AmbiguousWikilink {
+            raw: format!("[[{base}]]"),
+            resolved_to,
+            candidates,
+        })
     }
 
     /// Resolves a bare body-wikilink name to an absolute URL **only** when a
@@ -169,6 +329,8 @@ impl WikilinkIndex {
         self.by_alias.pin().clear();
         self.by_stem.pin().clear();
         self.by_dir_stem.pin().clear();
+        self.ambiguous_names.pin().clear();
+        self.ambiguous_dir_stems.pin().clear();
     }
 
     /// Returns true when the index holds no entries.
@@ -178,7 +340,34 @@ impl WikilinkIndex {
             && self.by_alias.pin().is_empty()
             && self.by_stem.pin().is_empty()
             && self.by_dir_stem.pin().is_empty()
+            && self.ambiguous_names.pin().is_empty()
+            && self.ambiguous_dir_stems.pin().is_empty()
     }
+}
+
+/// Appends `url` to an owner list unless it is already there, so a note that
+/// answers to one name through several tiers counts once.
+fn add_owner(owners: &mut Vec<String>, url: &str) {
+    if !owners.iter().any(|owned| owned == url) {
+        owners.push(url.to_string());
+    }
+}
+
+/// Drops every name owned by exactly one note, leaving only the ambiguous ones.
+fn retain_ambiguous<K: Ord>(owners: BTreeMap<K, Vec<String>>) -> BTreeMap<K, Vec<String>> {
+    owners
+        .into_iter()
+        .filter(|(_, urls)| urls.len() > 1)
+        .collect()
+}
+
+/// The owners of a name other than the one resolution picked.
+fn other_candidates(owners: &[String], winner: &str) -> Vec<String> {
+    owners
+        .iter()
+        .filter(|url| *url != winner)
+        .cloned()
+        .collect()
 }
 
 /// Clears `target` and repopulates it from `source`. Mirrors the
@@ -186,6 +375,18 @@ impl WikilinkIndex {
 fn swap_in<K>(target: &ConcurrentHashMap<K, String>, source: HashMap<K, String>)
 where
     K: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+{
+    let guard = target.pin();
+    guard.clear();
+    for (key, value) in source {
+        guard.insert(key, value);
+    }
+}
+
+/// [`swap_in`] for the owner-list tables, whose values are `Vec<String>`.
+fn swap_in_values<K>(target: &ConcurrentHashMap<K, Vec<String>>, source: BTreeMap<K, Vec<String>>)
+where
+    K: Clone + Eq + Ord + std::hash::Hash + Send + Sync + 'static,
 {
     let guard = target.pin();
     guard.clear();
@@ -425,6 +626,193 @@ mod tests {
         ]);
         // From the index page /people/, `[[john]]` is a same-folder sibling.
         assert_eq!(idx.resolve_wikilink("john", "/people/", true), None);
+    }
+
+    // ----- ambiguity reporting (detection only; resolution is unchanged) -----
+
+    #[test]
+    fn ambiguity_for_reports_notes_sharing_a_title() {
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/people/john-jr/", "John Doe", "john-jr", false),
+            note("/people/john-sr/", "John Doe", "john-sr", false),
+        ]);
+
+        let found = idx
+            .ambiguity_for("John Doe", "/notes/family/", false)
+            .expect("shared title should be reported");
+        assert_eq!(found.raw, "[[John Doe]]");
+        assert_eq!(found.resolved_to, "/people/john-jr/");
+        assert_eq!(found.candidates, vec!["/people/john-sr/".to_string()]);
+
+        // Resolution itself is untouched: the smallest URL still wins.
+        assert_eq!(
+            idx.resolve_wikilink("John Doe", "/notes/family/", false),
+            Some("/people/john-jr/".to_string())
+        );
+    }
+
+    #[test]
+    fn ambiguity_for_unique_name_returns_none() {
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/people/john/", "John Doe", "john", false),
+            note("/people/mary/", "Mary Doe", "mary", false),
+        ]);
+        assert_eq!(idx.ambiguity_for("John Doe", "/x/", false), None);
+    }
+
+    #[test]
+    fn ambiguity_for_missing_name_returns_none() {
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/a/sam/", "Sam", "sam", false),
+            note("/z/sam/", "Sam", "sam", false),
+        ]);
+        // "Nobody" matches nothing, so there was no arbitrary choice to report.
+        assert_eq!(idx.ambiguity_for("Nobody", "/x/", false), None);
+    }
+
+    #[test]
+    fn ambiguity_for_same_folder_win_is_not_ambiguous() {
+        // The current-folder rule settles this outright, so however many
+        // namesakes exist elsewhere the link is unambiguous. Judging ambiguity
+        // any other way would flag links that resolve exactly as intended.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/notes/family/", "Family", "family", false),
+            note("/notes/sam/", "Sam", "sam", false),
+            note("/other/sam/", "Sam", "sam", false),
+        ]);
+
+        // From /notes/family/, `[[sam]]` hits the sibling in /notes/.
+        assert_eq!(idx.ambiguity_for("sam", "/notes/family/", false), None);
+        // From elsewhere there is no folder-local winner, so it *is* ambiguous.
+        let found = idx
+            .ambiguity_for("sam", "/elsewhere/page/", false)
+            .expect("no folder-local winner, so the global choice is arbitrary");
+        assert_eq!(found.resolved_to, "/notes/sam/");
+        assert_eq!(found.candidates, vec!["/other/sam/".to_string()]);
+    }
+
+    #[test]
+    fn ambiguity_for_same_folder_case_variants_is_reported() {
+        // `Japan.md` and `japan.md` in one folder collide on the (folder,
+        // normalized stem) key, so even the folder-local win is arbitrary.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/notes/Japan/", "Japan", "Japan", false),
+            note("/notes/japan/", "japan", "japan", false),
+            note("/notes/other/", "Other", "other", false),
+        ]);
+
+        let found = idx
+            .ambiguity_for("japan", "/notes/other/", false)
+            .expect("case-variant siblings are ambiguous");
+        assert_eq!(found.resolved_to, "/notes/Japan/");
+        assert_eq!(found.candidates, vec!["/notes/japan/".to_string()]);
+    }
+
+    #[test]
+    fn ambiguity_for_ignores_a_note_matching_through_two_tiers() {
+        // Title and stem both normalise to "alpha" on the *same* note: one
+        // owner, so nothing is ambiguous.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[note("/a/alpha/", "alpha", "alpha", false)]);
+        assert_eq!(idx.ambiguity_for("alpha", "/x/", false), None);
+    }
+
+    #[test]
+    fn ambiguity_for_strips_the_anchor() {
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/a/sam/", "Sam", "sam", false),
+            note("/z/sam/", "Sam", "sam", false),
+        ]);
+        let found = idx
+            .ambiguity_for("Sam#early-life", "/x/", false)
+            .expect("anchor must not defeat the lookup");
+        assert_eq!(found.raw, "[[Sam]]");
+        assert_eq!(found.resolved_to, "/a/sam/");
+    }
+
+    #[test]
+    fn index_note_stems_are_not_reported_as_ambiguous() {
+        // Every folder's `index.md` shares the stem "index". Reporting that
+        // would mean a spurious warning in almost every real repository, so the
+        // stem of an index note is excluded from ambiguity detection — while
+        // resolution still works exactly as before.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/docs/", "Docs", "index", true),
+            note("/guide/", "Guide", "index", true),
+            note("/notes/", "Notes", "index", true),
+        ]);
+
+        assert_eq!(idx.ambiguity_for("index", "/x/y/", false), None);
+        // Resolution is unchanged: "index" still resolves, first-wins.
+        assert_eq!(
+            idx.resolve_wikilink("index", "/x/y/", false),
+            Some("/docs/".to_string())
+        );
+        // Non-index notes sharing a stem are still reported.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/a/note/", "A", "note", false),
+            note("/z/note/", "Z", "note", false),
+        ]);
+        assert!(idx.ambiguity_for("note", "/x/y/", false).is_some());
+    }
+
+    #[test]
+    fn ambiguity_warnings_are_capped_with_a_summary() {
+        // Detection is ungated and runs for every repository, so an ambiguous-
+        // name-heavy repo must not drown the log.
+        let mut notes = Vec::new();
+        for i in 0..25 {
+            notes.push(note(
+                &format!("/a{i:02}/"),
+                &format!("Dup {i:02}"),
+                &format!("a{i:02}"),
+                false,
+            ));
+            notes.push(note(
+                &format!("/b{i:02}/"),
+                &format!("Dup {i:02}"),
+                &format!("b{i:02}"),
+                false,
+            ));
+        }
+        let idx = WikilinkIndex::new();
+        let (_built, logs) = crate::test_support::capture_tracing(|| idx.rebuild(&notes));
+
+        assert_eq!(
+            logs.matches("ambiguous wikilink name `").count(),
+            20,
+            "{logs}"
+        );
+        assert!(
+            logs.contains("and 5 more ambiguous wikilink names"),
+            "{logs}"
+        );
+        // Detection is still complete regardless of the log cap.
+        assert!(idx.ambiguity_for("Dup 24", "/x/", false).is_some());
+    }
+
+    #[test]
+    fn rebuild_clears_stale_ambiguity() {
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/a/sam/", "Sam", "sam", false),
+            note("/z/sam/", "Sam", "sam", false),
+        ]);
+        assert!(idx.ambiguity_for("Sam", "/x/", false).is_some());
+        // The duplicate is renamed; the finding must go away.
+        idx.rebuild(&[
+            note("/a/sam/", "Sam", "sam", false),
+            note("/z/sam/", "Samuel", "samuel", false),
+        ]);
+        assert_eq!(idx.ambiguity_for("Sam", "/x/", false), None);
     }
 
     #[test]

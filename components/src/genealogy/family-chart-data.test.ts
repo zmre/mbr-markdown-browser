@@ -5,8 +5,13 @@ import {
   type RelationshipGraph,
   type SiteNote,
 } from '../graph/relationship-graph.js'
-import { GENEALOGY_TYPES, genealogyNotes } from '../graph/test-fixtures.js'
-import { familyChartGender, toFamilyChartData, type FamilyChartDatum } from './family-chart-data.js'
+import { GENEALOGY_TYPES, genealogyNotes, rel } from '../graph/test-fixtures.js'
+import {
+  familyChartGender,
+  findParentChildCycle,
+  toFamilyChartData,
+  type FamilyChartDatum,
+} from './family-chart-data.js'
 
 function fixtureGraph(
   focus = '/people/john/',
@@ -124,5 +129,128 @@ describe('UNIT toFamilyChartData', () => {
     const { mainId, data } = toFamilyChartData(fixtureGraph('/people/alice/'))
     expect(mainId).toBe('/people/alice/')
     expect(data.some((d) => d.id === '/people/alice/')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// findParentChildCycle
+// ---------------------------------------------------------------------------
+
+/** A minimal datum with only the rels under test populated. */
+const datum = (id: string, rels: Partial<FamilyChartDatum['rels']> = {}): FamilyChartDatum => ({
+  id,
+  data: { label: id },
+  rels: { parents: [], spouses: [], children: [], ...rels },
+})
+
+describe('UNIT findParentChildCycle', () => {
+  it('returns null for the acyclic fixture', () => {
+    expect(findParentChildCycle(toFamilyChartData(fixtureGraph()).data)).toBeNull()
+  })
+
+  it('returns null for a lone person and for empty data', () => {
+    expect(findParentChildCycle([])).toBeNull()
+    expect(findParentChildCycle([datum('/a/')])).toBeNull()
+  })
+
+  it('finds a 2-cycle in the children rels', () => {
+    const cycle = findParentChildCycle([
+      datum('/a/', { children: ['/b/'] }),
+      datum('/b/', { children: ['/a/'] }),
+    ])
+    expect(cycle).toEqual(['/a/', '/b/'])
+  })
+
+  it('finds a cycle declared only in the parents rels', () => {
+    // `toFamilyChartData` writes both directions, but `calculateTree` walks
+    // `parents` through d3.hierarchy() too, so a one-sided loop still hangs.
+    const cycle = findParentChildCycle([
+      datum('/a/', { parents: ['/b/'] }),
+      datum('/b/', { parents: ['/a/'] }),
+    ])
+    expect(cycle).toEqual(['/a/', '/b/'])
+  })
+
+  it('returns the members of a 3-cycle in traversal order', () => {
+    // The loop closes from the LAST id back to the first: a → b → c → a.
+    const cycle = findParentChildCycle([
+      datum('/a/', { children: ['/b/'] }),
+      datum('/b/', { children: ['/c/'] }),
+      datum('/c/', { children: ['/a/'] }),
+    ])
+    expect(cycle).toEqual(['/a/', '/b/', '/c/'])
+  })
+
+  it('reports only the looping members, not the tail that led into them', () => {
+    const cycle = findParentChildCycle([
+      datum('/root/', { children: ['/a/'] }),
+      datum('/a/', { children: ['/b/'] }),
+      datum('/b/', { children: ['/a/'] }),
+    ])
+    expect(cycle).toEqual(['/a/', '/b/'])
+  })
+
+  it('is not fooled by a diamond, shared children, or dangling ids', () => {
+    // Two parents of one child, plus a reference to a person not in the data.
+    expect(
+      findParentChildCycle([
+        datum('/mum/', { children: ['/kid/', '/ghost/'] }),
+        datum('/dad/', { children: ['/kid/'] }),
+        datum('/kid/', { parents: ['/mum/', '/dad/'] }),
+      ])
+    ).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Regression: a contradictory family tree must still render
+// ---------------------------------------------------------------------------
+
+describe('REGRESSION cyclic relationships never reach family-chart', () => {
+  /** Two notes that each declare the other as their own parent. */
+  function contradictoryPair(): Map<string, SiteNote> {
+    const notes: SiteNote[] = [
+      {
+        url_path: '/p/a/',
+        frontmatter: { type: 'person', title: 'Ann' },
+        relationships: [
+          rel({ rel_type: 'child', predicate: 'parent', neighbor: '/p/b/', direction: 'incoming' }),
+        ],
+      },
+      {
+        url_path: '/p/b/',
+        frontmatter: { type: 'person', title: 'Bob' },
+        relationships: [
+          rel({ rel_type: 'child', predicate: 'parent', neighbor: '/p/a/', direction: 'incoming' }),
+        ],
+      },
+    ]
+    return new Map(notes.map((n) => [n.url_path, n]))
+  }
+
+  it('lays out a tree for mutually-declared parents', async () => {
+    const graph = buildRelationshipGraph(
+      '/p/a/',
+      contradictoryPair(),
+      buildRegistry(GENEALOGY_TYPES)
+    )
+    const { data, mainId } = toFamilyChartData(graph)
+
+    // ORDER MATTERS — assert acyclicity FIRST and only call `calculateTree` if
+    // it holds. family-chart hands this data straight to `d3.hierarchy()`, which
+    // has NO cycle detection: on a regression `calculateTree` would allocate
+    // until the vitest worker is OOM-killed instead of failing cleanly.
+    expect(graph.droppedEdges).toHaveLength(1)
+    expect(findParentChildCycle(data)).toBeNull()
+
+    const { calculateTree } = await import('family-chart')
+    const tree = calculateTree(data as unknown as Parameters<typeof calculateTree>[0], {
+      main_id: mainId,
+      // Matches family-chart-view.ts's setSingleParentEmptyCard(false).
+      single_parent_empty_card: false,
+    })
+    expect(tree.main_id).toBe(mainId)
+    expect(tree.data.length).toBeGreaterThan(0)
+    expect(tree.data.map((node) => node.data.id)).toContain('/p/b/')
   })
 })

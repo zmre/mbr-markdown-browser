@@ -28,15 +28,113 @@ interface FrontmatterParseError {
   message: string;
 }
 
+/**
+ * A parent/child (or other inverse-pair) loop in the typed relationships. The
+ * genealogy chart cannot lay out a cyclic hierarchy, so one of the closing
+ * edges is discarded — see `breakHierarchicalCycles` in
+ * `graph/relationship-graph.ts`.
+ */
+interface RelationshipCycleError {
+  type: 'relationship_cycle';
+  /** Note `url_path`s taking part in the loop, in traversal order. */
+  members: string[];
+  /** Canonical relationship type whose edges close the loop, e.g. "child". */
+  rel_type: string;
+}
+
+/**
+ * A relationship endpoint that matched several notes and was resolved to the
+ * first one silently.
+ */
+interface AmbiguousRelationshipEndpointError {
+  type: 'ambiguous_relationship_endpoint';
+  raw: string;
+  resolved_to: string;
+  candidates: string[];
+}
+
+/** The same ambiguity, for a `[[wikilink]]` in the page body. */
+interface AmbiguousWikilinkError {
+  type: 'ambiguous_wikilink';
+  raw: string;
+  resolved_to: string;
+  candidates: string[];
+}
+
+/**
+ * Both ambiguity variants carry an identical payload, so one renderer serves
+ * both and only the heading differs.
+ */
+type AmbiguousNameError =
+  | AmbiguousRelationshipEndpointError
+  | AmbiguousWikilinkError;
+
 type PageErrorEntry =
   | BrokenInternalLinkError
   | BrokenMediaReferenceError
   | UnresolvedWikilinkError
-  | FrontmatterParseError;
+  | FrontmatterParseError
+  | RelationshipCycleError
+  | AmbiguousNameError;
 
 interface PageErrorsResponse {
   page_url: string;
   errors: PageErrorEntry[];
+}
+
+/**
+ * Singular / plural wording per problem type, in the order the detail groups
+ * are rendered below, so the summary reads in the same order as the panel.
+ */
+const ERROR_LABELS: ReadonlyArray<
+  readonly [PageErrorEntry['type'], string, string]
+> = [
+  ['broken_internal_link', 'broken link', 'broken links'],
+  [
+    'broken_media_reference',
+    'broken media reference',
+    'broken media references',
+  ],
+  ['unresolved_wikilink', 'unresolved wikilink', 'unresolved wikilinks'],
+  [
+    'frontmatter_parse_error',
+    'frontmatter parse error',
+    'frontmatter parse errors',
+  ],
+  ['relationship_cycle', 'relationship cycle', 'relationship cycles'],
+  [
+    'ambiguous_relationship_endpoint',
+    'ambiguous relationship name',
+    'ambiguous relationship names',
+  ],
+  ['ambiguous_wikilink', 'ambiguous wikilink', 'ambiguous wikilinks'],
+];
+
+/**
+ * One-line summary naming ONLY the problem types actually present.
+ *
+ * Enumerating every type — "0 broken links, 0 broken media references, 1
+ * frontmatter parse error, 0 relationship cycles, …" — buries the one real
+ * problem in noise, and gets worse with each type added. Zero-count types are
+ * therefore omitted entirely.
+ *
+ * Returns '' for an empty list; the panel is not rendered in that case.
+ */
+export function summarizePageErrors(errors: PageErrorEntry[]): string {
+  const phrases = ERROR_LABELS.flatMap(([type, singular, plural]) => {
+    const count = errors.filter((e) => e.type === type).length;
+    return count === 0 ? [] : [`${count} ${count === 1 ? singular : plural}`];
+  });
+  if (phrases.length === 0) return '';
+  const last = phrases[phrases.length - 1];
+  const listed =
+    phrases.length === 1
+      ? last
+      : // Oxford comma from three items up; a bare "and" for exactly two.
+        phrases.length === 2
+        ? `${phrases[0]} and ${last}`
+        : `${phrases.slice(0, -1).join(', ')}, and ${last}`;
+  return `Detected ${listed}.`;
 }
 
 declare global {
@@ -132,10 +230,6 @@ export class MbrPageErrorsElement extends LitElement {
     else this._open();
   }
 
-  private _countByType(t: PageErrorEntry['type']): number {
-    return this._errors.filter((e) => e.type === t).length;
-  }
-
   private _renderLinkGroup(): TemplateResult | typeof nothing {
     const items = this._errors.filter(
       (e): e is BrokenInternalLinkError => e.type === 'broken_internal_link'
@@ -218,6 +312,86 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
+  private _renderRelationshipCycleGroup(): TemplateResult | typeof nothing {
+    const items = this._errors.filter(
+      (e): e is RelationshipCycleError => e.type === 'relationship_cycle'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Relationship cycles (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`
+              <li>
+                <span class="kind">[${e.rel_type}]</span>
+                <code class="target">${e.members.join(' → ')}</code>
+                <span class="text">
+                  — each of these notes claims to be an ancestor of the next,
+                  which makes the family chart unrenderable until one of the
+                  links is corrected.
+                </span>
+              </li>
+            `
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
+  /** Shared renderer for the two identically-shaped ambiguity variants. */
+  private _renderAmbiguousGroup(
+    heading: string,
+    items: AmbiguousNameError[]
+  ): TemplateResult | typeof nothing {
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>${heading} (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`
+              <li>
+                <code class="target">${e.raw}</code>
+                <span class="text"> — resolved to </span>
+                <code class="target">${e.resolved_to}</code>
+                ${e.candidates.length > 0
+                  ? html`<div class="candidates">
+                      <span class="text">also matches:</span>
+                      ${e.candidates.map(
+                        (c) => html`<code class="target">${c}</code>`
+                      )}
+                    </div>`
+                  : nothing}
+              </li>
+            `
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
+  private _renderAmbiguousEndpointGroup(): TemplateResult | typeof nothing {
+    return this._renderAmbiguousGroup(
+      'Ambiguous relationship names',
+      this._errors.filter(
+        (e): e is AmbiguousRelationshipEndpointError =>
+          e.type === 'ambiguous_relationship_endpoint'
+      )
+    );
+  }
+
+  private _renderAmbiguousWikilinkGroup(): TemplateResult | typeof nothing {
+    return this._renderAmbiguousGroup(
+      'Ambiguous wikilinks',
+      this._errors.filter(
+        (e): e is AmbiguousWikilinkError => e.type === 'ambiguous_wikilink'
+      )
+    );
+  }
+
   private _renderTrigger(): TemplateResult {
     const count = this._errors.length;
     const label = `This page has ${count} problem${count === 1 ? '' : 's'}`;
@@ -251,26 +425,14 @@ export class MbrPageErrorsElement extends LitElement {
             Page Problems
             <span class="total-count">(${this._errors.length})</span>
           </h2>
-          <p class="summary">
-            Detected
-            ${this._countByType('broken_internal_link')} broken
-            link${this._countByType('broken_internal_link') === 1 ? '' : 's'},
-            ${this._countByType('broken_media_reference')} broken media
-            reference${this._countByType('broken_media_reference') === 1
-              ? ''
-              : 's'},
-            ${this._countByType('unresolved_wikilink')} unresolved
-            wikilink${this._countByType('unresolved_wikilink') === 1 ? '' : 's'},
-            and
-            ${this._countByType('frontmatter_parse_error')} frontmatter parse
-            error${this._countByType('frontmatter_parse_error') === 1
-              ? ''
-              : 's'}.
-          </p>
+          <p class="summary">${summarizePageErrors(this._errors)}</p>
           ${this._renderLinkGroup()}
           ${this._renderMediaGroup()}
           ${this._renderWikilinkGroup()}
           ${this._renderFrontmatterGroup()}
+          ${this._renderRelationshipCycleGroup()}
+          ${this._renderAmbiguousEndpointGroup()}
+          ${this._renderAmbiguousWikilinkGroup()}
         </div>
       </aside>
     `;
@@ -468,6 +630,15 @@ export class MbrPageErrorsElement extends LitElement {
     .text {
       color: var(--pico-muted-color, #666);
       font-style: italic;
+    }
+
+    .candidates {
+      margin-top: 0.2rem;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.85em;
     }
 
     @media (min-width: 768px) {
