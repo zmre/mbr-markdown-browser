@@ -152,7 +152,8 @@ Endpoints may be:
 If an endpoint can't be resolved, the raw string is kept for display and a
 warning is emitted — a broken relationship never fails a render or build.
 Ambiguous names (two notes with the same title) resolve deterministically to
-the note with the lexicographically smallest URL.
+the note with the lexicographically smallest URL, and mbr now tells you when it
+had to make that choice — see [Data problems mbr reports](#data-problems-mbr-reports).
 
 Body `[[Wikilinks]]` in page text resolve the same global way as relationship
 endpoints: the current folder is preferred, otherwise the first matching note in
@@ -393,7 +394,97 @@ The graph JS is a lazy chunk (`/.mbr/components/mbr-graph.min.js`, d3-force,
 tracking is disabled (`--no-link-tracking` / `link_tracking = false`), there is
 no `links.json` and the graph section simply doesn't appear.
 
+## Data problems mbr reports
+
+Relationship data goes wrong quietly: nothing 404s, nothing fails the build, and
+the note just renders with the wrong family. mbr detects the following and
+reports each one **twice** — once as a `WARN` line when the index is built (both
+`mbr -s` and `mbr -b`), and once on the affected page itself in the
+**page-problems panel**, which is server/GUI only. Static builds are never
+changed by any of this.
+
+### Relationship cycles
+
+A `parent`/`child` chain that loops back on itself — "A is B's parent, B is A's
+parent", or any longer ring. This cannot be true of a real family tree, and it
+is actively harmful: the genealogy chart walks the hierarchy and a cycle makes it
+unrenderable. mbr reports the loop with every note in it:
+
+```text
+WARN relationship cycle over `child`: /people/ada/ -> /people/bob/ -> /people/ada/
+     — each note is the previous note's `child`, which cannot be true in a
+     hierarchy (nobody is their own ancestor). ...
+```
+
+Open any note named in the chain and remove or correct the offending edge. Only
+**hierarchical** types are checked — the halves of an inverse pair like
+`parent`/`child` or `employer`/`employee`. Symmetric types (`spouse`, `sibling`)
+and untyped edges cycle legitimately and are never reported.
+
+The most common way to create one by accident is an ambiguous name (below)
+attaching an edge to the wrong namesake.
+
+### Ambiguous names
+
+Two notes answering to one name — a John Doe Sr and a John Doe Jr, a maiden name
+that is also someone else's title. mbr resolves these first-wins (smallest URL)
+and always has; what is new is that it says so, for both relationship endpoints
+and body `[[Wikilinks]]`:
+
+```text
+WARN ambiguous relationship endpoint name `[[john doe]]`: resolved to
+     /people/john-jr/; also matched by /people/john-sr/. mbr always picks the
+     first — rename a note, give it a distinguishing `aliases:` entry, or name
+     the file explicitly to choose
+```
+
+To disambiguate, pick any of:
+
+- Give the notes distinct titles (`title: John Doe Sr`).
+- Add an `aliases:` entry that is unique to one of them and reference that.
+- Name the file explicitly instead of using a name: `to: people/john-sr.md`. A
+  path endpoint is never ambiguous.
+
+A relationship-endpoint problem is reported on the note that **declared** the
+endpoint; a wikilink problem on the page that **contains** the link. Namesakes
+that merely share a name and declare nothing are not flagged.
+
+Genealogy repositories can have dozens of shared names, so the startup log shows
+at most 20 individual warnings followed by a one-line summary of the rest. The
+page-problems panel is never truncated — each page always lists all of its own.
+
+### Frontmatter parse errors
+
+A single YAML mistake discards the **entire** frontmatter block, not just the bad
+line: `type: person`, `born`, `aliases` and every `relationships` entry vanish at
+once. A duplicated key is the easy one to write by hand:
+
+```yaml
+relationships:
+  - type: parent
+    to: "[[Mary Doe]]"
+    to: "[[Sam Doe]]"   # second `to:` — the whole block is now discarded
+```
+
+(Use two separate list entries.) The warning names the file:
+
+```text
+WARN Failed to parse YAML frontmatter: String("to"): duplicated key in mapping
+     at byte 117 line 8 column 9; the whole frontmatter block (including any
+     `aliases` and `relationships`) is ignored for this note
+     path=/notes/people/john.md
+```
+
+Watch for this when other notes suddenly report unresolved endpoints: if a note
+loses its `aliases`, every note that referred to it by an alias stops resolving,
+so one parse error can look like a dozen unrelated broken relationships.
+
 ## Configuration
+
+No configuration is needed — reporting is always on and adds no options. It
+follows the feature it describes: `--no-relationship-tracking` turns off
+relationship tracking and its reports along with it, and the page-problems panel
+as a whole is gated on link tracking.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

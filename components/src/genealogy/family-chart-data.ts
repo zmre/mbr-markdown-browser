@@ -17,6 +17,13 @@
  * `spouses` lists. All edges in `RelationshipGraph` connect included nodes, so
  * no dangling ids are possible; sibling and unresolved relationships were
  * already excluded upstream in `buildRelationshipGraph`.
+ *
+ * The same upstream contract also guarantees ACYCLIC parent/child rels
+ * (`buildRelationshipGraph` breaks hierarchical cycles), which family-chart
+ * requires: its `calculateTree()` walks the rels with `d3.hierarchy()`, which
+ * has no cycle detection and allocates forever on a loop. `findParentChildCycle`
+ * below re-checks that here so a regression upstream surfaces as a message
+ * instead of a frozen tab.
  */
 import type { RelationshipGraph } from '../graph/relationship-graph.js'
 
@@ -92,4 +99,68 @@ export function toFamilyChartData(graph: RelationshipGraph): FamilyChartData {
   }
 
   return { data: [...byId.values()], mainId: graph.focus }
+}
+
+/**
+ * Find a parent/child cycle in family-chart data, or return `null` when there is
+ * none.
+ *
+ * The returned array lists the ids taking part in the loop in traversal order;
+ * the cycle closes from the LAST id back to the first (e.g. `['/a/', '/b/']`
+ * means a → b → a).
+ *
+ * Both rel directions are checked independently, even though `toFamilyChartData`
+ * writes them symmetrically: `calculateTree()` runs `d3.hierarchy()` over
+ * `children` AND over `parents`, so a loop in either one is fatal.
+ *
+ * Iterative DFS (no recursion — a deep lineage could exceed the JS stack).
+ * O(V + E).
+ */
+export function findParentChildCycle(data: FamilyChartDatum[]): string[] | null {
+  const ids = data.map((d) => d.id)
+  const children = new Map<string, string[]>()
+  const parents = new Map<string, string[]>()
+  for (const datum of data) {
+    children.set(datum.id, datum.rels.children)
+    parents.set(datum.id, datum.rels.parents)
+  }
+  return findCycle(children, ids) ?? findCycle(parents, ids)
+}
+
+/**
+ * Depth-first cycle search over one adjacency map, returning the cycle's members
+ * in traversal order. Ids absent from the map (dangling references) are skipped
+ * rather than treated as nodes.
+ */
+function findCycle(adjacency: Map<string, string[]>, ids: string[]): string[] | null {
+  const ON_STACK = 1
+  const FINISHED = 2
+  const state = new Map<string, typeof ON_STACK | typeof FINISHED>()
+
+  for (const root of ids) {
+    if (state.has(root)) continue
+    state.set(root, ON_STACK)
+    // `path` mirrors `stack`, so a back edge yields the cycle members directly.
+    const path: string[] = [root]
+    const stack: Array<{ id: string; next: number }> = [{ id: root, next: 0 }]
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]
+      const out = adjacency.get(frame.id)
+      if (!out || frame.next >= out.length) {
+        state.set(frame.id, FINISHED)
+        stack.pop()
+        path.pop()
+        continue
+      }
+      const id = out[frame.next++]
+      if (!adjacency.has(id)) continue
+      const seen = state.get(id)
+      if (seen === ON_STACK) return path.slice(path.indexOf(id))
+      if (seen === FINISHED) continue
+      state.set(id, ON_STACK)
+      path.push(id)
+      stack.push({ id, next: 0 })
+    }
+  }
+  return null
 }

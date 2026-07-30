@@ -70,6 +70,8 @@ pub mod server;
 pub mod sorting;
 pub mod tag_index;
 pub mod templates;
+#[cfg(test)]
+mod test_support;
 pub mod url_path;
 pub mod vid;
 #[cfg(feature = "media-metadata")]

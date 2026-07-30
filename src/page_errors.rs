@@ -13,6 +13,14 @@
 //! 3. Unresolved wikilinks — literal `[[...]]` substrings that escaped
 //!    `transform_wikilinks` (see `src/wikilink.rs`). Skipped inside `<code>`
 //!    and `<pre>` blocks.
+//! 4. Frontmatter parse errors — a YAML error discards the *whole* block, so
+//!    otherwise-valid fields vanish; the captured message is surfaced verbatim.
+//! 5. Relationship data problems — hierarchical (parent/child) cycles and
+//!    endpoints that resolved through a name shared by several notes. Both are
+//!    detected once per index rebuild (see `src/relationships.rs`) and only
+//!    looked up here.
+//! 6. Ambiguous body wikilinks — a `[[Name]]` several notes answer to, detected
+//!    during the render (see `src/wikilink_index.rs`).
 //!
 //! Designed to be cheap: each validator is a pure function and is expected to
 //! run on-demand for a single page render. The module is never invoked from
@@ -27,7 +35,9 @@ use crate::link_index::{OutboundLink, resolve_relative_url};
 use crate::path_resolver::{
     PathResolverConfig, ResolvedPath, normalize_link_target, resolve_request_path,
 };
+use crate::relationships::{AmbiguousEndpoint, RelationshipCycle};
 use crate::url_path::is_external_url;
+use crate::wikilink_index::AmbiguousWikilink;
 
 /// Type of media element whose `src` attribute is broken.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +68,34 @@ pub enum PageError {
     /// The YAML frontmatter block failed to parse, so the entire frontmatter
     /// (including otherwise-valid fields) was discarded.
     FrontmatterParseError { message: String },
+    /// Two or more notes form a parent/child cycle, which is impossible in a real
+    /// family tree and makes the genealogy chart unrenderable.
+    RelationshipCycle {
+        /// Note URLs in the cycle, in traversal order.
+        members: Vec<String>,
+        /// Canonical relation type whose edges close the cycle (e.g. "child").
+        rel_type: String,
+    },
+    /// A relationship endpoint named a title/alias shared by several notes; mbr
+    /// silently resolved it to one of them.
+    AmbiguousRelationshipEndpoint {
+        /// The endpoint as authored, e.g. "[[John Doe]]".
+        raw: String,
+        /// The note URL it resolved to.
+        resolved_to: String,
+        /// The other notes sharing that name.
+        candidates: Vec<String>,
+    },
+    /// A `[[Wikilink]]` in the body named a title/stem shared by several notes;
+    /// mbr silently resolved it to one of them.
+    AmbiguousWikilink {
+        /// The wikilink as authored, e.g. "[[John Doe]]".
+        raw: String,
+        /// The note URL it resolved to.
+        resolved_to: String,
+        /// The other notes sharing that name.
+        candidates: Vec<String>,
+    },
 }
 
 /// Response payload for `GET /{page}/errors.json`.
@@ -272,6 +310,51 @@ pub fn frontmatter_parse_errors(err: &Option<String>) -> Vec<PageError> {
     err.iter()
         .map(|message| PageError::FrontmatterParseError {
             message: message.clone(),
+        })
+        .collect()
+}
+
+/// Wraps the hierarchical relationship cycles a page is a member of (from
+/// [`crate::relationships::RelationshipIndex::cycles_for`]) into the page-error
+/// list.
+///
+/// Attached to every note *in* the cycle rather than to whichever note declared
+/// the closing edge: the data is wrong across the whole loop, and any member is
+/// a valid place to break it.
+pub fn relationship_cycle_errors(cycles: &[RelationshipCycle]) -> Vec<PageError> {
+    cycles
+        .iter()
+        .map(|cycle| PageError::RelationshipCycle {
+            members: cycle.members.clone(),
+            rel_type: cycle.rel_type.clone(),
+        })
+        .collect()
+}
+
+/// Wraps the ambiguous relationship endpoints a page *declared* (from
+/// [`crate::relationships::RelationshipIndex::ambiguous_endpoints_for`]) into
+/// the page-error list.
+pub fn ambiguous_relationship_endpoint_errors(endpoints: &[AmbiguousEndpoint]) -> Vec<PageError> {
+    endpoints
+        .iter()
+        .map(|endpoint| PageError::AmbiguousRelationshipEndpoint {
+            raw: endpoint.raw.clone(),
+            resolved_to: endpoint.resolved_to.clone(),
+            candidates: endpoint.candidates.clone(),
+        })
+        .collect()
+}
+
+/// Wraps the ambiguous body wikilinks found while rendering a page (from
+/// [`crate::markdown::MarkdownRenderResult::ambiguous_wikilinks`]) into the
+/// page-error list.
+pub fn ambiguous_wikilink_errors(wikilinks: &[AmbiguousWikilink]) -> Vec<PageError> {
+    wikilinks
+        .iter()
+        .map(|wikilink| PageError::AmbiguousWikilink {
+            raw: wikilink.raw.clone(),
+            resolved_to: wikilink.resolved_to.clone(),
+            candidates: wikilink.candidates.clone(),
         })
         .collect()
 }
@@ -859,6 +942,105 @@ mod tests {
             &errs[0],
             PageError::FrontmatterParseError { message } if message == "bad yaml"
         ));
+    }
+
+    // The three variants below are a pinned wire contract shared with
+    // `mbr-page-errors.ts`. The assertions spell out the exact JSON on purpose:
+    // renaming a field here silently breaks the frontend, and a full-string
+    // comparison is what makes that impossible to miss.
+
+    #[test]
+    fn relationship_cycle_serializes_to_the_pinned_shape() {
+        let err = PageError::RelationshipCycle {
+            members: vec!["/a/".to_string(), "/b/".to_string()],
+            rel_type: "child".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"type":"relationship_cycle","members":["/a/","/b/"],"rel_type":"child"}"#
+        );
+    }
+
+    #[test]
+    fn ambiguous_relationship_endpoint_serializes_to_the_pinned_shape() {
+        let err = PageError::AmbiguousRelationshipEndpoint {
+            raw: "[[John Doe]]".to_string(),
+            resolved_to: "/people/john-jr/".to_string(),
+            candidates: vec!["/people/john-sr/".to_string()],
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"type":"ambiguous_relationship_endpoint","raw":"[[John Doe]]","resolved_to":"/people/john-jr/","candidates":["/people/john-sr/"]}"#
+        );
+    }
+
+    #[test]
+    fn ambiguous_wikilink_serializes_to_the_pinned_shape() {
+        let err = PageError::AmbiguousWikilink {
+            raw: "[[John Doe]]".to_string(),
+            resolved_to: "/people/john-jr/".to_string(),
+            candidates: vec!["/people/john-sr/".to_string()],
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"type":"ambiguous_wikilink","raw":"[[John Doe]]","resolved_to":"/people/john-jr/","candidates":["/people/john-sr/"]}"#
+        );
+    }
+
+    #[test]
+    fn relationship_cycle_errors_maps_every_cycle() {
+        let cycles = vec![
+            RelationshipCycle {
+                members: vec!["/a/".to_string(), "/b/".to_string()],
+                rel_type: "child".to_string(),
+            },
+            RelationshipCycle {
+                members: vec!["/x/".to_string(), "/y/".to_string()],
+                rel_type: "employee".to_string(),
+            },
+        ];
+        let errs = relationship_cycle_errors(&cycles);
+        assert_eq!(errs.len(), 2);
+        assert!(matches!(
+            &errs[0],
+            PageError::RelationshipCycle { rel_type, members }
+                if rel_type == "child" && members.len() == 2
+        ));
+        assert!(relationship_cycle_errors(&[]).is_empty());
+    }
+
+    #[test]
+    fn ambiguous_relationship_endpoint_errors_preserves_all_candidates() {
+        let endpoints = vec![AmbiguousEndpoint {
+            raw: "[[Sam]]".to_string(),
+            resolved_to: "/a/sam/".to_string(),
+            candidates: vec!["/m/sam/".to_string(), "/z/sam/".to_string()],
+        }];
+        let errs = ambiguous_relationship_endpoint_errors(&endpoints);
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            PageError::AmbiguousRelationshipEndpoint { raw, resolved_to, candidates }
+                if raw == "[[Sam]]" && resolved_to == "/a/sam/" && candidates.len() == 2
+        ));
+        assert!(ambiguous_relationship_endpoint_errors(&[]).is_empty());
+    }
+
+    #[test]
+    fn ambiguous_wikilink_errors_preserves_all_candidates() {
+        let wikilinks = vec![AmbiguousWikilink {
+            raw: "[[Sam]]".to_string(),
+            resolved_to: "/a/sam/".to_string(),
+            candidates: vec!["/z/sam/".to_string()],
+        }];
+        let errs = ambiguous_wikilink_errors(&wikilinks);
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            PageError::AmbiguousWikilink { raw, resolved_to, candidates }
+                if raw == "[[Sam]]" && resolved_to == "/a/sam/" && candidates == &["/z/sam/".to_string()]
+        ));
+        assert!(ambiguous_wikilink_errors(&[]).is_empty());
     }
 
     #[test]

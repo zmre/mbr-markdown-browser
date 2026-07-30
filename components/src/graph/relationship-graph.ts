@@ -109,6 +109,16 @@ export interface RelationshipGraph {
   focus: string
   nodes: GraphNode[]
   edges: GraphEdge[]
+  /**
+   * Hierarchical edges removed to keep the hierarchical subgraph acyclic (see
+   * `breakHierarchicalCycles`). Each one is a contradictory parent/child
+   * declaration worth surfacing to the author.
+   *
+   * OPTIONAL on purpose: hand-written `RelationshipGraph` literals (test
+   * fixtures, callers building a graph directly) stay valid, and an absent
+   * value means "nothing was dropped" — same as an empty array.
+   */
+  droppedEdges?: GraphEdge[]
 }
 
 /** Registry lookups over the `relationship_types` list. */
@@ -295,6 +305,107 @@ export function canonicalizeNotePath(p: string): string {
   return `${p}/`
 }
 
+/** Code-unit string comparison (locale-independent, unlike `localeCompare`). */
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/**
+ * Make the `hierarchical` subgraph of `edges` acyclic by dropping back edges.
+ * Non-hierarchical edges (symmetric, directed) are returned untouched — cycles
+ * there are harmless and often meaningful.
+ *
+ * WHY THIS EXISTS: contradictory frontmatter — note A declaring B as its parent
+ * while note B declares A as its parent — does NOT collapse during
+ * de-duplication. `classifyRelationship` canonicalizes each declaration onto the
+ * smaller type name and swaps the endpoints, so the two produce the distinct
+ * keys `hier|child|B|A` and `hier|child|A|B` and both survive. family-chart's
+ * `calculateTree()` hands such data straight to `d3.hierarchy()`, which has no
+ * cycle detection and allocates a fresh node per step forever, pinning the
+ * browser's main thread. Two people in a loop are enough, and the library's
+ * ancestry/progeny depth limits do not help because trimming happens only after
+ * the hierarchy has been fully materialized.
+ *
+ * ALGORITHM: one iterative depth-first search (explicit stack — recursion could
+ * exceed the JS stack on a deep lineage) over the hierarchical edges only. An
+ * edge whose target is currently ON the DFS stack is a back edge: it closes a
+ * cycle and is dropped. Tree, forward, and cross edges are kept. Removing every
+ * back edge found by a DFS always leaves a DAG, so a single pass suffices.
+ * O(V + E).
+ *
+ * DETERMINISM: hierarchical edges are sorted by `(relType, from, to)` before
+ * traversal and DFS roots are visited in the order `[focus, ...sorted paths]`.
+ * The result therefore never depends on `Map` insertion order, and the edges
+ * reachable from the focus are explored first, so those closest to the focus
+ * survive as tree edges.
+ *
+ * Kept edges are returned in their original input order, so callers that rely
+ * on edge ordering see no change when there is nothing to drop.
+ */
+export function breakHierarchicalCycles(
+  edges: GraphEdge[],
+  focus: string
+): { edges: GraphEdge[]; droppedEdges: GraphEdge[] } {
+  const hierarchical = edges.filter((e) => e.kind === 'hierarchical')
+  if (hierarchical.length === 0) return { edges, droppedEdges: [] }
+
+  const sorted = [...hierarchical].sort(
+    (a, b) =>
+      compareStrings(a.relType, b.relType) ||
+      compareStrings(a.from, b.from) ||
+      compareStrings(a.to, b.to)
+  )
+
+  const outgoing = new Map<string, GraphEdge[]>()
+  const paths = new Set<string>()
+  for (const edge of sorted) {
+    paths.add(edge.from)
+    paths.add(edge.to)
+    const list = outgoing.get(edge.from)
+    if (list) list.push(edge)
+    else outgoing.set(edge.from, [edge])
+  }
+
+  // DFS colouring: ON_STACK = grey (an ancestor of the current node),
+  // FINISHED = black (fully explored).
+  const ON_STACK = 1
+  const FINISHED = 2
+  const state = new Map<string, typeof ON_STACK | typeof FINISHED>()
+  const droppedEdges: GraphEdge[] = []
+
+  for (const root of [focus, ...[...paths].sort(compareStrings)]) {
+    if (!paths.has(root) || state.has(root)) continue
+    state.set(root, ON_STACK)
+    // Each frame remembers how far through its node's outgoing edges we are.
+    const stack: Array<{ node: string; next: number }> = [{ node: root, next: 0 }]
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]
+      const out = outgoing.get(frame.node)
+      if (!out || frame.next >= out.length) {
+        state.set(frame.node, FINISHED)
+        stack.pop()
+        continue
+      }
+      const edge = out[frame.next++]
+      const target = state.get(edge.to)
+      if (target === ON_STACK) {
+        // Back edge (a self-loop counts): dropping it breaks the cycle.
+        droppedEdges.push(edge)
+        continue
+      }
+      // Already fully explored → a forward/cross edge, which cannot close a
+      // cycle; keep it but do not descend again.
+      if (target === FINISHED) continue
+      state.set(edge.to, ON_STACK)
+      stack.push({ node: edge.to, next: 0 })
+    }
+  }
+
+  if (droppedEdges.length === 0) return { edges, droppedEdges }
+  const dropped = new Set(droppedEdges)
+  return { edges: edges.filter((edge) => !dropped.has(edge)), droppedEdges }
+}
+
 /**
  * Build a de-duplicated relationship graph around `focusPath`.
  *
@@ -302,6 +413,12 @@ export function canonicalizeNotePath(p: string): string {
  * at `maxNodes` for performance); every relationship among the collected nodes
  * is then added as an edge, de-duplicated by canonical key. Unresolved edges,
  * self-loops, and edges to notes outside the collected set are skipped.
+ *
+ * INVARIANT: the `hierarchical` subgraph of the returned `edges` is guaranteed
+ * ACYCLIC. Contradictory parent/child declarations that would otherwise form a
+ * loop are removed and reported in `droppedEdges`; see
+ * `breakHierarchicalCycles` for why an unbroken loop hangs the browser.
+ * Non-hierarchical edges are never dropped.
  */
 export function buildRelationshipGraph(
   focusPath: string,
@@ -316,7 +433,7 @@ export function buildRelationshipGraph(
   const focus = canonicalizeNotePath(focusPath)
 
   if (!notesByPath.has(focus)) {
-    return { focus, nodes: [], edges: [] }
+    return { focus, nodes: [], edges: [], droppedEdges: [] }
   }
 
   const clampedDepth = Math.max(1, Math.min(Math.floor(depth) || DEFAULT_DEPTH, MAX_DEPTH))
@@ -373,7 +490,13 @@ export function buildRelationshipGraph(
     }
   }
 
-  return { focus, nodes, edges: [...edges.values()] }
+  // Phase 4: enforce the acyclic-hierarchy invariant. Must run here rather than
+  // in each consumer: family-chart hangs the tab on a parent/child loop, and
+  // reporting the dropped edges alongside the graph is what lets the UI point
+  // the author at the contradictory notes.
+  const { edges: acyclic, droppedEdges } = breakHierarchicalCycles([...edges.values()], focus)
+
+  return { focus, nodes, edges: acyclic, droppedEdges }
 }
 
 /** True when the graph contains at least one hierarchical (tree) edge. */

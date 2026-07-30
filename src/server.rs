@@ -4702,7 +4702,8 @@ impl Server {
     ///   is disabled, or when the underlying page does not exist.
     async fn try_serve_errors_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
         use crate::page_errors::{
-            PageErrors, detect_unresolved_wikilinks, frontmatter_parse_errors,
+            PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
+            detect_unresolved_wikilinks, frontmatter_parse_errors, relationship_cycle_errors,
             validate_internal_links, validate_media_references,
         };
 
@@ -4752,10 +4753,11 @@ impl Server {
         // rendered HTML for media / wikilink scans (the `LinkCache` only holds
         // outbound links), so unlike `try_serve_links_json` we cannot short-
         // circuit through the cache when the HTML is missing.
-        let (outbound_links, html_for_scan, frontmatter_error): (
+        let (outbound_links, html_for_scan, frontmatter_error, ambiguous_wikilinks): (
             Vec<crate::link_index::OutboundLink>,
             String,
             Option<String>,
+            Vec<crate::wikilink_index::AmbiguousWikilink>,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
                 let is_index_file = md_path
@@ -4803,6 +4805,7 @@ impl Server {
                             resolved_links,
                             render_result.html,
                             render_result.frontmatter_error,
+                            render_result.ambiguous_wikilinks,
                         )
                     }
                     Err(e) => {
@@ -4821,11 +4824,11 @@ impl Server {
                     &config.repo.tag_index,
                     &config.tag_sources,
                 );
-                (outbound, String::new(), None)
+                (outbound, String::new(), None, Vec::new())
             }
             ResolvedPath::TagSourceIndex { source } => {
                 let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
-                (outbound, String::new(), None)
+                (outbound, String::new(), None, Vec::new())
             }
             _ => {
                 tracing::debug!("errors.json: page not found: {}", page_url_path);
@@ -4843,6 +4846,19 @@ impl Server {
                 &page_url_path,
             ));
             errors.extend(detect_unresolved_wikilinks(&html_for_scan));
+        }
+        errors.extend(ambiguous_wikilink_errors(&ambiguous_wikilinks));
+
+        // Relationship data problems. Detected once per index rebuild, so this
+        // is a pair of map lookups; gated on the feature that produced them so
+        // `--no-relationship-tracking` reports nothing (the index is empty then
+        // anyway, but the gate keeps the contract explicit).
+        if config.relationship_tracking {
+            let index = &config.repo.relationship_index;
+            errors.extend(relationship_cycle_errors(&index.cycles_for(&page_url_path)));
+            errors.extend(ambiguous_relationship_endpoint_errors(
+                &index.ambiguous_endpoints_for(&page_url_path),
+            ));
         }
 
         let payload = PageErrors {
