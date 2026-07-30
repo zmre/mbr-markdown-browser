@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { LitElement } from 'lit'
-import { isInputTarget, isModalOpen } from './mbr-keys.js'
+import { isInputTarget, isMacPlatform, isModalOpen } from './mbr-keys.js'
 import type { MbrKeysElement } from './mbr-keys.js'
 import { isAnyOverlayOpen, findOverlay, OVERLAY_TAGS } from './overlay.js'
 import type { MbrOverlay, OverlayTag } from './overlay.js'
@@ -12,6 +12,7 @@ import './mbr-search.js'
 import './mbr-browse.js'
 import './mbr-browse-single.js'
 import './mbr-fuzzy-nav.js'
+import './mbr-find-bar.js'
 
 /**
  * Tests for the shared keyboard-guard helpers. `isInputTarget` must see the
@@ -93,6 +94,7 @@ const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay &
   { tag: 'mbr-browse', create: () => document.createElement('mbr-browse') },
   { tag: 'mbr-browse-single', create: () => document.createElement('mbr-browse-single') },
   { tag: 'mbr-fuzzy-nav', create: () => document.createElement('mbr-fuzzy-nav') },
+  { tag: 'mbr-find-bar', create: () => document.createElement('mbr-find-bar') },
 ]
 
 describe('isModalOpen', () => {
@@ -120,7 +122,7 @@ describe('isModalOpen', () => {
     expect(OVERLAY_CASES.map((c) => c.tag)).toEqual([...OVERLAY_TAGS])
   })
 
-  it('returns false when all four overlays are present but closed', async () => {
+  it('returns false when all five overlays are present but closed', async () => {
     for (const { create } of OVERLAY_CASES) {
       const el = document.body.appendChild(create())
       await el.updateComplete
@@ -281,6 +283,109 @@ describe('MbrKeysElement overlay shortcuts', () => {
     await expect(press('/')).resolves.toBeDefined()
     await expect(press('F2')).resolves.toBeDefined()
     await expect(press('f')).resolves.toBeDefined()
+  })
+})
+
+/**
+ * `Ctrl+f` used to be vim page-down on every platform, which meant a reader on
+ * Windows or Linux had no way to reach the browser's own find-in-page — in
+ * server and static modes as much as in GUI mode. It is macOS-only now, and
+ * GUI mode gets `<mbr-find-bar>` from the native Edit menu instead.
+ */
+describe('MbrKeysElement Ctrl+f page-down', () => {
+  let scrollBy: ReturnType<typeof vi.spyOn>
+
+  /** Pin navigator.platform, which is what isMacPlatform reads. */
+  function setPlatform(platform: string): void {
+    Object.defineProperty(navigator, 'platform', { value: platform, configurable: true })
+  }
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    document.body.appendChild(document.createElement('mbr-keys'))
+    scrollBy = vi.spyOn(window, 'scrollBy').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    scrollBy.mockRestore()
+    // Drop the own-property shadow so the prototype getter is live again.
+    delete (navigator as unknown as Record<string, unknown>).platform
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  /** Dispatch Ctrl+<key> from document.body and return the event. */
+  function pressCtrl(key: string): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { key, ctrlKey: true, bubbles: true, composed: true, cancelable: true })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  it('reads macOS from navigator.platform', () => {
+    setPlatform('MacIntel')
+    expect(isMacPlatform()).toBe(true)
+    setPlatform('Win32')
+    expect(isMacPlatform()).toBe(false)
+    setPlatform('Linux x86_64')
+    expect(isMacPlatform()).toBe(false)
+  })
+
+  it('scrolls a full page on macOS', () => {
+    setPlatform('MacIntel')
+    const event = pressCtrl('f')
+    expect(scrollBy).toHaveBeenCalledTimes(1)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('leaves Ctrl+f to the browser on Windows and Linux', () => {
+    for (const platform of ['Win32', 'Linux x86_64']) {
+      setPlatform(platform)
+      const event = pressCtrl('f')
+      expect(scrollBy).not.toHaveBeenCalled()
+      // Not preventing default is what lets the real find bar open.
+      expect(event.defaultPrevented).toBe(false)
+    }
+  })
+
+  it('still scrolls with Ctrl+b, Ctrl+d and Ctrl+u off macOS', () => {
+    setPlatform('Win32')
+    for (const key of ['b', 'd', 'u']) {
+      scrollBy.mockClear()
+      const event = pressCtrl(key)
+      expect(scrollBy).toHaveBeenCalledTimes(1)
+      expect(event.defaultPrevented).toBe(true)
+    }
+  })
+})
+
+/**
+ * The find bar only exists in GUI mode (`templates/_footer.html` gates it on
+ * `gui_mode`), so listing its keys anywhere else would document a feature the
+ * reader does not have.
+ */
+describe('MbrKeysElement help overlay GUI gating', () => {
+  afterEach(() => {
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  /** Category titles rendered in the help modal for the given mode. */
+  async function categoryTitles(guiMode: boolean): Promise<string[]> {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode }
+    const keys = document.body.appendChild(document.createElement('mbr-keys'))
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, composed: true, cancelable: true }))
+    await keys.updateComplete
+    return [...(keys.shadowRoot?.querySelectorAll('.shortcut-category h3') ?? [])].map((h) => h.textContent ?? '')
+  }
+
+  it('lists Find in Page only in GUI mode', async () => {
+    expect(await categoryTitles(true)).toContain('Find in Page')
+    document.body.innerHTML = ''
+    expect(await categoryTitles(false)).not.toContain('Find in Page')
+  })
+
+  it('still lists the always-on categories in both modes', async () => {
+    expect(await categoryTitles(false)).toContain('Navigation')
+    document.body.innerHTML = ''
+    expect(await categoryTitles(true)).toContain('Navigation')
   })
 })
 

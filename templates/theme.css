@@ -763,6 +763,30 @@ a.mbr-link-enhanced[data-tooltip]::after {
   border: 0;
 }
 
+/* ==================== Find in Page (GUI mode) ==================== */
+
+/*
+ * <mbr-find-bar> registers its match ranges in CSS.highlights, which is a
+ * DOCUMENT-scoped registry, and the ranges point into the light DOM under
+ * main#wrapper. A ::highlight() rule inside the element's shadow root would
+ * therefore match nothing at all -- these have to live here, in a sheet linked
+ * from _head.html on every page and overridable via user.css.
+ *
+ * Only color, background-color, text-decoration*, text-shadow and
+ * -webkit-text-stroke are honoured inside ::highlight(); borders and outlines
+ * are ignored. An engine without the Custom Highlight API drops just these two
+ * rules, and the bar falls back to a plain Selection on the active match.
+ */
+::highlight(mbr-find) {
+  background-color: rgba(255, 214, 0, 0.4);
+  color: inherit;
+}
+
+::highlight(mbr-find-active) {
+  background-color: #ff9632;
+  color: #000;
+}
+
 /* ==================== Footnotes (GitHub-Flavored Markdown) ==================== */
 
 /*

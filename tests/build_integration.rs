@@ -162,6 +162,29 @@ async fn test_build_sets_static_mode() {
 }
 
 #[tokio::test]
+async fn test_build_omits_find_bar() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("test").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    // The find bar is GUI-only. Builds never set gui_mode, so the
+    // `{% if gui_mode %}` gate in _footer.html must keep it out of every
+    // static page -- otherwise it ships to every site mbr builds.
+    assert!(
+        !html.contains("mbr-find-bar"),
+        "Static builds must not ship the GUI-only find bar"
+    );
+    assert!(
+        html.contains("guiMode: false"),
+        "Expected guiMode: false in output"
+    );
+}
+
+#[tokio::test]
 async fn test_build_head_includes_graph_depth() {
     let repo = TestRepo::new();
     repo.create_markdown("test.md", "# Test");

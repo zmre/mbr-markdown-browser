@@ -220,6 +220,29 @@ async fn test_head_config_includes_graph_depth() {
 }
 
 #[tokio::test]
+async fn test_gui_mode_emits_find_bar() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\nBody.");
+
+    // Plain server mode: the browser has its own find, so the bar must not ship.
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/readme/").await;
+    assert_html_not_contains(&html, "<mbr-find-bar>");
+    assert_html_contains(&html, "guiMode: false");
+
+    // GUI mode: the bar ships, because the webview has no find of its own.
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.gui_mode = true;
+    })
+    .await;
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, "<mbr-find-bar></mbr-find-bar>");
+    // The element and window.__MBR_CONFIG__.guiMode come from the same Tera
+    // variable; asserting both together keeps them from drifting apart.
+    assert_html_contains(&html, "guiMode: true");
+}
+
+#[tokio::test]
 async fn test_server_marks_incomplete_blocks_by_default() {
     // Server/GUI default for mark_incomplete is true; rendered HTML should
     // wrap blocks starting with TK/TODO/FIXME/XXX in an mbr-incomplete span.
