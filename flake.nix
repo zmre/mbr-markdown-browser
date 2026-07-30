@@ -165,6 +165,7 @@
           || (builtins.match ".*\\.icns$" path != null)
           || (builtins.match ".*\\.udl$" path != null) # UniFFI interface definitions
           || (builtins.match ".*/tests/pdfs/.*\\.pdf$" path != null) # Test PDF files
+          || (builtins.match ".*/tests/videos/.*" path != null) # Test video fixtures (remux/playability tests)
           || (builtins.match ".*/tests/fixtures/.*" path != null) # Test fixtures (golden HTML, configs)
           # QuickLook extension sources
           || (builtins.match ".*\\.swift$" path != null)
