@@ -79,6 +79,8 @@ pub mod video_metadata;
 #[cfg(feature = "media-metadata")]
 pub mod video_metadata_cache;
 #[cfg(feature = "media-metadata")]
+pub mod video_remux;
+#[cfg(feature = "media-metadata")]
 pub mod video_transcode;
 #[cfg(feature = "media-metadata")]
 pub mod video_transcode_cache;

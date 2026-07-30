@@ -62,7 +62,7 @@ Supported media types are detected by file extension:
 | `--no-mark-incomplete` | Disable incomplete-block highlighting | server/GUI: off, build: on (no effect) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
 | `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
-| `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding (server/GUI mode only) | `false` |
+| `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding to 720p/480p (server/GUI mode only). Not needed for [automatic playback recovery](configuration.md#automatic-playback-recovery), which is a stream copy and is always available. | `false` |
 | `--edit` | Enable the in-browser markdown editing endpoints (server/GUI mode). Loopback callers may edit without a token (still CSRF-protected); non-loopback callers require a token. See [editing](../modes/editing.md). | `false` |
 | `--generate-edit-token` | Prompt for a password (blank to auto-generate a random token), print the token and the `edit_token_hash` config line, then exit. Writes nothing to disk. | |
 | `-v, --verbose` | Increase log verbosity | warn level |

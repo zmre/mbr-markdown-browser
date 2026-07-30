@@ -498,6 +498,7 @@ The endpoint detects these issue types:
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
 | `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
+| `unplayable_media` | A video that exists and serves correctly but whose track layout matches a combination implicated in browser decode failures. Advisory only — see [Unplayable Media Detection](#unplayable-media-detection) below. Requires the `media-metadata` feature. |
 | `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
 | `ambiguous_relationship_endpoint` | A relationship endpoint named a title/alias shared by several notes; mbr resolved it to one of them. Reported on the note that declared the endpoint. |
 | `ambiguous_wikilink` | A body `[[Wikilink]]` named a title/stem shared by several notes. Reported on the page containing the link. |
@@ -519,6 +520,14 @@ The response is JSON with a stable, tagged shape:
     { "type": "broken_media_reference", "src": "./missing.png", "kind": "image" },
     { "type": "unresolved_wikilink", "raw": "[[never-a-real-page]]" },
     { "type": "frontmatter_parse_error", "message": "duplicated key in mapping" },
+    {
+      "type": "unplayable_media",
+      "src": "../Foo%20Bar.mp4",
+      "kind": "video",
+      "reason": "This file carries both a 'gpmd' timed-metadata track and a 'tx3g' subtitle track. Safari/WebKit sometimes fails to decode that combination, so it is the most likely cause. Files with this combination do not always fail, and other browsers are usually unaffected.",
+      "remedy": "ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4",
+      "advisory": true
+    },
     { "type": "relationship_cycle", "members": ["/people/ada/", "/people/bob/"], "rel_type": "child" },
     {
       "type": "ambiguous_relationship_endpoint",
@@ -553,6 +562,141 @@ self-guards on `window.__MBR_CONFIG__.serverMode`. `cargo run -- -b <repo>`
 continues to validate links at build time via the existing
 `--skip-link-checks` flow, without emitting `errors.json` files or
 `<mbr-page-errors>` elements into the output.
+
+### Unplayable Media Detection
+
+> **Note:** This feature requires the `media-metadata` Cargo feature (on by
+> default) and, like the rest of `errors.json`, runs only in server/GUI mode.
+> Static builds (`-b`) never probe media and never emit these diagnostics.
+
+Some video files are served perfectly — correct `video/mp4` content type,
+`accept-ranges: bytes`, valid `206` responses — and still refuse to play. The
+browser reports the right duration on `loadedmetadata` and *then* fails with
+`MediaError.code === 3` ("media failed to decode").
+
+One known trigger is a **`gpmd` timed-metadata track** (GoPro GPMF telemetry)
+**combined with a `tx3g` subtitle track**. Bisecting a reported file in Safari —
+the engine behind mbr's own GUI window — isolated the interaction: either track
+type alone plays fine, both together fail. Ruled out along the way, so they are
+*not* flagged: `text` data tracks, PNG cover-art video tracks, total track
+count, 4K resolution, and H.264 level 5.1.
+
+When you open a page, `<mbr-page-errors>` fetches `errors.json` in the
+background and mbr probes each referenced video's container headers. Matching
+files are reported as `unplayable_media` with a likely cause and the `ffmpeg`
+command that resolves it.
+
+**Advisory, not authoritative.** The combination is *necessary but not
+sufficient*: a minimal synthetic file carrying both tracks plays fine in the
+same Safari build, so matching it does not mean a file is broken. Every entry
+therefore carries `"advisory": true`, and the frontend withholds it until the
+browser reports a real `MediaError` for the same `src` — at which point the
+reason and remedy explain the failure. This is why an advisory entry alone never
+raises the ⚠ count: a heuristic must not put a warning on a working video. The
+browser's own error is the only ground truth for "this did not play", and it is
+also reported on its own (as `runtime_media_error`) when mbr has no hint to add.
+
+Only an explicit `"advisory": false` marks an entry as certain enough to show
+proactively. An absent field is treated as advisory, so an older or third-party
+payload errs toward staying quiet rather than warning wrongly.
+
+**Performance.** The probe reads container headers only — no frames are
+decoded — so its cost is independent of file length, and it runs on a blocking
+thread pool with bounded concurrency. Results are cached per file path +
+modification time, so a page reload never re-probes an unchanged file and an
+edited file is transparently re-probed. Nothing about this touches the markdown
+render path: a page with a 1.2 GB video renders at full speed, and the
+diagnosis arrives asynchronously afterwards (~70 ms cold, ~2 ms cached).
+
+The fix for an affected file is to remux it, keeping only the video and audio
+streams (this copies the streams — it does not re-encode, so it is fast and
+lossless):
+
+```bash
+ffmpeg -i in.mp4 -map 0:v -map 0:a -c copy -movflags +faststart out.mp4
+```
+
+mbr can also attempt that repair for you, at serve time, without touching the
+file — see [Automatic Playback Recovery](#automatic-playback-recovery)
+below.
+
+### Automatic Playback Recovery
+
+> **Note:** This feature requires the `media-metadata` Cargo feature (on by
+> default) and runs only in server/GUI mode. Static builds (`-b`) never register
+> these routes.
+
+Because a file's track table cannot tell you whether it will play, mbr does not
+try to get ahead of the problem. Instead, when a `<video>` element reports a real
+`MediaError`, the frontend retries the same video against a **remux variant**: an
+HLS playlist over the same media with the non-audio/video tracks left out.
+
+**No `--transcode` needed.** Unlike the 720p/480p ladder below, this variant is
+always available. It is a stream copy, so it costs a small fraction of a
+re-encode, and it exists to recover a video the reader has already watched fail.
+
+**It never re-encodes.** Every video and audio packet is copied byte-for-byte.
+Only the container is rebuilt, carrying just the best video stream and the best
+audio stream — which is exactly what leaves the data and subtitle tracks behind.
+There is no quality loss and no resolution change.
+
+**URL patterns.** For a video served at `/videos/demo.mp4`:
+
+| Type | URL | Content type |
+|------|-----|--------------|
+| Playlist | `/videos/demo.mp4-remux.m3u8` | `application/vnd.apple.mpegurl` |
+| Init segment | `/videos/demo.mp4-remux-init.mp4` | `video/mp4` |
+| Media segment | `/videos/demo.mp4-remux-000.m4s` | `video/iso.segment` |
+
+The video's own extension stays in the path, which keeps these URLs distinct from
+the `-720p.m3u8` transcode URLs and from the `.cover.jpg` / `.captions.en.vtt`
+sidecars.
+
+**Fragmented MP4, not MPEG-TS.** The transcode ladder emits `.ts` segments; it
+can, because it encodes fresh frames. A stream copy cannot: MP4 stores H.264 as
+length-prefixed AVCC and MPEG-TS needs Annex B, and that conversion requires a
+bitstream filter that mbr's ffmpeg bindings do not expose. Fragmented MP4
+(HLS v7+) avoids the problem by reusing the source's codec configuration
+unchanged.
+
+**Browser support.** This is native HLS, which in practice means WebKit — Safari
+and mbr's own `-g` GUI window. Chrome and Firefox have no native HLS support (it
+needs a JavaScript player), so recovery only applies where the browser can play
+the playlist. That is a good match for the problem: the decode failure this
+recovers from is itself a WebKit behaviour.
+
+**Segment boundaries.** Segments target 4 seconds but always begin at an existing
+keyframe, since a stream copy cannot insert one. Boundaries come from the
+container's own sync-sample index — already parsed when the file is opened — so
+no part of the file is scanned to find them, and `#EXTINF` durations reflect the
+real, slightly uneven segment lengths. A container that exposes no keyframe index
+returns `422` rather than a playlist whose segments a player could not decode.
+
+**Performance and memory.** Segments are generated on demand on a blocking thread
+pool, one generation per segment no matter how many requests arrive for it, and
+cached in the same in-memory HLS cache as the transcode ladder (~200 MB, no cache
+files on disk). Cache entries are keyed by file path + modification time, so
+editing a video transparently re-segments it. Playlists and init segments are
+evicted last, since they are tiny and needed for every playback attempt. A 4 s
+copy segment is roughly a tenth the size of the source's 4 s of data — about
+30 MB for extreme 60 Mbps 4K footage, single-digit MB for typical video.
+
+Nothing here runs during markdown rendering; the first request for a variant is
+the first time any of it happens.
+
+### Media Compression
+
+mbr gzip-compresses responses when the client asks for it, but never for
+already-compressed or range-critical payloads: `video/*`, `audio/*`,
+`application/pdf`, `application/zip`, `application/gzip`,
+`application/x-gzip`, and `application/octet-stream` (in addition to the
+images, gRPC and Server-Sent Events that `tower-http` excludes by default).
+
+This is a correctness requirement, not just an optimization. Compressing a
+response forces `transfer-encoding: chunked` and drops both `content-length`
+and `accept-ranges` — which breaks seeking and duration detection for every
+media player that negotiates gzip. There is no configuration knob; media is
+always served verbatim.
 
 ### Video Metadata Extraction
 

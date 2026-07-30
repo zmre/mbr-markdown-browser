@@ -96,6 +96,54 @@ pub enum PageError {
         /// The other notes sharing that name.
         candidates: Vec<String>,
     },
+    /// A media file that resolves and is served correctly, but whose track
+    /// layout matches a combination implicated in browser decode failures.
+    /// Detected by probing the container (see
+    /// `video_metadata::probe_playback_compatibility`), so it is server/GUI
+    /// only and requires the `media-metadata` feature.
+    ///
+    /// This is a *heuristic hint*, not a verdict — the combination it looks for
+    /// is necessary but not sufficient, with a known false positive (see
+    /// `video_metadata::WEBKIT_RISKY_DATA_TAGS`). The browser's own
+    /// `MediaError` is the only ground truth for "this did not play", so the
+    /// frontend surfaces these entries solely to explain a failure it has
+    /// already observed, and never as a standalone warning.
+    ///
+    /// Unlike [`Self::BrokenMediaReference`], `kind` describes the *media
+    /// type* (`video`) rather than the HTML element, because the diagnosis is
+    /// about the file, not about which tag referenced it.
+    UnplayableMedia {
+        /// Matches the `src` attribute the frontend sees on the corresponding
+        /// `<source>` / `<mbr-video-extras>` element, with any `#fragment` or
+        /// `?query` removed so both spellings compare equal.
+        src: String,
+        kind: MediaKind,
+        /// Human-readable explanation of the most likely cause.
+        reason: String,
+        /// Copy-pasteable command that resolves the conflict, when one exists.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remedy: Option<String>,
+        /// Always `true`: marks this entry as a heuristic hint so the frontend
+        /// keeps it out of the error badge until a real playback failure is
+        /// observed for the same `src`.
+        advisory: bool,
+    },
+}
+
+/// A media reference in the rendered HTML that resolves to a real file on disk.
+///
+/// Produced by [`collect_media_references`] so callers can inspect the actual
+/// bytes (e.g. probe a container for undecodable tracks) while still reporting
+/// the `src` string the browser sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaReference {
+    /// The element's `src` with `#fragment` / `?query` stripped. This is the
+    /// join key the frontend uses to match an element to its diagnosis.
+    pub src: String,
+    /// Which element carried the reference.
+    pub kind: MediaKind,
+    /// The file the server would actually serve for this `src`.
+    pub path: std::path::PathBuf,
 }
 
 /// Response payload for `GET /{page}/errors.json`.
@@ -174,8 +222,21 @@ pub fn validate_media_references(
     resolver_config: &PathResolverConfig,
     page_url: &str,
 ) -> Vec<PageError> {
-    // Parsing the HTML document is ~microseconds for typical page sizes; the
-    // selectors below compile once per call which keeps the API ergonomic.
+    scan_media_elements(html)
+        .into_iter()
+        .filter(|(src, _)| !media_reference_resolves(src, resolver_config, page_url))
+        .map(|(src, kind)| PageError::BrokenMediaReference { src, kind })
+        .collect()
+}
+
+/// Scans rendered HTML for every internal media reference, yielding
+/// `(src, kind)` pairs with the `src` verbatim as authored.
+///
+/// External (`https:`, `data:`, …) and empty `src` values are dropped because
+/// nothing local can be said about them. Parsing the document is
+/// ~microseconds for typical page sizes; the selectors compile once per call,
+/// which keeps the API ergonomic and the endpoint off any hot path.
+fn scan_media_elements(html: &str) -> Vec<(String, MediaKind)> {
     let doc = Html::parse_document(html);
 
     let specs: [(&str, MediaKind); 4] = [
@@ -185,33 +246,57 @@ pub fn validate_media_references(
         ("source[src]", MediaKind::Source),
     ];
 
-    let mut errors = Vec::new();
+    specs
+        .into_iter()
+        .filter_map(|(selector_str, kind)| {
+            Selector::parse(selector_str).ok().map(|sel| (sel, kind))
+        })
+        .flat_map(|(selector, kind)| {
+            doc.select(&selector)
+                .filter_map(|el| el.value().attr("src"))
+                .filter(|src| !src.is_empty() && !is_external_url(src))
+                .map(|src| (src.to_string(), kind.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
-    for (selector_str, kind) in specs {
-        let Ok(selector) = Selector::parse(selector_str) else {
-            continue;
-        };
-        for el in doc.select(&selector) {
-            let Some(src) = el.value().attr("src") else {
-                continue;
-            };
+/// Resolves every internal media reference in `html` to the file the server
+/// would actually serve, dropping the ones that do not resolve to a static
+/// file (those are already reported by [`validate_media_references`]).
+///
+/// The returned `src` has its `#fragment` / `?query` stripped, so a
+/// `<source src='…mp4#t=30,200'>` and the sibling
+/// `<mbr-video-extras src='…mp4'>` produce the same join key for the frontend.
+///
+/// References are deduplicated by `src`, so a file embedded twice on one page
+/// yields one entry and callers never probe the same bytes twice.
+pub fn collect_media_references(
+    html: &str,
+    resolver_config: &PathResolverConfig,
+    page_url: &str,
+) -> Vec<MediaReference> {
+    let mut seen = std::collections::HashSet::new();
 
-            if src.is_empty() || is_external_url(src) {
-                continue;
+    scan_media_elements(html)
+        .into_iter()
+        .filter_map(|(src, kind)| {
+            let path_part = src.split(['#', '?']).next().unwrap_or_default();
+            if path_part.is_empty() || !seen.insert(path_part.to_string()) {
+                return None;
             }
-
-            if media_reference_resolves(src, resolver_config, page_url) {
-                continue;
+            let absolute_url = resolve_relative_url(page_url, path_part, true);
+            let request_path = normalize_link_target(&absolute_url);
+            match resolve_request_path(resolver_config, &request_path) {
+                ResolvedPath::StaticFile(path) => Some(MediaReference {
+                    src: path_part.to_string(),
+                    kind,
+                    path,
+                }),
+                _ => None,
             }
-
-            errors.push(PageError::BrokenMediaReference {
-                src: src.to_string(),
-                kind: kind.clone(),
-            });
-        }
-    }
-
-    errors
+        })
+        .collect()
 }
 
 /// Resolves a media `src` against the page's canonical URL and checks whether
@@ -812,6 +897,97 @@ mod tests {
         ));
     }
 
+    // --- collect_media_references -----------------------------------------
+
+    fn video_setup() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("Projects")).unwrap();
+        std::fs::write(base.join("Projects/note.md"), "# x").unwrap();
+        std::fs::write(base.join("Projects/Foo Bar.mp4"), b"\x00\x00\x00\x18ftyp").unwrap();
+        (dir, base)
+    }
+
+    #[test]
+    fn collect_media_references_resolves_source_to_disk_path() {
+        let (_guard, base) = video_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<video><source src="../Foo%20Bar.mp4" type="video/mp4"></video>"#;
+        let refs = collect_media_references(html, &cfg, "/Projects/note/");
+
+        assert_eq!(refs.len(), 1, "{:?}", refs);
+        assert_eq!(refs[0].src, "../Foo%20Bar.mp4");
+        assert_eq!(refs[0].kind, MediaKind::Source);
+        assert_eq!(refs[0].path, base.join("Projects/Foo Bar.mp4"));
+    }
+
+    #[test]
+    fn collect_media_references_strips_time_fragment() {
+        // A `{{ vid(start=…) }}` embed puts `#t=30,200` on the <source> but not
+        // on the sibling <mbr-video-extras>. Stripping makes both spellings
+        // produce the same join key for the frontend.
+        let (_guard, base) = video_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<video><source src="../Foo%20Bar.mp4#t=30,200"></video>"#;
+        let refs = collect_media_references(html, &cfg, "/Projects/note/");
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].src, "../Foo%20Bar.mp4");
+    }
+
+    #[test]
+    fn collect_media_references_dedupes_repeated_embeds() {
+        // reid-video-issue.md embeds the same clip twice (percent-encoded and
+        // angle-bracketed); the probe must not run twice.
+        let (_guard, base) = video_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"
+            <video><source src="../Foo%20Bar.mp4"></video>
+            <video><source src="../Foo%20Bar.mp4#t=5"></video>
+        "#;
+        let refs = collect_media_references(html, &cfg, "/Projects/note/");
+        assert_eq!(refs.len(), 1, "{:?}", refs);
+    }
+
+    #[test]
+    fn collect_media_references_skips_missing_and_external() {
+        let (_guard, base) = video_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"
+            <video><source src="../Gone.mp4"></video>
+            <video><source src="https://example.com/x.mp4"></video>
+        "#;
+        let refs = collect_media_references(html, &cfg, "/Projects/note/");
+        assert!(refs.is_empty(), "{:?}", refs);
+    }
+
+    #[test]
+    fn collect_media_references_finds_images_and_audio_too() {
+        // The collector is media-type agnostic; callers filter by extension.
+        let (_guard, base) = media_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<img src="photo.png"><audio src="photo.png"></audio>"#;
+        let refs = collect_media_references(html, &cfg, "/");
+        // Deduped by src, so the second reference to photo.png is dropped.
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, MediaKind::Image);
+    }
+
     // --- detect_unresolved_wikilinks --------------------------------------
 
     #[test]
@@ -1041,6 +1217,61 @@ mod tests {
                 if raw == "[[Sam]]" && resolved_to == "/a/sam/" && candidates == &["/z/sam/".to_string()]
         ));
         assert!(ambiguous_wikilink_errors(&[]).is_empty());
+    }
+
+    #[test]
+    fn unplayable_media_serializes_to_the_frontend_contract() {
+        // This exact shape is a contract with `components/src/`. Changing any
+        // key or tag value here is a breaking frontend change.
+        let err = PageError::UnplayableMedia {
+            src: "../Foo%20Bar.mp4".to_string(),
+            kind: MediaKind::Video,
+            reason: "likely cause".to_string(),
+            remedy: Some(
+                "ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4".to_string(),
+            ),
+            advisory: true,
+        };
+
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "unplayable_media",
+                "src": "../Foo%20Bar.mp4",
+                "kind": "video",
+                "reason": "likely cause",
+                "remedy": "ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4",
+                "advisory": true
+            })
+        );
+    }
+
+    #[test]
+    fn unplayable_media_omits_absent_remedy() {
+        let err = PageError::UnplayableMedia {
+            src: "../x.mp4".to_string(),
+            kind: MediaKind::Video,
+            reason: "nope".to_string(),
+            remedy: None,
+            advisory: true,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(!json.contains("remedy"), "{}", json);
+    }
+
+    #[test]
+    fn unplayable_media_round_trips() {
+        let err = PageError::UnplayableMedia {
+            src: "../Foo%20Bar.mp4".to_string(),
+            kind: MediaKind::Video,
+            reason: "r".to_string(),
+            remedy: Some("cmd".to_string()),
+            advisory: true,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: PageError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, err);
     }
 
     #[test]

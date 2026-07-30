@@ -1,6 +1,17 @@
 import { LitElement, html, css, nothing, type CSSResultGroup, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { resolveUrl } from './shared.js';
+import {
+  buildMediaErrorNotice,
+  findUnplayableMedia,
+  isRecoverableMediaError,
+  mediaErrorStyles,
+  remuxUrlFor,
+  renderMediaErrorNotice,
+  reportMediaError,
+  supportsNativeHls,
+  type MediaErrorNotice,
+} from './media-errors.js';
 
 /**
  * Supported media types for the viewer.
@@ -34,7 +45,9 @@ export interface MediaViewerProps {
  */
 @customElement('mbr-media-viewer')
 export class MbrMediaViewerElement extends LitElement {
-  static override styles: CSSResultGroup = css`
+  static override styles: CSSResultGroup = [
+    mediaErrorStyles,
+    css`
     :host {
       display: block;
       width: 100%;
@@ -236,7 +249,8 @@ export class MbrMediaViewerElement extends LitElement {
       background: var(--pico-card-background-color, #f9f9f9);
       border-radius: 4px;
     }
-  `;
+  `,
+  ];
 
   /**
    * The type of media to render.
@@ -261,6 +275,16 @@ export class MbrMediaViewerElement extends LitElement {
    */
   @state()
   private _loading = true;
+
+  /**
+   * Playback failure for the current media, if any. Rendered next to the player
+   * rather than replacing it, so the download link stays reachable.
+   */
+  @state()
+  private _mediaError: MediaErrorNotice | null = null;
+
+  /** Guards the remux retry to a single attempt, so a failure reports rather than loops. */
+  private _remuxAttempted = false;
 
   /**
    * Whether cover art exists for audio files.
@@ -336,22 +360,53 @@ export class MbrMediaViewerElement extends LitElement {
         >
           <p>Your browser does not support the video element.</p>
         </video>
+        ${this._mediaError ? renderMediaErrorNotice(this._mediaError) : nothing}
         <figcaption>
-          <mbr-video-extras src="${this._path}"></mbr-video-extras>
+          <mbr-video-extras src="${this._path}" suppress-error></mbr-video-extras>
         </figcaption>
       </figure>
     `;
   }
 
   /**
-   * Handle video load errors - typically just ignore poster failures
-   * since they are optional and may not exist.
+   * Handle video playback errors. WebKit reports `MEDIA_ERR_DECODE` for
+   * otherwise-valid MP4s that carry tracks it cannot handle, so a silent
+   * console warning left the player looking simply broken. Show the reason and
+   * tell the rest of the page (the page-errors drawer listens).
+   *
+   * `<mbr-video-extras>` is rendered with `suppress-error` because this
+   * component owns the notice for the same `<video>`.
    */
   private _handleVideoError(event: Event): void {
-    const video = event.target as HTMLVideoElement;
-    // Log the error but don't break the UI
-    if (video && !video.readyState) {
-      console.warn('Video failed to load:', this._path);
+    const video = event.target as HTMLVideoElement | null;
+    const error = video?.error ?? null;
+    const src = this._path ?? '';
+
+    // Try the server's remuxed variant once before reporting anything: if it
+    // plays, the reader never needs to know. Which files need this cannot be
+    // predicted, so the real failure is the trigger.
+    if (
+      video &&
+      src &&
+      !this._remuxAttempted &&
+      isRecoverableMediaError(error?.code) &&
+      supportsNativeHls(video)
+    ) {
+      this._remuxAttempted = true;
+      video.src = remuxUrlFor(src);
+      video.load();
+      return;
+    }
+
+    this._mediaError = buildMediaErrorNotice({
+      code: error?.code ?? 0,
+      message: error?.message ?? '',
+      kind: 'video',
+      diagnosis: findUnplayableMedia(src),
+    });
+
+    if (src) {
+      reportMediaError(src, 'video', error);
     }
   }
 

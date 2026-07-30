@@ -1818,6 +1818,93 @@ async fn test_range_request_accept_ranges_header() {
     );
 }
 
+/// Regression: `CompressionLayer::new()`'s default predicate only excludes
+/// gRPC, images and SSE, so a plain `GET` of an `.mp4` with
+/// `Accept-Encoding: gzip` used to come back `content-encoding: gzip` +
+/// `transfer-encoding: chunked` with **no** `content-length` and **no**
+/// `accept-ranges` (tower-http strips both when it compresses). That destroys
+/// seeking and duration detection in any client that negotiates gzip — and
+/// burns CPU gzipping already-compressed H.264.
+#[tokio::test]
+async fn test_video_is_never_gzipped() {
+    let repo = TestRepo::new();
+    // Well above the 32-byte SizeAbove floor so compression is genuinely on
+    // the table for this response.
+    repo.create_static_file("clip.mp4", &vec![b'A'; 64 * 1024]);
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .client
+        .get(server.url("/clip.mp4"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers().get("content-encoding"),
+        None,
+        "video must not be gzipped, got headers: {:?}",
+        response.headers()
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok()),
+        Some("bytes"),
+        "compression strips accept-ranges, which breaks seeking"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("65536"),
+        "compression strips content-length, which breaks duration detection"
+    );
+
+    let body = response.bytes().await.unwrap();
+    assert_eq!(
+        body.len(),
+        64 * 1024,
+        "body must be the raw, unmodified file"
+    );
+}
+
+/// The exclusion must be narrow: HTML still gets compressed.
+#[tokio::test]
+async fn test_html_is_still_gzipped() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "page.md",
+        &format!("# Page\n\n{}", "lorem ipsum ".repeat(500)),
+    );
+
+    let server = TestServer::start(&repo).await;
+
+    let response = server
+        .client
+        .get(server.url("/page/"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+        "markdown pages should still be compressed, got headers: {:?}",
+        response.headers()
+    );
+}
+
 #[tokio::test]
 async fn test_range_request_invalid_range() {
     let repo = TestRepo::new();
@@ -4240,6 +4327,159 @@ async fn test_errors_json_clean_relationship_data_reports_nothing() {
     }
 }
 
+// ============================================================================
+// Unplayable-media detection (errors.json)
+// ============================================================================
+//
+// Fixtures in `tests/videos/` are 2-3 KB each and form the 2x2 that bisection
+// isolated in real Safari: only a `gpmd` data track *combined with* a `tx3g`
+// subtitle track discriminated failing cuts from playing ones. Either track
+// type alone measured as playing, so three of the four must never be flagged.
+//
+// - `gpmd-and-tx3g.mp4` — both tracks. The only fixture the heuristic flags.
+// - `gpmd-only.mp4`     — data track without subtitles. False-positive guard.
+// - `tx3g-only.mp4`     — subtitles without a risky data track. Same.
+// - `neither.mp4`       — a harmless `text` data track. Same.
+//
+// NOTE: the heuristic is advisory, not an oracle. `gpmd-and-tx3g.mp4` itself
+// *plays fine* in Safari despite matching, so the combination is necessary but
+// not sufficient. These tests therefore assert only what the predicate
+// computes, never that a flagged file fails or an unflagged one plays.
+
+/// Copies a checked-in video fixture into the test repo.
+#[cfg(feature = "media-metadata")]
+fn copy_video_fixture(repo: &TestRepo, fixture: &str, dest: &str) {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/videos")
+        .join(fixture);
+    let bytes = std::fs::read(&source)
+        .unwrap_or_else(|e| panic!("missing fixture {}: {e}", source.display()));
+    repo.create_static_file(dest, &bytes);
+}
+
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_errors_json_reports_unplayable_gpmd_and_tx3g_video() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "Foo Bar.mp4");
+    repo.create_markdown("note.md", "# Note\n\n![clip](<Foo Bar.mp4>)");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/note/errors.json").await;
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    let unplayable: Vec<_> = errors
+        .iter()
+        .filter(|e| e["type"] == "unplayable_media")
+        .collect();
+    assert_eq!(
+        unplayable.len(),
+        1,
+        "expected exactly one unplayable_media error in {:?}",
+        errors
+    );
+
+    // This shape is a contract with the frontend component.
+    let error = unplayable[0];
+    assert_eq!(error["kind"], "video");
+    assert_eq!(
+        error["remedy"],
+        "ffmpeg -i in.mp4 -map 0 -c copy -dn -movflags +faststart out.mp4"
+    );
+    // Marks the entry as a hint so the frontend keeps it out of the error
+    // badge until the browser actually reports a failure for this src.
+    assert_eq!(error["advisory"], true);
+
+    // The heuristic has a known false positive, so the prose must name both
+    // implicated tracks and must not claim the file is broken.
+    let reason = error["reason"].as_str().expect("reason must be a string");
+    assert!(reason.contains("'gpmd'"), "{reason}");
+    assert!(reason.contains("'tx3g'"), "{reason}");
+    assert!(reason.contains("most likely cause"), "{reason}");
+    assert!(!reason.contains("cannot decode"), "too absolute: {reason}");
+
+    // `src` must match the attribute the browser sees so the component can
+    // join an error to a specific <video>.
+    let src = error["src"].as_str().expect("src must be a string");
+    let page_html = server.get_text("/note/").await;
+    assert!(
+        page_html.contains(&format!("src='{src}'"))
+            || page_html.contains(&format!("src=\"{src}\"")),
+        "errors.json src {src:?} does not appear as an attribute in the rendered page"
+    );
+}
+
+/// The offending file resolves and serves fine — the diagnosis must not be
+/// confused with the pre-existing "file is missing" check.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_unplayable_video_is_not_reported_as_broken_reference() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "clip.mp4");
+    repo.create_markdown("note.md", "# Note\n\n![clip](clip.mp4)");
+
+    let server = TestServer::start(&repo).await;
+    let json: serde_json::Value = server.get("/note/errors.json").await.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    assert!(
+        !errors.iter().any(|e| e["type"] == "broken_media_reference"),
+        "a servable file must not be reported broken: {:?}",
+        errors
+    );
+    assert!(errors.iter().any(|e| e["type"] == "unplayable_media"));
+}
+
+/// The three non-flagging quadrants of the bisected 2x2. Each of these
+/// measured as *playing* in Safari, so flagging any of them would put a scary
+/// notice on a working video — the exact failure mode this heuristic must
+/// avoid.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_errors_json_does_not_flag_incomplete_risky_combinations() {
+    for fixture in ["gpmd-only.mp4", "tx3g-only.mp4", "neither.mp4"] {
+        let repo = TestRepo::new();
+        copy_video_fixture(&repo, fixture, "fine.mp4");
+        repo.create_markdown("note.md", "# Note\n\n![clip](fine.mp4)");
+
+        let server = TestServer::start(&repo).await;
+        let json: serde_json::Value = server.get("/note/errors.json").await.json().await.unwrap();
+        let errors = json["errors"].as_array().unwrap();
+
+        assert!(
+            !errors.iter().any(|e| e["type"] == "unplayable_media"),
+            "{fixture} plays in Safari and must not be flagged: {errors:?}"
+        );
+    }
+}
+
+/// The same clip embedded twice yields one diagnosis, so the endpoint never
+/// probes the same bytes more than once per page.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_errors_json_dedupes_repeated_unplayable_embeds() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "clip.mp4");
+    repo.create_markdown("note.md", "# Note\n\n![a](clip.mp4)\n\n![b](clip.mp4)");
+
+    let server = TestServer::start(&repo).await;
+    let json: serde_json::Value = server.get("/note/errors.json").await.json().await.unwrap();
+    let errors = json["errors"].as_array().unwrap();
+
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e["type"] == "unplayable_media")
+            .count(),
+        1,
+        "{:?}",
+        errors
+    );
+}
+
 // ==================== HLS Transcoding Security Tests ====================
 
 /// HLS requests must not be able to reach files outside the served root via
@@ -4283,6 +4523,529 @@ async fn test_hls_traversal_blocked() {
             "HLS path traversal must be blocked with 404 for {path}"
         );
     }
+}
+
+// ============================================================================
+// Stream-copy ("remux") HLS variant
+// ============================================================================
+//
+// The frontend retries a `<video>` against these URLs *after* the browser has
+// reported a real playback failure, because the offending track combination is
+// not predictable. So the variant has to be reachable without `--transcode`:
+// every server in this section leaves `transcode_enabled` at its default
+// `false`, which is what `test_server_config` sets.
+//
+// `multitrack-24s.mp4` is a 24 s fixture with video, audio, a `tx3g` subtitle
+// track and a data track, and a keyframe every 2 s — enough to exercise real
+// multi-segment output, which the 1 s fixtures cannot.
+
+/// URL of one part of a video's remux variant.
+#[cfg(feature = "media-metadata")]
+fn remux_url(video_url: &str, part: &str) -> String {
+    format!("{video_url}-remux{part}")
+}
+
+/// Fetches every part of a video's remux variant and concatenates init +
+/// segments into a single playable fMP4, the way a player would.
+#[cfg(feature = "media-metadata")]
+async fn fetch_remux_ladder(server: &TestServer, video_url: &str) -> (String, Vec<u8>) {
+    let playlist_response = server.get(&remux_url(video_url, ".m3u8")).await;
+    assert_eq!(
+        playlist_response.status(),
+        200,
+        "playlist must be served without --transcode"
+    );
+    let playlist = playlist_response.text().await.unwrap();
+
+    let init_response = server.get(&remux_url(video_url, "-init.mp4")).await;
+    assert_eq!(init_response.status(), 200);
+    let mut joined = init_response.bytes().await.unwrap().to_vec();
+
+    let segment_count = playlist
+        .lines()
+        .filter(|line| line.ends_with(".m4s"))
+        .count();
+    assert!(segment_count > 0, "playlist listed no segments: {playlist}");
+    for index in 0..segment_count {
+        let response = server
+            .get(&remux_url(video_url, &format!("-{index:03}.m4s")))
+            .await;
+        assert_eq!(response.status(), 200, "segment {index} must be served");
+        joined.extend_from_slice(&response.bytes().await.unwrap());
+    }
+
+    (playlist, joined)
+}
+
+/// All three routes must serve, with the content types the frontend switches on,
+/// and without `--transcode`.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_routes_serve_without_transcode() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    for (part, expected_type) in [
+        (".m3u8", "application/vnd.apple.mpegurl"),
+        ("-init.mp4", "video/mp4"),
+        ("-000.m4s", "video/iso.segment"),
+    ] {
+        let response = server.get(&remux_url("/videos/clip.mp4", part)).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "{part} must be served without --transcode"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_type),
+            "wrong content type for {part}"
+        );
+        assert!(
+            !response.bytes().await.unwrap().is_empty(),
+            "{part} must not be empty"
+        );
+    }
+}
+
+/// The playlist must be internally consistent: version 7 or later for
+/// `#EXT-X-MAP`, a `TARGETDURATION` no smaller than any `EXTINF`, and every
+/// listed URI actually fetchable.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_playlist_is_self_consistent() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    let (playlist, _joined) = fetch_remux_ladder(&server, "/videos/clip.mp4").await;
+
+    assert!(playlist.starts_with("#EXTM3U"), "{playlist}");
+    assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
+
+    let version: u32 = playlist
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-VERSION:"))
+        .expect("version tag")
+        .parse()
+        .expect("numeric version");
+    assert!(version >= 7, "EXT-X-MAP needs version >= 7, got {version}");
+
+    assert!(
+        playlist.contains("#EXT-X-MAP:URI=\"clip.mp4-remux-init.mp4\""),
+        "EXT-X-MAP must point at the init segment: {playlist}"
+    );
+
+    let target: f64 = playlist
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-TARGETDURATION:"))
+        .expect("target duration")
+        .parse()
+        .expect("numeric target");
+    let extinfs: Vec<f64> = playlist
+        .lines()
+        .filter_map(|line| line.strip_prefix("#EXTINF:"))
+        .map(|value| value.trim_end_matches(',').parse().expect("numeric EXTINF"))
+        .collect();
+
+    assert!(
+        extinfs.len() > 1,
+        "a 24s fixture must yield several segments: {playlist}"
+    );
+    for extinf in &extinfs {
+        assert!(
+            *extinf <= target,
+            "EXTINF {extinf} exceeds TARGETDURATION {target}"
+        );
+    }
+
+    // The playlist timeline must match the source's 24 s duration.
+    let total: f64 = extinfs.iter().sum();
+    assert!(
+        (total - 24.0).abs() < 0.5,
+        "playlist covers {total}s, expected ~24s"
+    );
+}
+
+/// The point of the whole variant: the served bytes must no longer carry the
+/// data or subtitle tracks implicated in the WebKit decode failure.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_drops_data_and_subtitle_tracks() {
+    for fixture in ["gpmd-and-tx3g.mp4", "multitrack-24s.mp4"] {
+        let repo = TestRepo::new();
+        copy_video_fixture(&repo, fixture, "videos/clip.mp4");
+        let server = TestServer::start(&repo).await;
+
+        let (_playlist, joined) = fetch_remux_ladder(&server, "/videos/clip.mp4").await;
+
+        // Sample entries live uncompressed in `moov`, so a surviving track would
+        // show its FourCC verbatim.
+        for tag in [b"gpmd".as_slice(), b"tx3g".as_slice()] {
+            assert!(
+                !joined.windows(4).any(|window| window == tag),
+                "{fixture}: remux output still carries a '{}' track",
+                String::from_utf8_lossy(tag)
+            );
+        }
+
+        // Probe the bytes a player would receive.
+        let temp = tempfile::Builder::new()
+            .suffix(".mp4")
+            .tempfile()
+            .expect("temp file");
+        std::fs::write(temp.path(), &joined).expect("write joined fMP4");
+
+        let metadata =
+            mbr::video_metadata::probe_video(temp.path()).expect("remux output must be readable");
+        assert!(
+            !metadata.has_subtitles,
+            "{fixture}: remux output must have no subtitle track"
+        );
+
+        // And the advisory heuristic that flagged the source must no longer fire.
+        let compat = mbr::video_metadata::probe_playback_compatibility(temp.path())
+            .expect("remux output must be probeable");
+        assert!(
+            !compat.has_known_risk(),
+            "{fixture}: remux output still matches the risky combination: {compat:?}"
+        );
+    }
+}
+
+/// The source must be left untouched — this is a serve-time repair, not an edit.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_does_not_modify_the_source_file() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "gpmd-and-tx3g.mp4", "videos/clip.mp4");
+    let before = std::fs::read(repo.path().join("videos/clip.mp4")).unwrap();
+
+    let server = TestServer::start(&repo).await;
+    let (_playlist, _joined) = fetch_remux_ladder(&server, "/videos/clip.mp4").await;
+
+    let after = std::fs::read(repo.path().join("videos/clip.mp4")).unwrap();
+    assert_eq!(before, after, "the original file must not be rewritten");
+    // The original URL still serves the original bytes.
+    let original = server.get("/videos/clip.mp4").await;
+    assert_eq!(original.status(), 200);
+    assert_eq!(original.bytes().await.unwrap().as_ref(), before.as_slice());
+}
+
+/// Repeated requests must be served from the cache byte-for-byte, so a player
+/// re-fetching a segment never gets a different answer.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_segment_is_stable_across_requests() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    let first = server.get("/videos/clip.mp4-remux-002.m4s").await;
+    assert_eq!(first.status(), 200);
+    let first_bytes = first.bytes().await.unwrap();
+
+    let second = server.get("/videos/clip.mp4-remux-002.m4s").await;
+    assert_eq!(second.status(), 200);
+    let second_bytes = second.bytes().await.unwrap();
+
+    assert_eq!(first_bytes, second_bytes);
+}
+
+/// A segment index past the end must 404 rather than return an empty body a
+/// player would sit waiting on.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_segment_out_of_range_is_not_found() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/videos/clip.mp4-remux-999.m4s").await;
+    assert_eq!(response.status(), 404);
+}
+
+/// Remux URLs must only apply to real video files.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_ignores_non_video_and_missing_sources() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note");
+    repo.create_static_file("docs/report.pdf", b"%PDF-1.4 fake");
+    let server = TestServer::start(&repo).await;
+
+    for path in [
+        // Not a video extension.
+        "/docs/report.pdf-remux.m3u8",
+        "/note.md-remux-000.m4s",
+        // Video extension, but no such file.
+        "/videos/missing.mp4-remux.m3u8",
+        "/videos/missing.mp4-remux-init.mp4",
+    ] {
+        assert_eq!(
+            server.get(path).await.status(),
+            404,
+            "{path} must not be treated as a remux request"
+        );
+    }
+}
+
+/// A file that ffmpeg cannot open must produce a status, not a hanging player.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_rejects_a_file_that_is_not_really_a_video() {
+    let repo = TestRepo::new();
+    repo.create_static_file("videos/bogus.mp4", b"this is not an mp4 at all");
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/videos/bogus.mp4-remux.m3u8").await;
+    assert!(
+        response.status().is_client_error() || response.status().is_server_error(),
+        "expected an error status, got {}",
+        response.status()
+    );
+    assert_ne!(
+        response.status(),
+        200,
+        "an unreadable file must never yield an empty playlist"
+    );
+}
+
+/// Remux requests must not be able to reach files outside the served root, the
+/// same guarantee `test_hls_traversal_blocked` gives the transcode ladder.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_traversal_blocked() {
+    // The served root is a subdirectory of the temp dir; the video lives
+    // OUTSIDE it, as a sibling of the root.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let outer = temp_dir.path().canonicalize().unwrap();
+    let repo_root = outer.join("repo");
+    std::fs::create_dir_all(repo_root.join(".mbr")).unwrap();
+    std::fs::write(repo_root.join("readme.md"), "# Hello").unwrap();
+
+    // A *real, remuxable* video outside the root, so a 404 proves containment
+    // rather than merely that the source could not be read.
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/videos")
+        .join("multitrack-24s.mp4");
+    std::fs::copy(&fixture, outer.join("secret.mp4")).unwrap();
+
+    let server = TestServer::start_at_path(repo_root).await;
+
+    // Percent-encoded slashes so the client does not normalize the ".." away;
+    // the server decodes them back to "../secret.mp4-remux...".
+    for path in [
+        "/..%2Fsecret.mp4-remux.m3u8",
+        "/..%2Fsecret.mp4-remux-init.mp4",
+        "/..%2Fsecret.mp4-remux-000.m4s",
+    ] {
+        assert_eq!(
+            server.get(path).await.status(),
+            404,
+            "remux path traversal must be blocked for {path}"
+        );
+    }
+}
+
+/// The remux URLs must not shadow the transcode ladder or the metadata
+/// sidecars, and must not be shadowed by them.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_urls_do_not_collide_with_other_video_routes() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    // The transcode ladder is disabled here, so its URLs must still 404 while
+    // the remux URLs succeed — proof the two are routed independently.
+    for path in ["/videos/clip-720p.m3u8", "/videos/clip-480p-000.ts"] {
+        assert_eq!(
+            server.get(path).await.status(),
+            404,
+            "{path} must stay unavailable without --transcode"
+        );
+    }
+    assert_eq!(
+        server.get("/videos/clip.mp4-remux.m3u8").await.status(),
+        200,
+        "the remux variant must not depend on --transcode"
+    );
+
+    // The metadata sidecar routes still work for the same file.
+    let cover = server.get("/videos/clip.mp4.cover.jpg").await;
+    assert_eq!(
+        cover.status(),
+        200,
+        "the cover sidecar must be unaffected by the remux routes"
+    );
+    assert_eq!(
+        cover
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/jpeg")
+    );
+}
+
+/// A request abandoned mid-generation must not poison its segment.
+///
+/// This is the shape Safari's HLS loader produces constantly: it starts a segment
+/// prefetch and drops it. axum drops the request future on disconnect, so any
+/// completion bookkeeping awaited in the request path is simply skipped — which
+/// used to leave the cache key marked in-progress forever. Every later request
+/// for that segment then waited out the 60 s in-flight timeout with no work
+/// running, so `<video>` stalled at t=0 with no error to report: strictly worse
+/// than the playback failure this feature exists to repair.
+///
+/// The aborts here race real generation, so a given run may or may not land
+/// mid-flight. That asymmetry is fine: a missed race passes exactly as correct
+/// code does, while a landed race on the old code hangs and fails. Twenty-odd
+/// aborts on a cold cache reproduced it every time. The deterministic coverage of
+/// the same invariant lives in `video_transcode_cache`'s cancellation tests.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_aborted_segment_request_does_not_poison_the_segment() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    let segment_count = server
+        .get_text("/videos/clip.mp4-remux.m3u8")
+        .await
+        .lines()
+        .filter(|line| line.ends_with(".m4s"))
+        .count();
+    assert!(segment_count > 1, "fixture must yield several segments");
+
+    // Abandon a request for every segment, at a spread of deadlines so some land
+    // while generation is in flight. Dropping the `send()` future closes the
+    // connection, which is what the server sees when a client goes away.
+    for index in 0..segment_count {
+        for micros in [1u64, 50, 250, 1_000] {
+            let url = server.url(&format!("/videos/clip.mp4-remux-{index:03}.m4s"));
+            let _ = tokio::time::timeout(
+                Duration::from_micros(micros),
+                mbr::http_client(Duration::from_secs(5)).get(url).send(),
+            )
+            .await;
+        }
+    }
+
+    // Every segment must still be servable, promptly. The bound is far below the
+    // 60 s in-flight timeout, so a leaked marker fails fast instead of stalling
+    // the suite.
+    for index in 0..segment_count {
+        let path = format!("/videos/clip.mp4-remux-{index:03}.m4s");
+        let started = std::time::Instant::now();
+        let response = tokio::time::timeout(Duration::from_secs(10), server.get(&path))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{path} did not respond within 10s — the segment is wedged in-progress")
+            });
+
+        assert_eq!(
+            response.status(),
+            200,
+            "{path} must still serve after an aborted request"
+        );
+        assert!(
+            !response.bytes().await.unwrap().is_empty(),
+            "{path} served an empty body"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{path} took {:?}, which means it waited on a stale in-flight marker",
+            started.elapsed()
+        );
+    }
+}
+
+/// The same guarantee for the playlist and init segment, which a player fetches
+/// first and is therefore the most likely thing to be abandoned.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_aborted_playlist_request_does_not_poison_the_variant() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    let server = TestServer::start(&repo).await;
+
+    for part in [".m3u8", "-init.mp4"] {
+        for micros in [1u64, 100, 500] {
+            let url = server.url(&format!("/videos/clip.mp4-remux{part}"));
+            let _ = tokio::time::timeout(
+                Duration::from_micros(micros),
+                mbr::http_client(Duration::from_secs(5)).get(url).send(),
+            )
+            .await;
+        }
+    }
+
+    // The whole ladder must still be fetchable, and the playlist still well-formed.
+    let (playlist, joined) = tokio::time::timeout(
+        Duration::from_secs(20),
+        fetch_remux_ladder(&server, "/videos/clip.mp4"),
+    )
+    .await
+    .expect("the remux ladder must not be wedged after aborted requests");
+
+    assert!(playlist.starts_with("#EXTM3U"), "{playlist}");
+    assert!(!joined.is_empty());
+}
+
+/// A file name with spaces must survive the round trip: mbr percent-encodes the
+/// playlist URIs (a raw space is not a legal URI), and the request path is
+/// decoded again before parsing.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_remux_handles_spaces_in_file_names() {
+    let repo = TestRepo::new();
+    copy_video_fixture(
+        &repo,
+        "multitrack-24s.mp4",
+        "videos/Eric Jones - Metal 3.mp4",
+    );
+    let server = TestServer::start(&repo).await;
+
+    let playlist = server
+        .get_text("/videos/Eric%20Jones%20-%20Metal%203.mp4-remux.m3u8")
+        .await;
+    assert!(
+        playlist.contains("Eric%20Jones%20-%20Metal%203.mp4-remux-000.m4s"),
+        "segment URIs must be percent-encoded: {playlist}"
+    );
+    assert!(
+        !playlist.contains(' '),
+        "no playlist line may contain a raw space: {playlist}"
+    );
+
+    // And the encoded URI a player would follow must actually resolve.
+    let segment = server
+        .get("/videos/Eric%20Jones%20-%20Metal%203.mp4-remux-000.m4s")
+        .await;
+    assert_eq!(segment.status(), 200);
+    assert!(!segment.bytes().await.unwrap().is_empty());
+}
+
+/// A static file whose name genuinely ends in a remux suffix must win, because
+/// the real file resolves before the fallback handlers run.
+#[cfg(feature = "media-metadata")]
+#[tokio::test]
+async fn test_real_file_named_like_a_remux_url_is_served_verbatim() {
+    let repo = TestRepo::new();
+    copy_video_fixture(&repo, "multitrack-24s.mp4", "videos/clip.mp4");
+    repo.create_static_file("videos/clip.mp4-remux.m3u8", b"#EXTM3U\n# hand written\n");
+    let server = TestServer::start(&repo).await;
+
+    let body = server.get_text("/videos/clip.mp4-remux.m3u8").await;
+    assert!(
+        body.contains("hand written"),
+        "an existing file must take precedence: {body}"
+    );
 }
 
 // ==================== Editing endpoint tests ====================
