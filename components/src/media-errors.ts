@@ -215,6 +215,50 @@ export function isUnplayableMediaError(entry: PageErrorLike): entry is Unplayabl
   return entry.type === 'unplayable_media';
 }
 
+/** HLS playlist MIME type, used for the native-support probe. */
+export const HLS_MIME = 'application/vnd.apple.mpegurl';
+
+/**
+ * URL of the server's remuxed ("copy") HLS variant of a media file.
+ *
+ * mbr can repair some containers at serve time by stream-copying video and
+ * audio into fMP4 segments, which drops the extra tracks implicated in WebKit
+ * decode failures. No re-encode, so no quality loss.
+ *
+ * Any `#t=` fragment is preserved, since it addresses playback position rather
+ * than the resource.
+ */
+export function remuxUrlFor(src: string): string {
+  const hash = src.indexOf('#');
+  const base = hash === -1 ? src : src.slice(0, hash);
+  const fragment = hash === -1 ? '' : src.slice(hash);
+  return `${base}-remux.m3u8${fragment}`;
+}
+
+/**
+ * Whether this browser can play an HLS playlist from a plain `src`.
+ *
+ * Only WebKit/Safari has native HLS, which is also where the decode failures we
+ * are recovering from occur — so the two line up. Chrome and Firefox return ''
+ * here and simply skip recovery rather than swapping to a URL they cannot play.
+ */
+export function supportsNativeHls(video: HTMLMediaElement): boolean {
+  return typeof video.canPlayType === 'function' && video.canPlayType(HLS_MIME) !== '';
+}
+
+/**
+ * Whether a failure is worth retrying against the remuxed variant.
+ *
+ * `MEDIA_ERR_DECODE` (3) is the signature of the container problems a remux
+ * fixes. `MEDIA_ERR_SRC_NOT_SUPPORTED` (4) is included because WebKit reports
+ * some unsupported track layouts that way rather than as a decode error. A
+ * network error or an abort says nothing about the container, so those are left
+ * alone — retrying them would just fail twice and delay the message.
+ */
+export function isRecoverableMediaError(code: number | undefined): boolean {
+  return code === 3 || code === 4;
+}
+
 /**
  * Last successfully loaded `errors.json` payload.
  *

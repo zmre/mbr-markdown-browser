@@ -4022,6 +4022,15 @@ impl Server {
                     return Ok(response);
                 }
 
+                // Try to serve the stream-copy (remux) HLS variant. Deliberately
+                // NOT gated on `transcode_enabled`: a remux costs a fraction of
+                // a re-encode and is how a video the browser refused to play
+                // gets recovered.
+                #[cfg(feature = "media-metadata")]
+                if let Some(response) = Self::try_serve_remux_content(&path, &config).await {
+                    return Ok(response);
+                }
+
                 // Try to serve dynamically generated video metadata (server mode only)
                 #[cfg(feature = "media-metadata")]
                 if let Some(response) = Self::try_serve_video_metadata(&path, &config).await {
@@ -5138,6 +5147,248 @@ impl Server {
                 .header(header::CONTENT_LENGTH, segment.len())
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .body(Body::from(segment.as_ref().clone())),
+        )
+    }
+
+    /// Build a response for one part of the stream-copy (remux) variant.
+    #[cfg(feature = "media-metadata")]
+    fn build_remux_response(
+        part: crate::video_remux::RemuxPart,
+        data: Arc<Vec<u8>>,
+    ) -> Response<Body> {
+        use crate::video_remux::{
+            INIT_CONTENT_TYPE, PLAYLIST_CONTENT_TYPE, RemuxPart, SEGMENT_CONTENT_TYPE,
+        };
+
+        let content_type = match part {
+            RemuxPart::Playlist => PLAYLIST_CONTENT_TYPE,
+            RemuxPart::Init => INIT_CONTENT_TYPE,
+            RemuxPart::Segment(_) => SEGMENT_CONTENT_TYPE,
+        };
+
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, data.len())
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
+                .body(Body::from(data.as_ref().clone())),
+        )
+    }
+
+    /// Serve one part of the remux variant from cache, or generate it exactly
+    /// once and serve that.
+    ///
+    /// Wraps the single-flight state machine in `HlsCache` so N concurrent
+    /// requests for the same key run one generation: the winner produces and the
+    /// rest await its result. That, plus the caching, is what bounds the
+    /// concurrent ffmpeg work a player can provoke.
+    ///
+    /// The generation is detached (see `HlsCache::spawn_generation`), so a client
+    /// that disconnects mid-request — which Safari's HLS loader does routinely —
+    /// cannot cancel the work or skip the cache bookkeeping. Awaiting the returned
+    /// `JoinHandle` is how this request reads the result; dropping it merely stops
+    /// listening.
+    ///
+    /// Every failure carries a status: an empty body or a bare 404 would leave a
+    /// player retrying or stalled with nothing to report.
+    #[cfg(feature = "media-metadata")]
+    async fn generate_remux_part<F>(
+        cache: &Arc<crate::video_transcode_cache::HlsCache>,
+        key: crate::video_transcode_cache::HlsCacheKey,
+        generate: F,
+    ) -> Result<Arc<Vec<u8>>, Response<Body>>
+    where
+        F: FnOnce() -> Result<Vec<u8>, crate::video_transcode::TranscodeError> + Send + 'static,
+    {
+        use crate::video_transcode_cache::{HLS_WAIT_TIMEOUT, HlsCache, HlsCacheStartResult};
+
+        match cache.start_generation(key.clone()) {
+            HlsCacheStartResult::Started(notify) => {
+                let handle = HlsCache::spawn_generation(cache, key.clone(), notify, generate);
+                match handle.await {
+                    Ok(Ok(data)) => Ok(data),
+                    Ok(Err(error)) => Err(Self::build_remux_error_response(&error)),
+                    // The detached task itself failed to finish; its guard has
+                    // released the claim, so a retry can succeed.
+                    Err(join_error) => {
+                        tracing::warn!("remux generation task did not finish: {join_error}");
+                        Err(Self::build_remux_retry_response(
+                            "generation did not complete",
+                        ))
+                    }
+                }
+            }
+            HlsCacheStartResult::AlreadyInProgress(notify) => {
+                match cache
+                    .wait_for_completion(&key, notify, HLS_WAIT_TIMEOUT)
+                    .await
+                {
+                    Some(data) => Ok(data),
+                    // Not complete: either the producer recorded a failure, or
+                    // the wait timed out / the claim was released. Distinguish
+                    // them so the client is told something true.
+                    None => Err(Self::remux_incomplete_response(cache, &key)),
+                }
+            }
+            HlsCacheStartResult::AlreadyComplete(data) => Ok(data),
+            HlsCacheStartResult::PreviouslyFailed(message) => {
+                tracing::debug!("previous remux generation failed: {message}");
+                Err(Self::build_remux_unprocessable_response(&message))
+            }
+            // With caching off there is no entry to settle, but the work is still
+            // detached so a disconnect cannot orphan a half-finished mux.
+            HlsCacheStartResult::CacheDisabled => {
+                let notify = Arc::new(tokio::sync::Notify::new());
+                let handle = HlsCache::spawn_generation(cache, key, notify, generate);
+                match handle.await {
+                    Ok(Ok(data)) => Ok(data),
+                    Ok(Err(error)) => Err(Self::build_remux_error_response(&error)),
+                    Err(join_error) => {
+                        tracing::warn!("remux generation task did not finish: {join_error}");
+                        Err(Self::build_remux_retry_response(
+                            "generation did not complete",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Explain why a waiter never saw completed content.
+    ///
+    /// A `Failed` entry means the producer got a real error worth reporting; the
+    /// alternative (timed out, or the claim was released by an interrupted
+    /// producer) is transient and retryable, so it must not be reported as a
+    /// permanent failure.
+    #[cfg(feature = "media-metadata")]
+    fn remux_incomplete_response(
+        cache: &crate::video_transcode_cache::HlsCache,
+        key: &crate::video_transcode_cache::HlsCacheKey,
+    ) -> Response<Body> {
+        use crate::video_transcode_cache::HlsCacheState;
+
+        match cache.get_state(key) {
+            Some(HlsCacheState::Failed(message)) => {
+                Self::build_remux_unprocessable_response(&message)
+            }
+            _ => Self::build_remux_retry_response("generation is not available yet"),
+        }
+    }
+
+    /// A permanent "this variant cannot be produced" answer.
+    #[cfg(feature = "media-metadata")]
+    fn build_remux_unprocessable_response(message: &str) -> Response<Body> {
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(format!("Cannot serve this variant: {message}"))),
+        )
+    }
+
+    /// A transient "try again" answer.
+    ///
+    /// `503` with `Retry-After: 1` rather than a 404, because the content may
+    /// well exist on the next attempt and a player should be told to come back
+    /// rather than treat the segment as missing.
+    #[cfg(feature = "media-metadata")]
+    fn build_remux_retry_response(reason: &str) -> Response<Body> {
+        build_response_or_500(
+            Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(header::RETRY_AFTER, "1")
+                .body(Body::from(format!("{reason}; please retry"))),
+        )
+    }
+
+    /// Map a remux failure to an honest status code.
+    ///
+    /// An empty playlist or a silent 404 would make a player hang or retry
+    /// forever, so every failure gets a status and a reason.
+    #[cfg(feature = "media-metadata")]
+    fn build_remux_error_response(
+        error: &crate::video_transcode::TranscodeError,
+    ) -> Response<Body> {
+        use crate::video_transcode::TranscodeError;
+
+        let status = match error {
+            // Nothing to copy, or nothing a player could decode.
+            TranscodeError::NoVideoStream { .. }
+            | TranscodeError::NoKeyframeIndex
+            | TranscodeError::UnsupportedFormat => StatusCode::UNPROCESSABLE_ENTITY,
+            // The client asked for a segment that does not exist.
+            TranscodeError::SegmentOutOfRange { .. } => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        tracing::warn!("remux failed ({status}): {error}");
+        build_response_or_500(
+            Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(error.to_string())),
+        )
+    }
+
+    /// Try to serve the stream-copy (remux) HLS variant.
+    ///
+    /// Reachable **without** `--transcode`: a remux is a stream copy costing a
+    /// tiny fraction of the 720p/480p re-encode, and it exists to recover a
+    /// video the browser has already failed to play, so it does not warrant the
+    /// same opt-in. Still server/GUI only — static builds never register this
+    /// route.
+    ///
+    /// Returns `Some(Response)` when the path was a remux URL, `None` to fall
+    /// through to the remaining handlers.
+    #[cfg(feature = "media-metadata")]
+    async fn try_serve_remux_content(path: &str, config: &ServerState) -> Option<Response<Body>> {
+        use crate::video_metadata_cache::cache_key_with_mtime;
+        use crate::video_remux::{
+            RemuxPart, generate_remux_init, generate_remux_playlist, generate_remux_segment,
+            parse_remux_request,
+        };
+        use crate::video_transcode_cache::HlsCacheKey;
+
+        let request = parse_remux_request(path)?;
+
+        // Path-traversal protection, and the source of the mtime the cache key
+        // is scoped to.
+        let Some(video_file) =
+            resolve_media_source_file(request.video_path, &config.base_dir, &config.static_folder)
+        else {
+            tracing::debug!("no video file for remux request: {}", request.video_path);
+            return None;
+        };
+
+        let cache_key =
+            HlsCacheKey::remux(cache_key_with_mtime(&video_file, "remux"), request.part);
+
+        // Segment URIs in the playlist are relative to the playlist URL, so the
+        // base name keeps the video's own extension.
+        let base_name = std::path::Path::new(request.video_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("video")
+            .to_string();
+
+        let part = request.part;
+        let source = video_file.clone();
+        let generate = move || match part {
+            RemuxPart::Playlist => {
+                generate_remux_playlist(&source, &base_name).map(String::into_bytes)
+            }
+            RemuxPart::Init => generate_remux_init(&source),
+            RemuxPart::Segment(index) => generate_remux_segment(&source, index),
+        };
+
+        tracing::debug!("remux request for {:?}: {:?}", video_file, part);
+        Some(
+            match Self::generate_remux_part(&config.hls_cache, cache_key, generate).await {
+                Ok(data) => Self::build_remux_response(part, data),
+                Err(response) => response,
+            },
         )
     }
 

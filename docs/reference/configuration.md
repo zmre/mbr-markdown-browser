@@ -616,6 +616,74 @@ lossless):
 ffmpeg -i in.mp4 -map 0:v -map 0:a -c copy -movflags +faststart out.mp4
 ```
 
+mbr can also attempt that repair for you, at serve time, without touching the
+file — see [Automatic Playback Recovery](#automatic-playback-recovery)
+below.
+
+### Automatic Playback Recovery
+
+> **Note:** This feature requires the `media-metadata` Cargo feature (on by
+> default) and runs only in server/GUI mode. Static builds (`-b`) never register
+> these routes.
+
+Because a file's track table cannot tell you whether it will play, mbr does not
+try to get ahead of the problem. Instead, when a `<video>` element reports a real
+`MediaError`, the frontend retries the same video against a **remux variant**: an
+HLS playlist over the same media with the non-audio/video tracks left out.
+
+**No `--transcode` needed.** Unlike the 720p/480p ladder below, this variant is
+always available. It is a stream copy, so it costs a small fraction of a
+re-encode, and it exists to recover a video the reader has already watched fail.
+
+**It never re-encodes.** Every video and audio packet is copied byte-for-byte.
+Only the container is rebuilt, carrying just the best video stream and the best
+audio stream — which is exactly what leaves the data and subtitle tracks behind.
+There is no quality loss and no resolution change.
+
+**URL patterns.** For a video served at `/videos/demo.mp4`:
+
+| Type | URL | Content type |
+|------|-----|--------------|
+| Playlist | `/videos/demo.mp4-remux.m3u8` | `application/vnd.apple.mpegurl` |
+| Init segment | `/videos/demo.mp4-remux-init.mp4` | `video/mp4` |
+| Media segment | `/videos/demo.mp4-remux-000.m4s` | `video/iso.segment` |
+
+The video's own extension stays in the path, which keeps these URLs distinct from
+the `-720p.m3u8` transcode URLs and from the `.cover.jpg` / `.captions.en.vtt`
+sidecars.
+
+**Fragmented MP4, not MPEG-TS.** The transcode ladder emits `.ts` segments; it
+can, because it encodes fresh frames. A stream copy cannot: MP4 stores H.264 as
+length-prefixed AVCC and MPEG-TS needs Annex B, and that conversion requires a
+bitstream filter that mbr's ffmpeg bindings do not expose. Fragmented MP4
+(HLS v7+) avoids the problem by reusing the source's codec configuration
+unchanged.
+
+**Browser support.** This is native HLS, which in practice means WebKit — Safari
+and mbr's own `-g` GUI window. Chrome and Firefox have no native HLS support (it
+needs a JavaScript player), so recovery only applies where the browser can play
+the playlist. That is a good match for the problem: the decode failure this
+recovers from is itself a WebKit behaviour.
+
+**Segment boundaries.** Segments target 4 seconds but always begin at an existing
+keyframe, since a stream copy cannot insert one. Boundaries come from the
+container's own sync-sample index — already parsed when the file is opened — so
+no part of the file is scanned to find them, and `#EXTINF` durations reflect the
+real, slightly uneven segment lengths. A container that exposes no keyframe index
+returns `422` rather than a playlist whose segments a player could not decode.
+
+**Performance and memory.** Segments are generated on demand on a blocking thread
+pool, one generation per segment no matter how many requests arrive for it, and
+cached in the same in-memory HLS cache as the transcode ladder (~200 MB, no cache
+files on disk). Cache entries are keyed by file path + modification time, so
+editing a video transparently re-segments it. Playlists and init segments are
+evicted last, since they are tiny and needed for every playback attempt. A 4 s
+copy segment is roughly a tenth the size of the source's 4 s of data — about
+30 MB for extreme 60 Mbps 4K footage, single-digit MB for typical video.
+
+Nothing here runs during markdown rendering; the first request for a variant is
+the first time any of it happens.
+
 ### Media Compression
 
 mbr gzip-compresses responses when the client asks for it, but never for

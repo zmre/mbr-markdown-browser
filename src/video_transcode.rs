@@ -116,6 +116,19 @@ pub enum TranscodeError {
     #[error("Transcoding failed: {0}")]
     TranscodeFailed(String),
 
+    /// The container exposes no sync-sample (keyframe) index, so the copy
+    /// variant cannot pick segment boundaries a player could decode. Guessing
+    /// uniform boundaries would emit segments starting mid-GOP; scanning the
+    /// whole file to find keyframes would be unacceptably slow on a large one.
+    #[error("Container has no keyframe index; cannot segment without re-encoding")]
+    NoKeyframeIndex,
+
+    /// A stream-copy remux failed. Distinct from [`Self::TranscodeFailed`]
+    /// because no encoding is involved, so the causes are container-level
+    /// (muxer setup, packet write, malformed fMP4 output).
+    #[error("Remux failed: {0}")]
+    RemuxFailed(String),
+
     #[error("Encoder not available: {0}")]
     EncoderNotAvailable(String),
 

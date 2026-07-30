@@ -6,12 +6,15 @@ import {
   clearPublishedPageErrors,
   describeMediaError,
   findUnplayableMedia,
+  isRecoverableMediaError,
   isUnplayableMediaError,
   mergeRuntimeMediaErrors,
   normalizeMediaSrc,
   publishPageErrors,
+  remuxUrlFor,
   reportMediaError,
   sameMediaSrc,
+  supportsNativeHls,
   type MediaErrorEventDetail,
   type PageErrorsLoadedEventDetail,
   type RuntimeMediaError,
@@ -227,5 +230,30 @@ describe('mergeRuntimeMediaErrors', () => {
     const merged = mergeRuntimeMediaErrors([link], [runtime('/videos/a.mp4')])
     expect(merged[0]).toBe(link)
     expect(merged[1].type).toBe('runtime_media_error')
+  })
+})
+
+describe('remux recovery helpers', () => {
+  it('builds the remux playlist URL', () => {
+    expect(remuxUrlFor('/videos/a.mp4')).toBe('/videos/a.mp4-remux.m3u8')
+  })
+
+  it('preserves a #t= fragment, which addresses position not resource', () => {
+    expect(remuxUrlFor('/videos/a.mp4#t=10,30')).toBe('/videos/a.mp4-remux.m3u8#t=10,30')
+  })
+
+  it('treats decode and unsupported-source as recoverable, others not', () => {
+    expect(isRecoverableMediaError(3)).toBe(true)
+    expect(isRecoverableMediaError(4)).toBe(true)
+    expect(isRecoverableMediaError(1)).toBe(false)
+    expect(isRecoverableMediaError(2)).toBe(false)
+    expect(isRecoverableMediaError(undefined)).toBe(false)
+  })
+
+  it('detects native HLS support via canPlayType', () => {
+    const yes = { canPlayType: () => 'maybe' } as unknown as HTMLMediaElement
+    const no = { canPlayType: () => '' } as unknown as HTMLMediaElement
+    expect(supportsNativeHls(yes)).toBe(true)
+    expect(supportsNativeHls(no)).toBe(false)
   })
 })

@@ -4,10 +4,13 @@ import {
   PAGE_ERRORS_LOADED_EVENT,
   buildMediaErrorNotice,
   findUnplayableMedia,
+  isRecoverableMediaError,
   mediaErrorStyles,
   normalizeMediaSrc,
+  remuxUrlFor,
   renderMediaErrorNotice,
   reportMediaError,
+  supportsNativeHls,
   type PageErrorsLoadedEventDetail,
   type UnplayableMediaError,
 } from './media-errors.js';
@@ -511,6 +514,11 @@ export class MbrVideoExtrasElement extends LitElement {
   private _boundPageErrorsLoaded = this._onPageErrorsLoaded.bind(this);
   private _lastSaveTime = 0;
   private _hasPlayed = false;
+  /**
+   * Guards the remux retry to a single attempt, so a container the remux cannot
+   * fix fails once and reports, rather than looping.
+   */
+  private _remuxAttempted = false;
 
   override connectedCallback() {
     super.connectedCallback();
@@ -742,16 +750,52 @@ export class MbrVideoExtrasElement extends LitElement {
   }
 
   /**
-   * Handle a `<video>` error: show it in the caption and tell the rest of the
-   * page. Without this the element goes blank with no feedback anywhere.
+   * Handle a `<video>` error. First try to recover silently by switching to the
+   * server's remuxed variant; only if that is impossible or also fails do we
+   * show the message and tell the rest of the page. Without this the element
+   * goes blank with no feedback anywhere.
    */
   private _onMediaError() {
     const error = this._videoElement?.error ?? null;
+
+    if (this._tryRemuxRecovery(error)) return;
+
     this._mediaErrorCode = error?.code ?? 0;
     this._mediaErrorMessage = error?.message ?? '';
     // The server may have already explained *why* this file is unplayable.
     this._serverDiagnosis = this._serverDiagnosis ?? findUnplayableMedia(this.src);
     reportMediaError(this.src, 'video', error);
+  }
+
+  /**
+   * Attempt a one-shot switch to the remuxed HLS variant.
+   *
+   * We cannot tell in advance which files a browser will refuse — the container
+   * heuristic has a known false positive — so recovery is driven by the actual
+   * failure rather than by prediction. Returns `true` when a retry is under way,
+   * in which case reporting is deferred: if the remux plays, the reader simply
+   * sees the video work after a brief stall, and nothing is ever reported.
+   */
+  private _tryRemuxRecovery(error: MediaError | null): boolean {
+    const video = this._videoElement;
+    if (!video || !this.src) return false;
+    if (this._remuxAttempted) return false;
+    if (!isRecoverableMediaError(error?.code)) return false;
+    if (!supportsNativeHls(video)) return false;
+
+    this._remuxAttempted = true;
+    // Assigning `src` takes precedence over the <source> children the server
+    // rendered, so the original MP4 is not retried.
+    video.src = remuxUrlFor(this.src);
+    video.load();
+    // Only resume automatically if the reader had already asked to play; a
+    // failure during preload must not start playback they did not request.
+    if (this._hasPlayed) {
+      void video.play().catch(() => {
+        /* Autoplay policy or a second failure; the error handler reports it. */
+      });
+    }
+    return true;
   }
 
   /**

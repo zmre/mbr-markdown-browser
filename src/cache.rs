@@ -268,6 +268,33 @@ where
         }
     }
 
+    /// Removes the entry for `key` when `predicate` accepts it, adjusting the
+    /// accounted total. Returns whether an entry was removed.
+    ///
+    /// The removal is a single atomic compare-and-remove, which is what makes
+    /// this safe for withdrawing a marker a caller owns: if another writer has
+    /// already replaced the entry, `predicate` sees the new value and can
+    /// decline, so a concurrent legitimate write is never clobbered.
+    pub fn remove_if(&self, key: K, predicate: impl Fn(&Entry<V>) -> bool) -> bool {
+        if self.is_disabled() {
+            return false;
+        }
+        let guard = self.map.pin();
+        let outcome = guard.compute(key, |existing| match existing {
+            Some((_, entry)) if predicate(entry) => Operation::Remove,
+            _ => Operation::Abort(()),
+        });
+
+        match outcome {
+            Compute::Removed(_, entry) => {
+                self.current_size
+                    .fetch_sub(entry.size_bytes, Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Removes evictable entries in ascending `priority` order until at least
     /// `target_bytes` have been freed (or no candidates remain).
     ///
@@ -354,6 +381,38 @@ mod tests {
         assert_eq!(total, 250);
         assert_eq!(map.current_size(), 250);
         assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_if_removes_only_matching_entries_and_adjusts_size() {
+        let map: SizeBoundedMap<String, String> = SizeBoundedMap::new(1024);
+        map.insert_weighted("keep".to_string(), "keep".to_string(), 100);
+        map.insert_weighted("drop".to_string(), "drop".to_string(), 250);
+        assert_eq!(map.current_size(), 350);
+
+        // A declining predicate must leave the entry, and the total, alone.
+        assert!(!map.remove_if("keep".to_string(), |entry| entry.value == "drop"));
+        assert_eq!(map.current_size(), 350);
+        assert_eq!(map.len(), 2);
+
+        // An accepting predicate removes the entry and reclaims its bytes.
+        assert!(map.remove_if("drop".to_string(), |entry| entry.value == "drop"));
+        assert_eq!(map.current_size(), 100);
+        assert_eq!(map.len(), 1);
+        assert!(map.with_entry("drop", |e| e.value.clone()).is_none());
+    }
+
+    #[test]
+    fn test_remove_if_absent_key_is_a_no_op() {
+        let map: SizeBoundedMap<String, String> = SizeBoundedMap::new(1024);
+        assert!(!map.remove_if("missing".to_string(), |_| true));
+        assert_eq!(map.current_size(), 0);
+    }
+
+    #[test]
+    fn test_remove_if_on_disabled_map_is_a_no_op() {
+        let map: SizeBoundedMap<String, String> = SizeBoundedMap::new(0);
+        assert!(!map.remove_if("k".to_string(), |_| true));
     }
 
     #[test]

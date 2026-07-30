@@ -405,6 +405,41 @@ Dropping the subtitle tracks instead also resolves the conflict, if you would
 rather keep the telemetry. Either way, don't re-encode to a lower resolution
 hoping to fix this.
 
+You may not have to run it yourself, though — see [Automatic
+recovery](#automatic-recovery) below.
+
+#### Automatic recovery
+
+When a video really does fail, mbr tries the same repair on the fly. Nothing is
+written to disk and your file is not touched; mbr just serves the same media
+through a rebuilt container that carries only the video and audio streams.
+
+Because a file's track list cannot tell you whether it will play, this is
+triggered by the failure rather than in anticipation of it: the browser reports a
+`MediaError`, and only then does the player retry against the repaired stream. If
+it works, the video simply starts playing, and the message under it says the
+recovery was used.
+
+Three things are worth knowing:
+
+- **It never re-encodes.** Every packet is copied byte-for-byte, so there is no
+  quality loss and no change in resolution. What changes is only which tracks the
+  container carries.
+- **It needs a browser with native HLS**, which in practice means Safari — and
+  mbr's own `-g` GUI window, which is the same engine. Chrome and Firefox cannot
+  play the repaired stream without a JavaScript player, so there is no automatic
+  recovery there. That lines up with the problem, since the decode failure is
+  itself a WebKit behaviour.
+- **It is not guaranteed.** Recovery can fail for reasons of its own — an
+  unusual container, or a file whose problem is something else entirely. When it
+  does, you still get the browser's error and the `ffmpeg` command above.
+
+For the URL scheme, caching and performance details, see [Automatic Playback
+Recovery](../reference/configuration.md#automatic-playback-recovery)
+in the configuration reference. Requires the `media-metadata` feature and
+server/GUI mode; static builds (`-b`) have no recovery route, so for a published
+site the permanent fix is to remux the file yourself.
+
 #### Playback diagnostics
 
 When a video actually fails to play, mbr tells you about it in two places:

@@ -253,7 +253,8 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 | `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
 | `vid.rs` | Video embed handling and shortcodes |
 | `video_transcode.rs` | HLS-based video transcoding - playlist generation and segment transcoding (requires `media-metadata` feature) |
-| `video_transcode_cache.rs` | LRU cache for HLS playlists and segments using papaya concurrent hashmap |
+| `video_remux.rs` | On-the-fly stream-copy ("remux") fMP4 HLS variant for videos a browser refuses to play. Drops data/subtitle tracks without re-encoding; available without `--transcode`, server/GUI only (requires `media-metadata`) |
+| `video_transcode_cache.rs` | LRU cache for HLS playlists and segments using papaya concurrent hashmap. Owns the single-flight state machine; `spawn_generation` detaches the work so a client disconnect can never leave a key stuck in-progress |
 | `oembed.rs` | Auto-embed for bare URLs in markdown (YouTube, Giphy, OpenGraph) |
 | `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
 | `html.rs` | Custom HTML output for pulldown-cmark with section support |

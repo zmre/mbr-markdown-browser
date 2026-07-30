@@ -4,9 +4,12 @@ import { resolveUrl } from './shared.js';
 import {
   buildMediaErrorNotice,
   findUnplayableMedia,
+  isRecoverableMediaError,
   mediaErrorStyles,
+  remuxUrlFor,
   renderMediaErrorNotice,
   reportMediaError,
+  supportsNativeHls,
   type MediaErrorNotice,
 } from './media-errors.js';
 
@@ -280,6 +283,9 @@ export class MbrMediaViewerElement extends LitElement {
   @state()
   private _mediaError: MediaErrorNotice | null = null;
 
+  /** Guards the remux retry to a single attempt, so a failure reports rather than loops. */
+  private _remuxAttempted = false;
+
   /**
    * Whether cover art exists for audio files.
    * Null means not checked, true/false after check.
@@ -375,6 +381,22 @@ export class MbrMediaViewerElement extends LitElement {
     const video = event.target as HTMLVideoElement | null;
     const error = video?.error ?? null;
     const src = this._path ?? '';
+
+    // Try the server's remuxed variant once before reporting anything: if it
+    // plays, the reader never needs to know. Which files need this cannot be
+    // predicted, so the real failure is the trigger.
+    if (
+      video &&
+      src &&
+      !this._remuxAttempted &&
+      isRecoverableMediaError(error?.code) &&
+      supportsNativeHls(video)
+    ) {
+      this._remuxAttempted = true;
+      video.src = remuxUrlFor(src);
+      video.load();
+      return;
+    }
 
     this._mediaError = buildMediaErrorNotice({
       code: error?.code ?? 0,

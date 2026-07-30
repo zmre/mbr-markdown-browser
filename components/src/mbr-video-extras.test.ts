@@ -209,3 +209,111 @@ describe('<mbr-video-extras> media failures', () => {
     expect(reported).toHaveLength(0)
   })
 })
+
+/**
+ * Recovery coverage. Which files a browser refuses cannot be predicted (the
+ * container heuristic has a known false positive), so mbr retries the server's
+ * remuxed variant on a real failure and only reports if that fails too.
+ *
+ * These tests must stub `canPlayType`: the test DOM reports no native HLS, so
+ * without the stub recovery is correctly skipped and never exercised.
+ */
+describe('<mbr-video-extras> remux recovery', () => {
+  const SRC2 = '/videos/clip.mp4'
+  let figure: HTMLElement
+  let video: HTMLVideoElement
+  let extras: MbrVideoExtrasElement
+  let reported: MediaErrorEventDetail[]
+  let loadCalls: number
+
+  const collect = (e: CustomEvent<MediaErrorEventDetail>) => {
+    reported.push(e.detail)
+  }
+
+  function build(hls: boolean, src = SRC2): void {
+    figure = document.createElement('figure')
+    figure.innerHTML = `
+      <video src="${src}"></video>
+      <figcaption><mbr-video-extras src="${src}"></mbr-video-extras></figcaption>
+    `
+    document.body.appendChild(figure)
+    video = figure.querySelector('video')!
+    extras = figure.querySelector('mbr-video-extras')!
+
+    video.canPlayType = () => (hls ? 'maybe' : '')
+    loadCalls = 0
+    video.load = () => {
+      loadCalls += 1
+    }
+    // jsdom has no media stack; play() would reject and pollute the run.
+    video.play = () => Promise.resolve()
+  }
+
+  beforeEach(() => {
+    clearPublishedPageErrors()
+    reported = []
+    document.addEventListener(MEDIA_ERROR_EVENT, collect)
+  })
+
+  afterEach(() => {
+    document.removeEventListener(MEDIA_ERROR_EVENT, collect)
+    document.body.innerHTML = ''
+    clearPublishedPageErrors()
+  })
+
+  const noticeShown = () => extras.shadowRoot?.querySelector('.media-error') !== null
+
+  it('retries the remuxed variant on a decode failure, silently', async () => {
+    build(true)
+    await settle(extras)
+
+    failVideo(video, 3, 'Media failed to decode')
+    await extras.updateComplete
+
+    expect(video.src).toContain('/videos/clip.mp4-remux.m3u8')
+    expect(loadCalls).toBe(1)
+    // Nothing surfaced: if the remux plays, the reader never needs to know.
+    expect(noticeShown()).toBe(false)
+    expect(reported).toHaveLength(0)
+  })
+
+  it('reports only after the remuxed variant also fails', async () => {
+    build(true)
+    await settle(extras)
+
+    failVideo(video, 3, 'Media failed to decode')
+    await extras.updateComplete
+    failVideo(video, 3, 'Media failed to decode')
+    await extras.updateComplete
+
+    expect(loadCalls).toBe(1) // one retry, never a loop
+    expect(noticeShown()).toBe(true)
+    expect(reported).toHaveLength(1)
+  })
+
+  it('does not retry a network error, which says nothing about the container', async () => {
+    build(true)
+    await settle(extras)
+
+    failVideo(video, 2, 'Network error')
+    await extras.updateComplete
+
+    expect(video.src).toContain('/videos/clip.mp4')
+    expect(video.src).not.toContain('remux')
+    expect(noticeShown()).toBe(true)
+    expect(reported).toHaveLength(1)
+  })
+
+  it('skips recovery when the browser has no native HLS', async () => {
+    build(false)
+    await settle(extras)
+
+    failVideo(video, 3, 'Media failed to decode')
+    await extras.updateComplete
+
+    expect(video.src).not.toContain('remux')
+    expect(loadCalls).toBe(0)
+    expect(noticeShown()).toBe(true)
+    expect(reported).toHaveLength(1)
+  })
+})
