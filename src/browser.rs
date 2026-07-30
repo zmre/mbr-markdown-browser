@@ -18,6 +18,39 @@ use tokio::task::JoinHandle;
 use wry::WebViewBuilderExtUnix;
 use wry::{NewWindowResponse, WebViewBuilder};
 
+// Scripts driving the GUI-only `<mbr-find-bar>` element from the native Edit menu.
+//
+// These are `&'static str` rather than a function returning `String` so the event loop
+// never allocates to dispatch a keystroke.
+//
+// NOTE: a Rust line-continuation backslash strips the newline *and* all leading
+// whitespace on the next line, so every JS statement below must end with `;`. There is
+// no newline left for ASI to insert one.
+
+/// Open the find bar, polling until the custom element has upgraded.
+///
+/// `templates/_scripts.html` loads the components bundle with `defer type="module"`, so
+/// the element may not be defined yet when the first Cmd+F lands. The retry is bounded
+/// (40 attempts x 25ms = 1s) and cancels itself on success. `open()` is idempotent on the
+/// TS side, so a duplicate menu event cannot toggle the bar shut.
+const FIND_OPEN_SCRIPT: &str = "(()=>{let n=0;const go=()=>{\
+    const e=document.querySelector('mbr-find-bar');\
+    if(e&&typeof e.open==='function'){e.open();return;}\
+    if(++n<40)setTimeout(go,25);\
+    };go();})()";
+
+/// Advance to the next match. Single-shot: the bar must already be open to have matches.
+const FIND_NEXT_SCRIPT: &str = "(()=>{\
+    const e=document.querySelector('mbr-find-bar');\
+    if(e&&typeof e.findNext==='function')e.findNext();\
+    })()";
+
+/// Step back to the previous match. Single-shot, as with `FIND_NEXT_SCRIPT`.
+const FIND_PREV_SCRIPT: &str = "(()=>{\
+    const e=document.querySelector('mbr-find-bar');\
+    if(e&&typeof e.findPrevious==='function')e.findPrevious();\
+    })()";
+
 /// Custom user events for the event loop
 enum UserEvent {
     MenuEvent(MenuEvent),
@@ -64,6 +97,16 @@ struct HistoryMenuItems {
     forward: MenuItem,
 }
 
+/// Menu items for find-in-page
+///
+/// wry wraps a bare webview with no browser chrome, so nothing claims Cmd+F.
+/// These items drive the GUI-only `<mbr-find-bar>` element via `evaluate_script`.
+struct FindMenuItems {
+    open: MenuItem,
+    next: MenuItem,
+    prev: MenuItem,
+}
+
 /// Handles to menu items needed for event matching after the menu bar is built
 struct MenuHandles {
     menu_bar: Menu,
@@ -71,6 +114,7 @@ struct MenuHandles {
     reload_item: MenuItem,
     print_item: MenuItem,
     history_items: HistoryMenuItems,
+    find_items: FindMenuItems,
     window_menu: Submenu,
 }
 
@@ -162,6 +206,34 @@ fn build_menu_bar() -> MenuHandles {
         ]),
     );
 
+    // Find uses Cmd+F / Cmd+G / Shift+Cmd+G on macOS, Ctrl+F / F3 / Shift+F3 elsewhere.
+    // F3 rather than Ctrl+G off macOS: Ctrl+G is already the info panel's binding.
+    #[cfg(target_os = "macos")]
+    let find_accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::KeyF);
+    #[cfg(not(target_os = "macos"))]
+    let find_accelerator = Accelerator::new(Some(Modifiers::CONTROL), Code::KeyF);
+
+    #[cfg(target_os = "macos")]
+    let find_next_accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::KeyG);
+    #[cfg(not(target_os = "macos"))]
+    let find_next_accelerator = Accelerator::new(None, Code::F3);
+
+    #[cfg(target_os = "macos")]
+    let find_prev_accelerator =
+        Accelerator::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyG);
+    #[cfg(not(target_os = "macos"))]
+    let find_prev_accelerator = Accelerator::new(Some(Modifiers::SHIFT), Code::F3);
+
+    let find_item = MenuItem::with_id("find", "&Find…", true, Some(find_accelerator));
+    let find_next_item =
+        MenuItem::with_id("find_next", "Find &Next", true, Some(find_next_accelerator));
+    let find_prev_item = MenuItem::with_id(
+        "find_prev",
+        "Find &Previous",
+        true,
+        Some(find_prev_accelerator),
+    );
+
     // Edit menu with standard clipboard operations
     let edit_menu = Submenu::new("&Edit", true);
     log_menu_result(
@@ -174,6 +246,10 @@ fn build_menu_bar() -> MenuHandles {
             &PredefinedMenuItem::copy(None),
             &PredefinedMenuItem::paste(None),
             &PredefinedMenuItem::select_all(None),
+            &PredefinedMenuItem::separator(),
+            &find_item,
+            &find_next_item,
+            &find_prev_item,
         ]),
     );
 
@@ -275,12 +351,19 @@ fn build_menu_bar() -> MenuHandles {
     #[cfg(target_os = "macos")]
     window_menu.set_as_windows_menu_for_nsapp();
 
+    let find_items = FindMenuItems {
+        open: find_item,
+        next: find_next_item,
+        prev: find_prev_item,
+    };
+
     MenuHandles {
         menu_bar,
         open_item,
         reload_item,
         print_item,
         history_items,
+        find_items,
         window_menu,
     }
 }
@@ -358,6 +441,7 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
         reload_item,
         print_item,
         history_items,
+        find_items,
         window_menu: _window_menu,
     } = build_menu_bar();
 
@@ -413,6 +497,9 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     let print_id = print_item.id().clone();
     let back_id = history_items.back.id().clone();
     let forward_id = history_items.forward.id().clone();
+    let find_id = find_items.open.id().clone();
+    let find_next_id = find_items.next.id().clone();
+    let find_prev_id = find_items.prev.id().clone();
 
     // Track modifier state for Alt+arrow handling
     let mut modifiers = ModifiersState::empty();
@@ -448,6 +535,15 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                 } else if menu_event.id == forward_id {
                     tracing::debug!("History forward via menu");
                     let _ = webview.evaluate_script("history.forward()");
+                } else if menu_event.id == find_id {
+                    tracing::debug!("Find requested via menu");
+                    let _ = webview.evaluate_script(FIND_OPEN_SCRIPT);
+                } else if menu_event.id == find_next_id {
+                    tracing::debug!("Find next via menu");
+                    let _ = webview.evaluate_script(FIND_NEXT_SCRIPT);
+                } else if menu_event.id == find_prev_id {
+                    tracing::debug!("Find previous via menu");
+                    let _ = webview.evaluate_script(FIND_PREV_SCRIPT);
                 }
                 // Note: PredefinedMenuItem events (quit, close, etc.) are handled automatically
             }
@@ -481,148 +577,6 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                         });
                     }
                 }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                tracing::debug!("The close button was pressed; stopping");
-                *control_flow = ControlFlow::Exit
-            }
-            Event::WindowEvent {
-                event: WindowEvent::ModifiersChanged(new_modifiers),
-                ..
-            } => {
-                modifiers = new_modifiers;
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        event: key_event, ..
-                    },
-                ..
-            } if key_event.state == ElementState::Pressed && modifiers.alt_key() => {
-                // Handle Alt+Left/Right for history navigation
-                match key_event.physical_key {
-                    KeyCode::ArrowLeft => {
-                        tracing::debug!("History back via Alt+Left");
-                        let _ = webview.evaluate_script("history.back()");
-                    }
-                    KeyCode::ArrowRight => {
-                        tracing::debug!("History forward via Alt+Right");
-                        let _ = webview.evaluate_script("history.forward()");
-                    }
-                    _ => {}
-                }
-            }
-            _ => (),
-        }
-    });
-}
-
-/// Legacy function for simple URL launch without server management
-/// Kept for backwards compatibility but launch_browser is preferred
-pub fn launch_url(url: &str) -> Result<(), BrowserError> {
-    // Create event loop with user events for menu handling
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-
-    // Set up menu event handler
-    let proxy = event_loop.create_proxy();
-    MenuEvent::set_event_handler(Some(move |event| {
-        let _ = proxy.send_event(UserEvent::MenuEvent(event));
-    }));
-
-    // Build the menu bar
-    let MenuHandles {
-        menu_bar,
-        open_item: _open_item,
-        reload_item,
-        print_item,
-        history_items,
-        window_menu: _window_menu,
-    } = build_menu_bar();
-
-    // Initialize menu for macOS (global app menu)
-    #[cfg(target_os = "macos")]
-    menu_bar.init_for_nsapp();
-
-    let icon = load_icon()?;
-    let window = WindowBuilder::new()
-        .with_title("mbr")
-        .with_window_icon(Some(icon))
-        .build(&event_loop)
-        .map_err(BrowserError::WindowCreationFailed)?;
-
-    // Initialize menu for Windows (per-window menu bar)
-    #[cfg(target_os = "windows")]
-    unsafe {
-        use tao::platform::windows::WindowExtWindows;
-        if let Err(e) = menu_bar.init_for_hwnd(window.hwnd()) {
-            tracing::warn!("Failed to attach menu bar to window: {e}");
-        }
-    }
-
-    // Initialize menu for Linux (GTK-based)
-    #[cfg(target_os = "linux")]
-    {
-        use tao::platform::unix::WindowExtUnix;
-        let _ = menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
-    }
-
-    let url_owned = url.to_string();
-    let builder = WebViewBuilder::new()
-        .with_devtools(true)
-        .with_url(&url_owned)
-        // Allow JS window.open() (e.g. Reveal.js speaker-notes view) to spawn a
-        // linked webview so the popup stays in sync with the opener.
-        .with_new_window_req_handler(|_url, _features| NewWindowResponse::Allow);
-
-    #[cfg(not(target_os = "linux"))]
-    let webview = builder
-        .build(&window)
-        .map_err(BrowserError::WebViewCreationFailed)?;
-    #[cfg(target_os = "linux")]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        builder
-            .build_gtk(window.gtk_window())
-            .map_err(BrowserError::WebViewCreationFailed)?
-    };
-
-    // Store menu item IDs for event matching
-    let reload_id = reload_item.id().clone();
-    let print_id = print_item.id().clone();
-    let back_id = history_items.back.id().clone();
-    let forward_id = history_items.forward.id().clone();
-
-    // Track modifier state for Alt+arrow handling
-    let mut modifiers = ModifiersState::empty();
-
-    event_loop.run(move |event, _target, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
-        match event {
-            Event::UserEvent(UserEvent::MenuEvent(menu_event)) => {
-                // Handle custom menu items
-                if menu_event.id == reload_id {
-                    tracing::debug!("Reload requested via menu");
-                    let _ = webview.load_url(&url_owned);
-                } else if menu_event.id == print_id {
-                    tracing::debug!("Print requested via menu");
-                    if let Err(e) = webview.print() {
-                        tracing::error!("Print failed: {e}");
-                    }
-                } else if menu_event.id == back_id {
-                    tracing::debug!("History back via menu");
-                    let _ = webview.evaluate_script("history.back()");
-                } else if menu_event.id == forward_id {
-                    tracing::debug!("History forward via menu");
-                    let _ = webview.evaluate_script("history.forward()");
-                }
-                // Note: PredefinedMenuItem events (quit, close, etc.) are handled automatically
-            }
-            Event::UserEvent(UserEvent::FolderSelected(_)) => {
-                // Not supported in legacy mode
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,

@@ -30,6 +30,7 @@ export const OVERLAY_TAGS = [
   'mbr-browse',
   'mbr-browse-single',
   'mbr-fuzzy-nav',
+  'mbr-find-bar',
 ] as const satisfies readonly (keyof HTMLElementTagNameMap)[];
 
 /** Tag name of an element implementing {@link MbrOverlay}. */

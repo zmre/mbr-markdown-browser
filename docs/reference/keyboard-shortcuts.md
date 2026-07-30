@@ -14,11 +14,16 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 |-----|--------|
 | `j` / `k` | Scroll down / up (one line) |
 | `Ctrl+d` / `Ctrl+u` | Half page down / up |
-| `Ctrl+f` / `Ctrl+b` | Full page down / up |
+| `Ctrl+f` / `Ctrl+b` | Full page down / up (`Ctrl+f` is macOS-only — see note below) |
 | `g g` | Go to top of page |
 | `G` | Go to bottom of page |
 | `H` / `L` | Previous / next sibling page |
 | `Ctrl+o` / `Ctrl+i` | History back / forward |
+
+**Note on `Ctrl+f`:** full-page-down is bound on macOS only, where `Cmd+F` is the find
+key. On Windows and Linux `Ctrl+F` is left alone so it reaches find-in-page — the
+browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Space` or
+`PageDown` to page forward there.
 
 ## Panels
 
@@ -78,6 +83,24 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 |-----|--------|
 | `?` | Toggle keyboard shortcuts overlay |
 
+## Find in Page (GUI mode)
+
+GUI mode (`mbr -g`) has no browser chrome, so it ships its own find bar, driven from the
+native **Edit** menu. In server and static modes this bar is not present at all and your
+browser's built-in find works as usual.
+
+| Action | macOS | Windows/Linux |
+|--------|-------|---------------|
+| Open find bar | `Cmd+F` | `Ctrl+F` |
+| Find next | `Cmd+G` | `F3` |
+| Find previous | `Shift+Cmd+G` | `Shift+F3` |
+| Find next / previous (bar focused) | `Enter` / `Shift+Enter` | `Enter` / `Shift+Enter` |
+| Close find bar | `Esc` | `Esc` |
+
+`F3` is used off macOS because `Ctrl+G` is already the info panel toggle. On macOS the
+info panel keeps `Ctrl+G`, and `Cmd+G` belongs to find-next as the platform expects.
+Reloading the page (including live reload) closes the bar and clears its highlights.
+
 ## macOS GUI Mode
 
 In GUI mode (`mbr -g`), standard macOS shortcuts are available:
@@ -88,6 +111,8 @@ In GUI mode (`mbr -g`), standard macOS shortcuts are available:
 | `Cmd+R` | Reload page |
 | `Cmd+[` | History back |
 | `Cmd+]` | History forward |
+| `Cmd+F` | Find in page |
+| `Cmd+G` / `Shift+Cmd+G` | Find next / previous |
 | `Cmd+Option+I` | Toggle developer tools |
 | `Cmd+W` | Close window |
 | `Cmd+Q` | Quit application |

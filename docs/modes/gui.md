@@ -25,16 +25,30 @@ mbr provides platform-appropriate menus:
 **macOS:**
 - **mbr** menu: About, Preferences, Quit (Cmd+Q)
 - **File**: Open Folder (Cmd+O)
-- **Edit**: Copy, Paste, Select All
+- **Edit**: Copy, Paste, Select All, Find… (Cmd+F), Find Next (Cmd+G), Find Previous (Shift+Cmd+G)
 - **View**: Reload (Cmd+R), Toggle DevTools (Cmd+Option+I)
 - **History**: Back (Cmd+[), Forward (Cmd+])
 - **Window**: Minimize, Zoom, Close (Cmd+W)
 
 **Windows/Linux:**
 - **File**: Open Folder, Exit
-- **Edit**: Copy, Paste, Select All
+- **Edit**: Copy, Paste, Select All, Find… (Ctrl+F), Find Next (F3), Find Previous (Shift+F3)
 - **View**: Reload, Toggle DevTools
 - **History**: Back, Forward
+
+### Find in Page
+
+GUI mode has no browser chrome, so Cmd+F/Ctrl+F has nothing to open — the webview
+underneath (WKWebView, WebView2 or WebKitGTK) ships no find bar of its own, and wry
+exposes no find API. mbr therefore provides its own, opened from the **Edit** menu.
+
+It highlights every match, shows a "3 of 17" counter, and supports case-sensitive
+matching. `Enter`/`Shift+Enter` step through matches while the bar is focused, and `Esc`
+closes it. Multi-word queries match across soft-wrapped lines but never across a
+paragraph or other block boundary.
+
+This bar exists **only** in GUI mode. Server mode (`mbr -s`) and static builds never
+include it, so your browser's native find is left untouched.
 
 ### Keyboard Shortcuts
 

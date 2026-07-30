@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { findOverlay, isAnyOverlayOpen } from './overlay.js'
+import { isGuiMode } from './shared.js'
 import type { NavTab } from './mbr-fuzzy-nav.js'
 
 /**
@@ -32,6 +33,26 @@ export function isInputTarget(e: KeyboardEvent): boolean {
   if (!target || !(target instanceof HTMLElement)) return false;
   const tagName = target.tagName.toLowerCase();
   return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable;
+}
+
+/**
+ * True on macOS/iOS.
+ *
+ * `Ctrl+f` is vim-style page-down here and ONLY here. On Windows and Linux
+ * `Ctrl+F` is the browser's own find-in-page, and intercepting it left readers
+ * of a long document with no way to search it — in server and static modes as
+ * much as in GUI mode. GUI mode has `<mbr-find-bar>` on the native Edit menu
+ * instead (Cmd+F on macOS, Ctrl+F elsewhere, which the menu accelerator claims
+ * before this handler ever sees it).
+ *
+ * `navigator.platform` is deprecated but is the one signal every engine mbr
+ * ships against still reports accurately; `userAgentData.platform` is
+ * Chromium-only, so it is preferred when present.
+ */
+export function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const hinted = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform
+  return /mac|iphone|ipad|ipod/i.test(hinted || navigator.platform || navigator.userAgent || '')
 }
 
 /**
@@ -134,6 +155,8 @@ interface Shortcut {
 interface ShortcutCategory {
   title: string;
   shortcuts: Shortcut[];
+  /** Only listed in GUI mode, where the native Edit menu supplies the keys. */
+  guiOnly?: true;
 }
 
 /**
@@ -145,7 +168,7 @@ const SHORTCUTS: ShortcutCategory[] = [
     shortcuts: [
       { keys: 'j / k', description: 'Scroll down / up' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Half page down / up' },
-      { keys: 'Ctrl+f / Ctrl+b', description: 'Full page down / up' },
+      { keys: 'Ctrl+f / Ctrl+b', description: 'Full page down / up (Ctrl+f: macOS only)' },
       { keys: 'g g', description: 'Go to top' },
       { keys: 'G', description: 'Go to bottom' },
       { keys: 'H / L', description: 'Previous / next sibling' },
@@ -170,6 +193,18 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'F', description: 'Open links in (backlinks)' },
       { keys: 'T', description: 'Open table of contents' },
       { keys: '⌘+Enter / Ctrl+Enter', description: 'Open link in new tab' },
+    ],
+  },
+  {
+    // GUI mode only: elsewhere the browser's own find bar owns these keys.
+    title: 'Find in Page',
+    guiOnly: true,
+    shortcuts: [
+      { keys: '⌘+f / Ctrl+f', description: 'Open find bar' },
+      { keys: '⌘+g / F3', description: 'Find next' },
+      { keys: '⇧⌘+g / Shift+F3', description: 'Find previous' },
+      { keys: 'Enter / Shift+Enter', description: 'Next / previous match' },
+      { keys: 'Esc', description: 'Close find bar' },
     ],
   },
   {
@@ -349,8 +384,8 @@ export class MbrKeysElement extends LitElement {
           }
           return;
 
-        case 'f': // Ctrl+f - full page down (but not Cmd+F which is find)
-          if (!e.metaKey) {
+        case 'f': // Ctrl+f - full page down, macOS only (see isMacPlatform)
+          if (!e.metaKey && isMacPlatform()) {
             e.preventDefault();
             scrollBy(window, SCROLL_FULL_PAGE());
           }
@@ -494,7 +529,7 @@ export class MbrKeysElement extends LitElement {
             </button>
           </div>
           <div class="help-content">
-            ${SHORTCUTS.map(category => html`
+            ${SHORTCUTS.filter(category => !category.guiOnly || isGuiMode()).map(category => html`
               <div class="shortcut-category">
                 <h3>${category.title}</h3>
                 <dl class="shortcut-list">

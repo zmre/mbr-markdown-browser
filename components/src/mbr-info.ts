@@ -208,8 +208,10 @@ export class MbrInfoElement extends LitElement {
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
-    // Ctrl+g or Cmd+g to toggle
-    if ((e.ctrlKey || e.metaKey) && e.key === 'g') {
+    // Ctrl+g to toggle. Deliberately NOT Cmd+g: that is Find Next everywhere —
+    // `<mbr-find-bar>`'s Edit-menu accelerator in GUI mode, and the real
+    // browser's find-next in server mode. Same guard `mbr-keys.ts` uses.
+    if (e.ctrlKey && !e.metaKey && e.key === 'g') {
       e.preventDefault();
       this._toggle();
     }
