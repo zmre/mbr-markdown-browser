@@ -86,3 +86,12 @@ This is useful for tracking projects, issues, tasks, etc., and seeing them in a 
 
 > [!NOTE]
 > This uses CSS columns and sometimes columns wrap despite being instructed not to.
+
+## Printing
+
+On screen a board is one screenful tall (`85vh`) with columns that scroll
+sideways. Both of those drop cards on paper — anything below the fold is cut
+off, and any column past the width of the sheet is simply never printed. So
+**print flattens the board to a single column**: it reads as a run of headed
+lists rather than side-by-side columns, which is the right trade when the
+alternative is losing cards without any indication that they existed.

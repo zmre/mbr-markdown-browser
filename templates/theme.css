@@ -46,6 +46,29 @@
   --mbr-incomplete-bg: rgba(255, 235, 59, 0.18);
   --mbr-incomplete-border: #f57c00;
 
+  /* Paper margins. Applied as padding on the content box rather than as an
+   * `@page` margin -- see the "Print Styles" section for the Safari reason. */
+  --mbr-print-margin-block: 0.5in;
+  --mbr-print-margin-inline: 1in;
+
+  /* Definition Lists (FAQ-style disclosure) Variables.
+   * All colors resolve through Pico custom properties, so light/dark mode and
+   * every color theme follow automatically -- override these, not the rules. */
+  --mbr-dl-question-color: var(--pico-color);
+  --mbr-dl-question-hover-color: var(--pico-primary-hover);
+  --mbr-dl-question-weight: 600;
+  --mbr-dl-answer-color: var(--pico-muted-color);
+  --mbr-dl-separator-color: var(--pico-muted-border-color);
+  --mbr-dl-marker-color: var(--pico-primary);
+  --mbr-dl-marker-size: 0.62em;
+  --mbr-dl-marker-gap: 0.55em;
+  /* Vertical breathing room above/below each question and under each answer. */
+  --mbr-dl-item-spacing: var(--pico-spacing);
+  /* How far the answer is indented from the question. */
+  --mbr-dl-answer-indent: calc(var(--pico-spacing) * 1.5);
+  --mbr-dl-transition-duration: 0.25s;
+  --mbr-dl-transition-easing: ease;
+
   /* Alert Icons (SVG Data URIs) */
   --mbr-icon-note: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cline x1='12' y1='16' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'%3E%3C/line%3E%3C/svg%3E");
   --mbr-icon-tip: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z'%3E%3C/path%3E%3Cpath d='M9 21h6'%3E%3C/path%3E%3C/svg%3E");
@@ -160,8 +183,22 @@ body > footer {
  * On mobile (<1024px), the sidebar is an overlay drawer - no grid layout needed.
  */
 
-/* Desktop: sidebar visible inline via CSS grid */
-@media (min-width: 1024px) {
+/* Desktop: sidebar visible inline via CSS grid.
+ *
+ * `screen and` is load-bearing, not decoration. Per CSS 2.1 a width query in
+ * paged media resolves against the page box (a Letter sheet is ~816px, so this
+ * block should never match when printing) -- but WebKit evaluates width and
+ * viewport units against the on-screen window instead
+ * (https://bugs.webkit.org/show_bug.cgi?id=250685, open since 2023;
+ * https://bugs.webkit.org/show_bug.cgi?id=126591 for `vw`). Unqualified, this
+ * block therefore applies while printing from any Safari window wider than
+ * 1024px, dropping a `min-height: 100vh` grid and two sticky children into the
+ * printed layout. Qualifying the media type sidesteps the bug entirely.
+ *
+ * Pico's own breakpoints are unqualified and have the same exposure; the print
+ * block's `main.container { max-width: none }` neutralises the consequence we
+ * can actually reach. */
+@media screen and (min-width: 1024px) {
   body.mbr-has-sidebar {
     display: grid;
     grid-template-columns: var(--mbr-sidebar-width) 1fr;
@@ -198,8 +235,9 @@ body > footer {
   }
 }
 
-/* Mobile: no grid layout, sidebar is overlay drawer handled by component */
-@media (max-width: 1023px) {
+/* Mobile: no grid layout, sidebar is overlay drawer handled by component.
+ * `screen and` for the same reason as the desktop block above. */
+@media screen and (max-width: 1023px) {
   body.mbr-has-sidebar {
     display: block;
   }
@@ -622,8 +660,14 @@ blockquote blockquote blockquote p::after {
   margin-left: -1px;
 }
 
-/* Show marginalia fixed in margin when screen is wide enough */
-@media (min-width: 2000px) {
+/* Show marginalia fixed in margin when screen is wide enough.
+ *
+ * `screen and` for the same WebKit reason as the sidebar block above, and here
+ * it changes printed output: the print block resets these paragraphs' position,
+ * transform and max-width but NOT their `width`, so on a Safari window ≥2000px
+ * an unqualified query left `width: calc(100vw - 40px)` -- a *window*-relative
+ * width in WebKit -- applied to every margin note on paper. */
+@media screen and (min-width: 2000px) {
   blockquote blockquote blockquote::before {
     content: "";
   }
@@ -896,19 +940,257 @@ sup.footnote-reference {
   margin-top: 0.5rem;
 }
 
+/* ==================== Definition Lists (FAQ-style disclosure) ==================== */
+
+/*
+ * Markdown definition lists render as an FAQ: each `<dt>` is a question, and
+ * its `<dd>` answer is collapsed until the question is activated.
+ *
+ * Example markdown:
+ *   What is mbr?
+ *   : A markdown browser, previewer and static site generator.
+ *
+ * This is deliberately JavaScript-free. The only hook is `tabindex="0"` on
+ * every `<dt>` (emitted by `src/html.rs`), which makes the question focusable
+ * so `:focus` can stand in for "open".
+ *
+ * ACCEPTED LIMITATION -- clicking an already-open question does NOT close it,
+ * because the click just re-focuses a `<dt>` that already has focus and CSS
+ * has no way to toggle. Clicking a different question, or anywhere off the
+ * list, does close it. The same mechanic means clicking *inside* an open
+ * answer (to select its text, say) moves focus to the body and collapses it;
+ * select from the question end, or print, to work around that. A real toggle
+ * needs `<details>` markup or JavaScript, and neither is on the table here.
+ *
+ * Scoped to `main` so it only ever touches rendered markdown -- `<dl>`s built
+ * by templates or components stay untouched. (`<mbr-keys>` also renders a
+ * `<dl>`, but it lives in a shadow root this sheet cannot reach anyway.)
+ */
+
+main dl {
+  margin-block: calc(var(--pico-spacing) * 1.5);
+  /* Each `dt` draws the separator above itself; this closes off the last
+   * answer so the list reads as a bounded block. */
+  border-bottom: 1px solid var(--mbr-dl-separator-color);
+}
+
+main dl > dt {
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  color: var(--mbr-dl-question-color);
+  font-weight: var(--mbr-dl-question-weight);
+  border-top: 1px solid var(--mbr-dl-separator-color);
+  padding-block: var(--mbr-dl-item-spacing);
+  /* Hanging indent: the marker sits in the gutter and the second line of a
+   * long question lines up under the first line's text, not under the marker. */
+  padding-inline-start: calc(
+    var(--mbr-dl-marker-size) + var(--mbr-dl-marker-gap)
+  );
+  text-indent: calc(-1 * (var(--mbr-dl-marker-size) + var(--mbr-dl-marker-gap)));
+  border-radius: var(--pico-border-radius);
+  transition: color var(--mbr-dl-transition-duration)
+    var(--mbr-dl-transition-easing);
+}
+
+main dl > dt:hover {
+  color: var(--mbr-dl-question-hover-color);
+}
+
+/* Suppress the ring on mouse activation, then put a real one back for keyboard
+ * users below -- same idiom as `.mbr-collapsible` above. */
+main dl > dt:focus {
+  outline: none;
+}
+
+main dl > dt:focus-visible {
+  outline: 2px solid var(--pico-primary-focus, var(--pico-primary));
+  outline-offset: 2px;
+}
+
+/* Disclosure marker. A square box clipped to a triangle, rather than the
+ * classic zero-size border trick, so `rotate()` pivots about the box's centre
+ * instead of drifting as it turns. */
+main dl > dt::before {
+  content: "";
+  display: inline-block;
+  inline-size: var(--mbr-dl-marker-size);
+  block-size: var(--mbr-dl-marker-size);
+  margin-inline-end: var(--mbr-dl-marker-gap);
+  vertical-align: -0.04em;
+  background-color: var(--mbr-dl-marker-color);
+  clip-path: polygon(25% 0%, 25% 100%, 90% 50%);
+  transition: transform var(--mbr-dl-transition-duration)
+    var(--mbr-dl-transition-easing);
+}
+
+/* Rotate the marker while this question's answers are open. The second
+ * selector reads "the nearest preceding question of the answer holding focus":
+ * it has a later answer with focus inside, and no *other* question stands
+ * between the two. Without the `:not()` every question above the open one
+ * would point down as well. */
+main dl > dt:focus::before,
+main dl > dt:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within))::before {
+  transform: rotate(90deg);
+}
+
+/* Collapsed answer.
+ *
+ * `visibility: hidden` is doing more work than it looks. `height: 0;
+ * overflow: hidden` alone hides the answer visually but leaves any links
+ * inside it in the tab order, so a keyboard user tabs into content they cannot
+ * see. `visibility: hidden` removes descendants from both the tab order and
+ * the accessibility tree, which fixes that.
+ *
+ * It has to be `visibility` specifically: `display: none` would kill the
+ * height transition, and `content-visibility: hidden` / `interactivity: inert`
+ * would make the answer permanently unfocusable, breaking the focus handoff in
+ * the rule below. */
+main dl > dd {
+  visibility: hidden;
+  height: 0;
+  overflow: hidden;
+  /* Zeroed so a collapsed answer contributes no height at all. Margins stay 0
+   * in both states; only padding is restored on open, which keeps the
+   * separator lines evenly placed. `overflow: hidden` also establishes a block
+   * formatting context, so a loose definition's `<p>` margins cannot collapse
+   * out through this box and reopen a gap. */
+  margin-block: 0;
+  padding-block: 0;
+  margin-inline-start: var(--mbr-dl-answer-indent);
+  color: var(--mbr-dl-answer-color);
+}
+
+/* Open answer.
+ *
+ * The combinator is `~`, not `+`, because one question may legitimately own
+ * several answers -- markdown's `Term` / `: one` / `: two` emits a `<dt>`
+ * followed by two sibling `<dd>`s, and so does any tight list whose entries
+ * are not blank-line separated. With `+` only the first answer would ever
+ * open, and since a closed answer is `visibility: hidden` the rest would be
+ * both invisible and untabbable, i.e. unreachable content.
+ *
+ * The `dd:focus-within` selectors are what make tabbing from a question into a
+ * link inside its answer work. At the instant focus leaves the `dt`,
+ * `dt:focus ~ dd` still matches, so the answers are visible and their links
+ * are focusable and can be reached; the moment focus lands inside,
+ * `dd:focus-within` takes over. Style recalculation happens after the focus
+ * move, so there is no frame in which neither selector matches and the answer
+ * flickers shut. `dd:focus-within ~ dd` keeps the *other* answers of a
+ * multi-answer question open too, so tabbing reaches every one of them.
+ *
+ * `dd:focus-within` can never open a *closed* answer on its own: `visibility:
+ * hidden` makes its descendants unfocusable, so focus can only ever get inside
+ * by way of the question. */
+main dl > dt:focus ~ dd,
+main dl > dd:focus-within,
+main dl > dd:focus-within ~ dd {
+  visibility: visible;
+  height: auto;
+  padding-block: 0 var(--mbr-dl-item-spacing);
+}
+
+/* `~` reaches every later sibling, including the answers belonging to the NEXT
+ * question, so shut those again. CSS has no "until" combinator; interposing a
+ * `dt` is how we say "past the end of this entry". These win on specificity
+ * (one extra type selector) as well as source order, and they are inert
+ * whenever nothing is focused -- which is why they do not fight the print
+ * rules below. */
+main dl > dt:focus ~ dt ~ dd,
+main dl > dd:focus-within ~ dt ~ dd {
+  visibility: hidden;
+  height: 0;
+  padding-block: 0;
+}
+
+/* Height only animates where the intrinsic-size keywords can be interpolated.
+ * Everything is gated together so browsers without it (Safari, at time of
+ * writing) snap the answer open cleanly rather than animating the padding
+ * against a height that jumps. No `max-height` magic numbers. */
+@supports (interpolate-size: allow-keywords) {
+  :root {
+    /* Inherited, so it is set at the root as the feature intends. */
+    interpolate-size: allow-keywords;
+  }
+
+  main dl > dd {
+    transition:
+      height var(--mbr-dl-transition-duration) var(--mbr-dl-transition-easing),
+      padding-block var(--mbr-dl-transition-duration)
+        var(--mbr-dl-transition-easing),
+      visibility var(--mbr-dl-transition-duration);
+    /* `visibility` interpolates by its own rule -- any value strictly between
+     * the endpoints resolves to `visible` -- so a closing answer stays on
+     * screen for the whole duration and only vanishes at the end, which is
+     * what lets the collapse animate instead of blinking out. `allow-discrete`
+     * is a no-op for `visibility` itself; it is here so that a genuinely
+     * discrete property added to this list by an override behaves too. */
+    transition-behavior: allow-discrete;
+  }
+}
+
+/* Must follow the @supports block: equal specificity, so source order decides. */
+@media (prefers-reduced-motion: reduce) {
+  main dl > dt,
+  main dl > dt::before,
+  main dl > dd {
+    transition: none;
+  }
+}
+
 /* ==================== Print Styles ==================== */
 
 @media print {
+  /* PAGE MARGINS ARE ZERO ON PURPOSE -- the sheet's margins come from
+   * `main.container`'s padding below. Do not "restore" a margin here.
+   *
+   * A non-zero `@page` margin makes Safari (and WKWebView, i.e. GUI mode) lay
+   * out a large empty band at the top of EVERY page; Chrome is unaffected.
+   * Zeroing the page box and moving the whitespace into the content box
+   * removes it. This was arrived at empirically -- printing is the only way to
+   * observe it -- so treat the pairing as load-bearing and re-test on Safari
+   * before changing either half.
+   *
+   * The mechanism is NOT the WebKit `@page`-vs-print-media rule-collection
+   * ordering, which was the obvious suspect: that would predict a band here
+   * too, since this rule is itself nested inside `@media print`. Whatever the
+   * true cause, the trigger is the non-zero value, not the nesting. Consistent
+   * with that, the band could also be cleared at print time by changing any
+   * print-dialog setting (in either direction) or by enabling print-media
+   * emulation in devtools -- both of which force a re-layout. GUI mode exposes
+   * no dialog controls, so there it was unavoidable. */
   @page {
-    margin: 0.5in 1in; /* top/bottom: 0.5in, left/right: 1in */
+    margin: 0;
   }
 
-  /* Hide navigation elements */
-  body > header,
-  body > footer,
-  nav.breadcrumbs,
-  mbr-nav,
-  mbr-browse-single {
+  /* Hide chrome with an ALLOWLIST, not a denylist.
+   *
+   * `<main>` is the content; every other child of `<body>` is chrome. Listing
+   * the chrome by tag name instead does not survive contact with this
+   * codebase, because which components are emitted depends on the mode:
+   * `_display_enhancements.html` adds six elements to every page, `_footer.html`
+   * adds `<mbr-keys>` and `<mbr-fuzzy-nav>` always, `<mbr-live-reload>` in
+   * server mode and `<mbr-find-bar>` + `<mbr-link-enhancement>` in GUI mode,
+   * and the sidebar layout prepends `<mbr-browse-single>`. A denylist silently
+   * rots every time a component is added, and the failure is invisible until
+   * someone prints -- a missed element that is `position: fixed` paints on the
+   * FIRST page only, and one that is `display: block` with height pushes the
+   * content down. Inverting the test makes new components correct by default.
+   *
+   * This also covers the overlays components append straight to `<body>` at
+   * runtime -- the editor backdrop (`editor-crepe.ts`), the picker backdrop
+   * (`editor-picker-shared.ts`) and the footnote hover card
+   * (`mbr-footnote-preview.ts`) -- all of which are `position: fixed` and would
+   * otherwise paint over page one.
+   *
+   * Two carve-outs:
+   *   - `<mbr-genealogy>` sits outside `<main>` but is generated *content*: the
+   *     family chart on `type: person` pages. It printed before this rule
+   *     existed and it still has to.
+   *   - `.mbr-print-keep` is the opt-in for repositories that put real content
+   *     in `.mbr/_footer_custom.html`. Without it their content would vanish
+   *     from the page with no clue why. */
+  body > *:not(main, mbr-genealogy, .mbr-print-keep) {
     display: none !important;
   }
 
@@ -922,11 +1204,147 @@ sup.footnote-reference {
     --pico-font-size: 62.5%;
   }
 
-  /* Reset main container margins - @page handles paper margins */
+  /* The paper margins live HERE, not on `@page` -- see the note by the `@page`
+   * rule above for why. `--mbr-print-margin-*` are the knobs to override.
+   *
+   * Known trade-off of moving the vertical margin into the content box: the
+   * padding applies at the start and end of the box, so a document that runs
+   * past one sheet gets its top margin on page 1 and its bottom margin on the
+   * last page, while continuation pages fall back to the printer's own
+   * unprintable area. The horizontal padding is unaffected and applies to
+   * every page. A non-zero `@page` margin is what would give uniform vertical
+   * margins, and that is exactly what triggers the Safari band. */
   main.container {
     margin: 0;
-    padding: 0;
+    padding: var(--mbr-print-margin-block) var(--mbr-print-margin-inline);
     max-width: none;
+  }
+
+  /* ---------- Nothing is collapsed or clipped on paper ----------
+   *
+   * Every collapse, clamp and clip in this sheet is an affordance for *reading
+   * on a screen*: it trades content for skimmability, on the understanding
+   * that the reader can always open the thing back up. Paper takes that
+   * bargain away. A section the reader collapsed before hitting Print does not
+   * come back -- it is simply missing from the page, with nothing to indicate
+   * that anything was there. So print undoes all of it.
+   *
+   * The one deliberate exception is `.sr-only`; see the end of this block. */
+
+  /* Sibling content hidden by a collapsed heading (`<mbr-heading-enhancer>`).
+   * This is the one that bites: collapsing is a transient reading gesture, not
+   * an instruction about the document, and the reader has no reason to expect
+   * it to follow them onto the paper.
+   *
+   * `revert` and not `block`, because the class is applied to whatever
+   * siblings happen to follow the heading -- `<p>`, `<ul>`, `<table>`,
+   * `<figure>`, `<pre>` -- and each has its own correct display. `revert`
+   * hands each element back its user-agent value. */
+  .sectionhidden {
+    display: revert;
+  }
+
+  /* The "+" marker announces hidden content. Nothing is hidden here. */
+  .mbr-section-collapsed::before {
+    content: none;
+  }
+
+  /* Permalink anchors only exist to be hovered. */
+  .mbr-heading-anchor {
+    display: none;
+  }
+
+  /* Raw `<details>` blocks. GFM passes literal `<details><summary>` straight
+   * through, and `docs/markdown/index.md` actively recommends it as the way to
+   * get a real toggle -- so a block the reader left closed prints with its body
+   * missing.
+   *
+   * CSS cannot set the `open` attribute, so the only lever is the user agent's
+   * own `::details-content` box, which carries `content-visibility: hidden`
+   * while the element is closed. Overriding that is the technique the CSSWG
+   * settled on when it finally closed csswg-drafts#2084, "Ability to style
+   * <details>/<summary> to be open (e.g. for print styles)", in August 2025.
+   *
+   * BROWSER SUPPORT, PLAINLY: `::details-content` is Chrome/Edge 131+, Safari
+   * 18.4+, Firefox 143+ (Baseline newly-available, September 2025); GUI mode
+   * uses the system WebKit, so it tracks the installed Safari. Anywhere older
+   * this rule is simply dropped as an unknown selector, a closed `<details>`
+   * still prints closed, and there is NO CSS-only alternative -- no shipping
+   * engine ever exposed a light-DOM hook for the closed content (Firefox 49-102
+   * suppressed frame construction outright in C++; everything since, in all
+   * three engines, hides a shadow slot), which is precisely why that CSSWG
+   * issue sat open for eight years. Do not add `details > *:not(summary) {
+   * display: block }` as a "fallback": the selector *matches*, so it looks
+   * applied in devtools, but the flat-tree slot above it is hidden and nothing
+   * happens -- in every engine. The real fallback is a `beforeprint` listener
+   * flipping the `open` attribute, which is JavaScript, and so deliberately
+   * not done here.
+   *
+   * `content-visibility` alone is what defeats the user agent; it does not
+   * need `!important`, because both Blink and WebKit deliberately let author
+   * rules outrank the inline style they put on that shadow slot. The
+   * `!important`s are aimed at *user.css*, which `_head.html` links after this
+   * sheet: a repository that copied MDN's accordion pattern
+   * (`details::details-content { block-size: 0; overflow: clip }`) matches this
+   * selector exactly, and `@media print` adds no specificity, so without them
+   * source order would re-collapse the block on paper. */
+  details::details-content {
+    content-visibility: visible !important;
+    block-size: auto !important;
+    overflow: visible !important;
+  }
+
+  /* The marker is drawn from the `open` attribute, which is still absent -- so
+   * without this the triangle points "closed" beside content that is plainly
+   * open. `disclosure-open` is the same keyword the UA stylesheet uses for
+   * `details[open]`, so it is available wherever the marker renders at all. */
+  details > summary:first-of-type {
+    list-style-type: disclosure-open;
+  }
+
+  /* Oembed link cards clamp the description to 200px and clip what does not
+   * fit. There is nothing to clip *for* on paper. */
+  .mbr-social-link-box {
+    max-height: none;
+    overflow: visible;
+  }
+
+  /* Kanban boards lose cards on paper twice over: `height: 85vh` cuts off
+   * everything below one screenful, and the columns scroll horizontally past
+   * the width of the sheet. Flattening to a single column is the only shape
+   * that guarantees every card reaches the page -- the board reads as a run of
+   * headed lists rather than side-by-side columns, which is the right trade
+   * when the alternative is dropping cards silently.
+   *
+   * `break-after` has to be reset too: `always` is a *page* break once there
+   * is no multicol context to consume it, so each list would otherwise eject
+   * the rest of the board onto a fresh sheet.
+   *
+   * Unscoped on purpose -- `.kanban` lands on `<section>` for `--- {.kanban}`
+   * and on `<body>` itself when a note sets `style: kanban` in frontmatter. */
+  .kanban {
+    height: auto;
+    max-height: none;
+    columns: auto;
+    overflow: visible;
+  }
+
+  .kanban > ul,
+  .kanban > ol,
+  .kanban ul:last-child,
+  .kanban ol:last-child {
+    break-before: auto;
+    break-after: auto;
+  }
+
+  /* Theater figures size themselves against the viewport and bleed to its full
+   * width. The video is dropped below, but the caption is content and must not
+   * be squeezed by a viewport-relative height. */
+  figure.theater {
+    max-height: none;
+    width: auto;
+    margin-inline: 0;
+    background: none;
   }
 
   /* Prevent awkward page breaks */
@@ -1040,6 +1458,58 @@ sup.footnote-reference {
   .footnote-definition:first-of-type {
     break-before: avoid;
   }
+
+  /* Definition lists: force every answer open. A printed FAQ showing only the
+   * questions would be useless.
+   *
+   * All three selectors are needed. Printing does NOT clear focus -- someone
+   * who opens a question and then hits Print still has a focused `<dt>` -- so
+   * the two re-collapse rules would otherwise keep matching and, at one extra
+   * type selector, outrank a bare `main dl > dd` here. Repeating them verbatim
+   * makes this an equal-specificity tie that source order settles our way,
+   * which is why the "Definition Lists" section has to stay above this block. */
+  main dl > dd,
+  main dl > dt:focus ~ dt ~ dd,
+  main dl > dd:focus-within ~ dt ~ dd {
+    visibility: visible;
+    height: auto;
+    overflow: visible;
+    padding-block: 0 var(--mbr-dl-item-spacing);
+  }
+
+  /* The disclosure chevron means nothing on paper. Dropping the marker box
+   * also means the question's hanging indent has to be undone, or the first
+   * line would hang out into the margin. */
+  main dl > dt::before {
+    content: none;
+  }
+
+  main dl > dt {
+    padding-inline-start: 0;
+    text-indent: 0;
+    /* Keep a question with the answer it introduces. */
+    break-after: avoid;
+  }
+
+  main dl > dt,
+  main dl > dd {
+    page-break-inside: avoid;
+  }
+
+  /* ---------- DELIBERATE EXCEPTION: `.sr-only` stays hidden ----------
+   *
+   * Do not add `.sr-only` to the "nothing is collapsed on paper" rules above.
+   * It is not collapsed content. `index.html` (and `home`/`section`/`tag`)
+   * emit a visually hidden *duplicate* of the page title purely so Pagefind
+   * can weight it (`<span class="sr-only" data-pagefind-weight="10">`) --
+   * revealing it would print the title twice, once as a stray line and once as
+   * the real `<h1>` directly beneath it.
+   *
+   * Nothing is lost by leaving it: the visible heading carries the same text.
+   * `aria-hidden` needs no print rule either -- it hides content from the
+   * accessibility tree, never visually -- and `[hidden]` is deliberately left
+   * alone, because unlike a collapsed section it is an explicit statement by
+   * the author that the content does not apply. */
 }
 
 /* ==================== Enhanced Oembed Social Link Boxes ==================== */
