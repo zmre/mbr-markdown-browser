@@ -111,6 +111,41 @@ pub const HLJS_FILES: &[(&str, &[u8], &str)] = &[
     ),
 ];
 
+/// Maps a filename extension to the highlight.js language that should render
+/// it, or `None` when no *embedded* language module covers that extension.
+///
+/// Deliberately closed over [`HLJS_LANGUAGES`]: the binary only ships those 17
+/// grammars, so returning any other name would emit a `language-*` class that
+/// highlight.js silently ignores. `test_every_mapped_language_is_embedded`
+/// keeps the two in sync.
+///
+/// `extension` is matched case-insensitively and must not include the dot.
+/// Returning `None` is not an error - callers render those files verbatim.
+pub fn language_for_extension(extension: &str) -> Option<&'static str> {
+    // Allocation-free lowercasing for the common (already-lowercase) case.
+    let ext = extension.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "bash" | "sh" | "zsh" | "ksh" | "bashrc" | "zshrc" => "bash",
+        "css" => "css",
+        "dockerfile" => "dockerfile",
+        "go" => "go",
+        "java" => "java",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "json" | "jsonc" | "json5" | "webmanifest" => "json",
+        "md" | "markdown" | "mdown" | "mkd" | "mkdn" => "markdown",
+        "nix" => "nix",
+        "py" | "pyi" | "pyw" => "python",
+        "rb" | "rake" | "gemspec" => "ruby",
+        "rs" => "rust",
+        "scala" | "sbt" | "sc" => "scala",
+        "sql" => "sql",
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
+        "xml" | "html" | "htm" | "xhtml" | "svg" | "plist" | "xsl" | "xslt" => "xml",
+        "yaml" | "yml" => "yaml",
+        _ => return None,
+    })
+}
+
 /// List of supported highlight.js languages.
 pub const HLJS_LANGUAGES: &[&str] = &[
     "bash",
@@ -177,6 +212,54 @@ mod tests {
                 .any(|(path, _, _)| *path == "/hljs.atom-one-dark.css"),
             "Dark theme CSS should be present"
         );
+    }
+
+    #[test]
+    fn test_every_mapped_language_is_embedded() {
+        // A `language-foo` class for a grammar we do not ship is a silent
+        // no-op in the browser, so every mapping must name an embedded module.
+        let mapped = [
+            "sh",
+            "css",
+            "dockerfile",
+            "go",
+            "java",
+            "jsx",
+            "json",
+            "md",
+            "nix",
+            "py",
+            "rb",
+            "rs",
+            "scala",
+            "sql",
+            "tsx",
+            "svg",
+            "yml",
+        ];
+        for ext in mapped {
+            let lang = language_for_extension(ext)
+                .unwrap_or_else(|| panic!("extension {ext} should map to a language"));
+            assert!(
+                HLJS_LANGUAGES.contains(&lang),
+                "{ext} maps to {lang}, which has no embedded hljs module"
+            );
+        }
+    }
+
+    #[test]
+    fn test_language_for_extension_is_case_insensitive() {
+        assert_eq!(language_for_extension("RS"), Some("rust"));
+        assert_eq!(language_for_extension("Json"), Some("json"));
+    }
+
+    #[test]
+    fn test_language_for_extension_unknown_is_none() {
+        // Plain text and types we ship no grammar for must fall through so the
+        // caller renders them verbatim rather than mislabelling them.
+        for ext in ["txt", "log", "toml", "csv", "", "exe"] {
+            assert_eq!(language_for_extension(ext), None, "unexpected match: {ext}");
+        }
     }
 
     #[test]

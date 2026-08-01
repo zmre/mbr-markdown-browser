@@ -1,12 +1,12 @@
 ---
 title: QuickLook Preview
-description: Preview markdown in macOS Finder
+description: Preview markdown and plain text in macOS Finder
 order: 4
 ---
 
 # QuickLook Preview (macOS)
 
-mbr includes a QuickLook extension for macOS, allowing you to preview markdown files directly in Finder.
+mbr includes a QuickLook extension for macOS, allowing you to preview markdown - and plain text files - directly in Finder.
 
 ## What is QuickLook?
 
@@ -23,6 +23,50 @@ With mbr's QuickLook extension, markdown files render as formatted HTML instead 
 - **Custom styling**: Respects your `.mbr/theme.css`
 - **Table of contents**: In the QuickLook info panel
 - **Frontmatter display**: Shows metadata in a clean format
+- **Plain text and source files**: Shown verbatim, with syntax highlighting where available
+
+## Plain Text Previews
+
+The extension previews plain text as well as markdown. Which path a file takes is decided by its extension:
+
+| File | Rendered as |
+|------|-------------|
+| `.md`, `.markdown`, `.mkd`, `.mkdn`, `.mdown`, `.mdwn`, `.mdtxt`, `.mdtext`, `.mdoc` | Full markdown |
+| Anything listed in your `markdown_extensions` config | Full markdown |
+| A source file mbr ships a grammar for (`.rs`, `.py`, `.json`, `.ts`, `.go`, `.rb`, `.sh`, `.nix`, `.sql`, `.yaml`, `.css`, `.xml`, ...) | Verbatim, syntax highlighted |
+| Everything else (`.txt`, `.log`, unknown extensions, files with no extension) | Verbatim, monospace |
+
+Verbatim means verbatim: whitespace, tabs and every literal character are preserved exactly, and markdown syntax in a `.txt` file stays as typed rather than being parsed. Long lines scroll horizontally instead of wrapping, so what you see matches what is on disk.
+
+Markdown extensions are the union of the built-in list above and your `markdown_extensions` setting. The built-in list is always honored, so a `.mkdn` file previews as markdown even in a repository whose config only publishes `.md`.
+
+### Limits
+
+Previews are meant to be instant, so two caps apply:
+
+| Cap | Value | Effect |
+|-----|-------|--------|
+| Bytes read | 1 MB | Longer files are cut off and the preview says "Preview truncated at 1024 KB" |
+| Bytes highlighted | 256 KB | Larger files still render, just without syntax highlighting |
+
+Files that are not valid UTF-8 (a latin-1 log, say) are decoded leniently: undecodable bytes become the Unicode replacement character rather than failing the preview. Empty files produce an empty preview.
+
+## File Types mbr Registers For
+
+Installing `MBR.app` registers these claims with macOS Launch Services:
+
+| Claim | Rank | Consequence |
+|-------|------|-------------|
+| Markdown (`net.daringfireball.markdown`, plus the nine extensions above) | `Default` | **mbr becomes the default app for markdown files**, replacing your previous default |
+| Plain text (`public.plain-text`) | `Alternate` | mbr appears under "Open With" for text files but does *not* displace your text editor |
+
+Both are registered as a **Viewer**, never an Editor: mbr renders the file it is given and never claims the ability to edit it in place.
+
+If you would rather keep your existing markdown app as the default, change it back in Finder: select a markdown file, **Get Info** (Cmd+I), pick your app under "Open with", and click **Change All**. That user choice outranks any app's declared handler rank.
+
+macOS itself declares no markdown type, so `MBR.app` also carries a `UTImportedTypeDeclarations` entry for `net.daringfireball.markdown`. Without it, `.md` files would resolve to an anonymous dynamic type and no UTI-based claim - including the QuickLook one - could match.
+
+`public.plain-text` is a supertype, so the plain-text claim is broader than `.txt`: source code conforms to it, which brings in roughly ninety extensions (`.c`, `.py`, `.rb`, `.sh`, `.swift`, `.js`, `.java`, ...) plus `.log`, `.csv` and `.tsv`. It does **not** cover `.json`, `.yaml`, `.css`, `.html` or `.xml` (which conform to `public.text` directly rather than to `public.plain-text`), nor extensions macOS declares no type for at all, such as `.rs`, `.toml` and `.nix`. Those files still preview correctly when opened through mbr; they just do not route to mbr automatically from Finder.
 
 ## Installation
 
@@ -142,6 +186,14 @@ If markdown files show as plain text:
    ```
 
    Other markdown QuickLook extensions may take precedence.
+
+### Text Files Preview With the System Renderer
+
+For `.txt` and source files, mbr's extension competes with the previewer built into macOS, and both claim `public.plain-text`. If you get Apple's plain preview instead of mbr's, confirm the extension is enabled in **System Settings -> General -> Login Items & Extensions -> Quick Look**, then reset the cache with `qlmanage -r && qlmanage -r cache`.
+
+### Wrong Default App for Markdown
+
+Installing mbr makes it the default opener for markdown files. To hand that back to another app, select a markdown file in Finder, press **Cmd+I**, choose the app under "Open with", and click **Change All**.
 
 ### Slow Previews
 

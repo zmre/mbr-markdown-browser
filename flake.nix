@@ -87,8 +87,44 @@
           <array>
             <string>MacOSX</string>
           </array>
+          <!--
+            File-type claims. Every entry is Viewer: mbr renders documents, it
+            never edits the file it was handed, so it must not advertise an
+            editor role.
+
+            Markdown is claimed TWICE on purpose. Since Mac OS X 10.4, a
+            CFBundleDocumentTypes dict that contains LSItemContentTypes has its
+            legacy CFBundleTypeExtensions / CFBundleTypeMIMETypes /
+            CFBundleTypeOSTypes keys IGNORED - the suppression is per-dict, not
+            per-bundle. Putting the UTI claim and the extension claim in
+            separate dicts is therefore the only way to have both, and the
+            extension dict is what still works on a Mac where the markdown UTI
+            somehow fails to register.
+          -->
           <key>CFBundleDocumentTypes</key>
           <array>
+            <dict>
+              <key>CFBundleTypeName</key>
+              <string>Markdown document</string>
+              <key>CFBundleTypeRole</key>
+              <string>Viewer</string>
+              <!--
+                Default (not Alternate): installing MBR makes it the default
+                app for markdown files, replacing whatever the user had.
+              -->
+              <key>LSHandlerRank</key>
+              <string>Default</string>
+              <key>LSItemContentTypes</key>
+              <array>
+                <!--
+                  Only net.daringfireball.markdown is listed. "public.markdown"
+                  is folklore: the "public." namespace is reserved for Apple,
+                  and CoreTypes.bundle declares no markdown type of any kind,
+                  so shipping it would be shipping an invented UTI.
+                -->
+                <string>net.daringfireball.markdown</string>
+              </array>
+            </dict>
             <dict>
               <key>CFBundleTypeExtensions</key>
               <array>
@@ -103,9 +139,79 @@
                 <string>mkdn</string>
               </array>
               <key>CFBundleTypeName</key>
-              <string>Markdown document</string>
+              <string>Markdown document (by extension)</string>
               <key>CFBundleTypeRole</key>
               <string>Viewer</string>
+              <key>LSHandlerRank</key>
+              <string>Default</string>
+            </dict>
+            <dict>
+              <key>CFBundleTypeName</key>
+              <string>Plain text document</string>
+              <key>CFBundleTypeRole</key>
+              <string>Viewer</string>
+              <!--
+                Alternate, deliberately: mbr should show up under "Open With"
+                for text files without displacing the user's text editor.
+
+                public.plain-text is a supertype, so this claims more than
+                .txt: public.source-code conforms to it, which pulls in ~90
+                source extensions (.c, .py, .rb, .sh, .swift, .js, .java, ...)
+                plus .log, .csv and .tsv. It does NOT claim .json, .yaml,
+                .css, .html or .xml (those conform to public.text directly),
+                nor extensions macOS declares no type for (.rs, .toml, .nix).
+              -->
+              <key>LSHandlerRank</key>
+              <string>Alternate</string>
+              <key>LSItemContentTypes</key>
+              <array>
+                <string>public.plain-text</string>
+              </array>
+            </dict>
+          </array>
+          <!--
+            Without this, the LSItemContentTypes claim above (and the appex's
+            QLSupportedContentTypes entry) would match nothing: macOS ships no
+            markdown UTI at all, so an unclaimed .md resolves to a dynamic UTI
+            that conforms only to public.data. Declaring the type is what binds
+            the markdown extensions to net.daringfireball.markdown.
+
+            Imported rather than Exported because mbr does not own this
+            identifier - it is Daring Fireball's de-facto community UTI, also
+            exported by several markdown editors. Whichever bundle registers
+            first wins; the declarations agree, so it does not matter which.
+          -->
+          <key>UTImportedTypeDeclarations</key>
+          <array>
+            <dict>
+              <key>UTTypeIdentifier</key>
+              <string>net.daringfireball.markdown</string>
+              <key>UTTypeDescription</key>
+              <string>Markdown document</string>
+              <key>UTTypeConformsTo</key>
+              <array>
+                <string>public.plain-text</string>
+              </array>
+              <key>UTTypeTagSpecification</key>
+              <dict>
+                <key>public.filename-extension</key>
+                <array>
+                  <string>markdown</string>
+                  <string>md</string>
+                  <string>mdoc</string>
+                  <string>mdown</string>
+                  <string>mdtext</string>
+                  <string>mdtxt</string>
+                  <string>mdwn</string>
+                  <string>mkd</string>
+                  <string>mkdn</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                  <string>text/markdown</string>
+                  <string>text/x-markdown</string>
+                </array>
+              </dict>
             </dict>
           </array>
           <key>CFBundleURLTypes</key>
@@ -489,8 +595,22 @@
                 quicklook/Generated/mbr.swift \
                 quicklook/MBRPreview/PreviewViewController.swift
 
-              # Copy Info.plist to complete the .appex bundle structure
+              # Copy Info.plist to complete the .appex bundle structure.
+              #
+              # The plist is shared with the Xcode dev project (project.yml),
+              # so it holds $(...) build settings that only xcodebuild expands.
+              # This build has to expand them itself or the shipped bundle gets
+              # a literal "$(PRODUCT_BUNDLE_IDENTIFIER)" as its identifier,
+              # which is not a valid bundle ID and is not prefixed by the host
+              # app's, so macOS will not load the extension.
+              #
+              # --replace-fail: if a token is renamed on either side this build
+              # fails loudly instead of silently shipping the unexpanded text.
               cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
+              substituteInPlace build/MBRPreview.appex/Contents/Info.plist \
+                --replace-fail '$(PRODUCT_BUNDLE_IDENTIFIER)' 'com.zmre.mbr.MBRPreview' \
+                --replace-fail '$(MARKETING_VERSION)' '${version}' \
+                --replace-fail '$(CURRENT_PROJECT_VERSION)' '${version}'
             '';
 
             installPhase = ''
