@@ -5,9 +5,23 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>MBR Markdown Preview</string>
+	<string>MBR Preview</string>
 	<key>CFBundleExecutable</key>
 	<string>MBRPreview</string>
+	<!--
+	  The three parenthesised tokens below are Xcode build settings, expanded
+	  by xcodebuild when the extension is built from quicklook/project.yml
+	  (the local dev flow). The SHIPPING build is the Nix one, which copies
+	  this file verbatim and therefore has to expand them itself - see the
+	  `mbr-quicklook` derivation in flake.nix, which substitutes all three
+	  with --replace-fail, so a renamed token fails the build instead of
+	  shipping an unexpanded placeholder as the bundle identifier.
+
+	  An app extension's bundle identifier must be its host app's identifier
+	  plus a suffix. Under Xcode the host is com.zmre.mbr.quicklook-host; in
+	  the shipping bundle it is com.zmre.mbr, so Nix substitutes
+	  com.zmre.mbr.MBRPreview here.
+	-->
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -17,13 +31,13 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.3.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.6</string>
 	<key>NSExtension</key>
@@ -34,10 +48,46 @@
 			<false/>
 			<key>QLSupportedContentTypes</key>
 			<array>
+				<!--
+				  macOS declares NO markdown UTI of its own (there is not a
+				  single "markdown" string in CoreTypes.bundle's 1201 type
+				  declarations), so .md would otherwise resolve to a dynamic
+				  UTI and match nothing here. MBR.app's
+				  UTImportedTypeDeclarations (see flake.nix) declares
+				  net.daringfireball.markdown and binds the markdown
+				  extensions to it, which is what makes this entry match.
+				-->
 				<string>net.daringfireball.markdown</string>
+				<!--
+				  Not an Apple-declared type: the "public." namespace is
+				  reserved for Apple and CoreTypes.bundle has no such entry.
+				  Kept only because some third-party editors export it anyway,
+				  in which case .md files on that machine resolve to it.
+				-->
 				<string>public.markdown</string>
+				<!--
+				  Xcode-era cruft. "com.unknown.md" is the placeholder Xcode
+				  writes for an extension it cannot map to a real UTI; it
+				  never matches anything. "dyn.ah62d4rv4ge81e5pe" decodes to
+				  the dynamic UTI for the ".rmd" extension (R Markdown) - NOT
+				  ".md", whose dynamic UTI is dyn.age8043a. Both are harmless
+				  (an unmatchable identifier is simply skipped) and the .rmd
+				  one is mildly useful, so they stay.
+				-->
 				<string>com.unknown.md</string>
 				<string>dyn.ah62d4rv4ge81e5pe</string>
+				<!--
+				  Plain text, including source code: public.source-code
+				  conforms to public.plain-text, so this one entry covers
+				  .txt/.log/.csv plus ~90 source extensions (.c, .py, .rb,
+				  .sh, .swift, .js, .java, ...). It does NOT cover .json,
+				  .yaml, .css, .html or .xml, which conform to public.text
+				  directly rather than to public.plain-text, nor extensions
+				  macOS declares no type for at all (.rs, .toml, .nix, .go).
+				  Files routed here render through the plain-text path in
+				  src/quicklook.rs, not the markdown parser.
+				-->
+				<string>public.plain-text</string>
 			</array>
 			<key>QLSupportsSearchableItems</key>
 			<false/>

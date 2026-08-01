@@ -196,6 +196,228 @@ mbr adds custom CSS variables for its unique features:
 }
 ```
 
+### Definition Lists (FAQ)
+
+Definition lists render as a [click-to-expand FAQ](../markdown/#definition-lists-faq-style).
+These are the defaults — every color resolves through a Pico variable, so light
+and dark mode and all the color themes follow automatically. Override the
+variables rather than the rules and you keep that for free:
+
+```css
+:root {
+  /* Question (dt) */
+  --mbr-dl-question-color: var(--pico-color);
+  --mbr-dl-question-hover-color: var(--pico-primary-hover);
+  --mbr-dl-question-weight: 600;
+
+  /* Answer (dd) */
+  --mbr-dl-answer-color: var(--pico-muted-color);
+  --mbr-dl-answer-indent: calc(var(--pico-spacing) * 1.5);
+
+  /* Separator rule drawn above each question */
+  --mbr-dl-separator-color: var(--pico-muted-border-color);
+
+  /* Disclosure marker (the chevron that rotates when open) */
+  --mbr-dl-marker-color: var(--pico-primary);
+  --mbr-dl-marker-size: 0.62em;
+  --mbr-dl-marker-gap: 0.55em;
+
+  /* Vertical breathing room around each question and under each answer */
+  --mbr-dl-item-spacing: var(--pico-spacing);
+
+  /* Expand/collapse animation */
+  --mbr-dl-transition-duration: 0.25s;
+  --mbr-dl-transition-easing: ease;
+}
+```
+
+Some worked examples:
+
+```css
+:root {
+  /* Tighter list with a louder question */
+  --mbr-dl-item-spacing: 0.5rem;
+  --mbr-dl-question-weight: 700;
+
+  /* Accent the marker instead of the text */
+  --mbr-dl-marker-color: var(--pico-del-color);
+  --mbr-dl-marker-size: 0.8em;
+
+  /* Snap open with no animation */
+  --mbr-dl-transition-duration: 0s;
+}
+```
+
+To opt a repository out of the FAQ treatment entirely and get plain, always-open
+definition lists back, override the rules themselves in `.mbr/user.css`. All
+three selectors are needed: theme.css collapses answers with one low-specificity
+rule plus two higher-specificity ones that re-close answers belonging to a
+different question. `user.css` is linked after `theme.css`, so matching each
+selector exactly is enough and no `!important` is required:
+
+```css
+main dl > dd,
+main dl > dt:focus ~ dt ~ dd,
+main dl > dd:focus-within ~ dt ~ dd {
+  visibility: visible;
+  height: auto;
+  padding-block: 0 var(--mbr-dl-item-spacing);
+}
+
+/* Dropping the marker also means undoing its hanging indent, or the first
+   line of every question hangs out into the margin. */
+main dl > dt::before {
+  content: none;
+}
+
+main dl > dt {
+  cursor: auto;
+  padding-inline-start: 0;
+  text-indent: 0;
+}
+```
+
+The height animation only runs where the browser can interpolate the `auto`
+keyword (`interpolate-size: allow-keywords`). Elsewhere — Safari, at the time
+of writing — answers simply snap open, and `prefers-reduced-motion: reduce`
+drops the transitions everywhere.
+
+## Printing
+
+Printing (and "Save as PDF", which is the same code path) is governed by the
+`@media print` block at the end of `theme.css`. Two rules define it.
+
+### Nothing is hidden on paper
+
+Everything mbr collapses, clamps or clips is an affordance for reading on a
+screen — it trades content for skimmability on the understanding that you can
+always open the thing back up. Paper takes that bargain away, so print undoes
+all of it:
+
+| Screen behavior | On paper |
+|---|---|
+| Sections collapsed by clicking a heading | Expanded; the `+` marker is dropped |
+| Definition-list answers (click-to-expand FAQ) | Every answer open, chevrons dropped |
+| A closed `<details>` written literally in the markdown | Forced open (see the caveat below) |
+| Marginalia (`>>>` sidenotes) shown on hover | Printed inline where they occur |
+| Oembed link cards clamped to 200px | Full height, nothing clipped |
+| Kanban boards (`85vh`, side-scrolling columns) | Flattened to one column so no card is cut off |
+| Theater-mode video figures sized to the viewport | Unconstrained, so the caption survives |
+| Heading permalink anchors | Hidden — they only exist to be hovered |
+| `<video>` / `media-player` | Replaced by `[Video content - see digital version]` |
+
+The one thing that stays hidden is `.sr-only`, which is a *duplicate* of the
+page title emitted for search weighting. Revealing it would print the title
+twice.
+
+Note that `[hidden]` content is deliberately left hidden. Unlike a section you
+collapsed a moment ago, `hidden` is an explicit statement by the author that
+the content does not apply.
+
+#### Caveat: `<details>` needs a recent browser
+
+CSS cannot set the `open` attribute, so forcing a closed `<details>` open on
+paper depends on the `::details-content` pseudo-element:
+
+```css
+details::details-content {
+  content-visibility: visible !important;
+  block-size: auto !important;
+  overflow: visible !important;
+}
+```
+
+That requires **Chrome/Edge 131+, Safari 18.4+ or Firefox 143+** (Baseline
+"newly available", September 2025); GUI mode uses the system WebKit, so it
+tracks whichever Safari is installed. On anything older the rule is dropped and
+a closed `<details>` prints closed — and there is no CSS-only workaround, which
+is why the CSS Working Group issue asking for one stayed open for eight years.
+If you must support older browsers, open the blocks by hand before printing, or
+add a `beforeprint` listener in `.mbr/components/` that sets `open`.
+
+The `!important` is aimed at your own `user.css`, which is linked *after*
+`theme.css`. If you have copied MDN's accordion animation
+(`details::details-content { block-size: 0; overflow: clip }`), it matches the
+same selector, and `@media print` adds no specificity — without `!important`
+source order would re-collapse the block on paper.
+
+Two things this does not fix: the content is still reported as *collapsed* to
+screen readers (the `open` attribute genuinely is absent), and print behavior
+specifically is not covered by any cross-browser test suite, so it is worth one
+manual print-preview check on your target browser.
+
+### Only `<main>` is printed
+
+Chrome — the header, breadcrumbs, footer and every `<mbr-*>` component — is
+hidden by an allowlist rather than a list of things to hide:
+
+```css
+body > *:not(main, mbr-genealogy, .mbr-print-keep) {
+  display: none !important;
+}
+```
+
+Which components a page carries depends on the mode (server adds live reload,
+GUI adds the find bar, the sidebar layout adds the navigation drawer), so any
+hand-maintained list of tag names goes stale the moment a component is added —
+and the failure only shows up on paper. Inverting the test makes new components
+correct by default.
+
+If your repository puts real content in `.mbr/_footer_custom.html`, mark it so
+it survives:
+
+```html
+<aside class="mbr-print-keep">
+  <p>© 2026 Example Corp. Internal use only.</p>
+</aside>
+```
+
+The family chart on `type: person` pages (`<mbr-genealogy>`) is generated
+content rather than chrome, so it is carved out and prints as-is.
+
+### Paper margins (and the Safari bug behind them)
+
+Margins come from padding on the content box, not from an `@page` margin:
+
+```css
+:root {
+  --mbr-print-margin-block: 0.5in;  /* top and bottom */
+  --mbr-print-margin-inline: 1in;   /* left and right */
+}
+```
+
+Override those variables to change the margins. **Do not move the values onto
+`@page`.** A non-zero `@page` margin makes Safari — and the GUI window, which
+is a WKWebView — lay out a large empty band at the top of *every* printed page.
+Chrome is unaffected. Zeroing the page box and moving the whitespace into the
+content box is what removes it.
+
+The band could also be cleared at print time by changing any setting in
+Safari's print dialog (in either direction) or by turning on print-media
+emulation in devtools — both force a re-layout. The GUI window exposes no
+dialog controls, so there it was unavoidable.
+
+The trade-off of the workaround: padding applies at the *start and end of the
+box*, so a document longer than one sheet gets its top margin on page 1 and its
+bottom margin on the last page, while continuation pages fall back to the
+printer's own unprintable area. Left and right margins are unaffected and apply
+to every page. If you print single-page documents, or your printer's hardware
+margin is enough, this is invisible; if you need uniform vertical margins on a
+long document and only ever print from Chrome, you can put them back:
+
+```css
+/* Chrome-only: uniform vertical margins, re-triggers the Safari band */
+@media print {
+  @page { margin: 0.5in 1in; }
+  main.container { padding: 0; }
+}
+```
+
+### Best results
+
+For best results when printing, use light mode and enable "Print backgrounds"
+in the browser's print dialog.
+
 ## Dark Mode
 
 mbr respects the system color scheme preference. Add dark mode overrides:

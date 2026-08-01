@@ -145,6 +145,84 @@ cd components && bun run build
 cargo fmt && cargo clippy -- -D warnings
 ```
 
+## Release Packaging and Nix-Store Independence
+
+```bash
+# Build the distributable archives (macOS: .app + CLI tarballs)
+nix build .#release
+
+# Wrap a built app in the drag-to-/Applications disk image
+scripts/make-macos-dmg.sh /path/to/MBR.app dist/mbr-macos-arm64.dmg
+```
+
+Release artifacts have to run on a Mac that has never had Nix installed, so
+**no Mach-O in them may reference `/nix/store`** — not in `LC_LOAD_DYLIB`, not
+in `LC_LOAD_WEAK_DYLIB`, not in `LC_RPATH`.
+
+Most of this is structural: ffmpeg and x264 are statically linked, and pdfium is
+`dlopen`'d at runtime from `Contents/Frameworks/` (app bundle) or `lib/` next to
+the executable (CLI tarball), never from a compiled-in store path. The one
+genuine dynamic leak is libiconv, which Nix's linker resolves to its own copy
+instead of the `/usr/lib/libiconv.2.dylib` that macOS ships.
+
+The `release` derivation in `flake.nix` therefore does two things, in this order
+and **before** any `codesign` step (`install_name_tool` invalidates signatures):
+
+1. `portablize` walks every Mach-O in the staged tree and rewrites store
+   libiconv references to `/usr/lib/libiconv.2.dylib`.
+2. `auditPortable` re-scans and **fails the build** if any store reference
+   survives.
+
+The audit exists because both halves of step 1 fail silently on their own:
+`install_name_tool -change` is a no-op when the old path does not match, and an
+earlier version applied it to a hardcoded list of two files, which would have
+missed a third Mach-O such as `PlugIns/MBRPreview.appex`. A store dependency
+other than libiconv is deliberately *not* auto-mapped to `/usr/lib/<name>` — a
+wrong guess would trade a loud failure for a subtle one — so it fails the audit
+and must be handled consciously.
+
+To verify a downloaded artifact by hand:
+
+```bash
+# Should print nothing
+otool -L MBR.app/Contents/MacOS/mbr | grep /nix/store
+
+# Strongest check: run it and watch what dyld actually loads
+DYLD_PRINT_LIBRARIES=1 MBR.app/Contents/MacOS/mbr --version 2>&1 | grep /nix/store
+```
+
+Note that `strings` on these binaries *does* show `/nix/store/eeee…eeee/...`
+paths. Those are harmless: Rust's `--remap-path-prefix` scrubs the real hashes
+to `e`s, and they appear only in panic-location and `tracing` metadata strings,
+never in a load command.
+
+### Code signing: never strip an ad-hoc signature
+
+**On Apple Silicon an unsigned Mach-O is SIGKILLed by the kernel.** It is not a
+Gatekeeper prompt or a warning — the process dies with exit 137 and prints
+nothing. The ad-hoc signature that the linker (and `install_name_tool`) applies
+automatically is what makes a binary runnable at all.
+
+`codesign` cannot reach its daemon inside the Nix sandbox, so every signing call
+in the `release` derivation is expected to fail and is written `|| true`. What it
+must **never** do is fall back to `codesign --remove-signature`: that fallback
+ran on every build and stripped the ad-hoc signature, so the app tarball shipped
+a bundle that could not launch (`codesign --verify` reported "code object is not
+signed at all"). Leaving the failed-to-re-sign ad-hoc signature in place is
+strictly better. The derivation now fails the build if any shipped Mach-O ends up
+unsigned.
+
+Proper signing happens later, in `scripts/make-macos-dmg.sh`, which runs on the
+CI runner outside the sandbox where `codesign` works, and gates itself with
+`codesign --verify --deep --strict`. This is why the DMG was correctly signed
+while the raw tarball was not.
+
+```bash
+# Both should print "Signature=adhoc" (or better) and then exit 0
+codesign -dv MBR.app/Contents/MacOS/mbr
+MBR.app/Contents/MacOS/mbr --version; echo "rc=$?"
+```
+
 ## Architecture Notes
 
 The `--template-folder` flag serves dual purposes:

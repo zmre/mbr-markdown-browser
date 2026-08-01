@@ -90,6 +90,16 @@ The macOS release includes `MBR.app`, a native application bundle with:
 The easiest install is the DMG: open it and drag `MBR.app` to the Applications
 folder. You can also extract a `.tar.gz` and move `MBR.app` yourself.
 
+> [!IMPORTANT]
+> Installing `MBR.app` makes it the **default app for markdown files**
+> (`.md`, `.markdown`, `.mkd` and friends), replacing whatever you used before.
+> It also registers as an *alternate* viewer for plain text, so it shows up
+> under "Open With" for `.txt` and source files without displacing your text
+> editor. mbr always registers as a viewer, never an editor. To restore a
+> previous default, select a markdown file in Finder, press **Cmd+I**, pick
+> your app under "Open with", and click **Change All**. See
+> [QuickLook Preview](../modes/quicklook/) for the full list of claimed types.
+
 These builds are ad-hoc signed but not notarized, so macOS blocks the first
 launch. Open **System Settings › Privacy & Security** and click **Open Anyway**,
 or clear the quarantine flag from a terminal:

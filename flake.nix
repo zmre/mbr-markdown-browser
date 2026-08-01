@@ -87,8 +87,44 @@
           <array>
             <string>MacOSX</string>
           </array>
+          <!--
+            File-type claims. Every entry is Viewer: mbr renders documents, it
+            never edits the file it was handed, so it must not advertise an
+            editor role.
+
+            Markdown is claimed TWICE on purpose. Since Mac OS X 10.4, a
+            CFBundleDocumentTypes dict that contains LSItemContentTypes has its
+            legacy CFBundleTypeExtensions / CFBundleTypeMIMETypes /
+            CFBundleTypeOSTypes keys IGNORED - the suppression is per-dict, not
+            per-bundle. Putting the UTI claim and the extension claim in
+            separate dicts is therefore the only way to have both, and the
+            extension dict is what still works on a Mac where the markdown UTI
+            somehow fails to register.
+          -->
           <key>CFBundleDocumentTypes</key>
           <array>
+            <dict>
+              <key>CFBundleTypeName</key>
+              <string>Markdown document</string>
+              <key>CFBundleTypeRole</key>
+              <string>Viewer</string>
+              <!--
+                Default (not Alternate): installing MBR makes it the default
+                app for markdown files, replacing whatever the user had.
+              -->
+              <key>LSHandlerRank</key>
+              <string>Default</string>
+              <key>LSItemContentTypes</key>
+              <array>
+                <!--
+                  Only net.daringfireball.markdown is listed. "public.markdown"
+                  is folklore: the "public." namespace is reserved for Apple,
+                  and CoreTypes.bundle declares no markdown type of any kind,
+                  so shipping it would be shipping an invented UTI.
+                -->
+                <string>net.daringfireball.markdown</string>
+              </array>
+            </dict>
             <dict>
               <key>CFBundleTypeExtensions</key>
               <array>
@@ -103,9 +139,79 @@
                 <string>mkdn</string>
               </array>
               <key>CFBundleTypeName</key>
-              <string>Markdown document</string>
+              <string>Markdown document (by extension)</string>
               <key>CFBundleTypeRole</key>
               <string>Viewer</string>
+              <key>LSHandlerRank</key>
+              <string>Default</string>
+            </dict>
+            <dict>
+              <key>CFBundleTypeName</key>
+              <string>Plain text document</string>
+              <key>CFBundleTypeRole</key>
+              <string>Viewer</string>
+              <!--
+                Alternate, deliberately: mbr should show up under "Open With"
+                for text files without displacing the user's text editor.
+
+                public.plain-text is a supertype, so this claims more than
+                .txt: public.source-code conforms to it, which pulls in ~90
+                source extensions (.c, .py, .rb, .sh, .swift, .js, .java, ...)
+                plus .log, .csv and .tsv. It does NOT claim .json, .yaml,
+                .css, .html or .xml (those conform to public.text directly),
+                nor extensions macOS declares no type for (.rs, .toml, .nix).
+              -->
+              <key>LSHandlerRank</key>
+              <string>Alternate</string>
+              <key>LSItemContentTypes</key>
+              <array>
+                <string>public.plain-text</string>
+              </array>
+            </dict>
+          </array>
+          <!--
+            Without this, the LSItemContentTypes claim above (and the appex's
+            QLSupportedContentTypes entry) would match nothing: macOS ships no
+            markdown UTI at all, so an unclaimed .md resolves to a dynamic UTI
+            that conforms only to public.data. Declaring the type is what binds
+            the markdown extensions to net.daringfireball.markdown.
+
+            Imported rather than Exported because mbr does not own this
+            identifier - it is Daring Fireball's de-facto community UTI, also
+            exported by several markdown editors. Whichever bundle registers
+            first wins; the declarations agree, so it does not matter which.
+          -->
+          <key>UTImportedTypeDeclarations</key>
+          <array>
+            <dict>
+              <key>UTTypeIdentifier</key>
+              <string>net.daringfireball.markdown</string>
+              <key>UTTypeDescription</key>
+              <string>Markdown document</string>
+              <key>UTTypeConformsTo</key>
+              <array>
+                <string>public.plain-text</string>
+              </array>
+              <key>UTTypeTagSpecification</key>
+              <dict>
+                <key>public.filename-extension</key>
+                <array>
+                  <string>markdown</string>
+                  <string>md</string>
+                  <string>mdoc</string>
+                  <string>mdown</string>
+                  <string>mdtext</string>
+                  <string>mdtxt</string>
+                  <string>mdwn</string>
+                  <string>mkd</string>
+                  <string>mkdn</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                  <string>text/markdown</string>
+                  <string>text/x-markdown</string>
+                </array>
+              </dict>
             </dict>
           </array>
           <key>CFBundleURLTypes</key>
@@ -489,8 +595,22 @@
                 quicklook/Generated/mbr.swift \
                 quicklook/MBRPreview/PreviewViewController.swift
 
-              # Copy Info.plist to complete the .appex bundle structure
+              # Copy Info.plist to complete the .appex bundle structure.
+              #
+              # The plist is shared with the Xcode dev project (project.yml),
+              # so it holds $(...) build settings that only xcodebuild expands.
+              # This build has to expand them itself or the shipped bundle gets
+              # a literal "$(PRODUCT_BUNDLE_IDENTIFIER)" as its identifier,
+              # which is not a valid bundle ID and is not prefixed by the host
+              # app's, so macOS will not load the extension.
+              #
+              # --replace-fail: if a token is renamed on either side this build
+              # fails loudly instead of silently shipping the unexpanded text.
               cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
+              substituteInPlace build/MBRPreview.appex/Contents/Info.plist \
+                --replace-fail '$(PRODUCT_BUNDLE_IDENTIFIER)' 'com.zmre.mbr.MBRPreview' \
+                --replace-fail '$(MARKETING_VERSION)' '${version}' \
+                --replace-fail '$(CURRENT_PROJECT_VERSION)' '${version}'
             '';
 
             installPhase = ''
@@ -738,6 +858,77 @@
               then ''
                 mkdir -p $out
 
+                # --- /nix/store independence -------------------------------
+                #
+                # Release archives must run on a Mac that has never had Nix
+                # installed, so no Mach-O in them may reference /nix/store.
+                #
+                # Two failure modes made the previous approach fragile, and
+                # both fail SILENTLY (green build, broken download):
+                #
+                #   1. `install_name_tool -change OLD NEW` is a no-op when OLD
+                #      does not match exactly. If pkgs.libiconv ever resolves
+                #      to a different store path than the one actually linked,
+                #      the rewrite quietly does nothing.
+                #   2. It was applied to a hardcoded list of two files, so any
+                #      newly bundled Mach-O (another dylib in Frameworks/, a
+                #      second plug-in) was never covered.
+                #
+                # So: discover Mach-Os instead of listing them, and afterwards
+                # hard-fail if any store reference survives. `otool -L` prints
+                # dependencies as tab-indented lines and prints none at all for
+                # a non-Mach-O, so it doubles as the file-type test.
+
+                machoDeps() {
+                  /usr/bin/otool -L "$1" 2>/dev/null | grep '^	' | awk '{print $1}'
+                }
+
+                machoRpaths() {
+                  /usr/bin/otool -l "$1" 2>/dev/null \
+                    | awk '/LC_RPATH/{r=1} r && /^ *path /{print $2; r=0}'
+                }
+
+                # Rewrite store dylib references to their macOS system twins.
+                portablize() {
+                  local f dep
+                  for f in $(find "$1" -type f); do
+                    for dep in $(machoDeps "$f" | grep '^/nix/store/'); do
+                      case "$(basename "$dep")" in
+                        libiconv.2.dylib)
+                          # macOS ships libiconv; Nix's copy is build-time only.
+                          chmod u+w "$f"
+                          /usr/bin/install_name_tool -change \
+                            "$dep" /usr/lib/libiconv.2.dylib "$f"
+                          ;;
+                        *)
+                          # Deliberately not auto-mapped to /usr/lib/<name>: a
+                          # wrong guess swaps a loud failure for a silent one.
+                          # New store deps must be handled consciously here.
+                          # The audit below turns this into a build failure.
+                          ;;
+                      esac
+                    done
+                  done
+                }
+
+                # Fail the build if ANY Mach-O still resolves into the store.
+                auditPortable() {
+                  local f bad refs
+                  bad=0
+                  for f in $(find "$1" -type f); do
+                    refs="$( (machoDeps "$f"; machoRpaths "$f") | grep '^/nix/store/' || true)"
+                    if [ -n "$refs" ]; then
+                      echo "error: $f references /nix/store:" >&2
+                      echo "$refs" >&2
+                      bad=1
+                    fi
+                  done
+                  if [ "$bad" -ne 0 ]; then
+                    echo "error: release artifacts are not portable" >&2
+                    exit 1
+                  fi
+                }
+
                 # Create staging directory for app bundle
                 # Start from the full app bundle (has pdfium, QuickLook, etc.)
                 mkdir -p staging
@@ -749,27 +940,46 @@
                 chmod u+w staging/MBR.app/Contents/MacOS/mbr
                 cp ${packages.mbr-cli}/bin/mbr staging/MBR.app/Contents/MacOS/mbr
 
-                # Rewrite Nix store libiconv path to system libiconv
-                # Nix's linker uses its own libiconv, but macOS ships /usr/lib/libiconv.2.dylib
-                /usr/bin/install_name_tool -change \
-                  ${pkgs.libiconv}/lib/libiconv.2.dylib \
-                  /usr/lib/libiconv.2.dylib \
-                  staging/MBR.app/Contents/MacOS/mbr
+                # Rewrite store dylib references across EVERY Mach-O in the
+                # bundle (main binary, Frameworks/, PlugIns/*.appex), then
+                # prove none survived. Must run before codesign below, since
+                # install_name_tool invalidates any signature it touches.
+                portablize staging
+                auditPortable staging
 
                 # Re-sign: replacing the binary invalidates the original signature.
                 # codesign may fail inside Nix sandbox, so allow failure and strip
                 # invalid signatures if signing doesn't work.
+                # NEVER fall back to `codesign --remove-signature` here. It was
+                # doing active harm: codesign cannot reach its daemon inside the
+                # Nix sandbox, so the fallback always ran, and it stripped the
+                # ad-hoc signature that the linker (and install_name_tool)
+                # applies automatically. On Apple Silicon an unsigned Mach-O is
+                # SIGKILLed by the kernel, so the tarball shipped an app that
+                # could not launch at all -- `codesign --verify` reported "code
+                # object is not signed at all" and running it exited 137.
+                #
+                # Leaving the ad-hoc signature in place is strictly better: it
+                # is what makes the binary runnable, and scripts/make-macos-dmg.sh
+                # re-signs properly on the CI runner (outside the sandbox, where
+                # codesign works) before packaging the DMG.
                 /usr/bin/codesign --force --sign - \
-                  staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || \
-                  /usr/bin/codesign --remove-signature \
-                    staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || true
+                  staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || true
                 /usr/bin/codesign --force --sign - \
                   --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
-                  staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || \
-                  /usr/bin/codesign --remove-signature \
-                    staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
-                /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || \
-                  /usr/bin/codesign --remove-signature staging/MBR.app 2>/dev/null || true
+                  staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
+                /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || true
+
+                # An unsigned Mach-O cannot run on Apple Silicon, so treat a
+                # missing signature as a build failure rather than shipping a
+                # download that dies with SIGKILL.
+                for f in staging/MBR.app/Contents/MacOS/mbr \
+                         staging/MBR.app/Contents/Frameworks/libpdfium.dylib; do
+                  if /usr/bin/codesign -dv "$f" 2>&1 | grep -q "not signed"; then
+                    echo "error: $f is unsigned; it would be SIGKILLed on arm64" >&2
+                    exit 1
+                  fi
+                done
 
                 # Create .app bundle archive
                 tar -czvf $out/mbr-${archString}.tar.gz \
@@ -780,11 +990,9 @@
                 mkdir -p staging-cli/lib
                 cp ${packages.mbr-cli}/bin/mbr staging-cli/
                 cp ${pkgs.pdfium-binaries}/lib/libpdfium.dylib staging-cli/lib/
-                # Rewrite Nix store libiconv path to system libiconv
-                /usr/bin/install_name_tool -change \
-                  ${pkgs.libiconv}/lib/libiconv.2.dylib \
-                  /usr/lib/libiconv.2.dylib \
-                  staging-cli/mbr
+                # Same treatment for the CLI archive: rewrite, then prove it.
+                portablize staging-cli
+                auditPortable staging-cli
                 tar -czvf $out/mbr-cli-${archString}.tar.gz \
                   -C staging-cli \
                   mbr lib

@@ -712,9 +712,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -722,9 +722,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
 dependencies = [
  "anstream",
  "anstyle",
@@ -962,7 +962,7 @@ dependencies = [
  "anes",
  "cast",
  "ciborium",
- "clap 4.6.4",
+ "clap 4.6.5",
  "criterion-plot",
  "itertools 0.13.0",
  "num-traits",
@@ -2224,9 +2224,9 @@ dependencies = [
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
+checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "typenum",
 ]
@@ -3009,7 +3009,7 @@ dependencies = [
  "argon2",
  "axum",
  "chrono",
- "clap 4.6.4",
+ "clap 4.6.5",
  "criterion",
  "ffmpeg-next",
  "figment",
@@ -3163,7 +3163,7 @@ version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14f1541610994bba178cb36757e102d06a52a2d9612aa6d34c64b3b377c5d943"
 dependencies = [
- "clap 4.6.4",
+ "clap 4.6.5",
 ]
 
 [[package]]
@@ -3239,6 +3239,12 @@ dependencies = [
  "raw-window-handle",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "ndk-sys"
@@ -3617,7 +3623,7 @@ dependencies = [
  "async-compression",
  "base64",
  "bit-set 0.10.0",
- "clap 4.6.4",
+ "clap 4.6.5",
  "console",
  "convert_case",
  "either",
@@ -5202,9 +5208,9 @@ dependencies = [
 
 [[package]]
 name = "tao"
-version = "0.35.3"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1c93047acf68669466a34690ac58cca7010bd1b201e1ec86f1fd0a75d3dd4a9"
+checksum = "e9fa4618f999c4249db1681cba0a19b890718f274de7fa93c445d46bd3a8a999"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
@@ -5222,6 +5228,7 @@ dependencies = [
  "libc",
  "log",
  "ndk",
+ "ndk-context",
  "ndk-sys",
  "objc2",
  "objc2-app-kit",
@@ -5801,7 +5808,7 @@ version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16de46d08a9d3a25e0a65bb70090797b970bd1e95d72872567ba8d02c0b03bdf"
 dependencies = [
- "clap 4.6.4",
+ "clap 4.6.5",
  "config-derive",
  "envy",
  "log",
@@ -5925,7 +5932,7 @@ dependencies = [
  "anyhow",
  "camino",
  "cargo_metadata",
- "clap 4.6.4",
+ "clap 4.6.5",
  "uniffi_bindgen",
  "uniffi_build",
  "uniffi_core",

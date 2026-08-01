@@ -55,7 +55,7 @@ flowchart TD
 | `repo.rs` | Repository scanning |
 | `vid.rs` | Video shortcode handling |
 | `oembed.rs` | URL metadata extraction |
-| `quicklook.rs` | macOS QuickLook extension |
+| `quicklook.rs` | macOS QuickLook extension - markdown rendering plus verbatim plain-text/source previews |
 | `errors.rs` | Error type definitions |
 
 ## Request Flow

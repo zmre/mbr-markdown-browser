@@ -643,6 +643,37 @@ async fn test_default_css_served() {
     assert!(content_type.to_str().unwrap().contains("text/css"));
 }
 
+/// The print stylesheet hides chrome with an allowlist -- it hides *every*
+/// child of `<body>` that is not `<main>` (see the "Print Styles" section of
+/// `templates/theme.css`). That is only safe while the page templates actually
+/// put the rendered content in a `<main>` element, and nothing in the compiler
+/// or the template engine enforces that coupling: renaming the container to a
+/// `<div>` would still serve a perfectly good page that prints as a blank
+/// sheet. Pin both halves together here so the drift fails loudly.
+#[tokio::test]
+async fn test_print_allowlist_matches_content_container() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Printable\n\nBody text.");
+
+    let server = TestServer::start(&repo).await;
+
+    let css = server.get_text("/.mbr/theme.css").await;
+    assert!(
+        css.contains("body > *:not(main, mbr-genealogy, .mbr-print-keep)"),
+        "print styles should hide body children via an allowlist"
+    );
+
+    let page = server.get_text("/test/").await;
+    assert!(
+        page.contains("<main id=\"wrapper\""),
+        "rendered content must live in <main>, or the print allowlist hides it"
+    );
+    assert!(
+        page.contains("Body text."),
+        "sanity: the page should contain the rendered markdown"
+    );
+}
+
 // ============================================================================
 // Search endpoint tests
 // ============================================================================

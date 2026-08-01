@@ -601,10 +601,18 @@ where
                 }
             }
             Tag::DefinitionListTitle => {
+                // MBR EXTENSION: definition lists render as an FAQ-style
+                // disclosure list -- the `<dd>` answer is collapsed until its
+                // `<dt>` question is activated. That behaviour is pure CSS (see
+                // the "Definition Lists" section of `templates/theme.css`), and
+                // pure CSS can only observe activation as `:focus`, which a
+                // `<dt>` cannot receive unless it is made focusable. The
+                // `tabindex` is therefore load-bearing, not decoration: drop it
+                // and every answer becomes permanently unreachable.
                 if self.end_newline {
-                    self.write("<dt>")
+                    self.write("<dt tabindex=\"0\">")
                 } else {
-                    self.write("\n<dt>")
+                    self.write("\n<dt tabindex=\"0\">")
                 }
             }
             Tag::DefinitionListDefinition => {
@@ -1255,6 +1263,76 @@ mod tests {
         assert!(
             inside.contains("more"),
             "Content after the rule must stay inside the definition. Got: {html}"
+        );
+    }
+
+    /// `templates/theme.css` renders definition lists as an FAQ-style
+    /// disclosure list keyed off `dt:focus`, and only a focusable element can
+    /// match `:focus`. Without `tabindex` on every `<dt>` there is no pure-CSS
+    /// way to open a `<dd>`, so the answers would be permanently hidden.
+    #[test]
+    fn test_definition_list_titles_are_focusable() {
+        let html = render_mbr("Tight\n: answer\n\nLoose\n\n: first para\n\n  second para\n");
+
+        assert!(
+            html.contains("<dl>"),
+            "definition lists must still open a <dl>. Got: {html}"
+        );
+        assert!(
+            html.contains("<dd>"),
+            "definitions must still render as <dd>. Got: {html}"
+        );
+        assert_eq!(
+            html.matches("<dt tabindex=\"0\">").count(),
+            2,
+            "every <dt> must be focusable so the CSS disclosure can open its \
+             <dd>. Got: {html}"
+        );
+        assert!(
+            !html.contains("<dt>"),
+            "no <dt> may be emitted without tabindex -- its answer would be \
+             unreachable. Got: {html}"
+        );
+    }
+
+    /// The two `<dd>` body shapes the disclosure CSS has to collapse. A tight
+    /// definition holds bare inline text; a loose one gets its body wrapped in
+    /// `<p>`, whose margins would escape a zero-height box if the CSS did not
+    /// establish a block formatting context. Pinned here so a parser upgrade
+    /// that changes either shape shows up as a test failure rather than as a
+    /// silently broken collapse.
+    #[test]
+    fn test_definition_bodies_are_tight_or_paragraph_wrapped() {
+        let tight = render_mbr("Term\n: answer\n");
+        assert!(
+            tight.contains("<dd>answer</dd>"),
+            "a tight definition should hold bare inline text. Got: {tight}"
+        );
+
+        let loose = render_mbr("Term\n\n: answer\n");
+        assert!(
+            loose.contains("<dd>\n<p>answer</p>\n</dd>"),
+            "a loose definition should wrap its body in <p>. Got: {loose}"
+        );
+    }
+
+    /// One question can own several answers. The CSS opens them with `dt:focus
+    /// ~ dd` rather than `+ dd` precisely because of this shape -- with the
+    /// adjacent combinator the second `<dd>` would stay `visibility: hidden`,
+    /// which also makes it untabbable, so its content would be unreachable.
+    #[test]
+    fn test_one_title_can_own_several_definitions() {
+        let html = render_mbr("Term\n: first\n: second\n");
+
+        assert_eq!(
+            html.matches("<dt tabindex=\"0\">").count(),
+            1,
+            "expected a single term. Got: {html}"
+        );
+        assert_eq!(
+            html.matches("<dd>").count(),
+            2,
+            "expected the term to own two sibling <dd>s. Got: {html}"
         );
     }
 

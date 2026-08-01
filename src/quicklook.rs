@@ -37,6 +37,39 @@ const CSS_PREALLOC_BYTES: usize = 64 * 1024;
 /// Pre-allocation size for inline JS string (512 KB).
 const JS_PREALLOC_BYTES: usize = 512 * 1024;
 
+/// Most bytes read from a non-markdown file for a text preview (1 MiB).
+///
+/// QuickLook previews must feel instant and the whole document is inlined into
+/// one HTML string, so an unbounded read would let a multi-gigabyte log file
+/// stall Finder and blow up memory. Anything past this is dropped and the
+/// preview says so. 1 MiB is ~15k lines of source - far more than anyone reads
+/// in a spacebar preview.
+const MAX_TEXT_PREVIEW_BYTES: usize = 1024 * 1024;
+
+/// Largest text a preview will ask highlight.js to colorize (256 KiB).
+///
+/// Highlighting is regex-driven and runs in the WebView on the main thread; on
+/// a file this size it already costs noticeably more than the rest of the
+/// preview combined. Past the threshold the content still renders, just
+/// verbatim, which is the same fallback used for unrecognized extensions.
+const MAX_HIGHLIGHT_BYTES: usize = 256 * 1024;
+
+/// Extensions always previewed as markdown, whatever the repo config says.
+///
+/// This is the same list `MBR.app` claims in its `Info.plist` (see the
+/// `infoPlist` / `UTImportedTypeDeclarations` blocks in `flake.nix`) and the
+/// two must stay in step: an extension the app registers for but that is not
+/// here would open in mbr and then render as unparsed source.
+///
+/// It is a *union* with `config.markdown_extensions` rather than a fallback.
+/// `markdown_extensions` defaults to just `["md"]` and its real job is
+/// deciding which files become pages of the site; a single-file preview of a
+/// `.mkdn` should still be rendered markdown even in a repo that would not
+/// publish it.
+const MARKDOWN_PREVIEW_EXTENSIONS: &[&str] = &[
+    "markdown", "md", "mdoc", "mdown", "mdtext", "mdtxt", "mdwn", "mkd", "mkdn",
+];
+
 /// Errors that can occur during QuickLook preview rendering.
 /// This type is exposed via UniFFI to Swift.
 #[derive(Debug, Error)]
@@ -75,6 +108,53 @@ impl Default for QuickLookConfig {
             include_mermaid: true,
             base_url: None,
         }
+    }
+}
+
+/// How a QuickLook preview should render a file.
+///
+/// The app registers as a viewer for `public.plain-text`, which is a supertype
+/// of `public.source-code`, so QuickLook hands this module `.py`, `.sh`, `.log`
+/// and friends - not just markdown. Deciding what to do with them is kept as a
+/// pure function of the file name so it can be tested without touching disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewMode {
+    /// Run the full markdown pipeline.
+    Markdown,
+    /// Show the bytes verbatim, colorized by highlight.js as this language.
+    HighlightedText(&'static str),
+    /// Show the bytes verbatim with no highlighting.
+    PlainText,
+}
+
+/// Decide how `path` should be previewed.
+///
+/// Markdown wins if the extension is in `markdown_extensions` *or* in
+/// [`MARKDOWN_PREVIEW_EXTENSIONS`]; otherwise a shipped highlight.js grammar is
+/// used when one matches the extension, and everything else - including a file
+/// with no extension at all - renders verbatim.
+pub fn preview_mode_for(path: &Path, markdown_extensions: &[String]) -> PreviewMode {
+    // No extension (`README`, `Makefile`, dotfiles): nothing to key off, so
+    // verbatim. Guessing markdown here would mangle the very files QuickLook
+    // is most likely to be showing from a source tree.
+    let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
+        return PreviewMode::PlainText;
+    };
+
+    let is_markdown = MARKDOWN_PREVIEW_EXTENSIONS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(extension))
+        || markdown_extensions
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(extension));
+
+    if is_markdown {
+        return PreviewMode::Markdown;
+    }
+
+    match embedded_hljs::language_for_extension(extension) {
+        Some(language) => PreviewMode::HighlightedText(language),
+        None => PreviewMode::PlainText,
     }
 }
 
@@ -127,6 +207,13 @@ pub fn render_preview_with_config(
 
     // Load config for markdown extensions
     let config = Config::read(&root_path).unwrap_or_default();
+
+    // Non-markdown files must never reach the markdown parser: smart quotes,
+    // emphasis and list markers would silently rewrite the user's source.
+    match preview_mode_for(&path, &config.markdown_extensions) {
+        PreviewMode::Markdown => {}
+        mode => return render_text_preview(&path, mode, &root_path, &ql_config, &config),
+    }
 
     // Determine if this is an index file (affects link transformation)
     let is_index_file = path
@@ -181,14 +268,7 @@ pub fn render_preview_with_config(
     let headings = render_result.headings;
     let html = render_result.html;
 
-    // Calculate base URL for relative asset resolution
-    // Use root_path (markdown repo root) to properly resolve root-relative paths like /videos/
-    let base_url = ql_config.base_url.clone().unwrap_or_else(|| {
-        root_path
-            .to_str()
-            .map(|s| format!("file://{}/", s))
-            .unwrap_or_default()
-    });
+    let base_url = preview_base_url(&ql_config, &root_path);
 
     // Render through QuickLook template
     render_quicklook_template(
@@ -199,6 +279,119 @@ pub fn render_preview_with_config(
         &base_url,
         &ql_config,
         &config,
+    )
+}
+
+/// Base URL for relative asset resolution.
+///
+/// Uses the markdown repo root (not the file's own directory) so that
+/// root-relative paths like `/videos/x.mp4` resolve the way they do on the
+/// server.
+fn preview_base_url(ql_config: &QuickLookConfig, root_path: &Path) -> String {
+    ql_config.base_url.clone().unwrap_or_else(|| {
+        root_path
+            .to_str()
+            .map(|s| format!("file://{}/", s))
+            .unwrap_or_default()
+    })
+}
+
+/// Read up to [`MAX_TEXT_PREVIEW_BYTES`] from `path`.
+///
+/// Returns the bytes and whether the file was longer than the cap. Uses
+/// `Read::take` rather than reading the file and truncating, so a huge file is
+/// never pulled into memory in the first place. One extra byte is requested so
+/// "exactly at the cap" is distinguishable from "longer than the cap" without a
+/// second `metadata()` syscall (and without the TOCTOU a stat-then-read has).
+fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), QuickLookError> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).map_err(|e| QuickLookError::FileReadError {
+        message: format!("{}: {}", path.display(), e),
+    })?;
+
+    let mut bytes = Vec::new();
+    file.take(MAX_TEXT_PREVIEW_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| QuickLookError::FileReadError {
+            message: format!("{}: {}", path.display(), e),
+        })?;
+
+    let truncated = bytes.len() > MAX_TEXT_PREVIEW_BYTES;
+    bytes.truncate(MAX_TEXT_PREVIEW_BYTES);
+    Ok((bytes, truncated))
+}
+
+/// Wrap verbatim text in a `<pre>` block for the preview template.
+///
+/// Escaping uses `encode_quoted_attribute` even though this is element text.
+/// Its escape set (`& < > " '`) is a superset of what element text needs, and
+/// the extra two matter: [`convert_root_relative_urls`] later runs regexes for
+/// `src="/..."` / `src='/...'` over the rendered HTML, and a source file
+/// containing that literal string would otherwise be rewritten mid-preview.
+/// Escaping the quotes makes those regexes unable to match, so the file is
+/// shown exactly as written. Browsers decode the entities back inside `<pre>`,
+/// which is not a raw-text element, so nothing is visible to the reader.
+fn text_to_pre_html(text: &str, mode: PreviewMode, truncated: bool) -> String {
+    // `nohighlight` stops hljs.highlightAll() from language-guessing an
+    // unlabelled block: auto-detection on prose or a log file produces
+    // confident, wrong, and very colorful results.
+    let code_class = match mode {
+        PreviewMode::HighlightedText(language) if text.len() <= MAX_HIGHLIGHT_BYTES => {
+            format!("language-{language}")
+        }
+        _ => "nohighlight".to_string(),
+    };
+
+    let escaped = html_escape::encode_quoted_attribute(text);
+    let notice = if truncated {
+        format!(
+            "<p class=\"mbr-text-truncated\">Preview truncated at {} KB - open the file to see the rest.</p>",
+            MAX_TEXT_PREVIEW_BYTES / 1024
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "<pre class=\"mbr-text-preview\"><code class=\"{code_class}\">{escaped}</code></pre>{notice}"
+    )
+}
+
+/// Render a non-markdown file as a verbatim text preview.
+///
+/// Shares the template, theme loading and asset inlining with the markdown
+/// path, so a text preview picks up the repo's `.mbr/theme.css` and the same
+/// inlined highlight.js. Invalid UTF-8 is replaced rather than rejected: this
+/// is a preview, and refusing to show a latin-1 log file would be worse than
+/// showing it with a few replacement characters.
+fn render_text_preview(
+    path: &Path,
+    mode: PreviewMode,
+    root_path: &Path,
+    ql_config: &QuickLookConfig,
+    config: &Config,
+) -> Result<String, QuickLookError> {
+    let (bytes, truncated) = read_capped(path)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let html = text_to_pre_html(&text, mode, truncated);
+
+    // There is no frontmatter in a text file, so title the preview with the
+    // file name - otherwise the template falls back to a bare "Preview".
+    let mut frontmatter = markdown::SimpleMetadata::new();
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        frontmatter.insert("title".to_string(), serde_json::Value::String(name.into()));
+    }
+
+    let base_url = preview_base_url(ql_config, root_path);
+    render_quicklook_template(
+        &html,
+        frontmatter,
+        Vec::new(), // no headings: a text preview has no table of contents
+        root_path,
+        &base_url,
+        ql_config,
+        config,
     )
 }
 
@@ -529,6 +722,26 @@ body {
 #info-panel-toggle {
     display: none !important;
 }
+
+/* Verbatim text / source previews.
+   `white-space: pre` (not pre-wrap) so a long line scrolls instead of being
+   re-flowed: a wrapped line is a different file than the one on disk. */
+pre.mbr-text-preview {
+    white-space: pre;
+    overflow-x: auto;
+    tab-size: 4;
+    -moz-tab-size: 4;
+}
+
+pre.mbr-text-preview code {
+    white-space: inherit;
+    font-family: var(--pico-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.mbr-text-truncated {
+    font-style: italic;
+    opacity: 0.7;
+}
 "##;
 
 /// QuickLook-specific JavaScript for initialization.
@@ -629,9 +842,21 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    /// A temp file that ends in `.md`.
+    ///
+    /// `NamedTempFile::new()` produces `.tmpXXXXXX`, which has no extension at
+    /// all, and since previews are now routed by extension that would be
+    /// treated as plain text. Markdown tests must therefore name their file.
+    fn markdown_temp_file() -> NamedTempFile {
+        tempfile::Builder::new()
+            .suffix(".md")
+            .tempfile()
+            .expect("temp file")
+    }
+
     #[test]
     fn test_render_simple_markdown() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = markdown_temp_file();
         writeln!(file, "# Hello World\n\nThis is a test.").unwrap();
         let path = file.path().to_str().unwrap().to_string();
 
@@ -646,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_render_with_frontmatter() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = markdown_temp_file();
         writeln!(
             file,
             "---\ntitle: Test Title\ndescription: A test document\n---\n\n# Content"
@@ -662,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_render_with_code_block() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = markdown_temp_file();
         writeln!(file, "```rust\nfn main() {{}}\n```").unwrap();
         let path = file.path().to_str().unwrap().to_string();
 
@@ -763,7 +988,7 @@ mod tests {
 
     #[test]
     fn test_minimal_config() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = markdown_temp_file();
         writeln!(file, "# Simple").unwrap();
         let path = file.path().to_str().unwrap().to_string();
 
@@ -1269,6 +1494,293 @@ mod tests {
 
         let found_root = config::find_root_dir(&file_path);
         assert_eq!(found_root, temp_dir.path().to_path_buf());
+    }
+
+    // MARK: text preview mode selection
+
+    #[test]
+    fn test_preview_mode_markdown_extensions() {
+        // Every extension MBR.app registers for must render as markdown, not
+        // as source - including the ones the default config omits.
+        let default_config = vec!["md".to_string()];
+        for name in [
+            "a.md",
+            "a.markdown",
+            "a.mkd",
+            "a.mkdn",
+            "a.mdown",
+            "a.mdwn",
+            "a.mdtxt",
+            "a.mdtext",
+            "a.mdoc",
+            "A.MD",
+            "Read.Me.Markdown",
+        ] {
+            assert_eq!(
+                preview_mode_for(Path::new(name), &default_config),
+                PreviewMode::Markdown,
+                "{name} should preview as markdown"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preview_mode_honors_configured_extension() {
+        // A repo that calls its pages ".page" gets them rendered.
+        assert_eq!(
+            preview_mode_for(Path::new("a.page"), &["page".to_string()]),
+            PreviewMode::Markdown
+        );
+    }
+
+    #[test]
+    fn test_preview_mode_source_extensions_highlight() {
+        for (name, language) in [
+            ("main.rs", "rust"),
+            ("setup.py", "python"),
+            ("build.sh", "bash"),
+            ("data.json", "json"),
+            ("app.tsx", "typescript"),
+            ("flake.nix", "nix"),
+        ] {
+            assert_eq!(
+                preview_mode_for(Path::new(name), &["md".to_string()]),
+                PreviewMode::HighlightedText(language),
+                "{name} should highlight as {language}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preview_mode_plain_for_unknown_and_extensionless() {
+        // No extension, an extension we ship no grammar for, and a dotfile all
+        // fall back to verbatim rather than being guessed at.
+        for name in [
+            "notes.txt",
+            "server.log",
+            "Makefile",
+            "README",
+            ".gitignore",
+        ] {
+            assert_eq!(
+                preview_mode_for(Path::new(name), &["md".to_string()]),
+                PreviewMode::PlainText,
+                "{name} should preview as plain text"
+            );
+        }
+    }
+
+    // MARK: text preview rendering
+
+    /// Writes `contents` to `<tmp>/<name>` and previews it.
+    fn preview_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).expect("write fixture");
+        let html = render_preview(path.to_str().unwrap().to_string(), None).expect("render");
+        (dir, html)
+    }
+
+    #[test]
+    fn test_text_preview_does_not_parse_markdown() {
+        // The whole point of the text path: markdown syntax in a .txt file is
+        // content, not markup.
+        let (_dir, html) = preview_file("notes.txt", b"# Not A Heading\n\n*not emphasis*\n");
+
+        assert!(html.contains("<pre class=\"mbr-text-preview\">"));
+        assert!(
+            html.contains("# Not A Heading"),
+            "hash must survive verbatim"
+        );
+        assert!(
+            html.contains("*not emphasis*"),
+            "asterisks must survive verbatim"
+        );
+        assert!(
+            !html.contains("<em>not emphasis</em>"),
+            "text preview must not run the markdown parser"
+        );
+    }
+
+    #[test]
+    fn test_text_preview_escapes_html() {
+        let (_dir, html) = preview_file("notes.txt", b"<script>alert('x' & \"y\")</script>\n");
+
+        assert!(
+            !html.contains("<script>alert"),
+            "raw tag from file content must not reach the document"
+        );
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&amp;"));
+        assert!(html.contains("&quot;"));
+        assert!(html.contains("&#x27;"));
+    }
+
+    #[test]
+    fn test_text_preview_preserves_whitespace_exactly() {
+        let source = "a\tb\n    four spaces\n\n\ttrailing tab\t\n";
+        let (_dir, html) = preview_file("notes.txt", source.as_bytes());
+
+        let body = html
+            .split("<pre class=\"mbr-text-preview\"><code class=\"nohighlight\">")
+            .nth(1)
+            .and_then(|rest| rest.split("</code></pre>").next())
+            .expect("pre block");
+        assert_eq!(body, source, "bytes must round-trip through the preview");
+    }
+
+    #[test]
+    fn test_text_preview_does_not_rewrite_urls_in_content() {
+        // convert_root_relative_urls() runs over the rendered HTML. A source
+        // file that merely mentions src="/..." must be shown, not rewritten.
+        let (_dir, html) = preview_file("page.txt", b"<img src=\"/images/x.png\">\n");
+
+        assert!(
+            !html.contains("mbrfile://"),
+            "file content must not be treated as a document reference"
+        );
+        // The quotes are escaped (which is what defeats the rewriter); the
+        // slashes are not, so the reader still sees the original path.
+        assert!(html.contains("&quot;/images/x.png&quot;"));
+    }
+
+    #[test]
+    fn test_source_preview_gets_language_class() {
+        let (_dir, html) = preview_file("main.rs", b"fn main() {}\n");
+
+        assert!(html.contains("<code class=\"language-rust\">"));
+        // The grammar must actually be inlined - QuickLook has no network.
+        assert!(html.contains("hljs"));
+    }
+
+    #[test]
+    fn test_plain_preview_opts_out_of_highlighting() {
+        // Without nohighlight, hljs.highlightAll() language-guesses prose.
+        let (_dir, html) = preview_file("notes.txt", b"just some prose\n");
+        assert!(html.contains("<code class=\"nohighlight\">"));
+    }
+
+    #[test]
+    fn test_text_preview_titles_with_file_name() {
+        let (_dir, html) = preview_file("notes.txt", b"hi\n");
+        assert!(html.contains("<title>notes.txt</title>"));
+    }
+
+    // MARK: hostile inputs
+    //
+    // public.plain-text is a broad supertype, so QuickLook will hand this
+    // module whatever is on the user's disk. None of these may panic.
+
+    /// Marker for the truncation notice.
+    ///
+    /// Matching on the bare class name would be meaningless: the inlined
+    /// QuickLook CSS declares `.mbr-text-truncated`, so it is present in every
+    /// preview. Only the opening tag is unique to the notice itself.
+    const TRUNCATION_NOTICE: &str = "<p class=\"mbr-text-truncated\">";
+
+    #[test]
+    fn test_text_preview_invalid_utf8_is_lossy_not_fatal() {
+        // Lone continuation bytes: invalid UTF-8 in any encoding-aware reader.
+        let (_dir, html) = preview_file("latin1.txt", b"caf\xe9 na\xefve\n\xff\xfe");
+
+        assert!(html.contains("<pre class=\"mbr-text-preview\">"));
+        assert!(
+            html.contains('\u{FFFD}'),
+            "undecodable bytes should become replacement characters"
+        );
+        assert!(html.contains("caf"), "decodable text should survive");
+    }
+
+    #[test]
+    fn test_text_preview_empty_file() {
+        let (_dir, html) = preview_file("empty.txt", b"");
+
+        assert!(html.contains("<pre class=\"mbr-text-preview\">"));
+        assert!(html.contains("</code></pre>"));
+        assert!(!html.contains(TRUNCATION_NOTICE));
+    }
+
+    #[test]
+    fn test_text_preview_file_with_no_extension() {
+        let (_dir, html) = preview_file("Makefile", b"all:\n\techo hi\n");
+
+        assert!(html.contains("<code class=\"nohighlight\">"));
+        assert!(html.contains("echo hi"));
+    }
+
+    #[test]
+    fn test_text_preview_caps_oversized_file() {
+        // One byte over the cap is the boundary that must trip truncation.
+        let oversized = vec![b'x'; MAX_TEXT_PREVIEW_BYTES + 1];
+        let (_dir, html) = preview_file("huge.txt", &oversized);
+
+        assert!(
+            html.contains(TRUNCATION_NOTICE),
+            "oversized preview must say it was truncated"
+        );
+        let body = html
+            .split("<code class=\"nohighlight\">")
+            .nth(1)
+            .and_then(|rest| rest.split("</code>").next())
+            .expect("pre block");
+        assert_eq!(
+            body.len(),
+            MAX_TEXT_PREVIEW_BYTES,
+            "no more than the cap may be inlined"
+        );
+    }
+
+    #[test]
+    fn test_text_preview_at_exactly_the_cap_is_not_truncated() {
+        let exact = vec![b'x'; MAX_TEXT_PREVIEW_BYTES];
+        let (_dir, html) = preview_file("exact.txt", &exact);
+
+        assert!(
+            !html.contains(TRUNCATION_NOTICE),
+            "a file exactly at the cap is complete"
+        );
+    }
+
+    #[test]
+    fn test_large_source_file_skips_highlighting() {
+        // Past MAX_HIGHLIGHT_BYTES the content still renders, just verbatim,
+        // so hljs cannot stall the preview.
+        let big = "// comment\n".repeat(MAX_HIGHLIGHT_BYTES / 11 + 100);
+        assert!(big.len() > MAX_HIGHLIGHT_BYTES);
+        let html = text_to_pre_html(&big, PreviewMode::HighlightedText("rust"), false);
+
+        assert!(html.contains("<code class=\"nohighlight\">"));
+        assert!(!html.contains("language-rust"));
+    }
+
+    #[test]
+    fn test_text_to_pre_html_truncation_notice_only_when_truncated() {
+        assert!(!text_to_pre_html("x", PreviewMode::PlainText, false).contains("truncated"));
+        assert!(text_to_pre_html("x", PreviewMode::PlainText, true).contains("truncated"));
+    }
+
+    #[test]
+    fn test_read_capped_reports_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let small = dir.path().join("small.txt");
+        std::fs::write(&small, b"abc").unwrap();
+        assert_eq!(read_capped(&small).unwrap(), (b"abc".to_vec(), false));
+
+        let big = dir.path().join("big.txt");
+        std::fs::write(&big, vec![b'z'; MAX_TEXT_PREVIEW_BYTES + 10]).unwrap();
+        let (bytes, truncated) = read_capped(&big).unwrap();
+        assert!(truncated);
+        assert_eq!(bytes.len(), MAX_TEXT_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn test_text_preview_missing_file_is_an_error() {
+        let result = render_preview("/nonexistent/file.txt".to_string(), None);
+        assert!(matches!(
+            result.unwrap_err(),
+            QuickLookError::FileReadError { .. }
+        ));
     }
 
     #[test]

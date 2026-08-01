@@ -250,7 +250,7 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 | `relationships.rs` | Typed frontmatter relationships (parse/registry/index) with inverse/symmetric derivation |
 | `repo.rs` | Parallel directory scanner using papaya/rayon for site metadata |
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature) |
-| `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration |
+| `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration. `preview_mode_for()` routes by extension: markdown extensions (config + the built-in list `MBR.app` registers for) take the markdown pipeline; everything else renders verbatim in a `<pre>`, syntax highlighted when `embedded_hljs::language_for_extension()` matches. Text reads are capped at 1 MiB and highlighting at 256 KiB, and invalid UTF-8 is lossy-decoded — the app claims `public.plain-text`, so arbitrary files land here |
 | `vid.rs` | Video embed handling and shortcodes |
 | `video_transcode.rs` | HLS-based video transcoding - playlist generation and segment transcoding (requires `media-metadata` feature) |
 | `video_remux.rs` | On-the-fly stream-copy ("remux") fMP4 HLS variant for videos a browser refuses to play. Drops data/subtitle tracks without re-encoding; available without `--transcode`, server/GUI only (requires `media-metadata`) |

@@ -20,6 +20,7 @@ These are pulldown-cmark's built-in extensions:
 | [Task lists](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_tasklist.html) | `- [ ]` / `- [x]` | Checkboxes in lists |
 | [Smart punctuation](https://pulldown-cmark.github.io/pulldown-cmark/third_party/smart_punct.html) | `"quotes"`, `--` | Curly quotes, em-dashes |
 | [Heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html) | `# Title {#id}` or `# Title {.myclass}` | Custom anchor IDs or classes |
+| Definition lists | `Term` on one line, `: Definition` on the next | Rendered as a [click-to-expand FAQ](#definition-lists-faq-style) |
 | Autolinks | `<https://...>` | Clickable URLs |
 | [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$` | LaTeX via KaTeX |
 | [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
@@ -319,6 +320,96 @@ mbr uses pulldown-cmark for markdown parsing[^1], which provides excellent Commo
 Footnotes appear at the bottom of the page. On desktop (hover-capable devices),
 hovering a footnote reference shows a preview card with the note's content;
 clicking still jumps to the definition at the bottom.
+
+## Definition Lists (FAQ Style)
+
+Definition lists render as an FAQ. Each term becomes a question you can open,
+and its definition stays collapsed until you do:
+
+```markdown
+What is mbr?
+: A markdown browser, previewer and static site generator.
+
+Does this need JavaScript?
+: No. The expand and collapse are pure CSS.
+```
+
+### Live Example
+
+What is mbr?
+: A markdown browser, previewer and static site generator. Click the question
+  above to toggle this answer.
+
+Where do I read more?
+: Start with the [Quickstart](../getting-started/quickstart/), then the
+  [CLI Reference](../reference/cli/).
+
+Can one question have several answers?
+: Yes — repeat the `:` line.
+: Every answer of that question opens together.
+
+### Leave a Blank Line Between Entries
+
+This is the one gotcha worth knowing. Without a blank line, the next term is
+swallowed as a lazy continuation of the previous definition:
+
+```markdown
+First question?
+: First answer.
+Second question?          <-- becomes part of the FIRST answer's text
+: Second answer.
+```
+
+Written that way you get **one** question with three answers instead of three
+questions. Separate every entry with a blank line:
+
+```markdown
+First question?
+: First answer.
+
+Second question?
+: Second answer.
+```
+
+### Behavior
+
+- **Click a question, or Tab to it,** to reveal its answer. For keyboard users
+  focus alone opens it — there is nothing to press.
+- **Tab again** to reach links inside the answer. The answer stays open while
+  focus is anywhere inside it.
+- **Links inside a closed answer are skipped by Tab** and hidden from screen
+  readers, so you never land on content you cannot see.
+- A question that owns **several answers** opens all of them at once.
+
+### Accepted Limitations
+
+The disclosure is CSS `:focus` with no JavaScript and no `<details>` element,
+which buys two rough edges:
+
+- **Clicking an open question does not close it.** The click only re-focuses a
+  question that already has focus, and CSS cannot toggle. Clicking a *different*
+  question, or anywhere off the list, does close it.
+- **Clicking inside an open answer closes it,** because focus moves to the page
+  body. This mostly bites when selecting an answer's text; start the selection
+  from the end of the question instead, or print the page.
+
+If you need a real toggle, write literal `<details>`/`<summary>` HTML in your
+markdown instead, or override the rules in `.mbr/theme.css`.
+
+### Printing
+
+Print styles force every answer open and drop the disclosure markers, so a
+printed page or PDF export shows the complete Q&A rather than a list of
+unanswered questions. The same goes for the rest of the page: collapsed heading
+sections, clipped link cards and closed `<details>` blocks are all expanded
+before printing — see [Printing](../customization/themes/#printing) for the
+full list and for the browser-version caveat on `<details>`.
+
+### Restyling
+
+Colors, spacing, the marker and the animation are all driven by `--mbr-dl-*`
+custom properties — see
+[Definition Lists in CSS Theming](../customization/themes/#definition-lists-faq).
 
 ## Heading Anchors
 
