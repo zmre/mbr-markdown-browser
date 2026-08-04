@@ -121,6 +121,7 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking (named frontmatter relationships) |
+| `tasks_enabled` | bool | `true` | Enable the task browser (server/GUI only). See [Task Settings](#task-settings). |
 | `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight blocks starting with TK/TODO/FIXME/XXX |
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag a block as incomplete |
 
@@ -203,6 +204,31 @@ CLI usage:
 ```bash
 mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 ```
+
+### Task Settings
+
+The task browser finds every markdown task (`- [ ]`, `- [x]`, `- [-]`, `- [>]`)
+in the repository and lets you filter and group them. It is **server/GUI only**:
+the index is built by reading live files, so static builds never expose it —
+`tasks_enabled` has no effect on `mbr -b`, and built pages always report
+`tasksEnabled: false` to the frontend.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
+
+Example:
+```toml
+# .mbr/config.toml
+tasks_enabled = false
+```
+
+**Cost when unused:** none. The index is built lazily on the first task query
+and then kept fresh by the file watcher, so a server whose user never opens the
+task panel never reads a file for it. The first query on a very large repository
+pays one sequential read pass; later ones are served from memory. There is no
+on-disk cache, so a restart discards the index — deliberately, since mbr is
+pointed at directories that change underneath it.
 
 ### Editing Settings
 

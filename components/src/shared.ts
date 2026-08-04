@@ -19,6 +19,7 @@ declare global {
       serverMode: boolean;
       guiMode: boolean;
       editEnabled?: boolean;
+      tasksEnabled?: boolean;
       searchEndpoint?: string;
       basePath?: string;
       tagSources?: TagSourceConfig[];
@@ -58,6 +59,15 @@ export function isGuiMode(): boolean {
  */
 export function isEditEnabled(): boolean {
   return window.__MBR_CONFIG__?.editEnabled ?? false;
+}
+
+/**
+ * Check if the task browser is available on this page.
+ * Driven by the server config (`tasks_enabled`); always false in static builds,
+ * because the task index is built from live files.
+ */
+export function isTasksEnabled(): boolean {
+  return window.__MBR_CONFIG__?.tasksEnabled ?? false;
 }
 
 /**

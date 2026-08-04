@@ -126,6 +126,7 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--fail-on-broken-links` | Exit non-zero if the build finds broken internal links (for CI) | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking (frontmatter relationships) | `false` |
+| `--no-tasks` | Disable the task browser (`POST /.mbr/tasks`); server/GUI only | `false` |
 | `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
 | `--no-mark-incomplete` | Disable incomplete-block highlighting | (unset) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
@@ -259,6 +260,9 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 | `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
 | `html.rs` | Custom HTML output for pulldown-cmark with section support |
 | `attrs.rs` | Reusable attribute parser for `{#id .class key=value}` syntax |
+| `tasks.rs` | Pure task-line parsing: the `- [ ]`/`[x]`/`[-]`/`[>]` grammar, `@due`/`@done`/`#tag`/`!!` annotations, `scan_source_tasks` (skips code fences and frontmatter), and `set_marker` for single-byte status rewrites. Knows nothing about the filesystem |
+| `task_index.rs` | `TaskIndex`: lazy, in-memory, papaya-backed map of `PathBuf -> Arc<FileTasks>`, holding only files that contain tasks. Built on the **first** task query (never at startup, no on-disk cache) via one **sequential** read pass under `spawn_blocking` — sequential for the reason documented at `search.rs:362`/`:658`. Single-flight via `tokio::sync::OnceCell::get_or_try_init`, which leaves the cell unset on failure so a failed build is retried rather than poisoned. `invalidate_file` / `rebuild_if_built` are no-ops until the index has been built |
+| `task_query.rs` | Pure filtering, grouping and counting for `POST /.mbr/tasks`. `run_query` takes an index snapshot plus `today: NaiveDate` (a parameter, so bucketing is testable without mocking the clock) and returns the whole response body |
 
 ### Key Pure Functions (Testable)
 
@@ -315,6 +319,8 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 - `/{path}` - Markdown files rendered to HTML (trailing slash convention)
 - `/.mbr/site.json` - Full site index with all files and frontmatter
 - `/.mbr/*` - Static assets (theme.css, components)
+- `POST /.mbr/search` - Metadata + content search
+- `POST /.mbr/tasks` - Task query: filter, group, and count markdown tasks. Server/GUI only, gated on `tasks_enabled` (404 when off)
 
 ### Lit Web Components
 

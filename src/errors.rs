@@ -272,6 +272,17 @@ pub enum SearchError {
     },
 }
 
+/// Errors related to building the lazy task index.
+///
+/// Deliberately narrow: an individual unreadable file is skipped with a debug
+/// log rather than failing the whole build, so the only way to get here is for
+/// the blocking build task itself to fail.
+#[derive(Debug, Error)]
+pub enum TaskIndexError {
+    #[error("Task index build failed: {reason}")]
+    BuildFailed { reason: String },
+}
+
 /// Errors related to video metadata extraction.
 #[cfg(feature = "media-metadata")]
 #[derive(Debug, Error)]

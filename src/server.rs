@@ -1063,6 +1063,8 @@ pub struct ServerConfig {
     pub mark_incomplete: bool,
     /// Marker strings used by the incomplete-block highlighter.
     pub incomplete_markers: Vec<String>,
+    /// Enable the task browser (`POST /.mbr/tasks`).
+    pub tasks_enabled: bool,
     /// Enable the in-browser markdown editing endpoints.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1124,6 +1126,7 @@ impl From<&crate::config::Config> for ServerConfig {
             // Server/GUI default: on unless config overrides.
             mark_incomplete: config.mark_incomplete.unwrap_or(true),
             incomplete_markers: config.incomplete_markers.clone(),
+            tasks_enabled: config.tasks_enabled,
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
@@ -1241,6 +1244,14 @@ pub struct ServerState {
     pub mark_incomplete: bool,
     /// Marker strings used by the incomplete-block highlighter.
     pub incomplete_markers: Vec<String>,
+    /// Whether the task browser (`POST /.mbr/tasks`) is enabled.
+    pub tasks_enabled: bool,
+    /// Lazy index of the repository's markdown tasks.
+    ///
+    /// Deliberately *not* built at startup: it is filled on the first task
+    /// query and then kept fresh by the watcher, so a server whose user never
+    /// opens the task panel never pays for a full-repo read pass.
+    pub task_index: Arc<crate::task_index::TaskIndex>,
     /// Whether the in-browser markdown editing endpoints are enabled.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1605,6 +1616,7 @@ impl Server {
             title_suffix,
             mark_incomplete,
             incomplete_markers,
+            tasks_enabled,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -1826,6 +1838,12 @@ impl Server {
             });
         }
 
+        // Lazy task index. Created here so the watcher can keep it fresh, but
+        // deliberately left *empty*: it is filled by the first `/.mbr/tasks`
+        // request, and `invalidate_file` is a no-op until then, so a server
+        // whose user never opens the task panel never reads a file for it.
+        let task_index = Arc::new(crate::task_index::TaskIndex::new());
+
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
         // For small batches (<=50 files): surgical per-file invalidation.
@@ -1839,6 +1857,7 @@ impl Server {
         let inbound_index_for_invalidation = Arc::clone(&inbound_index);
         let link_index_config_for_invalidation = link_index_config.clone();
         let index_lock_for_invalidation = Arc::clone(&index_lock);
+        let task_index_for_invalidation = Arc::clone(&task_index);
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1909,6 +1928,7 @@ impl Server {
                 let inbound_index = Arc::clone(&inbound_index_for_invalidation);
                 let link_index_cfg = link_index_config_for_invalidation.clone();
                 let index_lock = Arc::clone(&index_lock_for_invalidation);
+                let task_index = Arc::clone(&task_index_for_invalidation);
 
                 if relevant_events.len() <= SURGICAL_THRESHOLD {
                     // Surgical invalidation: update individual files
@@ -1955,6 +1975,17 @@ impl Server {
                                 matches!(event.event, crate::watcher::ChangeEventType::Deleted),
                             ));
                             repo.invalidate_file(&abs_path, &event.event);
+                            // After `repo.invalidate_file`, never before: a
+                            // created or modified file's url/title are read
+                            // back out of the repository's own map, which the
+                            // call above is what populates. A no-op until the
+                            // task index has actually been built.
+                            task_index.invalidate_file(
+                                &abs_path,
+                                &event.event,
+                                &repo,
+                                &link_index_cfg.base_dir,
+                            );
                         }
                         // Rebuild tag index if any files were deleted or modified
                         // (created files add tags inline in invalidate_file)
@@ -2031,6 +2062,10 @@ impl Server {
                         if inbound_index.is_ready() {
                             populate_inbound_index(&repo, &inbound_index, &link_index_cfg);
                         }
+                        // Same reasoning for tasks: too many files moved for a
+                        // per-file patch to be cheaper than one read pass. Still
+                        // a no-op unless somebody has actually used tasks.
+                        task_index.rebuild_if_built(&repo, &link_index_cfg.base_dir);
                         let _ = base_dir; // keep alive for potential future use
                     })
                     .await
@@ -2104,6 +2139,8 @@ impl Server {
             title_suffix,
             mark_incomplete,
             incomplete_markers,
+            tasks_enabled,
+            task_index,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -2115,6 +2152,8 @@ impl Server {
             .route("/.mbr/site.json", get(Self::get_site_info))
             .route("/.mbr/media.json", get(Self::get_media_info))
             .route("/.mbr/search", post(Self::search_handler))
+            // Task browser query endpoint (gated by tasks_enabled; 404 when off)
+            .route("/.mbr/tasks", post(Self::tasks_handler))
             // Editing endpoints: raw source fetch and save (gated by edit_enabled + auth)
             .route("/.mbr/raw/{*path}", get(Self::raw_markdown_handler))
             .route(
@@ -2653,6 +2692,119 @@ impl Server {
                 )
             }
         }
+    }
+
+    /// Task query endpoint for the task browser.
+    ///
+    /// `POST /.mbr/tasks`
+    ///
+    /// Every request field is optional, so `{}` means "all incomplete tasks in
+    /// the repository, grouped by file":
+    ///
+    /// ```json
+    /// {
+    ///   "q": "report #work",
+    ///   "folder": "/docs/",
+    ///   "statuses": ["open"],
+    ///   "priorities": [],
+    ///   "due": "any",
+    ///   "mode": "category",
+    ///   "limit": 500
+    /// }
+    /// ```
+    ///
+    /// Returns `404` when `tasks_enabled` is off. Server/GUI only — static
+    /// builds have no task endpoint at all.
+    ///
+    /// The first request builds the index (one sequential read pass over the
+    /// repository's markdown); later ones reuse it, and the watcher keeps it
+    /// fresh. Like search, this does not wait for the repository scan: partial
+    /// results with `scan_in_progress: true` beat a hung panel.
+    pub async fn tasks_handler(
+        State(config): State<ServerState>,
+        Json(query): Json<crate::task_query::TaskQuery>,
+    ) -> Response<Body> {
+        if !config.tasks_enabled {
+            return Self::tasks_error(StatusCode::NOT_FOUND, "Task browsing is disabled");
+        }
+
+        let scan_in_progress = !config.repo.is_scan_complete();
+
+        if let Err(e) = config
+            .task_index
+            .ensure_built(&config.repo, &config.base_dir)
+            .await
+        {
+            tracing::error!("Task index build failed: {e}");
+            return Self::tasks_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build the task index",
+            );
+        }
+
+        // Grouping is pure CPU work over an in-memory snapshot, but a
+        // repository with a hundred thousand tasks makes it long enough to be
+        // worth keeping off the async runtime.
+        let files = config.task_index.snapshot();
+        let today = chrono::Local::now().date_naive();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::task_query::run_query(&files, &query, today)
+        })
+        .await;
+
+        let mut response = match result {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::error!("Task query task panicked: {e}");
+                return Self::tasks_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Task query task failed",
+                );
+            }
+        };
+        response.scan_in_progress = scan_in_progress;
+
+        tracing::debug!(
+            "Task query completed: {} matches in {} group(s), {}ms",
+            response.total_matches,
+            response.groups.len(),
+            response.duration_ms
+        );
+
+        match serde_json::to_vec(&response) {
+            Ok(body) => build_response_or_500(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to serialize task response: {e}");
+                Self::tasks_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to serialize task response",
+                )
+            }
+        }
+    }
+
+    /// A JSON error body shaped like an empty task response, so the frontend
+    /// can render a failure without a second parse path.
+    fn tasks_error(status: StatusCode, message: &str) -> Response<Body> {
+        let body = serde_json::json!({
+            "error": message,
+            "groups": [],
+            "folders": [],
+            "total_matches": 0,
+            "duration_ms": 0,
+            "scan_in_progress": false,
+        });
+        build_response_or_500(
+            Response::builder()
+                .status(status)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string())),
+        )
     }
 
     /// Enforces the access policy shared by the raw-fetch and save editing
@@ -3509,6 +3661,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 );
             }
         };
@@ -3528,6 +3681,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 );
             }
         };
@@ -3548,6 +3702,7 @@ impl Server {
                         &config.sidebar_style,
                         config.sidebar_max_items,
                         config.graph_depth,
+                        config.tasks_enabled,
                     );
                 }
                 Err(MbrError::InvalidMediaPath(msg)) => {
@@ -3562,6 +3717,7 @@ impl Server {
                         &config.sidebar_style,
                         config.sidebar_max_items,
                         config.graph_depth,
+                        config.tasks_enabled,
                     );
                 }
                 Err(e) => {
@@ -3576,6 +3732,7 @@ impl Server {
                         &config.sidebar_style,
                         config.sidebar_max_items,
                         config.graph_depth,
+                        config.tasks_enabled,
                     );
                 }
             };
@@ -3624,6 +3781,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -3653,6 +3811,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 )
             }
         }
@@ -3825,6 +3984,7 @@ impl Server {
         sidebar_style: &str,
         sidebar_max_items: usize,
         graph_depth: usize,
+        tasks_enabled: bool,
     ) -> Response<Body> {
         use std::collections::HashMap;
 
@@ -3850,6 +4010,7 @@ impl Server {
                 sidebar_style,
                 sidebar_max_items,
                 graph_depth,
+                tasks_enabled,
                 title_affixes: None,
             },
         );
@@ -4066,6 +4227,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 ))
             }
         }
@@ -5930,6 +6092,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
             },
@@ -6148,6 +6311,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6225,6 +6389,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6267,6 +6432,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );

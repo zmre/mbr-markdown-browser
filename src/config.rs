@@ -59,6 +59,10 @@ fn default_relationship_tracking() -> bool {
     true
 }
 
+fn default_tasks_enabled() -> bool {
+    true
+}
+
 /// Default markers that flag a block as incomplete.
 ///
 /// A block whose first text matches `^(MARKER)\b` (uppercase, word boundary)
@@ -462,6 +466,14 @@ pub struct Config {
     /// `--mark-incomplete` / `--no-mark-incomplete` force a value.
     #[serde(default)]
     pub mark_incomplete: Option<bool>,
+    /// Enable the task browser (`POST /.mbr/tasks` and the task panel).
+    ///
+    /// Server/GUI only: the tasks index is built from live files, so static
+    /// builds never expose it regardless of this value. When disabled, the
+    /// endpoint returns 404 and the frontend does not offer the panel.
+    /// Default: true (enabled). CLI flag `--no-tasks` disables it.
+    #[serde(default = "default_tasks_enabled")]
+    pub tasks_enabled: bool,
     /// Enable the in-browser markdown editing endpoints in server/GUI mode:
     /// `/.mbr/raw` + `/.mbr/edit` (read/save an existing file) and the
     /// file-management endpoints `/.mbr/create` (new file), `/.mbr/move`
@@ -575,6 +587,7 @@ impl Default for Config {
             title_suffix: String::new(),
             incomplete_markers: default_incomplete_markers(),
             mark_incomplete: None,
+            tasks_enabled: true, // Task browser enabled by default (server/GUI only)
             edit_enabled: false,
             edit_token_hash: None,
             edit_require_token_on_loopback: false,

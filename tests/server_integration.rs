@@ -45,6 +45,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         title_suffix: String::new(),
         mark_incomplete: true,
         incomplete_markers: mbr::config::default_incomplete_markers(),
+        tasks_enabled: true,
         edit_enabled: false,
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
@@ -6912,5 +6913,330 @@ async fn perf_site_json_latency() {
             start.elapsed(),
             body.len()
         );
+    }
+}
+
+// ============================================================================
+// Task browser (`POST /.mbr/tasks`)
+// ============================================================================
+
+/// A repository with tasks spread across folders, statuses, priorities, tags
+/// and due dates. Due dates are absolute, so tests that depend on "today" pin
+/// the bucket they assert on rather than relying on the wall clock.
+fn task_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "inbox.md",
+        concat!(
+            "# Inbox\n\n",
+            "- [ ] write the report #work !!\n",
+            "- [x] file the receipts\n",
+            "- [-] abandoned idea\n",
+        ),
+    );
+    repo.create_markdown(
+        "docs/plan.md",
+        concat!(
+            "---\ntitle: The Plan\n---\n\n",
+            "- [ ] draft the outline #work\n",
+            "- [ ] review with Bob\n",
+        ),
+    );
+    repo.create_markdown(
+        "docs/notes/weekly.md",
+        "- [ ] weekly retro #team @due(2026-08-05)\n",
+    );
+    repo.create_markdown("prose.md", "# Just prose\n\nNo tasks here at all.\n");
+    repo
+}
+
+/// POSTs a task query and returns the parsed JSON body.
+async fn tasks_query(server: &TestServer, body: &str) -> serde_json::Value {
+    let response = server.post_json("/.mbr/tasks", body).await;
+    assert_eq!(response.status(), 200, "task query should succeed");
+    response.json().await.expect("task response is JSON")
+}
+
+/// Every returned task's display text, in response order.
+fn task_texts(body: &serde_json::Value) -> Vec<String> {
+    body["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .flat_map(|g| g["tasks"].as_array().expect("tasks array"))
+        .map(|t| t["text"].as_str().expect("text").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_returns_404_when_disabled() {
+    let repo = task_repo();
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_enabled = false;
+    })
+    .await;
+
+    let response = server.post_json("/.mbr/tasks", "{}").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "a disabled task browser must not answer queries"
+    );
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_returns_grouped_incomplete_tasks_by_default() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+
+    // Default view: incomplete only, grouped by file, files sorted by URL.
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g["key"].as_str().expect("key"))
+            .collect::<Vec<_>>(),
+        vec!["/docs/notes/weekly/", "/docs/plan/", "/inbox/"],
+        "a file with no tasks must not produce a group"
+    );
+
+    // Group metadata: frontmatter title, folder sublabel, page URL.
+    let plan = &groups[1];
+    assert_eq!(plan["label"], "The Plan");
+    assert_eq!(plan["sublabel"], "docs");
+    assert_eq!(plan["url_path"], "/docs/plan/");
+    assert!(plan["date"].is_null(), "category groups carry no date");
+
+    // Parsed annotations survive the round trip.
+    let report = &groups[2]["tasks"][0];
+    assert_eq!(report["text"], "write the report");
+    assert_eq!(report["status"], "open");
+    assert_eq!(report["priority"], "high");
+    assert_eq!(report["tags"][0], "work");
+    assert_eq!(report["url_path"], "/inbox/");
+    assert_eq!(report["line"], 3);
+
+    assert_eq!(body["total_matches"], 4);
+    assert!(body["duration_ms"].is_number());
+    assert_eq!(body["scan_in_progress"], false);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_counts_include_tasks_filtered_out_of_the_view() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Only the open task in inbox.md matches, but the group's progress must
+    // describe the whole file — and exclude the canceled item from both halves.
+    let body = tasks_query(&server, r#"{"q": "report"}"#).await;
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["tasks"].as_array().expect("tasks").len(), 1);
+    assert_eq!(groups[0]["done"], 1);
+    assert_eq!(groups[0]["total"], 2);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_status_filter_is_a_multi_select() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let done_only = tasks_query(&server, r#"{"statuses": ["done"]}"#).await;
+    assert_eq!(task_texts(&done_only), vec!["file the receipts"]);
+
+    let canceled = tasks_query(&server, r#"{"statuses": ["canceled"]}"#).await;
+    assert_eq!(task_texts(&canceled), vec!["abandoned idea"]);
+
+    let everything = tasks_query(
+        &server,
+        r#"{"statuses": ["open", "done", "canceled"], "folder": "/"}"#,
+    )
+    .await;
+    assert_eq!(everything["total_matches"], 6);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_folder_scope_includes_subfolders() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"folder": "/docs/"}"#).await;
+    assert_eq!(
+        task_texts(&body),
+        vec!["weekly retro", "draft the outline", "review with Bob"],
+        "a folder scope must reach into its subfolders"
+    );
+
+    let deeper = tasks_query(&server, r#"{"folder": "/docs/notes/"}"#).await;
+    assert_eq!(task_texts(&deeper), vec!["weekly retro"]);
+
+    // Facets are computed ignoring the folder filter, so the folder pane can
+    // still offer somewhere else to go, and count subfolders cumulatively.
+    let facets: Vec<(&str, u64)> = deeper["folders"]
+        .as_array()
+        .expect("folders array")
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().expect("path"),
+                f["count"].as_u64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(facets, vec![("/", 4), ("/docs/", 3), ("/docs/notes/", 1)]);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_query_matches_text_and_tags() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // A `#tag` token matches tags only.
+    let tagged = tasks_query(&server, r##"{"q": "#work"}"##).await;
+    assert_eq!(
+        task_texts(&tagged),
+        vec!["draft the outline", "write the report"]
+    );
+
+    // Bare words match the display text, case-insensitively, and AND together.
+    let words = tasks_query(&server, r#"{"q": "THE report"}"#).await;
+    assert_eq!(task_texts(&words), vec!["write the report"]);
+
+    let none = tasks_query(&server, r##"{"q": "#nonexistent"}"##).await;
+    assert!(none["groups"].as_array().expect("groups").is_empty());
+    assert_eq!(none["total_matches"], 0);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_limit_truncates_without_changing_total_matches() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"limit": 2}"#).await;
+    assert_eq!(task_texts(&body).len(), 2, "limit caps returned tasks");
+    assert_eq!(
+        body["total_matches"], 4,
+        "total_matches is counted before truncation"
+    );
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_calendar_mode_buckets_by_due_date() {
+    let repo = TestRepo::new();
+    // Pinned far in the past and future so the buckets are stable whenever the
+    // suite runs; "today"/"tomorrow" are covered by the unit tests, which can
+    // supply their own `today`.
+    repo.create_markdown(
+        "due.md",
+        concat!(
+            "- [ ] ancient @due(2001-01-01)\n",
+            "- [ ] distant @due(2999-12-31)\n",
+            "- [x] distant done @due(2999-12-31)\n",
+            "- [-] canceled @due(2999-12-31)\n",
+            "- [ ] undated\n",
+        ),
+    );
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"mode": "calendar"}"#).await;
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g["key"].as_str().expect("key"))
+            .collect::<Vec<_>>(),
+        vec!["overdue", "upcoming:2999-12-31", "none"]
+    );
+
+    // Overdue carries no progress numbers at all.
+    assert_eq!(
+        (groups[0]["done"].clone(), groups[0]["total"].clone()),
+        (serde_json::json!(0), serde_json::json!(0))
+    );
+
+    // The dated bucket shows only the open task (default status filter) but
+    // counts the completed one too — and ignores the canceled one entirely.
+    let dated = &groups[1];
+    assert_eq!(
+        dated["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .map(|t| t["text"].as_str().expect("text"))
+            .collect::<Vec<_>>(),
+        vec!["distant"]
+    );
+    assert_eq!(dated["done"], 1);
+    assert_eq!(dated["total"], 2);
+    assert_eq!(dated["date"], "2999-12-31");
+    assert!(dated["url_path"].is_null());
+}
+
+/// The watcher must keep the task index fresh once it has been built, the same
+/// way it keeps links.json fresh (see
+/// `test_links_json_refreshes_after_watcher_sees_external_edit`).
+#[tokio::test]
+async fn test_tasks_refresh_after_watcher_sees_external_edit() {
+    let repo = TestRepo::new();
+    let notes = repo.create_markdown("notes.md", "- [ ] original task\n");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    // The watcher is initialized on a background thread; an edit that lands
+    // before it is listening is simply never seen.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    // Build the index by querying it once — nothing is indexed before this.
+    let before = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&before), vec!["original task"]);
+
+    let edited = "- [ ] original task\n- [ ] added externally\n";
+    std::fs::write(&notes, edited).expect("rewrite notes");
+
+    // Watcher event + 2 s debounce; poll rather than sleeping blind, re-touching
+    // the file so a dropped first event cannot hang the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = tasks_query(&server, "{}").await;
+        if task_texts(&body) == vec!["original task", "added externally"] {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task index still served the stale file: {:?}",
+            task_texts(&body)
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::write(&notes, edited).expect("re-touch notes");
+    }
+}
+
+#[tokio::test]
+async fn test_head_config_includes_tasks_enabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\nBody.");
+
+    // Markdown pages, section pages and the home page all need the flag, since
+    // the task panel is reachable from every one of them.
+    let server = TestServer::start(&repo).await;
+    for path in ["/readme/", "/"] {
+        assert_html_contains(&server.get_text(path).await, "tasksEnabled: true");
+    }
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_enabled = false;
+    })
+    .await;
+    for path in ["/readme/", "/"] {
+        assert_html_contains(&server.get_text(path).await, "tasksEnabled: false");
     }
 }

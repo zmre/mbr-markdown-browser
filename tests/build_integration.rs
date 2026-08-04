@@ -201,6 +201,32 @@ async fn test_build_head_includes_graph_depth() {
     );
 }
 
+/// The task browser is server/GUI only: its index is built by reading live
+/// files, which a published static site does not have. Every page kind must
+/// therefore advertise `tasksEnabled: false`, no matter what the config says.
+#[tokio::test]
+async fn test_build_head_disables_tasks() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+    repo.create_markdown("docs/guide.md", "# Guide");
+
+    let output = build_site(&repo).await;
+
+    for page in [
+        output.join("index.html"),              // home
+        output.join("test").join("index.html"), // markdown page
+        output.join("docs").join("index.html"), // section page
+        output.join("docs").join("guide").join("index.html"),
+    ] {
+        let html = fs::read_to_string(&page).unwrap();
+        assert!(
+            html.contains("tasksEnabled: false"),
+            "Expected tasksEnabled: false in {}",
+            page.display()
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_build_no_incomplete_spans_by_default() {
     // Static builds default mark_incomplete=false; published sites must not
