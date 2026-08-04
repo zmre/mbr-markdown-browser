@@ -69,6 +69,7 @@ pub mod search;
 pub mod server;
 pub mod sorting;
 pub mod tag_index;
+pub mod tasks;
 pub mod templates;
 #[cfg(test)]
 mod test_support;
@@ -105,5 +106,9 @@ pub use quicklook::{
 };
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
 pub use sorting::sort_files;
+pub use tasks::{
+    Annotations, Task, TaskPriority, TaskStatus, parse_task_line, scan_source_tasks, set_marker,
+    strip_annotations,
+};
 #[cfg(feature = "media-metadata")]
 pub use video_transcode::TranscodeError;

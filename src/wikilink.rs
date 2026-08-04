@@ -251,14 +251,18 @@ pub fn transform_wikilinks(input: &str, valid_sources: &HashSet<String>) -> Stri
 /// Whether a source line belongs to a code block (copied verbatim) or to
 /// ordinary text (scanned for wikilinks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineKind {
+pub(crate) enum LineKind {
     Text,
     Code,
 }
 
 /// Line-at-a-time scanner for the block-level code regions that
 /// [`transform_wikilinks`] must not rewrite inside.
-struct BlockScanner {
+///
+/// Also used by [`crate::tasks::scan_source_tasks`], which has the same problem:
+/// it is a raw-text line scan that must not treat `- [ ]` inside a code sample
+/// as a real task.
+pub(crate) struct BlockScanner {
     /// Open fence as (marker byte, marker run length), if any.
     fence: Option<(u8, usize)>,
     /// Previous line was blank; the start of the input counts as blank.
@@ -272,7 +276,7 @@ struct BlockScanner {
 }
 
 impl BlockScanner {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             fence: None,
             after_blank: true,
@@ -282,7 +286,7 @@ impl BlockScanner {
     }
 
     /// Classifies one line (trailing newline included) and advances the state.
-    fn classify(&mut self, line: &str) -> LineKind {
+    pub(crate) fn classify(&mut self, line: &str) -> LineKind {
         let content = line.trim_end_matches(['\n', '\r']);
 
         if let Some((marker, len)) = self.fence {
@@ -322,7 +326,7 @@ impl BlockScanner {
 }
 
 /// Columns of leading indentation, counting a tab as four columns.
-fn indent_width(line: &str) -> usize {
+pub(crate) fn indent_width(line: &str) -> usize {
     line.bytes()
         .take_while(|b| *b == b' ' || *b == b'\t')
         .map(|b| if b == b'\t' { 4 } else { 1 })
