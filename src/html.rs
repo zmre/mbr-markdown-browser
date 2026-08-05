@@ -62,6 +62,8 @@
 use std::collections::HashMap;
 
 use crate::attrs::ParsedAttrs;
+use crate::tasks::{Annotations, TaskPriority, TaskStatus};
+use chrono::NaiveDateTime;
 use pulldown_cmark_escape::IoWriter;
 use pulldown_cmark_escape::{FmtWriter, StrWrite, escape_href, escape_html, escape_html_body_text};
 
@@ -202,6 +204,157 @@ fn is_block_container_end(tag: &TagEnd) -> bool {
             | TagEnd::DefinitionList
             | TagEnd::DefinitionListDefinition
     )
+}
+
+// ============================================================================
+// MBR EXTENSION: Task list markup
+// ============================================================================
+
+/// Closing tag for the span [`task_text_open`] opens.
+pub(crate) const TASK_TEXT_CLOSE: &str = "</span>";
+
+/// Renders the checkbox that stands in for a markdown task marker.
+///
+/// `line` is the 1-based source line the checkbox was written on. It is `Some`
+/// on the document render path, where [`crate::markdown`] recovers it from the
+/// parser's byte offsets, and `None` on the raw [`push_html_mbr`] path, which
+/// has no source to measure against.
+///
+/// The checkbox is `disabled` in **every** mode — server, GUI, static build and
+/// QuickLook alike. Making it live is a frontend concern: a later phase removes
+/// the attribute at runtime when edit mode is on, which keeps config plumbing
+/// out of the render path and keeps a static build byte-identical to a served
+/// page.
+pub(crate) fn task_checkbox_html(status: TaskStatus, line: Option<u32>) -> String {
+    // Long enough for the widest form (`canceled`, four-digit line) without a
+    // reallocation.
+    let mut html = String::with_capacity(128);
+    html.push_str("<input type=\"checkbox\" class=\"mbr-task-check\"");
+    if let Some(line) = line {
+        // `id` is the anchor the task browser deep-links to (`#mbr-task-42`);
+        // `data-mbr-task-line` is what a line patch sends back to the server.
+        let _ = write!(
+            html,
+            " id=\"mbr-task-{line}\" data-mbr-task-line=\"{line}\""
+        );
+    }
+    // `checked` alone cannot distinguish canceled from open, so the status is
+    // also written out for CSS and for the toggle handler.
+    let _ = write!(
+        html,
+        " data-mbr-task-status=\"{}\"",
+        task_status_slug(status)
+    );
+    if status == TaskStatus::Done {
+        html.push_str(" checked");
+    }
+    html.push_str(" disabled>");
+    html
+}
+
+/// Opening tag for the span wrapping a task's display text.
+///
+/// The status class goes here rather than on the `<li>` so that a canceled
+/// parent task strikes through its own text only, leaving its subtasks and its
+/// annotation chips untouched. (`<li>` carries no class at all: pulldown-cmark
+/// gives the writer no attribute channel for list items, and CSS reaches it
+/// with `:has()` — see the task rules in `templates/theme.css`.)
+pub(crate) const fn task_text_open(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Canceled => "<span class=\"mbr-task-text mbr-task-canceled\">",
+        TaskStatus::Open | TaskStatus::Done => "<span class=\"mbr-task-text\">",
+    }
+}
+
+/// Renders the annotations stripped out of a task's text as chips.
+///
+/// Returns an empty string for a task with no annotations, which is the common
+/// case and the one worth not allocating for.
+pub(crate) fn task_annotations_html(annotations: &Annotations) -> String {
+    let mut html = String::new();
+
+    if let Some((class, label)) = task_priority_chip(annotations.priority) {
+        // Empty content on purpose: the dot is drawn by CSS, so the label has
+        // to reach a screen reader some other way.
+        let _ = write!(
+            html,
+            " <span class=\"mbr-task-pri {class}\" role=\"img\" aria-label=\"{label}\" title=\"{label}\"></span>"
+        );
+    }
+    for tag in &annotations.tags {
+        html.push_str(" <span class=\"mbr-task-tag\">#");
+        // The tag grammar is `[A-Za-z0-9_-]+`, so this can never change a byte.
+        // It stays because markup assembled by hand is exactly where a later
+        // grammar widening turns into an injection.
+        let _ = escape_html(&mut html, tag);
+        html.push_str("</span>");
+    }
+    if let Some(due) = annotations.due {
+        push_task_time(&mut html, "mbr-task-due", due, annotations.due_has_time);
+    }
+    if let Some(done) = annotations.done {
+        push_task_time(
+            &mut html,
+            "mbr-task-completed",
+            done,
+            annotations.done_has_time,
+        );
+    }
+    if let Some(moved_to) = annotations.moved_to {
+        push_task_time(
+            &mut html,
+            "mbr-task-moved",
+            moved_to.and_time(chrono::NaiveTime::MIN),
+            false,
+        );
+    }
+
+    html
+}
+
+/// The value written to `data-mbr-task-status`.
+const fn task_status_slug(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Open => "open",
+        TaskStatus::Done => "done",
+        TaskStatus::Canceled => "canceled",
+    }
+}
+
+/// Modifier class and accessible label for a priority dot, or `None` for the
+/// default priority, which draws nothing.
+const fn task_priority_chip(priority: TaskPriority) -> Option<(&'static str, &'static str)> {
+    match priority {
+        TaskPriority::Normal => None,
+        TaskPriority::High => Some(("mbr-task-pri-high", "High priority")),
+        TaskPriority::Urgent => Some(("mbr-task-pri-urgent", "Urgent priority")),
+    }
+}
+
+/// Appends one `<time>` chip.
+///
+/// The visible label deliberately omits the year: a chip reading "Aug 5" is
+/// legible at a glance, and the unabbreviated value is already in `datetime`
+/// for anything that needs to compute with it. Nothing here is relative to
+/// *today* — a server render is cached and a static build is frozen, so an
+/// "overdue" class baked in at render time would be a lie by tomorrow. Marking
+/// overdue is left to the frontend, which knows what day it is.
+fn push_task_time(html: &mut String, class: &str, value: NaiveDateTime, has_time: bool) {
+    let (attr, label) = if has_time {
+        (
+            value.format("%Y-%m-%dT%H:%M").to_string(),
+            value.format("%b %-d, %-I:%M %p").to_string(),
+        )
+    } else {
+        (
+            value.format("%Y-%m-%d").to_string(),
+            value.format("%b %-d").to_string(),
+        )
+    };
+    let _ = write!(
+        html,
+        " <time class=\"{class}\" datetime=\"{attr}\">{label}</time>"
+    );
 }
 
 // ============================================================================
@@ -422,11 +575,22 @@ where
                     write!(&mut self.writer, "{}", number)?;
                     self.write("</a></sup>")?;
                 }
-                TaskListMarker(true) => {
-                    self.write("<input disabled=\"\" type=\"checkbox\" checked=\"\"/>\n")?;
-                }
-                TaskListMarker(false) => {
-                    self.write("<input disabled=\"\" type=\"checkbox\"/>\n")?;
+                // MBR EXTENSION: the checkbox carries mbr's task classes so the
+                // theme styles it the same way here as on the document render
+                // path. It cannot carry a source line: this writer is handed an
+                // event stream, not the markdown it came from.
+                // `markdown::collect_events_and_headings` replaces the marker
+                // with a line-numbered checkbox before the events ever reach
+                // here, so in the application this arm only runs for callers of
+                // `push_html_mbr` that skip that pass.
+                TaskListMarker(checked) => {
+                    let status = if checked {
+                        TaskStatus::Done
+                    } else {
+                        TaskStatus::Open
+                    };
+                    self.write(&task_checkbox_html(status, None))?;
+                    self.write("\n")?;
                 }
             }
         }
@@ -1062,6 +1226,109 @@ mod tests {
         let mut html = String::new();
         push_html_with_config(&mut html, parser, config);
         html
+    }
+
+    // ---- task markup ---------------------------------------------------------
+
+    #[test]
+    fn task_checkbox_carries_its_line_when_one_is_known() {
+        assert_eq!(
+            task_checkbox_html(TaskStatus::Open, Some(42)),
+            concat!(
+                r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-42" "#,
+                r#"data-mbr-task-line="42" data-mbr-task-status="open" disabled>"#
+            )
+        );
+        assert_eq!(
+            task_checkbox_html(TaskStatus::Done, Some(1)),
+            concat!(
+                r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-1" "#,
+                r#"data-mbr-task-line="1" data-mbr-task-status="done" checked disabled>"#
+            )
+        );
+    }
+
+    #[test]
+    fn task_checkbox_without_a_line_omits_the_anchor() {
+        let html = task_checkbox_html(TaskStatus::Canceled, None);
+        assert_eq!(
+            html,
+            r#"<input type="checkbox" class="mbr-task-check" data-mbr-task-status="canceled" disabled>"#
+        );
+        assert!(!html.contains("id="));
+    }
+
+    #[test]
+    fn every_task_checkbox_is_inert() {
+        for status in [TaskStatus::Open, TaskStatus::Done, TaskStatus::Canceled] {
+            for line in [None, Some(7)] {
+                assert!(
+                    task_checkbox_html(status, line).ends_with(" disabled>"),
+                    "{status:?} {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_task_with_no_annotations_renders_no_chips() {
+        assert_eq!(task_annotations_html(&Annotations::default()), "");
+    }
+
+    #[test]
+    fn annotation_chips_render_in_a_fixed_order() {
+        let annotations = Annotations {
+            priority: TaskPriority::Urgent,
+            tags: vec!["work".to_string(), "ops".to_string()],
+            due: chrono::NaiveDate::from_ymd_opt(2026, 8, 5).and_then(|d| d.and_hms_opt(15, 0, 0)),
+            due_has_time: true,
+            done: chrono::NaiveDate::from_ymd_opt(2026, 8, 4).and_then(|d| d.and_hms_opt(0, 0, 0)),
+            done_has_time: false,
+            moved_to: chrono::NaiveDate::from_ymd_opt(2026, 9, 1),
+        };
+        assert_eq!(
+            task_annotations_html(&annotations),
+            concat!(
+                r#" <span class="mbr-task-pri mbr-task-pri-urgent" role="img" "#,
+                r#"aria-label="Urgent priority" title="Urgent priority"></span>"#,
+                r#" <span class="mbr-task-tag">#work</span>"#,
+                r#" <span class="mbr-task-tag">#ops</span>"#,
+                r#" <time class="mbr-task-due" datetime="2026-08-05T15:00">Aug 5, 3:00 PM</time>"#,
+                r#" <time class="mbr-task-completed" datetime="2026-08-04">Aug 4</time>"#,
+                r#" <time class="mbr-task-moved" datetime="2026-09-01">Sep 1</time>"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_high_priority_dot_is_labelled_differently_from_an_urgent_one() {
+        let high = task_annotations_html(&Annotations {
+            priority: TaskPriority::High,
+            ..Annotations::default()
+        });
+        assert!(high.contains("mbr-task-pri-high"), "{high}");
+        assert!(high.contains(r#"aria-label="High priority""#), "{high}");
+        assert!(!high.contains("mbr-task-pri-urgent"), "{high}");
+    }
+
+    /// The tag grammar cannot produce these today; the escape is there so a
+    /// later widening of it does not silently become an injection.
+    #[test]
+    fn tag_chips_are_html_escaped() {
+        let html = task_annotations_html(&Annotations {
+            tags: vec!["<script>".to_string()],
+            ..Annotations::default()
+        });
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
+    }
+
+    #[test]
+    fn only_a_canceled_task_gets_the_canceled_text_class() {
+        assert!(task_text_open(TaskStatus::Canceled).contains("mbr-task-canceled"));
+        for status in [TaskStatus::Open, TaskStatus::Done] {
+            assert_eq!(task_text_open(status), r#"<span class="mbr-task-text">"#);
+        }
     }
 
     /// Renders with the same options the application uses (`Options::all()`),

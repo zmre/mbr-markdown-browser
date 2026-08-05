@@ -385,6 +385,94 @@ pub fn strip_annotations(text: &str) -> (String, Annotations) {
     (display, annotations)
 }
 
+/// Separator [`strip_annotations_across_runs`] splices between inline text runs.
+///
+/// U+0000 is the natural choice: CommonMark tells a parser to replace it with
+/// U+FFFD, so it should never reach a renderer, and it is not whitespace, so it
+/// cannot merge two runs into one token. pulldown-cmark 0.13 does *not* in fact
+/// perform that replacement, so [`strip_annotations_across_runs`] does it
+/// itself rather than assume — see [`RUN_BOUNDARY_REPLACEMENT`].
+const RUN_BOUNDARY: char = '\0';
+
+/// What a literal [`RUN_BOUNDARY`] in the source is rewritten to, which is what
+/// CommonMark says should have happened to it upstream.
+const RUN_BOUNDARY_REPLACEMENT: char = '\u{fffd}';
+
+/// [`strip_annotations`] for a task whose text is split across inline
+/// formatting boundaries.
+///
+/// A rendered task line does not arrive as one string: `fix **this** #bug`
+/// reaches the renderer as the runs `["fix ", "this", " #bug"]` with
+/// `<strong>` events in between. Stripping each run on its own is wrong twice
+/// over — the per-run trim would delete the space before `<strong>`, and
+/// `$`-anchored rules like the trailing `> YYYY-MM-DD` would fire at the end of
+/// every run rather than at the end of the text.
+///
+/// So the runs are spliced into one string with [`RUN_BOUNDARY`] between them,
+/// stripped by the single grammar in [`strip_annotations`], and split apart
+/// again. The boundary is not whitespace, so it never merges two runs into one
+/// token, and none of the stripping passes can consume or emit one; the
+/// returned vector therefore has exactly one entry per input run. A literal
+/// boundary character already in the text is rewritten first, so a document
+/// containing one cannot desynchronise the split.
+///
+/// Splicing also makes the *renderer* agree with [`scan_source_tasks`] about
+/// what is adjacent to what: `**a**#work` has no whitespace before the `#` in
+/// the source, and the boundary preserves that, so neither reads it as a tag.
+///
+/// # Examples
+///
+/// ```
+/// use mbr::tasks::strip_annotations_across_runs;
+///
+/// let (runs, ann) = strip_annotations_across_runs(&["fix ", "this", " #bug"]);
+/// assert_eq!(runs, ["fix ", "this", ""]);
+/// assert_eq!(ann.tags, ["bug"]);
+/// ```
+pub fn strip_annotations_across_runs(runs: &[&str]) -> (Vec<String>, Annotations) {
+    match runs {
+        [] => (Vec::new(), Annotations::default()),
+        [only] => {
+            let (text, annotations) = strip_annotations(only);
+            (vec![text], annotations)
+        }
+        _ => {
+            let mut joined = String::with_capacity(runs.iter().map(|r| r.len() + 1).sum());
+            for (index, run) in runs.iter().enumerate() {
+                if index > 0 {
+                    joined.push(RUN_BOUNDARY);
+                }
+                if run.contains(RUN_BOUNDARY) {
+                    joined.extend(run.chars().map(|c| {
+                        if c == RUN_BOUNDARY {
+                            RUN_BOUNDARY_REPLACEMENT
+                        } else {
+                            c
+                        }
+                    }));
+                } else {
+                    joined.push_str(run);
+                }
+            }
+
+            let (stripped, annotations) = strip_annotations(&joined);
+            let mut parts: Vec<String> = stripped.split(RUN_BOUNDARY).map(str::to_string).collect();
+
+            // Unreachable given the invariant documented above, but a
+            // misalignment here would silently drop text from the page, so
+            // recover by keeping every character in the first run rather than
+            // trusting the split.
+            if parts.len() != runs.len() {
+                debug_assert!(false, "run boundaries were not preserved: {stripped:?}");
+                parts = std::iter::once(stripped.replace(RUN_BOUNDARY, " "))
+                    .chain(std::iter::repeat_n(String::new(), runs.len() - 1))
+                    .collect();
+            }
+            (parts, annotations)
+        }
+    }
+}
+
 /// Cheap conservative pre-filter: rejects lines that cannot possibly match
 /// [`TASK_LINE`] without paying for the regex.
 ///
@@ -464,7 +552,15 @@ fn strip_date_annotations(text: &str, annotations: &mut Annotations) -> String {
 /// destination. Loops so that `... > 2026-08-04 < 2026-08-01` yields both.
 fn strip_trailing_move(text: &str, annotations: &mut Annotations) -> String {
     let mut rest = text;
-    while let Some(caps) = TRAILING_MOVE.captures(rest) {
+    // The pattern ends `\d{4}-\d{2}-\d{2}[ \t]*$`, so it can only match when the
+    // last non-blank byte is a digit. Testing that first keeps the regex crate's
+    // capture-tracking engine — the slow one, by roughly a factor of ten, as
+    // documented on [`TASK_LINE`] — off the overwhelming majority of task lines,
+    // which carry no move marker at all. This is on the render path for every
+    // task in a document and on the read path for every task in a repository.
+    while ends_with_digit_ignoring_blanks(rest)
+        && let Some(caps) = TRAILING_MOVE.captures(rest)
+    {
         let Some(date) =
             group(&caps, "date").and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
         else {
@@ -480,6 +576,16 @@ fn strip_trailing_move(text: &str, annotations: &mut Annotations) -> String {
         rest = &rest[..whole.start()];
     }
     rest.to_string()
+}
+
+/// Whether the last byte of `text`, ignoring trailing spaces and tabs, is an
+/// ASCII digit. A necessary condition for [`TRAILING_MOVE`] to match, and far
+/// cheaper to test.
+fn ends_with_digit_ignoring_blanks(text: &str) -> bool {
+    text.as_bytes()
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+        .is_some_and(|at| text.as_bytes()[at].is_ascii_digit())
 }
 
 /// Removes `#tag` occurrences, collecting them de-duplicated case-insensitively
@@ -905,6 +1011,33 @@ mod tests {
         }
     }
 
+    /// The cheap pre-filter in front of [`TRAILING_MOVE`] must never reject a
+    /// line the regex would have matched.
+    #[test]
+    fn trailing_move_prefilter_never_rejects_a_match() {
+        for text in [
+            "moved > 2026-08-04",
+            "moved > 2026-08-04   ",
+            "moved >2026-08-04\t",
+            "moved < 2026-08-01",
+            "> 2026-08-04",
+            "nothing here",
+            "ends in a digit 42",
+            "trailing space ",
+            "",
+            "   ",
+            "a > b",
+        ] {
+            assert!(
+                !TRAILING_MOVE.is_match(text) || ends_with_digit_ignoring_blanks(text),
+                "prefilter rejected a line the regex matches: {text:?}"
+            );
+        }
+        // It really does reject: otherwise it would be buying nothing.
+        assert!(!ends_with_digit_ignoring_blanks("nothing here"));
+        assert!(ends_with_digit_ignoring_blanks("moved > 2026-08-04  "));
+    }
+
     #[test]
     fn trailing_move_needs_a_real_date() {
         let task = parse("- [ ] nope > 2026-13-45");
@@ -1244,6 +1377,71 @@ mod tests {
         assert_eq!(tasks[0].text, "real");
     }
 
+    // ---- strip_annotations_across_runs ---------------------------------------
+
+    /// Convenience wrapper so the tests read like the renderer's call site.
+    fn across(runs: &[&str]) -> (Vec<String>, Annotations) {
+        strip_annotations_across_runs(runs)
+    }
+
+    #[test]
+    fn runs_keep_the_whitespace_that_separates_inline_formatting() {
+        // `fix **this** #bug`: stripping each run alone would trim the trailing
+        // space off "fix " and weld the words together.
+        let (runs, ann) = across(&["fix ", "this", " #bug"]);
+        assert_eq!(runs, ["fix ", "this", ""]);
+        assert_eq!(ann.tags, ["bug"]);
+    }
+
+    #[test]
+    fn a_single_run_matches_strip_annotations_exactly() {
+        let (runs, ann) = across(&["ship it !!! #work @due(2026-08-05)"]);
+        let (text, expected) = strip_annotations("ship it !!! #work @due(2026-08-05)");
+        assert_eq!(runs, [text]);
+        assert_eq!(ann, expected);
+    }
+
+    #[test]
+    fn an_empty_run_list_yields_nothing() {
+        let (runs, ann) = across(&[]);
+        assert!(runs.is_empty());
+        assert_eq!(ann, Annotations::default());
+    }
+
+    #[test]
+    fn every_annotation_kind_is_found_across_run_boundaries() {
+        let (runs, ann) = across(&[
+            "do ",
+            "the",
+            " thing !! #work @due(2026-08-05) > 2026-08-04",
+        ]);
+        // Only the annotations go; the words around them stay where they were.
+        assert_eq!(runs, ["do ", "the", " thing"]);
+        assert_eq!(ann.priority, TaskPriority::High);
+        assert_eq!(ann.tags, ["work"]);
+        assert_eq!(ann.due, Some(dt(2026, 8, 5, 0, 0)));
+        assert_eq!(ann.moved_to, NaiveDate::from_ymd_opt(2026, 8, 4));
+    }
+
+    #[test]
+    fn a_run_boundary_is_not_whitespace_so_it_cannot_invent_a_tag() {
+        // `**a**#work` has no space before the `#` in the source, and
+        // `strip_annotations` would not call it a tag either.
+        let (runs, ann) = across(&["", "a", "#work"]);
+        assert!(ann.tags.is_empty());
+        assert_eq!(runs.concat(), "a#work");
+    }
+
+    #[test]
+    fn a_literal_boundary_character_cannot_desynchronise_the_split() {
+        // pulldown-cmark 0.13 does not perform CommonMark's U+0000 → U+FFFD
+        // replacement, so a NUL really can reach the renderer.
+        let (runs, ann) = across(&["a\u{0}b ", "c", " #t"]);
+        assert_eq!(runs.len(), 3, "run count must be preserved");
+        assert_eq!(runs, ["a\u{fffd}b ", "c", ""]);
+        assert_eq!(ann.tags, ["t"]);
+    }
+
     // ---- serde ---------------------------------------------------------------
 
     #[test]
@@ -1385,6 +1583,54 @@ mod tests {
             prop_assert_eq!(reparsed.depth, original.depth);
             prop_assert_eq!(reparsed.priority, original.priority);
             prop_assert_eq!(reparsed.due, original.due);
+        }
+
+        /// The pre-filter guarding [`TRAILING_MOVE`] is only ever allowed to
+        /// reject text the regex would also have rejected.
+        #[test]
+        fn trailing_move_prefilter_is_sound(s in taskish_text()) {
+            prop_assert!(
+                !TRAILING_MOVE.is_match(&s) || ends_with_digit_ignoring_blanks(&s),
+                "prefilter rejected a match in {s:?}"
+            );
+        }
+
+        /// Splicing runs together never loses or gains one, whatever the text.
+        ///
+        /// This is the invariant the renderer's inline-formatting support rests
+        /// on: one output run per input run, so each `Event::Text` can be
+        /// rewritten in place without disturbing the `<strong>`/`<em>`/`<a>`
+        /// events between them.
+        #[test]
+        fn splicing_runs_preserves_their_count(
+            runs in proptest::collection::vec(taskish_text(), 0..6)
+        ) {
+            let borrowed: Vec<&str> = runs.iter().map(String::as_str).collect();
+            let (out, _) = strip_annotations_across_runs(&borrowed);
+            prop_assert_eq!(out.len(), runs.len());
+        }
+
+        /// Whatever the run split, the concatenated display text is the same as
+        /// stripping the equivalent single string — so a task's text does not
+        /// depend on where the author happened to put a `**`.
+        #[test]
+        fn splicing_agrees_with_single_string_stripping_on_plain_text(
+            words in proptest::collection::vec("[a-z]{1,6}", 1..6),
+            split_at in 0usize..6,
+        ) {
+            let joined = words.join(" ");
+            let at = split_at.min(words.len());
+            let (head, tail) = words.split_at(at);
+            let runs = [
+                format!("{} ", head.join(" ")),
+                tail.join(" "),
+            ];
+            let borrowed: Vec<&str> = runs.iter().map(String::as_str).collect();
+            let (out, _) = strip_annotations_across_runs(&borrowed);
+
+            let collapsed: String = out.concat().split_whitespace().collect::<Vec<_>>().join(" ");
+            let (single, _) = strip_annotations(&joined);
+            prop_assert_eq!(collapsed, single);
         }
 
         /// Every task the scanner returns points at a line that really is that task.
