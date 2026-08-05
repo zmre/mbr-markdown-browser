@@ -44,11 +44,17 @@ Oh and on mac, it includes a quicklook plugin that's head and shoulders above an
 
 ```bash
 # Using Nix to quick run without installing
-nix run github:zmre/mbr-markdown-browser -- /path/to/notes
+nix run --accept-flake-config github:zmre/mbr-markdown-browser -- /path/to/notes
 
 # Using Cargo
 cargo install --git https://github.com/zmre/mbr-markdown-browser
 ```
+
+`--accept-flake-config` opts in to the prebuilt binary cache. Without it Nix
+ignores the substituters this flake declares and compiles everything from
+source, which takes a while. See [Getting
+Started](https://zmre.github.io/mbr-markdown-browser/getting-started/) to
+configure it permanently — and for the one case where it does not help.
 
 Or download a pre-built binary from [the releases page](https://github.com/zmre/mbr-markdown-browser/releases).
 

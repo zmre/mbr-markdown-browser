@@ -15,8 +15,44 @@ Nix provides reproducible builds and includes all dependencies.
 
 ```bash
 # Run directly from GitHub
-nix run github:zmre/mbr -- -g /path/to/notes
+nix run --accept-flake-config github:zmre/mbr-markdown-browser -- -g /path/to/notes
 ```
+
+### Using the Binary Cache
+
+Prebuilt binaries for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin` are
+published to [zmre.cachix.org](https://zmre.cachix.org) on every push to `main`.
+Without them, installing mbr means compiling ffmpeg, pdfium, and the full crate
+dependency graph — tens of minutes.
+
+Nix **ignores substituters declared in a flake's `nixConfig` unless the flake is
+trusted**, so you have to opt in. Either pass the flag each time:
+
+```bash
+nix run --accept-flake-config github:zmre/mbr-markdown-browser -- -g /path/to/notes
+```
+
+...or configure it permanently in `~/.config/nix/nix.conf` (or
+`/etc/nix/nix.conf`):
+
+```
+extra-substituters = https://zmre.cachix.org
+extra-trusted-public-keys = zmre.cachix.org-1:WIE1U2a16UyaUVr+Wind0JM6pEXBe43PQezdPKoDWLE=
+```
+
+**Caveat:** `substituters` is a *trusted* Nix setting. On a multi-user install,
+a user who is not listed in `trusted-users` gets
+
+```
+warning: ignoring untrusted flake configuration setting 'extra-substituters'
+```
+
+and builds from source regardless of which method above they used. Fixing that
+requires adding the user to `trusted-users` in the system-level `nix.conf` and
+restarting the daemon — an administrator action, not something the flake can do.
+
+The cache is plain signed HTTP, so which Nix you run is irrelevant: Determinate
+Nix, upstream Nix, Lix, and nix-darwin all consume it identically.
 
 ### Build from Source
 
@@ -34,7 +70,7 @@ nix build
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    mbr.url = "github:zmre/mbr";
+    mbr.url = "github:zmre/mbr-markdown-browser";
   };
 
   outputs = { self, nixpkgs, mbr }: {
@@ -43,13 +79,33 @@ nix build
 }
 ```
 
+A flake's `nixConfig` applies only when *that* flake is the one being built, so
+consuming mbr as an input does **not** inherit its substituters — even with
+`--accept-flake-config`. Declare them in your own flake to avoid rebuilding mbr
+from source:
+
+```nix
+{
+  nixConfig = {
+    extra-substituters = [ "https://zmre.cachix.org" ];
+    extra-trusted-public-keys = [
+      "zmre.cachix.org-1:WIE1U2a16UyaUVr+Wind0JM6pEXBe43PQezdPKoDWLE="
+    ];
+  };
+  # ...
+}
+```
+
 ## Using Cargo
 
 If you have Rust installed, you can build from source:
 
 ```bash
-cargo install --git https://github.com/zmre/mbr
+cargo install --git https://github.com/zmre/mbr-markdown-browser
 ```
+
+Note that Cargo does not use the binary cache — this compiles everything
+locally. Use the Nix install above if you want prebuilt binaries.
 
 ### Prerequisites
 

@@ -29,12 +29,27 @@ jobs:
       # Without this the flake's own extra-substituters are ignored ("untrusted
       # flake configuration"), so nothing is pulled from the zmre cache and every
       # dependency is built from source.
+      #
+      # `pushFilter` is a regex over store paths, applied by the post-job daemon
+      # that uploads everything the job built — so it belongs on EVERY cachix
+      # block in this repo, not just the ones that build artifacts. Source trees
+      # and vendor dirs are quota waste: a consumer substituting a finished
+      # output never needs them, and a builder that does miss can regenerate them
+      # from the git tree or refetch them (they are fixed-output). Note the
+      # documented caveat — a filtered path is still uploaded when it is part of
+      # some other path's closure, so this can only ever drop genuinely
+      # unreferenced paths.
+      #
+      # Do NOT add nixpkgs to this filter. Cachix has skipped paths already
+      # available from cache.nixos.org since 2020; when this cache is full it is
+      # full of our own build products.
       - name: Setup Cachix
         uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       # `nix build .#fmt` (craneLib.cargoFmt), not `nix develop --command cargo
       # fmt`. The dev shell pulls in the whole build closure — ffmpeg, webkitgtk,
@@ -60,6 +75,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Build components
         run: |
@@ -131,6 +147,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Clippy lint
         run: nix build -L .#clippy
@@ -163,6 +180,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Run tests
         run: nix build -L .#tests
@@ -203,12 +221,71 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Build
         run: nix build -L .#mbr
 
       - name: Check docs for broken links
         run: ./result/bin/mbr -b docs --fail-on-broken-links
+
+      # Pin the artifacts consumers actually resolve to, so Cachix's LRU garbage
+      # collector cannot evict them.
+      #
+      # The free tier collects least-recently-used, which is exactly backwards
+      # for this repo. The crane dependency layer (`mbr-deps`, ~950 MB per
+      # system) is touched by every CI run and stays warm; `packages.mbr` is
+      # downloaded only when a stranger runs `nix run github:zmre/...` and is
+      # therefore always the coldest thing in the cache. Measured 2026-08-05,
+      # before this step existed: `mbr-0.5.1` returned 404 from zmre.cachix.org
+      # for BOTH Linux systems, so the README's `nix run` line was compiling from
+      # source for every Linux user. Pinned paths are exempt from GC — that is
+      # the entire fix, and it is why this matrix spans exactly the three systems
+      # consumers install on.
+      #
+      # `.#default`, not `.#mbr`: that is what `nix run`, `nix build github:...`
+      # and `nix profile install` all resolve to (verified — `apps.default.program`
+      # is `${packages.default}/bin/mbr` on all three systems), so repointing
+      # `default` moves the pin with it.
+      #
+      # ffmpeg/x264 are a deliberate exception to "never pin the dependency
+      # layer". They are not the churny part of it: both are fixed-version
+      # (ffmpeg 7.1, one x264 commit), they total 33 MB, and losing them costs
+      # the 30-60 minute from-source build the `build` matrix comment above
+      # already warns about. The ~950 MB crate layer is emphatically NOT pinned —
+      # it churns on every Cargo.lock bump and CI keeps it warm by itself.
+      #
+      # This pushes before it pins because the cachix-action daemon does its
+      # upload as a POST-JOB step, i.e. after everything here has already run.
+      # Pinning a path the cache has never seen is at best a no-op.
+      - name: Push and pin consumer artifacts
+        if: github.event_name == 'push'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Secrets are absent on fork PRs. Without this guard every outside
+          # contributor's PR goes red on a step that is none of their business.
+          if [ -z "${CACHIX_AUTH_TOKEN:-}" ]; then
+            echo "No CACHIX_AUTH_TOKEN (fork or unset) - skipping push and pins."
+            exit 0
+          fi
+          # Derived rather than hardcoded: this matrix spans three systems and
+          # runner architectures change.
+          sys=$(nix eval --raw --impure --expr builtins.currentSystem)
+          push_and_pin() {
+            local name="$1" attr="$2" path
+            path=$(nix build --no-link --print-out-paths ".#$attr")
+            echo "==> $name-$sys -> $path"
+            cachix push zmre "$path"
+            cachix pin zmre "$name-$sys" "$path" --keep-revisions 2
+          }
+          # A pin name is the stable identity of "current artifact for this
+          # system"; --keep-revisions 2 keeps the previous one alive while a new
+          # one propagates, instead of accruing a pin per commit.
+          push_and_pin mbr default
+          push_and_pin ffmpeg-minimal-static ffmpegMinimalStatic
+          push_and_pin x264-static x264Static
 
   # Build and test the exact feature set Windows ships, but on Linux.
   #
@@ -249,6 +326,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Clippy lint
         run: nix build -L .#clippy-minimal
@@ -373,6 +451,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Swift format check
         run: nix build -L .#swiftfmt

@@ -81,6 +81,10 @@ jobs:
         name: zmre
         authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
         extraPullNames: nix-community
+        # See the long note on the first cachix block in ci.yml. This belongs
+        # on every cachix block, including jobs that build nothing new, because
+        # the post-job daemon uploads whatever the job put in the store.
+        pushFilter: '-(source|vendor)$'
 
     # Build the Rust static library BEFORE CodeQL init so Nix's sandboxed
     # compilation doesn't interfere with CodeQL's compiler tracing.

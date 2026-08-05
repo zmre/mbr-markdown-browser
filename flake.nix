@@ -45,11 +45,29 @@
         config.allowUnfree = true;
       };
 
-      # Get rust toolchain from rust-toolchain.toml
+      # Get rust toolchain from rust-toolchain.toml. Kept deliberately lean —
+      # see the comment in that file for why.
       rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+      # Editor/IDE components, added for `nix develop` only.
+      #
+      # These must NOT be in `rustToolchain`: that one is a runtime reference of
+      # every crane derivation, so anything in it is uploaded to the binary cache
+      # once per system. rust-analyzer (38 MB) and rust-src (69 MB) are of no use
+      # to a compile, and the `profile = "default"` that used to be in
+      # rust-toolchain.toml also dragged in rust-docs (695 MB) and llvm-tools
+      # (404 MB) — 1.2 GB per system of a 5 GB cache, for an HTML manual and a
+      # profiler nothing in this repo invokes.
+      rustToolchainDev = rustToolchain.override {
+        extensions = ["rust-analyzer" "rust-src"];
+      };
 
       # Create crane lib with our toolchain
       craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+      # Same crane, dev toolchain. Used only by devShells.default, so the extra
+      # components never reach a cached build derivation.
+      craneLibDev = (crane.mkLib pkgs).overrideToolchain rustToolchainDev;
 
       # Read version from Cargo.toml - single source of truth
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
@@ -453,6 +471,24 @@
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
           cargoExtraArgs = "--locked --features ${cliFeatures}";
+
+          # crane defaults to `zstd -3`; -19 takes this artifact from 942 MB to
+          # 582 MB (measured) for byte-identical contents. Worth it because this
+          # is the single largest thing we push: 3.54 GB of target/ that is ~63%
+          # redundant by construction — `panic = 'abort'` in Cargo.toml plus
+          # crane's `cargo test --no-run` means the whole dep tree is compiled
+          # twice (libtest needs unwinding), and `cargo check --all-targets`
+          # adds a third set of rmeta on top. None of that is safely removable:
+          # packages.tests and packages.clippy reuse exactly those artifacts.
+          #
+          # The cost lands only when this derivation actually rebuilds (a
+          # Cargo.lock bump): ~7s -> ~140s of compression. Every consumer job
+          # then downloads 360 MB less, so on balance CI gets faster.
+          #
+          # Deliberately not `--long=27` or higher: crane's inherit hook
+          # decompresses with a plain `zstd -d`, which would need a matching
+          # window size. -19 needs no such flag.
+          zstdCompressionExtraArgs = "-19";
           preBuild = ''
             # crane's mkDummySrc strips `required-features` from every [[bin]]
             # (see crane's cleanCargoToml.nix). That un-gates the `uniffi-bindgen`
@@ -493,6 +529,11 @@
           src = craneLib.cleanCargoSource ./.;
           pname = "mbr-minimal";
           cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+
+          # Same reasoning as cargoArtifacts above. This one is 747 MB at crane's
+          # default, and the two together were 1.69 GB per system — over the 5 GB
+          # cache tier on their own once multiplied by the three systems CI builds.
+          zstdCompressionExtraArgs = "-19";
           preBuild = ''
             # Same crane mkDummySrc workaround as cargoArtifacts above — see the
             # comment there. It matters more here: `ffi` is off in this feature
@@ -843,8 +884,18 @@
             '';
         }
         // {
-          # Expose the minimal static ffmpeg for independent build/verification
+          # Expose the minimal static ffmpeg for independent build/verification.
+          #
+          # Both of these are also named directly by ci.yml's "Push and pin
+          # consumer artifacts" step. They are fixed-version, effectively
+          # immutable, and cost 30-60 minutes to rebuild from source, so they are
+          # pinned in the binary cache against LRU eviction — which requires them
+          # to be addressable as flake attrs. x264Static is pinned in its own
+          # right rather than as a reference of ffmpegMinimalStatic: the Cachix
+          # docs promise only that "pinned paths are immune from garbage
+          # collection", never that the promise extends to the closure.
           ffmpegMinimalStatic = ffmpegMinimalStatic;
+          x264Static = x264Static;
 
           default = packages.mbr;
 
@@ -1059,8 +1110,12 @@
         }}/bin/mbr-release";
       };
 
-      # Development shell
-      devShells.default = craneLib.devShell (commonEnvVars
+      # Development shell.
+      #
+      # craneLibDev, not craneLib: this is the one place rust-analyzer and
+      # rust-src belong. Keeping them out of craneLib is what keeps them out of
+      # every cached build derivation's closure.
+      devShells.default = craneLibDev.devShell (commonEnvVars
         // {
           # Include checks to ensure dev environment matches CI
           checks = self.checks.${system};
