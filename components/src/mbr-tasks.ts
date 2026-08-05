@@ -39,20 +39,17 @@ export function setTasksChunkImporter(importer: () => Promise<unknown>): void {
 /**
  * The panel's writer.
  *
- * Two things the panel cannot do for itself, both of which are about the page
- * *behind* the overlay:
- *
- * - `suppressReload`, because the write makes the server broadcast a file
- *   change and `<mbr-live-reload>` would reload the page — closing the panel
- *   and discarding the user's filters — to show a document the panel has
- *   already refreshed by re-querying.
- * - `syncDocumentTask`, which is the other half of that bargain: with the
- *   reload suppressed, a task on the page currently on screen would otherwise
- *   sit there still unchecked once the panel closes.
+ * The one thing the panel cannot do for itself is the page *behind* the
+ * overlay. Every task write suppresses the live reload it would otherwise
+ * trigger (see `task-toggle.ts`), which for the panel means its overlay and the
+ * user's filters survive a toggle — but it also means a task from the file on
+ * screen would sit there still unchecked once the panel closes.
+ * `syncDocumentTask` is the other half of that bargain, and the server's new
+ * source line is what lets it redraw a stamped `@done(...)` too.
  */
 async function panelToggle(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
-  const outcome = await toggleTask(target, { suppressReload: true })
-  if (outcome.ok) syncDocumentTask(target.path, target.line, target.to)
+  const outcome = await toggleTask(target)
+  if (outcome.ok) syncDocumentTask(target.path, target.line, target.to, outcome.text)
   return outcome
 }
 

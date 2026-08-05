@@ -111,7 +111,19 @@ export type TaskToggleFailure =
   | 'other'
 
 export type TaskToggleOutcome =
-  | { ok: true }
+  | {
+      ok: true
+      /**
+       * The line's new source text, verbatim
+       * (`server.rs::TaskToggleResponse::text`), or absent when the response
+       * could not be parsed.
+       *
+       * The panel has no use for it — it re-queries — but the main bundle does:
+       * a write no longer reloads the page, so this is the only thing that can
+       * tell the document about a freshly stamped `@done(...)`.
+       */
+      text?: string
+    }
   | { ok: false; kind: TaskToggleFailure; message: string }
 
 /**

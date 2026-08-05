@@ -10,7 +10,7 @@ import {
   toggleTask,
   wasSelfWrite,
 } from './task-toggle.js'
-import { setEditToken } from './edit-token.js'
+import { clearEditToken, isEditTokenRequired, setEditToken } from './edit-token.js'
 
 /** The file every test here patches, and the line it aims at. */
 const SOURCE = '# Notes\n\n- [ ] write the report !!\n- [ ] second\n'
@@ -48,7 +48,10 @@ function lastTaskBody(): unknown {
 describe('toggleTask', () => {
   beforeEach(() => {
     resetTaskToggleState()
-    setEditToken('')
+    clearEditToken()
+    // The token module is inert on a page with editing off, which is every
+    // page that has no `__MBR_CONFIG__` at all.
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
     fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
     routeFetch({ ok: true, status: 200 })
@@ -56,14 +59,17 @@ describe('toggleTask', () => {
 
   afterEach(() => {
     resetTaskToggleState()
-    setEditToken('')
+    clearEditToken()
+    window.__MBR_CONFIG__ = undefined
     vi.restoreAllMocks()
   })
 
   it('sends exactly the body the endpoint expects', async () => {
     const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
 
-    expect(outcome).toEqual({ ok: true })
+    // The new source line comes back with the outcome: with the live reload
+    // suppressed, it is the only thing that can redraw a `@done(...)` chip.
+    expect(outcome).toEqual({ ok: true, text: '- [x] write the report !!' })
     // The whole body is spelled out: `TaskToggleRequest` is `#[serde(default)]`
     // on the Rust side, so a misspelled key degrades silently rather than
     // erroring, and this assertion is the only guard against that.
@@ -167,6 +173,53 @@ describe('toggleTask', () => {
     expect(taskCalls()).toHaveLength(0)
   })
 
+  it('reports a token-refused raw read as an auth problem, not a read problem', async () => {
+    // `/.mbr/raw` sits behind the same `check_edit_access` policy as the write,
+    // so on a token-protected server the FIRST thing a click does is 401 —
+    // before `/.mbr/task` is ever reached. Reporting that as "could not read
+    // the file" would hide the one thing the user can do about it.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve({ ok: false, status: 401, text: () => Promise.resolve('') })
+    )
+
+    const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+
+    expect(outcome).toEqual({
+      ok: false,
+      kind: 'auth',
+      message: 'Editing needs a token — open the editor (e) and enter it first.',
+    })
+    expect(taskCalls()).toHaveLength(0)
+    // ...and the editor will have its token field waiting when they get there.
+    expect(isEditTokenRequired()).toBe(true)
+  })
+
+  it('reports a token-refused write as an auth problem too', async () => {
+    routeFetch({ ok: false, status: 401 })
+
+    const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+
+    expect(outcome).toMatchObject({ ok: false, kind: 'auth' })
+    expect(isEditTokenRequired()).toBe(true)
+  })
+
+  it('still reports success when the response body is unusable, minus the text', async () => {
+    routeFetch({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new Error('not JSON')),
+    } as never)
+
+    // The status code already confirmed the write; only the chip is lost.
+    expect(await toggleTask({ path: 'notes.md', line: 3, to: 'done' })).toEqual({ ok: true })
+
+    // And the cached line was dropped, so the next click re-reads.
+    routeFetch({ ok: true, status: 200 })
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    const rawCalls = fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/.mbr/raw/'))
+    expect(rawCalls).toHaveLength(2)
+  })
+
   it('refuses a line the file does not have', async () => {
     const outcome = await toggleTask({ path: 'notes.md', line: 99, to: 'done' })
     expect(outcome).toMatchObject({ ok: false, kind: 'other' })
@@ -199,6 +252,7 @@ describe('toggleTask', () => {
 describe('self-write suppression', () => {
   beforeEach(() => {
     resetTaskToggleState()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
     fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
     routeFetch({ ok: true, status: 200 })
@@ -206,30 +260,70 @@ describe('self-write suppression', () => {
 
   afterEach(() => {
     resetTaskToggleState()
+    window.__MBR_CONFIG__ = undefined
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
-  it('registers a write only when asked, and only once', async () => {
-    await toggleTask({ path: 'notes.md', line: 3, to: 'done' }, { suppressReload: true })
-
-    // The path arrives from the watcher, which may lead with a slash.
-    expect(wasSelfWrite('/notes.md')).toBe(true)
-    // Consumed: the watcher's own later event for the same file is a genuine
-    // external change as far as this page can tell.
-    expect(wasSelfWrite('notes.md')).toBe(false)
-  })
-
-  it('leaves an unsuppressed write to trigger the live reload', async () => {
+  it('suppresses every event a single write produces, not just the first', async () => {
     await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
 
+    // One write is announced three times on macOS: the handler broadcasts
+    // before it responds, then the watcher sees the atomic rename. Consuming a
+    // single entry would let the echo reload the page — taking the in-memory
+    // edit token with it — which is the whole failure this guards.
+    // The path arrives from the watcher, which may lead with a slash.
+    expect(wasSelfWrite('/notes.md')).toBe(true)
+    expect(wasSelfWrite('notes.md')).toBe(true)
+    expect(wasSelfWrite('notes.md')).toBe(true)
+  })
+
+  it('registers before the request, because the broadcast can beat the response', async () => {
+    // The handler sends the WebSocket frame before it writes the response, so
+    // an event can reach the page while the fetch is still pending. Anything
+    // that registered afterwards would lose that race every time.
+    let seenDuringFlight: boolean | null = null
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url) === '/.mbr/task') {
+        seenDuringFlight = wasSelfWrite('notes.md')
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ line: 3, text: '- [x] write the report !!' }),
+        })
+      }
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(SOURCE) })
+    })
+
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+
+    expect(seenDuringFlight).toBe(true)
+  })
+
+  it('stops suppressing once the window has passed', async () => {
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(wasSelfWrite('notes.md')).toBe(true)
+
+    // Somebody else's edit, seconds later, is a real change and must reload.
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.now() + 5000)
     expect(wasSelfWrite('notes.md')).toBe(false)
   })
 
-  it('does not register a failed write', async () => {
-    routeFetch({ ok: false, status: 409 })
-    await toggleTask({ path: 'notes.md', line: 3, to: 'done' }, { suppressReload: true })
+  it('never suppresses a change to a file this page did not write', async () => {
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
 
-    expect(wasSelfWrite('notes.md')).toBe(false)
+    expect(wasSelfWrite('other.md')).toBe(false)
+  })
+
+  it('leaves a failed write’s window standing rather than risk withdrawing another', async () => {
+    // A failed write triggers no broadcast, so the window suppresses nothing of
+    // ours; withdrawing it would have to identify which registration to drop,
+    // and dropping a successful sibling's is the expensive mistake.
+    routeFetch({ ok: false, status: 409 })
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+
+    expect(wasSelfWrite('notes.md')).toBe(true)
   })
 })
 
@@ -295,5 +389,21 @@ describe('checkbox status helpers', () => {
 
     // A line with no checkbox on this page is simply not there.
     expect(() => syncDocumentTask('notes.md', 99, 'done')).not.toThrow()
+  })
+
+  it('draws the panel’s write into the page behind it, chip and all', () => {
+    const input = checkbox('open')
+    window.frontmatter = { markdown_source: 'notes.md' }
+
+    syncDocumentTask('notes.md', 3, 'done', '- [x] write the report @done(2026-08-04 22:16)')
+
+    expect(input.checked).toBe(true)
+    const chip = input.parentElement!.querySelector('.mbr-task-completed')!
+    expect(chip.getAttribute('datetime')).toBe('2026-08-04T22:16')
+    expect(chip.textContent).toBe('Aug 4, 10:16 PM')
+
+    // ...and takes it away again on a reopen.
+    syncDocumentTask('notes.md', 3, 'open', '- [ ] write the report')
+    expect(input.parentElement!.querySelector('.mbr-task-completed')).toBeNull()
   })
 })

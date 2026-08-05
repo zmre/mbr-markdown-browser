@@ -293,10 +293,11 @@ describe('MbrLiveReloadElement message handling', () => {
     expectReload()
   })
 
-  it('skips a reload this page asked to be skipped, once', async () => {
-    // The task panel writes with `suppressReload`, because a reload would tear
-    // down the open overlay for a view it has already refreshed itself.
+  it('skips every event a task write of its own produced', async () => {
+    // A task write patches the document itself and must not reload: the edit
+    // token lives only in memory, and an open task panel would be torn down.
     resetTaskToggleState()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
     globalThis.fetch = vi.fn().mockImplementation((url: string) =>
       String(url).startsWith('/.mbr/raw/')
         ? Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('- [ ] a\n') })
@@ -306,18 +307,22 @@ describe('MbrLiveReloadElement message handling', () => {
             json: () => Promise.resolve({ line: 1, text: '- [x] a' }),
           }),
     ) as unknown as typeof fetch
-    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' }, { suppressReload: true })
+    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' })
 
     await mount()
     latestSocket().emitOpen()
 
+    // One write announces itself several times — the handler broadcasts before
+    // it responds, then the watcher echoes the atomic rename (twice, on macOS,
+    // about 7ms later). Swallowing only the first would reload the page anyway.
+    await fileChanged('docs/guide.md')
+    await fileChanged('docs/guide.md')
     await fileChanged('docs/guide.md')
     expectNoReload()
 
-    // Only the one event is swallowed: the watcher's own later event for the
-    // same file is indistinguishable from somebody else's edit.
-    await fileChanged('docs/guide.md')
-    expectReload()
+    // A file this page did not write is somebody else's change, as ever.
+    await fileChanged('docs/other-note.md', 'modified')
+    expectNoReload() // ...not this page's document, so still nothing
     resetTaskToggleState()
   })
 

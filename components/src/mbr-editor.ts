@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { isEditEnabled } from './shared.js';
 import { isInputTarget, isModalOpen } from './mbr-keys.js';
+import { getEditToken, isEditTokenRequired, setEditToken } from './edit-token.js';
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -9,11 +10,28 @@ declare global {
   }
 }
 
-/** Type of the lazily-loaded editor chunk (erased at compile time). */
-type EditorModule = typeof import('./editor-crepe.js');
+/**
+ * The part of the lazily-loaded editor chunk this trigger uses (erased at
+ * compile time). Narrowed to the one export it calls, so a test can stand in
+ * for the chunk without reproducing the rest of the module.
+ */
+type EditorModule = Pick<typeof import('./editor-crepe.js'), 'openEditor'>;
 
 /** Runtime URL of the separately-built Crepe editor chunk (server mode only). */
 const EDITOR_CHUNK_URL = '/.mbr/components/mbr-editor.min.js';
+
+/**
+ * Import the editor chunk. Overridable seam so tests can stub the dynamic
+ * import — happy-dom cannot execute a runtime URL import — mirroring
+ * `setTasksChunkImporter` in `mbr-tasks.ts` and the graph seam in `mbr-info.ts`.
+ */
+let importEditorChunk: () => Promise<EditorModule> = () =>
+  import(/* @vite-ignore */ EDITOR_CHUNK_URL) as Promise<EditorModule>;
+
+/** Test hook: replace the chunk importer (module-level seam). */
+export function setEditorChunkImporter(importer: () => Promise<EditorModule>): void {
+  importEditorChunk = importer;
+}
 
 /**
  * Lightweight edit trigger: a pencil button (next to the info button) that,
@@ -76,11 +94,18 @@ export class MbrEditorElement extends LitElement {
     // download/parse can take a moment, so give instant feedback on click.
     this._loading = true;
     try {
-      const mod = (await import(/* @vite-ignore */ EDITOR_CHUNK_URL)) as EditorModule;
+      const mod = await importEditorChunk();
       await mod.openEditor({
         rawUrl,
         saveUrl,
         filePath: source,
+        // The chunk holds no token state of its own: it borrows what the page
+        // knows and hands back whatever the user types, so the single
+        // in-memory copy in `edit-token.ts` stays the only one. Nothing here
+        // reaches `localStorage` or `sessionStorage`.
+        token: getEditToken(),
+        tokenRequired: isEditTokenRequired(),
+        onToken: (token: string) => setEditToken(token),
         // Fired once the editor modal is on screen: hand off from our spinner.
         onReady: () => {
           this._isOpen = true;

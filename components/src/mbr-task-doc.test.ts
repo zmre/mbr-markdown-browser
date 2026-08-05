@@ -1,39 +1,58 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import './mbr-task-doc.js'
 import { flashTask, revealTaskFromHash, taskLineFromHash } from './mbr-task-doc.js'
-import { resetTaskToggleState } from './task-toggle.js'
+import { resetTaskToggleState, wasSelfWrite } from './task-toggle.js'
 
-/** Rendered markup for one open and one completed task, as `html.rs` emits it. */
+/**
+ * Rendered markup for one open and one completed task, as `html.rs` emits it.
+ *
+ * The first task carries a `@due(...)` chip so the completion chip added by a
+ * toggle has a neighbour to be ordered against; the second is already done and
+ * stamped, so reopening it has a chip to take away.
+ */
 const DOCUMENT = `
   <main id="wrapper">
     <ul>
       <li><input type="checkbox" class="mbr-task-check" id="mbr-task-3"
                  data-mbr-task-line="3" data-mbr-task-status="open" disabled>
-        <span class="mbr-task-text">write the report</span></li>
+        <span class="mbr-task-text">write the report</span> <time class="mbr-task-due" datetime="2026-08-05">Aug 5</time></li>
       <li><input type="checkbox" class="mbr-task-check" id="mbr-task-4"
                  data-mbr-task-line="4" data-mbr-task-status="done" checked disabled>
-        <span class="mbr-task-text">second</span></li>
+        <span class="mbr-task-text">second</span> <time class="mbr-task-completed" datetime="2026-08-01">Aug 1</time></li>
     </ul>
   </main>
 `
 
-const SOURCE = '# Notes\n\n- [ ] write the report !!\n- [x] second\n'
+const SOURCE =
+  '# Notes\n\n- [ ] write the report !! @due(2026-08-05)\n- [x] second @done(2026-08-01)\n'
+
+/** What the server writes back for each line it patches, keyed by line. */
+const PATCHED: Record<number, string> = {
+  3: '- [x] write the report !! @due(2026-08-05) @done(2026-08-04 22:16)',
+  4: '- [ ] second',
+}
 
 let fetchMock: ReturnType<typeof vi.fn>
 let alertMock: ReturnType<typeof vi.fn>
 
 /** Raw reads always succeed; `/.mbr/task` answers with `taskStatus`. */
 function routeFetch(taskStatus = 200) {
-  fetchMock.mockImplementation((url: string) => {
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
     if (String(url).startsWith('/.mbr/raw/')) {
       return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(SOURCE) })
     }
+    const line = (JSON.parse(String(init?.body ?? '{}')) as { line?: number }).line ?? 3
     return Promise.resolve({
       ok: taskStatus >= 200 && taskStatus < 300,
       status: taskStatus,
-      json: () => Promise.resolve({ line: 3, text: '- [x] write the report !!' }),
+      json: () => Promise.resolve({ line, text: PATCHED[line] ?? '' }),
     })
   })
+}
+
+/** The completion chip beside a task, if it has one. */
+function doneChip(line: number): Element | null {
+  return checkbox(line).parentElement!.querySelector('.mbr-task-completed')
 }
 
 /** Mount the element and let its `waitForDom()` promise settle. */
@@ -197,7 +216,7 @@ describe('in-document checkbox toggling', () => {
     expect(JSON.parse(taskCalls()[0][1].body as string)).toEqual({
       path: 'notes.md',
       line: 3,
-      expected: '- [ ] write the report !!',
+      expected: '- [ ] write the report !! @due(2026-08-05)',
       to: 'done',
     })
   })
@@ -209,6 +228,46 @@ describe('in-document checkbox toggling', () => {
     await flush()
 
     expect(JSON.parse(taskCalls()[0][1].body as string)).toMatchObject({ line: 4, to: 'open' })
+  })
+
+  it('draws the freshly stamped @done(...) instead of reloading for it', async () => {
+    element = await mount()
+
+    checkbox(3).click()
+    await flush()
+
+    // The page is not going to be re-rendered: this element has to produce the
+    // chip the reload used to, in the position `task_annotations_html` puts it.
+    const chip = doneChip(3)!
+    expect(chip.getAttribute('datetime')).toBe('2026-08-04T22:16')
+    expect(chip.textContent).toBe('Aug 4, 10:16 PM')
+    expect(chip.previousElementSibling!.className).toBe('mbr-task-due')
+
+    // ...and the reload it would otherwise trigger is suppressed, which is what
+    // keeps the in-memory edit token alive for the next click.
+    expect(wasSelfWrite('notes.md')).toBe(true)
+  })
+
+  it('takes the stamp away again when a task is reopened', async () => {
+    element = await mount()
+    expect(doneChip(4)).not.toBeNull()
+
+    checkbox(4).click()
+    await flush()
+
+    expect(checkbox(4).checked).toBe(false)
+    expect(doneChip(4)).toBeNull()
+  })
+
+  it('leaves the chips alone when the write is refused', async () => {
+    routeFetch(500)
+    element = await mount()
+
+    checkbox(3).click()
+    await flush()
+
+    expect(doneChip(3)).toBeNull()
+    expect(checkbox(3).dataset.mbrTaskStatus).toBe('open')
   })
 
   it('right click cancels and suppresses the browser context menu', async () => {

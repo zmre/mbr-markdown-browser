@@ -18,19 +18,23 @@
  * even though nothing there can produce one. The toggle half self-gates on
  * `isEditEnabled()`, which is false in a build.
  *
- * # Why the optimistic flip is so small
+ * # Why the page does not reload any more
  *
- * A successful write makes the server broadcast a file change, so
- * `<mbr-live-reload>` re-renders the page within a second and that render is
- * what shows a newly stamped `@done(...)` chip. The flip here exists to cover
- * the round trip, not to reproduce the renderer: it moves the box, the status
- * attribute and the strikethrough, and leaves the chips to the reload. On
- * failure no broadcast happens, no reload comes, and the flip is reverted.
+ * A successful write makes the server broadcast a file change, and this used to
+ * let `<mbr-live-reload>` re-render the page — the render being the only thing
+ * that could draw a newly stamped `@done(...)` chip. It no longer does: the
+ * edit token lives in memory for the life of the page (`edit-token.ts`), so a
+ * reload after every checkbox would 401 the next click on a token-protected
+ * server. The write suppresses its own reload and this element finishes the job
+ * instead — the optimistic flip covers the box, the status attribute and the
+ * strikethrough, and the response's source line redraws the chip. On failure no
+ * broadcast happens, and the flip is reverted.
  */
 import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { waitForDom } from './dynamic-loader.js'
 import { isEditEnabled } from './shared.js'
+import { syncDoneChip } from './task-chips.js'
 import {
   applyCheckboxStatus,
   checkboxStatus,
@@ -232,12 +236,14 @@ export class MbrTaskDocElement extends LitElement {
     this._inFlight.add(line)
     applyCheckboxStatus(input, to)
     try {
-      // No `suppressReload`: the reload this triggers is the authoritative
-      // re-render, and the only thing that can draw a new `@done(...)` chip.
       const outcome = await toggleTask({ path, line, to })
       if (!outcome.ok) {
         applyCheckboxStatus(input, previous)
         this._report(outcome.message)
+      } else if (outcome.text !== undefined) {
+        // The write suppressed its own reload, so this is where a newly
+        // stamped `@done(...)` appears — or disappears, on a reopen.
+        syncDoneChip(input, outcome.text)
       }
     } finally {
       this._inFlight.delete(line)

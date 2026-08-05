@@ -145,6 +145,12 @@ behind it. If the write is refused, it moves back and tells you why — most
 usefully when the line has changed on disk since the page was rendered, in which
 case nothing is written and the panel refreshes itself.
 
+The page does **not** reload for your own toggle. A `@done(...)` chip appears
+(or disappears) in place, your scroll position and the panel's filters survive,
+and on a server that requires an [edit
+token](../modes/editing/#entering-the-token) the token — which is kept in memory
+only — is still there for the next click.
+
 Only the marker byte and the `@done(...)` stamp are rewritten. Indentation,
 bullet style, spacing, your other annotations, the line's ending (a CRLF file
 stays CRLF) and the presence or absence of a trailing newline are all preserved.

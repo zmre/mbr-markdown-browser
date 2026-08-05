@@ -25,7 +25,6 @@ import { createLinkAutocompletePlugin, AUTOCOMPLETE_CSS } from './editor-link-au
 import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
 import { noteDir } from './editor-upload.js';
-import { getEditToken, setEditToken } from './edit-token.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
 
 export interface OpenEditorOptions {
@@ -35,21 +34,33 @@ export interface OpenEditorOptions {
   saveUrl: string;
   /** Human-readable file path shown in the header. */
   filePath: string;
+  /**
+   * The bearer token the page already knows, used to prefill the footer field.
+   *
+   * This chunk deliberately owns no token state of its own. The main bundle
+   * holds it in memory (`edit-token.ts`) so that a task checkbox — which is
+   * over there, behind the same `check_edit_access` policy — can use it, and so
+   * that nothing durable is written to web storage. The chunk cannot import
+   * that module (chunks must not import main-bundle state), so the value comes
+   * in here and goes back out through {@link onToken}.
+   */
+  token?: string;
+  /**
+   * Show the token field from the start.
+   *
+   * Normally the field stays hidden until there is a reason for it — a 401 on
+   * save, or a token already in hand. The main bundle sets this when a task
+   * write has already been refused for want of one, so that "open the editor
+   * and enter it" leads somewhere.
+   */
+  tokenRequired?: boolean;
+  /** Hand a token the user typed back to the main bundle (memory only). */
+  onToken?: (token: string) => void;
   /** Called as soon as the editor modal is visible (hides the trigger spinner). */
   onReady?: () => void;
   /** Called when the modal is dismissed so the trigger can reset its state. */
   onClose: () => void;
 }
-
-/**
- * Bearer token for this tab.
- *
- * Held in `sessionStorage` rather than only in this variable, because the
- * editor is its own bundle: a task checkbox in the main bundle needs the same
- * token to reach the same `check_edit_access` policy, and a module-level
- * variable here is invisible over there. See `edit-token.ts`.
- */
-let sessionToken = getEditToken();
 
 let stylesInjected = false;
 
@@ -277,6 +288,10 @@ function insertFootnote(ctx: Ctx): void {
 export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   injectStyles();
 
+  // Bearer token for this editor session. Seeded from the page and published
+  // straight back to it on every keystroke; never persisted here or anywhere.
+  let sessionToken = opts.token ?? '';
+
   const backdrop = document.createElement('div');
   backdrop.className = 'mbr-editor-backdrop';
   const modal = document.createElement('div');
@@ -437,6 +452,13 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   tokenInput.placeholder = 'Edit token';
   tokenInput.value = sessionToken;
   tokenInput.autocomplete = 'off';
+  // Publish as the user types, rather than only on save. Uploads, New, Rename
+  // and Move all read `sessionToken` through `authHeaders`, and a token typed
+  // for one of those used not to be picked up until a save happened to run.
+  tokenInput.addEventListener('input', () => {
+    sessionToken = tokenInput.value.trim();
+    opts.onToken?.(sessionToken);
+  });
   // Insert-footnote helper. Lives in the footer chrome we fully control (rather
   // than a slash-menu item) so the insert never has to reconcile with Crepe's
   // typed `/query` range. ProseMirror keeps the last selection even when focus
@@ -557,9 +579,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
 
   const doSave = async (): Promise<boolean> => {
     if (!crepe) return false;
+    // Belt and braces alongside the `input` listener: a value set some way that
+    // fires no input event still reaches the request and the main bundle.
     sessionToken = tokenInput.value.trim();
-    // Share it with the main bundle (task toggles) and with the next page load.
-    setEditToken(sessionToken);
+    opts.onToken?.(sessionToken);
     const content = currentContent();
     saveBtn.setAttribute('aria-busy', 'true');
     setStatus('Saving…');
@@ -766,8 +789,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       save.focus();
     });
 
-  // If we already know a token is needed (revealed on a prior 401), keep it shown.
-  if (sessionToken) tokenInput.classList.add('show');
+  // Show the field when a token is already in hand, or when the page has had a
+  // write refused for want of one — the token lives only as long as the page,
+  // so on a token-protected server the second case is the usual one.
+  if (sessionToken || opts.tokenRequired) tokenInput.classList.add('show');
 }
 
 function describeError(status: number, phase: 'load' | 'save'): string {
