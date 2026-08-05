@@ -2150,8 +2150,9 @@ async fn test_components_js_bundle_served() {
 
 #[tokio::test]
 async fn test_graph_chunks_served() {
-    // The lazy-loaded mini-graph and genealogy chunks are compiled into the
-    // binary (DEFAULT_FILES) and must be served alongside the main bundle.
+    // The lazy-loaded mini-graph, genealogy and task-panel chunks are compiled
+    // into the binary (DEFAULT_FILES) and must be served alongside the main
+    // bundle.
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
@@ -2159,6 +2160,7 @@ async fn test_graph_chunks_served() {
     for path in [
         "/.mbr/components/mbr-graph.min.js",
         "/.mbr/components/mbr-genealogy.min.js",
+        "/.mbr/components/mbr-tasks.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -2215,11 +2217,15 @@ async fn test_components_js_bundle_no_missing_imports() {
         );
     }
 
-    // The mini-graph and genealogy chunks are lazy-loaded through
+    // The mini-graph, genealogy and task-panel chunks are lazy-loaded through
     // runtime-computed URLs (asset base + "components/<chunk>.min.js"), so
     // they never appear as literal import() targets. If the bundle references
-    // either chunk filename, that chunk must actually be served.
-    for chunk in ["mbr-graph.min.js", "mbr-genealogy.min.js"] {
+    // any of those chunk filenames, that chunk must actually be served.
+    for chunk in [
+        "mbr-graph.min.js",
+        "mbr-genealogy.min.js",
+        "mbr-tasks.min.js",
+    ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");
             let resp = server.get(&path).await;
@@ -7018,6 +7024,7 @@ async fn test_tasks_endpoint_returns_grouped_incomplete_tasks_by_default() {
     assert_eq!(report["priority"], "high");
     assert_eq!(report["tags"][0], "work");
     assert_eq!(report["url_path"], "/inbox/");
+    assert_eq!(report["path"], "inbox.md");
     assert_eq!(report["line"], 3);
 
     assert_eq!(body["total_matches"], 4);
@@ -7498,6 +7505,45 @@ async fn test_task_toggle_is_reflected_by_the_task_index() {
     );
     assert_eq!(all["groups"][0]["done"], 1);
     assert_eq!(all["groups"][0]["total"], 2);
+}
+
+#[tokio::test]
+async fn test_task_query_path_round_trips_into_a_toggle() {
+    // `docs/index.md` is served at `/docs/`, so a client that rebuilt the file
+    // path out of `url_path` would send `docs.md` and get a 404. This is the
+    // pairing that makes `TaskHit::path` worth putting on the wire.
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("docs/index.md", "- [ ] indexed task\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+    let hit = &body["groups"][0]["tasks"][0];
+    assert_eq!(hit["url_path"], "/docs/", "the URL hides the file name");
+    assert_eq!(hit["path"], "docs/index.md");
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": hit["path"],
+            "line": hit["line"],
+            "expected": "- [ ] indexed task",
+            "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the path a query reports must be the one the toggle accepts"
+    );
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .starts_with("- [x] indexed task"),
+        "the toggle should have landed on the indexed file"
+    );
 }
 
 #[tokio::test]

@@ -25,6 +25,7 @@ import { createLinkAutocompletePlugin, AUTOCOMPLETE_CSS } from './editor-link-au
 import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
 import { noteDir } from './editor-upload.js';
+import { getEditToken, setEditToken } from './edit-token.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
 
 export interface OpenEditorOptions {
@@ -40,8 +41,15 @@ export interface OpenEditorOptions {
   onClose: () => void;
 }
 
-/** In-memory (never persisted) bearer token for this page session. */
-let sessionToken = '';
+/**
+ * Bearer token for this tab.
+ *
+ * Held in `sessionStorage` rather than only in this variable, because the
+ * editor is its own bundle: a task checkbox in the main bundle needs the same
+ * token to reach the same `check_edit_access` policy, and a module-level
+ * variable here is invisible over there. See `edit-token.ts`.
+ */
+let sessionToken = getEditToken();
 
 let stylesInjected = false;
 
@@ -550,6 +558,8 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   const doSave = async (): Promise<boolean> => {
     if (!crepe) return false;
     sessionToken = tokenInput.value.trim();
+    // Share it with the main bundle (task toggles) and with the next page load.
+    setEditToken(sessionToken);
     const content = currentContent();
     saveBtn.setAttribute('aria-busy', 'true');
     setStatus('Saving…');

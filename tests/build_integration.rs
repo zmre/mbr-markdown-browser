@@ -1743,6 +1743,35 @@ async fn test_build_writes_graph_chunks() {
 }
 
 #[tokio::test]
+async fn test_build_omits_the_tasks_chunk_and_the_tasks_trigger() {
+    // Tasks are held out of static builds entirely (TASKS_SPEC.md
+    // "Applicability"): the index is built by reading live files and
+    // `POST /.mbr/tasks` only exists in server/GUI mode. The generic
+    // DEFAULT_FILES loop would otherwise ship the chunk into every generated
+    // site as an unreachable payload.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\n- [ ] a task\n");
+
+    let output = build_site(&repo).await;
+
+    let chunk = output
+        .join(".mbr")
+        .join("components")
+        .join("mbr-tasks.min.js");
+    assert!(
+        !chunk.exists(),
+        "the tasks chunk must not be written to a static build: {}",
+        chunk.display()
+    );
+
+    let html = fs::read_to_string(output.join("test").join("index.html")).expect("test index.html");
+    assert!(
+        !html.contains("<mbr-tasks"),
+        "a built page must not carry the tasks trigger: {html}"
+    );
+}
+
+#[tokio::test]
 async fn test_build_body_wikilink_resolves_globally() {
     let repo = TestRepo::new();
     // Target file in one folder; referencing page in a *different* folder.

@@ -107,8 +107,10 @@ destination; otherwise a missing parent is rejected with `400`.
 
 ### Task toggling
 
-With editing on, task checkboxes become clickable and flipping one patches the
-single line it came from:
+With editing on, task checkboxes become clickable: a **left click** completes or
+reopens a task and a **right click** cancels it, both in a rendered page and in
+the [task browser](../markdown/tasks/#toggling-a-task) (where `Space` and `x` do
+the same from the keyboard). Flipping one patches the single line it came from:
 
 | Endpoint | Body | Purpose |
 |----------|------|---------|

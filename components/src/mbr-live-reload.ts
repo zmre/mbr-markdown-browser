@@ -1,5 +1,6 @@
 import { LitElement, css, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { wasSelfWrite } from './task-toggle.js';
 
 interface FileChangeEvent {
   path: string;
@@ -220,6 +221,15 @@ export class MbrLiveReloadElement extends LitElement {
     console.log('[mbr-live-reload] File changed:', event);
 
     const changedPath = event.relative_path;
+
+    // A change this page made and asked not to be reloaded for. Today that is
+    // only the task panel, whose overlay a reload would tear down for a view it
+    // has already refreshed by re-querying. See `task-toggle.ts`.
+    if (wasSelfWrite(changedPath)) {
+      console.log('[mbr-live-reload] Skipping reload for our own write:', changedPath);
+      return;
+    }
+
     const shouldReload = this._shouldReloadForFile(changedPath);
 
     if (shouldReload) {

@@ -208,7 +208,9 @@ mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 ### Task Settings
 
 The task browser finds every markdown task (`- [ ]`, `- [x]`, `- [-]`, `- [>]`)
-in the repository and lets you filter and group them. It is **server/GUI only**:
+in the repository and lets you filter and group them — see
+[Task Browser](../markdown/tasks/) for the user guide and
+[Markdown Extensions](../markdown/#tasks) for the syntax. It is **server/GUI only**:
 the index is built by reading live files, so static builds never expose it —
 `tasks_enabled` has no effect on `mbr -b`, and built pages always report
 `tasksEnabled: false` to the frontend.

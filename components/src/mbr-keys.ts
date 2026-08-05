@@ -182,6 +182,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: '=', description: 'Open media browser' },
       { keys: '- or F2', description: 'Open file browser' },
       { keys: 'Ctrl+g', description: 'Toggle info panel' },
+      { keys: 't', description: 'Open task browser (server/GUI only)' },
       { keys: 'e', description: 'Open editor (when editing enabled)' },
       { keys: 'Esc', description: 'Close panel' },
     ],
@@ -226,6 +227,19 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'l or Enter', description: 'Expand / open' },
       { keys: 'o or ⌘+Enter / Ctrl+Enter', description: 'Open in new tab' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll panel' },
+    ],
+  },
+  {
+    title: 'Task Browser (when open)',
+    shortcuts: [
+      { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate tasks' },
+      { keys: '↑ / ↓', description: 'Navigate tasks' },
+      { keys: '← / →', description: 'Collapse / expand group (empty filter)' },
+      { keys: 'Enter', description: 'Open task / toggle group' },
+      { keys: 'Space', description: 'Complete / reopen focused task (editing on)' },
+      { keys: 'x', description: 'Cancel / reopen focused task (editing on)' },
+      { keys: 'Tab', description: 'Switch pane' },
+      { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll active pane' },
     ],
   },
   {

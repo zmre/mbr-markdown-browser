@@ -7,6 +7,12 @@
   * [ ] Display the person `image` everywhere a person surfaces (infobox done; consider graph nodes and link/hover previews).
   * [ ] Edit the person `image` from edit mode — pick/replace the portrait. If the in-browser editor can't upload images yet, add image/photo upload to the editor and wire it to the `image` field.
 
+* **Tasks** (see [docs](docs/markdown/tasks.md))
+  * [ ] Scan for `TODO:` / `FIXME:` style markers in source files as well as markdown checkboxes, driven by a configurable list of regexes. Deferred from TASKS_SPEC.md's opening paragraph; needs a decision on what "a task" means when there is no checkbox to toggle.
+  * [ ] An edit-token prompt that is not the editor. `POST /.mbr/task` needs the same bearer token as `/.mbr/edit`, and the only place to enter one is the editor's footer — so on a token-protected server the first checkbox click fails and tells the user to open the editor first. A small prompt on the 401, sharing `edit-token.ts`, would close the loop.
+  * [ ] Annotation chips in the document go stale after a panel-driven toggle. The panel suppresses its own live reload (it would close the overlay), so `syncDocumentTask` patches the checkbox and the strikethrough but a freshly stamped `@done(...)` chip does not appear until the page next renders. Either render the chip client-side from the response's `text`, or reload on panel close if something was suppressed.
+  * [ ] Editing a task's *text* (not just its status) still means opening the file. A single-line inline edit in the panel would cover most of what the editor is used for on a daily note.
+
 * [ ] Can we allow cmd-f (ctrl-f elsewhere except that's page down so...) to do in-page search in gui? works fine already in browser so this should be part of the gui shell probably, not in-page javascript.
 * [ ] Should we allow tabs for viewing multiple markdown files in one session (gui)?
 * [ ] CriticMarkup support?

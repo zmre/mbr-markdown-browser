@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && vite build --config vite.editor.config.ts && vite build --config vite.graph.config.ts && vite build --config vite.genealogy.config.ts",
+    "build": "tsc && vite build && vite build --config vite.editor.config.ts && vite build --config vite.graph.config.ts && vite build --config vite.genealogy.config.ts && vite build --config vite.tasks.config.ts",
     "watch": "tsc && vite build --watch",
     "preview": "vite preview",
     "test": "vitest run",

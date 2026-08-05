@@ -272,7 +272,10 @@ pub fn normalize_folder(folder: Option<&str>) -> Option<String> {
     Some(format!("/{trimmed}/"))
 }
 
-/// One task in a response: every [`Task`] field, plus the page it lives on.
+/// One task in a response: every [`Task`] field, plus where it lives.
+///
+/// Two locations, deliberately, because they answer different questions:
+/// `url_path` is where a reader goes, `path` is what a writer patches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TaskHit {
     /// The task itself, flattened so `line`, `status`, `text` … are top-level.
@@ -280,6 +283,16 @@ pub struct TaskHit {
     pub task: Task,
     /// URL of the page containing the task.
     pub url_path: String,
+    /// Source path **relative to the repository root**, extension included and
+    /// always `/`-separated — exactly what `POST /.mbr/task` wants as `path`.
+    ///
+    /// Sent rather than left to the client to reconstruct, because `url_path`
+    /// does not determine it: an index file's URL *is* its folder
+    /// (`docs/index.md` → `/docs/`), the static-folder overlay hides a whole
+    /// directory level, and the extension is dropped. Any string surgery that
+    /// recovered the file for one repository would silently patch the wrong
+    /// one — or nothing — in another.
+    pub path: String,
 }
 
 /// One heading in the results list, with its tasks and progress numbers.
@@ -440,6 +453,8 @@ fn group_by_file(files: &[&Arc<FileTasks>], filters: &Filters) -> Vec<TaskGroup>
     let mut groups: Vec<TaskGroup> = files
         .iter()
         .filter_map(|file| {
+            // Built once per file, not once per hit: `path_to_url` allocates.
+            let path = crate::url_path::path_to_url(&file.raw_path);
             let mut tasks: Vec<TaskHit> = file
                 .tasks
                 .iter()
@@ -447,6 +462,7 @@ fn group_by_file(files: &[&Arc<FileTasks>], filters: &Filters) -> Vec<TaskGroup>
                 .map(|task| TaskHit {
                     task: task.clone(),
                     url_path: file.url_path.clone(),
+                    path: path.clone(),
                 })
                 .collect();
             if tasks.is_empty() {
@@ -485,6 +501,9 @@ fn group_by_due(files: &[&Arc<FileTasks>], filters: &Filters) -> Vec<TaskGroup> 
     let mut buckets: BTreeMap<DueBucket, BucketAccumulator> = BTreeMap::new();
 
     for file in files {
+        // Hoisted out of the task loop for the same reason as in
+        // `group_by_file`: one allocation per file rather than one per hit.
+        let path = crate::url_path::path_to_url(&file.raw_path);
         for task in &file.tasks {
             if !filters.admissible(task) || !filters.matches_except_status(task) {
                 continue;
@@ -501,6 +520,7 @@ fn group_by_due(files: &[&Arc<FileTasks>], filters: &Filters) -> Vec<TaskGroup> 
                 entry.tasks.push(TaskHit {
                     task: task.clone(),
                     url_path: file.url_path.clone(),
+                    path: path.clone(),
                 });
             }
         }
@@ -1362,12 +1382,63 @@ mod tests {
         let hit = &json["groups"][0]["tasks"][0];
 
         assert_eq!(hit["url_path"], "/notes/");
+        assert_eq!(hit["path"], "notes.md");
         assert_eq!(hit["line"], 1);
         assert_eq!(hit["status"], "open");
         assert_eq!(hit["priority"], "urgent");
         assert_eq!(hit["text"], "ship it");
         assert_eq!(hit["tags"][0], "work");
         assert_eq!(hit["due"], "2026-08-05T00:00:00");
+    }
+
+    #[test]
+    fn a_hit_carries_the_source_path_that_the_page_url_cannot_reproduce() {
+        // Two files whose URLs are indistinguishable from a folder: only
+        // `path` says which file `POST /.mbr/task` must open.
+        let files = vec![
+            file("/docs/", "docs/index.md", None, "- [ ] from the index\n"),
+            file(
+                "/docs/guide/",
+                "docs/guide.md",
+                None,
+                "- [ ] from the guide\n",
+            ),
+        ];
+        let response = run_query(&files, &query(), today());
+
+        let located: Vec<(&str, &str)> = response
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.tasks
+                    .iter()
+                    .map(|t| (t.url_path.as_str(), t.path.as_str()))
+            })
+            .collect();
+        assert_eq!(
+            located,
+            vec![
+                ("/docs/", "docs/index.md"),
+                ("/docs/guide/", "docs/guide.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn calendar_hits_carry_the_source_path_too() {
+        let files = vec![file(
+            "/docs/",
+            "docs/index.md",
+            None,
+            "- [ ] due today @due(2026-08-04)\n",
+        )];
+        let q = TaskQuery {
+            mode: TaskMode::Calendar,
+            ..query()
+        };
+        let response = run_query(&files, &q, today());
+
+        assert_eq!(response.groups[0].tasks[0].path, "docs/index.md");
     }
 
     #[test]

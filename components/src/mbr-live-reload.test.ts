@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-live-reload.ts'
 import type { MbrLiveReloadElement } from './mbr-live-reload.ts'
+import { resetTaskToggleState, toggleTask } from './task-toggle.ts'
 
 /**
  * Tests for <mbr-live-reload>, the server-mode element that watches
@@ -290,6 +291,34 @@ describe('MbrLiveReloadElement message handling', () => {
     await fileChanged('docs/guide.md')
 
     expectReload()
+  })
+
+  it('skips a reload this page asked to be skipped, once', async () => {
+    // The task panel writes with `suppressReload`, because a reload would tear
+    // down the open overlay for a view it has already refreshed itself.
+    resetTaskToggleState()
+    globalThis.fetch = vi.fn().mockImplementation((url: string) =>
+      String(url).startsWith('/.mbr/raw/')
+        ? Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('- [ ] a\n') })
+        : Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ line: 1, text: '- [x] a' }),
+          }),
+    ) as unknown as typeof fetch
+    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' }, { suppressReload: true })
+
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('docs/guide.md')
+    expectNoReload()
+
+    // Only the one event is swallowed: the watcher's own later event for the
+    // same file is indistinguishable from somebody else's edit.
+    await fileChanged('docs/guide.md')
+    expectReload()
+    resetTaskToggleState()
   })
 
   it('shows a notification before navigating away', async () => {

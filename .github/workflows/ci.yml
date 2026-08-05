@@ -75,6 +75,7 @@ jobs:
           test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
           test -f templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
           test -f templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
+          test -f templates/components-js/mbr-tasks.min.js || { echo "FATAL: mbr-tasks.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7

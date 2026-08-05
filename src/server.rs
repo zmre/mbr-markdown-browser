@@ -7034,6 +7034,13 @@ const CACHE_CONTROL_NO_CACHE: &str = "no-cache";
 /// Standard cache control header for truly dynamic content that shouldn't be cached.
 const CACHE_CONTROL_NO_STORE: &str = "no-store";
 
+/// [`DEFAULT_FILES`] route of the lazy task-browser chunk.
+///
+/// Named because `build.rs` has to skip exactly this entry: the task browser is
+/// server/GUI only (the index is built from live files), so shipping the chunk
+/// into a static site would be dead weight behind a button that cannot exist.
+pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
+
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/favicon.png",
@@ -7078,6 +7085,14 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         // <mbr-genealogy> on `type: person` pages only.
         "/components/mbr-genealogy.min.js",
         include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Task-browser panel chunk, lazy-loaded by <mbr-tasks> the first time
+        // the panel is opened. Deliberately excluded from static builds — see
+        // `TASKS_CHUNK_ROUTE` in build.rs.
+        TASKS_CHUNK_ROUTE,
+        include_bytes!("../templates/components-js/mbr-tasks.min.js"),
         "application/javascript",
     ),
     (

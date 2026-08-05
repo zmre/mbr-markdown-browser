@@ -277,12 +277,39 @@ Mirrors `mbr-search` / `mbr-fuzzy-nav` so it feels like the rest of the app.
 resolves that hash on load, scrolls the line into view and flashes a highlight (reusing
 `scrollRangeIntoView`'s inset math from `find-in-page.ts`).
 
+**As built:** `mbr-task-doc.ts`, emitted from `_display_enhancements.html`. Runs in
+static builds too — `task_checkbox_html` emits the `id` in every mode, so a bookmarked
+deep link works on a built site.
+
 ### 3.5 In-document checkbox interaction
 
 Only when `editEnabled`: a delegated listener on `main#wrapper` turns clicks on
 `.mbr-task-check` into a `POST /.mbr/task`, and `contextmenu` into a cancel. Optimistic
 UI update, revert + toast on 409. The line's current text is read back from
 `/.mbr/raw` lazily on first interaction to fill `expected`.
+
+**As built (phase 9), and where it diverged:**
+
+- `POST /.mbr/task` needs a *filesystem* path, which `url_path` cannot reproduce
+  (`docs/index.md` → `/docs/`, static-folder overlay, no extension). `TaskHit` gained a
+  `path` field rather than the client doing string surgery.
+- `expected` is sourced from `/.mbr/raw`, cached per file for the page's lifetime,
+  refreshed in place from each successful write's response text, and dropped on a 409.
+- **Live reload vs. optimistic update.** A write broadcasts a file change, so
+  `<mbr-live-reload>` reloads. For an in-document click that reload is *wanted* — it is
+  the only thing that draws a newly stamped `@done(...)` chip — so the optimistic flip
+  is deliberately minimal: box, status attribute, strikethrough, nothing else. For a
+  panel toggle the reload would tear down the open overlay for a view the panel has
+  already refreshed by re-querying, so the panel's writes register themselves via
+  `wasSelfWrite()` and live-reload skips exactly that one event; `syncDocumentTask`
+  then patches the page behind the panel so it is not left stale.
+- No toast component: an in-document failure uses `window.alert` (it only fires on a
+  refused write, which locally means a real misconfiguration), and the panel shows a
+  dismissible notice strip above its results.
+- The optimistic flip in the *document* does not `preventDefault()` the click. Cancelling
+  a checkbox's click restores its pre-click state after the listener returns, which
+  silently undid the flip. The panel's card can and does cancel it, because there
+  `checked` is a Lit property binding that is re-committed on the next render.
 
 ---
 
@@ -302,22 +329,32 @@ Each phase ends green on `cargo fmt`, `cargo clippy --all-targets -- -D warnings
 | 6 | Trigger + chunk plumbing | `mbr-tasks.ts`, vite config, `DEFAULT_FILES`, CI guard, nav icon, `t` key |
 | 7 | Panel UI | Two-pane layout, category mode, cards, collapse, keyboard nav |
 | 8 | Calendar mode | Date bucketing, per-bucket progress, mode tabs |
-| 9 | Toggling + jump-to | Space/x/click toggling, hash jump + flash, optimistic UI |
-| 10| Docs + polish | `cli.md`, `configuration.md`, `keyboard-shortcuts.md`, `docs/markdown/index.md`, TODO.md |
+| 9 | Toggling + jump-to | Space/x/click toggling, hash jump + flash, optimistic UI ✅ |
+| 10| Docs + polish | `configuration.md`, `keyboard-shortcuts.md`, `docs/markdown/index.md`, `docs/markdown/tasks.md`, `editing.md`, TODO.md ✅ |
 
 Phases 1-5 are Rust and can land as one PR; 6-9 are frontend and can land as a second.
 
+`cli.md` needed nothing in phase 10: `--no-tasks` is the feature's only flag and it
+landed with phase 5. Phase 9 did add one Rust change — `TaskHit::path` (§3.5).
+
 ## 5. Registration checklist (easy to miss)
 
-- [ ] `components/vite.tasks.config.ts` + `package.json` build chain
-- [ ] `components/src/main.js` exports the **trigger**, never the chunk
-- [ ] `src/server.rs` `DEFAULT_FILES` `include_bytes!` entry
-- [ ] `src/build.rs` skips the tasks chunk in static output (spec: no tasks in builds)
-- [ ] `.github/workflows/ci.yml` `test -f templates/components-js/mbr-tasks.min.js` guard
-- [ ] `components/src/overlay.ts` `OVERLAY_TAGS`
-- [ ] `components/src/mbr-keys.ts` `SHORTCUTS` table
-- [ ] `components/src/shared.ts` `__MBR_CONFIG__` type + accessor
-- [ ] `CLAUDE.md` module table + bundle table
+- [x] `components/vite.tasks.config.ts` + `package.json` build chain
+- [x] `components/src/main.js` exports the **trigger**, never the chunk
+- [x] `src/server.rs` `DEFAULT_FILES` `include_bytes!` entry (`TASKS_CHUNK_ROUTE`)
+- [x] `src/build.rs` skips the tasks chunk in static output (spec: no tasks in builds)
+- [x] `.github/workflows/ci.yml` `test -f templates/components-js/mbr-tasks.min.js` guard
+- [x] `components/src/overlay.ts` `OVERLAY_TAGS` (+ `OVERLAY_CASES` in `mbr-keys.test.ts`)
+- [x] `components/src/mbr-keys.ts` `SHORTCUTS` table
+- [x] `components/src/shared.ts` `__MBR_CONFIG__` type + accessor (phase 3)
+- [x] `templates/_nav.html` `{% if server_mode and tasks_enabled %}`
+- [x] `docs/reference/keyboard-shortcuts.md` (incl. `Space` / `x`, phase 10)
+- [x] `CLAUDE.md` module table + bundle table
+- [x] `templates/_display_enhancements.html` `<mbr-task-doc>` (phase 9)
+- [x] `components/src/main.js` exports `mbr-task-doc` (phase 9)
+- [x] `templates/theme.css` `--mbr-task-flash-color` + `.mbr-task-editable` (phase 9)
+- [x] `docs/markdown/tasks.md` + links from `docs/index.md`, `markdown/index.md`,
+      `configuration.md`, `editing.md` (phase 10)
 
 ## 6. Risks
 
