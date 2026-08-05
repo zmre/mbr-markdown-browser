@@ -1,0 +1,42 @@
+<section>
+<ul>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+this is a task due tomorrow @due(2026-08-05)</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="done" checked disabled>
+this task was done yesterday @done(2026-08-04 12:11 PM)</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+this task is urgent !!! #hotlist #work @due(2026-08-04 03:00 PM)</li>
+<li>[-] this task was canceled</li>
+<li>[&gt;] This task was moved to a specific date &gt; 2026-08-04</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+fix <strong>this</strong> and <code>that</code> !! #bug</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+carried over &lt; 2026-08-01</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+parent task
+<ul>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+broken down subtask 1 @due(2026-09-01)</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="done" checked disabled>
+broken down subtask 2</li>
+</ul>
+</li>
+</ul>
+<p>Loose list:</p>
+<ul>
+<li>
+<p><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled>
+loose one #tag @due(2027-01-02 09:05)</p>
+<p>a second paragraph, which is not part of the task line</p>
+</li>
+<li>
+<p><input type="checkbox" class="mbr-task-check" data-mbr-task-status="done" checked disabled>
+loose two</p>
+</li>
+</ul>
+<p>Not tasks:</p>
+<pre><code class="language-markdown">- [-] fenced code is not a task
+- [ ] neither is this @due(2026-08-05)
+</code></pre>
+<p>[-] a bare bracket in a paragraph is not a task either</p>
+</section>

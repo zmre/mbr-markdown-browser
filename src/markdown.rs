@@ -5,12 +5,13 @@ use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
+use crate::tasks::{self, TaskStatus};
 use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use crate::wikilink_index::WikilinkIndex;
 use pulldown_cmark::{
     BlockQuoteKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind, Options,
-    Parser as MDParser, Tag, TagEnd, TextMergeStream,
+    Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
 };
 use regex::Regex;
 use std::{
@@ -119,7 +120,11 @@ pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
     })?;
     strip_bom_in_place(&mut markdown_input);
 
-    let (events, headings, _section_attrs) = collect_events_and_headings(&markdown_input);
+    // Task markup is skipped: this entry point returns an event stream for
+    // callers to render themselves, and only reads the events here for
+    // headings, frontmatter and word counts.
+    let (events, headings, _section_attrs) =
+        collect_events_and_headings(&markdown_input, TaskMarkup::Skip);
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
     // Single pass: extract frontmatter and count words
@@ -449,24 +454,188 @@ fn transform_rule_attrs(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, HashMap<usiz
     (result, section_attrs)
 }
 
-/// Merged pass 1: parse markdown, extract headings with anchor IDs, and detect
-/// `--- {attrs}` rule patterns -- all in a single iteration over the parser output.
+/// Byte offset → 1-based line number lookups over a markdown source.
+///
+/// Built once per document and only when the document actually contains a task
+/// checkbox, so prose-only pages — the overwhelming majority — never pay for
+/// the scan. Lookups binary-search rather than counting newlines per marker,
+/// which keeps a document of a thousand tasks from becoming quadratic.
+struct LineIndex {
+    /// Byte offset of every `\n`, ascending.
+    newlines: Vec<usize>,
+}
+
+/// Bytes per line assumed when sizing a [`LineIndex`]. Markdown is prose, so
+/// this is a close enough guess that the vector rarely has to grow.
+const ASSUMED_LINE_BYTES: usize = 32;
+
+/// Ceiling on that guess, so a file that is one enormous line (a minified blob
+/// with a `.md` extension, say) cannot reserve megabytes it will never use.
+const MAX_RESERVED_LINES: usize = 1 << 16;
+
+impl LineIndex {
+    fn build(source: &str) -> Self {
+        // `match_indices` over a `char` pattern takes the standard library's
+        // vectorised byte search, which measured ~5x faster than the obvious
+        // `bytes().enumerate().filter(..)` loop (32.5us against 6.4us on a
+        // 60 kB document) -- and that loop was, before this, the single largest
+        // cost of task rendering on a large page.
+        let mut newlines =
+            Vec::with_capacity((source.len() / ASSUMED_LINE_BYTES).min(MAX_RESERVED_LINES));
+        newlines.extend(source.match_indices('\n').map(|(offset, _)| offset));
+        Self { newlines }
+    }
+
+    /// The 1-based line containing byte `offset`.
+    fn line_of(&self, offset: usize) -> u32 {
+        // `partition_point` counts the newlines strictly before `offset`, which
+        // is the number of complete lines preceding it.
+        let preceding = self.newlines.partition_point(|&newline| newline < offset);
+        u32::try_from(preceding + 1).unwrap_or(u32::MAX)
+    }
+}
+
+/// Whether [`collect_events_and_headings`] should also rewrite task list items
+/// into mbr's checkbox-and-chips markup.
+///
+/// [`TaskMarkup::Skip`] exists for the callers that only want the event stream:
+/// the repository-wide backlink scan runs over every markdown file in the
+/// repository, and running the annotation grammar over every task line of every
+/// one of them buys it nothing — it collects link destinations, which this
+/// rewrite never touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskMarkup {
+    Render,
+    Skip,
+}
+
+/// Decodes a task checkbox from `event`, or `None` if it is not one.
+///
+/// `at_item_start` must be true only when `event` is the first inline event of
+/// a list item. That is the sole position where the non-standard `[-]` and
+/// `[>]` markers are recognised, and gating on it is also what keeps a `[-]`
+/// written inside a fenced code block, a heading, or ordinary prose from
+/// turning into a checkbox — none of those is a list item's first inline event.
+fn task_marker_status(event: &Event<'_>, at_item_start: bool) -> Option<TaskStatus> {
+    match event {
+        // pulldown-cmark recognises `[ ]` and `[x]` natively.
+        Event::TaskListMarker(true) => Some(TaskStatus::Done),
+        Event::TaskListMarker(false) => Some(TaskStatus::Open),
+        Event::Text(text) if at_item_start => split_extended_marker(text).map(|(status, _)| status),
+        _ => None,
+    }
+}
+
+/// Splits mbr's `[-]` (canceled) or `[>]` (moved elsewhere) marker off the
+/// front of a list item's first text run, returning the status and the text
+/// that follows it.
+///
+/// pulldown-cmark only understands `[ ]` and `[x]`, so these two reach the
+/// renderer as ordinary text and mbr has to pick them out itself. The marker
+/// must be followed by whitespace or end the run, matching the grammar in
+/// [`crate::tasks`], so `[-]x` is not a checkbox.
+fn split_extended_marker(text: &str) -> Option<(TaskStatus, &str)> {
+    let rest = text
+        .strip_prefix("[-]")
+        .or_else(|| text.strip_prefix("[>]"))?;
+    match rest.as_bytes().first() {
+        None => Some((TaskStatus::Canceled, rest)),
+        // One ASCII byte, so the split is always on a char boundary.
+        Some(b' ' | b'\t') => Some((TaskStatus::Canceled, &rest[1..])),
+        Some(_) => None,
+    }
+}
+
+/// True for events that belong to a block's inline content.
+///
+/// A task's text span closes at the first event that is not one of these — a
+/// nested `Start(List)`, the item's `End(Paragraph)`, or its `End(Item)` — so
+/// the annotation chips land at the end of the task's own line rather than
+/// after its subtasks.
+fn is_inline_event(event: &Event<'_>) -> bool {
+    match event {
+        Event::Text(_)
+        | Event::Code(_)
+        | Event::InlineMath(_)
+        | Event::DisplayMath(_)
+        | Event::InlineHtml(_)
+        | Event::FootnoteReference(_)
+        | Event::SoftBreak
+        | Event::HardBreak
+        | Event::TaskListMarker(_) => true,
+        Event::Start(tag) => matches!(
+            tag,
+            Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Superscript
+                | Tag::Subscript
+                | Tag::Link { .. }
+                | Tag::Image { .. }
+        ),
+        Event::End(tag) => matches!(
+            tag,
+            TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Superscript
+                | TagEnd::Subscript
+                | TagEnd::Link
+                | TagEnd::Image
+        ),
+        // `Event::Html` is a raw *block*, `Event::Rule` a thematic break.
+        _ => false,
+    }
+}
+
+/// Merged pass 1: parse markdown, extract headings with anchor IDs, detect
+/// `--- {attrs}` rule patterns, and rewrite task list items -- all in a single
+/// iteration over the parser output.
 ///
 /// Returns (events, headings, section_attrs).
 ///
-/// This merges what was previously two separate passes (heading extraction loop +
+/// This merges what were previously separate passes (heading extraction loop +
 /// `transform_rule_attrs`) into one. The rule-attrs detection uses a 3-element
 /// look-back buffer: when we encounter `End(Paragraph)`, we check if the preceding
 /// two events form the `Start(Paragraph), Text("em-dash + attrs")` pattern.
+///
+/// Task rewriting is folded in here rather than run as its own pass for two
+/// reasons. The source line each checkbox came from is only knowable from the
+/// parser's byte ranges, which exist nowhere else; and a separate pass would
+/// have to allocate and move a second copy of the whole event vector, which
+/// measured as most of the cost of the feature on a task-heavy document.
+/// Everything else discards its range immediately.
+///
+/// # Task output shape
+///
+/// For `- [ ] fix **this** !! #bug @due(2026-08-05)` on line 1:
+///
+/// ```html
+/// <li><input type="checkbox" class="mbr-task-check" id="mbr-task-1"
+///            data-mbr-task-line="1" data-mbr-task-status="open" disabled>
+/// <span class="mbr-task-text">fix <strong>this</strong></span>
+/// <span class="mbr-task-pri mbr-task-pri-high" …></span>
+/// <span class="mbr-task-tag">#bug</span>
+/// <time class="mbr-task-due" datetime="2026-08-05">Aug 5</time></li>
+/// ```
+///
+/// # Caveat: offsets are into the transformed source
+///
+/// The ranges index `markdown_input`, which is the wikilink-substituted source
+/// rather than the file on disk. Line numbers survive that substitution because
+/// `transform_wikilinks` only ever rewrites within a single line: a wikilink
+/// that spans a line break is not a wikilink (see `wikilink::push_transformed`),
+/// so no rewrite can add or remove a newline.
 fn collect_events_and_headings(
     markdown_input: &str,
+    task_markup: TaskMarkup,
 ) -> (
     Vec<Event<'_>>,
     Vec<HeadingInfo>,
     HashMap<usize, ParsedAttrs>,
 ) {
-    let parser = MDParser::new_ext(markdown_input, markdown_options());
-    let parser = TextMergeStream::new(parser);
+    let parser = MDParser::new_ext(markdown_input, markdown_options()).into_offset_iter();
+    let parser = TextMergeWithOffset::new(parser);
 
     let mut events = Vec::new();
     let mut headings = Vec::new();
@@ -475,8 +644,77 @@ fn collect_events_and_headings(
     let mut section_attrs = HashMap::new();
     let mut section_index = 0;
     let mut hint_open = false;
+    // Built on the first checkbox, so a document without tasks never scans for
+    // newlines at all.
+    let mut line_index: Option<LineIndex> = None;
+    let mut at_item_start = false;
+    let mut pending_task: Option<PendingTask> = None;
 
-    for event in parser {
+    for (event, range) in parser {
+        let was_at_item_start = at_item_start;
+        // A loose list item wraps its content in a paragraph, so the marker
+        // arrives one event later there than in a tight list.
+        at_item_start = matches!(event, Event::Start(Tag::Item))
+            || (at_item_start && matches!(event, Event::Start(Tag::Paragraph)));
+
+        if task_markup == TaskMarkup::Render {
+            if let Some(status) = task_marker_status(&event, was_at_item_start) {
+                // A marker always opens a fresh item, so nothing should still
+                // be open; closing defensively beats emitting a stray `<span>`.
+                if let Some(open) = pending_task.take() {
+                    close_task(&mut events, open);
+                }
+                let index = line_index.get_or_insert_with(|| LineIndex::build(markdown_input));
+                let line = index.line_of(range.start);
+
+                events.push(Event::Html(CowStr::from(crate::html::task_checkbox_html(
+                    status,
+                    Some(line),
+                ))));
+                events.push(Event::Html(CowStr::from(crate::html::task_text_open(
+                    status,
+                ))));
+
+                let mut task = PendingTask {
+                    text_at: Vec::new(),
+                };
+                // `[-]` / `[>]` are not parser-recognised markers: the checkbox
+                // and the first run of display text arrive as one text event, so
+                // the remainder has to be put back.
+                if let Event::Text(text) = &event
+                    && let Some((_, rest)) = split_extended_marker(text)
+                {
+                    task.text_at.push(events.len());
+                    events.push(Event::Text(CowStr::from(rest.to_string())));
+                }
+                pending_task = Some(task);
+                // The marker event itself is replaced, so it is never pushed.
+                continue;
+            }
+
+            if let Some(task) = pending_task.as_mut() {
+                if is_inline_event(&event) {
+                    // Pushed here rather than falling through to the match, so
+                    // the recorded index is provably the slot the run lands in.
+                    // None of the arms below applies to a task's inline content:
+                    // the heading arms need an open heading and the hint arm a
+                    // `Start(Paragraph)` immediately behind, which the span-open
+                    // event displaces.
+                    if matches!(event, Event::Text(_)) {
+                        task.text_at.push(events.len());
+                    }
+                    events.push(event);
+                    continue;
+                }
+                // End of the task's own line: close the text span and emit the
+                // chips before whatever block comes next (a nested subtask
+                // list, the item's end, a second paragraph).
+                if let Some(task) = pending_task.take() {
+                    close_task(&mut events, task);
+                }
+            }
+        }
+
         match &event {
             // --- Heading extraction ---
             Event::Start(Tag::Heading { .. }) => {
@@ -625,7 +863,49 @@ fn collect_events_and_headings(
         }
     }
 
+    // A document that ends mid-item still has to close its span.
+    if let Some(task) = pending_task.take() {
+        close_task(&mut events, task);
+    }
+
     (events, headings, section_attrs)
+}
+
+/// A task item whose checkbox has been emitted and whose text span is still open.
+struct PendingTask {
+    /// Positions in the output of the text runs making up the display text.
+    ///
+    /// Collected rather than stripped as they arrive: the annotation grammar
+    /// has end-anchored rules (the trailing `> YYYY-MM-DD`, the whitespace
+    /// collapse), so no run can be rewritten until the last one has been seen.
+    text_at: Vec<usize>,
+}
+
+/// Closes an open task: strips the annotations out of its text runs, rewrites
+/// them in place, and appends the closing span plus the annotation chips.
+fn close_task(output: &mut Vec<Event<'_>>, task: PendingTask) {
+    let (stripped, annotations) = {
+        let runs: Vec<&str> = task
+            .text_at
+            .iter()
+            .map(|&index| match &output[index] {
+                Event::Text(text) => text.as_ref(),
+                // Only text events are recorded, so this is unreachable.
+                _ => "",
+            })
+            .collect();
+        tasks::strip_annotations_across_runs(&runs)
+    };
+
+    for (&index, text) in task.text_at.iter().zip(stripped) {
+        output[index] = Event::Text(CowStr::from(text));
+    }
+
+    output.push(Event::Html(CowStr::from(crate::html::TASK_TEXT_CLOSE)));
+    let chips = crate::html::task_annotations_html(&annotations);
+    if !chips.is_empty() {
+        output.push(Event::Html(CowStr::from(chips)));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -699,9 +979,13 @@ pub async fn render_with_cache(
     };
 
     // Single merged pass: collect events, extract headings with anchor IDs,
-    // and detect `--- {attrs}` rule patterns (merging what was previously
-    // the heading extraction loop + transform_rule_attrs into one iteration).
-    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(&markdown_input);
+    // detect `--- {attrs}` rule patterns, and rewrite task list items (merging
+    // what were previously the heading extraction loop, transform_rule_attrs
+    // and a separate task pass into one iteration). Running the task rewrite
+    // here rather than after `process_all_events` also means the annotations
+    // are gone before text is counted for readability and scanned for bare URLs.
+    let (events_with_ids, headings, section_attrs) =
+        collect_events_and_headings(&markdown_input, TaskMarkup::Render);
 
     // Detect if the first heading is an H1 (used for conditional title rendering in templates)
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -994,8 +1278,9 @@ pub fn render_sync(
     };
 
     // Single merged pass: collect events, extract headings with anchor IDs,
-    // and detect `--- {attrs}` rule patterns.
-    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(&markdown_input);
+    // detect `--- {attrs}` rule patterns, and rewrite task list items.
+    let (events_with_ids, headings, section_attrs) =
+        collect_events_and_headings(&markdown_input, TaskMarkup::Render);
 
     // Detect if the first heading is an H1
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -1088,7 +1373,11 @@ pub fn extract_outbound_links_sync(
         transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
     };
 
-    let (events_with_ids, _headings, _section_attrs) = collect_events_and_headings(&markdown_input);
+    // Task markup is skipped: it rewrites text runs, never link destinations,
+    // so it cannot change which links this function collects -- and this runs
+    // over every markdown file in the repository.
+    let (events_with_ids, _headings, _section_attrs) =
+        collect_events_and_headings(&markdown_input, TaskMarkup::Skip);
 
     let prefetched_oembed = collect_local_embeds(&events_with_ids);
 
@@ -1700,18 +1989,11 @@ fn process_event(
                 }
                 (event, state)
             } else if state.in_code_block {
-                // Code blocks are verbatim: the vid shortcode, bare-URL oembed,
-                // and `[-] ` checkbox rewrites below must never fire on sample
-                // code. Checked after `in_metadata` (not folded into it) so we
-                // never run the YAML loader over code text.
+                // Code blocks are verbatim: the vid shortcode and bare-URL
+                // oembed rewrites below must never fire on sample code. Checked
+                // after `in_metadata` (not folded into it) so we never run the
+                // YAML loader over code text.
                 (event, state)
-            } else if let Some(remaining_text) = text.strip_prefix("[-] ") {
-                // Canceled todo item: `- [-] canceled task` or `* [-] canceled task`
-                let html = format!(
-                    r#"<input disabled type="checkbox" class="canceled-checkbox"/><s>{}</s>"#,
-                    html_escape::encode_text(remaining_text)
-                );
-                (Event::Html(html.into()), state)
             } else if !state.in_link && text.starts_with("http") && !text.contains(' ') {
                 // Only process bare URLs that are NOT inside a link element.
                 // URLs in <http://...> autolinks or [text](url) links are already
@@ -1761,6 +2043,37 @@ mod tests {
 
     async fn render_markdown_with_tags(content: &str, tag_sources: HashSet<String>) -> String {
         render_markdown_with_config(content, false, tag_sources).await
+    }
+
+    /// Renders with an explicit `server_mode`, for asserting that output does
+    /// *not* vary between a served page and a static build.
+    async fn render_markdown_with_mode(content: &str, server_mode: bool) -> String {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+            current_page_url: String::new(),
+        };
+        render(
+            path,
+            &root,
+            0,
+            config,
+            server_mode,
+            false,
+            HashSet::new(),
+            false,
+            &[],
+            None,
+        )
+        .await
+        .unwrap()
+        .html
     }
 
     async fn render_markdown_with_config(
@@ -2209,55 +2522,342 @@ mod tests {
         assert_eq!(result.syllable_count, 0);
     }
 
-    #[tokio::test]
-    async fn test_canceled_checkbox_dash() {
-        let md = "- [-] canceled task";
-        let html = render_markdown(md).await;
-        assert!(html.contains(r#"<input disabled type="checkbox" class="canceled-checkbox"/>"#));
-        assert!(html.contains("<s>canceled task</s>"));
+    // ---- task list rendering -------------------------------------------------
+
+    /// The `<li>` body a task renders to, checkbox included, for exact-match
+    /// assertions that stay readable.
+    fn task_body(html: &str) -> String {
+        let start = html.find("<li>").expect("a list item") + "<li>".len();
+        let end = html.find("</li>").expect("a closed list item");
+        html[start..end].to_string()
     }
 
     #[tokio::test]
-    async fn test_canceled_checkbox_asterisk() {
-        let md = "* [-] another canceled item";
-        let html = render_markdown(md).await;
-        assert!(html.contains(r#"<input disabled type="checkbox" class="canceled-checkbox"/>"#));
-        assert!(html.contains("<s>another canceled item</s>"));
+    async fn canceled_marker_renders_a_checkbox_and_a_status_class() {
+        // Replaces the old bare `<s>` hack: the class is what the theme styles,
+        // and it sits on the text so a canceled parent does not strike out its
+        // own subtasks.
+        for md in ["- [-] canceled task", "* [-] canceled task"] {
+            assert_eq!(
+                task_body(&render_markdown(md).await),
+                concat!(
+                    r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-1" "#,
+                    r#"data-mbr-task-line="1" data-mbr-task-status="canceled" disabled>"#,
+                    r#"<span class="mbr-task-text mbr-task-canceled">canceled task</span>"#
+                ),
+                "for {md:?}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn test_unchecked_checkbox() {
-        let md = "- [ ] unchecked item";
-        let html = render_markdown(md).await;
-        assert!(html.contains(r#"<input disabled="" type="checkbox"/>"#));
-        assert!(!html.contains("canceled-checkbox"));
+    async fn moved_marker_is_canceled_and_shows_its_destination_date() {
+        let html = render_markdown("- [>] moved along > 2026-08-04").await;
+        assert_eq!(
+            task_body(&html),
+            concat!(
+                r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-1" "#,
+                r#"data-mbr-task-line="1" data-mbr-task-status="canceled" disabled>"#,
+                r#"<span class="mbr-task-text mbr-task-canceled">moved along</span>"#,
+                r#" <time class="mbr-task-moved" datetime="2026-08-04">Aug 4</time>"#
+            )
+        );
     }
 
     #[tokio::test]
-    async fn test_checked_checkbox() {
-        let md = "- [x] checked item";
-        let html = render_markdown(md).await;
-        assert!(html.contains(r#"<input disabled="" type="checkbox" checked=""/>"#));
-        assert!(!html.contains("canceled-checkbox"));
+    async fn unchecked_and_checked_markers_carry_their_status() {
+        let open = render_markdown("- [ ] unchecked item").await;
+        assert!(
+            open.contains(r#"data-mbr-task-status="open" disabled>"#),
+            "{open}"
+        );
+        assert!(!open.contains(" checked"), "{open}");
+
+        let done = render_markdown("- [x] checked item").await;
+        assert!(
+            done.contains(r#"data-mbr-task-status="done" checked disabled>"#),
+            "{done}"
+        );
     }
 
     #[tokio::test]
-    async fn test_canceled_checkbox_with_special_chars() {
-        // Test that special characters are preserved in canceled checkbox text
-        let md = "- [-] text with special chars: & < > \"";
-        let html = render_markdown(md).await;
-        // The canceled checkbox renders with strikethrough
-        assert!(html.contains("<s>"));
-        assert!(html.contains("</s>"));
-        assert!(html.contains("canceled-checkbox"));
+    async fn task_text_is_html_escaped() {
+        let html = render_markdown("- [-] special chars: & < > \"").await;
+        assert!(html.contains("special chars: &amp; &lt; &gt;"), "{html}");
     }
 
     #[tokio::test]
-    async fn test_canceled_checkbox_plain_text() {
-        // Verify canceled checkboxes work with plain text
-        let md = "- [-] plain canceled text";
-        let html = render_markdown(md).await;
-        assert!(html.contains("<s>plain canceled text</s>"));
+    async fn checkboxes_are_inert_in_every_mode() {
+        // Interactivity is turned on by the frontend, not by the renderer, so
+        // a static build and a served page emit identical markup.
+        for server_mode in [false, true] {
+            let html = render_markdown_with_mode("- [ ] a task", server_mode).await;
+            assert!(html.contains(" disabled>"), "server_mode={server_mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn annotations_render_as_chips_instead_of_literal_text() {
+        let html = render_markdown(
+            "- [ ] write the report !!! #work @due(2026-08-05) @done(2026-08-04 12:11 PM)",
+        )
+        .await;
+        assert_eq!(
+            task_body(&html),
+            concat!(
+                r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-1" "#,
+                r#"data-mbr-task-line="1" data-mbr-task-status="open" disabled>"#,
+                r#"<span class="mbr-task-text">write the report</span>"#,
+                r#" <span class="mbr-task-pri mbr-task-pri-urgent" role="img" "#,
+                r#"aria-label="Urgent priority" title="Urgent priority"></span>"#,
+                r#" <span class="mbr-task-tag">#work</span>"#,
+                r#" <time class="mbr-task-due" datetime="2026-08-05">Aug 5</time>"#,
+                r#" <time class="mbr-task-completed" datetime="2026-08-04T12:11">Aug 4, 12:11 PM</time>"#
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_with_no_annotations_emits_no_chips() {
+        let html = render_markdown("- [ ] plain task").await;
+        assert_eq!(
+            task_body(&html),
+            concat!(
+                r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-1" "#,
+                r#"data-mbr-task-line="1" data-mbr-task-status="open" disabled>"#,
+                r#"<span class="mbr-task-text">plain task</span>"#
+            )
+        );
+    }
+
+    /// The hard case: annotations arrive as text runs interleaved with inline
+    /// formatting events, so they cannot be stripped from one flat string.
+    #[tokio::test]
+    async fn inline_formatting_survives_annotation_stripping() {
+        let html = render_markdown("- [ ] fix **this** and *that* #bug").await;
+        assert!(
+            html.contains(
+                r#"<span class="mbr-task-text">fix <strong>this</strong> and <em>that</em></span>"#
+            ),
+            "inline formatting and its spacing must survive: {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="mbr-task-tag">#bug</span>"#),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn links_inside_a_task_keep_working() {
+        let html = render_markdown("- [ ] read [the guide](guide.md) !! @due(2026-08-05)").await;
+        assert!(
+            html.contains(r#"<a href="../guide/">the guide</a>"#),
+            "{html}"
+        );
+        assert!(html.contains("mbr-task-pri-high"), "{html}");
+        assert!(!html.contains("@due("), "{html}");
+    }
+
+    /// A trailing `< YYYY-MM-DD` says where a task came from. Nothing surfaces
+    /// it, so it is stripped and dropped.
+    #[tokio::test]
+    async fn moved_from_marker_is_stripped_without_a_chip() {
+        let html = render_markdown("- [ ] carried over < 2026-08-01").await;
+        assert!(html.contains(">carried over</span>"), "{html}");
+        assert!(!html.contains("2026-08-01"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn nested_subtasks_each_get_their_own_line_number() {
+        let html = render_markdown("- [ ] parent\n\t- [ ] child one\n\t- [x] child two").await;
+        for line in 1..=3 {
+            assert!(
+                html.contains(&format!(r#"data-mbr-task-line="{line}""#)),
+                "missing line {line}: {html}"
+            );
+        }
+        // The parent's text span must close before its subtask list, or the
+        // chips would render underneath the children.
+        assert!(
+            html.contains("<span class=\"mbr-task-text\">parent</span>\n<ul>"),
+            "the parent's text span must close before its subtask list: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_marker_inside_a_fenced_code_block_is_left_alone() {
+        let html = render_result("```\n- [-] not a checkbox\n- [ ] nor this\n```\n")
+            .await
+            .html;
+        assert!(!html.contains("mbr-task-check"), "{html}");
+        assert!(html.contains("- [-] not a checkbox"), "{html}");
+        assert!(html.contains("- [ ] nor this"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_bracket_marker_outside_a_list_item_is_not_a_task() {
+        // The old renderer turned any text starting with `[-] ` into a
+        // checkbox, including ordinary prose.
+        let html = render_result("[-] this is just a sentence\n").await.html;
+        assert!(!html.contains("mbr-task-check"), "{html}");
+        assert!(html.contains("[-] this is just a sentence"), "{html}");
+    }
+
+    // ---- task line numbers ---------------------------------------------------
+
+    /// The 1-based lines advertised by the rendered checkboxes, in order.
+    fn rendered_task_lines(html: &str) -> Vec<u32> {
+        const ATTR: &str = "data-mbr-task-line=\"";
+        html.match_indices(ATTR)
+            .map(|(at, _)| {
+                let rest = &html[at + ATTR.len()..];
+                let end = rest.find('"').expect("unterminated attribute");
+                rest[..end].parse().expect("numeric line")
+            })
+            .collect()
+    }
+
+    /// Line numbers must survive whatever sits between the tasks — headings,
+    /// fences, blank lines, frontmatter — because they are derived from byte
+    /// offsets rather than from counting events.
+    #[tokio::test]
+    async fn task_line_numbers_survive_intervening_blocks() {
+        let md = concat!(
+            "---\n",           // 1
+            "title: T\n",      // 2
+            "---\n",           // 3
+            "\n",              // 4
+            "# Heading\n",     // 5
+            "\n",              // 6
+            "- [ ] first\n",   // 7
+            "\n",              // 8
+            "```js\n",         // 9
+            "// - [ ] fake\n", // 10
+            "```\n",           // 11
+            "\n",              // 12
+            "Some prose.\n",   // 13
+            "\n",              // 14
+            "- [x] second\n",  // 15
+            "- [-] third\n",   // 16
+        );
+        let html = render_result(md).await.html;
+        assert_eq!(rendered_task_lines(&html), vec![7, 15, 16]);
+        assert_eq!(
+            rendered_task_lines(&html),
+            crate::tasks::scan_source_tasks(md)
+                .into_iter()
+                .map(|task| task.line)
+                .collect::<Vec<_>>(),
+            "the renderer and the task index must agree about line numbers"
+        );
+    }
+
+    #[tokio::test]
+    async fn crlf_line_endings_do_not_shift_task_line_numbers() {
+        let md = "- [ ] first\r\n\r\nprose\r\n\r\n- [x] second\r\n";
+        let html = render_result(md).await.html;
+        assert_eq!(rendered_task_lines(&html), vec![1, 5]);
+    }
+
+    /// The incomplete-block pass runs after the task rewrite, so it sees the
+    /// annotation-stripped display text and must still wrap the item.
+    #[tokio::test]
+    async fn incomplete_markers_still_fire_inside_a_task() {
+        let html = render_markdown_marked("- [ ] TODO: write it up #docs", &["TODO"]).await;
+        assert!(html.contains(INCOMPLETE_SPAN_OPEN), "{html}");
+        assert!(html.contains("TODO: write it up"), "{html}");
+        assert!(
+            html.contains(r#"<span class="mbr-task-tag">#docs</span>"#),
+            "{html}"
+        );
+        // One open, one close: the two passes must not interleave their spans
+        // into overlapping tags.
+        assert_eq!(html.matches(INCOMPLETE_SPAN_OPEN).count(), 1, "{html}");
+    }
+
+    /// The parser is handed the *wikilink-transformed* source, not the file on
+    /// disk, so `transform_wikilinks` sits between the bytes on disk and the
+    /// offsets the line numbers come from. For an ordinary single-line wikilink
+    /// it rewrites within the line and the numbers are unaffected.
+    #[tokio::test]
+    async fn wikilinks_on_a_task_line_do_not_shift_its_line_number() {
+        let sources: HashSet<String> = ["Tags".to_string()].into_iter().collect();
+        let md = concat!(
+            "- [ ] read about [[Tags:rust]] #study\n",
+            "- [ ] and [[Tags:async]] too\n",
+            "\n",
+            "- [x] last one\n",
+        );
+        let html = render_markdown_with_tags(md, sources).await;
+        assert_eq!(rendered_task_lines(&html), vec![1, 2, 4]);
+        assert!(html.contains("href=\"/tags/rust/\""), "{html}");
+        assert!(
+            html.contains(r#"<span class="mbr-task-tag">#study</span>"#),
+            "{html}"
+        );
+    }
+
+    /// A `[[Source:value]]` whose brackets straddle a line break is not a
+    /// wikilink, so the substitution cannot swallow the newline and the lines
+    /// below keep their numbers.
+    ///
+    /// This used to be a pinned known limitation: the transformed source came
+    /// out a line shorter than the file on disk, every later task advertised a
+    /// line number one too small, and a line patch aimed at one of those numbers
+    /// would have edited the wrong line.
+    #[tokio::test]
+    async fn a_multi_line_tag_wikilink_does_not_shift_later_line_numbers() {
+        let sources: HashSet<String> = ["Tags".to_string()].into_iter().collect();
+        let md = "- [ ] see [[Tags:\nrust]] here\n- [x] second\n";
+
+        let expected: Vec<u32> = crate::tasks::scan_source_tasks(md)
+            .into_iter()
+            .map(|task| task.line)
+            .collect();
+        assert_eq!(expected, vec![1, 3]);
+
+        let html = render_markdown_with_tags(md, sources).await;
+        assert_eq!(
+            rendered_task_lines(&html),
+            expected,
+            "the renderer and the task index must agree about line numbers"
+        );
+        // ...and it was not rewritten into a tag link on the way through.
+        assert!(!html.contains("/tags/rust/"), "{html}");
+    }
+
+    #[test]
+    fn line_index_maps_offsets_to_one_based_lines() {
+        //             0123 456 78
+        let index = LineIndex::build("ab\nc\n\nd");
+        assert_eq!(index.line_of(0), 1);
+        assert_eq!(index.line_of(2), 1); // the newline itself ends line 1
+        assert_eq!(index.line_of(3), 2);
+        assert_eq!(index.line_of(5), 3); // the empty line
+        assert_eq!(index.line_of(6), 4);
+        // Past the end is still the last line rather than a panic.
+        assert_eq!(index.line_of(999), 4);
+
+        assert_eq!(LineIndex::build("").line_of(0), 1);
+    }
+
+    #[test]
+    fn split_extended_marker_requires_whitespace_after_the_box() {
+        assert_eq!(
+            split_extended_marker("[-] canceled"),
+            Some((TaskStatus::Canceled, "canceled"))
+        );
+        assert_eq!(
+            split_extended_marker("[>]\tmoved"),
+            Some((TaskStatus::Canceled, "moved"))
+        );
+        assert_eq!(
+            split_extended_marker("[-]"),
+            Some((TaskStatus::Canceled, ""))
+        );
+        for text in ["[-]x", "[x] done", "[ ] open", "[?] what", "prose"] {
+            assert_eq!(split_extended_marker(text), None, "for {text:?}");
+        }
     }
 
     #[tokio::test]
@@ -3760,7 +4360,7 @@ mod tests {
     async fn canceled_checkbox_marker_inside_code_fence_is_not_transformed() {
         let html = render_result("```\n[-] not a checkbox\n```\n").await.html;
         assert!(
-            !html.contains("canceled-checkbox"),
+            !html.contains("mbr-task-check"),
             "checkbox transform fired inside a fence: {html}"
         );
         assert!(
@@ -3785,7 +4385,7 @@ mod tests {
 
         let todo_html = render_result("- [-] canceled task").await.html;
         assert!(
-            todo_html.contains("canceled-checkbox"),
+            todo_html.contains("mbr-task-check"),
             "checkbox transform must still work outside a fence: {todo_html}"
         );
     }
@@ -3794,13 +4394,17 @@ mod tests {
     fn collect_bare_urls_skips_code_blocks() {
         // A URL that only appears in a code sample must never trigger an
         // outbound HTTP request.
-        let (fenced, _, _) = collect_events_and_headings("```\nhttps://example.com/in-code\n```\n");
+        let (fenced, _, _) = collect_events_and_headings(
+            "```\nhttps://example.com/in-code\n```\n",
+            TaskMarkup::Skip,
+        );
         assert!(
             collect_bare_urls(&fenced).is_empty(),
             "code-block URLs must not be queued for fetching"
         );
 
-        let (prose, _, _) = collect_events_and_headings("https://example.com/outside\n");
+        let (prose, _, _) =
+            collect_events_and_headings("https://example.com/outside\n", TaskMarkup::Skip);
         assert_eq!(
             collect_bare_urls(&prose).len(),
             1,
@@ -3979,7 +4583,7 @@ mod tests {
         // Every URL here short-circuits in `PageInfo::new_from_url` via the
         // no-network embed path, so this exercises the bounded stream with no I/O.
         let md = "https://youtu.be/aaaaaaaaaaa\n\nhttps://youtu.be/bbbbbbbbbbb\n\nhttps://youtu.be/ccccccccccc\n";
-        let (events, _, _) = collect_events_and_headings(md);
+        let (events, _, _) = collect_events_and_headings(md, TaskMarkup::Skip);
         let results = prefetch_oembed_urls(&events, 500, &None).await;
         assert_eq!(results.len(), 3);
         assert!(results.values().all(|info| info.embed_html.is_some()));

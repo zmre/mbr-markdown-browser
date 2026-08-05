@@ -13,6 +13,8 @@ import './mbr-browse.js'
 import './mbr-browse-single.js'
 import './mbr-fuzzy-nav.js'
 import './mbr-find-bar.js'
+import './mbr-tasks.js'
+import { setTasksChunkImporter } from './mbr-tasks.js'
 
 /**
  * Tests for the shared keyboard-guard helpers. `isInputTarget` must see the
@@ -95,12 +97,19 @@ const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay &
   { tag: 'mbr-browse-single', create: () => document.createElement('mbr-browse-single') },
   { tag: 'mbr-fuzzy-nav', create: () => document.createElement('mbr-fuzzy-nav') },
   { tag: 'mbr-find-bar', create: () => document.createElement('mbr-find-bar') },
+  { tag: 'mbr-tasks', create: () => document.createElement('mbr-tasks') },
 ]
 
 describe('isModalOpen', () => {
   beforeEach(() => {
-    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    // `tasksEnabled` matters here: <mbr-tasks> refuses to open without the
+    // endpoint, since an invisible "open" overlay would suppress every
+    // bare-letter shortcut on the page.
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: true }
     window.headings = []
+    // <mbr-tasks>.open() lazy-imports its panel chunk from a runtime URL, which
+    // happy-dom cannot execute; stub the seam.
+    setTasksChunkImporter(() => Promise.resolve({}))
     // <mbr-fuzzy-nav>.open() kicks off a links.json fetch; keep it well-formed
     // so the modal can render without the shared cache seeing garbage.
     vi.stubGlobal(
@@ -122,7 +131,7 @@ describe('isModalOpen', () => {
     expect(OVERLAY_CASES.map((c) => c.tag)).toEqual([...OVERLAY_TAGS])
   })
 
-  it('returns false when all five overlays are present but closed', async () => {
+  it('returns false when every overlay is present but closed', async () => {
     for (const { create } of OVERLAY_CASES) {
       const el = document.body.appendChild(create())
       await el.updateComplete
@@ -209,8 +218,14 @@ describe('MbrKeysElement overlay shortcuts', () => {
   let keys: MbrKeysElement
 
   beforeEach(() => {
-    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    // `tasksEnabled` matters here: <mbr-tasks> refuses to open without the
+    // endpoint, since an invisible "open" overlay would suppress every
+    // bare-letter shortcut on the page.
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: true }
     window.headings = []
+    // <mbr-tasks>.open() lazy-imports its panel chunk from a runtime URL, which
+    // happy-dom cannot execute; stub the seam.
+    setTasksChunkImporter(() => Promise.resolve({}))
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ inbound: [], outbound: [] }) }),

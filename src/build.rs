@@ -1136,6 +1136,9 @@ impl Builder {
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
+                // Static builds never carry the task browser: the task index
+                // reads live files, which a published site does not have.
+                tasks_enabled: false,
                 title_prefix: &self.config.title_prefix,
                 title_suffix: &self.config.title_suffix,
             },
@@ -1385,6 +1388,8 @@ impl Builder {
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
+                // The task browser needs a live server; a published site has none.
+                tasks_enabled: false,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1609,6 +1614,8 @@ impl Builder {
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
+                // The task browser needs a live server; a published site has none.
+                tasks_enabled: false,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1678,6 +1685,8 @@ impl Builder {
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
+                // The task browser needs a live server; a published site has none.
+                tasks_enabled: false,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1938,6 +1947,15 @@ impl Builder {
                 continue;
             }
 
+            // Skip the task-browser chunk. Tasks are held out of static builds
+            // entirely (TASKS_SPEC.md "Applicability"): the index is built by
+            // reading live files and `POST /.mbr/tasks` only exists in
+            // server/GUI mode, so `<mbr-tasks>` never renders here and the
+            // chunk would be an unreachable payload in every generated site.
+            if *route == crate::server::TASKS_CHUNK_ROUTE {
+                continue;
+            }
+
             // Strip leading / from route to get filename
             let filename = route.trim_start_matches('/');
             let output_path = mbr_output.join(filename);
@@ -2114,6 +2132,8 @@ impl Builder {
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
+                // The task browser needs a live server; a published site has none.
+                tasks_enabled: false,
                 title_affixes: None,
             },
         );
@@ -2197,6 +2217,8 @@ impl Builder {
                     sidebar_style: &self.config.sidebar_style,
                     sidebar_max_items: self.config.sidebar_max_items,
                     graph_depth: self.config.graph_depth,
+                    // The task browser needs a live server; a published site has none.
+                    tasks_enabled: false,
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 },
             );

@@ -21,6 +21,7 @@ description: The fast, complete markdown browser and static site generator
 | [In-Browser Editing](modes/editing/) | Edit markdown from the browser (server/GUI) |
 | [Customization](customization/) | Themes, templates, and components |
 | [Markdown Extensions](markdown/) | Extended syntax reference |
+| [Task Browser](markdown/tasks/) | Find, filter and complete tasks (server/GUI) |
 | [Relationships & Genealogy](markdown/relationships/) | Typed relationships between notes |
 | [CLI Reference](reference/cli/) | Command line options |
 | [Configuration Reference](reference/configuration/) | Config file, environment variables, and feature settings |
@@ -54,6 +55,7 @@ https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbG5udXhqcWpseDgyaGJ2bDd0MXRqYW
 - **Breadcrumbs** - Navigate up through the directory structure
 - **Next/Prev** - Press `L` to go to the next file and `H` to go to the previous one
 - **Info** - Press `Ctrl-g` to open an info window showing table of contents and frontmatter
+- **Task Browser** - Press `t` to find, filter and complete every task in the repository (server/GUI mode)
 
 ## How It Works
 

@@ -69,6 +69,9 @@ pub mod search;
 pub mod server;
 pub mod sorting;
 pub mod tag_index;
+pub mod task_index;
+pub mod task_query;
+pub mod tasks;
 pub mod templates;
 #[cfg(test)]
 mod test_support;
@@ -94,7 +97,7 @@ pub use config::{Config, RelationType, SortField, TagSource, find_root_dir};
 pub use errors::MetadataError;
 #[cfg(feature = "media-metadata")]
 pub use errors::PdfMetadataError;
-pub use errors::{BuildError, ConfigError, MbrError, SearchError};
+pub use errors::{BuildError, ConfigError, MbrError, SearchError, TaskIndexError};
 pub use markdown::{MarkdownRenderResult, ParsedDocument};
 pub use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd,
@@ -105,5 +108,14 @@ pub use quicklook::{
 };
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
 pub use sorting::sort_files;
+pub use task_index::{FileTasks, TaskIndex};
+pub use task_query::{
+    DueBucket, DueFilter, TaskGroup, TaskMode, TaskQuery, TaskQueryResponse, due_bucket,
+    parse_task_query, run_query,
+};
+pub use tasks::{
+    Annotations, Task, TaskPriority, TaskStatus, parse_task_line, scan_source_tasks, set_marker,
+    strip_annotations,
+};
 #[cfg(feature = "media-metadata")]
 pub use video_transcode::TranscodeError;

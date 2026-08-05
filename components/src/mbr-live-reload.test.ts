@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-live-reload.ts'
 import type { MbrLiveReloadElement } from './mbr-live-reload.ts'
+import { resetTaskToggleState, toggleTask } from './task-toggle.ts'
 
 /**
  * Tests for <mbr-live-reload>, the server-mode element that watches
@@ -290,6 +291,39 @@ describe('MbrLiveReloadElement message handling', () => {
     await fileChanged('docs/guide.md')
 
     expectReload()
+  })
+
+  it('skips every event a task write of its own produced', async () => {
+    // A task write patches the document itself and must not reload: the edit
+    // token lives only in memory, and an open task panel would be torn down.
+    resetTaskToggleState()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    globalThis.fetch = vi.fn().mockImplementation((url: string) =>
+      String(url).startsWith('/.mbr/raw/')
+        ? Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('- [ ] a\n') })
+        : Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ line: 1, text: '- [x] a' }),
+          }),
+    ) as unknown as typeof fetch
+    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' })
+
+    await mount()
+    latestSocket().emitOpen()
+
+    // One write announces itself several times — the handler broadcasts before
+    // it responds, then the watcher echoes the atomic rename (twice, on macOS,
+    // about 7ms later). Swallowing only the first would reload the page anyway.
+    await fileChanged('docs/guide.md')
+    await fileChanged('docs/guide.md')
+    await fileChanged('docs/guide.md')
+    expectNoReload()
+
+    // A file this page did not write is somebody else's change, as ever.
+    await fileChanged('docs/other-note.md', 'modified')
+    expectNoReload() // ...not this page's document, so still nothing
+    resetTaskToggleState()
   })
 
   it('shows a notification before navigating away', async () => {

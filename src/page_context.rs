@@ -85,6 +85,9 @@ pub struct PageChrome<'a> {
     pub sidebar_style: &'a str,
     pub sidebar_max_items: usize,
     pub graph_depth: usize,
+    /// Whether the task browser is available on this page. Always `false` in
+    /// static builds: the task index is built from live files.
+    pub tasks_enabled: bool,
     /// `Some((prefix, suffix))` for content pages; `None` for error pages,
     /// which historically omit `title_prefix`/`title_suffix`.
     pub title_affixes: Option<(&'a str, &'a str)>,
@@ -114,6 +117,7 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
         json!(chrome.sidebar_max_items),
     );
     ctx.insert("graph_depth".to_string(), json!(chrome.graph_depth));
+    ctx.insert("tasks_enabled".to_string(), json!(chrome.tasks_enabled));
     if let Some((prefix, suffix)) = chrome.title_affixes {
         ctx.insert("title_prefix".to_string(), json!(prefix));
         ctx.insert("title_suffix".to_string(), json!(suffix));
@@ -264,6 +268,10 @@ pub struct MarkdownContextOptions<'a> {
     pub sidebar_style: &'a str,
     pub sidebar_max_items: usize,
     pub graph_depth: usize,
+    /// Whether the task browser is available on this page. Markdown pages do
+    /// not go through [`insert_page_chrome`], so this is the sibling of
+    /// [`PageChrome::tasks_enabled`] for them. Always `false` in static builds.
+    pub tasks_enabled: bool,
     pub title_prefix: &'a str,
     pub title_suffix: &'a str,
 }
@@ -337,6 +345,7 @@ pub fn markdown_extra_context(
         json!(opts.sidebar_max_items),
     );
     ctx.insert("graph_depth".to_string(), json!(opts.graph_depth));
+    ctx.insert("tasks_enabled".to_string(), json!(opts.tasks_enabled));
     ctx.insert("title_prefix".to_string(), json!(opts.title_prefix));
     ctx.insert("title_suffix".to_string(), json!(opts.title_suffix));
 
@@ -420,6 +429,7 @@ mod tests {
                 sidebar_style: "auto",
                 sidebar_max_items: 10,
                 graph_depth: 3,
+                tasks_enabled: true,
                 title_affixes: Some(("pre ", " suf")),
             },
         );
@@ -429,6 +439,7 @@ mod tests {
         assert_eq!(ctx.get("sidebar_style"), Some(&json!("auto")));
         assert_eq!(ctx.get("sidebar_max_items"), Some(&json!(10)));
         assert_eq!(ctx.get("graph_depth"), Some(&json!(3)));
+        assert_eq!(ctx.get("tasks_enabled"), Some(&json!(true)));
         assert_eq!(ctx.get("title_prefix"), Some(&json!("pre ")));
         assert_eq!(ctx.get("title_suffix"), Some(&json!(" suf")));
         assert!(!ctx.contains_key("relative_root"));
@@ -447,6 +458,7 @@ mod tests {
                 sidebar_style: "auto",
                 sidebar_max_items: 10,
                 graph_depth: 2,
+                tasks_enabled: false,
                 title_affixes: None,
             },
         );
@@ -467,6 +479,7 @@ mod tests {
                 sidebar_style: "auto",
                 sidebar_max_items: 5,
                 graph_depth: 2,
+                tasks_enabled: false,
                 title_affixes: Some(("", "")),
             },
         );
@@ -474,6 +487,8 @@ mod tests {
         assert_eq!(ctx.get("relative_base"), Some(&json!("../../.mbr/")));
         assert_eq!(ctx.get("relative_root"), Some(&json!("../../")));
         assert!(!ctx.contains_key("gui_mode"));
+        // Static builds never carry the task browser: its index reads live files.
+        assert_eq!(ctx.get("tasks_enabled"), Some(&json!(false)));
     }
 
     #[test]
@@ -644,6 +659,7 @@ mod tests {
             sidebar_style: "auto",
             sidebar_max_items: 10,
             graph_depth: 2,
+            tasks_enabled: true,
             title_prefix: "",
             title_suffix: "",
         }
@@ -679,6 +695,7 @@ mod tests {
         let ctx = markdown_extra_context(&params, &markdown_opts(&[]), &UrlMode::Absolute);
 
         assert_eq!(ctx.get("has_h1"), Some(&json!(true)));
+        assert_eq!(ctx.get("tasks_enabled"), Some(&json!(true)));
         assert_eq!(ctx.get("word_count"), Some(&json!(401)));
         // 401 words at 200 wpm rounds up to 3 minutes
         assert_eq!(ctx.get("reading_time_minutes"), Some(&json!(3)));

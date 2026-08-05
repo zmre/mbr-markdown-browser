@@ -44,7 +44,12 @@ ffi = ["dep:uniffi"]
 [dependencies]
 # winit = "0.30.11"
 axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"] }
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# `serde` is needed so `tasks::Task`'s NaiveDateTime fields cross the HTTP boundary.
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
 clap = { version = "4.5", features = ["derive"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 futures = "0.3.32"
@@ -193,4 +198,8 @@ harness = false
 
 [[bench]]
 name = "cache_operations"
+harness = false
+
+[[bench]]
+name = "tasks"
 harness = false

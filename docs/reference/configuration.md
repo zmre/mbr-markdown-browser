@@ -121,6 +121,7 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `skip_link_checks` | bool | `false` | Skip internal link validation during builds |
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking (named frontmatter relationships) |
+| `tasks_enabled` | bool | `true` | Enable the task browser (server/GUI only). See [Task Settings](#task-settings). |
 | `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight blocks starting with TK/TODO/FIXME/XXX |
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag a block as incomplete |
 
@@ -203,6 +204,54 @@ CLI usage:
 ```bash
 mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 ```
+
+### Task Settings
+
+The task browser finds every markdown task (`- [ ]`, `- [x]`, `- [-]`, `- [>]`)
+in the repository and lets you filter and group them — see
+[Task Browser](../markdown/tasks/) for the user guide and
+[Markdown Extensions](../markdown/#tasks) for the syntax. It is **server/GUI only**:
+the index is built by reading live files, so static builds never expose it —
+`tasks_enabled` has no effect on `mbr -b`, and built pages always report
+`tasksEnabled: false` to the frontend.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
+| `tasks_stamp_done` | bool | `true` | Maintain the `@done(...)` annotation when a task is toggled through `POST /.mbr/task`. Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
+
+Example:
+```toml
+# .mbr/config.toml
+tasks_enabled = false
+```
+
+**`@done(...)` stamping (`tasks_stamp_done`):**
+
+When you check a box (editing must be enabled — see
+[Editing Settings](#editing-settings)), mbr appends the completion time to the
+line in the format its own parser reads back:
+
+```markdown
+- [ ] write the report !!                            ← before
+- [x] write the report !! @done(2026-08-04 14:32)    ← after
+```
+
+Reopening or canceling the task removes that annotation again, and completing an
+already-completed task does **not** add a second one or re-date the first. The
+timestamp is local wall-clock time, matching the naive/local dates `@due(...)`
+uses.
+
+Set `tasks_stamp_done = false` to have the endpoint rewrite nothing but the
+marker byte, leaving any `@done(...)` exactly as its author wrote it. Either way
+mbr never writes to a markdown file unless you ask it to.
+
+**Cost when unused:** none. The index is built lazily on the first task query
+and then kept fresh by the file watcher, so a server whose user never opens the
+task panel never reads a file for it. The first query on a very large repository
+pays one sequential read pass; later ones are served from memory. There is no
+on-disk cache, so a restart discards the index — deliberately, since mbr is
+pointed at directories that change underneath it.
 
 ### Editing Settings
 

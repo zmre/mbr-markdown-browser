@@ -201,6 +201,32 @@ async fn test_build_head_includes_graph_depth() {
     );
 }
 
+/// The task browser is server/GUI only: its index is built by reading live
+/// files, which a published static site does not have. Every page kind must
+/// therefore advertise `tasksEnabled: false`, no matter what the config says.
+#[tokio::test]
+async fn test_build_head_disables_tasks() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test");
+    repo.create_markdown("docs/guide.md", "# Guide");
+
+    let output = build_site(&repo).await;
+
+    for page in [
+        output.join("index.html"),              // home
+        output.join("test").join("index.html"), // markdown page
+        output.join("docs").join("index.html"), // section page
+        output.join("docs").join("guide").join("index.html"),
+    ] {
+        let html = fs::read_to_string(&page).unwrap();
+        assert!(
+            html.contains("tasksEnabled: false"),
+            "Expected tasksEnabled: false in {}",
+            page.display()
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_build_no_incomplete_spans_by_default() {
     // Static builds default mark_incomplete=false; published sites must not
@@ -1714,6 +1740,35 @@ async fn test_build_writes_graph_chunks() {
         let size = fs::metadata(&path).expect("chunk metadata").len();
         assert!(size > 0, "{} should be non-empty", path.display());
     }
+}
+
+#[tokio::test]
+async fn test_build_omits_the_tasks_chunk_and_the_tasks_trigger() {
+    // Tasks are held out of static builds entirely (TASKS_SPEC.md
+    // "Applicability"): the index is built by reading live files and
+    // `POST /.mbr/tasks` only exists in server/GUI mode. The generic
+    // DEFAULT_FILES loop would otherwise ship the chunk into every generated
+    // site as an unreachable payload.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\n- [ ] a task\n");
+
+    let output = build_site(&repo).await;
+
+    let chunk = output
+        .join(".mbr")
+        .join("components")
+        .join("mbr-tasks.min.js");
+    assert!(
+        !chunk.exists(),
+        "the tasks chunk must not be written to a static build: {}",
+        chunk.display()
+    );
+
+    let html = fs::read_to_string(output.join("test").join("index.html")).expect("test index.html");
+    assert!(
+        !html.contains("<mbr-tasks"),
+        "a built page must not carry the tasks trigger: {html}"
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 import { LitElement, css, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { wasSelfWrite } from './task-toggle.js';
 
 interface FileChangeEvent {
   path: string;
@@ -220,6 +221,18 @@ export class MbrLiveReloadElement extends LitElement {
     console.log('[mbr-live-reload] File changed:', event);
 
     const changedPath = event.relative_path;
+
+    // A change this page made and already drew for itself: every task write
+    // patches the document in place, so reloading for it would cost the edit
+    // token (which lives only in memory) and tear down an open task panel for
+    // nothing. One write produces several of these events — the handler's own
+    // broadcast plus the watcher's echo of the atomic rename — so the check
+    // covers a short window rather than a single event. See `task-toggle.ts`.
+    if (wasSelfWrite(changedPath)) {
+      console.log('[mbr-live-reload] Skipping reload for our own write:', changedPath);
+      return;
+    }
+
     const shouldReload = this._shouldReloadForFile(changedPath);
 
     if (shouldReload) {

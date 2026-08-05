@@ -126,6 +126,7 @@ cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 | `--fail-on-broken-links` | Exit non-zero if the build finds broken internal links (for CI) | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking (backlinks) | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking (frontmatter relationships) | `false` |
+| `--no-tasks` | Disable the task browser (`POST /.mbr/tasks`); server/GUI only | `false` |
 | `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
 | `--no-mark-incomplete` | Disable incomplete-block highlighting | (unset) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
@@ -220,7 +221,7 @@ bun run build      # Production build (tsc + vite)
 
 Built components are placed in `dist/` and compiled into the binary via `include_bytes!`.
 
-The build produces **four bundles** — one main bundle plus three lazy chunks, each with its own vite config:
+The build produces **five bundles** — one main bundle plus four lazy chunks, each with its own vite config:
 
 | Bundle | Vite config | Contents | Loaded |
 |--------|-------------|----------|--------|
@@ -228,6 +229,7 @@ The build produces **four bundles** — one main bundle plus three lazy chunks, 
 | `mbr-editor.min.js` | `vite.editor.config.ts` | Milkdown/Crepe markdown editor | Lazily, when editing opens |
 | `mbr-graph.min.js` | `vite.graph.config.ts` | `<mbr-mini-graph>` + d3-force (~57 kB min / ~19 kB gz) | Lazily, when the info panel first opens |
 | `mbr-genealogy.min.js` | `vite.genealogy.config.ts` | Genealogy charts: family-chart + timeline tree (~204 kB min / ~61 kB gz) | Lazily, near-viewport on person pages (prefetched there) |
+| `mbr-tasks.min.js` | `vite.tasks.config.ts` | `<mbr-tasks-panel>`: the two-pane task browser (~50 kB min / ~15 kB gz) | Lazily, when the task browser first opens. **Excluded from static builds** — see `TASKS_CHUNK_ROUTE` |
 
 Stateful modules (top-level fetches/caches like `shared.ts`) live only in the main bundle; chunk elements receive data and services via Lit properties.
 
@@ -259,6 +261,9 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 | `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
 | `html.rs` | Custom HTML output for pulldown-cmark with section support |
 | `attrs.rs` | Reusable attribute parser for `{#id .class key=value}` syntax |
+| `tasks.rs` | Pure task-line parsing: the `- [ ]`/`[x]`/`[-]`/`[>]` grammar, `@due`/`@done`/`#tag`/`!!` annotations, `scan_source_tasks` (skips code fences and frontmatter), `set_marker` for single-byte status rewrites, `set_status` (marker + `@done(...)` stamp, clock passed in), and `patch_task_line` — the whole body of `POST /.mbr/task` minus the I/O, so line addressing, the `expected` check and terminator preservation are testable without a filesystem. Knows nothing about the filesystem |
+| `task_index.rs` | `TaskIndex`: lazy, in-memory, papaya-backed map of `PathBuf -> Arc<FileTasks>`, holding only files that contain tasks. Built on the **first** task query (never at startup, no on-disk cache) via one **sequential** read pass under `spawn_blocking` — sequential for the reason documented at `search.rs:362`/`:658`. Single-flight via `tokio::sync::OnceCell::get_or_try_init`, which leaves the cell unset on failure so a failed build is retried rather than poisoned. `invalidate_file` / `rebuild_if_built` are no-ops until the index has been built |
+| `task_query.rs` | Pure filtering, grouping and counting for `POST /.mbr/tasks`. `run_query` takes an index snapshot plus `today: NaiveDate` (a parameter, so bucketing is testable without mocking the clock) and returns the whole response body. Each `TaskHit` carries **both** `url_path` (where a reader goes) and `path` (the repo-relative source file `POST /.mbr/task` patches) — the second cannot be derived from the first, since `docs/index.md` is served at `/docs/`, the static-folder overlay hides a directory level, and the extension is gone |
 
 ### Key Pure Functions (Testable)
 
@@ -315,6 +320,9 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 - `/{path}` - Markdown files rendered to HTML (trailing slash convention)
 - `/.mbr/site.json` - Full site index with all files and frontmatter
 - `/.mbr/*` - Static assets (theme.css, components)
+- `POST /.mbr/search` - Metadata + content search
+- `POST /.mbr/tasks` - Task query: filter, group, and count markdown tasks. Server/GUI only, gated on `tasks_enabled` (404 when off)
+- `POST /.mbr/task` - Single-line task toggle (`{path, line, expected, to}`). Gated on `edit_enabled` + `check_edit_access`, **not** on `tasks_enabled`, since in-document checkboxes exist whether or not the task browser does. Per-line optimistic concurrency: `expected` must still match the line on disk (409 otherwise), which is the line-sized analogue of `/.mbr/edit`'s `base_hash`. Maintains the `@done(...)` stamp per `tasks_stamp_done`
 
 ### Lit Web Components
 
@@ -326,6 +334,12 @@ Components in `components/src/`:
 - `genealogy/` - Genealogy chunk source: chart registry + selector (localStorage `mbr_genealogy_chart`), family-chart view (default), and the custom d3-free timeline-tree layout/view. The registry is the extension point for future chart types (sunburst, edge bundling, birth-place bubble map).
 - `mbr-find-bar.ts` - GUI-only find-in-page bar (`<mbr-find-bar>`), emitted from `templates/_footer.html` under `{% if gui_mode %}` so it never ships to server or static pages (where the browser's own find works). Driven by the native Edit menu in `src/browser.rs`, which calls its `open`/`close`/`findNext`/`findPrevious` methods via `evaluate_script` — **those four names are referenced from Rust string literals, so renaming them cannot fail at compile time**; `mbr-find-bar.test.ts` asserts they exist.
 - `find-in-page.ts` - Pure matching logic behind the find bar (text indexing over `main#wrapper`, query compilation, match offsets, Range construction). Kept separate from the element so it is unit-testable under happy-dom, which has no `CSS.highlights`. Highlight styles live in `templates/theme.css`, not the element's `static styles`, because `CSS.highlights` is a document-scoped registry and the ranges are in the light DOM.
+- `mbr-tasks.ts` - Task-browser trigger (`<mbr-tasks>`, main bundle): a clipboard button in the nav plus the lowercase `t` shortcut. Emitted by `_nav.html` under `{% if server_mode and tasks_enabled %}`, and renders nothing without `tasksEnabled` (the index is built from live files, so static builds have no `POST /.mbr/tasks`). Lazy-loads the `mbr-tasks.min.js` chunk on first open via the same overridable-importer seam as `mbr-info.ts` (`setTasksChunkImporter`), and injects the endpoint and `resolveUrl` as properties.
+- `tasks/` - Task-browser chunk: `mbr-tasks-panel.ts` (the two-pane overlay), `task-card.ts` (one card, restating theme.css's `--mbr-task-*` vocabulary inside the shadow root), plus pure helpers — `types.ts` (the wire contract, derived from `src/task_query.rs`, **plus the `TaskToggler` service type the trigger injects**), `task-format.ts` (local-time date parsing, runtime overdue marking, progress math), `task-groups.ts` (display groups and the flat row list the keyboard walks; synthesizes the aggregate "Upcoming" heading the server does not send), `folder-tree.ts` (folder pane from the `folders` facet). Filtering, grouping and the x/y counts are the **server's** job — every filter change is a new debounced request. `Space` / `x` toggle the focused task and the card checkboxes are clickable, but only when the injected `editEnabled` is true; those keys otherwise stay with the filter field, which keeps focus throughout (they are claimed only once `_focusRow` is on a task, the same trade `Enter` makes).
+- `mbr-task-doc.ts` - In-document task behaviour (`<mbr-task-doc>`, main bundle, emitted from `_display_enhancements.html`): one delegated `click`/`contextmenu` listener on `main#wrapper` (left click completes, right click cancels, both `editEnabled`-gated), and the `#mbr-task-N` fragment handler that scrolls a deep-linked task clear of the sticky header and flashes it on load and on `hashchange`. The fragment half runs in static builds too. **The click handler deliberately does not `preventDefault()`** — cancelling a checkbox's click restores its pre-click state *after* the listener returns, silently undoing the optimistic flip; `data-mbr-task-status`, not `checked`, is the state the next click reads. A successful write no longer reloads the page, so the handler finishes the render itself: the optimistic flip covers box + status + strikethrough and `syncDoneChip` draws the stamp from the response.
+- `task-toggle.ts` - The one implementation of `POST /.mbr/task` (main bundle; injected into the panel as a property because it is stateful). Sources `expected` from `/.mbr/raw/<path>` and caches the file's lines for the page's lifetime — the rendered HTML cannot supply it, since annotations are stripped out of the display text. A successful write refreshes the cached line from the response and hands the same text back to the caller; a 409 drops the file. Also owns the **live-reload seam**: **every** task write registers itself, and `wasSelfWrite()` makes `<mbr-live-reload>` skip events for that file for a short window. A *window*, not a single consumable event, because one write is announced several times — the handler broadcasts before it responds, then the watcher echoes the atomic rename (twice, on macOS, ~7ms later) — and it is registered *before* the request, because the handler's broadcast can reach the page while the fetch is still pending. Suppression is not optional: the edit token lives only in memory, so a reload per checkbox would 401 the next click on a token-protected server. What the reload used to buy is replaced by `task-chips.ts` plus the optimistic flip.
+- `task-chips.ts` - Redraws the `@done(...)` chip in the document from the source line the server wrote back, since nothing re-renders the page after a toggle. Mirrors `tasks.rs`'s `DATE_ANNOTATION`/`DATETIME` grammar to read the stamp and `html.rs::push_task_time` to render it — hand-formatted in English rather than `toLocaleDateString`, because the chip lands among sibling chips the *server* rendered (the opposite of `tasks/task-format.ts`'s choice, which renders the panel's own view in the reader's locale).
+- `edit-token.ts` - The optional `Authorization: Bearer` token, held in **one in-memory variable for the life of the page** and never in `localStorage`/`sessionStorage`: mbr renders arbitrary markdown and markdown may contain raw HTML, so web storage would turn "may write while this page is open" into a durable, replayable credential. The editor is its own chunk and cannot import this module, so `openEditor()` takes `token` in and hands new ones back through `onToken`, with `<mbr-editor>` doing the plumbing. Also records `noteEditTokenRequired()` on a 401 so the editor opens with its otherwise-hidden token field visible, and forgets everything when `isEditEnabled()` is false. `edit-token.test.ts` guards the invariant twice: a full editor-open → token → toggle cycle with both storages instrumented, plus a source scan (the editor chunk is not importable under happy-dom) that also pins the list of modules allowed to touch `localStorage` at all.
 - `shared.ts` - Shared state (site navigation data)
 
 These are Lit-based custom elements using decorators (`@customElement`, `@state`, etc.) and compile to ES modules loaded by the HTML template.
@@ -347,7 +361,7 @@ The project uses Tera templates with a partial-based architecture. Templates are
 - `_nav.html` - Navigation header with breadcrumbs and menus
 - `_footer.html` - Page footer with web components
 - `_scripts.html` - Script includes
-- `_display_enhancements.html` - Display-enhancement elements (mermaid/hljs loaders; `<mbr-genealogy>` gated on `{% if type and type == "person" %}`)
+- `_display_enhancements.html` - Display-enhancement elements (mermaid/hljs loaders; `<mbr-task-doc>`; `<mbr-genealogy>` gated on `{% if type and type == "person" %}`)
 
 **Tera Template Gotchas:**
 - Chained `default()` filters don't work as expected for variable fallbacks. Use conditionals instead:

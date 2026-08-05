@@ -11,6 +11,7 @@
         <ul>
           {% if server_mode %}<li><mbr-page-errors></mbr-page-errors></li>{% endif %}
           {% if edit_enabled %}<li><mbr-editor></mbr-editor></li>{% endif %}
+          {% if server_mode and tasks_enabled %}<li><mbr-tasks></mbr-tasks></li>{% endif %}
           <li><mbr-info></mbr-info></li>
           <li><mbr-search></mbr-search></li>
         </ul>

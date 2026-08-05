@@ -45,6 +45,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         title_suffix: String::new(),
         mark_incomplete: true,
         incomplete_markers: mbr::config::default_incomplete_markers(),
+        tasks_enabled: true,
+        tasks_stamp_done: true,
         edit_enabled: false,
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
@@ -2148,8 +2150,9 @@ async fn test_components_js_bundle_served() {
 
 #[tokio::test]
 async fn test_graph_chunks_served() {
-    // The lazy-loaded mini-graph and genealogy chunks are compiled into the
-    // binary (DEFAULT_FILES) and must be served alongside the main bundle.
+    // The lazy-loaded mini-graph, genealogy and task-panel chunks are compiled
+    // into the binary (DEFAULT_FILES) and must be served alongside the main
+    // bundle.
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
@@ -2157,6 +2160,7 @@ async fn test_graph_chunks_served() {
     for path in [
         "/.mbr/components/mbr-graph.min.js",
         "/.mbr/components/mbr-genealogy.min.js",
+        "/.mbr/components/mbr-tasks.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -2213,11 +2217,15 @@ async fn test_components_js_bundle_no_missing_imports() {
         );
     }
 
-    // The mini-graph and genealogy chunks are lazy-loaded through
+    // The mini-graph, genealogy and task-panel chunks are lazy-loaded through
     // runtime-computed URLs (asset base + "components/<chunk>.min.js"), so
     // they never appear as literal import() targets. If the bundle references
-    // either chunk filename, that chunk must actually be served.
-    for chunk in ["mbr-graph.min.js", "mbr-genealogy.min.js"] {
+    // any of those chunk filenames, that chunk must actually be served.
+    for chunk in [
+        "mbr-graph.min.js",
+        "mbr-genealogy.min.js",
+        "mbr-tasks.min.js",
+    ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");
             let resp = server.get(&path).await;
@@ -6912,5 +6920,649 @@ async fn perf_site_json_latency() {
             start.elapsed(),
             body.len()
         );
+    }
+}
+
+// ============================================================================
+// Task browser (`POST /.mbr/tasks`)
+// ============================================================================
+
+/// A repository with tasks spread across folders, statuses, priorities, tags
+/// and due dates. Due dates are absolute, so tests that depend on "today" pin
+/// the bucket they assert on rather than relying on the wall clock.
+fn task_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "inbox.md",
+        concat!(
+            "# Inbox\n\n",
+            "- [ ] write the report #work !!\n",
+            "- [x] file the receipts\n",
+            "- [-] abandoned idea\n",
+        ),
+    );
+    repo.create_markdown(
+        "docs/plan.md",
+        concat!(
+            "---\ntitle: The Plan\n---\n\n",
+            "- [ ] draft the outline #work\n",
+            "- [ ] review with Bob\n",
+        ),
+    );
+    repo.create_markdown(
+        "docs/notes/weekly.md",
+        "- [ ] weekly retro #team @due(2026-08-05)\n",
+    );
+    repo.create_markdown("prose.md", "# Just prose\n\nNo tasks here at all.\n");
+    repo
+}
+
+/// POSTs a task query and returns the parsed JSON body.
+async fn tasks_query(server: &TestServer, body: &str) -> serde_json::Value {
+    let response = server.post_json("/.mbr/tasks", body).await;
+    assert_eq!(response.status(), 200, "task query should succeed");
+    response.json().await.expect("task response is JSON")
+}
+
+/// Every returned task's display text, in response order.
+fn task_texts(body: &serde_json::Value) -> Vec<String> {
+    body["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .flat_map(|g| g["tasks"].as_array().expect("tasks array"))
+        .map(|t| t["text"].as_str().expect("text").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_returns_404_when_disabled() {
+    let repo = task_repo();
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_enabled = false;
+    })
+    .await;
+
+    let response = server.post_json("/.mbr/tasks", "{}").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "a disabled task browser must not answer queries"
+    );
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_returns_grouped_incomplete_tasks_by_default() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+
+    // Default view: incomplete only, grouped by file, files sorted by URL.
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g["key"].as_str().expect("key"))
+            .collect::<Vec<_>>(),
+        vec!["/docs/notes/weekly/", "/docs/plan/", "/inbox/"],
+        "a file with no tasks must not produce a group"
+    );
+
+    // Group metadata: frontmatter title, folder sublabel, page URL.
+    let plan = &groups[1];
+    assert_eq!(plan["label"], "The Plan");
+    assert_eq!(plan["sublabel"], "docs");
+    assert_eq!(plan["url_path"], "/docs/plan/");
+    assert!(plan["date"].is_null(), "category groups carry no date");
+
+    // Parsed annotations survive the round trip.
+    let report = &groups[2]["tasks"][0];
+    assert_eq!(report["text"], "write the report");
+    assert_eq!(report["status"], "open");
+    assert_eq!(report["priority"], "high");
+    assert_eq!(report["tags"][0], "work");
+    assert_eq!(report["url_path"], "/inbox/");
+    assert_eq!(report["path"], "inbox.md");
+    assert_eq!(report["line"], 3);
+
+    assert_eq!(body["total_matches"], 4);
+    assert!(body["duration_ms"].is_number());
+    assert_eq!(body["scan_in_progress"], false);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_counts_include_tasks_filtered_out_of_the_view() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Only the open task in inbox.md matches, but the group's progress must
+    // describe the whole file — and exclude the canceled item from both halves.
+    let body = tasks_query(&server, r#"{"q": "report"}"#).await;
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["tasks"].as_array().expect("tasks").len(), 1);
+    assert_eq!(groups[0]["done"], 1);
+    assert_eq!(groups[0]["total"], 2);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_status_filter_is_a_multi_select() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let done_only = tasks_query(&server, r#"{"statuses": ["done"]}"#).await;
+    assert_eq!(task_texts(&done_only), vec!["file the receipts"]);
+
+    let canceled = tasks_query(&server, r#"{"statuses": ["canceled"]}"#).await;
+    assert_eq!(task_texts(&canceled), vec!["abandoned idea"]);
+
+    let everything = tasks_query(
+        &server,
+        r#"{"statuses": ["open", "done", "canceled"], "folder": "/"}"#,
+    )
+    .await;
+    assert_eq!(everything["total_matches"], 6);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_folder_scope_includes_subfolders() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"folder": "/docs/"}"#).await;
+    assert_eq!(
+        task_texts(&body),
+        vec!["weekly retro", "draft the outline", "review with Bob"],
+        "a folder scope must reach into its subfolders"
+    );
+
+    let deeper = tasks_query(&server, r#"{"folder": "/docs/notes/"}"#).await;
+    assert_eq!(task_texts(&deeper), vec!["weekly retro"]);
+
+    // Facets are computed ignoring the folder filter, so the folder pane can
+    // still offer somewhere else to go, and count subfolders cumulatively.
+    let facets: Vec<(&str, u64)> = deeper["folders"]
+        .as_array()
+        .expect("folders array")
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().expect("path"),
+                f["count"].as_u64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(facets, vec![("/", 4), ("/docs/", 3), ("/docs/notes/", 1)]);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_query_matches_text_and_tags() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // A `#tag` token matches tags only.
+    let tagged = tasks_query(&server, r##"{"q": "#work"}"##).await;
+    assert_eq!(
+        task_texts(&tagged),
+        vec!["draft the outline", "write the report"]
+    );
+
+    // Bare words match the display text, case-insensitively, and AND together.
+    let words = tasks_query(&server, r#"{"q": "THE report"}"#).await;
+    assert_eq!(task_texts(&words), vec!["write the report"]);
+
+    let none = tasks_query(&server, r##"{"q": "#nonexistent"}"##).await;
+    assert!(none["groups"].as_array().expect("groups").is_empty());
+    assert_eq!(none["total_matches"], 0);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_limit_truncates_without_changing_total_matches() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"limit": 2}"#).await;
+    assert_eq!(task_texts(&body).len(), 2, "limit caps returned tasks");
+    assert_eq!(
+        body["total_matches"], 4,
+        "total_matches is counted before truncation"
+    );
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_calendar_mode_buckets_by_due_date() {
+    let repo = TestRepo::new();
+    // Pinned far in the past and future so the buckets are stable whenever the
+    // suite runs; "today"/"tomorrow" are covered by the unit tests, which can
+    // supply their own `today`.
+    repo.create_markdown(
+        "due.md",
+        concat!(
+            "- [ ] ancient @due(2001-01-01)\n",
+            "- [ ] distant @due(2999-12-31)\n",
+            "- [x] distant done @due(2999-12-31)\n",
+            "- [-] canceled @due(2999-12-31)\n",
+            "- [ ] undated\n",
+        ),
+    );
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"mode": "calendar"}"#).await;
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g["key"].as_str().expect("key"))
+            .collect::<Vec<_>>(),
+        vec!["overdue", "upcoming:2999-12-31", "none"]
+    );
+
+    // Overdue carries no progress numbers at all.
+    assert_eq!(
+        (groups[0]["done"].clone(), groups[0]["total"].clone()),
+        (serde_json::json!(0), serde_json::json!(0))
+    );
+
+    // The dated bucket shows only the open task (default status filter) but
+    // counts the completed one too — and ignores the canceled one entirely.
+    let dated = &groups[1];
+    assert_eq!(
+        dated["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .map(|t| t["text"].as_str().expect("text"))
+            .collect::<Vec<_>>(),
+        vec!["distant"]
+    );
+    assert_eq!(dated["done"], 1);
+    assert_eq!(dated["total"], 2);
+    assert_eq!(dated["date"], "2999-12-31");
+    assert!(dated["url_path"].is_null());
+}
+
+/// The watcher must keep the task index fresh once it has been built, the same
+/// way it keeps links.json fresh (see
+/// `test_links_json_refreshes_after_watcher_sees_external_edit`).
+#[tokio::test]
+async fn test_tasks_refresh_after_watcher_sees_external_edit() {
+    let repo = TestRepo::new();
+    let notes = repo.create_markdown("notes.md", "- [ ] original task\n");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    // The watcher is initialized on a background thread; an edit that lands
+    // before it is listening is simply never seen.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    // Build the index by querying it once — nothing is indexed before this.
+    let before = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&before), vec!["original task"]);
+
+    let edited = "- [ ] original task\n- [ ] added externally\n";
+    std::fs::write(&notes, edited).expect("rewrite notes");
+
+    // Watcher event + 2 s debounce; poll rather than sleeping blind, re-touching
+    // the file so a dropped first event cannot hang the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = tasks_query(&server, "{}").await;
+        if task_texts(&body) == vec!["original task", "added externally"] {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task index still served the stale file: {:?}",
+            task_texts(&body)
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::write(&notes, edited).expect("re-touch notes");
+    }
+}
+
+// ============================================================================
+// Task toggle (`POST /.mbr/task`)
+// ============================================================================
+
+/// A file whose second task is the one every toggle test aims at, with a
+/// neighbour above and below so a patch that moves other bytes is caught.
+const TOGGLE_SOURCE: &str = "# Notes\n\n- [ ] write the report !!\n- [ ] second\n";
+
+/// The body of a toggle request for line 3 of [`TOGGLE_SOURCE`].
+fn toggle_body(to: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": "notes.md",
+        "line": 3,
+        "expected": "- [ ] write the report !!",
+        "to": to,
+    })
+}
+
+#[tokio::test]
+async fn test_task_toggle_disabled_returns_403() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    // Editing off (the default) — the task browser being on must not matter.
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "toggling must be 403 when editing is off"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        TOGGLE_SOURCE,
+        "a rejected toggle must not touch the file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_missing_csrf_header_returns_403() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = server
+        .client
+        .post(server.url("/.mbr/task"))
+        .header("Content-Type", "application/json")
+        .body(toggle_body("done").to_string())
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 403, "missing X-MBR-Edit must be 403");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+#[tokio::test]
+async fn test_task_toggle_happy_path_stamps_and_writes_exact_bytes() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON response");
+    assert_eq!(json["line"], 3);
+    let text = json["text"].as_str().expect("text").to_string();
+
+    // The stamp is wall-clock, so assert its shape by reading it back with the
+    // same parser the index uses rather than by pinning a literal timestamp.
+    assert!(
+        text.starts_with("- [x] write the report !! @done("),
+        "unexpected line: {text}"
+    );
+    let parsed = mbr::tasks::parse_task_line(&text, 3).expect("still a task");
+    assert_eq!(parsed.status, mbr::tasks::TaskStatus::Done);
+    assert_eq!(parsed.text, "write the report");
+    assert!(parsed.done.is_some() && parsed.done_has_time);
+
+    // Exactly that line changed; every other byte of the file is where it was.
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("# Notes\n\n{text}\n- [ ] second\n")
+    );
+
+    // Reopening it removes the stamp again, restoring the original file.
+    let reopen = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 3, "expected": text, "to": "open",
+        }),
+    )
+    .await;
+    assert_eq!(reopen.status(), 200);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+#[tokio::test]
+async fn test_task_toggle_without_stamping_rewrites_only_the_marker() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "# Notes\n\n- [x] write the report !!\n- [ ] second\n"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_preserves_crlf_line_endings() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", "- [ ] windows task\r\n- [ ] second\r\n");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 1,
+            "expected": "- [ ] windows task", "to": "canceled",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "- [-] windows task\r\n- [ ] second\r\n",
+        "a CRLF file must stay a CRLF file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_stale_expected_returns_409() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Somebody edited that very line since the page was rendered.
+    let edited = "# Notes\n\n- [ ] write the report tomorrow !!\n- [ ] second\n";
+    std::fs::write(&file, edited).expect("rewrite");
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 409, "a changed line must be 409");
+    let message = resp.text().await.expect("body");
+    assert!(
+        message.contains("changed on disk"),
+        "the 409 should say why: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        edited,
+        "a rejected toggle must not touch the file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_rejects_a_line_that_is_not_a_task() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Line 1 is the heading, and matches `expected` exactly — it is simply not
+    // a task, which is a different failure from a stale line.
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 1, "expected": "# Notes", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "a non-task line must be 400");
+
+    // As is a line past the end of the file.
+    let past_end = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 99, "expected": "", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(past_end.status(), 400, "a missing line must be 400");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+#[tokio::test]
+async fn test_task_toggle_rejects_paths_outside_the_root() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    repo.create_static_file("data.txt", b"- [ ] not markdown\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for path in [
+        "../escape.md",
+        "../../etc/passwd",
+        "/etc/passwd",
+        "missing.md",
+        "data.txt",
+    ] {
+        let resp = edit_post(
+            &server,
+            "/.mbr/task",
+            serde_json::json!({
+                "path": path, "line": 1, "expected": "- [ ] x", "to": "done",
+            }),
+        )
+        .await;
+        assert!(
+            resp.status() == 404 || resp.status() == 400,
+            "toggling {path} must be rejected, got {}",
+            resp.status()
+        );
+    }
+}
+
+/// The panel that sent a toggle re-queries immediately, long before the
+/// watcher's debounce elapses, so the handler has to invalidate the index
+/// itself.
+#[tokio::test]
+async fn test_task_toggle_is_reflected_by_the_task_index() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes.md", "- [ ] toggle me\n- [ ] leave me\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Build the index first: this is the "already built" path, where a stale
+    // entry would otherwise survive.
+    let before = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&before), vec!["toggle me", "leave me"]);
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 1,
+            "expected": "- [ ] toggle me", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Default view is incomplete-only, so the completed task drops out at once.
+    let after = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&after), vec!["leave me"]);
+
+    // ...and it really is done, stamp and all, in the everything view.
+    let all = tasks_query(&server, r#"{"statuses": ["open", "done", "canceled"]}"#).await;
+    let toggled = &all["groups"][0]["tasks"][0];
+    assert_eq!(toggled["text"], "toggle me");
+    assert_eq!(toggled["status"], "done");
+    assert!(
+        !toggled["done"].is_null(),
+        "the @done stamp should be indexed: {toggled}"
+    );
+    assert_eq!(all["groups"][0]["done"], 1);
+    assert_eq!(all["groups"][0]["total"], 2);
+}
+
+#[tokio::test]
+async fn test_task_query_path_round_trips_into_a_toggle() {
+    // `docs/index.md` is served at `/docs/`, so a client that rebuilt the file
+    // path out of `url_path` would send `docs.md` and get a 404. This is the
+    // pairing that makes `TaskHit::path` worth putting on the wire.
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("docs/index.md", "- [ ] indexed task\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+    let hit = &body["groups"][0]["tasks"][0];
+    assert_eq!(hit["url_path"], "/docs/", "the URL hides the file name");
+    assert_eq!(hit["path"], "docs/index.md");
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": hit["path"],
+            "line": hit["line"],
+            "expected": "- [ ] indexed task",
+            "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the path a query reports must be the one the toggle accepts"
+    );
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .starts_with("- [x] indexed task"),
+        "the toggle should have landed on the indexed file"
+    );
+}
+
+#[tokio::test]
+async fn test_head_config_includes_tasks_enabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\nBody.");
+
+    // Markdown pages, section pages and the home page all need the flag, since
+    // the task panel is reachable from every one of them.
+    let server = TestServer::start(&repo).await;
+    for path in ["/readme/", "/"] {
+        assert_html_contains(&server.get_text(path).await, "tasksEnabled: true");
+    }
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_enabled = false;
+    })
+    .await;
+    for path in ["/readme/", "/"] {
+        assert_html_contains(&server.get_text(path).await, "tasksEnabled: false");
     }
 }

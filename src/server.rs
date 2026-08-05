@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::config::{RelationType, SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
-use crate::errors::{MbrError, ServerError};
+use crate::errors::{MbrError, ServerError, TaskPatchError};
 use crate::link_grep::InboundLinkCache;
 use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
@@ -1063,6 +1063,11 @@ pub struct ServerConfig {
     pub mark_incomplete: bool,
     /// Marker strings used by the incomplete-block highlighter.
     pub incomplete_markers: Vec<String>,
+    /// Enable the task browser (`POST /.mbr/tasks`).
+    pub tasks_enabled: bool,
+    /// Maintain the `@done(...)` annotation when `POST /.mbr/task` toggles a
+    /// task's status.
+    pub tasks_stamp_done: bool,
     /// Enable the in-browser markdown editing endpoints.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1124,6 +1129,8 @@ impl From<&crate::config::Config> for ServerConfig {
             // Server/GUI default: on unless config overrides.
             mark_incomplete: config.mark_incomplete.unwrap_or(true),
             incomplete_markers: config.incomplete_markers.clone(),
+            tasks_enabled: config.tasks_enabled,
+            tasks_stamp_done: config.tasks_stamp_done,
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
@@ -1241,6 +1248,17 @@ pub struct ServerState {
     pub mark_incomplete: bool,
     /// Marker strings used by the incomplete-block highlighter.
     pub incomplete_markers: Vec<String>,
+    /// Whether the task browser (`POST /.mbr/tasks`) is enabled.
+    pub tasks_enabled: bool,
+    /// Whether `POST /.mbr/task` maintains the `@done(...)` annotation when it
+    /// toggles a task's status.
+    pub tasks_stamp_done: bool,
+    /// Lazy index of the repository's markdown tasks.
+    ///
+    /// Deliberately *not* built at startup: it is filled on the first task
+    /// query and then kept fresh by the watcher, so a server whose user never
+    /// opens the task panel never pays for a full-repo read pass.
+    pub task_index: Arc<crate::task_index::TaskIndex>,
     /// Whether the in-browser markdown editing endpoints are enabled.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1258,6 +1276,34 @@ pub struct EditRequest {
     pub content: String,
     /// SHA-256 hex of the content the client loaded, for optimistic concurrency.
     pub base_hash: String,
+}
+
+/// JSON body for `POST /.mbr/task`.
+///
+/// `expected` is the per-line analogue of [`EditRequest::base_hash`]: it is what
+/// makes it safe to patch one line of a file without holding the whole file.
+#[derive(serde::Deserialize)]
+pub struct TaskToggleRequest {
+    /// Repo-relative **filesystem** path of the file to patch (with extension),
+    /// the same convention as `/.mbr/raw` and `/.mbr/edit`.
+    pub path: String,
+    /// 1-based source line of the task.
+    pub line: u32,
+    /// The exact current text of that line, verbatim. The line terminator is
+    /// ignored, everything else must match byte for byte.
+    pub expected: String,
+    /// Target status: `open`, `done` or `canceled`.
+    pub to: crate::tasks::TaskStatus,
+}
+
+/// Response for a successful `POST /.mbr/task`.
+#[derive(serde::Serialize)]
+pub struct TaskToggleResponse {
+    /// The line that was patched, echoed back.
+    pub line: u32,
+    /// Its new text, without the terminator — including any `@done(...)` the
+    /// server added or removed, which the client cannot predict.
+    pub text: String,
 }
 
 /// JSON body for `POST /.mbr/create/{*path}`.
@@ -1605,6 +1651,8 @@ impl Server {
             title_suffix,
             mark_incomplete,
             incomplete_markers,
+            tasks_enabled,
+            tasks_stamp_done,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -1826,6 +1874,12 @@ impl Server {
             });
         }
 
+        // Lazy task index. Created here so the watcher can keep it fresh, but
+        // deliberately left *empty*: it is filled by the first `/.mbr/tasks`
+        // request, and `invalidate_file` is a no-op until then, so a server
+        // whose user never opens the task panel never reads a file for it.
+        let task_index = Arc::new(crate::task_index::TaskIndex::new());
+
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
         // For small batches (<=50 files): surgical per-file invalidation.
@@ -1839,6 +1893,7 @@ impl Server {
         let inbound_index_for_invalidation = Arc::clone(&inbound_index);
         let link_index_config_for_invalidation = link_index_config.clone();
         let index_lock_for_invalidation = Arc::clone(&index_lock);
+        let task_index_for_invalidation = Arc::clone(&task_index);
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1909,6 +1964,7 @@ impl Server {
                 let inbound_index = Arc::clone(&inbound_index_for_invalidation);
                 let link_index_cfg = link_index_config_for_invalidation.clone();
                 let index_lock = Arc::clone(&index_lock_for_invalidation);
+                let task_index = Arc::clone(&task_index_for_invalidation);
 
                 if relevant_events.len() <= SURGICAL_THRESHOLD {
                     // Surgical invalidation: update individual files
@@ -1955,6 +2011,17 @@ impl Server {
                                 matches!(event.event, crate::watcher::ChangeEventType::Deleted),
                             ));
                             repo.invalidate_file(&abs_path, &event.event);
+                            // After `repo.invalidate_file`, never before: a
+                            // created or modified file's url/title are read
+                            // back out of the repository's own map, which the
+                            // call above is what populates. A no-op until the
+                            // task index has actually been built.
+                            task_index.invalidate_file(
+                                &abs_path,
+                                &event.event,
+                                &repo,
+                                &link_index_cfg.base_dir,
+                            );
                         }
                         // Rebuild tag index if any files were deleted or modified
                         // (created files add tags inline in invalidate_file)
@@ -2031,6 +2098,10 @@ impl Server {
                         if inbound_index.is_ready() {
                             populate_inbound_index(&repo, &inbound_index, &link_index_cfg);
                         }
+                        // Same reasoning for tasks: too many files moved for a
+                        // per-file patch to be cheaper than one read pass. Still
+                        // a no-op unless somebody has actually used tasks.
+                        task_index.rebuild_if_built(&repo, &link_index_cfg.base_dir);
                         let _ = base_dir; // keep alive for potential future use
                     })
                     .await
@@ -2104,6 +2175,9 @@ impl Server {
             title_suffix,
             mark_incomplete,
             incomplete_markers,
+            tasks_enabled,
+            tasks_stamp_done,
+            task_index,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -2115,6 +2189,8 @@ impl Server {
             .route("/.mbr/site.json", get(Self::get_site_info))
             .route("/.mbr/media.json", get(Self::get_media_info))
             .route("/.mbr/search", post(Self::search_handler))
+            // Task browser query endpoint (gated by tasks_enabled; 404 when off)
+            .route("/.mbr/tasks", post(Self::tasks_handler))
             // Editing endpoints: raw source fetch and save (gated by edit_enabled + auth)
             .route("/.mbr/raw/{*path}", get(Self::raw_markdown_handler))
             .route(
@@ -2123,6 +2199,10 @@ impl Server {
                     // Cap edit payloads at 5 MB (axum default is 2 MB).
                     .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
             )
+            // Single-line task toggle (gated by edit_enabled + auth, like the
+            // rest of the write endpoints). Singular `/task`, next to the plural
+            // `/tasks` query above.
+            .route("/.mbr/task", post(Self::task_toggle_handler))
             // File-management endpoints (gated by edit_enabled + auth): create a
             // new file, move/rename with repo-wide link rewrite, create a folder.
             .route(
@@ -2655,6 +2735,119 @@ impl Server {
         }
     }
 
+    /// Task query endpoint for the task browser.
+    ///
+    /// `POST /.mbr/tasks`
+    ///
+    /// Every request field is optional, so `{}` means "all incomplete tasks in
+    /// the repository, grouped by file":
+    ///
+    /// ```json
+    /// {
+    ///   "q": "report #work",
+    ///   "folder": "/docs/",
+    ///   "statuses": ["open"],
+    ///   "priorities": [],
+    ///   "due": "any",
+    ///   "mode": "category",
+    ///   "limit": 500
+    /// }
+    /// ```
+    ///
+    /// Returns `404` when `tasks_enabled` is off. Server/GUI only — static
+    /// builds have no task endpoint at all.
+    ///
+    /// The first request builds the index (one sequential read pass over the
+    /// repository's markdown); later ones reuse it, and the watcher keeps it
+    /// fresh. Like search, this does not wait for the repository scan: partial
+    /// results with `scan_in_progress: true` beat a hung panel.
+    pub async fn tasks_handler(
+        State(config): State<ServerState>,
+        Json(query): Json<crate::task_query::TaskQuery>,
+    ) -> Response<Body> {
+        if !config.tasks_enabled {
+            return Self::tasks_error(StatusCode::NOT_FOUND, "Task browsing is disabled");
+        }
+
+        let scan_in_progress = !config.repo.is_scan_complete();
+
+        if let Err(e) = config
+            .task_index
+            .ensure_built(&config.repo, &config.base_dir)
+            .await
+        {
+            tracing::error!("Task index build failed: {e}");
+            return Self::tasks_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build the task index",
+            );
+        }
+
+        // Grouping is pure CPU work over an in-memory snapshot, but a
+        // repository with a hundred thousand tasks makes it long enough to be
+        // worth keeping off the async runtime.
+        let files = config.task_index.snapshot();
+        let today = chrono::Local::now().date_naive();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::task_query::run_query(&files, &query, today)
+        })
+        .await;
+
+        let mut response = match result {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::error!("Task query task panicked: {e}");
+                return Self::tasks_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Task query task failed",
+                );
+            }
+        };
+        response.scan_in_progress = scan_in_progress;
+
+        tracing::debug!(
+            "Task query completed: {} matches in {} group(s), {}ms",
+            response.total_matches,
+            response.groups.len(),
+            response.duration_ms
+        );
+
+        match serde_json::to_vec(&response) {
+            Ok(body) => build_response_or_500(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to serialize task response: {e}");
+                Self::tasks_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to serialize task response",
+                )
+            }
+        }
+    }
+
+    /// A JSON error body shaped like an empty task response, so the frontend
+    /// can render a failure without a second parse path.
+    fn tasks_error(status: StatusCode, message: &str) -> Response<Body> {
+        let body = serde_json::json!({
+            "error": message,
+            "groups": [],
+            "folders": [],
+            "total_matches": 0,
+            "duration_ms": 0,
+            "scan_in_progress": false,
+        });
+        build_response_or_500(
+            Response::builder()
+                .status(status)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string())),
+        )
+    }
+
     /// Enforces the access policy shared by the raw-fetch and save editing
     /// endpoints. Returns `Ok(())` when the request may proceed, or `Err(resp)`
     /// with the appropriate error response.
@@ -2902,6 +3095,108 @@ impl Server {
             resp.headers_mut().insert("x-mbr-content-hash", hv);
         }
         resp
+    }
+
+    /// POST /.mbr/task — flips the status of a single task line.
+    ///
+    /// ```json
+    /// { "path": "docs/guide.md", "line": 42,
+    ///   "expected": "- [ ] write the report !!", "to": "done" }
+    /// ```
+    ///
+    /// ```json
+    /// { "line": 42, "text": "- [x] write the report !! @done(2026-08-04 14:32)" }
+    /// ```
+    ///
+    /// Gated on `edit_enabled` and the same [`Self::check_edit_access`] policy
+    /// as every other write endpoint — this writes to the user's files, so it
+    /// answers to the editing switch, not to `tasks_enabled` (in-document
+    /// checkboxes exist whether or not the task browser does).
+    ///
+    /// # Why `expected` rather than a whole-file hash
+    ///
+    /// The editor holds a whole file open and can afford
+    /// [`EditRequest::base_hash`]. A checkbox cannot: the page has been open for
+    /// an hour and the user has no idea what else changed in the file. Matching
+    /// just the one line means an unrelated edit elsewhere in the file does not
+    /// spuriously fail the toggle, while an edit *to that line* — the only case
+    /// where flipping its marker could corrupt something — still does, with a
+    /// `409`.
+    ///
+    /// | Status | Cause |
+    /// |--------|-------|
+    /// | `403` / `401` | [`Self::check_edit_access`] (disabled, CSRF, cross-origin, `Host`, token) |
+    /// | `404` | The path is not an editable markdown file |
+    /// | `400` | Path outside the root, unreadable/not-UTF-8 file, no such line, or the line is not a task |
+    /// | `409` | The line no longer matches `expected` |
+    /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
+    /// | `500` | The write failed |
+    pub async fn task_toggle_handler(
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<TaskToggleRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
+
+        let source = match tokio::fs::read(&md_path).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "File is not valid UTF-8").into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to read markdown before task toggle: {e}");
+                return (StatusCode::NOT_FOUND, "File not found").into_response();
+            }
+        };
+
+        // Local wall clock, matching the naive/local dates `tasks.rs` parses.
+        let stamp = config
+            .tasks_stamp_done
+            .then(|| chrono::Local::now().naive_local());
+        let patched =
+            match crate::tasks::patch_task_line(&source, req.line, &req.expected, req.to, stamp) {
+                Ok(patched) => patched,
+                Err(e) => {
+                    let status = match e {
+                        TaskPatchError::Mismatch { .. } => StatusCode::CONFLICT,
+                        TaskPatchError::LineOutOfRange { .. } | TaskPatchError::NotATask { .. } => {
+                            StatusCode::BAD_REQUEST
+                        }
+                    };
+                    return (status, e.to_string()).into_response();
+                }
+            };
+
+        if let Err(e) = Self::atomic_write_file(&md_path, patched.source.as_bytes()) {
+            tracing::error!("Failed to write task toggle: {e:?}");
+            return e.into_response();
+        }
+
+        // Live-reload for connected clients, then the task index, which the
+        // watcher would also refresh — but only after its debounce, and the
+        // panel that sent this expects its own next query to see the change.
+        Self::broadcast_change(&config, &md_path, crate::watcher::ChangeEventType::Modified);
+        config.task_index.invalidate_file(
+            &md_path,
+            &crate::watcher::ChangeEventType::Modified,
+            &config.repo,
+            &config.base_dir,
+        );
+
+        Json(TaskToggleResponse {
+            line: req.line,
+            text: patched.text,
+        })
+        .into_response()
     }
 
     /// Resolves a repo-relative path that may not yet exist to an absolute
@@ -3509,6 +3804,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 );
             }
         };
@@ -3528,6 +3824,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 );
             }
         };
@@ -3548,6 +3845,7 @@ impl Server {
                         &config.sidebar_style,
                         config.sidebar_max_items,
                         config.graph_depth,
+                        config.tasks_enabled,
                     );
                 }
                 Err(MbrError::InvalidMediaPath(msg)) => {
@@ -3562,6 +3860,7 @@ impl Server {
                         &config.sidebar_style,
                         config.sidebar_max_items,
                         config.graph_depth,
+                        config.tasks_enabled,
                     );
                 }
                 Err(e) => {
@@ -3576,6 +3875,7 @@ impl Server {
                         &config.sidebar_style,
                         config.sidebar_max_items,
                         config.graph_depth,
+                        config.tasks_enabled,
                     );
                 }
             };
@@ -3624,6 +3924,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -3653,6 +3954,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 )
             }
         }
@@ -3825,6 +4127,7 @@ impl Server {
         sidebar_style: &str,
         sidebar_max_items: usize,
         graph_depth: usize,
+        tasks_enabled: bool,
     ) -> Response<Body> {
         use std::collections::HashMap;
 
@@ -3850,6 +4153,7 @@ impl Server {
                 sidebar_style,
                 sidebar_max_items,
                 graph_depth,
+                tasks_enabled,
                 title_affixes: None,
             },
         );
@@ -4066,6 +4370,7 @@ impl Server {
                     &config.sidebar_style,
                     config.sidebar_max_items,
                     config.graph_depth,
+                    config.tasks_enabled,
                 ))
             }
         }
@@ -5930,6 +6235,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
             },
@@ -6148,6 +6454,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6225,6 +6532,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6267,6 +6575,7 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6725,6 +7034,13 @@ const CACHE_CONTROL_NO_CACHE: &str = "no-cache";
 /// Standard cache control header for truly dynamic content that shouldn't be cached.
 const CACHE_CONTROL_NO_STORE: &str = "no-store";
 
+/// [`DEFAULT_FILES`] route of the lazy task-browser chunk.
+///
+/// Named because `build.rs` has to skip exactly this entry: the task browser is
+/// server/GUI only (the index is built from live files), so shipping the chunk
+/// into a static site would be dead weight behind a button that cannot exist.
+pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
+
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/favicon.png",
@@ -6769,6 +7085,14 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         // <mbr-genealogy> on `type: person` pages only.
         "/components/mbr-genealogy.min.js",
         include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Task-browser panel chunk, lazy-loaded by <mbr-tasks> the first time
+        // the panel is opened. Deliberately excluded from static builds — see
+        // `TASKS_CHUNK_ROUTE` in build.rs.
+        TASKS_CHUNK_ROUTE,
+        include_bytes!("../templates/components-js/mbr-tasks.min.js"),
         "application/javascript",
     ),
     (

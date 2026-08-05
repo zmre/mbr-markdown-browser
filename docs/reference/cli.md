@@ -58,6 +58,7 @@ Supported media types are detected by file extension:
 | `--fail-on-broken-links` | Exit with a non-zero status if the static build (`-b`) finds broken internal links. For CI. No effect with `--skip-link-checks` (the build warns on stderr when both are set, since the combination disables the gate). | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking | `false` |
+| `--no-tasks` | Disable the task browser. The `/.mbr/tasks` endpoint returns `404` and no task index is ever built. Server/GUI only — static builds never include tasks either way. | `false` |
 | `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
 | `--no-mark-incomplete` | Disable incomplete-block highlighting | server/GUI: off, build: on (no effect) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |

@@ -1,0 +1,32 @@
+<section>
+<ul>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-1" data-mbr-task-line="1" data-mbr-task-status="open" disabled><span class="mbr-task-text">this is a task due tomorrow</span> <time class="mbr-task-due" datetime="2026-08-05">Aug 5</time></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-2" data-mbr-task-line="2" data-mbr-task-status="done" checked disabled><span class="mbr-task-text">this task was done yesterday</span> <time class="mbr-task-completed" datetime="2026-08-04T12:11">Aug 4, 12:11 PM</time></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-3" data-mbr-task-line="3" data-mbr-task-status="open" disabled><span class="mbr-task-text">this task is urgent</span> <span class="mbr-task-pri mbr-task-pri-urgent" role="img" aria-label="Urgent priority" title="Urgent priority"></span> <span class="mbr-task-tag">#hotlist</span> <span class="mbr-task-tag">#work</span> <time class="mbr-task-due" datetime="2026-08-04T15:00">Aug 4, 3:00 PM</time></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-4" data-mbr-task-line="4" data-mbr-task-status="canceled" disabled><span class="mbr-task-text mbr-task-canceled">this task was canceled</span></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-5" data-mbr-task-line="5" data-mbr-task-status="canceled" disabled><span class="mbr-task-text mbr-task-canceled">This task was moved to a specific date</span> <time class="mbr-task-moved" datetime="2026-08-04">Aug 4</time></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-6" data-mbr-task-line="6" data-mbr-task-status="open" disabled><span class="mbr-task-text">fix <strong>this</strong> and <code>that</code></span> <span class="mbr-task-pri mbr-task-pri-high" role="img" aria-label="High priority" title="High priority"></span> <span class="mbr-task-tag">#bug</span></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-7" data-mbr-task-line="7" data-mbr-task-status="open" disabled><span class="mbr-task-text">carried over</span></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-8" data-mbr-task-line="8" data-mbr-task-status="open" disabled><span class="mbr-task-text">parent task</span>
+<ul>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-9" data-mbr-task-line="9" data-mbr-task-status="open" disabled><span class="mbr-task-text">broken down subtask 1</span> <time class="mbr-task-due" datetime="2026-09-01">Sep 1</time></li>
+<li><input type="checkbox" class="mbr-task-check" id="mbr-task-10" data-mbr-task-line="10" data-mbr-task-status="done" checked disabled><span class="mbr-task-text">broken down subtask 2</span></li>
+</ul>
+</li>
+</ul>
+<p>Loose list:</p>
+<ul>
+<li>
+<p><input type="checkbox" class="mbr-task-check" id="mbr-task-14" data-mbr-task-line="14" data-mbr-task-status="open" disabled><span class="mbr-task-text">loose one</span> <span class="mbr-task-tag">#tag</span> <time class="mbr-task-due" datetime="2027-01-02T09:05">Jan 2, 9:05 AM</time></p>
+<p>a second paragraph, which is not part of the task line</p>
+</li>
+<li>
+<p><input type="checkbox" class="mbr-task-check" id="mbr-task-18" data-mbr-task-line="18" data-mbr-task-status="done" checked disabled><span class="mbr-task-text">loose two</span></p>
+</li>
+</ul>
+<p>Not tasks:</p>
+<pre><code class="language-markdown">- [-] fenced code is not a task
+- [ ] neither is this @due(2026-08-05)
+</code></pre>
+<p>[-] a bare bracket in a paragraph is not a task either</p>
+</section>

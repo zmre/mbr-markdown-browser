@@ -115,14 +115,32 @@ x> A risky operation.
 
 This shorthand is always on (no configuration required). The marker must appear at the very start of a paragraph and be followed by a space; otherwise the text is left untouched.
 
-## Canceled Task Items
+## Tasks
 
-In addition to standard checkboxes, mbr supports canceled items:
+mbr extends GitHub's task lists with two extra markers and a small set of
+annotations, all of which render as chips, pills and dots rather than as raw
+text. The same syntax feeds the [task browser](tasks/), which finds
+every task in the repository and lets you filter and group them.
+
+### Markers
+
+| Marker | Status | Meaning |
+|--------|--------|---------|
+| `- [ ]` | Open | Not done yet |
+| `- [x]` | Done | Completed (`- [X]` works too) |
+| `- [-]` | Canceled | Abandoned — struck through, and never counted in a progress bar |
+| `- [>]` | Canceled | Moved somewhere else; see [move markers](#move-markers) |
+
+Any list bullet works — `-`, `*`, `+`, `1.` or `1)` — and a task may be
+indented under another one. Nested tasks are treated as independent tasks: mbr
+does not roll a parent's progress up from its children.
 
 ```markdown
 - [ ] Unchecked task
 - [x] Completed task
 - [-] Canceled task
+* [ ] Parent task
+	* [ ] A subtask, counted on its own
 ```
 
 ### Live Example
@@ -130,6 +148,95 @@ In addition to standard checkboxes, mbr supports canceled items:
 - [ ] Write documentation
 - [x] Set up project structure
 - [-] Use complex build system (not needed!)
+
+### Annotations
+
+Annotations may appear anywhere in a task's text. They are lifted out of the
+displayed text and rendered as their own elements, so the line stays readable.
+
+| Syntax | Meaning | Notes |
+|--------|---------|-------|
+| `@due(<date>)` | Due date | Rendered as a 🗓 chip |
+| `@done(<date>)` | Completion time | Rendered as a ✓ chip |
+| `#tag` | Tag | `A–Z`, `a–z`, `0–9`, `_` and `-`; must follow a space or start the text |
+| `!!` | High priority | An orange dot |
+| `!!!` | Urgent | A red dot; wins over `!!` |
+
+```markdown
+- [ ] Write the report !! #work @due(2026-08-05)
+- [x] File the receipts #admin @done(2026-08-04 12:11 PM)
+- [ ] Ship the release !!! #release @due(2026-08-04 15:00)
+```
+
+Live:
+
+- [ ] Write the report !! #work @due(2026-08-05)
+- [x] File the receipts #admin @done(2026-08-04 12:11 PM)
+- [ ] Ship the release !!! #release @due(2026-08-04 15:00)
+
+A few rules worth knowing:
+
+- **`#tag` needs whitespace in front of it.** That is what keeps
+  `page.md#anchor` from becoming a tag.
+- **`!!` needs whitespace on both sides** (or the end of the line), so `wow!!`
+  is emphasis, not a priority.
+- **A tag is one word.** `#in-progress` and `#in_progress` are tags;
+  `#in progress` is the tag `#in` followed by the word "progress".
+- **There is no low priority.** Normal is the default and draws no dot.
+
+### Date formats
+
+`@due(...)` and `@done(...)` take the same grammar:
+
+| Form | Example |
+|------|---------|
+| Date only | `@due(2026-08-05)` |
+| Date + 24-hour time | `@due(2026-08-05 15:00)` |
+| Date + 12-hour time | `@due(2026-08-05 03:00 PM)` |
+
+Dates are **naive and local**: mbr does no timezone conversion and no UTC
+round trip, so `2026-08-05 09:00` means nine in the morning wherever you are.
+A due date with no time is treated as the start of that day, and a task is
+overdue only once that whole day has passed — a task due today at 09:00 still
+reads as "Today" at five in the afternoon.
+
+> [!NOTE]
+> An annotation whose contents are not a date is **not** an annotation.
+> `@due(next tuesday)` stays in the text exactly as written, so a mistyped date
+> shows up as your typo rather than as a task that quietly lost its deadline.
+
+### Move markers
+
+When a task moves to another note — most often a dated daily note — record
+where it went with a trailing `> DATE`, and where it came from with a trailing
+`< DATE`:
+
+```markdown
+- [>] Draft the agenda > 2026-08-06
+- [ ] Draft the agenda < 2026-08-04
+```
+
+Both markers are stripped from the displayed text. The `>` form marks the task
+canceled (it lives somewhere else now) and its destination date is kept and
+shown as a → chip; the `<` form is recognised only so it does not clutter the
+display, and is otherwise discarded.
+
+### Where tasks are and are not found
+
+The task browser scans markdown files line by line and skips fenced code
+blocks, indented code blocks, HTML blocks and YAML frontmatter — so a `- [ ]`
+inside an example like the ones above is documentation, not a task.
+
+### Editing tasks
+
+With [editing](../modes/editing/) enabled, checkboxes in a rendered page become
+clickable: a left click completes or reopens a task, and a right click cancels
+it. Only the marker byte (and the `@done(...)` stamp) is rewritten; your
+indentation, bullet style, spacing, other annotations and line endings are left
+exactly as you wrote them. See the
+[task browser](tasks/#toggling-a-task) for the same thing from the
+panel, and
+[`tasks_stamp_done`](../reference/configuration/#task-settings) for the stamp.
 
 ## Pull Quotes
 
@@ -490,6 +597,7 @@ URLs in angle brackets become clickable:
 ## See Also
 
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
+- [Task Browser](tasks/) - Find, filter and complete tasks across the repository
 - [Relationships & Genealogy](relationships/) - Typed frontmatter relationships and family trees
 - [Presentation Slides](slides/) - Create slide presentations from markdown
 - [Slides Example](test-slides/) - A live example presentation

@@ -33,6 +33,7 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `-` or `F2` | Open file browser |
 | `=` | Open media browser |
 | `Ctrl+g` | Toggle info panel |
+| `t` | Open the task browser (server and GUI modes only) |
 | `e` | Open the editor for the current file (when [editing](../modes/editing/) is enabled) |
 | `Esc` | Close current panel |
 
@@ -65,6 +66,39 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `o` | Open in new tab |
 | `Ctrl+d` / `Ctrl+u` | Scroll panel half page |
 | `Esc` | Close browser |
+
+## Task Browser (when open)
+
+The task browser (`t`) is a live view of the tasks in your markdown, so it exists in
+server and GUI modes only — a static build has no files to re-read. Disable it with
+`--no-tasks`. See [Task Browser](../markdown/tasks/) for the full guide.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+n` / `Ctrl+p` | Navigate tasks and headings |
+| `↑` / `↓` | Navigate tasks and headings |
+| `←` / `→` | Collapse / expand the focused group |
+| `Enter` | Open the focused task in its file, or toggle the focused heading |
+| `Space` | Complete / reopen the focused task (when [editing](../modes/editing/) is enabled) |
+| `x` | Cancel / reopen the focused task (when editing is enabled) |
+| `Tab` | Switch between the folder pane and the results pane |
+| `Ctrl+d` / `Ctrl+u` | Scroll the active pane half a page |
+| `Ctrl+f` / `Ctrl+b` | Scroll the active pane a full page |
+| `Esc` | Close the filter options, then the panel |
+
+The filter field keeps focus the whole time, so `Space`, `x`, `←` and `→` reach it
+until you move onto a task with the arrow keys — and typing in the field hands them
+back. Filtering for "buy milk" therefore works as you would expect.
+
+## Task Checkboxes (in a page)
+
+With [editing](../modes/editing/) enabled, the checkboxes in a rendered page are
+clickable.
+
+| Action | Result |
+|--------|--------|
+| Left click | Complete / reopen the task |
+| Right click | Cancel / reopen the task |
 
 ## Fuzzy Nav Modal (when open)
 

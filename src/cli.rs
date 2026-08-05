@@ -128,6 +128,12 @@ pub struct Args {
     #[arg(long)]
     pub no_relationship_tracking: bool,
 
+    /// Disable the task browser (server/GUI only).
+    /// When disabled, the /.mbr/tasks endpoint returns 404 and no task index
+    /// is ever built. Static builds never include tasks either way.
+    #[arg(long)]
+    pub no_tasks: bool,
+
     /// Highlight blocks that start with an incomplete-marker (TK/TODO/FIXME/XXX).
     /// Default: on for server/GUI mode, off for static builds.
     #[arg(long, conflicts_with = "no_mark_incomplete")]
@@ -270,6 +276,10 @@ pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, Config
     if args.no_relationship_tracking {
         config.relationship_tracking = false;
     }
+    // Apply no_tasks from CLI
+    if args.no_tasks {
+        config.tasks_enabled = false;
+    }
     // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
     if args.mark_incomplete {
         config.mark_incomplete = Some(true);
@@ -324,6 +334,7 @@ mod tests {
             fail_on_broken_links: false,
             no_link_tracking: false,
             no_relationship_tracking: false,
+            no_tasks: false,
             mark_incomplete: false,
             no_mark_incomplete: false,
             title_prefix: None,
@@ -524,6 +535,24 @@ mod tests {
     fn test_parse_no_relationship_tracking() {
         let args = Args::parse_from(["mbr", "--no-relationship-tracking"]);
         assert!(args.no_relationship_tracking);
+    }
+
+    #[test]
+    fn test_parse_no_tasks() {
+        let args = Args::parse_from(["mbr", "--no-tasks"]);
+        assert!(args.no_tasks);
+        assert!(!Args::parse_from(["mbr"]).no_tasks);
+    }
+
+    #[test]
+    fn test_no_tasks_disables_the_config_flag() {
+        // Default is on; only the flag turns it off.
+        let mut config = Config::default();
+        assert!(config.tasks_enabled);
+
+        let args = Args::parse_from(["mbr", "--no-tasks"]);
+        config = apply_overrides(config, &args).expect("overrides apply");
+        assert!(!config.tasks_enabled);
     }
 
     #[test]

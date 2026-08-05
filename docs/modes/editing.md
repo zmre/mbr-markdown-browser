@@ -105,6 +105,41 @@ its JSON response.
 Set `create_dirs: true` to create any missing parent directories at the
 destination; otherwise a missing parent is rejected with `400`.
 
+### Task toggling
+
+With editing on, task checkboxes become clickable: a **left click** completes or
+reopens a task and a **right click** cancels it, both in a rendered page and in
+the [task browser](../markdown/tasks/#toggling-a-task) (where `Space` and `x` do
+the same from the keyboard). Flipping one patches the single line it came from:
+
+| Endpoint | Body | Purpose |
+|----------|------|---------|
+| `POST /.mbr/task` | `{ "path": "docs/guide.md", "line": 42, "expected": "- [ ] write the report", "to": "done" }` | Set one task's status to `open`, `done` or `canceled`. |
+
+It answers to `edit_enabled`, not to `tasks_enabled` — in-document checkboxes
+exist whether or not the [task browser](../reference/configuration.md#task-settings)
+does — and it carries the same headers and token as every other write endpoint.
+On success it returns `{ "line": 42, "text": "…" }` with the line's new text.
+
+`expected` is the line-sized version of `/.mbr/edit`'s `base_hash`: it must
+still match the file on disk (ignoring the line terminator) or the request is
+rejected with `409`. Matching one line rather than the whole file means somebody
+else editing a different part of the document does not spuriously fail your
+click, while an edit to *that* line — the only case where flipping its marker
+could clobber something — still does.
+
+Only the marker byte and the `@done(...)` annotation change; indentation, bullet
+style, spacing, other annotations, the line's terminator (a CRLF file stays
+CRLF) and the presence or absence of a trailing newline are all preserved. See
+[`tasks_stamp_done`](../reference/configuration.md#task-settings) for the stamp.
+
+A toggle deliberately does **not** live-reload the page. The marker byte and the
+`@done(...)` stamp are the only things a status change alters, so the page
+updates itself from the response instead of re-rendering — which keeps your
+scroll position, keeps the task browser's overlay and filters intact, and (on a
+token-protected server) keeps the in-memory token alive so the next click still
+authenticates. An edit made anywhere else still reloads the page as usual.
+
 ## Generating a token
 
 For remote editing you need a shared token. Generate one:
@@ -125,8 +160,27 @@ edit_enabled = true
 edit_token_hash = "$argon2id$v=19$m=19456,t=2,p=1$...."
 ```
 
-The editor UI has a token field (revealed automatically on an auth failure);
-the token is kept only in memory for the page session and never persisted.
+### Entering the token
+
+The editor's footer has a token field. It is hidden until there is a reason for
+it, and revealed automatically when something is refused for want of a token —
+including a task checkbox, so "open the editor and enter it" always leads to a
+visible field.
+
+The token is held **in memory only, for as long as the page is open**. It is
+never written to `localStorage` or `sessionStorage`: mbr renders arbitrary
+markdown and markdown may contain raw HTML, so a token parked in web storage
+would be a durable credential that any script on the page could read and replay
+later, long after you had finished editing. A variable dies with the page.
+
+In practice that means one token entry per page load, and only on a
+token-protected server:
+
+- Checkbox toggles do not reload the page, so a token entered once covers every
+  toggle on that page.
+- Saving in the editor *does* reload (that is the point — the whole document was
+  rewritten), so the next write after a save asks for the token again.
+- Navigating to another page asks again.
 
 ## Remote editing
 

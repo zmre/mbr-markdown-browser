@@ -46,6 +46,19 @@
   --mbr-incomplete-bg: rgba(255, 235, 59, 0.18);
   --mbr-incomplete-border: #f57c00;
 
+  /* Task annotations (!! / !!! priority, #tag, @due, @done, [-] canceled) */
+  --mbr-task-pri-high-color: #f57c00;
+  --mbr-task-pri-urgent-color: #c62828;
+  --mbr-task-pri-size: 0.55em;
+  --mbr-task-tag-bg: rgba(115, 130, 140, 0.16);
+  --mbr-task-tag-color: var(--pico-muted-color, #5c6b73);
+  --mbr-task-chip-bg: rgba(115, 130, 140, 0.1);
+  --mbr-task-chip-color: var(--pico-muted-color, #5c6b73);
+  --mbr-task-chip-radius: 0.5em;
+  --mbr-task-canceled-color: var(--pico-muted-color, #5c6b73);
+  /* Arrival flash for a #mbr-task-N deep link. */
+  --mbr-task-flash-color: rgba(255, 213, 79, 0.55);
+
   /* Paper margins. Applied as padding on the content box rather than as an
    * `@page` margin -- see the "Print Styles" section for the Safari reason. */
   --mbr-print-margin-block: 0.5in;
@@ -353,6 +366,13 @@ li::marker {
     --mbr-alert-caution-bg: rgba(183, 28, 28, 0.2);
     --mbr-alert-caution-border: #ef5350;
     --mbr-alert-caution-icon-color: #ef5350;
+
+    /* Task annotations - Dark Mode */
+    --mbr-task-pri-high-color: #ffa726;
+    --mbr-task-pri-urgent-color: #ef5350;
+    --mbr-task-tag-bg: rgba(148, 163, 184, 0.2);
+    --mbr-task-chip-bg: rgba(148, 163, 184, 0.14);
+    --mbr-task-flash-color: rgba(255, 213, 79, 0.28);
   }
 }
 
@@ -384,6 +404,13 @@ li::marker {
   --mbr-alert-caution-bg: rgba(183, 28, 28, 0.2);
   --mbr-alert-caution-border: #ef5350;
   --mbr-alert-caution-icon-color: #ef5350;
+
+  /* Task annotations - Dark Mode */
+  --mbr-task-pri-high-color: #ffa726;
+  --mbr-task-pri-urgent-color: #ef5350;
+  --mbr-task-tag-bg: rgba(148, 163, 184, 0.2);
+  --mbr-task-chip-bg: rgba(148, 163, 184, 0.14);
+  --mbr-task-flash-color: rgba(255, 213, 79, 0.28);
 }
 
 /* ==================== Standard Block Quotes (> - Level 1 Nesting) ==================== */
@@ -567,6 +594,152 @@ blockquote.markdown-alert-caution > p:first-of-type::before {
   border-bottom: 2px dotted var(--mbr-incomplete-border);
   padding: 0 0.15rem;
   border-radius: 2px;
+}
+
+/* ==================== Task Lists ==================== */
+
+/*
+ * Markup emitted by `markdown::collect_events_and_headings` for `- [ ]`,
+ * `- [x]`, `- [-]` (canceled) and `- [>]` (moved), with the `@due` / `@done` /
+ * `#tag` / `!!` annotations lifted out of the text and rendered as chips:
+ *
+ *   <li><input type="checkbox" class="mbr-task-check" id="mbr-task-12"
+ *              data-mbr-task-line="12" data-mbr-task-status="open" disabled>
+ *   <span class="mbr-task-text">write the report</span>
+ *   <span class="mbr-task-pri mbr-task-pri-urgent" …></span>
+ *   <span class="mbr-task-tag">#work</span>
+ *   <time class="mbr-task-due" datetime="2026-08-05">Aug 5</time></li>
+ *
+ * The `<li>` carries no class of its own -- pulldown-cmark gives the HTML
+ * writer no attribute channel for list items -- so the bullet is suppressed by
+ * matching on the checkbox instead. The second selector covers a loose list,
+ * where the item's content is wrapped in a paragraph.
+ */
+
+li:has(> .mbr-task-check),
+li:has(> p > .mbr-task-check) {
+  list-style: none;
+}
+
+.mbr-task-check {
+  /* Vertically centre against the text rather than sitting on the baseline. */
+  vertical-align: middle;
+  margin-inline-end: 0.4em;
+}
+
+/* Only when editing is on does `mbr-task-doc.ts` drop `disabled` and add this
+ * class -- a box that cannot be written to must not invite a click. */
+.mbr-task-check.mbr-task-editable {
+  cursor: pointer;
+}
+
+/*
+ * Arrival flash for a `#mbr-task-42` deep link, applied to the task's <li> by
+ * `mbr-task-doc.ts` on load and on every hashchange.
+ *
+ * A fading background rather than a border or an outline, so nothing in the
+ * line moves: a layout shift landing at the same moment as the fragment jump
+ * would scroll the task the user just followed a link to back off screen.
+ */
+@keyframes mbr-task-flash {
+  from {
+    background-color: var(--mbr-task-flash-color, rgba(255, 213, 79, 0.55));
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+li.mbr-task-flash,
+.mbr-task-flash {
+  border-radius: 4px;
+  animation: mbr-task-flash 1.6s ease-out 1;
+}
+
+/* Respect a reduced-motion preference by holding the highlight steady and
+ * letting the cleanup timeout remove it, rather than animating it away. */
+@media (prefers-reduced-motion: reduce) {
+  li.mbr-task-flash,
+  .mbr-task-flash {
+    animation: none;
+    background-color: var(--mbr-task-flash-color, rgba(255, 213, 79, 0.55));
+  }
+}
+
+/* Canceled (`[-]`) and moved (`[>]`) tasks. Replaces the bare <s> the old
+ * renderer emitted, so the strikethrough now stops at the task's own text and
+ * leaves its subtasks and chips legible. */
+.mbr-task-canceled {
+  text-decoration: line-through;
+  color: var(--mbr-task-canceled-color);
+}
+
+/* Priority dot. Empty by design: the element is a swatch, and its meaning
+ * reaches assistive tech through `role="img"` + `aria-label`. */
+.mbr-task-pri {
+  display: inline-block;
+  width: var(--mbr-task-pri-size);
+  height: var(--mbr-task-pri-size);
+  border-radius: 50%;
+  vertical-align: baseline;
+}
+
+.mbr-task-pri-high {
+  background: var(--mbr-task-pri-high-color);
+}
+
+.mbr-task-pri-urgent {
+  background: var(--mbr-task-pri-urgent-color);
+}
+
+.mbr-task-tag {
+  background: var(--mbr-task-tag-bg);
+  color: var(--mbr-task-tag-color);
+  border-radius: var(--mbr-task-chip-radius);
+  padding: 0.05em 0.5em;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+/*
+ * Date chips. Styled neutrally on purpose: whether a due date is overdue
+ * depends on today's date, and this HTML is cached by the server and frozen
+ * outright by a static build, so an "overdue" class baked in at render time
+ * would be wrong by the next morning. The frontend adds one at runtime; the
+ * machine-readable value it needs is already in each chip's `datetime`.
+ */
+.mbr-task-due,
+.mbr-task-completed,
+.mbr-task-moved {
+  background: var(--mbr-task-chip-bg);
+  color: var(--mbr-task-chip-color);
+  border-radius: var(--mbr-task-chip-radius);
+  padding: 0.05em 0.5em;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+/*
+ * Chip icons. The gap is a margin rather than a space inside `content`,
+ * because CSS consumes one whitespace character as the terminator of a hex
+ * escape -- `content: "\2713 "` renders the tick with no space after it.
+ */
+.mbr-task-due::before,
+.mbr-task-completed::before,
+.mbr-task-moved::before {
+  margin-inline-end: 0.3em;
+}
+
+.mbr-task-due::before {
+  content: "\1F5D3\FE0E"; /* 🗓 calendar, text presentation */
+}
+
+.mbr-task-completed::before {
+  content: "\2713"; /* ✓ */
+}
+
+.mbr-task-moved::before {
+  content: "\2192"; /* → */
 }
 
 /* ==================== Marginalia (>>> - Level 3+ Nesting) ==================== */
