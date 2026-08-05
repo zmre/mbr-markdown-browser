@@ -63,6 +63,10 @@ fn default_tasks_enabled() -> bool {
     true
 }
 
+fn default_tasks_stamp_done() -> bool {
+    true
+}
+
 /// Default markers that flag a block as incomplete.
 ///
 /// A block whose first text matches `^(MARKER)\b` (uppercase, word boundary)
@@ -474,6 +478,16 @@ pub struct Config {
     /// Default: true (enabled). CLI flag `--no-tasks` disables it.
     #[serde(default = "default_tasks_enabled")]
     pub tasks_enabled: bool,
+    /// Maintain the `@done(YYYY-MM-DD HH:MM)` annotation when a task's status
+    /// is toggled through `POST /.mbr/task`: stamp it on completion, remove it
+    /// when the task is reopened or canceled.
+    ///
+    /// Turn it off to have that endpoint rewrite nothing but the marker byte,
+    /// leaving any `@done(...)` exactly as its author wrote it. Nothing else in
+    /// mbr ever writes to a markdown file on its own.
+    /// Default: true (stamp).
+    #[serde(default = "default_tasks_stamp_done")]
+    pub tasks_stamp_done: bool,
     /// Enable the in-browser markdown editing endpoints in server/GUI mode:
     /// `/.mbr/raw` + `/.mbr/edit` (read/save an existing file) and the
     /// file-management endpoints `/.mbr/create` (new file), `/.mbr/move`
@@ -588,6 +602,7 @@ impl Default for Config {
             incomplete_markers: default_incomplete_markers(),
             mark_incomplete: None,
             tasks_enabled: true, // Task browser enabled by default (server/GUI only)
+            tasks_stamp_done: true, // Stamp @done(...) when a task is completed
             edit_enabled: false,
             edit_token_hash: None,
             edit_require_token_on_loopback: false,

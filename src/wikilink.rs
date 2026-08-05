@@ -399,6 +399,10 @@ fn push_transformed(result: &mut String, text: &str, valid_sources: &HashSet<Str
     // Everything before `copied` has already been written to `result`.
     let mut copied = 0;
     let mut pos = 0;
+    // Offset up to which the scan has already proven there is no `]]`. Without
+    // it, a long line holding many `[[` and no closing brackets would re-scan
+    // the remainder of that line once per `[[`, which is quadratic.
+    let mut no_close_until = 0;
 
     while pos < bytes.len() {
         match bytes[pos] {
@@ -413,12 +417,31 @@ fn push_transformed(result: &mut String, text: &str, valid_sources: &HashSet<Str
             }
             b'[' if bytes.get(pos + 1) == Some(&b'[') => {
                 let inner_start = pos + 2;
-                // With no `]]` left in the run, no later wikilink can close
-                // either, so the rest is copied verbatim.
-                let Some(offset) = text[inner_start..].find("]]") else {
-                    break;
+                // A wikilink may not span a line break, so the closing `]]` is
+                // only ever looked for on the opening line. Searching the whole
+                // run instead would let `[[Tags:\nrust]]` match, and the trim in
+                // `parse_wikilink_inner` would then swallow the newline: the
+                // substituted source comes out a line shorter than the file on
+                // disk, and every source line number derived from it — most
+                // visibly the task checkboxes a line patch is aimed at — is one
+                // too small from there on.
+                //
+                // A `[[` that closes nowhere on its line is ordinary text, so
+                // the scan steps over it and carries on; it must not stop, or a
+                // wikilink further down the run would be missed.
+                if inner_start < no_close_until {
+                    // Same line as an earlier `[[` that found no `]]`.
+                    pos = inner_start;
+                    continue;
+                }
+                let rest = &text[inner_start..];
+                let line_end = rest.find('\n').unwrap_or(rest.len());
+                let Some(offset) = rest[..line_end].find("]]") else {
+                    no_close_until = inner_start + line_end;
+                    pos = inner_start;
+                    continue;
                 };
-                let inner = &text[inner_start..inner_start + offset];
+                let inner = &rest[..offset];
                 if let Some(wikilink) = parse_wikilink_inner(inner, valid_sources) {
                     result.push_str(&text[copied..pos]);
                     result.push_str(&wikilink.to_markdown_link());
@@ -473,11 +496,21 @@ fn code_span_end(text: &str, open: usize) -> Option<usize> {
 /// Parses the inner content of a wikilink (`Source:value`).
 ///
 /// Returns `None` if:
+/// - The content spans a line break
 /// - No colon found
 /// - Source is empty
 /// - Source is a URL scheme
 /// - Source is not in valid_sources set
 fn parse_wikilink_inner(inner: &str, valid_sources: &HashSet<String>) -> Option<ParsedWikilink> {
+    // A wikilink is a single-line construct. `transform_wikilinks` enforces
+    // that structurally by never looking past the end of a line for the closing
+    // `]]`, so this is the rule stated where the "is this a wikilink?" decision
+    // is made — which is also what stops a link *destination* containing a
+    // newline from being read as `Source:value` by `parse_tag_link`.
+    if inner.contains('\n') {
+        return None;
+    }
+
     // Split on first colon only
     let colon_pos = inner.find(':')?;
     let source = inner[..colon_pos].trim();
@@ -710,6 +743,89 @@ mod tests {
         let input = "[[Tags:rust is broken";
         let output = transform_wikilinks(input, &sources);
         assert_eq!(output, "[[Tags:rust is broken"); // Unchanged
+    }
+
+    // A wikilink must not span a line break.
+    //
+    // This is not cosmetic. The transformed source is what pulldown-cmark
+    // parses, and `markdown.rs` derives every source line number from *its*
+    // byte offsets. A match that swallowed a newline made the source one
+    // line shorter than the file on disk, so every task below it reported a line
+    // number one too small — and `POST /.mbr/task` would have patched the wrong
+    // line.
+
+    #[test]
+    fn test_transform_wikilinks_does_not_match_across_a_line_break() {
+        let sources = make_sources(&["tags"]);
+        let input = "see [[Tags:\nrust]] here";
+        assert_eq!(transform_wikilinks(input, &sources), input);
+    }
+
+    #[test]
+    fn test_transform_wikilinks_across_a_line_break_preserves_the_line_count() {
+        let sources = make_sources(&["tags"]);
+        let input = "- [ ] see [[Tags:\nrust]] here\n- [x] second\n";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(
+            output.lines().count(),
+            input.lines().count(),
+            "a transform that loses a line shifts every later line number"
+        );
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_transform_wikilinks_unclosed_on_one_line_still_links_the_next() {
+        // Scanning must step over the rejected `[[` rather than give up: the
+        // wikilink on the following line is perfectly good.
+        let sources = make_sources(&["tags"]);
+        let input = "an unclosed [[ bracket\n[[Tags:rust]] links.";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "an unclosed [[ bracket\n[rust](/tags/rust/) links.");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_multi_line_candidate_does_not_swallow_a_later_link() {
+        // The old whole-run `]]` search consumed everything up to the closing
+        // brackets, taking a valid single-line wikilink with it.
+        let sources = make_sources(&["tags"]);
+        let input = "[[Tags:\nand [[Tags:rust]] after";
+        let output = transform_wikilinks(input, &sources);
+        assert_eq!(output, "[[Tags:\nand [rust](/tags/rust/) after");
+    }
+
+    #[test]
+    fn test_transform_wikilinks_unclosed_bracket_does_not_hide_a_later_code_span() {
+        // Stepping over the rejected `[[` must not mean stepping over the rest
+        // of its line: the backtick after it opens a span that wraps onto the
+        // next line, and the wikilink inside that span stays literal.
+        let sources = make_sources(&["tags"]);
+        let input = "a [[ b `code\n[[Tags:rust]]` d";
+        assert_eq!(transform_wikilinks(input, &sources), input);
+    }
+
+    #[test]
+    fn test_transform_wikilinks_many_unclosed_brackets_on_one_line() {
+        // The `no_close_until` bound keeps this linear; before it, a line like
+        // this cost one full-line scan per `[[`.
+        let sources = make_sources(&["tags"]);
+        let input = format!("{}\n[[Tags:rust]]", "[[ ".repeat(2000));
+        let output = transform_wikilinks(&input, &sources);
+        assert!(output.ends_with("\n[rust](/tags/rust/)"), "{output}");
+        assert_eq!(output.matches("[[ ").count(), 2000);
+    }
+
+    #[test]
+    fn test_transform_wikilinks_crlf_does_not_hide_the_line_break() {
+        let sources = make_sources(&["tags"]);
+        let input = "see [[Tags:\r\nrust]] here\r\n";
+        assert_eq!(transform_wikilinks(input, &sources), input);
+    }
+
+    #[test]
+    fn test_parse_tag_link_rejects_a_destination_with_a_newline() {
+        let sources = make_sources(&["tags"]);
+        assert!(parse_tag_link("Tags:ru\nst", &sources).is_none());
     }
 
     #[test]

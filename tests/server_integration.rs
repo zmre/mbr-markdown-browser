@@ -46,6 +46,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         mark_incomplete: true,
         incomplete_markers: mbr::config::default_incomplete_markers(),
         tasks_enabled: true,
+        tasks_stamp_done: true,
         edit_enabled: false,
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
@@ -7218,6 +7219,285 @@ async fn test_tasks_refresh_after_watcher_sees_external_edit() {
         tokio::time::sleep(Duration::from_millis(500)).await;
         std::fs::write(&notes, edited).expect("re-touch notes");
     }
+}
+
+// ============================================================================
+// Task toggle (`POST /.mbr/task`)
+// ============================================================================
+
+/// A file whose second task is the one every toggle test aims at, with a
+/// neighbour above and below so a patch that moves other bytes is caught.
+const TOGGLE_SOURCE: &str = "# Notes\n\n- [ ] write the report !!\n- [ ] second\n";
+
+/// The body of a toggle request for line 3 of [`TOGGLE_SOURCE`].
+fn toggle_body(to: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": "notes.md",
+        "line": 3,
+        "expected": "- [ ] write the report !!",
+        "to": to,
+    })
+}
+
+#[tokio::test]
+async fn test_task_toggle_disabled_returns_403() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    // Editing off (the default) — the task browser being on must not matter.
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "toggling must be 403 when editing is off"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        TOGGLE_SOURCE,
+        "a rejected toggle must not touch the file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_missing_csrf_header_returns_403() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = server
+        .client
+        .post(server.url("/.mbr/task"))
+        .header("Content-Type", "application/json")
+        .body(toggle_body("done").to_string())
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 403, "missing X-MBR-Edit must be 403");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+#[tokio::test]
+async fn test_task_toggle_happy_path_stamps_and_writes_exact_bytes() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON response");
+    assert_eq!(json["line"], 3);
+    let text = json["text"].as_str().expect("text").to_string();
+
+    // The stamp is wall-clock, so assert its shape by reading it back with the
+    // same parser the index uses rather than by pinning a literal timestamp.
+    assert!(
+        text.starts_with("- [x] write the report !! @done("),
+        "unexpected line: {text}"
+    );
+    let parsed = mbr::tasks::parse_task_line(&text, 3).expect("still a task");
+    assert_eq!(parsed.status, mbr::tasks::TaskStatus::Done);
+    assert_eq!(parsed.text, "write the report");
+    assert!(parsed.done.is_some() && parsed.done_has_time);
+
+    // Exactly that line changed; every other byte of the file is where it was.
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("# Notes\n\n{text}\n- [ ] second\n")
+    );
+
+    // Reopening it removes the stamp again, restoring the original file.
+    let reopen = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 3, "expected": text, "to": "open",
+        }),
+    )
+    .await;
+    assert_eq!(reopen.status(), 200);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+#[tokio::test]
+async fn test_task_toggle_without_stamping_rewrites_only_the_marker() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "# Notes\n\n- [x] write the report !!\n- [ ] second\n"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_preserves_crlf_line_endings() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", "- [ ] windows task\r\n- [ ] second\r\n");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 1,
+            "expected": "- [ ] windows task", "to": "canceled",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "- [-] windows task\r\n- [ ] second\r\n",
+        "a CRLF file must stay a CRLF file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_stale_expected_returns_409() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Somebody edited that very line since the page was rendered.
+    let edited = "# Notes\n\n- [ ] write the report tomorrow !!\n- [ ] second\n";
+    std::fs::write(&file, edited).expect("rewrite");
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 409, "a changed line must be 409");
+    let message = resp.text().await.expect("body");
+    assert!(
+        message.contains("changed on disk"),
+        "the 409 should say why: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        edited,
+        "a rejected toggle must not touch the file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_rejects_a_line_that_is_not_a_task() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Line 1 is the heading, and matches `expected` exactly — it is simply not
+    // a task, which is a different failure from a stale line.
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 1, "expected": "# Notes", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "a non-task line must be 400");
+
+    // As is a line past the end of the file.
+    let past_end = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 99, "expected": "", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(past_end.status(), 400, "a missing line must be 400");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+#[tokio::test]
+async fn test_task_toggle_rejects_paths_outside_the_root() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    repo.create_static_file("data.txt", b"- [ ] not markdown\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for path in [
+        "../escape.md",
+        "../../etc/passwd",
+        "/etc/passwd",
+        "missing.md",
+        "data.txt",
+    ] {
+        let resp = edit_post(
+            &server,
+            "/.mbr/task",
+            serde_json::json!({
+                "path": path, "line": 1, "expected": "- [ ] x", "to": "done",
+            }),
+        )
+        .await;
+        assert!(
+            resp.status() == 404 || resp.status() == 400,
+            "toggling {path} must be rejected, got {}",
+            resp.status()
+        );
+    }
+}
+
+/// The panel that sent a toggle re-queries immediately, long before the
+/// watcher's debounce elapses, so the handler has to invalidate the index
+/// itself.
+#[tokio::test]
+async fn test_task_toggle_is_reflected_by_the_task_index() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes.md", "- [ ] toggle me\n- [ ] leave me\n");
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // Build the index first: this is the "already built" path, where a stale
+    // entry would otherwise survive.
+    let before = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&before), vec!["toggle me", "leave me"]);
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 1,
+            "expected": "- [ ] toggle me", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Default view is incomplete-only, so the completed task drops out at once.
+    let after = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&after), vec!["leave me"]);
+
+    // ...and it really is done, stamp and all, in the everything view.
+    let all = tasks_query(&server, r#"{"statuses": ["open", "done", "canceled"]}"#).await;
+    let toggled = &all["groups"][0]["tasks"][0];
+    assert_eq!(toggled["text"], "toggle me");
+    assert_eq!(toggled["status"], "done");
+    assert!(
+        !toggled["done"].is_null(),
+        "the @done stamp should be indexed: {toggled}"
+    );
+    assert_eq!(all["groups"][0]["done"], 1);
+    assert_eq!(all["groups"][0]["total"], 2);
 }
 
 #[tokio::test]

@@ -61,7 +61,15 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
+use crate::errors::TaskPatchError;
 use crate::wikilink::{BlockScanner, LineKind, indent_width};
+
+/// Format of the `@done(...)` timestamp [`set_status`] writes.
+///
+/// The 24-hour form on purpose: it is the shortest spelling
+/// [`parse_datetime`] accepts, so a line mbr stamps parses straight back to the
+/// instant it wrote.
+const DONE_STAMP_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// The task-line *prefix*: `- [ ] `, `1. [x]\t`, `* [-]`, `+ [>] `.
 ///
@@ -294,6 +302,213 @@ pub fn set_marker(line: &str, status: TaskStatus) -> Option<String> {
     // Every marker is one ASCII byte, so this split is always on a char boundary.
     out.push_str(&line[at + 1..]);
     Some(out)
+}
+
+/// Rewrites the marker of a task line *and* maintains its `@done(...)` stamp.
+///
+/// `now` is the clock, passed in rather than read, so this stays a pure
+/// function of its inputs. `None` disables stamping entirely (the
+/// `tasks_stamp_done = false` case), making this exactly [`set_marker`]: an
+/// existing `@done(...)` is then left as the author wrote it, because a user who
+/// opted out has not asked mbr to curate their annotations.
+///
+/// With a clock:
+///
+/// - to [`TaskStatus::Done`], ` @done(<now>)` is appended — unless the line
+///   already carries a recognised one, so toggling done twice does not stamp
+///   twice;
+/// - away from `Done`, every recognised `@done(...)` is removed together with
+///   the whitespace in front of it.
+///
+/// A `@done(...)` whose payload is not a date is not an annotation (see
+/// [`strip_annotations`]) and is therefore neither recognised nor removed.
+///
+/// Everything else survives byte for byte, including any line terminator — a
+/// CRLF line stays CRLF.
+///
+/// # Examples
+///
+/// ```
+/// use chrono::NaiveDate;
+/// use mbr::tasks::{TaskStatus, set_status};
+///
+/// let now = NaiveDate::from_ymd_opt(2026, 8, 4)
+///     .and_then(|d| d.and_hms_opt(14, 32, 0))
+///     .unwrap();
+///
+/// let done = set_status("- [ ] write the report !!", TaskStatus::Done, Some(now)).unwrap();
+/// assert_eq!(done, "- [x] write the report !! @done(2026-08-04 14:32)");
+///
+/// // Stamping is idempotent...
+/// assert_eq!(set_status(&done, TaskStatus::Done, Some(now)).unwrap(), done);
+/// // ...and reversible.
+/// assert_eq!(
+///     set_status(&done, TaskStatus::Open, Some(now)).unwrap(),
+///     "- [ ] write the report !!"
+/// );
+/// ```
+pub fn set_status(line: &str, status: TaskStatus, now: Option<NaiveDateTime>) -> Option<String> {
+    let rewritten = set_marker(line, status)?;
+    let Some(now) = now else {
+        return Some(rewritten);
+    };
+
+    let (content, terminator) = split_line_terminator(&rewritten);
+    let updated = match status {
+        TaskStatus::Done => with_done_stamp(content, now),
+        TaskStatus::Open | TaskStatus::Canceled => without_done_stamp(content),
+    };
+    Some(format!("{updated}{terminator}"))
+}
+
+/// A markdown source with exactly one line rewritten by [`patch_task_line`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchedSource {
+    /// The whole file, ready to be written back.
+    pub source: String,
+    /// The new text of the patched line, without its terminator.
+    pub text: String,
+}
+
+/// Rewrites one task line of a markdown source, checking first that the line is
+/// still what the caller last saw.
+///
+/// This is the whole body of `POST /.mbr/task`, minus the I/O: the caller reads
+/// the file, hands the text here, and writes back [`PatchedSource::source`].
+/// Keeping it pure is what makes the awkward parts — line addressing, the
+/// terminator, the `expected` comparison — testable without a filesystem.
+///
+/// `line_number` is 1-based. `expected` is compared to the line on disk
+/// byte-for-byte *modulo the line terminator*, so a client that captured the
+/// line with or without its `\n` (or `\r\n`) is treated the same.
+///
+/// Only the one line is touched: no other byte of `source` moves, the patched
+/// line keeps its own terminator, and a file that did not end in a newline still
+/// does not.
+///
+/// # Examples
+///
+/// ```
+/// use chrono::NaiveDate;
+/// use mbr::tasks::{TaskStatus, patch_task_line};
+///
+/// let now = NaiveDate::from_ymd_opt(2026, 8, 4)
+///     .and_then(|d| d.and_hms_opt(14, 32, 0))
+///     .unwrap();
+/// let source = "# Notes\r\n- [ ] ship it\r\n- [ ] later\r\n";
+///
+/// let patched =
+///     patch_task_line(source, 2, "- [ ] ship it", TaskStatus::Done, Some(now)).unwrap();
+/// assert_eq!(patched.text, "- [x] ship it @done(2026-08-04 14:32)");
+/// assert_eq!(
+///     patched.source,
+///     "# Notes\r\n- [x] ship it @done(2026-08-04 14:32)\r\n- [ ] later\r\n"
+/// );
+/// ```
+pub fn patch_task_line(
+    source: &str,
+    line_number: u32,
+    expected: &str,
+    status: TaskStatus,
+    now: Option<NaiveDateTime>,
+) -> Result<PatchedSource, TaskPatchError> {
+    let span = line_span(source, line_number)
+        .ok_or(TaskPatchError::LineOutOfRange { line: line_number })?;
+    let (content, terminator) = split_line_terminator(&source[span.clone()]);
+
+    if content != split_line_terminator(expected).0 {
+        return Err(TaskPatchError::Mismatch { line: line_number });
+    }
+    // `set_status` would refuse too, but checking here means a non-task line is
+    // reported as one rather than as a generic failure to rewrite.
+    if parse_task_line(content, line_number).is_none() {
+        return Err(TaskPatchError::NotATask { line: line_number });
+    }
+    let text =
+        set_status(content, status, now).ok_or(TaskPatchError::NotATask { line: line_number })?;
+
+    let mut patched = String::with_capacity(source.len() + text.len());
+    patched.push_str(&source[..span.start]);
+    patched.push_str(&text);
+    patched.push_str(terminator);
+    patched.push_str(&source[span.end..]);
+
+    Ok(PatchedSource {
+        source: patched,
+        text,
+    })
+}
+
+/// Byte range of the 1-based `line_number`th line of `source`, terminator
+/// included, or `None` when the source has no such line.
+///
+/// A trailing newline terminates the last line rather than starting an empty
+/// one, so `"a\n"` has exactly one line — which is what every editor, and
+/// [`str::lines`], also says.
+fn line_span(source: &str, line_number: u32) -> Option<std::ops::Range<usize>> {
+    let target = usize::try_from(line_number).ok()?.checked_sub(1)?;
+    let mut start = 0;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        if index == target {
+            return Some(start..start + line.len());
+        }
+        start += line.len();
+    }
+    None
+}
+
+/// Splits a line into its content and its terminator (`""`, `"\n"`, `"\r\n"`,
+/// or a lone `"\r"`).
+///
+/// The terminator is carried through verbatim rather than normalized: a CRLF
+/// file that mbr patches one line of must stay a CRLF file.
+fn split_line_terminator(line: &str) -> (&str, &str) {
+    let content = line.trim_end_matches(['\r', '\n']);
+    (content, &line[content.len()..])
+}
+
+/// Appends `@done(now)`, unless a recognised one is already there.
+fn with_done_stamp(content: &str, now: NaiveDateTime) -> String {
+    if done_annotations(content).next().is_some() {
+        return content.to_string();
+    }
+    // Trailing blanks would otherwise strand a widening gap in front of the
+    // stamp every time a task is re-completed.
+    let trimmed = content.trim_end_matches([' ', '\t']);
+    format!("{trimmed} @done({})", now.format(DONE_STAMP_FORMAT))
+}
+
+/// Removes every recognised `@done(...)`, taking the whitespace in front of it
+/// so that un-completing a task does not leave a trailing space behind.
+fn without_done_stamp(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut copied = 0;
+
+    for range in done_annotations(content) {
+        let mut start = range.start;
+        while start > copied && matches!(content.as_bytes()[start - 1], b' ' | b'\t') {
+            start -= 1;
+        }
+        out.push_str(&content[copied..start]);
+        copied = range.end;
+    }
+    out.push_str(&content[copied..]);
+    out
+}
+
+/// Byte ranges of every `@done(...)` in `text` whose payload really is a
+/// datetime.
+///
+/// Shared by the add and remove paths so they cannot disagree about what a
+/// stamp is — the idempotence of [`set_status`] rests on exactly that.
+fn done_annotations(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    DATE_ANNOTATION.captures_iter(text).filter_map(|caps| {
+        if group(&caps, "kind") != Some("done") {
+            return None;
+        }
+        group(&caps, "value").and_then(parse_datetime)?;
+        Some(caps.get(0)?.range())
+    })
 }
 
 /// Scans a whole markdown source for task lines.
@@ -1211,6 +1426,311 @@ mod tests {
         }
     }
 
+    // ---- set_status (the @done stamp) ----------------------------------------
+
+    /// The clock every stamping test is handed, so the expected strings can be
+    /// written out literally.
+    fn stamp() -> NaiveDateTime {
+        dt(2026, 8, 4, 14, 32)
+    }
+
+    fn stamped(line: &str, status: TaskStatus) -> String {
+        set_status(line, status, Some(stamp())).unwrap_or_else(|| panic!("task line: {line:?}"))
+    }
+
+    #[test]
+    fn completing_a_task_appends_a_done_stamp() {
+        assert_eq!(
+            stamped("- [ ] write the report !!", TaskStatus::Done),
+            "- [x] write the report !! @done(2026-08-04 14:32)"
+        );
+    }
+
+    #[test]
+    fn a_stamp_round_trips_through_the_parser() {
+        // The stamp is only worth writing if the reader agrees it is one.
+        let task = parse(&stamped("- [ ] ship it", TaskStatus::Done));
+        assert_eq!(task.status, TaskStatus::Done);
+        assert_eq!(task.done, Some(stamp()));
+        assert!(task.done_has_time);
+        assert_eq!(task.text, "ship it");
+    }
+
+    #[test]
+    fn stamping_is_idempotent() {
+        let once = stamped("- [ ] ship it", TaskStatus::Done);
+        let twice = stamped(&once, TaskStatus::Done);
+        assert_eq!(twice, once, "a second completion must not stamp again");
+        assert_eq!(twice.matches("@done(").count(), 1);
+    }
+
+    #[test]
+    fn an_existing_stamp_is_left_at_the_time_the_author_wrote() {
+        // Re-completing an already-done task must not silently re-date it.
+        let line = "- [x] ship it @done(2020-01-02 03:04)";
+        assert_eq!(stamped(line, TaskStatus::Done), line);
+    }
+
+    #[test]
+    fn reopening_a_task_removes_the_stamp() {
+        let done = stamped("- [ ] ship it", TaskStatus::Done);
+        assert_eq!(stamped(&done, TaskStatus::Open), "- [ ] ship it");
+        assert_eq!(stamped(&done, TaskStatus::Canceled), "- [-] ship it");
+    }
+
+    #[test]
+    fn removing_a_stamp_takes_its_leading_whitespace_but_nothing_else() {
+        assert_eq!(
+            stamped("- [x] a @done(2026-08-04 14:32) b", TaskStatus::Open),
+            "- [ ] a b"
+        );
+        assert_eq!(
+            stamped("- [x] a  \t@done(2026-08-04 14:32)", TaskStatus::Open),
+            "- [ ] a"
+        );
+        // A stamp is the only thing that goes; the rest of the line is intact.
+        assert_eq!(
+            stamped(
+                "\t2)  [x]   do  it !!! #work @due(2026-08-05) @done(2026-08-04 14:32)",
+                TaskStatus::Open
+            ),
+            "\t2)  [ ]   do  it !!! #work @due(2026-08-05)"
+        );
+    }
+
+    #[test]
+    fn a_line_that_already_ends_in_annotations_keeps_them_all() {
+        let line = "- [ ] file taxes !!! #work #irs @due(2026-08-05 09:00)";
+        let done = stamped(line, TaskStatus::Done);
+        assert_eq!(
+            done,
+            "- [x] file taxes !!! #work #irs @due(2026-08-05 09:00) @done(2026-08-04 14:32)"
+        );
+
+        // And every one of them still parses out of the stamped line.
+        let task = parse(&done);
+        assert_eq!(task.text, "file taxes");
+        assert_eq!(task.priority, TaskPriority::Urgent);
+        assert_eq!(task.tags, ["work", "irs"]);
+        assert_eq!(task.due, Some(dt(2026, 8, 5, 9, 0)));
+        assert_eq!(task.done, Some(stamp()));
+
+        // ...and reopening puts the line back exactly as it was.
+        assert_eq!(stamped(&done, TaskStatus::Open), line);
+    }
+
+    #[test]
+    fn a_trailing_move_marker_survives_a_stamp() {
+        // `> YYYY-MM-DD` is "trailing" only after date annotations are stripped,
+        // which is exactly why appending the stamp after it is safe.
+        let done = stamped("- [ ] shuffled > 2026-08-04", TaskStatus::Done);
+        assert_eq!(done, "- [x] shuffled > 2026-08-04 @done(2026-08-04 14:32)");
+        let task = parse(&done);
+        assert_eq!(task.text, "shuffled");
+        assert_eq!(task.moved_to, NaiveDate::from_ymd_opt(2026, 8, 4));
+    }
+
+    #[test]
+    fn stamping_does_not_pile_up_trailing_whitespace() {
+        assert_eq!(
+            stamped("- [ ] ship it   \t ", TaskStatus::Done),
+            "- [x] ship it @done(2026-08-04 14:32)"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_done_payload_is_prose_not_a_stamp() {
+        // `strip_annotations` leaves it verbatim, so neither may this: the user
+        // gets one real stamp added next to their typo, and reopening the task
+        // leaves the typo alone.
+        let done = stamped("- [ ] a @done(sometime)", TaskStatus::Done);
+        assert_eq!(done, "- [x] a @done(sometime) @done(2026-08-04 14:32)");
+        assert_eq!(
+            stamped(&done, TaskStatus::Open),
+            "- [ ] a @done(sometime)",
+            "only the recognised stamp is removed"
+        );
+    }
+
+    #[test]
+    fn a_line_terminator_is_preserved_through_a_stamp() {
+        for terminator in ["\n", "\r\n", ""] {
+            let line = format!("- [ ] ship it{terminator}");
+            assert_eq!(
+                stamped(&line, TaskStatus::Done),
+                format!("- [x] ship it @done(2026-08-04 14:32){terminator}"),
+                "terminator {terminator:?}"
+            );
+            let done = format!("- [x] ship it @done(2026-08-04 14:32){terminator}");
+            assert_eq!(
+                stamped(&done, TaskStatus::Open),
+                format!("- [ ] ship it{terminator}"),
+                "terminator {terminator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_clock_set_status_is_exactly_set_marker() {
+        for line in [
+            "- [ ] ship it",
+            "- [x] ship it @done(2026-08-04 14:32)",
+            "- [ ] a @done(2020-01-01 00:00) b\r\n",
+        ] {
+            for status in [TaskStatus::Open, TaskStatus::Done, TaskStatus::Canceled] {
+                assert_eq!(
+                    set_status(line, status, None),
+                    set_marker(line, status),
+                    "{line:?} -> {status:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_status_returns_none_for_non_tasks() {
+        for line in ["# heading", "- not a task", "", "[ ] bare"] {
+            assert!(
+                set_status(line, TaskStatus::Done, Some(stamp())).is_none(),
+                "{line:?}"
+            );
+        }
+    }
+
+    // ---- patch_task_line -----------------------------------------------------
+
+    fn patch(
+        source: &str,
+        line: u32,
+        expected: &str,
+        status: TaskStatus,
+    ) -> Result<PatchedSource, TaskPatchError> {
+        patch_task_line(source, line, expected, status, Some(stamp()))
+    }
+
+    #[test]
+    fn patch_rewrites_only_the_addressed_line() {
+        let source = "# Notes\n\n- [ ] first\n- [ ] second\n";
+        let patched = patch(source, 4, "- [ ] second", TaskStatus::Done).expect("patched");
+        assert_eq!(patched.text, "- [x] second @done(2026-08-04 14:32)");
+        assert_eq!(
+            patched.source,
+            "# Notes\n\n- [ ] first\n- [x] second @done(2026-08-04 14:32)\n"
+        );
+    }
+
+    #[test]
+    fn patch_preserves_crlf_terminators() {
+        let source = "- [ ] first\r\n- [ ] second\r\n";
+        let patched = patch(source, 1, "- [ ] first", TaskStatus::Done).expect("patched");
+        assert_eq!(
+            patched.source,
+            "- [x] first @done(2026-08-04 14:32)\r\n- [ ] second\r\n"
+        );
+        // The response text is the line, not the line plus its terminator.
+        assert_eq!(patched.text, "- [x] first @done(2026-08-04 14:32)");
+    }
+
+    #[test]
+    fn patch_neither_adds_nor_removes_a_trailing_newline() {
+        let source = "- [ ] last line has no newline";
+        let patched = patch(source, 1, source, TaskStatus::Canceled).expect("patched");
+        assert_eq!(patched.source, "- [-] last line has no newline");
+        assert!(!patched.source.ends_with('\n'));
+
+        let terminated = "- [ ] terminated\n";
+        let patched =
+            patch(terminated, 1, "- [ ] terminated", TaskStatus::Canceled).expect("patched");
+        assert_eq!(patched.source, "- [-] terminated\n");
+    }
+
+    #[test]
+    fn patch_accepts_expected_with_or_without_its_terminator() {
+        let source = "- [ ] ship it\r\n";
+        for expected in ["- [ ] ship it", "- [ ] ship it\n", "- [ ] ship it\r\n"] {
+            assert!(
+                patch(source, 1, expected, TaskStatus::Done).is_ok(),
+                "{expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_rejects_a_line_that_changed_underneath_the_client() {
+        let source = "- [ ] the text changed\n";
+        assert_eq!(
+            patch(source, 1, "- [ ] what the client saw", TaskStatus::Done),
+            Err(TaskPatchError::Mismatch { line: 1 })
+        );
+        // Whitespace is part of the line: a difference there is still a change.
+        assert_eq!(
+            patch(source, 1, "- [ ]  the text changed", TaskStatus::Done),
+            Err(TaskPatchError::Mismatch { line: 1 })
+        );
+    }
+
+    #[test]
+    fn patch_rejects_a_line_number_the_file_does_not_have() {
+        let source = "- [ ] only line\n";
+        // A trailing newline terminates line 1; it does not start a line 2.
+        assert_eq!(
+            patch(source, 2, "", TaskStatus::Done),
+            Err(TaskPatchError::LineOutOfRange { line: 2 })
+        );
+        assert_eq!(
+            patch(source, 0, "- [ ] only line", TaskStatus::Done),
+            Err(TaskPatchError::LineOutOfRange { line: 0 })
+        );
+        assert_eq!(
+            patch("", 1, "", TaskStatus::Done),
+            Err(TaskPatchError::LineOutOfRange { line: 1 })
+        );
+    }
+
+    #[test]
+    fn patch_rejects_a_line_that_is_not_a_task() {
+        let source = "# Notes\n- [ ] a task\n";
+        assert_eq!(
+            patch(source, 1, "# Notes", TaskStatus::Done),
+            Err(TaskPatchError::NotATask { line: 1 })
+        );
+    }
+
+    #[test]
+    fn patch_addresses_the_same_lines_the_scanner_reports() {
+        // The endpoint's line numbers come from the index, which comes from
+        // `scan_source_tasks`; if the two ever disagreed, a toggle would patch
+        // the wrong line.
+        let source = concat!(
+            "---\ntitle: T\n---\n\n",   // 1-4
+            "- [ ] first\n",            // 5
+            "\n```\n- [ ] fake\n```\n", // 6-9
+            "- [ ] second\n",           // 10
+        );
+        for task in scan_source_tasks(source) {
+            let line = source
+                .lines()
+                .nth(usize::try_from(task.line).expect("fits") - 1)
+                .expect("line exists");
+            let patched = patch(source, task.line, line, TaskStatus::Done).expect("patched");
+            assert!(patched.source.contains("- [ ] fake"), "code stayed code");
+            assert_eq!(
+                patched.source.matches("@done(").count(),
+                1,
+                "exactly one line was touched"
+            );
+        }
+    }
+
+    #[test]
+    fn line_span_covers_every_line_including_its_terminator() {
+        let source = "a\r\nbb\nccc";
+        assert_eq!(line_span(source, 1).map(|r| &source[r]), Some("a\r\n"));
+        assert_eq!(line_span(source, 2).map(|r| &source[r]), Some("bb\n"));
+        assert_eq!(line_span(source, 3).map(|r| &source[r]), Some("ccc"));
+        assert_eq!(line_span(source, 4), None);
+    }
+
     // ---- scan_source_tasks ---------------------------------------------------
 
     #[test]
@@ -1583,6 +2103,39 @@ mod tests {
             prop_assert_eq!(reparsed.depth, original.depth);
             prop_assert_eq!(reparsed.priority, original.priority);
             prop_assert_eq!(reparsed.due, original.due);
+        }
+
+        /// Completing a task and then reopening it restores the line exactly,
+        /// as long as it carried no stamp to begin with.
+        ///
+        /// This is the round trip the UI performs every time somebody mis-clicks
+        /// a checkbox, so anything it corrupts, it corrupts in the user's file.
+        #[test]
+        fn stamping_and_unstamping_restores_the_original_line(
+            indent in "[ \t]{0,4}",
+            bullet in prop::sample::select(vec!["-", "*", "+", "1.", "7)"]),
+            body in "[a-zA-Z0-9#@!>< -]{0,40}",
+            terminator in prop::sample::select(vec!["", "\n", "\r\n"]),
+            reopen_as in prop::sample::select(vec![TaskStatus::Open, TaskStatus::Canceled]),
+        ) {
+            // Trailing blanks are deliberately not preserved (the stamp would
+            // strand them), so keep them out of the generated line.
+            let content = format!("{indent}{bullet} [ ] {body}");
+            let line = format!("{}{terminator}", content.trim_end());
+            prop_assume!(parse_task_line(&line, 1).is_some());
+            prop_assume!(done_annotations(&line).next().is_none());
+
+            let now = dt(2026, 8, 4, 14, 32);
+            let done = set_status(&line, TaskStatus::Done, Some(now)).expect("task line");
+            prop_assert_eq!(
+                parse_task_line(&done, 1).and_then(|t| t.done),
+                Some(now),
+                "the stamp must be readable back out of {:?}", done
+            );
+
+            let reopened = set_status(&done, reopen_as, Some(now)).expect("task line");
+            let expected = set_marker(&line, reopen_as).expect("task line");
+            prop_assert_eq!(reopened, expected);
         }
 
         /// The pre-filter guarding [`TRAILING_MOVE`] is only ever allowed to

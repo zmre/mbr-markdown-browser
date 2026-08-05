@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::config::{RelationType, SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
-use crate::errors::{MbrError, ServerError};
+use crate::errors::{MbrError, ServerError, TaskPatchError};
 use crate::link_grep::InboundLinkCache;
 use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
@@ -1065,6 +1065,9 @@ pub struct ServerConfig {
     pub incomplete_markers: Vec<String>,
     /// Enable the task browser (`POST /.mbr/tasks`).
     pub tasks_enabled: bool,
+    /// Maintain the `@done(...)` annotation when `POST /.mbr/task` toggles a
+    /// task's status.
+    pub tasks_stamp_done: bool,
     /// Enable the in-browser markdown editing endpoints.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1127,6 +1130,7 @@ impl From<&crate::config::Config> for ServerConfig {
             mark_incomplete: config.mark_incomplete.unwrap_or(true),
             incomplete_markers: config.incomplete_markers.clone(),
             tasks_enabled: config.tasks_enabled,
+            tasks_stamp_done: config.tasks_stamp_done,
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
@@ -1246,6 +1250,9 @@ pub struct ServerState {
     pub incomplete_markers: Vec<String>,
     /// Whether the task browser (`POST /.mbr/tasks`) is enabled.
     pub tasks_enabled: bool,
+    /// Whether `POST /.mbr/task` maintains the `@done(...)` annotation when it
+    /// toggles a task's status.
+    pub tasks_stamp_done: bool,
     /// Lazy index of the repository's markdown tasks.
     ///
     /// Deliberately *not* built at startup: it is filled on the first task
@@ -1269,6 +1276,34 @@ pub struct EditRequest {
     pub content: String,
     /// SHA-256 hex of the content the client loaded, for optimistic concurrency.
     pub base_hash: String,
+}
+
+/// JSON body for `POST /.mbr/task`.
+///
+/// `expected` is the per-line analogue of [`EditRequest::base_hash`]: it is what
+/// makes it safe to patch one line of a file without holding the whole file.
+#[derive(serde::Deserialize)]
+pub struct TaskToggleRequest {
+    /// Repo-relative **filesystem** path of the file to patch (with extension),
+    /// the same convention as `/.mbr/raw` and `/.mbr/edit`.
+    pub path: String,
+    /// 1-based source line of the task.
+    pub line: u32,
+    /// The exact current text of that line, verbatim. The line terminator is
+    /// ignored, everything else must match byte for byte.
+    pub expected: String,
+    /// Target status: `open`, `done` or `canceled`.
+    pub to: crate::tasks::TaskStatus,
+}
+
+/// Response for a successful `POST /.mbr/task`.
+#[derive(serde::Serialize)]
+pub struct TaskToggleResponse {
+    /// The line that was patched, echoed back.
+    pub line: u32,
+    /// Its new text, without the terminator — including any `@done(...)` the
+    /// server added or removed, which the client cannot predict.
+    pub text: String,
 }
 
 /// JSON body for `POST /.mbr/create/{*path}`.
@@ -1617,6 +1652,7 @@ impl Server {
             mark_incomplete,
             incomplete_markers,
             tasks_enabled,
+            tasks_stamp_done,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -2140,6 +2176,7 @@ impl Server {
             mark_incomplete,
             incomplete_markers,
             tasks_enabled,
+            tasks_stamp_done,
             task_index,
             edit_enabled,
             edit_require_token_on_loopback,
@@ -2162,6 +2199,10 @@ impl Server {
                     // Cap edit payloads at 5 MB (axum default is 2 MB).
                     .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
             )
+            // Single-line task toggle (gated by edit_enabled + auth, like the
+            // rest of the write endpoints). Singular `/task`, next to the plural
+            // `/tasks` query above.
+            .route("/.mbr/task", post(Self::task_toggle_handler))
             // File-management endpoints (gated by edit_enabled + auth): create a
             // new file, move/rename with repo-wide link rewrite, create a folder.
             .route(
@@ -3054,6 +3095,108 @@ impl Server {
             resp.headers_mut().insert("x-mbr-content-hash", hv);
         }
         resp
+    }
+
+    /// POST /.mbr/task — flips the status of a single task line.
+    ///
+    /// ```json
+    /// { "path": "docs/guide.md", "line": 42,
+    ///   "expected": "- [ ] write the report !!", "to": "done" }
+    /// ```
+    ///
+    /// ```json
+    /// { "line": 42, "text": "- [x] write the report !! @done(2026-08-04 14:32)" }
+    /// ```
+    ///
+    /// Gated on `edit_enabled` and the same [`Self::check_edit_access`] policy
+    /// as every other write endpoint — this writes to the user's files, so it
+    /// answers to the editing switch, not to `tasks_enabled` (in-document
+    /// checkboxes exist whether or not the task browser does).
+    ///
+    /// # Why `expected` rather than a whole-file hash
+    ///
+    /// The editor holds a whole file open and can afford
+    /// [`EditRequest::base_hash`]. A checkbox cannot: the page has been open for
+    /// an hour and the user has no idea what else changed in the file. Matching
+    /// just the one line means an unrelated edit elsewhere in the file does not
+    /// spuriously fail the toggle, while an edit *to that line* — the only case
+    /// where flipping its marker could corrupt something — still does, with a
+    /// `409`.
+    ///
+    /// | Status | Cause |
+    /// |--------|-------|
+    /// | `403` / `401` | [`Self::check_edit_access`] (disabled, CSRF, cross-origin, `Host`, token) |
+    /// | `404` | The path is not an editable markdown file |
+    /// | `400` | Path outside the root, unreadable/not-UTF-8 file, no such line, or the line is not a task |
+    /// | `409` | The line no longer matches `expected` |
+    /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
+    /// | `500` | The write failed |
+    pub async fn task_toggle_handler(
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<TaskToggleRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
+
+        let source = match tokio::fs::read(&md_path).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "File is not valid UTF-8").into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to read markdown before task toggle: {e}");
+                return (StatusCode::NOT_FOUND, "File not found").into_response();
+            }
+        };
+
+        // Local wall clock, matching the naive/local dates `tasks.rs` parses.
+        let stamp = config
+            .tasks_stamp_done
+            .then(|| chrono::Local::now().naive_local());
+        let patched =
+            match crate::tasks::patch_task_line(&source, req.line, &req.expected, req.to, stamp) {
+                Ok(patched) => patched,
+                Err(e) => {
+                    let status = match e {
+                        TaskPatchError::Mismatch { .. } => StatusCode::CONFLICT,
+                        TaskPatchError::LineOutOfRange { .. } | TaskPatchError::NotATask { .. } => {
+                            StatusCode::BAD_REQUEST
+                        }
+                    };
+                    return (status, e.to_string()).into_response();
+                }
+            };
+
+        if let Err(e) = Self::atomic_write_file(&md_path, patched.source.as_bytes()) {
+            tracing::error!("Failed to write task toggle: {e:?}");
+            return e.into_response();
+        }
+
+        // Live-reload for connected clients, then the task index, which the
+        // watcher would also refresh — but only after its debounce, and the
+        // panel that sent this expects its own next query to see the change.
+        Self::broadcast_change(&config, &md_path, crate::watcher::ChangeEventType::Modified);
+        config.task_index.invalidate_file(
+            &md_path,
+            &crate::watcher::ChangeEventType::Modified,
+            &config.repo,
+            &config.base_dir,
+        );
+
+        Json(TaskToggleResponse {
+            line: req.line,
+            text: patched.text,
+        })
+        .into_response()
     }
 
     /// Resolves a repo-relative path that may not yet exist to an absolute

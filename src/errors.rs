@@ -283,6 +283,23 @@ pub enum TaskIndexError {
     BuildFailed { reason: String },
 }
 
+/// Why [`crate::tasks::patch_task_line`] refused to rewrite a line.
+///
+/// These are the three ways a single-line patch can be aimed at something other
+/// than the task the client thinks it is aimed at, which is exactly what the
+/// per-line optimistic-concurrency check exists to catch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TaskPatchError {
+    #[error("The file has no line {line}")]
+    LineOutOfRange { line: u32 },
+
+    #[error("Line {line} is not what the client last saw; the file changed on disk")]
+    Mismatch { line: u32 },
+
+    #[error("Line {line} is not a task")]
+    NotATask { line: u32 },
+}
+
 /// Errors related to video metadata extraction.
 #[cfg(feature = "media-metadata")]
 #[derive(Debug, Error)]

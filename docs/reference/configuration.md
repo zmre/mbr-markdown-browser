@@ -216,12 +216,33 @@ the index is built by reading live files, so static builds never expose it —
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
+| `tasks_stamp_done` | bool | `true` | Maintain the `@done(...)` annotation when a task is toggled through `POST /.mbr/task`. Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
 
 Example:
 ```toml
 # .mbr/config.toml
 tasks_enabled = false
 ```
+
+**`@done(...)` stamping (`tasks_stamp_done`):**
+
+When you check a box (editing must be enabled — see
+[Editing Settings](#editing-settings)), mbr appends the completion time to the
+line in the format its own parser reads back:
+
+```markdown
+- [ ] write the report !!                            ← before
+- [x] write the report !! @done(2026-08-04 14:32)    ← after
+```
+
+Reopening or canceling the task removes that annotation again, and completing an
+already-completed task does **not** add a second one or re-date the first. The
+timestamp is local wall-clock time, matching the naive/local dates `@due(...)`
+uses.
+
+Set `tasks_stamp_done = false` to have the endpoint rewrite nothing but the
+marker byte, leaving any `@done(...)` exactly as its author wrote it. Either way
+mbr never writes to a markdown file unless you ask it to.
 
 **Cost when unused:** none. The index is built lazily on the first task query
 and then kept fresh by the file watcher, so a server whose user never opens the

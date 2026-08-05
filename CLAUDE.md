@@ -260,7 +260,7 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 | `oembed_cache.rs` | LRU cache for oembed metadata using papaya concurrent hashmap |
 | `html.rs` | Custom HTML output for pulldown-cmark with section support |
 | `attrs.rs` | Reusable attribute parser for `{#id .class key=value}` syntax |
-| `tasks.rs` | Pure task-line parsing: the `- [ ]`/`[x]`/`[-]`/`[>]` grammar, `@due`/`@done`/`#tag`/`!!` annotations, `scan_source_tasks` (skips code fences and frontmatter), and `set_marker` for single-byte status rewrites. Knows nothing about the filesystem |
+| `tasks.rs` | Pure task-line parsing: the `- [ ]`/`[x]`/`[-]`/`[>]` grammar, `@due`/`@done`/`#tag`/`!!` annotations, `scan_source_tasks` (skips code fences and frontmatter), `set_marker` for single-byte status rewrites, `set_status` (marker + `@done(...)` stamp, clock passed in), and `patch_task_line` — the whole body of `POST /.mbr/task` minus the I/O, so line addressing, the `expected` check and terminator preservation are testable without a filesystem. Knows nothing about the filesystem |
 | `task_index.rs` | `TaskIndex`: lazy, in-memory, papaya-backed map of `PathBuf -> Arc<FileTasks>`, holding only files that contain tasks. Built on the **first** task query (never at startup, no on-disk cache) via one **sequential** read pass under `spawn_blocking` — sequential for the reason documented at `search.rs:362`/`:658`. Single-flight via `tokio::sync::OnceCell::get_or_try_init`, which leaves the cell unset on failure so a failed build is retried rather than poisoned. `invalidate_file` / `rebuild_if_built` are no-ops until the index has been built |
 | `task_query.rs` | Pure filtering, grouping and counting for `POST /.mbr/tasks`. `run_query` takes an index snapshot plus `today: NaiveDate` (a parameter, so bucketing is testable without mocking the clock) and returns the whole response body |
 
@@ -321,6 +321,7 @@ The `static_folder` config option (default: `"static"`) creates a URL overlay - 
 - `/.mbr/*` - Static assets (theme.css, components)
 - `POST /.mbr/search` - Metadata + content search
 - `POST /.mbr/tasks` - Task query: filter, group, and count markdown tasks. Server/GUI only, gated on `tasks_enabled` (404 when off)
+- `POST /.mbr/task` - Single-line task toggle (`{path, line, expected, to}`). Gated on `edit_enabled` + `check_edit_access`, **not** on `tasks_enabled`, since in-document checkboxes exist whether or not the task browser does. Per-line optimistic concurrency: `expected` must still match the line on disk (409 otherwise), which is the line-sized analogue of `/.mbr/edit`'s `base_hash`. Maintains the `@done(...)` stamp per `tasks_stamp_done`
 
 ### Lit Web Components
 

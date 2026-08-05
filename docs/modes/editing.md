@@ -105,6 +105,32 @@ its JSON response.
 Set `create_dirs: true` to create any missing parent directories at the
 destination; otherwise a missing parent is rejected with `400`.
 
+### Task toggling
+
+With editing on, task checkboxes become clickable and flipping one patches the
+single line it came from:
+
+| Endpoint | Body | Purpose |
+|----------|------|---------|
+| `POST /.mbr/task` | `{ "path": "docs/guide.md", "line": 42, "expected": "- [ ] write the report", "to": "done" }` | Set one task's status to `open`, `done` or `canceled`. |
+
+It answers to `edit_enabled`, not to `tasks_enabled` — in-document checkboxes
+exist whether or not the [task browser](../reference/configuration.md#task-settings)
+does — and it carries the same headers and token as every other write endpoint.
+On success it returns `{ "line": 42, "text": "…" }` with the line's new text.
+
+`expected` is the line-sized version of `/.mbr/edit`'s `base_hash`: it must
+still match the file on disk (ignoring the line terminator) or the request is
+rejected with `409`. Matching one line rather than the whole file means somebody
+else editing a different part of the document does not spuriously fail your
+click, while an edit to *that* line — the only case where flipping its marker
+could clobber something — still does.
+
+Only the marker byte and the `@done(...)` annotation change; indentation, bullet
+style, spacing, other annotations, the line's terminator (a CRLF file stays
+CRLF) and the presence or absence of a trailing newline are all preserved. See
+[`tasks_stamp_done`](../reference/configuration.md#task-settings) for the stamp.
+
 ## Generating a token
 
 For remote editing you need a shared token. Generate one:

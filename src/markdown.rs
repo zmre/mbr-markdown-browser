@@ -622,9 +622,10 @@ fn is_inline_event(event: &Event<'_>) -> bool {
 /// # Caveat: offsets are into the transformed source
 ///
 /// The ranges index `markdown_input`, which is the wikilink-substituted source
-/// rather than the file on disk. `transform_wikilinks` rewrites within a line,
-/// so line numbers normally survive it -- but see
-/// `known_limitation_a_multi_line_tag_wikilink_shifts_later_line_numbers`.
+/// rather than the file on disk. Line numbers survive that substitution because
+/// `transform_wikilinks` only ever rewrites within a single line: a wikilink
+/// that spans a line break is not a wikilink (see `wikilink::push_transformed`),
+/// so no rewrite can add or remove a newline.
 fn collect_events_and_headings(
     markdown_input: &str,
     task_markup: TaskMarkup,
@@ -2796,39 +2797,33 @@ mod tests {
         );
     }
 
-    /// Known limitation, pinned so that fixing it is a deliberate, visible act.
+    /// A `[[Source:value]]` whose brackets straddle a line break is not a
+    /// wikilink, so the substitution cannot swallow the newline and the lines
+    /// below keep their numbers.
     ///
-    /// `transform_wikilinks` resolves a `[[Source:value]]` whose brackets span
-    /// a line break, and trimming the value can swallow the newline. The
-    /// substituted source is then a line shorter than the file on disk, so
-    /// every task below it advertises a line number that is too small — and a
-    /// line patch aimed at that number would edit the wrong line.
-    ///
-    /// It takes a tag-source wikilink (so `tag_sources` must be configured),
-    /// split across lines, with whitespace where the newline is; nothing in a
-    /// normally-authored document does this. The fix belongs in
-    /// `wikilink.rs` — a wikilink should not match across a line break at all.
+    /// This used to be a pinned known limitation: the transformed source came
+    /// out a line shorter than the file on disk, every later task advertised a
+    /// line number one too small, and a line patch aimed at one of those numbers
+    /// would have edited the wrong line.
     #[tokio::test]
-    async fn known_limitation_a_multi_line_tag_wikilink_shifts_later_line_numbers() {
+    async fn a_multi_line_tag_wikilink_does_not_shift_later_line_numbers() {
         let sources: HashSet<String> = ["Tags".to_string()].into_iter().collect();
         let md = "- [ ] see [[Tags:\nrust]] here\n- [x] second\n";
 
-        // `scan_source_tasks` reads the file verbatim and gets it right.
-        assert_eq!(
-            crate::tasks::scan_source_tasks(md)
-                .into_iter()
-                .map(|task| task.line)
-                .collect::<Vec<_>>(),
-            vec![1, 3]
-        );
+        let expected: Vec<u32> = crate::tasks::scan_source_tasks(md)
+            .into_iter()
+            .map(|task| task.line)
+            .collect();
+        assert_eq!(expected, vec![1, 3]);
 
-        // The renderer measures the transformed source, which lost a newline.
         let html = render_markdown_with_tags(md, sources).await;
         assert_eq!(
             rendered_task_lines(&html),
-            vec![1, 2],
-            "if this now reads [1, 3], transform_wikilinks was fixed -- delete this test"
+            expected,
+            "the renderer and the task index must agree about line numbers"
         );
+        // ...and it was not rewritten into a tag link on the way through.
+        assert!(!html.contains("/tags/rust/"), "{html}");
     }
 
     #[test]
