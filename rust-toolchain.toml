@@ -1,5 +1,21 @@
+# Kept minimal on purpose.
+#
+# This toolchain is a runtime reference of every crane derivation, so every
+# component listed here is uploaded to the binary cache once per system.
+# `profile = "default"` used to pull in rust-docs (695 MB), and this list used to
+# carry llvm-tools (404 MB) and rust-analyzer (38 MB) — 1.2 GB per system, times
+# the three systems CI builds, out of a 5 GB cache, for an HTML manual plus a
+# profiler and an LSP server that no build, test, lint, or CI job in this repo
+# invokes (verified by grep across workflows, flake.nix, scripts, and docs).
+#
+# rust-analyzer and rust-src live in `rustToolchainDev` in flake.nix instead, so
+# `nix develop` is unchanged. If you add coverage tooling (cargo-llvm-cov,
+# grcov), add llvm-tools there — not here.
+#
+# rustfmt and clippy stay: `nix build .#fmt` and `.#clippy` need them, as does
+# the Windows CI job, which reads this file via
+# actions-rust-lang/setup-rust-toolchain.
 [toolchain]
-profile = "default"
+profile = "minimal"
 channel = "1.97.1"
-components = ["rust-src", "rust-analyzer", "llvm-tools", "rustfmt", "clippy", "rust-analyzer"]
-
+components = ["rustfmt", "clippy"]

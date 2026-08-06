@@ -101,14 +101,70 @@ git config --local core.hooksPath .githooks
 
 ### CI Checks
 
-GitHub Actions runs on every push to main and all PRs:
-- `cargo test --all-features`
-- `cargo clippy -- -D warnings`
-- `cargo fmt -- --check`
-- `bun run test` (components)
-- `bun run build` (components)
+GitHub Actions runs on every push to main and all PRs. Everything except the
+Windows and component legs goes through Nix, so the same derivation is shared
+between CI, Release, and your laptop:
+
+- `nix build .#fmt` — rustfmt
+- `nix build .#clippy` — clippy with `-D warnings` (Linux + macOS)
+- `nix build .#tests` — the shipped feature set (`cliFeatures`), **not**
+  `--all-features`: `ffi` is macOS-only by design, so `--all-features` fails to
+  compile on Linux
+- `nix build .#clippy-minimal` / `.#tests-minimal` — the feature set Windows
+  ships (`--no-default-features --features gui`), run on Linux
+- `nix build .#mbr` — full build on x86_64-linux, aarch64-linux, and macOS
+- `nix build .#swiftfmt` / `.#swiftlint-check` — QuickLook extension (macOS)
+- `cargo clippy` / `cargo test` / `cargo build` on Windows (no Nix there)
+- `bun run test` and `bun run build` (components)
 
 All checks must pass before merge.
+
+### Binary Cache
+
+CI pushes to [zmre.cachix.org](https://zmre.cachix.org) so that contributors and
+end users substitute prebuilt outputs instead of compiling ffmpeg, pdfium, and
+the full crate graph. Two things keep that working, and both are easy to break:
+
+**`pushFilter` on every `cachix-action` block.** The action's post-job daemon
+uploads everything the job put in the store, so the filter belongs on every
+block — including jobs that build nothing new. A new job with a `cachix-action`
+step and no `pushFilter` silently starts uploading source and vendor trees.
+
+**Pins on the consumer artifacts.** Cachix's free tier garbage-collects
+least-recently-used, which is exactly backwards here: the ~950 MB crane
+dependency layer is touched by every CI run and stays warm, while
+`packages.default` is fetched only when someone runs `nix run` and is therefore
+always the coldest thing in the cache. The `build` job pins these after a green
+build on `main` (see the comment on that step for the full reasoning):
+
+| Pin name | Attr | Why |
+|---|---|---|
+| `mbr-<system>` | `.#default` | What `nix run` / `nix build` / `nix profile install` resolve to |
+| `ffmpeg-minimal-static-<system>` | `.#ffmpegMinimalStatic` | Fixed-version, 30–60 min to rebuild |
+| `x264-static-<system>` | `.#x264Static` | Same; pinned separately because Cachix does not document pins as covering the closure |
+
+The crate dependency layer is deliberately **not** pinned — it churns on every
+`Cargo.lock` bump and CI keeps it warm by itself.
+
+Verify coverage from outside without building anything. Store paths are
+content-addressed, so evaluating a revision anywhere reproduces what CI built:
+
+```bash
+REV=github:zmre/mbr-markdown-browser/<commit-sha>
+for s in x86_64-linux aarch64-linux aarch64-darwin; do
+  p=$(nix eval --raw "$REV#packages.$s.default.outPath")
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    "https://zmre.cachix.org/$(basename "$p" | cut -d- -f1).narinfo")
+  echo "$code  $s  $(basename "$p")"
+done
+```
+
+`200` means a consumer gets a download; `404` means they compile. A `404` for a
+path CI demonstrably pushed is *eviction*, not a broken push — check the cache's
+usage page before touching the workflow.
+
+Pushes and pins are skipped when `CACHIX_AUTH_TOKEN` is absent, so PRs from
+forks are unaffected rather than failing.
 
 ## Performance Benchmarks
 

@@ -57,6 +57,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Build components
         run: |
@@ -128,6 +129,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       # `nix build -L .#tests` (craneLib.cargoTest) — the same command ci.yml's
       # Test job runs, so "the tested feature set" has exactly one definition:
@@ -238,6 +240,7 @@ jobs:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
+          pushFilter: '-(source|vendor)$'
 
       - name: Build release artifacts
         run: |

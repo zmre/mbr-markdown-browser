@@ -143,13 +143,16 @@ jobs:
 
       - uses: DeterminateSystems/determinate-nix-action@main
 
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: your-cache
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Source trees and vendor dirs are quota waste — nothing that
+          # substitutes a finished output ever needs them.
+          pushFilter: '-(source|vendor)$'
 
       - name: Build mbr
-        run: nix build -L .#mbr
+        run: nix build -L --accept-flake-config .#mbr
 
       - name: Build documentation
         run: ./result/bin/mbr -b --output ./docs-build ./docs
@@ -178,7 +181,7 @@ jobs:
 # netlify.toml
 [build]
   publish = "build"
-  command = "nix run github:zmre/mbr -- -b ."
+  command = "nix run --accept-flake-config github:zmre/mbr-markdown-browser -- -b ."
 
 [build.environment]
   NODE_VERSION = "20"
@@ -188,9 +191,13 @@ jobs:
 
 ```yaml
 # In Cloudflare dashboard:
-# Build command: nix run github:zmre/mbr -- -b --output ./build .
+# Build command: nix run --accept-flake-config github:zmre/mbr-markdown-browser -- -b --output ./build .
 # Build output: /build
 ```
+
+> **Keep `--accept-flake-config` on hosted builders.** Without it Nix ignores
+> mbr's substituters and compiles ffmpeg, pdfium, and the full crate graph on
+> every deploy — tens of minutes of build time you are usually paying for.
 
 ## Other Static Site Generators
 
