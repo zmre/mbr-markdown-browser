@@ -185,6 +185,27 @@ async fn test_build_omits_find_bar() {
 }
 
 #[tokio::test]
+async fn test_build_omits_external_link_handler() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\n[out](https://example.com/)");
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("test").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    // `<mbr-link-enhancement>` intercepts link clicks and asks the host process
+    // to hand the URL to the operating system. A built site is read in an
+    // ordinary browser that already does that, and the site may be published
+    // anywhere, so the element must not ship. `_display_enhancements.html`
+    // mounted it ungated on every markdown page until this was closed.
+    assert!(
+        !html.contains("mbr-link-enhancement"),
+        "Static builds must not ship the GUI-only external-link handler"
+    );
+}
+
+#[tokio::test]
 async fn test_build_head_includes_graph_depth() {
     let repo = TestRepo::new();
     repo.create_markdown("test.md", "# Test");

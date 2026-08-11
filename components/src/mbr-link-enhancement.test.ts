@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { externalHrefForClick, handleExternalLinkClick } from './mbr-link-enhancement.ts'
+import {
+  externalHrefForClick,
+  handleExternalLinkClick,
+  MbrLinkEnhancementElement,
+} from './mbr-link-enhancement.ts'
 
 /**
  * The GUI-only hand-off of cross-origin link clicks to the host.
@@ -241,5 +245,142 @@ describe('external link hand-off', () => {
 
       expect(externalHrefForClick(eventOn([inner, anchor, main, document]))).toBeNull()
     })
+  })
+})
+
+/**
+ * The element's own GUI gate, which is a security boundary rather than a
+ * feature flag.
+ *
+ * Handing a URL to the operating system means *starting an application*, and
+ * only the native GUI window may ask for that. Server mode and static builds run
+ * in a real browser that already does the job, and a machine that is merely
+ * serving markdown must never be induced to launch applications on its host.
+ *
+ * mbr's own templates mount this element behind a `gui_mode` gate, but templates
+ * are overridable: a repository can ship its own `.mbr/_display_enhancements.html`
+ * or `.mbr/_footer.html` — quite plausibly copied from an older mbr, which
+ * mounted this element ungated — and mbr will prefer it to the built-in. So the
+ * element must be inert on its own when constructed outside GUI mode, no matter
+ * what mounted it. These tests construct it exactly the way such an override
+ * would.
+ */
+describe('mount gating outside GUI mode', () => {
+  const PREFIX = 'mbr:open-external:'
+  const PAGE_URL = 'http://localhost:3000/docs/guide/'
+
+  const originalConfig = window.__MBR_CONFIG__
+
+  let main: HTMLElement
+  let posted: string[]
+  let mounted: HTMLElement[]
+
+  beforeEach(() => {
+    // Uncancelled clicks really navigate under happy-dom, which would make the
+    // next test's "external" URL same-origin. Pin the page every time.
+    ;(window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(PAGE_URL)
+
+    main = document.body.appendChild(document.createElement('main'))
+    posted = []
+    mounted = []
+    window.ipc = { postMessage: (message: string) => posted.push(message) }
+  })
+
+  afterEach(() => {
+    // Disconnecting is what removes any listener the element registered, so a
+    // GUI-mode test cannot leak one into the next test.
+    for (const element of mounted) element.remove()
+    main.remove()
+    delete window.ipc
+    window.__MBR_CONFIG__ = originalConfig
+  })
+
+  /** Mounts the element the way a template does, in the given mode. */
+  function mount(guiMode: boolean): HTMLElement {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode }
+    const element = document.body.appendChild(document.createElement('mbr-link-enhancement'))
+    mounted.push(element)
+    return element
+  }
+
+  /** Clicks a fresh cross-origin link and reports what the click produced. */
+  function clickExternalLink(): MouseEvent {
+    const anchor = document.createElement('a')
+    anchor.setAttribute('href', 'https://example.com/page')
+    anchor.textContent = 'link'
+    main.appendChild(anchor)
+
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+    })
+    anchor.dispatchEvent(event)
+    return event
+  }
+
+  it('registers no click listener when isGuiMode() is false', () => {
+    const addEventListener = vi.spyOn(document, 'addEventListener')
+
+    mount(false)
+
+    const clickRegistrations = addEventListener.mock.calls.filter(([type]) => type === 'click')
+    expect(clickRegistrations).toEqual([])
+
+    addEventListener.mockRestore()
+  })
+
+  it('sends no IPC and does not cancel a cross-origin click in server mode', () => {
+    mount(false)
+
+    const event = clickExternalLink()
+
+    // Nothing asked the host to launch anything...
+    expect(posted).toEqual([])
+    // ...and the click was left entirely to the browser, which is the whole
+    // contract for server and static modes.
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('stays inert even when a stale template override mounts it twice', () => {
+    // Exactly the shape of the bug this gate defends against: an old
+    // `.mbr/_display_enhancements.html` mounting the element alongside the
+    // footer's copy, on a server-mode page.
+    mount(false)
+    mount(false)
+
+    const event = clickExternalLink()
+
+    expect(posted).toEqual([])
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('tags no links with tooltips in server mode', () => {
+    // The browser has a URL bar and a status line; the tooltip is GUI-only for
+    // the same reason the listener is.
+    const anchor = main.appendChild(document.createElement('a'))
+    anchor.setAttribute('href', 'https://example.com/page')
+
+    mount(false)
+
+    expect(anchor.hasAttribute('data-tooltip')).toBe(false)
+  })
+
+  // The positive control. Without it the tests above would still pass if the
+  // element stopped working entirely.
+  it('does hand off the click in GUI mode', () => {
+    mount(true)
+
+    const event = clickExternalLink()
+
+    expect(posted).toEqual([`${PREFIX}https://example.com/page`])
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('constructs as the expected element class', () => {
+    // Guards the import above from being dropped as unused, and pins that the
+    // tag name the templates write is the one this module defines.
+    expect(mount(false)).toBeInstanceOf(MbrLinkEnhancementElement)
   })
 })

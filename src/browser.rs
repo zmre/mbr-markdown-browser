@@ -2,7 +2,8 @@ extern crate image;
 use crate::Config;
 use crate::errors::BrowserError;
 use crate::external_open::{
-    SiteOrigin, apply_decision, decide_without_frame_info, open_external, parse_ipc_open_request,
+    SiteOrigin, apply_decision, decide_without_frame_info, mark_gui_active, open_external,
+    parse_ipc_open_request,
 };
 use crate::server::{Server, ServerConfig};
 use muda::{
@@ -442,6 +443,17 @@ fn reinit_server(
 
 /// Launch the browser window with full context for server management
 pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
+    // The only place in the codebase that arms `open_external`. Until this runs,
+    // handing a URL to the operating system fails closed with
+    // `ExternalOpenError::GuiOnly`, so a server-mode process — which links this
+    // same code, since the `gui` feature is on by default — cannot be talked
+    // into starting an application on its host no matter who calls the launcher.
+    //
+    // Set here rather than next to the handlers so it is unambiguously before
+    // the WebView exists: every request to launch something originates in that
+    // WebView, so nothing can ask before the latch is set.
+    mark_gui_active();
+
     // Create event loop with user events for menu handling
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 

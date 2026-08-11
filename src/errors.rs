@@ -254,6 +254,22 @@ pub enum BrowserError {
 #[cfg(feature = "gui")]
 #[derive(Debug, Error)]
 pub enum ExternalOpenError {
+    /// The fail-closed refusal: no GUI window is running in this process, so
+    /// nothing was handed to the operating system.
+    ///
+    /// Not a failure to launch — nothing was attempted. Launching applications
+    /// is a thing an *interactive window* does on behalf of the person sitting
+    /// in front of it. A process answering HTTP has no such person, and must
+    /// never be induced to start applications on its host, so
+    /// [`crate::external_open::open_external`] refuses before it touches the OS.
+    /// The `gui` feature is on by default, so a server-mode process still
+    /// *contains* the launcher; this is what keeps it unreachable.
+    #[error(
+        "Refusing to open {url}: handing URLs to the operating system is GUI-only, \
+         and no GUI window is running in this process"
+    )]
+    GuiOnly { url: String },
+
     #[error("The system URL parser rejected {url}")]
     Malformed { url: String },
 

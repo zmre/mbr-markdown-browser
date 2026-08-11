@@ -32,9 +32,28 @@
 //! or re-encoding the `%3C`/`%3E` produces an ID that Mail cannot find. Nothing
 //! here parses and reserializes a URL — the policy only *reads* prefixes — and
 //! [`apply_decision`] passes its `&str` straight through.
+//!
+//! ## Launching is GUI-only, and fails closed
+//!
+//! Deciding a URL is external is one thing; *starting an application* is
+//! another, and only a GUI window may do the second. A person is sitting in
+//! front of that window and clicked something. A process answering HTTP has no
+//! such person, and "make the server host launch an application" is not a
+//! feature — so in server and static modes links are the visiting browser's
+//! business and mbr does nothing at all.
+//!
+//! Today no HTTP handler can reach [`open_external`]: this module and
+//! `browser.rs` are both `#[cfg(feature = "gui")]`, and `launch_browser` is
+//! called only from the GUI arm of `main.rs`. That is convention, though, and
+//! the `gui` feature is **on by default**, so a server-mode binary still
+//! contains the launcher. [`GUI_ACTIVE`] turns the convention into a runtime
+//! fact: unless [`mark_gui_active`] has run, [`open_external`] refuses before it
+//! touches the OS, whoever the caller is — a future route handler, a test, a
+//! library consumer of this crate.
 
 use crate::errors::ExternalOpenError;
 use crate::url_path::url_scheme;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What the GUI webview should do with a navigation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,12 +281,76 @@ where
     }
 }
 
+/// Whether this process is actually running a GUI window.
+///
+/// A one-way latch: `false` until [`mark_gui_active`], never cleared, because a
+/// process either grew a window or it did not.
+///
+/// [`Ordering::Relaxed`] on both ends is deliberate. Nothing is published
+/// *through* this flag — no other memory has to become visible alongside it —
+/// so there is no release/acquire pair to establish, and the value itself is
+/// atomic at any ordering. The only race a weaker ordering permits is a reader
+/// observing a stale `false` shortly after `launch_browser` sets it, and that
+/// direction is the safe one: a stale read refuses a launch, it never invents
+/// one. A guard that can only ever err toward refusing needs no fence.
+static GUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Records that this process is launching a GUI window, unlocking
+/// [`open_external`].
+///
+/// Called exactly once, from [`crate::browser::launch_browser`], before the
+/// WebView exists — so it is set before anything can possibly ask for a launch,
+/// since every request originates in that WebView.
+///
+/// **No test may call this.** It is process-global and shared by every test in
+/// the binary, so setting it would silently disarm
+/// [`open_external`]'s guard for whatever runs afterwards. The guard's tests
+/// drive [`open_external_guarded`] with an explicit flag instead, which is why
+/// that inner function exists.
+pub(crate) fn mark_gui_active() {
+    GUI_ACTIVE.store(true, Ordering::Relaxed);
+}
+
 /// Opens `url` with the operating system's default handler for its scheme.
+///
+/// Refuses with [`ExternalOpenError::GuiOnly`] unless a GUI window is running in
+/// this process; see the module docs for why that is a security property and not
+/// a tidiness one. `pub(crate)` for the same reason: the only legitimate caller
+/// is `browser.rs`, which is in this crate, and a narrower surface is one fewer
+/// thing to keep true by convention.
 ///
 /// Deliberately not a call to `open`/`xdg-open`/`rundll32`: mbr ships as a
 /// single self-contained binary and shells out to nothing.
-pub fn open_external(url: &str) -> Result<(), ExternalOpenError> {
-    open_external_impl(url)
+pub(crate) fn open_external(url: &str) -> Result<(), ExternalOpenError> {
+    open_external_guarded(GUI_ACTIVE.load(Ordering::Relaxed), url, open_external_impl)
+}
+
+/// The guard itself, with the flag and the launcher both passed in.
+///
+/// Split out so the refusal is testable without touching process-global state:
+/// a test that set [`GUI_ACTIVE`] could never be un-set, and would make every
+/// later test in the same binary see an armed launcher. Taking `launch` as a
+/// parameter is the other half — a test can prove the refusal happened *before*
+/// any OS call by passing a launcher that records whether it ran, rather than
+/// inferring it from an error type.
+fn open_external_guarded<F>(gui_active: bool, url: &str, launch: F) -> Result<(), ExternalOpenError>
+where
+    F: FnOnce(&str) -> Result<(), ExternalOpenError>,
+{
+    if !gui_active {
+        // `warn`, not `debug`: reaching this branch means something in a
+        // process with no window tried to start an application, which is either
+        // a bug that drifted in or somebody probing for one. Either way an
+        // operator should see it in the log.
+        tracing::warn!(
+            "Refusing to hand {url} to the operating system: no GUI window is running in this process"
+        );
+        return Err(ExternalOpenError::GuiOnly {
+            url: url.to_string(),
+        });
+    }
+
+    launch(url)
 }
 
 /// Extracts `scheme://authority` from a URL, lowercased for case-insensitive
@@ -786,6 +869,144 @@ mod tests {
             parse_ipc_open_request(&unknown, "mbr:open-external:https://example.com/"),
             None
         );
+    }
+
+    // ==================== The GUI-only launcher guard ====================
+
+    /// A stand-in for the platform launcher that records whether it ran.
+    ///
+    /// Every guard test uses one, so "the OS was never called" is an assertion
+    /// about an observed fact rather than an inference from the error type.
+    fn recording_launcher(
+        seen: &RefCell<Vec<String>>,
+    ) -> impl FnOnce(&str) -> Result<(), ExternalOpenError> + '_ {
+        move |url| {
+            seen.borrow_mut().push(url.to_string());
+            Ok(())
+        }
+    }
+
+    /// The security regression test.
+    ///
+    /// mbr must never be usable as a way to start applications on a machine
+    /// that is merely *serving* markdown. No HTTP handler calls `open_external`
+    /// today, but the `gui` feature is on by default, so a server-mode process
+    /// links this launcher; the flag is what keeps it inert. If this test ever
+    /// fails, a server can be induced to launch applications on its host.
+    #[test]
+    fn open_external_refuses_when_gui_is_not_running() {
+        let reached_os = RefCell::new(Vec::new());
+
+        let result = open_external_guarded(false, MESSAGE_URL, recording_launcher(&reached_os));
+
+        assert!(
+            matches!(result, Err(ExternalOpenError::GuiOnly { ref url }) if url == MESSAGE_URL),
+            "a non-GUI process must refuse with GuiOnly, got {result:?}"
+        );
+        assert!(
+            reached_os.into_inner().is_empty(),
+            "the refusal must happen BEFORE the operating system is touched"
+        );
+    }
+
+    /// The same refusal for every class of URL that survives the policy, so the
+    /// guard cannot be mistaken for something scheme-specific. `http(s)` is in
+    /// the list because that is what the IPC path hands over.
+    #[test]
+    fn open_external_refuses_every_url_when_gui_is_not_running() {
+        for url in [
+            MESSAGE_URL,
+            "mailto:someone@example.com",
+            "zoommtg://zoom.us/join?confno=1234567890",
+            "file:///etc/passwd",
+            "https://example.com/",
+            "x-devonthink-item://8A3B0C1D-2E4F",
+            "",
+        ] {
+            let reached_os = RefCell::new(Vec::new());
+
+            let result = open_external_guarded(false, url, recording_launcher(&reached_os));
+
+            assert!(
+                matches!(result, Err(ExternalOpenError::GuiOnly { .. })),
+                "{url:?} must be refused outside GUI mode, got {result:?}"
+            );
+            assert!(
+                reached_os.into_inner().is_empty(),
+                "{url:?} must not reach the operating system outside GUI mode"
+            );
+        }
+    }
+
+    /// The other half: the guard is a gate, not a wall. With a window running,
+    /// the URL reaches the launcher unchanged — the byte-for-byte promise has to
+    /// survive the guard too.
+    #[test]
+    fn open_external_reaches_the_launcher_verbatim_when_the_gui_is_running() {
+        let reached_os = RefCell::new(Vec::new());
+
+        let result = open_external_guarded(true, MESSAGE_URL, recording_launcher(&reached_os));
+
+        assert!(result.is_ok(), "a GUI process may launch, got {result:?}");
+        assert_eq!(
+            reached_os.into_inner(),
+            vec![MESSAGE_URL.to_string()],
+            "the launcher must see the URL exactly as the webview gave it"
+        );
+    }
+
+    /// A launcher failure is reported as itself, not swallowed or relabelled as
+    /// a refusal — the two mean very different things in a log.
+    #[test]
+    fn open_external_surfaces_launcher_failures_unchanged() {
+        let result = open_external_guarded(true, "zoommtg://zoom.us/join", |url| {
+            Err(ExternalOpenError::LaunchFailed {
+                url: url.to_string(),
+                reason: "no application is registered for this scheme".to_string(),
+            })
+        });
+
+        assert!(
+            matches!(result, Err(ExternalOpenError::LaunchFailed { .. })),
+            "expected the launcher's own error, got {result:?}"
+        );
+    }
+
+    /// Proves the *real* entry point is wired to the latch, which the tests
+    /// above deliberately bypass.
+    ///
+    /// Deterministic because `mark_gui_active` is called from exactly one place
+    /// — `browser::launch_browser` — and no test opens a window. Its doc comment
+    /// forbids calling it from a test for precisely this reason; if that ever
+    /// changes, this test is the thing that notices.
+    #[test]
+    fn open_external_is_wired_to_the_gui_latch_and_defaults_to_refusing() {
+        assert!(
+            !GUI_ACTIVE.load(Ordering::Relaxed),
+            "no test may call mark_gui_active(); the latch must still be closed here"
+        );
+
+        assert!(
+            matches!(
+                open_external("https://example.com/"),
+                Err(ExternalOpenError::GuiOnly { .. })
+            ),
+            "open_external must consult the latch, not just open_external_guarded"
+        );
+    }
+
+    /// The message an operator reads has to say *why* it was refused, since the
+    /// obvious guess ("no handler for that scheme") is wrong and would send them
+    /// looking at the wrong machine.
+    #[test]
+    fn gui_only_refusal_explains_itself() {
+        let message = ExternalOpenError::GuiOnly {
+            url: "https://example.com/".to_string(),
+        }
+        .to_string();
+
+        assert!(message.contains("https://example.com/"), "{message}");
+        assert!(message.contains("GUI-only"), "{message}");
     }
 
     // ==================== Origin handling ====================

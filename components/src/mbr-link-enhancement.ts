@@ -149,19 +149,26 @@ export class MbrLinkEnhancementElement extends LitElement {
     // One delegated listener for the whole document, not per link: it has to
     // cover the nav, footer and anything a component renders later.
     //
-    // The isGuiMode() check above is load-bearing, not belt-and-braces.
-    // _footer.html gates this element on `{% if gui_mode %}`, but
-    // _display_enhancements.html mounts it UNGATED on every markdown page, so
-    // in server mode and static builds the element is still constructed and
-    // that early return is the only thing keeping a document-wide click
-    // listener off the page. Those modes must not have one: a real browser
-    // already opens https:// itself and hands message:// and friends to the
-    // OS, which is the behaviour this listener exists to emulate.
+    // The isGuiMode() check above is load-bearing, not belt-and-braces, even
+    // though mbr's own templates now mount this element only behind a gui_mode
+    // gate. Templates are not ours to rely on: `.mbr/` overrides are a headline
+    // feature of this project, and a repository can ship its own
+    // _display_enhancements.html or _footer.html — very plausibly copied from an
+    // older mbr, where this element WAS mounted ungated — and mbr will use it in
+    // preference to the built-in. So the template gate decides whether the
+    // element is constructed, and this early return decides whether it does
+    // anything. Only the second is under our control.
     //
-    // In GUI mode both mounts are present, so this line runs twice.
-    // addEventListener dedups on (type, listener, capture) and
-    // handleExternalLinkClick is a module-level function, so exactly one
-    // listener is registered and a click cannot open the URL twice.
+    // Server mode and static builds must not have this listener: they run in a
+    // real browser, which already opens https:// itself and hands message:// and
+    // friends to the OS. Worse, the listener's whole purpose is to ask the *host
+    // process* to launch an application, which a machine that is merely serving
+    // markdown must never be asked to do.
+    //
+    // A repo could also mount the element twice. addEventListener dedups on
+    // (type, listener, capture) and handleExternalLinkClick is a module-level
+    // function, so exactly one listener is registered and a click cannot open
+    // the URL twice.
     document.addEventListener('click', handleExternalLinkClick)
 
     // Wait for DOM to be ready before enhancing links

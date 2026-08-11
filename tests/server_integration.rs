@@ -261,6 +261,41 @@ async fn test_gui_mode_emits_find_bar() {
 }
 
 #[tokio::test]
+async fn test_server_mode_omits_the_external_link_handler() {
+    // `<mbr-link-enhancement>` asks the *host process* to launch applications.
+    // That is a GUI-only capability by design: a machine merely serving markdown
+    // must never be induced to start programs on its host, and a real browser
+    // already opens external links itself. A markdown page is exactly the kind
+    // of page whose content mbr does not control, so the element must not be on
+    // it in server mode.
+    //
+    // `_display_enhancements.html` used to mount this UNGATED on every markdown
+    // page, which is what this test pins shut. The Rust launcher fails closed
+    // regardless (see `external_open::open_external`), but the page should not
+    // even carry the click listener.
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\n[out](https://example.com/)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/readme/").await;
+    assert_html_not_contains(&html, "mbr-link-enhancement");
+
+    // GUI mode: exactly one mount, from the `{% if gui_mode %}` gate in
+    // _footer.html. Two would be harmless (addEventListener dedups) but would
+    // mean the ungated copy came back.
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.gui_mode = true;
+    })
+    .await;
+    let html = server.get_text("/readme/").await;
+    assert_eq!(
+        html.matches("<mbr-link-enhancement>").count(),
+        1,
+        "GUI mode should mount the external-link handler exactly once: {html}"
+    );
+}
+
+#[tokio::test]
 async fn test_server_marks_incomplete_blocks_by_default() {
     // Server/GUI default for mark_incomplete is true; rendered HTML should
     // wrap blocks starting with TK/TODO/FIXME/XXX in an mbr-incomplete span.
