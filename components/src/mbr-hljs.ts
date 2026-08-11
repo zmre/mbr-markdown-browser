@@ -40,7 +40,7 @@ const LOCAL_LANGUAGES = new Set([
 ])
 
 /** HLJS version - must match embedded version in embedded_hljs.rs */
-const HLJS_VERSION = '11.11.1'
+const HLJS_VERSION = '11.11.2'
 
 /** CDN base URL for languages not embedded locally */
 const CDN_BASE = `https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@${HLJS_VERSION}/build`

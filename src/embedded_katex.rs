@@ -4,10 +4,10 @@
 //! centralized access to math rendering assets.
 
 /// KaTeX minified CSS
-pub const KATEX_CSS: &[u8] = include_bytes!("../templates/katex.0.16.27.min.css");
+pub const KATEX_CSS: &[u8] = include_bytes!("../templates/katex.0.18.4.min.css");
 
 /// KaTeX minified JavaScript
-pub const KATEX_JS: &[u8] = include_bytes!("../templates/katex.0.16.27.min.js");
+pub const KATEX_JS: &[u8] = include_bytes!("../templates/katex.0.18.4.min.js");
 
 // Font files - WOFF2 format (primary, smallest)
 pub const KATEX_FONT_AMS_REGULAR_WOFF2: &[u8] =
