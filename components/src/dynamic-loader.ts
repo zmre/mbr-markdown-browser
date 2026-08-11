@@ -91,7 +91,16 @@ export function loadCss(href: string, integrity?: string): Promise<void> {
       console.error('[loadCss] Failed to load:', href, e)
       reject(new Error(`Failed to load CSS: ${href}`))
     }
-    document.head.appendChild(link)
+    // Insert before user.css rather than appending: user.css is the per-repo
+    // override and must have the last word. Appending to <head> put reveal.css,
+    // katex.min.css and hljs.atom-one-dark.css AFTER it, so at equal specificity
+    // they outranked the user's rules. Final order: pico -> theme -> dynamic -> user.
+    // The fallback is load-bearing, not defensive padding: `.mbr/_head.html` is a
+    // documented per-repo override, so a custom template may not carry the id.
+    // Appending there preserves today's behaviour instead of throwing.
+    const anchor = document.getElementById('mbr-user-css')
+    if (anchor) anchor.before(link)
+    else document.head.appendChild(link)
   })
 }
 
