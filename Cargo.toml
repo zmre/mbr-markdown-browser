@@ -32,8 +32,19 @@ bench = false
 [features]
 default = ["gui", "media-metadata"]
 # GUI feature enables native window/browser functionality (wry, tao, muda, rfd)
+# plus the per-platform system-URL-handler crates `external_open` uses to send
+# off-site links to the user's browser/mail client instead of the mbr window.
 # Disable for QuickLook builds: cargo build --release --no-default-features
-gui = ["dep:wry", "dep:tao", "dep:muda", "dep:rfd"]
+gui = [
+    "dep:wry",
+    "dep:tao",
+    "dep:muda",
+    "dep:rfd",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+    "dep:windows-sys",
+    "dep:gio",
+]
 # Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
 media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile"]
 # Static ffmpeg linking for (remove runtime ffmpeg dependency)
@@ -123,11 +134,38 @@ rfd = { version = "0.17", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 muda = { version = "0.19", features = ["gtk", "libxdo"], optional = true }
+# `external_open`: gio's AppInfo::launch_default_for_uri is the desktop-portal
+# aware equivalent of xdg-open without the process spawn. Already in the tree
+# via gtk/webkit2gtk at this exact version, so this adds no crate.
+gio = { version = "0.18", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# `external_open`: ShellExecuteW. windows-sys 0.61.2 is already in the tree many
+# times over; only the feature gates below are new, and those add no crate.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+], optional = true }
 
 # UniFFI is only used for the macOS QuickLook Swift extension (ffi feature).
 # Target-gate it to macOS so Linux/Windows builds never compile the Swift
 # bindings generator, even transitively as a build-dependency.
 [target.'cfg(target_os = "macos")'.dependencies]
+# `external_open`: NSWorkspace::openURL, the only way a WKWebView-hosted app can
+# reach the user's default handler (unlike UIKit, WKWebView never falls back to
+# it on its own). Both crates are already in the tree at exactly these versions
+# via tao/wry; promoting them to direct dependencies and adding the NSWorkspace
+# feature gate adds no crate to the graph. Safe wrappers, so no `unsafe` here.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSWorkspace",
+], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSURL",
+], optional = true }
 # Pinned to 0.31: uniffi_bindgen 0.32 pulls askama 0.16, which reads askama.toml
 # via a CARGO_MANIFEST_DIR-relative path that breaks under crane's split vendoring
 # (macOS mbr-quicklook-staticlib build fails). Revisit when crane/askama interop is fixed.

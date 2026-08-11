@@ -6,6 +6,122 @@ import { isGuiMode } from './shared.ts'
 const ENHANCED_CLASS = 'mbr-link-enhanced'
 
 /**
+ * Prefix of the IPC message that asks Rust to open a URL with the system
+ * default handler. Must stay identical to `IPC_OPEN_EXTERNAL_PREFIX` in
+ * `src/external_open.rs`, which is the only reader.
+ */
+const IPC_OPEN_EXTERNAL_PREFIX = 'mbr:open-external:'
+
+/**
+ * The resolved URL a click should hand to the operating system, or `null` to
+ * leave the click alone.
+ *
+ * Only cross-origin `http(s)` qualifies. Everything else is somebody else's
+ * job, and getting that division wrong is how embeds break:
+ *
+ * - Application schemes (`mailto:`, `message:`, `zoommtg:`) are handled by the
+ *   Rust navigation handler, which is safe to act on them because an `<iframe>`
+ *   can never navigate to one. See `decide_without_frame_info` in
+ *   `src/external_open.rs`.
+ * - Cross-origin `http(s)` is *not* safe there — wry's handler receives a bare
+ *   URL and is called for frame loads too, so cancelling would blank YouTube
+ *   embeds. This listener is the piece that knows a click from an embed.
+ * - `target="_blank"` goes to wry's new-window handler, which applies the full
+ *   origin-aware policy itself.
+ *
+ * The checks below mirror what a browser does before following a link, so a
+ * modifier-click or a middle-click still behaves the way the user expects.
+ */
+export function externalHrefForClick(event: MouseEvent): string | null {
+  // Something else already claimed this click.
+  if (event.defaultPrevented) return null
+
+  // Left button only. Middle-click and right-click are the browser's.
+  if (event.button !== 0) return null
+
+  // Cmd/Ctrl/Shift/Alt all mean "not a plain navigation" to a browser.
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return null
+
+  const anchor = anchorFromEvent(event)
+  if (!anchor) return null
+
+  // Downloads and explicit targets are handled elsewhere (or by the webview).
+  if (anchor.hasAttribute('download')) return null
+  const target = anchor.getAttribute('target')
+  if (target && target !== '_self') return null
+
+  // In-page anchors never leave the document.
+  const href = anchor.getAttribute('href')
+  if (!href || href.startsWith('#')) return null
+
+  let url: URL
+  try {
+    // `anchor.href` is the resolved absolute URL, which is what the OS needs;
+    // the raw attribute is usually relative.
+    url = new URL(anchor.href)
+  } catch {
+    return null
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (url.origin === window.location.origin) return null
+
+  return anchor.href
+}
+
+/**
+ * Find the anchor a click landed on, crossing shadow boundaries.
+ *
+ * `composedPath()` rather than `target.closest()` because a link rendered
+ * inside a component's shadow root would otherwise report the host element.
+ */
+function anchorFromEvent(event: MouseEvent): HTMLAnchorElement | null {
+  const path = typeof event.composedPath === 'function' ? event.composedPath() : []
+
+  for (const node of path) {
+    if (node instanceof HTMLAnchorElement && node.hasAttribute('href')) return node
+  }
+
+  const target = event.target
+  return target instanceof Element ? target.closest('a[href]') : null
+}
+
+/**
+ * Ask the host to open `url` with the system default handler.
+ *
+ * Returns whether the message was actually posted. It is not posted when
+ * `window.ipc` is absent — the bundle also loads under a plain browser during
+ * development and in tests — and the caller must then leave the click alone
+ * rather than swallow it.
+ */
+function postOpenExternal(url: string): boolean {
+  const ipc = window.ipc
+  if (!ipc || typeof ipc.postMessage !== 'function') return false
+
+  try {
+    ipc.postMessage(IPC_OPEN_EXTERNAL_PREFIX + url)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Click handler: hand cross-origin links to the operating system.
+ *
+ * Exported for tests. `preventDefault()` happens only after the message is
+ * away, so a failure to reach the host degrades to the previous behaviour
+ * (the link opens in the mbr window) instead of a link that does nothing.
+ */
+export function handleExternalLinkClick(event: MouseEvent): void {
+  const url = externalHrefForClick(event)
+  if (!url) return
+  if (!postOpenExternal(url)) return
+
+  event.preventDefault()
+}
+
+/**
  * Link enhancement component for GUI mode.
  *
  * In GUI mode (native window), there's no browser URL bar, so users can't
@@ -30,6 +146,13 @@ export class MbrLinkEnhancementElement extends LitElement {
       return
     }
 
+    // One delegated listener for the whole document, not per link: it has to
+    // cover the nav, footer and anything a component renders later, and this
+    // element is only ever emitted under `{% if gui_mode %}` in
+    // templates/_footer.html, so it never runs in server mode or a static
+    // build, where the real browser already opens external links correctly.
+    document.addEventListener('click', handleExternalLinkClick)
+
     // Wait for DOM to be ready before enhancing links
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => this._enhanceLinks())
@@ -37,6 +160,11 @@ export class MbrLinkEnhancementElement extends LitElement {
       // DOM already loaded
       this._enhanceLinks()
     }
+  }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback()
+    document.removeEventListener('click', handleExternalLinkClick)
   }
 
   /**
@@ -98,5 +226,14 @@ export class MbrLinkEnhancementElement extends LitElement {
 declare global {
   interface HTMLElementTagNameMap {
     'mbr-link-enhancement': MbrLinkEnhancementElement
+  }
+
+  interface Window {
+    /**
+     * wry's host channel, injected into the page only in GUI mode. Optional
+     * because the same bundle runs in server mode and static builds, where
+     * nothing is listening.
+     */
+    ipc?: { postMessage(message: string): void }
   }
 }

@@ -133,6 +133,13 @@ pub enum ConfigError {
     InvalidBuildConcurrency { value: usize },
 
     #[error(
+        "Invalid tasks_ignore_globs pattern {pattern:?}: {reason}. \
+         Patterns match a file's repository-relative path, e.g. \"templates/**\" \
+         or \"**/templates/**\""
+    )]
+    InvalidTasksIgnoreGlob { pattern: String, reason: String },
+
+    #[error(
         "Editing is enabled on a non-loopback host but no edit_token_hash is set. \
          Run `mbr --generate-edit-token` and add the printed edit_token_hash to \
          .mbr/config.toml, or bind to 127.0.0.1."
@@ -236,6 +243,22 @@ pub enum BrowserError {
 
     #[error("Server failed to start for new folder")]
     ServerStartFailed,
+}
+
+/// Why handing a URL to the operating system's default handler failed.
+///
+/// The reason is carried as a `String` rather than the platform error type so
+/// this enum stays free of `cfg` noise: the three back ends in
+/// [`crate::external_open`] fail with an `NSWorkspace` bool, a Win32 status code
+/// and a `glib::Error` respectively, and nothing downstream does more than log.
+#[cfg(feature = "gui")]
+#[derive(Debug, Error)]
+pub enum ExternalOpenError {
+    #[error("The system URL parser rejected {url}")]
+    Malformed { url: String },
+
+    #[error("The system refused to open {url}: {reason}")]
+    LaunchFailed { url: String, reason: String },
 }
 
 /// Errors related to file watching.

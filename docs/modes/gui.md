@@ -88,6 +88,45 @@ When files change on disk, the GUI automatically reloads the current page. This 
 
 Use **File → Open Folder** (Cmd+O) to switch to a different markdown repository without restarting mbr.
 
+### External Links
+
+The mbr window is a viewer for your notes, not a web browser, so it only ever
+displays pages from mbr's own local server. Anything else is handed to the
+system, exactly as if you had clicked it in another native app:
+
+| Link | What happens |
+|------|--------------|
+| `docs/guide.md`, `/notes/`, `#section` | Navigates inside the mbr window |
+| `https://example.com` | Opens in your **default browser** |
+| `mailto:`, `tel:`, `message:`, `zoommtg:`, `x-devonthink-item:`, … | Opens in the application registered for that scheme |
+| `javascript:`, `vbscript:`, `data:` | Refused — neither followed nor handed to the system |
+
+Application schemes are recognised by *shape*, not from a list, so a scheme mbr
+has never heard of works as long as something on your machine claims it. The URL
+reaches the system byte for byte: a `message:` link addresses a message by its
+`Message-ID`, whose angle brackets arrive percent-encoded as `%3C`/`%3E`, and
+re-encoding or decoding them would hand your mail client an ID it cannot find.
+
+`target="_blank"` links and `window.open()` follow the same rule: same-origin
+popups open a linked mbr window (this is what Reveal.js speaker notes need),
+while external ones go to your browser rather than opening a second mbr window
+around somebody else's site.
+
+**Embedded content is unaffected.** A YouTube embed, or any other `<iframe>`,
+keeps loading in place — embeds are not links and are never handed to the
+system. This is not incidental: the webview's navigation callback cannot tell an
+`<iframe>` load from a click, so mbr splits the work. Application schemes are
+decided there (no frame can ever load a `mailto:`), while ordinary `http`/`https`
+links are recognised in the page itself, where a click is unmistakably a click.
+`src/external_open.rs` carries the full reasoning.
+
+Server mode (`mbr -s`) and static builds need none of this — they run in a real
+browser, which already does it — so none of the machinery ships to them.
+
+The hand-off is built in. mbr does not shell out to `open`, `xdg-open` or
+`rundll32`; it calls `NSWorkspace` on macOS, `ShellExecuteW` on Windows and gio's
+default-application launcher on Linux.
+
 ## macOS App Bundle
 
 The macOS release includes `MBR.app`, a proper application bundle that:

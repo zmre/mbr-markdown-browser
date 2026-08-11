@@ -160,7 +160,11 @@ The QuickLook preview is simplified compared to the full mbr experience:
 
 In QuickLook:
 - Internal links are disabled (no navigation)
-- External links open in your default browser
+- External links do **not** open your browser. The preview extension installs no
+  navigation policy of its own, so a click is handled by the preview's web view
+  or ignored — press Space again to dismiss the preview and open the file in mbr
+  to follow the link. [GUI mode](gui.md#external-links) is where external and
+  application-scheme links are handed to the system
 - Anchor links scroll within the preview
 
 ## Troubleshooting
