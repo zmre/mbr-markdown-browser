@@ -199,6 +199,44 @@ jobs:
 > mbr's substituters and compiles ffmpeg, pdfium, and the full crate graph on
 > every deploy — tens of minutes of build time you are usually paying for.
 
+## Web Frameworks
+
+### SvelteKit
+
+SvelteKit serves a route from its filesystem path, so markdown you want at
+`/blog/post/` has to live at `src/routes/blog/post.md`. Put `.mbr/` there to make
+`src/routes/` the markdown root — mbr searches upward for `.mbr/` before `.git/`,
+so this wins over the project root — and point `static_folder` at the project's
+own `static/` folder two levels up. mbr's URLs then match the ones SvelteKit
+serves:
+
+```
+project/
+├── src/
+│   └── routes/
+│       ├── .mbr/config.toml   # static_folder = "../../static"
+│       └── blog/
+│           └── post.md        # /blog/post/
+└── static/
+    └── images/
+        └── logo.png           # /images/logo.png
+```
+
+```toml
+# src/routes/.mbr/config.toml
+static_folder = "../../static"
+```
+
+```bash
+mbr -s src/routes
+```
+
+Two levels is mbr's limit for an overlay above the markdown root, and it logs a
+`WARN` naming the directory it settled on. See
+[Where the static folder may live](configuration.md#where-the-static-folder-may-live)
+for the full rule and the `MBR_STATIC_FOLDER` escape hatch for layouts that need
+to reach further.
+
 ## Other Static Site Generators
 
 ### Comparison

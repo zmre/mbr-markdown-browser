@@ -317,7 +317,7 @@ The root directory is found by searching upward for common repository markers:
 - **Directories** (in order): `.mbr/`, `.git/`, `.zk/`, `.obsidian/`
 - **Files** (if no dirs found): `book.toml`, `mkdocs.yml`, `docusaurus.config.js`
 
-The `static_folder` config option (default: `"static"`) creates a URL overlay - files in `static/images/` become available at `/images/`.
+The `static_folder` config option (default: `"static"`) creates a URL overlay - files in `static/images/` become available at `/images/`. It may also point *outside* the markdown root, up to two levels above it (`../static` for `project/content` + `project/static`; `../../static` for SvelteKit's `src/routes` + `static`). `config::resolve_static_overlay` is the single statement of that policy — the validator and the repo scanner share the one call so they cannot drift — and it refuses anything past the two-level budget, anything reached through `$HOME` or the filesystem root, and any directory that *contains* the root.
 
 ### Key Endpoints
 

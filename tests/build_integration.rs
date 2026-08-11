@@ -2281,6 +2281,80 @@ async fn test_build_places_peer_static_folder_assets_inside_output() {
     );
 }
 
+/// The build-mode half of the two-level overlay. Depth is the whole point: the
+/// URL each asset is placed at comes from stripping a *two*-component overlay
+/// prefix, which a peer fixture cannot tell apart from stripping one.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_places_two_deep_static_folder_assets_inside_output() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = tmp.path().canonicalize().expect("canonicalize");
+
+    let routes = base.join("project").join("src").join("routes");
+    fs::create_dir_all(routes.join(".mbr")).expect("routes/.mbr");
+    fs::write(routes.join("index.md"), "# Home").expect("write index.md");
+
+    let static_dir = base.join("project").join("static");
+    fs::create_dir_all(static_dir.join("images")).expect("static/images");
+    let logo_bytes: &[u8] = b"\x89PNG\r\n\x1a\nfake";
+    fs::write(static_dir.join("images/logo.png"), logo_bytes).expect("write logo");
+    fs::write(static_dir.join("favicon.ico"), b"ICO bytes").expect("write favicon");
+
+    // Nested so a `../../..` escape would have somewhere visible to land.
+    let output_dir = base.join("deep").join("out");
+
+    let config = mbr::Config {
+        root_dir: routes.clone(),
+        static_folder: "../../static".to_string(),
+        oembed_timeout_ms: 0,
+        ..Default::default()
+    };
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+
+    let logo = output_dir.join("images/logo.png");
+    assert!(
+        logo.exists(),
+        "the two-level static folder's image must be placed at images/logo.png"
+    );
+    assert_eq!(
+        fs::read(&logo).expect("read placed logo"),
+        logo_bytes,
+        "the placed asset must resolve to the original bytes"
+    );
+    assert!(
+        output_dir.join("favicon.ico").exists(),
+        "the two-level static folder's favicon must be placed at favicon.ico"
+    );
+
+    // Nothing beside the output directory.
+    let deep = base.join("deep");
+    let stray: Vec<String> = walk_paths_shallow_of_symlinks(&deep)
+        .into_iter()
+        .filter(|p| !p.starts_with(&output_dir))
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "build wrote outside {}:\n  {}",
+        output_dir.display(),
+        stray.join("\n  ")
+    );
+
+    // And nothing was written back into the source project either.
+    assert!(
+        !routes.join("images").exists(),
+        "the build must not write assets back into the markdown root"
+    );
+
+    let site_json = fs::read_to_string(output_dir.join(".mbr/site.json")).expect("read site.json");
+    assert!(
+        !site_json.contains("\"../"),
+        "site.json must not contain an escaping path"
+    );
+}
+
 /// A markdown file inside an external static overlay is skipped, so the build
 /// never gets a `../static/…` URL to join onto `--output`.
 #[cfg(unix)]

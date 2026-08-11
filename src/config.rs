@@ -632,20 +632,26 @@ impl Default for Config {
     }
 }
 
+/// The user's home directory, read from the variable the platform actually sets.
+///
+/// Windows does not set `HOME`; the equivalent is `USERPROFILE`. Without this
+/// the guards below never fire there, so a stray `C:\Users\you\.git` or
+/// `.obsidian` would silently make the entire home directory the repo root and
+/// trigger a scan of everything the user owns.
+fn home_dir() -> Option<PathBuf> {
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(home_var).map(PathBuf::from)
+}
+
 /// Returns true if the given path is the user's home directory.
 ///
 /// Compares canonical forms when both sides resolve, because callers do not
 /// agree on path shape: [`find_root_dir`] walks raw ancestors, while
-/// [`Config::validate_static_folder`] compares an already-canonicalized root.
-/// Without this, a `$HOME` reached through a symlink (`/home/me` ->
-/// `/mnt/users/me`) would slip past both guards.
+/// [`static_folder_anchor`] compares an already-canonicalized root. Without
+/// this, a `$HOME` reached through a symlink (`/home/me` -> `/mnt/users/me`)
+/// would slip past both guards.
 fn is_home_dir(path: &Path) -> bool {
-    // Windows does not set `HOME`; the equivalent is `USERPROFILE`. Without
-    // this the guard below never fires there, so a stray `C:\Users\you\.git`
-    // or `.obsidian` would silently make the entire home directory the repo
-    // root and trigger a scan of everything the user owns.
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let Some(home) = std::env::var_os(home_var).map(PathBuf::from) else {
+    let Some(home) = home_dir() else {
         return false;
     };
     if path == home {
@@ -653,6 +659,40 @@ fn is_home_dir(path: &Path) -> bool {
     }
     match (path.canonicalize(), home.canonicalize()) {
         (Ok(path), Ok(home)) => path == home,
+        _ => false,
+    }
+}
+
+/// True when `path` is the home directory *or* a directory that contains it.
+///
+/// [`is_home_dir`] on its own was enough while the overlay could climb only one
+/// level: a root whose parent is `/home` would have to be `/home/notes`, which
+/// nobody has. At two levels it is `/home/you/notes` — an ordinary layout whose
+/// grandparent holds every account on the machine — and `is_home_dir` does not
+/// fire on `/home`, because `/home` is not `$HOME`. Ancestors of `$HOME`
+/// (`/home`, `/Users`, `C:\Users`) are therefore refused as an anchor too.
+///
+/// Nothing here helps when `HOME`/`USERPROFILE` is unset, as it can be for a
+/// service account started without a login session; the filesystem-root guard
+/// in [`static_folder_anchor`] is the only backstop then.
+fn contains_home_dir(path: &Path) -> bool {
+    if is_home_dir(path) {
+        return true;
+    }
+    // `starts_with("")` is true of every path, and an empty parent is how a
+    // *relative* root bottoms out — that case belongs to the filesystem-root
+    // guard, not to this one.
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    let Some(home) = home_dir() else {
+        return false;
+    };
+    if home.starts_with(path) {
+        return true;
+    }
+    match (path.canonicalize(), home.canonicalize()) {
+        (Ok(path), Ok(home)) => home.starts_with(path),
         _ => false,
     }
 }
@@ -778,18 +818,36 @@ impl Config {
         }
     }
 
-    /// Emits one INFO line when the static overlay lands outside the markdown
-    /// root, so an external static root is never silently in effect.
+    /// Emits one line when the static overlay lands outside the markdown root,
+    /// so an external static root is never silently in effect.
+    ///
+    /// A *peer* overlay is an ordinary layout and only rates INFO. Reaching two
+    /// levels up is rare and much wider — the anchor is the root's grandparent,
+    /// so the value could have named any directory under it — so that case is
+    /// raised to WARN, which is visible at the default log level.
     fn log_external_static_folder(&self) {
         if let Ok(StaticOverlay::External(dir)) =
             resolve_static_overlay(&self.root_dir, &self.static_folder)
         {
-            tracing::info!(
-                "static_folder {:?} resolves outside the markdown root ({}): serving and indexing assets from {}",
-                self.static_folder,
-                self.root_dir.display(),
-                dir.display()
-            );
+            let within_peer = self
+                .root_dir
+                .parent()
+                .is_some_and(|parent| dir.starts_with(parent));
+            if within_peer {
+                tracing::info!(
+                    "static_folder {:?} resolves outside the markdown root ({}): serving and indexing assets from {}",
+                    self.static_folder,
+                    self.root_dir.display(),
+                    dir.display()
+                );
+            } else {
+                tracing::warn!(
+                    "static_folder {:?} resolves two levels above the markdown root ({}): serving and indexing assets from {}",
+                    self.static_folder,
+                    self.root_dir.display(),
+                    dir.display()
+                );
+            }
         }
     }
 
@@ -800,7 +858,8 @@ impl Config {
     /// - `sidebar_max_items`: Must be > 0
     /// - `graph_depth`: Must be between 1 and 5
     /// - `build_concurrency`: If set, must be > 0
-    /// - `static_folder`: Must stay inside `root_dir` or be a peer of it (see
+    /// - `static_folder`: Must stay inside `root_dir`, or land under a directory
+    ///   at most [`MAX_STATIC_FOLDER_ASCENT`] levels above it (see
     ///   [`Config::validate_static_folder`])
     /// - `tasks_ignore_globs`: Every pattern must compile
     ///
@@ -857,8 +916,9 @@ impl Config {
         Ok(())
     }
 
-    /// Rejects a `static_folder` that reaches further than a *peer* of the
-    /// markdown root. See [`resolve_static_overlay`] for the policy itself.
+    /// Rejects a `static_folder` that reaches further above the markdown root
+    /// than [`MAX_STATIC_FOLDER_ASCENT`] levels, or that resolves to a directory
+    /// containing the root. See [`resolve_static_overlay`] for the policy itself.
     fn validate_static_folder(&self) -> Result<(), ConfigError> {
         resolve_static_overlay(&self.root_dir, &self.static_folder).map(|_| ())
     }
@@ -888,18 +948,33 @@ pub enum StaticOverlay {
 ///   [`Config::reject_repo_supplied_absolute_static_folder`] when it came from a
 ///   repository config file. A value that survives to here was set by the
 ///   operator via `MBR_STATIC_FOLDER` and is trusted as given.
-/// - **Outside the root**: accepted only as a strict descendant of the root's
-///   *parent*, which is what makes the common `repo/content` + `repo/static`
-///   layout work. The parent itself is refused — that would expose every sibling
-///   of the root, which is not a peer relationship — and so is any parent that is
-///   `$HOME` or the filesystem root, which is what keeps `~/notes` +
-///   `static_folder = "../.ssh"` from resolving into the home directory.
+/// - **Outside the root**: accepted only as a strict descendant of the *anchor*
+///   — the directory at most [`MAX_STATIC_FOLDER_ASCENT`] levels above the root
+///   that [`static_folder_anchor`] can reach without stepping into `$HOME` or
+///   the filesystem root. One level makes the common `repo/content` +
+///   `repo/static` layout work; two makes a framework layout work, where the
+///   markdown root is pinned by the framework (SvelteKit's `<project>/src/routes`)
+///   and the assets live at `<project>/static`.
+/// - **Never an ancestor of the root**, even one the anchor would otherwise
+///   admit. At two levels the root's own parent has become a legal descendant of
+///   the anchor, so without this `static_folder = ".."` would be accepted — and
+///   it serves every sibling of the root plus the markdown source itself as raw
+///   static files.
 ///
 /// The resolved directory is canonicalized when it exists, so a `static -> /etc`
 /// symlink is judged by where it actually lands rather than by how innocent it
 /// looks lexically. When it does not exist yet the resolution falls back to
 /// lexical normalization, so an escape whose target has not been created is
 /// caught too.
+///
+/// What two levels *does* concede, and what the `warn!` in
+/// [`Config::log_external_static_folder`] exists to surface: an untrusted
+/// `.mbr/config.toml` can now name any directory under the root's grandparent —
+/// `<project>/.git` and its credentials, `<project>/node_modules`. One level
+/// already reached `../.git`, so this widens an existing exposure rather than
+/// opening a new class. The one genuinely new crossing is serving a repository
+/// out of *another* user's home directory, which no `$HOME` check can catch
+/// because `$HOME` is the operator's, not theirs.
 ///
 /// This is the single definition of the policy on purpose: `Config::validate`
 /// refuses a bad value at startup, and `Repo` uses the *same* call to decide
@@ -925,41 +1000,115 @@ pub fn resolve_static_overlay(
         return Ok(StaticOverlay::External(dir));
     }
 
-    let Some(parent) = root.parent() else {
-        return Err(invalid_static_folder(
-            static_folder,
-            "resolves outside the markdown root, which has no parent directory",
-        ));
-    };
-    // Reuses `find_root_dir`'s notion of "home" rather than inventing a second
-    // one: `~/notes` with `../.ssh` must not become servable.
-    if is_home_dir(parent) {
-        return Err(invalid_static_folder(
-            static_folder,
-            "resolves outside the markdown root and into the home directory",
-        ));
+    let (anchor, stop) = static_folder_anchor(&root);
+
+    // When the climb was stopped on its first turn, `anchor` is the root itself
+    // and nothing outside the root can satisfy this — which is exactly the
+    // one-level behaviour for a root under `$HOME` or at the filesystem root.
+    if !dir.starts_with(&anchor) {
+        return Err(invalid_static_folder(static_folder, &stop.refusal(&anchor)));
     }
-    if parent.parent().is_none() {
+    // `dir == anchor` is implied by the ancestor test, since the anchor is an
+    // ancestor of the root by construction, but it is spelled out so the rule
+    // reads as "a strict descendant" without relying on that proof.
+    if dir == anchor || root.starts_with(&dir) {
         return Err(invalid_static_folder(
             static_folder,
-            "resolves outside the markdown root and into the filesystem root",
-        ));
-    }
-    if dir == parent {
-        return Err(invalid_static_folder(
-            static_folder,
-            "resolves to the parent of the markdown root, which would expose every \
-             sibling directory; name a specific sibling instead",
-        ));
-    }
-    if !dir.starts_with(parent) {
-        return Err(invalid_static_folder(
-            static_folder,
-            "reaches past the parent of the markdown root; only a peer of the root is allowed",
+            "resolves to a directory that contains the markdown root, which would expose every \
+             sibling of the root — and the markdown source itself; name a specific directory \
+             instead",
         ));
     }
 
     Ok(StaticOverlay::External(dir))
+}
+
+/// How far above the markdown root an outside-the-root `static_folder` may reach.
+///
+/// One level covers `repo/content` + `repo/static`. Two covers the framework
+/// layout this was raised for: SvelteKit puts routes at `<project>/src/routes`
+/// (a route's filesystem path *is* its URL, so the markdown root has to live
+/// there) while assets live at `<project>/static`.
+///
+/// Three is not on the table. At three levels the anchor for a repository in a
+/// temp directory is the *system* temp directory — which is what
+/// `test_validate_static_folder_symlink_escape_fails` relies on being out of
+/// reach — and the same shape generalizes: a checkout's anchor becomes the
+/// workspace folder holding every unrelated checkout.
+const MAX_STATIC_FOLDER_ASCENT: usize = 2;
+
+/// Why [`static_folder_anchor`] stopped climbing, so a refusal names the wall it
+/// hit instead of reporting "outside the boundary" for four different reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AscentStop {
+    /// Spent the whole ascent budget; the anchor is [`MAX_STATIC_FOLDER_ASCENT`]
+    /// levels above the root.
+    Budget,
+    /// The markdown root has no parent — it *is* a filesystem root.
+    RootHasNoParent,
+    /// The next directory up is the filesystem root.
+    FilesystemRoot,
+    /// The next directory up is `$HOME`, or a directory containing it.
+    HomeDir,
+}
+
+impl AscentStop {
+    /// The reason text for a `static_folder` that landed outside `anchor`.
+    ///
+    /// Naming the anchor tells the operator what *would* have worked, which the
+    /// old fixed-boundary messages could leave implicit because there was only
+    /// ever one candidate.
+    fn refusal(self, anchor: &Path) -> String {
+        match self {
+            Self::RootHasNoParent => {
+                "resolves outside the markdown root, which has no parent directory".to_string()
+            }
+            Self::HomeDir => format!(
+                "resolves outside {}, and the next directory up is the home directory",
+                anchor.display()
+            ),
+            Self::FilesystemRoot => format!(
+                "resolves outside {}, and the next directory up is the filesystem root",
+                anchor.display()
+            ),
+            Self::Budget => format!(
+                "resolves outside {}; an overlay may reach at most \
+                 {MAX_STATIC_FOLDER_ASCENT} levels above the markdown root",
+                anchor.display()
+            ),
+        }
+    }
+}
+
+/// The highest directory an outside-the-root overlay may live under, and why the
+/// climb stopped there.
+///
+/// Climbs at most [`MAX_STATIC_FOLDER_ASCENT`] levels, refusing at *every* level
+/// to step into the filesystem root or into `$HOME` (or a directory containing
+/// it). Checking at every level rather than only at the final anchor is what
+/// makes the first turn of the loop reproduce the old one-level policy exactly,
+/// so the ascent can only ever widen what was already accepted, never narrow it.
+fn static_folder_anchor(root: &Path) -> (PathBuf, AscentStop) {
+    let mut anchor = root;
+    for _ in 0..MAX_STATIC_FOLDER_ASCENT {
+        // Only reachable on the first turn: every later `anchor` is a directory
+        // this loop has already proved has a parent.
+        let Some(parent) = anchor.parent() else {
+            return (anchor.to_path_buf(), AscentStop::RootHasNoParent);
+        };
+        // Tested before the home guard because `contains_home_dir` is true of
+        // the filesystem root on every normal system — `$HOME` starts with `/`
+        // — and "the next directory up is the home directory" is the wrong
+        // thing to tell someone whose root is `/notes`.
+        if parent.parent().is_none() {
+            return (anchor.to_path_buf(), AscentStop::FilesystemRoot);
+        }
+        if contains_home_dir(parent) {
+            return (anchor.to_path_buf(), AscentStop::HomeDir);
+        }
+        anchor = parent;
+    }
+    (anchor.to_path_buf(), AscentStop::Budget)
 }
 
 /// True when `path` begins at a filesystem root or a drive prefix.
@@ -1564,15 +1713,24 @@ mod tests {
         }
     }
 
-    /// Retargeted from "any `..` is an escape" to the boundary that actually
-    /// matters. `repo/content` + `repo/static` is a real layout, so climbing one
-    /// level is now legal; the threat this still covers is a hostile
-    /// `.mbr/config.toml` reaching *past* that one level — or grabbing the
-    /// parent wholesale, which would expose every sibling of the root.
+    /// Retargeted twice: first from "any `..` is an escape" to a one-level
+    /// boundary, now to a two-level one. `repo/content` + `repo/static` and
+    /// `<project>/src/routes` + `<project>/static` are both real layouts, so
+    /// climbing is legal up to [`MAX_STATIC_FOLDER_ASCENT`]. What this still
+    /// covers is a hostile `.mbr/config.toml` reaching past that budget, or
+    /// grabbing an ancestor of the root wholesale — `..` and `../..` are both
+    /// ancestors of `project/content` and would expose the markdown source
+    /// itself as raw static files.
     #[test]
     fn test_validate_static_folder_parent_escape_fails() {
         let (_tmp, root) = peer_layout();
-        for value in ["..", "../..", "../../assets", "assets/../../.."] {
+        for value in [
+            "..",
+            "../..",
+            "../../../assets",
+            "assets/../../../..",
+            "assets/../../..",
+        ] {
             let err = match config_with_static(&root, value).validate() {
                 Err(err) => err,
                 Ok(()) => panic!("escaping static_folder must be rejected: {value:?}"),
@@ -1616,18 +1774,46 @@ mod tests {
             config_with_static(&root, "static").validate().is_ok(),
             "an in-root static folder must still work under $HOME"
         );
+
+        // One level deeper, the ascent budget alone would reach `$HOME` on the
+        // second step. The climb has to stop at `<home>/project`, which still
+        // leaves the ordinary peer layout working inside it.
+        let nested = home.path().join("project/content");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(home.path().join("project/static")).unwrap();
+        assert!(
+            config_with_static(&nested, "../static").validate().is_ok(),
+            "a peer overlay one level below $HOME must still be accepted"
+        );
+        for value in ["../../static", "../../.ssh", "../.."] {
+            assert!(
+                config_with_static(&nested, value).validate().is_err(),
+                "static_folder {value:?} must not climb through $HOME"
+            );
+        }
     }
 
-    /// A markdown root sitting directly under `/` has no peer boundary that
+    /// A markdown root sitting directly under `/` has no boundary above it that
     /// isn't the filesystem root itself, so nothing outside it is reachable.
+    /// One level down, the ascent budget stops one short for the same reason.
     #[test]
     fn test_validate_static_folder_filesystem_root_boundary_fails() {
-        let root = if cfg!(windows) { r"C:\notes" } else { "/notes" };
+        let (root, nested) = if cfg!(windows) {
+            (r"C:\notes", r"C:\srv\notes")
+        } else {
+            ("/notes", "/srv/notes")
+        };
         assert!(
             config_with_static(Path::new(root), "../etc")
                 .validate()
                 .is_err(),
             "a root whose parent is the filesystem root must not reach outside itself"
+        );
+        assert!(
+            config_with_static(Path::new(nested), "../../etc")
+                .validate()
+                .is_err(),
+            "the climb must stop below the filesystem root rather than spending its budget"
         );
     }
 
@@ -1719,23 +1905,245 @@ mod tests {
         }
     }
 
-    /// A peer that does not exist yet must be judged the same way an existing
-    /// one is: `canonicalize` fails, so the lexical fallback has to produce the
-    /// same verdict rather than silently passing everything.
+    /// Builds `<tmp>/project/{src/routes,static}` and returns the temp dir plus
+    /// the markdown root (`src/routes`) — the SvelteKit shape, where the
+    /// framework pins the markdown root two levels below the project because a
+    /// route's filesystem path *is* its URL.
+    ///
+    /// Nested inside a `project` directory for the same reason as
+    /// [`peer_layout`]: the anchor two levels up must be `project`'s own parent
+    /// (the temp dir), never `$HOME` or the filesystem root by accident.
+    fn two_deep_layout() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project/src/routes");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(tmp.path().join("project/static/images")).unwrap();
+        (tmp, root)
+    }
+
+    /// The regression this change exists for: SvelteKit's `src/routes` holding
+    /// the markdown (and `.mbr/`) with the project's `static/` two levels up.
+    #[test]
+    fn test_validate_static_folder_two_levels_up_passes() {
+        let (_tmp, root) = two_deep_layout();
+
+        for value in [
+            "../../static",
+            "../../static/images",
+            "./../../static",
+            "../../not-created-yet",
+        ] {
+            assert!(
+                config_with_static(&root, value).validate().is_ok(),
+                "two-level static_folder {value:?} must be accepted"
+            );
+        }
+    }
+
+    /// The anchor alone is not the whole rule. With two levels of ascent the
+    /// root's own parent has become a legal *descendant* of the anchor, so
+    /// without the ancestor check `..` would be accepted — and it serves the
+    /// entire `src/` tree, including the markdown sources, as raw static files.
+    #[test]
+    fn test_validate_static_folder_ancestor_of_root_fails() {
+        let (_tmp, root) = two_deep_layout();
+
+        for value in ["..", "../..", "../../src", "../../src/routes/.."] {
+            let err = match config_with_static(&root, value).validate() {
+                Err(err) => err,
+                Ok(()) => panic!("an ancestor of the markdown root must be rejected: {value:?}"),
+            };
+            assert!(
+                format!("{err:?}").contains("contains the markdown root"),
+                "error should say the value contains the root, got: {err:?}"
+            );
+        }
+    }
+
+    /// Two levels is the budget, and spending it is what the refusal must say —
+    /// these values are neither ancestors of the root nor near `$HOME`, so the
+    /// budget is the only thing refusing them.
+    #[test]
+    fn test_validate_static_folder_three_levels_up_fails() {
+        let (_tmp, root) = two_deep_layout();
+
+        for value in ["../../../elsewhere", "../../../../elsewhere"] {
+            let err = match config_with_static(&root, value).validate() {
+                Err(err) => err,
+                Ok(()) => {
+                    panic!("static_folder past the ascent budget must be rejected: {value:?}")
+                }
+            };
+            assert!(
+                format!("{err:?}").contains("levels above the markdown root"),
+                "error should name the ascent limit, got: {err:?}"
+            );
+        }
+    }
+
+    /// The anchor is the one thing the whole policy is measured against, so it
+    /// must always be the root or one of its ancestors, and never more than
+    /// [`MAX_STATIC_FOLDER_ASCENT`] levels up. A bug that let it wander would
+    /// widen every other rule at once.
+    #[test]
+    fn test_static_folder_anchor_never_leaves_the_root_line() {
+        let (tmp, peer_root) = peer_layout();
+        let (tmp2, deep_root) = two_deep_layout();
+
+        for root in [
+            peer_root.as_path(),
+            deep_root.as_path(),
+            tmp.path(),
+            tmp2.path(),
+            Path::new("/"),
+            Path::new("/notes"),
+        ] {
+            let (anchor, _) = static_folder_anchor(root);
+            assert!(
+                root.starts_with(&anchor),
+                "anchor {} is not an ancestor of root {}",
+                anchor.display(),
+                root.display()
+            );
+            let climbed = root.components().count() - anchor.components().count();
+            assert!(
+                climbed <= MAX_STATIC_FOLDER_ASCENT,
+                "anchor {} climbed {climbed} levels above {}",
+                anchor.display(),
+                root.display()
+            );
+        }
+    }
+
+    /// `is_home_dir` fires only on `$HOME` itself, which was enough at one
+    /// level. At two it is not: the anchor for `/home/you/notes` would be
+    /// `/home`, and `../bob` would then name another account. The climb has to
+    /// stop below any directory that *contains* `$HOME`.
+    #[test]
+    fn test_ascent_stops_at_a_directory_containing_home() {
+        let _guard = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let users = tmp.path().join("Users");
+        let home = users.join("alice");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(users.join("bob")).unwrap();
+
+        let home_str = home.to_string_lossy().into_owned();
+        let _env = EnvVars::set(&[("HOME", &home_str), ("USERPROFILE", &home_str)]);
+
+        // A root sitting directly under `Users` is the case `is_home_dir` alone
+        // misses: its parent is not `$HOME`, it merely *contains* it, and one
+        // level of budget is all it takes to get there.
+        let beside_home = users.join("notes");
+        std::fs::create_dir(&beside_home).unwrap();
+        let (anchor, stop) = static_folder_anchor(&beside_home);
+        assert_eq!(
+            anchor, beside_home,
+            "the climb must not step into a directory holding $HOME"
+        );
+        assert_eq!(stop, AscentStop::HomeDir);
+        assert!(
+            config_with_static(&beside_home, "../alice")
+                .validate()
+                .is_err(),
+            "$HOME must not be reachable from a sibling of it"
+        );
+
+        // And the case it does catch, one level lower, still stops for the
+        // same reason rather than spending the second level of budget.
+        let root = home.join("notes");
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(static_folder_anchor(&root).1, AscentStop::HomeDir);
+        assert!(
+            config_with_static(&root, "../../bob").validate().is_err(),
+            "another account under the same Users directory must not be reachable"
+        );
+    }
+
+    /// A relative `root_dir` bottoms out at an empty parent rather than at a
+    /// filesystem root, and `contains_home_dir` must not claim that empty path
+    /// as `$HOME` — `starts_with("")` is true of every path. Pinned because the
+    /// distinction is invisible until someone constructs a `Config` by hand.
+    #[test]
+    fn test_validate_static_folder_relative_root_dir() {
+        let root = PathBuf::from("no-such-root-8f2c/content");
+        for value in ["../../x", "../../../x"] {
+            assert!(
+                config_with_static(&root, value).validate().is_err(),
+                "a relative root must not reach outside itself: {value:?}"
+            );
+        }
+    }
+
+    /// A UNC share root behaves exactly like `C:\`: it has no parent, so the
+    /// climb stops there rather than reaching another share.
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_static_folder_unc_share_boundary() {
+        let root = Path::new(r"\\server\share\proj\content");
+        assert!(
+            config_with_static(root, r"..\..\x").validate().is_err(),
+            "the climb must stop at a UNC share root"
+        );
+    }
+
+    /// Four different walls produce four different refusals. The messages are
+    /// the only thing an operator sees when mbr refuses to start, and "outside
+    /// the boundary" for all four would not tell them which knob to turn.
+    #[test]
+    fn test_static_folder_refusal_messages_name_the_wall() {
+        let anchor = Path::new("/project");
+
+        assert!(
+            AscentStop::RootHasNoParent
+                .refusal(anchor)
+                .contains("no parent directory")
+        );
+        assert!(
+            AscentStop::HomeDir
+                .refusal(anchor)
+                .contains("the home directory")
+        );
+        assert!(
+            AscentStop::FilesystemRoot
+                .refusal(anchor)
+                .contains("the filesystem root")
+        );
+
+        let budget = AscentStop::Budget.refusal(anchor);
+        assert!(budget.contains("levels above the markdown root"));
+        // Each message names the anchor, which is what tells the operator where
+        // an overlay *would* have been accepted.
+        for stop in [
+            AscentStop::HomeDir,
+            AscentStop::FilesystemRoot,
+            AscentStop::Budget,
+        ] {
+            assert!(
+                stop.refusal(anchor).contains("/project"),
+                "refusal should name the anchor: {}",
+                stop.refusal(anchor)
+            );
+        }
+    }
+
+    /// A directory that does not exist yet must be judged the same way an
+    /// existing one is: `canonicalize` fails, so the lexical fallback has to
+    /// produce the same verdict rather than silently passing everything.
     #[test]
     fn test_validate_static_folder_nonexistent_paths_use_lexical_fallback() {
         let (_tmp, root) = peer_layout();
+        for value in ["../not-created-yet", "../../not-created-yet"] {
+            assert!(
+                config_with_static(&root, value).validate().is_ok(),
+                "a not-yet-created directory within the ascent budget is still allowed: {value:?}"
+            );
+        }
         assert!(
-            config_with_static(&root, "../not-created-yet")
-                .validate()
-                .is_ok(),
-            "a peer that does not exist yet is still a peer"
-        );
-        assert!(
-            config_with_static(&root, "../../not-created-yet")
+            config_with_static(&root, "../../../not-created-yet")
                 .validate()
                 .is_err(),
-            "a nonexistent path past the boundary must still be rejected"
+            "a nonexistent path past the ascent budget must still be rejected"
         );
     }
 
