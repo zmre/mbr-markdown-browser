@@ -47,6 +47,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         incomplete_markers: mbr::config::default_incomplete_markers(),
         tasks_enabled: true,
         tasks_stamp_done: true,
+        tasks_ignore_globs: Vec::new(),
         edit_enabled: false,
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
@@ -7098,6 +7099,75 @@ async fn test_tasks_endpoint_folder_scope_includes_subfolders() {
         })
         .collect();
     assert_eq!(facets, vec![("/", 4), ("/docs/", 3), ("/docs/notes/", 1)]);
+}
+
+/// `tasks_ignore_globs` filters at index-build time, which is the one place
+/// every part of the response derives from: the groups, the folder facet and
+/// the totals must all agree that the folder is not there.
+#[tokio::test]
+async fn test_tasks_endpoint_omits_folders_matched_by_tasks_ignore_globs() {
+    let repo = task_repo();
+    repo.create_markdown("templates/checklist.md", "- [ ] template step\n");
+    repo.create_markdown(
+        "templates/onboarding/day-one.md",
+        "- [ ] nested template step\n",
+    );
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_ignore_globs = vec!["templates/**".to_string()];
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(
+        &server,
+        r#"{"statuses": ["open", "done", "canceled"], "folder": "/"}"#,
+    )
+    .await;
+
+    let texts = task_texts(&body);
+    assert!(
+        !texts.iter().any(|t| t.contains("template step")),
+        "ignored files must contribute no tasks, got: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"write the report".to_string()),
+        "everything else is untouched, got: {texts:?}"
+    );
+
+    let folders: Vec<&str> = body["folders"]
+        .as_array()
+        .expect("folders array")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(
+        folders,
+        vec!["/", "/docs/", "/docs/notes/"],
+        "an ignored folder must not appear in the folder pane"
+    );
+
+    assert_eq!(
+        body["total_matches"], 6,
+        "counts must exclude the ignored folder too"
+    );
+}
+
+/// The other half of the deal: the *documents* are untouched. An ignored file
+/// still renders, and still renders its checkboxes — in-document checkboxes
+/// exist whether or not the task browser lists them.
+#[tokio::test]
+async fn test_tasks_ignore_globs_do_not_affect_rendering() {
+    let repo = task_repo();
+    repo.create_markdown("templates/checklist.md", "- [ ] template step\n");
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_ignore_globs = vec!["templates/**".to_string()];
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/templates/checklist/").await;
+    assert_html_contains(&html, "template step");
+    assert_html_contains(&html, "mbr-task-check");
 }
 
 #[tokio::test]

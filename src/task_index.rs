@@ -150,6 +150,11 @@ fn folder_of(raw_path: &Path) -> String {
 /// Files without tasks are deliberately **absent** rather than stored empty:
 /// on a repository of tens of thousands of notes, only a fraction carry tasks,
 /// and skipping the rest keeps both memory and every query's iteration small.
+///
+/// Files matching `tasks_ignore_globs` are absent too. Excluding them *here*,
+/// at the one place the index is filled, is what makes the exclusion complete:
+/// the panel, the folder facets, `total_matches` and every count all derive
+/// from [`TaskIndex::snapshot`].
 pub struct TaskIndex {
     /// Keyed by absolute path, matching [`Repo::markdown_files`] so the
     /// watcher's canonical paths address the same entries.
@@ -161,21 +166,56 @@ pub struct TaskIndex {
     /// the next caller instead of poisoning the index for the life of the
     /// process.
     built: tokio::sync::OnceCell<()>,
+    /// `tasks_ignore_globs`, compiled once at construction. See
+    /// [`TaskIndex::is_ignored`].
+    ignore_globs: Vec<glob::Pattern>,
 }
 
 impl Default for TaskIndex {
     fn default() -> Self {
-        Self::new()
+        Self::new(&[])
     }
 }
 
 impl TaskIndex {
-    /// Creates an empty, unbuilt index.
-    pub fn new() -> Self {
+    /// Creates an empty, unbuilt index that excludes files matching
+    /// `ignore_globs` (the `tasks_ignore_globs` config option).
+    ///
+    /// The patterns are compiled **here, once**, mirroring `Repo::init`'s
+    /// `compiled_ignore_globs`: the build walks every markdown file in the
+    /// repository, so re-parsing the patterns per file would cost far more than
+    /// the matching itself.
+    ///
+    /// A pattern that does not compile is dropped with a warning rather than
+    /// refused. [`Config::validate`](crate::config::Config::validate) already
+    /// rejects one at startup, so the only way to reach here with a bad pattern
+    /// is to bypass config loading entirely.
+    pub fn new(ignore_globs: &[String]) -> Self {
         Self {
             files: HashMap::new(),
             built: tokio::sync::OnceCell::new(),
+            ignore_globs: compile_ignore_globs(ignore_globs),
         }
+    }
+
+    /// Whether `tasks_ignore_globs` excludes this repository-relative path.
+    ///
+    /// Matching is against the `/`-separated relative path
+    /// (`docs/templates/onboarding.md`), not the absolute one: a pattern must
+    /// mean the same thing wherever the repository happens to sit on disk, and
+    /// on every platform — [`MarkdownInfo::raw_path`] uses `\` on Windows, which
+    /// `glob::Pattern` would never match against a `/`-shaped pattern.
+    ///
+    /// Returns before allocating when nothing is configured, which is the
+    /// default and therefore the hot path.
+    fn is_ignored(&self, raw_path: &Path) -> bool {
+        if self.ignore_globs.is_empty() {
+            return false;
+        }
+        let relative = crate::url_path::path_to_url(raw_path);
+        self.ignore_globs
+            .iter()
+            .any(|pattern| pattern.matches(&relative))
     }
 
     /// Whether the one-time build has completed.
@@ -282,6 +322,15 @@ impl TaskIndex {
                     return;
                 };
 
+                // The same guard `scan_all` applies, repeated because this is a
+                // separate path into the map: without it, editing a file in an
+                // ignored folder would quietly index the very file the build
+                // skipped.
+                if self.is_ignored(&target.raw_path) {
+                    self.files.pin().remove(abs_path);
+                    return;
+                }
+
                 let mut buffer = String::new();
                 match target.scan(root_dir, &mut buffer) {
                     // A file that lost its last task must leave the index, or
@@ -357,6 +406,9 @@ impl TaskIndex {
             .markdown_files
             .pin()
             .iter()
+            // Filtered before the read, not after: an excluded file is never
+            // opened, so a large template folder costs nothing to skip.
+            .filter(|(_, info)| !self.is_ignored(&info.raw_path))
             .map(|(abs_path, info)| ScanTarget::from_info(abs_path, info))
             .collect();
 
@@ -431,6 +483,22 @@ impl ScanTarget {
             tasks,
         ))
     }
+}
+
+/// Compiles `tasks_ignore_globs`, skipping any pattern that does not parse.
+///
+/// Lenient by design, and safe to be: [`Config::validate`](crate::config::Config::validate)
+/// refuses a malformed pattern before a server ever starts, so this only
+/// forgives callers that construct a `TaskIndex` without loading config.
+fn compile_ignore_globs(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|pattern| {
+            glob::Pattern::new(pattern)
+                .map_err(|e| tracing::warn!("Invalid tasks_ignore_globs pattern '{pattern}': {e}"))
+                .ok()
+        })
+        .collect()
 }
 
 /// Reads a whole file into `buffer`, refusing anything over [`MAX_SCAN_BYTES`].
@@ -626,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn index_is_not_built_until_first_use() {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
 
         // Constructing the index reads nothing.
         assert!(!index.is_built());
@@ -662,7 +730,7 @@ mod tests {
             ("without.md", "# Notes\n\nJust prose.\n"),
             ("fenced.md", "```\n- [ ] not a task\n```\n"),
         ]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -682,7 +750,7 @@ mod tests {
             "docs/plan.md",
             "---\ntitle: The Plan\n---\n\n- [ ] one\n- [x] two\n- [-] three\n",
         )]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -700,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_built_is_idempotent_and_single_flight() {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
 
         // Concurrent callers must converge on one build, not N.
         let calls = (0..8).map(|_| {
@@ -727,7 +795,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_rescans_a_modified_file() {
         let fixture = repo_over(&[("notes.md", "- [ ] before\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -750,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_drops_a_file_that_lost_its_last_task() {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -775,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_removes_a_deleted_file() {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -799,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_indexes_a_newly_created_file() {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -825,7 +893,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_ignores_files_the_repo_does_not_track() {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -854,7 +922,7 @@ mod tests {
             ("change.md", "- [ ] before\n"),
             ("gone.md", "- [ ] doomed\n"),
         ]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await
@@ -888,6 +956,214 @@ mod tests {
         assert!(index.get(&fixture.path("keep.md")).is_some(), "kept");
     }
 
+    // ---- tasks_ignore_globs --------------------------------------------------
+
+    /// A `templates/` folder at the root, a second one nested under `docs/`,
+    /// and one file that is nobody's template.
+    fn templates_repo() -> TestRepo {
+        repo_over(&[
+            ("templates/checklist.md", "- [ ] template step\n"),
+            ("templates/nested/deep.md", "- [ ] nested template step\n"),
+            ("docs/templates/local.md", "- [ ] docs template step\n"),
+            ("docs/plan.md", "- [ ] real work\n"),
+        ])
+    }
+
+    /// Every indexed file's repo-relative path, sorted.
+    fn indexed_paths(index: &TaskIndex) -> Vec<String> {
+        let mut paths: Vec<String> = index
+            .snapshot()
+            .iter()
+            .map(|f| crate::url_path::path_to_url(&f.raw_path))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    async fn built_index(fixture: &TestRepo, globs: &[&str]) -> Arc<TaskIndex> {
+        let globs: Vec<String> = globs.iter().map(|g| (*g).to_string()).collect();
+        let index = Arc::new(TaskIndex::new(&globs));
+        index
+            .ensure_built(&fixture.repo, &fixture.root)
+            .await
+            .expect("build succeeds");
+        index
+    }
+
+    /// The pattern table in `docs/reference/configuration.md#task-settings`,
+    /// pinned so the documentation cannot drift from the matcher.
+    #[test]
+    fn documented_pattern_semantics() {
+        let matches = |pattern: &str, path: &str| {
+            TaskIndex::new(&[pattern.to_string()]).is_ignored(Path::new(path))
+        };
+
+        // `templates/**` — anchored at the root, reaching all the way down.
+        assert!(matches("templates/**", "templates/a.md"));
+        assert!(matches("templates/**", "templates/deep/b.md"));
+        assert!(!matches("templates/**", "docs/templates/a.md"));
+
+        // `**/templates/**` — any depth, including the root: `**/` matches zero
+        // leading components.
+        assert!(matches("**/templates/**", "templates/a.md"));
+        assert!(matches("**/templates/**", "docs/templates/a.md"));
+        assert!(matches("**/templates/**", "a/b/templates/c.md"));
+        assert!(!matches("**/templates/**", "templates.md"));
+
+        // A literal path excludes exactly one folder.
+        assert!(matches("docs/templates/**", "docs/templates/a.md"));
+        assert!(!matches("docs/templates/**", "templates/a.md"));
+
+        // Suffix patterns.
+        assert!(matches(
+            "**/*.checklist.md",
+            "templates/onboarding.checklist.md"
+        ));
+        assert!(!matches("**/*.checklist.md", "templates/onboarding.md"));
+
+        // Patterns name files, so a bare folder name excludes nothing.
+        assert!(!matches("templates", "templates/a.md"));
+
+        // A single `*` is not stopped by `/` — mbr's globs behave this way
+        // everywhere, and the docs say so.
+        assert!(matches("templates/*.md", "templates/deep/a.md"));
+    }
+
+    /// `templates/**` is anchored at the repository root and reaches all the way
+    /// down, so the nested file goes too — but a same-named folder elsewhere
+    /// stays.
+    #[tokio::test]
+    async fn ignore_globs_exclude_a_folder_and_everything_under_it() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["templates/**"]).await;
+
+        assert_eq!(
+            indexed_paths(&index),
+            vec!["docs/plan.md", "docs/templates/local.md"]
+        );
+        assert!(
+            index
+                .get(&fixture.path("templates/nested/deep.md"))
+                .is_none(),
+            "`**` must reach past the folder's direct children"
+        );
+        assert!(
+            index.get(&fixture.path("docs/plan.md")).is_some(),
+            "files outside the pattern must be untouched"
+        );
+    }
+
+    /// The other documented spelling: `**/templates/**` matches a `templates`
+    /// folder at *any* depth, including the repository root — `**/` matches zero
+    /// leading components.
+    #[tokio::test]
+    async fn leading_double_star_matches_at_the_root_too() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["**/templates/**"]).await;
+
+        assert_eq!(indexed_paths(&index), vec!["docs/plan.md"]);
+    }
+
+    /// Documented semantics, pinned: patterns match a *file* path, so a bare
+    /// folder name matches nothing. `templates/**` is the spelling that works.
+    #[tokio::test]
+    async fn a_bare_folder_name_matches_nothing() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["templates"]).await;
+
+        assert_eq!(index.len(), 4, "a bare folder name excludes nothing");
+    }
+
+    /// The default: no patterns, nothing excluded.
+    #[tokio::test]
+    async fn no_ignore_globs_excludes_nothing() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &[]).await;
+
+        assert_eq!(index.len(), 4);
+    }
+
+    /// A malformed pattern is dropped rather than treated as a literal, so it
+    /// cannot accidentally exclude something. `Config::validate` rejects it
+    /// before a real server ever gets here.
+    #[tokio::test]
+    async fn a_malformed_pattern_is_dropped_not_applied() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["templates/**bad", "templates/**"]).await;
+
+        assert_eq!(
+            indexed_paths(&index),
+            vec!["docs/plan.md", "docs/templates/local.md"],
+            "the valid pattern still applies"
+        );
+    }
+
+    /// The guard `invalidate_file` needs of its own: it is a second way into the
+    /// map, so without it, editing a file in an ignored folder silently indexes
+    /// exactly the file the build skipped.
+    #[tokio::test]
+    async fn invalidate_does_not_readd_an_ignored_file() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["templates/**"]).await;
+        assert_eq!(index.len(), 2);
+
+        let path = fixture.write("templates/checklist.md", "- [ ] edited template step\n");
+        // Mirrors the watcher: the repo is invalidated first.
+        fixture
+            .repo
+            .invalidate_file(&path, &ChangeEventType::Modified);
+        index.invalidate_file(
+            &path,
+            &ChangeEventType::Modified,
+            &fixture.repo,
+            &fixture.root,
+        );
+
+        assert!(
+            index.get(&path).is_none(),
+            "editing an ignored file must not index it"
+        );
+        assert_eq!(index.len(), 2);
+    }
+
+    /// Creating a file inside an ignored folder is the same story through the
+    /// `Created` arm.
+    #[tokio::test]
+    async fn invalidate_does_not_add_a_newly_created_ignored_file() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["templates/**"]).await;
+
+        let path = fixture.write("templates/fresh.md", "- [ ] brand new template step\n");
+        fixture
+            .repo
+            .invalidate_file(&path, &ChangeEventType::Created);
+        index.invalidate_file(
+            &path,
+            &ChangeEventType::Created,
+            &fixture.repo,
+            &fixture.root,
+        );
+
+        assert!(index.get(&path).is_none());
+        assert_eq!(index.len(), 2);
+    }
+
+    /// The full-rescan path shares `scan_all`, so it inherits the filter.
+    #[tokio::test]
+    async fn rebuild_keeps_ignored_files_out() {
+        let fixture = templates_repo();
+        let index = built_index(&fixture, &["templates/**"]).await;
+
+        fixture.write("templates/added.md", "- [ ] another template step\n");
+        fixture.repo.full_rescan();
+        index.rebuild_if_built(&fixture.repo, &fixture.root);
+
+        assert_eq!(
+            indexed_paths(&index),
+            vec!["docs/plan.md", "docs/templates/local.md"]
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_returns_every_indexed_file() {
         let fixture = repo_over(&[
@@ -895,7 +1171,7 @@ mod tests {
             ("docs/b.md", "- [ ] two\n"),
             ("docs/c.md", "no tasks\n"),
         ]);
-        let index = Arc::new(TaskIndex::new());
+        let index = Arc::new(TaskIndex::new(&[]));
         index
             .ensure_built(&fixture.repo, &fixture.root)
             .await

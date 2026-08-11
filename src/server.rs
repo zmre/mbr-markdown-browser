@@ -1068,6 +1068,9 @@ pub struct ServerConfig {
     /// Maintain the `@done(...)` annotation when `POST /.mbr/task` toggles a
     /// task's status.
     pub tasks_stamp_done: bool,
+    /// Globs matched against repo-relative paths whose files are kept out of the
+    /// task index (e.g. `templates/**`). Empty by default.
+    pub tasks_ignore_globs: Vec<String>,
     /// Enable the in-browser markdown editing endpoints.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1131,6 +1134,7 @@ impl From<&crate::config::Config> for ServerConfig {
             incomplete_markers: config.incomplete_markers.clone(),
             tasks_enabled: config.tasks_enabled,
             tasks_stamp_done: config.tasks_stamp_done,
+            tasks_ignore_globs: config.tasks_ignore_globs.clone(),
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
@@ -1653,6 +1657,7 @@ impl Server {
             incomplete_markers,
             tasks_enabled,
             tasks_stamp_done,
+            tasks_ignore_globs,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -1878,7 +1883,8 @@ impl Server {
         // deliberately left *empty*: it is filled by the first `/.mbr/tasks`
         // request, and `invalidate_file` is a no-op until then, so a server
         // whose user never opens the task panel never reads a file for it.
-        let task_index = Arc::new(crate::task_index::TaskIndex::new());
+        // The ignore patterns are compiled once, by the constructor.
+        let task_index = Arc::new(crate::task_index::TaskIndex::new(&tasks_ignore_globs));
 
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
