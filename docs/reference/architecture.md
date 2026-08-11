@@ -98,6 +98,76 @@ Resolution order:
 5. Directory without index → DirectoryListing
 6. Nothing matches → NotFound
 
+## Links and URL Conventions
+
+### One canonical URL per page
+
+A markdown page is served at exactly one URL — the directory-style one:
+
+| File | Canonical URL |
+|------|---------------|
+| `docs/guide.md` | `/docs/guide/` |
+| `docs/index.md` | `/docs/` |
+| `README.md` | `/README/` |
+
+The trailing slash is load-bearing, not cosmetic. It decides the base a browser
+uses for the page's own relative links: from `/docs/guide/` a `../other/` href
+resolves to `/docs/other/`, but from `/docs/guide` it resolves to `/other/`.
+Serving a page at the slashless URL therefore breaks every relative link *on
+that page* — one click after the wrong URL, which is what makes the symptom so
+hard to trace.
+
+Server and GUI mode answer any non-canonical spelling — `/docs/guide`,
+`/docs/guide.md`, `/docs`, `/docs/index/` — with a `301` to the canonical URL,
+preserving the query string. Fragments are not echoed in `Location`, because
+per RFC 9110 §10.2.2 the client reapplies the original one. Static files and
+directory listings are never redirected.
+
+Static builds have no server, so the redirect cannot save them: there the
+correct href has to be emitted at render time, and the build's link checker
+reports any that are not (see [Build Mode](../modes/build/)).
+
+### Link transformation
+
+`link_transform::transform_link` rewrites each authored href for the
+trailing-slash convention:
+
+| Authored in `docs/guide.md` | Emitted href | Lands on |
+|------|------|------|
+| `other.md` | `../other/` | `/docs/other/` |
+| `other` | `../other/` | `/docs/other/` |
+| `other/` | `../other/` | `/docs/other/` |
+| `subfolder/index.md` | `../subfolder/` | `/docs/subfolder/` |
+| `../folder/file.md` | `../../folder/file/` | `/folder/file/` |
+| `photo.png` | `../photo.png` | `/docs/photo.png` |
+| `Makefile` | `../Makefile` | `/docs/Makefile` |
+| `/docs/other/` | unchanged (server) | `/docs/other/` |
+| `https://…`, `mailto:…` | unchanged | off-site |
+
+The extra `../` on non-index pages compensates for the trailing slash; index
+pages already sit at a directory URL and get none.
+
+An **extension-less** target is ambiguous — `../folder/file` could be a markdown
+page or a file literally named `file`. Guessing either way corrupts the other
+(`LICENSE`, `Makefile`, `Dockerfile` are real, common link targets), so mbr asks
+the repository through the same path resolver a live request uses. Contexts with
+no repository — CLI and QuickLook rendering — treat an extension-less target as
+a static file.
+
+### Link validation
+
+| Mode | Where | What it reads |
+|------|-------|---------------|
+| Server / GUI | `GET /{page}/errors.json` (`page_errors.rs`) | Every `<a href>` in the **rendered** HTML |
+| Build | after rendering (`build.rs::validate_links`) | Every `<a href>` in the **generated** HTML |
+
+Both read the href that was actually emitted rather than re-deriving one from
+the markdown source: a checker that re-derives re-applies the same rules the
+transform used, so a transform defect is invisible to it by construction. Both
+report three kinds of problem — a target that does not exist, a page link
+missing its trailing slash, and a `../` chain that escapes the repository root
+(which browsers silently clamp).
+
 ## Design Decisions
 
 ### On-the-Fly Rendering

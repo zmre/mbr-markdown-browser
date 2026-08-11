@@ -46,6 +46,8 @@ pub mod embedded_hljs;
 pub mod embedded_katex;
 pub mod embedded_pico;
 pub mod errors;
+#[cfg(feature = "gui")]
+pub mod external_open;
 pub mod html;
 pub mod link_grep;
 pub mod link_index;

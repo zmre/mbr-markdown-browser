@@ -329,6 +329,7 @@ async fn main() -> Result<(), MbrError> {
             // CLI stdout mode renders a single file with no repo index, so
             // body wikilinks never resolve globally; the page URL is unused.
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only).

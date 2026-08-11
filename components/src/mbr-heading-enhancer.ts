@@ -66,7 +66,12 @@ export class MbrHeadingEnhancerElement extends LitElement {
         anchor.className = ANCHOR_CLASS
         anchor.href = `#${id}`
         anchor.setAttribute('aria-label', 'Permalink')
-        anchor.textContent = '#'
+        // The "#" glyph is drawn by `.mbr-heading-anchor::after` in theme.css,
+        // deliberately NOT set as text here: a real text node inside the <h*>
+        // becomes part of the heading's text run, so selecting a heading copies
+        // "Intro#", and every `textContent` consumer sees the stray "#" too.
+        // Generated content is excluded from the copy buffer in every engine.
+        // aria-label carries the accessible name, so the empty element is fine.
         // Prevent the heading's collapse handler from firing when users
         // click the permalink to copy or navigate to the anchor.
         anchor.addEventListener('click', (event) => event.stopPropagation())

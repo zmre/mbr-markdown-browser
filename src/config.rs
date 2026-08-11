@@ -488,6 +488,26 @@ pub struct Config {
     /// Default: true (stamp).
     #[serde(default = "default_tasks_stamp_done")]
     pub tasks_stamp_done: bool,
+    /// Glob patterns whose matching files are left out of the **task index**.
+    ///
+    /// Each pattern is matched against a markdown file's repository-relative
+    /// path, always `/`-separated (`docs/templates/onboarding.md`). A file that
+    /// matches any pattern contributes nothing to the task browser: no tasks, no
+    /// folder in the folder pane, no counts.
+    ///
+    /// The use case is a folder of checklist *templates*, which is full of
+    /// deliberately unchecked boxes that are nobody's actual work. Rendering is
+    /// untouched — those files stay readable and their checkboxes stay
+    /// clickable, because in-document checkboxes exist whether or not the task
+    /// browser does.
+    ///
+    /// Patterns name **files**, not folders, so exclude a folder's contents
+    /// (`templates/**`) rather than the folder (`templates`, which matches
+    /// nothing). Default: empty, so nothing is excluded.
+    ///
+    /// Config file and `MBR_TASKS_IGNORE_GLOBS` only; there is no CLI flag.
+    #[serde(default)]
+    pub tasks_ignore_globs: Vec<String>,
     /// Enable the in-browser markdown editing endpoints in server/GUI mode:
     /// `/.mbr/raw` + `/.mbr/edit` (read/save an existing file) and the
     /// file-management endpoints `/.mbr/create` (new file), `/.mbr/move`
@@ -603,6 +623,7 @@ impl Default for Config {
             mark_incomplete: None,
             tasks_enabled: true, // Task browser enabled by default (server/GUI only)
             tasks_stamp_done: true, // Stamp @done(...) when a task is completed
+            tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
             edit_enabled: false,
             edit_token_hash: None,
             edit_require_token_on_loopback: false,
@@ -781,6 +802,7 @@ impl Config {
     /// - `build_concurrency`: If set, must be > 0
     /// - `static_folder`: Must stay inside `root_dir` or be a peer of it (see
     ///   [`Config::validate_static_folder`])
+    /// - `tasks_ignore_globs`: Every pattern must compile
     ///
     /// Note: `oembed_cache_size` of 0 is valid (disables caching).
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -809,6 +831,18 @@ impl Config {
         // build_concurrency of 0 would mean no parallelism (None means auto-detect)
         if matches!(self.build_concurrency, Some(0)) {
             return Err(ConfigError::InvalidBuildConcurrency { value: 0 });
+        }
+
+        // Task-ignore patterns are compiled once, at `TaskIndex` construction,
+        // and a pattern that fails to compile there is dropped with a log line
+        // nobody reads — silently indexing exactly the folder it was meant to
+        // exclude. Fail here instead, while there is still a startup to abort.
+        if let Some((pattern, reason)) = self.tasks_ignore_globs.iter().find_map(|pattern| {
+            glob::Pattern::new(pattern)
+                .err()
+                .map(|e| (pattern.clone(), e.to_string()))
+        }) {
+            return Err(ConfigError::InvalidTasksIgnoreGlob { pattern, reason });
         }
 
         // Refuse to expose an unauthenticated writable endpoint to the network:
@@ -1876,6 +1910,104 @@ mod tests {
             config.markdown_extensions,
             Config::default().markdown_extensions,
             "untouched keys keep the compiled-in default"
+        );
+    }
+
+    // ==================== tasks_ignore_globs Tests ====================
+
+    /// Opt-in: an unconfigured repository indexes every file's tasks.
+    #[test]
+    fn test_tasks_ignore_globs_defaults_to_empty() {
+        assert!(Config::default().tasks_ignore_globs.is_empty());
+    }
+
+    #[test]
+    fn test_config_read_tasks_ignore_globs_from_toml() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "tasks_ignore_globs = [\"templates/**\", \"**/archive/**\"]\n",
+        ));
+
+        let config = Config::read(repo.path()).expect("toml must load");
+
+        assert_eq!(config.tasks_ignore_globs, ["templates/**", "**/archive/**"]);
+    }
+
+    /// The env layer takes a JSON array, and wins over the repository's own
+    /// config file like every other key.
+    #[test]
+    fn test_config_read_tasks_ignore_globs_env_overrides_toml() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("tasks_ignore_globs = [\"templates/**\"]\n"));
+        let _env = EnvVars::set(&[("MBR_TASKS_IGNORE_GLOBS", r#"["**/archive/**"]"#)]);
+
+        let config = Config::read(repo.path()).expect("env must load");
+
+        assert_eq!(config.tasks_ignore_globs, ["**/archive/**"]);
+    }
+
+    /// A `.mbr/config.toml` written before this option existed must still load.
+    #[test]
+    fn test_config_read_without_tasks_ignore_globs_key_still_loads() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("theme = \"amber\"\nport = 5323\n"));
+
+        let config = Config::read(repo.path()).expect("a config predating the option must load");
+
+        assert!(config.tasks_ignore_globs.is_empty());
+        assert_eq!(config.theme, "amber");
+    }
+
+    /// Fail fast: the patterns are compiled once at `TaskIndex` construction,
+    /// where a bad one would be dropped and silently index the folder it was
+    /// meant to exclude.
+    #[test]
+    fn test_validate_rejects_a_malformed_tasks_ignore_glob() {
+        // `**` must be a whole path component; `**bad` is not.
+        let config = Config {
+            tasks_ignore_globs: vec!["templates/**".to_string(), "templates/**bad".to_string()],
+            ..Default::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("a malformed glob must fail validation");
+
+        assert!(
+            matches!(err, ConfigError::InvalidTasksIgnoreGlob { ref pattern, .. } if pattern == "templates/**bad"),
+            "expected InvalidTasksIgnoreGlob naming the offending pattern, got: {err:?}"
+        );
+        assert!(err.to_string().contains("templates/**"));
+    }
+
+    #[test]
+    fn test_validate_accepts_the_documented_glob_spellings() {
+        let config = Config {
+            tasks_ignore_globs: vec![
+                "templates/**".to_string(),
+                "**/templates/**".to_string(),
+                "docs/*.md".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    /// The validation runs during load, not only when called directly.
+    #[test]
+    fn test_config_read_rejects_a_malformed_tasks_ignore_glob() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("tasks_ignore_globs = [\"templates/**bad\"]\n"));
+
+        let err = Config::read(repo.path()).expect_err("a malformed glob must abort loading");
+
+        assert!(
+            matches!(
+                err,
+                crate::MbrError::Config(ConfigError::InvalidTasksIgnoreGlob { .. })
+            ),
+            "expected ConfigError::InvalidTasksIgnoreGlob, got: {err:?}"
         );
     }
 

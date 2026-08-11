@@ -133,6 +133,13 @@ pub enum ConfigError {
     InvalidBuildConcurrency { value: usize },
 
     #[error(
+        "Invalid tasks_ignore_globs pattern {pattern:?}: {reason}. \
+         Patterns match a file's repository-relative path, e.g. \"templates/**\" \
+         or \"**/templates/**\""
+    )]
+    InvalidTasksIgnoreGlob { pattern: String, reason: String },
+
+    #[error(
         "Editing is enabled on a non-loopback host but no edit_token_hash is set. \
          Run `mbr --generate-edit-token` and add the printed edit_token_hash to \
          .mbr/config.toml, or bind to 127.0.0.1."
@@ -236,6 +243,38 @@ pub enum BrowserError {
 
     #[error("Server failed to start for new folder")]
     ServerStartFailed,
+}
+
+/// Why handing a URL to the operating system's default handler failed.
+///
+/// The reason is carried as a `String` rather than the platform error type so
+/// this enum stays free of `cfg` noise: the three back ends in
+/// [`crate::external_open`] fail with an `NSWorkspace` bool, a Win32 status code
+/// and a `glib::Error` respectively, and nothing downstream does more than log.
+#[cfg(feature = "gui")]
+#[derive(Debug, Error)]
+pub enum ExternalOpenError {
+    /// The fail-closed refusal: no GUI window is running in this process, so
+    /// nothing was handed to the operating system.
+    ///
+    /// Not a failure to launch — nothing was attempted. Launching applications
+    /// is a thing an *interactive window* does on behalf of the person sitting
+    /// in front of it. A process answering HTTP has no such person, and must
+    /// never be induced to start applications on its host, so
+    /// [`crate::external_open::open_external`] refuses before it touches the OS.
+    /// The `gui` feature is on by default, so a server-mode process still
+    /// *contains* the launcher; this is what keeps it unreachable.
+    #[error(
+        "Refusing to open {url}: handing URLs to the operating system is GUI-only, \
+         and no GUI window is running in this process"
+    )]
+    GuiOnly { url: String },
+
+    #[error("The system URL parser rejected {url}")]
+    Malformed { url: String },
+
+    #[error("The system refused to open {url}: {reason}")]
+    LaunchFailed { url: String, reason: String },
 }
 
 /// Errors related to file watching.

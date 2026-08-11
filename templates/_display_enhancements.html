@@ -3,7 +3,12 @@
 <mbr-hljs></mbr-hljs>
 <mbr-mermaid></mbr-mermaid>
 <mbr-katex></mbr-katex>
-<mbr-link-enhancement></mbr-link-enhancement>
+{# <mbr-link-enhancement> is deliberately NOT mounted here. It is GUI-only, and
+   _footer.html mounts it behind a gui_mode gate; every page template includes
+   _footer.html, so GUI mode is fully covered. An ungated copy here only ever
+   constructed the element again in server mode and static builds — modes that
+   must not have its document-wide click listener at all, because handing URLs
+   to the OS is the GUI's job. See docs/modes/gui.md#external-links. #}
 <mbr-heading-enhancer></mbr-heading-enhancer>
 <mbr-footnote-preview></mbr-footnote-preview>
 <mbr-task-doc></mbr-task-doc>

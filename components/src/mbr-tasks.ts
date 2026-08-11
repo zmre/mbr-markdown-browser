@@ -3,7 +3,7 @@ import { customElement, state } from 'lit/decorators.js'
 import { isEditEnabled, isTasksEnabled, resolveUrl } from './shared.js'
 import { isInputTarget, isModalOpen } from './mbr-keys.js'
 import { getMbrAssetBase } from './dynamic-loader.js'
-import { syncDocumentTask, toggleTask } from './task-toggle.js'
+import { currentDocumentPath, syncDocumentTask, toggleTask } from './task-toggle.js'
 import type { MbrOverlay } from './overlay.js'
 import type { TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 
@@ -233,6 +233,7 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
               .resolveHref=${resolveUrl}
               .editEnabled=${isEditEnabled()}
               .toggleTask=${panelToggle}
+              .currentPath=${currentDocumentPath()}
               @mbr-tasks-close=${() => this.close()}
             ></mbr-tasks-panel>
           `

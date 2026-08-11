@@ -2058,6 +2058,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         render(
             path,
@@ -2091,6 +2092,7 @@ mod tests {
             is_index_file,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         // Tests run with server_mode=false, transcode_enabled=false, mark_incomplete=false
         let result = render(
@@ -2122,6 +2124,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let owned: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
         let result = render(
@@ -2152,6 +2155,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         render(
             path,
@@ -2187,6 +2191,7 @@ mod tests {
             is_index_file: false,
             url_depth,
             current_page_url: current_page_url.to_string(),
+            markdown_page_probe: None,
         };
         render(
             path,
@@ -2377,6 +2382,7 @@ mod tests {
                     is_index_file: false,
                     url_depth: None,
                     current_page_url: "/broken-note/".to_string(),
+                    markdown_page_probe: None,
                 },
                 true,
                 false,
@@ -2873,6 +2879,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let result = render(
             path,
@@ -2943,6 +2950,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let result = render(
             path,
@@ -2974,6 +2982,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let result = render(
             path,
@@ -3006,6 +3015,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let result = render(
             path,
@@ -3042,6 +3052,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let result = render(
             path,
@@ -3078,6 +3089,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
         let result = render(
             path,
@@ -4428,6 +4440,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         };
 
         let async_result = render_with_cache(

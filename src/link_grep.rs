@@ -1940,6 +1940,7 @@ mod tests {
                     is_index_file: *is_index,
                     url_depth: None,
                     current_page_url: (*page_url).to_string(),
+                    markdown_page_probe: None,
                 },
                 None,
                 true,

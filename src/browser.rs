@@ -1,12 +1,18 @@
 extern crate image;
 use crate::Config;
 use crate::errors::BrowserError;
+use crate::external_open::{
+    SiteOrigin, apply_decision, decide_without_frame_info, mark_gui_active, open_external,
+    parse_ipc_open_request,
+};
 use crate::server::{Server, ServerConfig};
 use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
+use parking_lot::RwLock;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tao::{
     event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
@@ -368,6 +374,18 @@ fn build_menu_bar() -> MenuHandles {
     }
 }
 
+/// Hand an off-site URL to the operating system's default handler.
+///
+/// A failure is logged rather than surfaced: the in-window navigation has
+/// already been refused by the time we get here, and there is nothing useful a
+/// dialog could offer for "no application claims `zoommtg:`".
+fn open_with_system_handler(url: &str) {
+    tracing::debug!("Opening {url} with the system default handler");
+    if let Err(e) = open_external(url) {
+        tracing::warn!("Could not open {url} externally: {e}");
+    }
+}
+
 /// Spawn a thread to show folder picker dialog and send result via event loop proxy
 fn spawn_folder_picker(proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || {
@@ -425,6 +443,17 @@ fn reinit_server(
 
 /// Launch the browser window with full context for server management
 pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
+    // The only place in the codebase that arms `open_external`. Until this runs,
+    // handing a URL to the operating system fails closed with
+    // `ExternalOpenError::GuiOnly`, so a server-mode process — which links this
+    // same code, since the `gui` feature is on by default — cannot be talked
+    // into starting an application on its host no matter who calls the launcher.
+    //
+    // Set here rather than next to the handlers so it is unambiguously before
+    // the WebView exists: every request to launch something originates in that
+    // WebView, so nothing can ask before the latch is set.
+    mark_gui_active();
+
     // Create event loop with user events for menu handling
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
@@ -472,12 +501,69 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
         let _ = menu_bar.init_for_gtk_window(window.gtk_window(), window.default_vbox());
     }
 
+    // Shared because the policy has to follow the server: `Open Folder…`
+    // restarts it, usually on a different port, and a stale origin would send
+    // every internal link to the system browser.
+    let site_origin = Arc::new(RwLock::new(SiteOrigin::new(&ctx.url)));
+    let new_window_origin = Arc::clone(&site_origin);
+    let ipc_origin = Arc::clone(&site_origin);
+
     let builder = WebViewBuilder::new()
         .with_devtools(true)
         .with_url(&ctx.url)
-        // Allow JS window.open() (e.g. Reveal.js speaker-notes view) to spawn a
-        // linked webview so the popup stays in sync with the opener.
-        .with_new_window_req_handler(|_url, _features| NewWindowResponse::Allow);
+        // Without a handler wry allows every navigation, so an application
+        // scheme silently did nothing: WKWebView, unlike UIKit, does not fall
+        // back to NSWorkspace for a scheme it cannot render.
+        //
+        // `decide_without_frame_info` is the weaker of the two policies in
+        // `external_open`, and its doc comment explains why at length. The short
+        // version: wry hands this closure a URL and nothing else, and WebKit
+        // calls it for `<iframe>` loads as well as document navigations, so it
+        // deliberately lets *all* http(s) through — cancelling cross-origin
+        // http(s) here would blank YouTube embeds. Clicked cross-origin links
+        // are caught by the IPC handler below instead.
+        .with_navigation_handler(|url| {
+            apply_decision(
+                decide_without_frame_info(&url),
+                &url,
+                open_with_system_handler,
+            )
+        })
+        // The full origin-aware policy *is* safe here: this handler is only
+        // consulted for window.open()/target="_blank", never for a frame.
+        // Same-origin popups keep their linked webview so the Reveal.js
+        // speaker-notes view stays in sync with its opener, while an external
+        // one would otherwise open a second mbr-chrome window around somebody
+        // else's site.
+        //
+        // The origin is copied out rather than read through a held guard: the
+        // hand-off calls into AppKit/GTK, and nothing that can spin a run loop
+        // should run while a lock this event loop also writes is held. One small
+        // allocation per popup, which is a user action.
+        .with_new_window_req_handler(move |url, _features| {
+            let origin = new_window_origin.read().clone();
+            if apply_decision(origin.decide(&url), &url, open_with_system_handler) {
+                NewWindowResponse::Allow
+            } else {
+                NewWindowResponse::Deny
+            }
+        })
+        // The other half of the external-link fix. `mbr-link-enhancement.ts`
+        // runs only in GUI mode and only in the main frame, so it can tell a
+        // clicked link from an embed — which the navigation handler cannot. It
+        // cancels the click and posts the resolved URL here.
+        //
+        // The payload is page-controlled: anything that can run script in the
+        // webview can post to this channel, including raw HTML in somebody
+        // else's markdown. `parse_ipc_open_request` therefore re-runs the full
+        // policy instead of trusting it.
+        .with_ipc_handler(move |request| {
+            let origin = ipc_origin.read().clone();
+            match parse_ipc_open_request(&origin, request.body()) {
+                Some(url) => open_with_system_handler(url),
+                None => tracing::debug!("Ignoring unrecognized IPC message from the page"),
+            }
+        });
 
     #[cfg(not(target_os = "linux"))]
     let webview = builder
@@ -558,6 +644,9 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                     Ok((new_handle, new_url, _new_config)) => {
                         server_handle = new_handle;
                         current_url = new_url.clone();
+                        // The new server rarely lands on the old port, and the
+                        // navigation handler compares against this.
+                        *site_origin.write() = SiteOrigin::new(&current_url);
                         tracing::info!("Server restarted at {}", current_url);
                         let _ = webview.load_url(&current_url);
                     }

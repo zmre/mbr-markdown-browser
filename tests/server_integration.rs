@@ -47,6 +47,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         incomplete_markers: mbr::config::default_incomplete_markers(),
         tasks_enabled: true,
         tasks_stamp_done: true,
+        tasks_ignore_globs: Vec::new(),
         edit_enabled: false,
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
@@ -146,6 +147,21 @@ impl TestServer {
             .expect("Failed to get response text")
     }
 
+    /// Issues a request **without** following redirects, so a test can assert
+    /// on the 301 itself. The shared client follows redirects by default (as a
+    /// browser does), which is exactly what hides a canonicalization bug.
+    async fn get_no_redirect(&self, path: &str) -> reqwest::Response {
+        mbr::http_client_builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client")
+            .get(self.url(path))
+            .send()
+            .await
+            .expect("Request failed")
+    }
+
     async fn post_json(&self, path: &str, body: &str) -> reqwest::Response {
         self.client
             .post(self.url(path))
@@ -242,6 +258,41 @@ async fn test_gui_mode_emits_find_bar() {
     // The element and window.__MBR_CONFIG__.guiMode come from the same Tera
     // variable; asserting both together keeps them from drifting apart.
     assert_html_contains(&html, "guiMode: true");
+}
+
+#[tokio::test]
+async fn test_server_mode_omits_the_external_link_handler() {
+    // `<mbr-link-enhancement>` asks the *host process* to launch applications.
+    // That is a GUI-only capability by design: a machine merely serving markdown
+    // must never be induced to start programs on its host, and a real browser
+    // already opens external links itself. A markdown page is exactly the kind
+    // of page whose content mbr does not control, so the element must not be on
+    // it in server mode.
+    //
+    // `_display_enhancements.html` used to mount this UNGATED on every markdown
+    // page, which is what this test pins shut. The Rust launcher fails closed
+    // regardless (see `external_open::open_external`), but the page should not
+    // even carry the click listener.
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\n[out](https://example.com/)");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/readme/").await;
+    assert_html_not_contains(&html, "mbr-link-enhancement");
+
+    // GUI mode: exactly one mount, from the `{% if gui_mode %}` gate in
+    // _footer.html. Two would be harmless (addEventListener dedups) but would
+    // mean the ungated copy came back.
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.gui_mode = true;
+    })
+    .await;
+    let html = server.get_text("/readme/").await;
+    assert_eq!(
+        html.matches("<mbr-link-enhancement>").count(),
+        1,
+        "GUI mode should mount the external-link handler exactly once: {html}"
+    );
 }
 
 #[tokio::test]
@@ -920,6 +971,334 @@ async fn test_link_transform_index_collapse() {
         html.contains(r#"href="../subfolder/""#),
         "Links to index.md should collapse to folder/. Got: {}",
         html
+    );
+}
+
+// ==================== Canonical URL Redirect Tests ====================
+
+/// The safety net. A markdown page has exactly one URL — the directory-style
+/// one — and serving it at any other spelling with a 200 silently rebases every
+/// relative link the page emitted, so the damage lands on the *next* click.
+/// This fixes every source of a slashless URL, not just hrefs mbr generated:
+/// hand-typed URLs, inbound external links and stale bookmarks too.
+#[tokio::test]
+async fn test_slashless_markdown_url_redirects_to_canonical() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_markdown("docs/index.md", "# Docs");
+    repo.create_markdown("readme.md", "# Readme");
+
+    let server = TestServer::start(&repo).await;
+
+    for (requested, canonical) in [
+        ("/docs/guide", "/docs/guide/"),
+        ("/readme", "/readme/"),
+        // A directory whose index.md is the page.
+        ("/docs", "/docs/"),
+        // The extension-bearing spelling is just another non-canonical URL.
+        ("/docs/guide.md", "/docs/guide/"),
+    ] {
+        let response = server.get_no_redirect(requested).await;
+        assert_eq!(
+            response.status(),
+            301,
+            "{requested} must redirect, not serve in place"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some(canonical),
+            "{requested} must redirect to its canonical URL"
+        );
+    }
+
+    // The canonical URL itself must not redirect (no loops).
+    assert_eq!(server.get_no_redirect("/docs/guide/").await.status(), 200);
+    assert_eq!(server.get_no_redirect("/docs/").await.status(), 200);
+    assert_eq!(server.get_no_redirect("/").await.status(), 200);
+}
+
+/// The query string is part of the request the client made; dropping it changes
+/// what the target page renders. The fragment is deliberately *not* echoed —
+/// it never leaves the browser, and RFC 9110 §10.2.2 makes the client reapply
+/// the original one to a fragment-less `Location`.
+#[tokio::test]
+async fn test_canonical_redirect_preserves_query_string() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get_no_redirect("/docs/guide?a=1&b=two").await;
+
+    assert_eq!(response.status(), 301);
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok()),
+        Some("/docs/guide/?a=1&b=two")
+    );
+}
+
+/// Static files are addressed by their exact name and must never gain a
+/// trailing slash; directory listings and `/.mbr/*` keep their behaviour too.
+#[tokio::test]
+async fn test_canonical_redirect_leaves_non_markdown_alone() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_static_file("images/photo.png", b"\x89PNG");
+    repo.create_static_file("LICENSE", b"MIT");
+    // A directory with no index file renders a listing.
+    repo.create_dir("posts");
+    repo.create_markdown("posts/one.md", "# One");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    for path in [
+        "/images/photo.png",
+        "/LICENSE",
+        "/.mbr/theme.css",
+        "/.mbr/site.json",
+    ] {
+        let response = server.get_no_redirect(path).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "{path} must be served, not redirected"
+        );
+    }
+
+    // A directory listing is not a markdown page; its handling is untouched.
+    let listing = server.get_no_redirect("/posts/").await;
+    assert_eq!(listing.status(), 200);
+}
+
+/// The end-to-end cascade the reported bug produced: land on the target page
+/// via a slashless URL, and the sibling link on *that* page 404s. With the
+/// redirect in place the browser is on the canonical URL before it ever reads
+/// those links.
+#[tokio::test]
+async fn test_slashless_landing_does_not_break_the_next_hop() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide\n\n[File](../folder/file)");
+    repo.create_markdown("folder/file.md", "# File\n\n[Sibling](sibling.md)");
+    repo.create_markdown("folder/sibling.md", "# Sibling");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // 1. The extension-less link is emitted with the trailing slash.
+    let guide = server.get_text("/docs/guide/").await;
+    assert_html_contains(&guide, r#"href="../../folder/file/""#);
+
+    // 2. Even so, a slashless URL reaching the server is redirected rather than
+    //    served in place — the belt to that fix's braces.
+    let redirect = server.get_no_redirect("/folder/file").await;
+    assert_eq!(redirect.status(), 301);
+    assert_eq!(
+        redirect
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok()),
+        Some("/folder/file/")
+    );
+
+    // 3. The target page's own sibling link resolves. `/folder/sibling/` is
+    //    where `../sibling/` lands from `/folder/file/`; from `/folder/file` it
+    //    would have landed on `/sibling/`, which 404s.
+    let file = server.get_text("/folder/file/").await;
+    assert_html_contains(&file, r#"href="../sibling/""#);
+    assert_eq!(server.get("/folder/sibling/").await.status(), 200);
+    assert_eq!(
+        server.get("/sibling/").await.status(),
+        404,
+        "sanity: the URL a slashless landing would have produced really is a 404"
+    );
+}
+
+// ==================== Extension-less Link Target Tests ====================
+
+/// The reported bug at the layer that causes it. An extension-less markdown
+/// target must gain the trailing slash its canonical URL has; an extension-less
+/// *static* file must not, or every `LICENSE`/`Makefile` link in the repository
+/// breaks instead.
+#[tokio::test]
+async fn test_extensionless_link_targets_are_distinguished() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n[Page](../folder/file)\n\n[Page With Ext](../folder/file.md)\n\n\
+         [License](../LICENSE)\n\n[Makefile](Makefile)",
+    );
+    repo.create_markdown("folder/file.md", "# File");
+    repo.create_static_file("LICENSE", b"MIT");
+    repo.create_static_file("docs/Makefile", b"all:");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/docs/guide/").await;
+
+    assert_html_contains(&html, r#"href="../../folder/file/""#);
+    assert_html_not_contains(&html, r#"href="../../folder/file""#);
+    assert_html_contains(&html, r#"href="../../LICENSE""#);
+    assert_html_contains(&html, r#"href="../Makefile""#);
+    assert_html_not_contains(&html, r#"href="../../LICENSE/""#);
+    assert_html_not_contains(&html, r#"href="../Makefile/""#);
+}
+
+/// The same distinction from an index page, where no `../` compensation
+/// applies.
+#[tokio::test]
+async fn test_extensionless_link_targets_from_index_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/index.md",
+        "# Docs\n\n[Guide](guide)\n\n[Makefile](Makefile)",
+    );
+    repo.create_markdown("docs/guide.md", "# Guide");
+    repo.create_static_file("docs/Makefile", b"all:");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/docs/").await;
+
+    assert_html_contains(&html, r#"href="guide/""#);
+    assert_html_contains(&html, r#"href="Makefile""#);
+    assert_html_not_contains(&html, r#"href="Makefile/""#);
+}
+
+// ==================== Page Error Reporting Tests ====================
+
+/// `errors.json` must judge the href that actually went into the HTML. A link
+/// re-derived from the markdown source re-applies the same rules the transform
+/// used, so a transform defect is invisible to it by construction.
+#[tokio::test]
+async fn test_errors_json_reports_non_canonical_and_escaping_links() {
+    let repo = TestRepo::new();
+    // Raw HTML hrefs bypass the link transform entirely, which is how a
+    // hand-authored non-canonical URL reaches the page.
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n<a href=\"/folder/file\">no trailing slash</a>\n\n\
+         <a href=\"../../../escape/target/\">above root</a>\n\n\
+         <a href=\"/folder/file/\">canonical</a>\n",
+    );
+    repo.create_markdown("folder/file.md", "# File");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/docs/guide/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    let targets: Vec<&str> = errors
+        .iter()
+        .filter(|e| e["type"] == "broken_internal_link")
+        .filter_map(|e| e["target"].as_str())
+        .collect();
+
+    assert!(
+        targets.contains(&"/folder/file"),
+        "a page link with no trailing slash must be reported: {errors:?}"
+    );
+    assert!(
+        targets.contains(&"../../../escape/target/"),
+        "a link escaping the repository root must be reported: {errors:?}"
+    );
+    assert!(
+        !targets.contains(&"/folder/file/"),
+        "the canonical spelling must not be reported: {errors:?}"
+    );
+}
+
+/// The complement: a page whose links are all canonical reports nothing, so the
+/// new checks cannot turn the error badge into permanent noise.
+#[tokio::test]
+async fn test_errors_json_stays_silent_for_canonical_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n[Ext](../folder/file)\n\n[Dot Md](../folder/file.md)\n\n\
+         [License](../LICENSE)\n\n[Sibling](other.md)\n",
+    );
+    repo.create_markdown("docs/other.md", "# Other");
+    repo.create_markdown("folder/file.md", "# File");
+    repo.create_static_file("LICENSE", b"MIT");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let json: serde_json::Value = server
+        .get("/docs/guide/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        !errors.iter().any(|e| e["type"] == "broken_internal_link"),
+        "no link on this page is defective: {errors:?}"
+    );
+}
+
+// ==================== Backlink Resolution Tests ====================
+
+/// Regression for the double-compensated backlink target. `docs/beta.md` is
+/// served at `/docs/beta/`; its `alpha.md` link is transformed to `../alpha/`,
+/// and resolving *that* with the page's `is_index_file` strips the last URL
+/// segment a second time, recording the backlink on `/alpha/`. The bug was
+/// masked at the repository root, where the clamp on an above-root `..`
+/// cancelled the extra hop — so this fixture is deliberately one folder deep.
+#[tokio::test]
+async fn test_backlinks_resolve_inside_a_subfolder() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/alpha.md", "# Alpha");
+    repo.create_markdown("docs/beta.md", "# Beta\n\n[Alpha](alpha.md)");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // The backlink index is built in the background; poll briefly for it.
+    let mut inbound = serde_json::Value::Null;
+    for _ in 0..50 {
+        let json: serde_json::Value = server
+            .get("/docs/alpha/links.json")
+            .await
+            .json()
+            .await
+            .unwrap();
+        inbound = json["inbound"].clone();
+        if inbound.as_array().is_some_and(|a| !a.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let sources: Vec<&str> = inbound
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["from"].as_str())
+        .collect();
+    assert!(
+        sources.contains(&"/docs/beta/"),
+        "docs/beta.md links to docs/alpha.md, so /docs/alpha/ must show that \
+         backlink: {inbound:?}"
+    );
+
+    // `/alpha/` is where the bug filed the backlink, and it is not a page at
+    // all — so the backlink was not merely misplaced, it was unreachable.
+    assert_eq!(
+        server.get("/alpha/").await.status(),
+        404,
+        "/alpha/ must not exist; that is what made the misfiled backlink invisible"
     );
 }
 
@@ -6592,12 +6971,17 @@ async fn test_body_wikilink_resolves_globally_across_folders() {
             && e["target"].as_str().unwrap_or("").contains("Patrick")),
         "resolved [[Patrick Walsh]] must NOT be reported broken: {errors:?}"
     );
+    // `target` is the href as emitted into the HTML, so the space arrives
+    // percent-encoded (the same convention `broken_media_reference` uses for
+    // `src`). Accept either spelling so the assertion is about the *link*, not
+    // about escaping.
     assert!(
-        errors.iter().any(|e| e["type"] == "broken_internal_link"
-            && e["target"]
-                .as_str()
-                .unwrap_or("")
-                .contains("Totally Missing")),
+        errors.iter().any(|e| {
+            e["type"] == "broken_internal_link" && {
+                let target = e["target"].as_str().unwrap_or("");
+                target.contains("Totally Missing") || target.contains("Totally%20Missing")
+            }
+        }),
         "unresolved [[Totally Missing]] must be reported broken: {errors:?}"
     );
 }
@@ -7098,6 +7482,75 @@ async fn test_tasks_endpoint_folder_scope_includes_subfolders() {
         })
         .collect();
     assert_eq!(facets, vec![("/", 4), ("/docs/", 3), ("/docs/notes/", 1)]);
+}
+
+/// `tasks_ignore_globs` filters at index-build time, which is the one place
+/// every part of the response derives from: the groups, the folder facet and
+/// the totals must all agree that the folder is not there.
+#[tokio::test]
+async fn test_tasks_endpoint_omits_folders_matched_by_tasks_ignore_globs() {
+    let repo = task_repo();
+    repo.create_markdown("templates/checklist.md", "- [ ] template step\n");
+    repo.create_markdown(
+        "templates/onboarding/day-one.md",
+        "- [ ] nested template step\n",
+    );
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_ignore_globs = vec!["templates/**".to_string()];
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(
+        &server,
+        r#"{"statuses": ["open", "done", "canceled"], "folder": "/"}"#,
+    )
+    .await;
+
+    let texts = task_texts(&body);
+    assert!(
+        !texts.iter().any(|t| t.contains("template step")),
+        "ignored files must contribute no tasks, got: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"write the report".to_string()),
+        "everything else is untouched, got: {texts:?}"
+    );
+
+    let folders: Vec<&str> = body["folders"]
+        .as_array()
+        .expect("folders array")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(
+        folders,
+        vec!["/", "/docs/", "/docs/notes/"],
+        "an ignored folder must not appear in the folder pane"
+    );
+
+    assert_eq!(
+        body["total_matches"], 6,
+        "counts must exclude the ignored folder too"
+    );
+}
+
+/// The other half of the deal: the *documents* are untouched. An ignored file
+/// still renders, and still renders its checkboxes — in-document checkboxes
+/// exist whether or not the task browser lists them.
+#[tokio::test]
+async fn test_tasks_ignore_globs_do_not_affect_rendering() {
+    let repo = task_repo();
+    repo.create_markdown("templates/checklist.md", "- [ ] template step\n");
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.tasks_ignore_globs = vec!["templates/**".to_string()];
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/templates/checklist/").await;
+    assert_html_contains(&html, "template step");
+    assert_html_contains(&html, "mbr-task-check");
 }
 
 #[tokio::test]

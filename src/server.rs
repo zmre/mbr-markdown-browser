@@ -200,6 +200,23 @@ fn invalidate_derived_caches(
     inbound_link_cache.invalidate_all();
 }
 
+/// The path-resolution inputs, owned rather than borrowed.
+///
+/// [`PathResolverConfig`] borrows from [`ServerState`], which is right for a
+/// request handler but impossible for the `'static` markdown-page probe the
+/// link transform carries into the renderer. Built per page render; the clones
+/// are a handful of short strings.
+fn owned_resolver_config(config: &ServerState) -> crate::path_resolver::OwnedPathResolverConfig {
+    crate::path_resolver::OwnedPathResolverConfig {
+        base_dir: config.base_dir.clone(),
+        canonical_base_dir: config.canonical_base_dir.clone(),
+        static_folder: config.static_folder.clone(),
+        markdown_extensions: config.markdown_extensions.clone(),
+        index_file: config.index_file.clone(),
+        tag_sources: crate::config::tag_sources_to_url_sources(&config.tag_sources),
+    }
+}
+
 /// Everything [`index_page_links`] needs to reproduce the renderer's link
 /// resolution outside a request.
 ///
@@ -239,6 +256,7 @@ fn index_page_links(
         is_index_file,
         url_depth: None,
         current_page_url: url_path.to_string(),
+        markdown_page_probe: None,
     };
 
     match markdown::extract_outbound_links_sync(
@@ -270,13 +288,24 @@ fn index_page_links(
                                 is_index_file,
                                 url_depth: None,
                                 current_page_url: url_path.to_string(),
+                                markdown_page_probe: None,
                             },
                         );
                     }
                     link
                 })
                 .collect();
-            let resolved = resolve_outbound_links(url_path, resolved, is_index_file);
+            // `true`, not `is_index_file`. These hrefs have *already* been
+            // through `transform_link`, which added the `../` that compensates
+            // for the trailing-slash URL convention. Passing `is_index_file`
+            // here makes `resolve_relative_url` strip the page URL's last
+            // segment a second time, so `docs/beta.md` linking `alpha.md`
+            // recorded a backlink on `/alpha/` instead of `/docs/alpha/`. The
+            // bug hid at the repository root, where the (former) silent clamp
+            // on an above-root `..` cancelled the extra hop. This is the same
+            // reasoning `page_errors::validate_media_references` documents for
+            // post-transform srcs.
+            let resolved = resolve_outbound_links(url_path, resolved, true);
             index.set_page_links(url_path, &resolved);
         }
         Err(e) => {
@@ -1068,6 +1097,9 @@ pub struct ServerConfig {
     /// Maintain the `@done(...)` annotation when `POST /.mbr/task` toggles a
     /// task's status.
     pub tasks_stamp_done: bool,
+    /// Globs matched against repo-relative paths whose files are kept out of the
+    /// task index (e.g. `templates/**`). Empty by default.
+    pub tasks_ignore_globs: Vec<String>,
     /// Enable the in-browser markdown editing endpoints.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1131,6 +1163,7 @@ impl From<&crate::config::Config> for ServerConfig {
             incomplete_markers: config.incomplete_markers.clone(),
             tasks_enabled: config.tasks_enabled,
             tasks_stamp_done: config.tasks_stamp_done,
+            tasks_ignore_globs: config.tasks_ignore_globs.clone(),
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
@@ -1653,6 +1686,7 @@ impl Server {
             incomplete_markers,
             tasks_enabled,
             tasks_stamp_done,
+            tasks_ignore_globs,
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -1878,7 +1912,8 @@ impl Server {
         // deliberately left *empty*: it is filled by the first `/.mbr/tasks`
         // request, and `invalidate_file` is a no-op until then, so a server
         // whose user never opens the task panel never reads a file for it.
-        let task_index = Arc::new(crate::task_index::TaskIndex::new());
+        // The ignore patterns are compiled once, by the constructor.
+        let task_index = Arc::new(crate::task_index::TaskIndex::new(&tasks_ignore_globs));
 
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
@@ -4268,6 +4303,31 @@ impl Server {
                 Self::serve_static_file(file_path, req).await
             }
             ResolvedPath::MarkdownFile(md_path) => {
+                // A markdown page has exactly one URL — the directory-style one
+                // (`docs/guide.md` -> `/docs/guide/`). Serving it at any other
+                // spelling with a 200 is not harmless: the browser's base for
+                // that page's own relative links becomes `/docs/` instead of
+                // `/docs/guide/`, so every `../` href the renderer emitted for
+                // the trailing-slash convention lands one directory too high
+                // and 404s. The damage therefore shows up one click *after* the
+                // wrong URL, which is what makes it so hard to trace back.
+                //
+                // Redirecting here is the general fix: it repairs hand-typed
+                // URLs, inbound external links and stale bookmarks, not just
+                // hrefs mbr generated itself.
+                if let Some(canonical) = crate::path_resolver::canonical_page_redirect(
+                    &path,
+                    &crate::repo::build_markdown_url_path(
+                        &md_path,
+                        config
+                            .canonical_base_dir
+                            .as_deref()
+                            .unwrap_or(config.base_dir.as_path()),
+                        &config.index_file,
+                    ),
+                ) {
+                    return Ok(canonical_redirect_response(&canonical, req.uri().query()));
+                }
                 tracing::debug!("rendering markdown: {:?}", &md_path);
                 Self::markdown_to_html(&md_path, &config)
                     .await
@@ -4308,15 +4368,10 @@ impl Server {
                         StatusCode::INTERNAL_SERVER_ERROR
                     })
             }
-            ResolvedPath::Redirect(canonical_url) => {
-                tracing::debug!("redirecting to canonical URL: {}", &canonical_url);
-                Ok(build_response_or_500(
-                    Response::builder()
-                        .status(StatusCode::MOVED_PERMANENTLY)
-                        .header(header::LOCATION, &canonical_url)
-                        .body(Body::empty()),
-                ))
-            }
+            ResolvedPath::Redirect(canonical_url) => Ok(canonical_redirect_response(
+                &canonical_url,
+                req.uri().query(),
+            )),
             ResolvedPath::NotFound => {
                 // Try to serve HLS content (playlist or segment) for transcoded variants
                 #[cfg(feature = "media-metadata")]
@@ -4899,6 +4954,7 @@ impl Server {
                         is_index_file,
                         url_depth: None,
                         current_page_url: page_url_path.clone(),
+                        markdown_page_probe: None,
                     };
 
                     let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
@@ -5109,7 +5165,7 @@ impl Server {
         use crate::page_errors::{
             PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
             detect_unresolved_wikilinks, frontmatter_parse_errors, relationship_cycle_errors,
-            validate_internal_links, validate_media_references,
+            validate_internal_links, validate_media_references, validate_rendered_links,
         };
 
         // Only handle exact `errors.json` tails. This keeps the endpoint
@@ -5176,6 +5232,16 @@ impl Server {
                     is_index_file,
                     url_depth: None,
                     current_page_url: page_url_path.clone(),
+                    // Must match `markdown_to_html`: the hrefs this render
+                    // produces are the ones `validate_rendered_links` judges,
+                    // so a checker rendering without the probe would report
+                    // every extension-less markdown link as non-canonical while
+                    // the page a reader sees is perfectly fine.
+                    markdown_page_probe: Some(
+                        crate::link_transform::filesystem_markdown_page_probe(
+                            owned_resolver_config(config),
+                        ),
+                    ),
                 };
 
                 let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
@@ -5243,8 +5309,22 @@ impl Server {
 
         let mut errors = Vec::new();
         errors.extend(frontmatter_parse_errors(&frontmatter_error));
-        errors.extend(validate_internal_links(&outbound_links, &resolver_config));
-        if !html_for_scan.is_empty() {
+        if html_for_scan.is_empty() {
+            // Tag pages and tag indexes have no authored body; their outbound
+            // links are synthesized absolute URLs, so that list is the only
+            // thing to check.
+            errors.extend(validate_internal_links(&outbound_links, &resolver_config));
+        } else {
+            // For a rendered page, read the hrefs that actually went into the
+            // HTML. `outbound_links` holds the *authored* destinations resolved
+            // with markdown semantics, so re-resolving those re-applies the
+            // same rules the transform used and can never see a transform bug —
+            // which is exactly how a missing trailing slash stayed invisible.
+            errors.extend(validate_rendered_links(
+                &html_for_scan,
+                &resolver_config,
+                &page_url_path,
+            ));
             errors.extend(validate_media_references(
                 &html_for_scan,
                 &resolver_config,
@@ -6098,6 +6178,13 @@ impl Server {
                 root_path,
                 &config.index_file,
             ),
+            // The page a reader is actually looking at: extension-less
+            // markdown targets must come out with the trailing slash their
+            // canonical URL has, or every relative link on the page they lead
+            // to resolves one directory too high.
+            markdown_page_probe: Some(crate::link_transform::filesystem_markdown_page_probe(
+                owned_resolver_config(config),
+            )),
         };
 
         // Transcoding is only available with media-metadata feature
@@ -7007,6 +7094,29 @@ fn build_response_or_500(result: Result<Response<Body>, axum::http::Error>) -> R
         *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
         response
     })
+}
+
+/// Builds the `301 Moved Permanently` that sends a non-canonical page URL to
+/// its canonical, trailing-slash form.
+///
+/// The query string is carried over verbatim, because it is part of the
+/// request the client made and dropping it silently changes what the target
+/// page renders. The **fragment** is deliberately *not* carried: fragments
+/// never leave the browser, and RFC 9110 §10.2.2 says a client applies the
+/// original request's fragment to a `Location` that has none — so emitting no
+/// fragment is exactly how `#section` survives the hop.
+fn canonical_redirect_response(canonical_url: &str, query: Option<&str>) -> Response<Body> {
+    let location = match query {
+        Some(query) if !query.is_empty() => format!("{canonical_url}?{query}"),
+        _ => canonical_url.to_string(),
+    };
+    tracing::debug!("redirecting to canonical URL: {}", &location);
+    build_response_or_500(
+        Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header(header::LOCATION, &location)
+            .body(Body::empty()),
+    )
 }
 
 /// Generates a weak ETag from content bytes using a simple hash.

@@ -66,6 +66,27 @@ The sidebar shows a tag tree for filtering files.
 
 mbr tracks recently viewed files (stored in browser localStorage), providing quick access to your working set.
 
+### External Links
+
+**Server mode deliberately does nothing with external links.** `https://` links,
+`mailto:`, `message:`, `zoommtg:` and every other scheme are left entirely to the
+browser you are visiting with, which already opens them the way you expect. Same
+for static builds.
+
+This is the opposite of [GUI mode](gui.md#external-links), where there is no
+browser to defer to and mbr hands the URL to the operating system itself. That
+hand-off is **GUI-only by design and enforced at runtime**: the launcher refuses,
+before touching the OS, unless a GUI window is actually running in the process,
+and logs the refusal at `warn`.
+
+The reason is worth stating plainly: **a server must never be induced to launch
+applications on its host.** Launching an application is something an interactive
+window does for the person in front of it. `mbr -s` has no such person, and if a
+page could make the serving process start programs, anyone who could reach that
+page — especially on a shared or non-loopback bind — could start programs on the
+machine running it. So the capability simply is not available outside GUI mode,
+regardless of what a page, a template override, or a future code path asks for.
+
 ## File Browser Sidebar
 
 Press **`-`** (minus key) to open the file browser sidebar. This is a three-pane navigator for exploring your entire markdown collection.
@@ -203,7 +224,8 @@ Press **`f`**, **`F`**, or **`T`** to open the Link Explorer - a quick navigatio
 
 - **Fuzzy search** - Type to filter items with intelligent matching
 - **Visibility awareness** - In ToC mode, currently visible headings are prioritized and marked
-- **Internal vs External** - External links open in new tabs, internal links navigate in place
+- **Internal vs External** - External links open in new tabs, internal links navigate in place. In [GUI mode](gui.md#external-links) there are no tabs, so external links go to your default browser instead
+- **Link handling is your browser's** - Server mode never touches external links itself; see [External links](#external-links) below
 - **Tab cycling** - Press `Tab` to cycle between the three views
 
 ### Layout
@@ -259,10 +281,32 @@ This enables wiki-style bidirectional link navigation without requiring any spec
 |----------|--------|-------------|
 | `/` | GET | Home page (root directory listing) |
 | `/{path}/` | GET | Markdown page or directory |
+| `/{path}` | GET | `301` to the canonical `/{path}/` when it names a markdown page |
 | `/.mbr/site.json` | GET | Full site metadata as JSON |
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/ws/changes` | WS | WebSocket for live reload |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
+
+### Canonical URL Redirects
+
+Markdown pages have exactly one URL: the directory-style one with a trailing
+slash (`docs/guide.md` → `/docs/guide/`). Any other spelling gets a `301`:
+
+```
+GET /docs/guide      → 301 Location: /docs/guide/
+GET /docs/guide.md   → 301 Location: /docs/guide/
+GET /docs            → 301 Location: /docs/          (docs/index.md)
+GET /docs/index/     → 301 Location: /docs/
+GET /docs/guide?x=1  → 301 Location: /docs/guide/?x=1
+```
+
+This is not cosmetic. The trailing slash decides the base a browser uses for the
+page's own relative links: from `/docs/guide/` a `../other/` href reaches
+`/docs/other/`, but from `/docs/guide` it reaches `/other/`. Serving the page in
+place at the slashless URL would break every link *on* it, one click later.
+
+Static files (`/images/photo.png`, `/LICENSE`), directory listings and `/.mbr/*`
+routes are never redirected.
 
 ### Search API
 

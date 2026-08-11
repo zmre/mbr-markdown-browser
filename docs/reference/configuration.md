@@ -74,6 +74,14 @@ watcher_ignore_dirs = [
 # Note: Build mode defaults to 0 (disabled) for performance. Override with CLI if needed.
 oembed_timeout_ms = 500
 
+# Folders whose tasks are left out of the task browser (empty by default).
+# Patterns match a file's repository-relative path, so exclude a folder's
+# *contents* with `/**`. The files still render normally.
+tasks_ignore_globs = [
+    "templates/**",
+    "**/archive/**"
+]
+
 ```
 
 ## Configuration Options
@@ -219,12 +227,57 @@ the index is built by reading live files, so static builds never expose it —
 |--------|------|---------|-------------|
 | `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
 | `tasks_stamp_done` | bool | `true` | Maintain the `@done(...)` annotation when a task is toggled through `POST /.mbr/task`. Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
+| `tasks_ignore_globs` | array | `[]` | Glob patterns whose matching files contribute nothing to the task browser. Set with `MBR_TASKS_IGNORE_GLOBS='["templates/**"]'`; there is no CLI flag. |
 
 Example:
 ```toml
 # .mbr/config.toml
 tasks_enabled = false
 ```
+
+**Excluding folders from the task browser (`tasks_ignore_globs`):**
+
+A folder of checklist *templates* is full of unchecked boxes that are not
+anybody's work, and left alone it drowns the task browser. List it here:
+
+```toml
+# .mbr/config.toml
+tasks_ignore_globs = ["templates/**"]
+```
+
+Files matching any pattern are never put in the task index, so they disappear
+from the whole task browser at once: no tasks in the list, no folder in the
+folder pane, and nothing counted in the totals or the `x/y` progress figures.
+
+The exclusion stops there. Those files still render, still show their
+checkboxes, and — with [editing](#editing-settings) enabled — those checkboxes
+still work: in-document tasks exist whether or not the task browser lists them.
+Nothing else in mbr is affected either; `ignore_globs` is the option that keeps
+files out of the site entirely.
+
+Each pattern is matched against the file's **repository-relative path**, always
+`/`-separated (so one pattern behaves the same on macOS, Linux and Windows):
+
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `templates/**` | `templates/a.md`, `templates/deep/b.md` | `docs/templates/a.md` |
+| `**/templates/**` | `templates/a.md`, `docs/templates/a.md`, `a/b/templates/c.md` | `templates.md` |
+| `docs/templates/**` | `docs/templates/a.md` | `templates/a.md` |
+| `**/*.checklist.md` | `templates/onboarding.checklist.md` | `templates/onboarding.md` |
+| `templates` | *(nothing)* | every path — see below |
+
+Two things are worth pinning down:
+
+- **Patterns name files, not folders.** `templates` matches a *file* called
+  `templates`, so it excludes nothing. Write `templates/**` to mean "everything
+  in that folder". `**/` matches zero or more leading folders, which is why
+  `**/templates/**` also covers a `templates/` at the repository root.
+- **`*` crosses `/`.** As elsewhere in mbr's globs, a single `*` is not stopped
+  by a path separator, so `templates/*.md` also matches
+  `templates/deep/a.md`. Use a literal path when you mean one level.
+
+A pattern that does not compile aborts startup with an error naming it, rather
+than being quietly skipped and indexing the folder you meant to exclude.
 
 **`@done(...)` stamping (`tasks_stamp_done`):**
 
@@ -960,6 +1013,10 @@ MBR_TRANSCODE=true
 # Incomplete-block highlighting (TK / TODO / FIXME / XXX)
 MBR_MARK_INCOMPLETE=true
 MBR_INCOMPLETE_MARKERS='["NOTE","DRAFT"]'
+
+# Tasks
+MBR_TASKS_ENABLED=false
+MBR_TASKS_IGNORE_GLOBS='["templates/**","**/archive/**"]'  # kept out of the task browser
 
 # Editing
 MBR_EDIT_ENABLED=true

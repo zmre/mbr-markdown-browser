@@ -71,6 +71,7 @@ fn render_pipeline(markdown: &str) -> String {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         },
         None,  // no oembed cache
         false, // server_mode

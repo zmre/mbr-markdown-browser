@@ -121,7 +121,13 @@ pub fn is_external_url(url: &str) -> bool {
 /// The scheme grammar excludes `/`, `?` and `#`, so a colon that appears after
 /// one of those (`docs/a:b.md`) fails the character check and yields `None`
 /// without a separate delimiter scan.
-fn url_scheme(url: &str) -> Option<&str> {
+///
+/// Crate-visible because [`crate::external_open`] needs the *name* of the
+/// scheme, not just whether one is present: the GUI navigation policy refuses
+/// to hand `javascript:`, `vbscript:` and `data:` to the operating system. It
+/// reuses this scan so there is still one definition of what a scheme looks
+/// like — the whole point of this module.
+pub(crate) fn url_scheme(url: &str) -> Option<&str> {
     let colon = url.find(':')?;
     let scheme = &url[..colon];
 
@@ -263,6 +269,25 @@ mod tests {
             ("sms:+15555550123", true),
             ("callto:+15555550123", true),
             ("blob:http://localhost:5220/550e8400-e29b", true),
+            // Application schemes. `message:` is the shape that motivated the
+            // GUI navigation handler: mail clients address a message by its
+            // `Message-ID`, whose angle brackets arrive percent-encoded, and
+            // both the `//` and the bare forms are in the wild.
+            (
+                "message://%3CCAEn-OzgEreVRuNkdnb9gdFNLXByerYCLraYJGRvjSvXw9chVMQ@mail.gmail.com%3E",
+                true,
+            ),
+            ("message:%3Cabc123@mail.example.com%3E", true),
+            ("zoommtg://zoom.us/join?confno=1234567890", true),
+            ("x-devonthink-item://8A3B0C1D-2E4F", true),
+            // Percent-encoding does not change the answer either way: it is not
+            // a scheme character, so it can neither create nor hide one.
+            ("https://example.com/a%20b?c=%26d#e%2Ff", true),
+            ("docs/my%20file.md", false),
+            ("/docs/caf%C3%A9/", false),
+            ("./%3Cbrackets%3E.md", false),
+            // An encoded colon is just a character in a filename.
+            ("Notes%3A2024.md", false),
             // Schemes every copy already knew about.
             ("mailto:test@example.com", true),
             ("tel:+15555550123", true),

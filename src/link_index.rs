@@ -151,20 +151,55 @@ pub fn normalize_url_path(url: &str) -> String {
 /// - `resolve_relative_url("/docs/guide/", "intro/", false)` → `"/docs/intro/"`
 /// - `resolve_relative_url("/docs/guide/", "../other/", false)` → `"/other/"`
 /// - `resolve_relative_url("/source/", "../", false)` → `"/"`
+///
+/// A `..` that would climb above the site root is **clamped** here, matching
+/// what a browser does with an over-long traversal. Callers that need to
+/// *report* such a link rather than silently repair it must use
+/// [`resolve_relative_url_checked`].
 pub fn resolve_relative_url(base_url: &str, relative_url: &str, is_index_file: bool) -> String {
+    resolve_relative_url_parts(base_url, relative_url, is_index_file).0
+}
+
+/// [`resolve_relative_url`], but `None` when the link climbs above the site
+/// root instead of clamping there.
+///
+/// The clamp exists because that is what browsers do (RFC 3986 §5.2.4 discards
+/// excess `..` segments), so it is the right behaviour for *resolution*. It is
+/// exactly the wrong behaviour for *validation*: a link that escapes the
+/// repository root is a genuine authoring defect, and clamping turns it into a
+/// link to some unrelated page that happens to exist, producing no diagnostic
+/// at all.
+pub fn resolve_relative_url_checked(
+    base_url: &str,
+    relative_url: &str,
+    is_index_file: bool,
+) -> Option<String> {
+    let (url, escaped) = resolve_relative_url_parts(base_url, relative_url, is_index_file);
+    (!escaped).then_some(url)
+}
+
+/// Shared body of [`resolve_relative_url`] and [`resolve_relative_url_checked`].
+///
+/// Returns the resolved URL plus whether any `..` segment was discarded because
+/// there was nothing left to pop — i.e. whether the link escaped the site root.
+fn resolve_relative_url_parts(
+    base_url: &str,
+    relative_url: &str,
+    is_index_file: bool,
+) -> (String, bool) {
     // If the relative URL is already absolute, just normalize it
     if relative_url.starts_with('/') {
         let trimmed = relative_url.trim_end_matches('/');
         return if trimmed.is_empty() {
-            "/".to_string()
+            ("/".to_string(), false)
         } else {
-            format!("{}/", trimmed)
+            (format!("{}/", trimmed), false)
         };
     }
 
     // Anchor-only links stay as-is
     if relative_url.starts_with('#') {
-        return relative_url.to_string();
+        return (relative_url.to_string(), false);
     }
 
     let base_segments: Vec<&str> = base_url
@@ -182,11 +217,17 @@ pub fn resolve_relative_url(base_url: &str, relative_url: &str, is_index_file: b
         base_segments[..base_segments.len() - 1].to_vec()
     };
 
+    let mut escaped = false;
     for part in relative_url.split('/') {
         match part {
             "" | "." => {} // Skip empty or current directory
             ".." => {
-                segments.pop();
+                // `Vec::pop` on an empty vec returns `None`; discarding that is
+                // precisely how an above-root traversal used to vanish without
+                // a trace.
+                if segments.pop().is_none() {
+                    escaped = true;
+                }
             }
             segment => {
                 segments.push(segment);
@@ -194,11 +235,13 @@ pub fn resolve_relative_url(base_url: &str, relative_url: &str, is_index_file: b
         }
     }
 
-    if segments.is_empty() {
+    let url = if segments.is_empty() {
         "/".to_string()
     } else {
         format!("/{}/", segments.join("/"))
-    }
+    };
+
+    (url, escaped)
 }
 
 /// Resolves all relative URLs in outbound links to absolute URLs.
@@ -1131,6 +1174,57 @@ mod tests {
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].to, "/docs/intro/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_checked_accepts_in_root_links() {
+        // Every shape that stays inside the site must resolve identically to
+        // the clamping version.
+        let cases = [
+            ("/modes/", "gui/", true),
+            ("/docs/guide/", "intro/", false),
+            ("/docs/sub/guide/", "../other/", false),
+            ("/docs/sub/guide/", "../../other/", false),
+            ("/modes/", "../", true),
+            ("/docs/guide/", "/other/", false),
+            ("/modes/", "#section", true),
+        ];
+
+        for (base, relative, is_index) in cases {
+            assert_eq!(
+                resolve_relative_url_checked(base, relative, is_index),
+                Some(resolve_relative_url(base, relative, is_index)),
+                "{relative} from {base} must resolve without an escape"
+            );
+        }
+    }
+
+    /// Regression: `Vec::pop()` on an empty vec returns `None`, and discarding
+    /// that made a link escaping the repository root indistinguishable from a
+    /// link to a real page. The clamping resolver still repairs it (browsers
+    /// do the same), but validation must be able to see it.
+    #[test]
+    fn test_resolve_relative_url_checked_rejects_above_root_traversal() {
+        let cases = [
+            ("/docs/guide/", "../../../escape/", false),
+            ("/docs/", "../../escape/", true),
+            ("/", "../escape/", true),
+            ("/note/", "../../", false),
+            // A root-level page's `../` really does name the repository's
+            // parent directory, so the emitted `../../` escapes.
+            ("/source/", "../../", true),
+        ];
+
+        for (base, relative, is_index) in cases {
+            assert_eq!(
+                resolve_relative_url_checked(base, relative, is_index),
+                None,
+                "{relative} from {base} escapes the site root and must be reported"
+            );
+            // The clamping variant still returns something; that is the whole
+            // reason the escape was invisible.
+            assert!(resolve_relative_url(base, relative, is_index).starts_with('/'));
+        }
     }
 
     #[test]

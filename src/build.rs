@@ -29,6 +29,7 @@ use crate::{
     markdown,
     oembed_cache::OembedCache,
     page_context::{self, ModeFlags, PageChrome, UrlMode},
+    path_resolver::OwnedPathResolverConfig,
     repo::{MarkdownInfo, Repo},
     server::{
         DEFAULT_FILES, MediaViewerType, generate_breadcrumbs, get_current_dir_name,
@@ -231,12 +232,65 @@ fn is_contained_in(base: &Path, path: &Path) -> bool {
     }
 }
 
-/// Checks if a link target exists using a pre-built set of valid file paths.
+/// What is wrong with one emitted `<a href>` in the generated site.
+///
+/// Reported through [`BrokenLink::reason`] so the build's stderr summary names
+/// the actual defect; all three leave a reader stranded, just at different
+/// moments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokenLinkReason {
+    /// Nothing in the output answers this href.
+    Missing,
+    /// A `..` climbed above the site root. Browsers clamp the excess segments
+    /// (RFC 3986 §5.2.4), so the reader lands on an unrelated page rather than
+    /// seeing an error.
+    EscapesSiteRoot,
+    /// The href reaches a *page* (`<dir>/index.html`) but does not end in `/`.
+    /// The page is served, so this looks fine — until the browser resolves that
+    /// page's own relative links against `<dir>/`'s parent instead of `<dir>/`
+    /// and every one of them 404s. A static host has no redirect to repair it.
+    MissingTrailingSlash,
+}
+
+impl std::fmt::Display for BrokenLinkReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::Missing => "no such page or file",
+            Self::EscapesSiteRoot => "escapes the site root",
+            Self::MissingTrailingSlash => {
+                "points at a page but has no trailing slash (breaks that page's relative links)"
+            }
+        };
+        f.write_str(text)
+    }
+}
+
+/// Judges one resolved link target against the generated output.
 ///
 /// Uses O(1) HashSet lookups instead of filesystem stat() calls.
-/// Handles both direct file matches and the directory/index.html convention.
-fn link_target_exists(path: &Path, valid_files: &HashSet<PathBuf>) -> bool {
-    valid_files.contains(path) || valid_files.contains(&path.join("index.html"))
+///
+/// `href_path` is the href with any `#fragment` / `?query` already removed; its
+/// trailing slash is what distinguishes "a page, addressed canonically" from
+/// "a page, addressed at a URL whose relative links will all break".
+fn classify_link_target(
+    path: &Path,
+    href_path: &str,
+    output_dir: &Path,
+    valid_files: &HashSet<PathBuf>,
+) -> Option<BrokenLinkReason> {
+    // Checked before existence: an escaping link that happens to land on a real
+    // file outside the output is still wrong, and one that lands on nothing
+    // deserves the accurate reason rather than a bare "missing".
+    if !is_contained_in(output_dir, path) {
+        return Some(BrokenLinkReason::EscapesSiteRoot);
+    }
+    if valid_files.contains(path) {
+        return None;
+    }
+    if valid_files.contains(&path.join("index.html")) {
+        return (!href_path.ends_with('/')).then_some(BrokenLinkReason::MissingTrailingSlash);
+    }
+    Some(BrokenLinkReason::Missing)
 }
 
 /// Records the first error observed across parallel (rayon) workers.
@@ -355,6 +409,10 @@ pub struct BrokenLink {
     pub source_page: String,
     /// The broken link URL
     pub link_url: String,
+    /// Why it is broken. Not every defect is a plain 404 — see
+    /// [`BrokenLinkReason`] — and the two non-404 kinds are precisely the ones
+    /// an author cannot diagnose from the URL alone.
+    pub reason: BrokenLinkReason,
 }
 
 /// Static site builder.
@@ -374,6 +432,13 @@ pub struct Builder {
     /// pass (url_path -> error message). Summarized to stderr after the build,
     /// mirroring broken-link reporting.
     frontmatter_errors: Arc<ConcurrentHashMap<String, String>>,
+    /// Tells the link transform whether an extension-less target
+    /// (`[x](../folder/file)`) is a markdown page — and therefore needs the
+    /// trailing slash the URL convention requires — or a genuinely
+    /// extension-less static file. Static output has no server to redirect a
+    /// non-canonical URL to the canonical one, so getting this right at render
+    /// time is the only chance.
+    markdown_page_probe: crate::link_transform::MarkdownPageProbe,
 }
 
 impl Builder {
@@ -390,6 +455,18 @@ impl Builder {
             config.oembed_cache_size
         );
 
+        // Built once, not per file: every rendered page shares it and the
+        // closure only holds a few small owned strings.
+        let markdown_page_probe =
+            crate::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
+                base_dir: config.root_dir.clone(),
+                canonical_base_dir: config.root_dir.canonicalize().ok(),
+                static_folder: config.static_folder.clone(),
+                markdown_extensions: config.markdown_extensions.clone(),
+                index_file: config.index_file.clone(),
+                tag_sources: crate::config::tag_sources_to_url_sources(&config.tag_sources),
+            });
+
         Ok(Builder {
             config,
             templates,
@@ -398,6 +475,7 @@ impl Builder {
             oembed_cache,
             build_link_index,
             frontmatter_errors,
+            markdown_page_probe,
         })
     }
 
@@ -527,7 +605,10 @@ impl Builder {
                     broken_links.len()
                 );
                 for link in &broken_links {
-                    eprintln!("   {} → {}", link.source_page, link.link_url);
+                    eprintln!(
+                        "   {} → {} ({})",
+                        link.source_page, link.link_url, link.reason
+                    );
                 }
                 eprintln!();
             }
@@ -836,10 +917,22 @@ impl Builder {
                         is_index_file: *is_index_file,
                         url_depth: None,
                         current_page_url: source_url.clone(),
+                        markdown_page_probe: None,
                     },
                 );
-                // Resolve the relative URL to an absolute URL based on the source page
-                let target_url = resolve_relative_url(source_url, &transformed, *is_index_file);
+                // Resolve the relative URL to an absolute URL based on the
+                // source page. `true`, not `*is_index_file`: `transformed` has
+                // already been through `transform_link`, which added the `../`
+                // that compensates for the trailing-slash URL convention.
+                // Passing `*is_index_file` strips the page URL's last segment a
+                // second time, so `docs/beta.md` linking `alpha.md` recorded a
+                // backlink on `/alpha/` instead of `/docs/alpha/`. The bug hid
+                // at the repository root, where the (former) silent clamp on an
+                // above-root `..` cancelled the extra hop. Same reasoning as
+                // `page_errors::validate_media_references` for post-transform
+                // srcs, and as `server::index_page_links`, so the two modes
+                // still agree.
+                let target_url = resolve_relative_url(source_url, &transformed, true);
 
                 let inbound_link = InboundLink {
                     from: source_url.clone(),
@@ -1026,6 +1119,7 @@ impl Builder {
             is_index_file,
             url_depth: Some(url_depth(&info.url_path)),
             current_page_url: info.url_path.clone(),
+            markdown_page_probe: Some(self.markdown_page_probe.clone()),
         };
 
         tracing::debug!("build: rendering {}", path.display());
@@ -2397,12 +2491,28 @@ impl Builder {
                             continue;
                         }
 
+                        // The href minus fragment/query: `resolve_link`
+                        // strips those internally, and the trailing slash that
+                        // survives is what tells a canonical page URL from one
+                        // whose relative links will all break.
+                        let href_path = href
+                            .split(['#', '?'])
+                            .next()
+                            .unwrap_or_default()
+                            .to_string();
+
                         if let Some(resolved) = self.resolve_link(path, href)
-                            && !link_target_exists(&resolved, &valid_files)
+                            && let Some(reason) = classify_link_target(
+                                &resolved,
+                                &href_path,
+                                &self.output_dir,
+                                &valid_files,
+                            )
                         {
                             broken.push(BrokenLink {
                                 source_page: source_page.clone(),
                                 link_url: href.to_string(),
+                                reason,
                             });
                         }
                     }
@@ -2725,9 +2835,22 @@ mod tests {
         let link = BrokenLink {
             source_page: "docs/index.html".to_string(),
             link_url: "../missing/".to_string(),
+            reason: BrokenLinkReason::Missing,
         };
         assert_eq!(link.source_page, "docs/index.html");
         assert_eq!(link.link_url, "../missing/");
+        assert_eq!(link.reason.to_string(), "no such page or file");
+        // The two non-404 reasons must read as distinct diagnoses; they are the
+        // ones an author cannot infer from the URL alone.
+        assert_eq!(
+            BrokenLinkReason::EscapesSiteRoot.to_string(),
+            "escapes the site root"
+        );
+        assert!(
+            BrokenLinkReason::MissingTrailingSlash
+                .to_string()
+                .contains("trailing slash")
+        );
     }
 
     #[test]
@@ -2836,6 +2959,16 @@ mod tests {
         let build_link_index = Arc::new(ConcurrentHashMap::new());
         let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
 
+        let markdown_page_probe =
+            crate::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
+                base_dir: config.root_dir.clone(),
+                canonical_base_dir: config.root_dir.canonicalize().ok(),
+                static_folder: config.static_folder.clone(),
+                markdown_extensions: config.markdown_extensions.clone(),
+                index_file: config.index_file.clone(),
+                tag_sources: crate::config::tag_sources_to_url_sources(&config.tag_sources),
+            });
+
         Builder {
             config,
             templates,
@@ -2844,6 +2977,7 @@ mod tests {
             oembed_cache,
             build_link_index,
             frontmatter_errors,
+            markdown_page_probe,
         }
     }
 
@@ -3102,7 +3236,7 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // ---------------------- link_target_exists tests ----------------------
+    // -------------------- classify_link_target tests ----------------------
 
     /// Helper to build a HashSet of valid files from a directory (mirrors validate_links logic).
     fn build_valid_files(dir: &Path) -> HashSet<PathBuf> {
@@ -3116,7 +3250,7 @@ mod tests {
     }
 
     #[test]
-    fn test_link_target_exists_file() {
+    fn test_classify_link_target_file() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
 
@@ -3125,11 +3259,30 @@ mod tests {
         std::fs::write(&file_path, "content").unwrap();
 
         let valid_files = build_valid_files(&temp_path);
-        assert!(link_target_exists(&file_path, &valid_files));
+        assert_eq!(
+            classify_link_target(&file_path, "readme.html", &temp_path, &valid_files),
+            None
+        );
+    }
+
+    /// A genuinely extension-less *file* (LICENSE, Makefile) is addressed by
+    /// its exact name and must not be asked for a trailing slash.
+    #[test]
+    fn test_classify_link_target_extensionless_file_is_canonical() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let file_path = temp_path.join("LICENSE");
+        std::fs::write(&file_path, "MIT").unwrap();
+
+        let valid_files = build_valid_files(&temp_path);
+        assert_eq!(
+            classify_link_target(&file_path, "LICENSE", &temp_path, &valid_files),
+            None
+        );
     }
 
     #[test]
-    fn test_link_target_exists_directory_with_index() {
+    fn test_classify_link_target_directory_with_index() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
 
@@ -3139,11 +3292,38 @@ mod tests {
         std::fs::write(dir_path.join("index.html"), "content").unwrap();
 
         let valid_files = build_valid_files(&temp_path);
-        assert!(link_target_exists(&dir_path, &valid_files));
+        assert_eq!(
+            classify_link_target(&dir_path, "docs/", &temp_path, &valid_files),
+            None
+        );
+    }
+
+    /// The reported defect, at the layer that must catch it in static output:
+    /// the page *is* there, so the old existence-only check waved it through,
+    /// but without the trailing slash every relative link on that page resolves
+    /// one directory too high.
+    #[test]
+    fn test_classify_link_target_page_without_trailing_slash_is_non_canonical() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+
+        let dir_path = temp_path.join("folder/file");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        std::fs::write(dir_path.join("index.html"), "content").unwrap();
+
+        let valid_files = build_valid_files(&temp_path);
+        assert_eq!(
+            classify_link_target(&dir_path, "../../folder/file", &temp_path, &valid_files),
+            Some(BrokenLinkReason::MissingTrailingSlash)
+        );
+        assert_eq!(
+            classify_link_target(&dir_path, "../../folder/file/", &temp_path, &valid_files),
+            None
+        );
     }
 
     #[test]
-    fn test_link_target_exists_directory_without_index() {
+    fn test_classify_link_target_directory_without_index() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
 
@@ -3152,14 +3332,17 @@ mod tests {
         std::fs::create_dir_all(&dir_path).unwrap();
 
         let valid_files = build_valid_files(&temp_path);
-        // Directory exists but has no index.html, so returns false
+        // Directory exists but has no index.html, so it is missing.
         // This is important because the link indexer creates directories
         // with just links.json for pages that don't exist
-        assert!(!link_target_exists(&dir_path, &valid_files));
+        assert_eq!(
+            classify_link_target(&dir_path, "docs/", &temp_path, &valid_files),
+            Some(BrokenLinkReason::Missing)
+        );
     }
 
     #[test]
-    fn test_link_target_exists_missing() {
+    fn test_classify_link_target_missing() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
 
@@ -3167,11 +3350,34 @@ mod tests {
 
         // Non-existent path
         let missing = temp_path.join("nonexistent");
-        assert!(!link_target_exists(&missing, &valid_files));
+        assert_eq!(
+            classify_link_target(&missing, "nonexistent", &temp_path, &valid_files),
+            Some(BrokenLinkReason::Missing)
+        );
+    }
+
+    /// A `..` chain that climbs out of the output directory used to be reported
+    /// (if at all) as a plain missing target, which sends an author looking for
+    /// a file that was never the point.
+    #[test]
+    fn test_classify_link_target_escaping_site_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let output_dir = temp.path().join("build");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        // A real file just outside the output: escaping must be reported even
+        // when the target exists.
+        let outside = temp.path().join("secret.html");
+        std::fs::write(&outside, "content").unwrap();
+
+        let valid_files = build_valid_files(temp.path());
+        assert_eq!(
+            classify_link_target(&outside, "../secret.html", &output_dir, &valid_files),
+            Some(BrokenLinkReason::EscapesSiteRoot)
+        );
     }
 
     #[test]
-    fn test_link_target_exists_path_with_trailing_slash() {
+    fn test_classify_link_target_path_with_trailing_slash() {
         let temp = tempfile::tempdir().unwrap();
         let temp_path = temp.path().to_path_buf();
 
@@ -3184,11 +3390,17 @@ mod tests {
 
         // Path with trailing slash should check for index.html
         let path_with_slash = temp_path.join("docs/");
-        assert!(link_target_exists(&path_with_slash, &valid_files));
+        assert_eq!(
+            classify_link_target(&path_with_slash, "docs/", &temp_path, &valid_files),
+            None
+        );
 
         // Non-existent directory with trailing slash
         let missing_with_slash = temp_path.join("missing/");
-        assert!(!link_target_exists(&missing_with_slash, &valid_files));
+        assert_eq!(
+            classify_link_target(&missing_with_slash, "missing/", &temp_path, &valid_files),
+            Some(BrokenLinkReason::Missing)
+        );
     }
 
     // ---------------------- validate_links tests ----------------------

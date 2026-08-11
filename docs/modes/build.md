@@ -81,13 +81,23 @@ Search works entirely client-side with no server required.
 
 ### 6. Validate Links
 
-mbr checks all internal links and reports broken references:
+mbr checks every `<a href>` in the generated HTML and reports the ones a reader
+cannot follow:
 
 ```
-Warning: Broken link found
-  Source: /docs/guide/index.html
-  Target: /docs/missing-page/
+⚠️  Broken links detected (3 total):
+   docs/guide/index.html → ../missing/ (no such page or file)
+   docs/guide/index.html → ../../folder/file (points at a page but has no trailing slash (breaks that page's relative links))
+   docs/guide/index.html → ../../../../escape/ (escapes the site root)
 ```
+
+The three reasons are genuinely different problems:
+
+| Reason | What is wrong |
+|--------|---------------|
+| `no such page or file` | Nothing in the output answers this URL. |
+| `points at a page but has no trailing slash` | The page *is* there, so the link appears to work — but pages live at directory-style URLs, and without the slash the browser resolves that page's own relative links one directory too high. The damage lands on the **next** click. A static host has no redirect to repair it (server mode does — see [Server Mode](server/)). |
+| `escapes the site root` | A `../` chain climbed above the site root. Browsers silently discard the excess (RFC 3986 §5.2.4), so the reader lands on an unrelated page instead of seeing an error. |
 
 ### Frontmatter Parse Errors
 
@@ -210,6 +220,12 @@ If mbr reports broken links:
 1. Check that the target file exists
 2. Verify the link path is correct (case-sensitive on Linux)
 3. Ensure the file has a recognized markdown extension
+4. For "no trailing slash", write the link as `page.md`, `page/` or `[[Page]]`
+   rather than as a hand-written `<a href="/page">` — mbr's own transform always
+   emits the canonical form
+5. For "escapes the site root", count the `../` segments: a link authored in
+   `docs/guide.md` resolves relative to `docs/`, so `../../x` already leaves the
+   repository
 
 ### Large Asset Files
 

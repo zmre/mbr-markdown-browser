@@ -88,6 +88,69 @@ When files change on disk, the GUI automatically reloads the current page. This 
 
 Use **File → Open Folder** (Cmd+O) to switch to a different markdown repository without restarting mbr.
 
+### External Links
+
+The mbr window is a viewer for your notes, not a web browser, so it only ever
+displays pages from mbr's own local server. Anything else is handed to the
+system, exactly as if you had clicked it in another native app:
+
+| Link | What happens |
+|------|--------------|
+| `docs/guide.md`, `/notes/`, `#section` | Navigates inside the mbr window |
+| `https://example.com` | Opens in your **default browser** |
+| `mailto:`, `tel:`, `message:`, `zoommtg:`, `x-devonthink-item:`, … | Opens in the application registered for that scheme |
+| `javascript:`, `vbscript:`, `data:` | Refused — neither followed nor handed to the system |
+
+Application schemes are recognised by *shape*, not from a list, so a scheme mbr
+has never heard of works as long as something on your machine claims it. The URL
+reaches the system byte for byte: a `message:` link addresses a message by its
+`Message-ID`, whose angle brackets arrive percent-encoded as `%3C`/`%3E`, and
+re-encoding or decoding them would hand your mail client an ID it cannot find.
+
+`target="_blank"` links and `window.open()` follow the same rule: same-origin
+popups open a linked mbr window (this is what Reveal.js speaker notes need),
+while external ones go to your browser rather than opening a second mbr window
+around somebody else's site.
+
+**Embedded content is unaffected.** A YouTube embed, or any other `<iframe>`,
+keeps loading in place — embeds are not links and are never handed to the
+system. This is not incidental: the webview's navigation callback cannot tell an
+`<iframe>` load from a click, so mbr splits the work. Application schemes are
+decided there (no frame can ever load a `mailto:`), while ordinary `http`/`https`
+links are recognised in the page itself, where a click is unmistakably a click.
+`src/external_open.rs` carries the full reasoning.
+
+The hand-off is built in. mbr does not shell out to `open`, `xdg-open` or
+`rundll32`; it calls `NSWorkspace` on macOS, `ShellExecuteW` on Windows and gio's
+default-application launcher on Linux.
+
+#### Launching applications is GUI-only, by design
+
+**Only the GUI window ever hands a URL to the operating system.** Server mode
+(`mbr -s`) and static builds deliberately do nothing with external links: they
+delegate to the browser you are visiting with, which already opens `https://`
+itself and hands `mailto:`, `message:` and friends to your own machine's
+registered applications.
+
+That is a security boundary, not a missing feature. Launching an application is
+something an interactive window does on behalf of the person sitting in front of
+it. A process answering HTTP has no such person, and **a server must never be
+induced to launch applications on its host** — a shared or remote `mbr -s` would
+otherwise let anyone who can reach the page start programs on the machine
+running it.
+
+mbr enforces this in three independent places, so no single mistake re-opens it:
+
+| Layer | What it does |
+|-------|--------------|
+| Runtime guard | The launcher refuses unless a GUI window is actually running in the process, and refuses *before* touching the OS. Because the GUI is compiled in by default, a server-mode binary still contains the launcher; this is what keeps it inert regardless of who calls it. Refusals are logged at `warn`. |
+| Templates | The in-page click handler is emitted only on GUI pages. Server and static pages never load it. |
+| The component itself | Checks the mode again at runtime and does nothing outside GUI mode — because `.mbr/` template overrides mean your repository's own templates, not mbr's, may decide what gets mounted. |
+
+If you see `Refusing to open … : handing URLs to the operating system is
+GUI-only` in a server log, nothing was launched; something asked a windowless
+process to start an application and was turned down.
+
 ## macOS App Bundle
 
 The macOS release includes `MBR.app`, a proper application bundle that:

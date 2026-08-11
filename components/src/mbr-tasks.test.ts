@@ -30,6 +30,7 @@ describe('MbrTasksElement', () => {
   afterEach(() => {
     element.remove()
     window.__MBR_CONFIG__ = undefined
+    window.frontmatter = undefined
     setTasksChunkImporter(() => Promise.reject(new Error('unset test importer')))
   })
 
@@ -190,6 +191,7 @@ describe('MbrTasksElement', () => {
         tasksEnabled: true,
         editEnabled: true,
       }
+      window.frontmatter = { markdown_source: 'docs/notes.md' }
       element.open()
       await settle(element)
 
@@ -201,11 +203,27 @@ describe('MbrTasksElement', () => {
         editEnabled: boolean
         toggleTask: unknown
         resolveHref: unknown
+        currentPath: string | null
       }
       expect(panel.endpoint).toBe('/.mbr/tasks')
       expect(panel.editEnabled).toBe(true)
       expect(typeof panel.toggleTask).toBe('function')
       expect(typeof panel.resolveHref).toBe('function')
+      // The page the panel opens scoped to and pins first; the chunk cannot
+      // read `window.frontmatter` through `task-toggle.ts` for itself.
+      expect(panel.currentPath).toBe('docs/notes.md')
+    })
+
+    it('injects a null current path from a page that is not a file', async () => {
+      // Section and home pages render no `markdown_source`, and the panel then
+      // opens exactly as it always has: unscoped and unpinned.
+      element.open()
+      await settle(element)
+
+      const panel = element.shadowRoot?.querySelector('mbr-tasks-panel') as unknown as {
+        currentPath: string | null
+      }
+      expect(panel.currentPath).toBeNull()
     })
 
     it('does not offer toggling when editing is off', async () => {

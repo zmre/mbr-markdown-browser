@@ -107,6 +107,9 @@ describe('buildTextIndex', () => {
     expect(matches(markup, 'Release Notes')).toEqual(['Release Notes'])
   })
 
+  // mbr-heading-enhancer now leaves the anchor empty and draws the "#" from
+  // CSS, so this prune is belt-and-braces — it keeps find-in-page correct for
+  // pages served by an older cached bundle, and for custom .mbr/ overrides.
   it('ignores the # permalink mbr-heading-enhancer appends to every heading', () => {
     const markup = '<h2 id="intro">Intro<a class="mbr-heading-anchor" href="#intro" aria-label="Permalink">#</a></h2>'
     expect(matches(markup, '#')).toEqual([])

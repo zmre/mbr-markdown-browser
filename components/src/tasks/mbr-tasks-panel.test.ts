@@ -26,9 +26,27 @@ async function flush(element: MbrTasksPanelElement): Promise<void> {
 
 async function mount(response: TaskQueryResponse = categoryResponse()) {
   respondWith(response)
+  return mountBare(null)
+}
+
+/**
+ * Mount with a current page, answering each query from `responses` in order —
+ * the last one repeats. Opening from a page can cost two queries (the folder
+ * scope, then the widened retry), so the tests below need per-call answers.
+ */
+async function mountFrom(currentPath: string | null, ...responses: TaskQueryResponse[]) {
+  for (const response of responses.slice(0, -1)) {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve(response) })
+  }
+  respondWith(responses[responses.length - 1])
+  return mountBare(currentPath)
+}
+
+async function mountBare(currentPath: string | null) {
   const element = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
   element.today = TODAY
   element.locale = 'en-US'
+  element.currentPath = currentPath
   document.body.appendChild(element)
   await flush(element)
   return element
@@ -38,9 +56,24 @@ function press(key: string, init: KeyboardEventInit = {}): void {
   document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }))
 }
 
+function bodyAt(index: number): unknown {
+  return JSON.parse((fetchMock.mock.calls[index][1] as RequestInit).body as string)
+}
+
 function lastBody(): unknown {
-  const call = fetchMock.mock.calls[fetchMock.mock.calls.length - 1]
-  return JSON.parse((call[1] as RequestInit).body as string)
+  return bodyAt(fetchMock.mock.calls.length - 1)
+}
+
+/** Display name of the selected folder row, or `null` when none is. */
+function selectedFolder(element: MbrTasksPanelElement): string | null {
+  const row = element.shadowRoot!.querySelector('.tree-row.selected .label-text')
+  return row?.textContent?.trim() ?? null
+}
+
+function folderLabels(element: MbrTasksPanelElement): string[] {
+  return Array.from(element.shadowRoot!.querySelectorAll('.tree-label .label-text')).map(
+    (node) => node.textContent?.trim() ?? ''
+  )
 }
 
 function rowLabels(element: MbrTasksPanelElement): string[] {
@@ -75,7 +108,7 @@ describe('MbrTasksPanelElement', () => {
   })
 
   describe('the request body', () => {
-    it('posts the default filter state on open', async () => {
+    it('posts the default filter state on open, unscoped without a current page', async () => {
       element = await mount()
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -88,6 +121,23 @@ describe('MbrTasksPanelElement', () => {
       expect(lastBody()).toEqual({
         q: '',
         folder: null,
+        statuses: ['open'],
+        priorities: [],
+        due: 'any',
+        mode: 'category',
+        limit: 500,
+      })
+    })
+
+    it('scopes that same default to the current page’s folder', async () => {
+      element = await mountFrom('docs/notes.md', categoryResponse())
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // Spelled out for the same reason: `folder` is the only field that moves,
+      // and the rest must not drift along with it.
+      expect(lastBody()).toEqual({
+        q: '',
+        folder: '/docs/',
         statuses: ['open'],
         priorities: [],
         due: 'any',
@@ -211,6 +261,147 @@ describe('MbrTasksPanelElement', () => {
       await flush(element)
 
       expect((lastBody() as { q: string }).q).toBe('report #work')
+    })
+  })
+
+  describe('opening from a page', () => {
+    /** One task three folders deep, with the facet chain the server sends for it. */
+    function deepResponse(): TaskQueryResponse {
+      return makeResponse({
+        groups: [
+          makeGroup({
+            key: '/docs/notes/weekly/',
+            label: 'Weekly',
+            url_path: '/docs/notes/weekly/',
+            tasks: [makeHit({ text: 'deep', path: 'docs/notes/weekly.md' })],
+          }),
+        ],
+        folders: [
+          { path: '/', count: 1 },
+          { path: '/docs/', count: 1 },
+          { path: '/docs/notes/', count: 1 },
+        ],
+        total_matches: 1,
+      })
+    }
+
+    /**
+     * No matches, but the folder facets the server sends regardless: they are
+     * computed ignoring the folder filter, so scoping never empties the tree.
+     */
+    function emptyResponse(): TaskQueryResponse {
+      return makeResponse({ folders: categoryResponse().folders })
+    }
+
+    it('selects the current page’s folder in the tree', async () => {
+      element = await mountFrom('docs/notes.md', categoryResponse())
+      expect(selectedFolder(element)).toBe('docs')
+    })
+
+    it('expands the whole ancestor chain, so the scoped folder is on screen', async () => {
+      element = await mountFrom('docs/notes/weekly.md', deepResponse())
+
+      // `notes` is only rendered if `/docs/` was expanded; the default set
+      // holds `/` alone, which would leave it hidden under a collapsed parent.
+      expect(folderLabels(element)).toEqual(['Home', 'docs', 'notes'])
+      expect(selectedFolder(element)).toBe('notes')
+      expect((lastBody() as { folder: string | null }).folder).toBe('/docs/notes/')
+    })
+
+    it('leaves the scope alone for a page at the repository root', async () => {
+      element = await mountFrom('todo.md', categoryResponse())
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect((lastBody() as { folder: string | null }).folder).toBeNull()
+      expect(selectedFolder(element)).toBe('Home')
+    })
+
+    it('behaves exactly as before without a current page', async () => {
+      element = await mount()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect((lastBody() as { folder: string | null }).folder).toBeNull()
+      expect(selectedFolder(element)).toBe('Home')
+      expect(rowLabels(element)).toEqual([
+        'H:Weekly notes',
+        'T:write the report',
+        'T:follow up',
+        'H:Todo',
+        'T:buy milk',
+      ])
+    })
+
+    it('pins the current page to the top of the category list', async () => {
+      // `todo.md` is at the root, so nothing is scoped: this isolates the pin.
+      element = await mountFrom('todo.md', categoryResponse())
+      expect(rowLabels(element)).toEqual([
+        'H:Todo',
+        'T:buy milk',
+        'H:Weekly notes',
+        'T:write the report',
+        'T:follow up',
+      ])
+    })
+
+    it('pins nothing in calendar mode, where a group is a date', async () => {
+      const calendar = calendarResponse()
+      // The current page's task in the middle bucket: were the pin to run here,
+      // "Tomorrow" would jump the queue.
+      calendar.groups[2].tasks[0].path = 'todo.md'
+      element = await mountFrom('todo.md', categoryResponse(), calendar)
+
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[1].click()
+      await flush(element)
+
+      const headings = Array.from(element.shadowRoot!.querySelectorAll('.group-label')).map((n) =>
+        n.textContent?.trim()
+      )
+      expect(headings[0]).toBe('Overdue')
+    })
+
+    describe('the empty-folder fallback', () => {
+      it('widens to the whole repository rather than opening on nothing', async () => {
+        element = await mountFrom('docs/notes.md', emptyResponse(), categoryResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect((bodyAt(0) as { folder: string | null }).folder).toBe('/docs/')
+        expect((bodyAt(1) as { folder: string | null }).folder).toBeNull()
+        // The selection follows the scope, and the empty guess is never shown.
+        expect(selectedFolder(element)).toBe('Home')
+        expect(rowLabels(element)).toContain('H:Weekly notes')
+        expect(element.shadowRoot!.querySelector('.results-empty')).toBeNull()
+      })
+
+      it('fires at most once, so an empty folder the user picks stays picked', async () => {
+        // 1st: empty (widens), 2nd: the full list, 3rd onwards: empty again.
+        element = await mountFrom(
+          'docs/notes.md',
+          emptyResponse(),
+          categoryResponse(),
+          emptyResponse()
+        )
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+
+        const docs = element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.tree-label')[1]
+        docs.click()
+        await flush(element)
+
+        expect(fetchMock).toHaveBeenCalledTimes(3) // no automatic third widening
+        expect((lastBody() as { folder: string | null }).folder).toBe('/docs/')
+        expect(selectedFolder(element)).toBe('docs')
+      })
+
+      it('leaves the folder alone when a typed query is what came back empty', async () => {
+        element = await mountFrom('docs/notes.md', categoryResponse(), emptyResponse())
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+
+        const input = element.shadowRoot!.querySelector('#tasks-filter') as HTMLInputElement
+        input.value = 'nothing matches this'
+        input.dispatchEvent(new Event('input'))
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        await flush(element)
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect((lastBody() as { folder: string | null }).folder).toBe('/docs/')
+      })
     })
   })
 

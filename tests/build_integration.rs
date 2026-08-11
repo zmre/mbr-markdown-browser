@@ -185,6 +185,27 @@ async fn test_build_omits_find_bar() {
 }
 
 #[tokio::test]
+async fn test_build_omits_external_link_handler() {
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\n[out](https://example.com/)");
+
+    let output = build_site(&repo).await;
+
+    let html_path = output.join("test").join("index.html");
+    let html = fs::read_to_string(&html_path).unwrap();
+
+    // `<mbr-link-enhancement>` intercepts link clicks and asks the host process
+    // to hand the URL to the operating system. A built site is read in an
+    // ordinary browser that already does that, and the site may be published
+    // anywhere, so the element must not ship. `_display_enhancements.html`
+    // mounted it ungated on every markdown page until this was closed.
+    assert!(
+        !html.contains("mbr-link-enhancement"),
+        "Static builds must not ship the GUI-only external-link handler"
+    );
+}
+
+#[tokio::test]
 async fn test_build_head_includes_graph_depth() {
     let repo = TestRepo::new();
     repo.create_markdown("test.md", "# Test");
@@ -976,6 +997,131 @@ async fn test_build_detects_broken_internal_links() {
         stats.broken_links, 1,
         "Expected 1 broken link, got {}",
         stats.broken_links
+    );
+}
+
+/// Static output has no server to redirect a non-canonical URL, so the
+/// trailing slash has to be right at render time. An extension-less markdown
+/// target must get it; an extension-less *static* file must not.
+#[tokio::test]
+async fn test_build_extensionless_link_targets_are_distinguished() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n[Page](../folder/file)\n\n[License](../LICENSE)\n\n[Makefile](Makefile)",
+    );
+    repo.create_markdown("folder/file.md", "# File\n\n[Sibling](sibling.md)");
+    repo.create_markdown("folder/sibling.md", "# Sibling");
+    repo.create_static_file("LICENSE", b"MIT");
+    repo.create_static_file("docs/Makefile", b"all:");
+
+    let (output, stats) = build_site_with_stats(&repo).await;
+
+    let guide = fs::read_to_string(output.join("docs/guide/index.html")).unwrap();
+    assert!(
+        guide.contains(r#"href="../../folder/file/""#),
+        "extension-less markdown target must carry its trailing slash:\n{guide}"
+    );
+    assert!(
+        guide.contains(r#"href="../../LICENSE""#) && !guide.contains(r#"href="../../LICENSE/""#),
+        "an extension-less static file must not gain a trailing slash:\n{guide}"
+    );
+    assert!(
+        guide.contains(r#"href="../Makefile""#) && !guide.contains(r#"href="../Makefile/""#),
+        "a sibling static file must not gain a trailing slash:\n{guide}"
+    );
+
+    // The cascade: the page the link lands on emits its own relative link, and
+    // that one only resolves because the first hop was canonical.
+    let file = fs::read_to_string(output.join("folder/file/index.html")).unwrap();
+    assert!(
+        file.contains(r#"href="../sibling/""#),
+        "the landed page's sibling link:\n{file}"
+    );
+
+    assert_eq!(
+        stats.broken_links, 0,
+        "a correctly transformed site has no broken links"
+    );
+}
+
+/// The build's own checker must see the defect too. `<dir>/index.html` exists,
+/// so an existence-only check waves a slashless page link through — and static
+/// hosting has no redirect to repair it.
+#[tokio::test]
+async fn test_build_detects_page_link_without_trailing_slash() {
+    let repo = TestRepo::new();
+    // Raw HTML bypasses the link transform, which is how a hand-authored
+    // non-canonical URL reaches the output.
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n<a href=\"../../folder/file\">no slash</a>\n",
+    );
+    repo.create_markdown("folder/file.md", "# File");
+
+    let (_output, stats) = build_site_with_stats(&repo).await;
+
+    assert_eq!(
+        stats.broken_links, 1,
+        "a page link with no trailing slash must be reported, got {}",
+        stats.broken_links
+    );
+}
+
+/// A `..` chain that climbs out of the output directory produced no diagnostic
+/// while the resolver silently clamped it.
+#[tokio::test]
+async fn test_build_detects_link_escaping_the_site_root() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n<a href=\"../../../../escape/target/\">out</a>\n",
+    );
+
+    let (_output, stats) = build_site_with_stats(&repo).await;
+
+    assert_eq!(
+        stats.broken_links, 1,
+        "a link escaping the site root must be reported, got {}",
+        stats.broken_links
+    );
+}
+
+/// Regression for the double-compensated backlink target: `docs/beta.md` is
+/// served at `/docs/beta/`, so resolving its already-transformed `../alpha/`
+/// with the page's own `is_index_file` strips the last URL segment twice and
+/// files the backlink on `/alpha/`. Deliberately one folder deep — at the
+/// repository root the clamp on an above-root `..` cancels the extra hop and
+/// the bug disappears.
+#[tokio::test]
+async fn test_build_backlinks_resolve_inside_a_subfolder() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/alpha.md", "# Alpha");
+    repo.create_markdown("docs/beta.md", "# Beta\n\n[Alpha](alpha.md)");
+
+    let output = build_site(&repo).await;
+
+    let links: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join("docs/alpha/links.json")).expect("links.json for alpha"),
+    )
+    .unwrap();
+    let sources: Vec<&str> = links["inbound"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["from"].as_str())
+        .collect();
+    assert_eq!(
+        sources,
+        vec!["/docs/beta/"],
+        "docs/beta.md links to docs/alpha.md, so the backlink belongs on \
+         /docs/alpha/: {links:?}"
+    );
+
+    // `/alpha/` is where the bug filed it, and no such page exists.
+    assert!(
+        !output.join("alpha").join("index.html").exists(),
+        "/alpha/ is not a page; a backlink filed there is unreachable"
     );
 }
 
@@ -2410,9 +2556,15 @@ async fn test_build_is_byte_deterministic() {
         "docs/alpha.md",
         "---\ntitle: Alpha\ntags:\n  - alpha\n---\n\n[Note From Alpha](../note/)\n",
     );
+    // Beta also links to a sibling *inside* `docs/`. A repo-root target alone
+    // cannot detect a double-compensated backlink URL: resolving the extra hop
+    // hits the site root, where an above-root `..` is clamped and the mistake
+    // cancels out. Only a non-root target shows `/alpha/` instead of
+    // `/docs/alpha/`.
     repo.create_markdown(
         "docs/beta.md",
-        "---\ntitle: Beta\ntags:\n  - beta\n---\n\n[Note From Beta](../note/)\n",
+        "---\ntitle: Beta\ntags:\n  - beta\n---\n\n[Note From Beta](../note/)\n\n\
+         [Alpha From Beta](alpha.md)\n",
     );
     repo.create_static_file("images/pic.png", b"\x89PNG\r\n\x1a\nfake");
     repo.create_static_file("images/other.png", b"\x89PNG\r\n\x1a\nfake2");
