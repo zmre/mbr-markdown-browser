@@ -62,17 +62,23 @@ export type TaskRow =
 /**
  * Project a response into display groups, in render order.
  *
- * Category mode is 1:1 with the server's groups. Calendar mode keeps the
- * server's bucket order (Overdue → Today → Tomorrow → dates → No due date) and
- * splices the synthesized Upcoming header in front of the first date bucket.
+ * Category mode is 1:1 with the server's groups, except that the page the user
+ * opened the panel from is pinned first. Calendar mode keeps the server's
+ * bucket order (Overdue → Today → Tomorrow → dates → No due date) and splices
+ * the synthesized Upcoming header in front of the first date bucket — a date is
+ * not a file, so there is nothing to pin.
  */
 export function buildDisplayGroups(
   response: TaskQueryResponse | null,
-  mode: TaskMode
+  mode: TaskMode,
+  currentPath: string | null = null
 ): DisplayGroup[] {
   const groups = response?.groups ?? []
   if (mode === 'category') {
-    return groups.map((group) => fromServerGroup(group, true, 0, null))
+    return pinCurrentFile(
+      groups.map((group) => fromServerGroup(group, true, 0, null)),
+      currentPath
+    )
   }
 
   const out: DisplayGroup[] = []
@@ -110,6 +116,26 @@ export function buildDisplayGroups(
   }
 
   return out
+}
+
+/**
+ * Move the group for the page the panel was opened from to the front, leaving
+ * every other group in the server's order.
+ *
+ * Matched on the tasks' source `path`, never on the group key: that key is the
+ * file's `url_path`, which a source path does not determine — `docs/index.md`
+ * is served at `/docs/` and the static-folder overlay hides a directory level
+ * (see `task_query::TaskHit::path`). One task is enough, since a category group
+ * is one file.
+ *
+ * A splice rather than a sort, so the reorder is stable.
+ */
+function pinCurrentFile(groups: DisplayGroup[], currentPath: string | null): DisplayGroup[] {
+  if (currentPath === null) return groups
+  const index = groups.findIndex((group) => group.tasks.some((task) => task.path === currentPath))
+  if (index <= 0) return groups
+  groups.unshift(...groups.splice(index, 1))
+  return groups
 }
 
 function fromServerGroup(

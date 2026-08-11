@@ -93,3 +93,29 @@ export function folderScopeValue(path: string | null): string | null {
   const trimmed = path.trim().replace(/^\/+|\/+$/g, '')
   return trimmed.length === 0 ? null : `/${trimmed}/`
 }
+
+/**
+ * The folder a repo-relative *source* path sits in, in facet shape:
+ * `docs/notes.md` -> `/docs/`, and a file at the repository root -> `null`.
+ *
+ * `null` for the root rather than `/` because that is how the pane already
+ * spells "no scope": the Home row is selected whenever the folder is `null`.
+ *
+ * Expects the separator normalization `task-toggle.ts`'s `currentDocumentPath`
+ * already applies (forward slashes, no leading slash) — the only source of the
+ * value, and one this chunk cannot import for itself.
+ */
+export function folderOfSourcePath(path: string | null): string | null {
+  if (typeof path !== 'string') return null
+  const cut = path.lastIndexOf('/')
+  return cut < 0 ? null : folderScopeValue(path.slice(0, cut))
+}
+
+/**
+ * Every tree node that has to be expanded for `path`'s row to be on screen,
+ * the folder itself included: `/docs/notes/` -> `/`, `/docs/`, `/docs/notes/`.
+ */
+export function folderAncestors(path: string): string[] {
+  const segments = path.split('/').filter((s) => s.length > 0)
+  return ['/', ...segments.map((_, i) => `/${segments.slice(0, i + 1).join('/')}/`)]
+}

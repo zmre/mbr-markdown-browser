@@ -42,6 +42,22 @@ never empties out the siblings you might want to switch to.
 
 **Right pane — results.** A filter field, the two mode tabs, and the task list.
 
+### Where it opens
+
+The panel opens where you already are. The folder of the note you pressed `t`
+on starts selected — with the tree expanded down to it — so the first thing you
+see is the work nearest to what you were reading, not the top of the
+repository. Selecting **Home** widens to everything, and one click on any other
+folder goes wherever you meant to go instead.
+
+If that folder has nothing matching in it, the panel widens to the whole
+repository by itself rather than opening on an empty list. That happens only on
+the way in: once you are in, a folder you pick yourself stays picked even when
+it turns up empty.
+
+Opening from the home page or a section page — neither of which is a file —
+starts unscoped, exactly as it always has.
+
 ## The two modes
 
 ### Category (the default)
@@ -49,6 +65,10 @@ never empties out the siblings you might want to switch to.
 One heading per file, tasks in the order they appear in it. The heading is the
 note's title, with its folder underneath in smaller type, and clicking it opens
 that note.
+
+The note you opened the panel from is pinned to the top of the list, so its
+tasks are the first ones you see; everything else keeps the server's order
+below it. Calendar mode does not pin — a heading there is a date, not a file.
 
 The `x/y` and progress bar on the right count **every task in the file**,
 including ones the current filter has hidden — so a file showing you one
@@ -95,6 +115,10 @@ The ⚙ button opens the rest of the filters:
   means "incomplete" to the server, which would be confusing to look at).
 - **Priority** — Normal, High, Urgent. Empty means all.
 - **Due** — Any, Overdue, Due today, Due tomorrow, Upcoming, or No due date.
+
+The folder scope is the one filter that does *not* start empty: it starts on
+the folder of the note you were reading (see [Where it
+opens](#where-it-opens)).
 
 Every filter change is a fresh query; nothing is filtered in the browser, so
 the counts and the list can never disagree.
@@ -167,8 +191,31 @@ unbound — no control appears that cannot do anything.
 |--------|---------|--------|
 | `tasks_enabled` | `true` | Turn the panel and its endpoint off (`--no-tasks`) |
 | `tasks_stamp_done` | `true` | Maintain `@done(...)` when a task is completed |
+| `tasks_ignore_globs` | `[]` | Folders whose tasks the panel ignores (config/env only) |
 
 See [Task Settings](../reference/configuration/#task-settings) for the details.
+
+## Hiding a folder from the panel
+
+A folder of checklist *templates* is the usual problem: dozens of permanently
+unchecked boxes that are nobody's actual work, crowding out the real ones. Name
+its contents in `tasks_ignore_globs`:
+
+```toml
+# .mbr/config.toml
+tasks_ignore_globs = ["templates/**"]
+```
+
+Matching files are left out of the index the panel is built from, so they vanish
+from all of it at once — the list, the folder pane, and every count.
+
+The documents themselves are untouched: they still render, still show their
+checkboxes, and those checkboxes still toggle when editing is on. The panel is a
+view over your tasks, not the definition of them. Patterns match a file's
+repository-relative path, so use `templates/**` (the folder's contents), not
+`templates`; see
+[Task Settings](../reference/configuration/#task-settings) for the full pattern
+rules.
 
 ## Why not in static builds
 

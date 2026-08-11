@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { buildTaskFolderTree, folderScopeValue, type FolderTreeNode } from './folder-tree.js'
+import {
+  buildTaskFolderTree,
+  folderAncestors,
+  folderOfSourcePath,
+  folderScopeValue,
+  type FolderTreeNode,
+} from './folder-tree.js'
 import type { FolderFacet } from './types.js'
 
 /** `path(count)` pairs, depth-first, for compact structural assertions. */
@@ -91,5 +97,29 @@ describe('folderScopeValue', () => {
       expect(folderScopeValue(input)).toBeNull()
     }
     expect(folderScopeValue(null)).toBeNull()
+  })
+})
+
+describe('folderOfSourcePath', () => {
+  it('turns a source path into its folder, in facet shape', () => {
+    expect(folderOfSourcePath('docs/notes.md')).toBe('/docs/')
+    expect(folderOfSourcePath('docs/notes/weekly.md')).toBe('/docs/notes/')
+  })
+
+  it('reports no scope for a file at the repository root', () => {
+    // `null`, not `/`: that is how the pane already spells "no scope", and it
+    // keeps the Home row selected exactly as it is without a current page.
+    expect(folderOfSourcePath('todo.md')).toBeNull()
+    expect(folderOfSourcePath(null)).toBeNull()
+  })
+})
+
+describe('folderAncestors', () => {
+  it('lists every node that must be expanded, the folder itself included', () => {
+    expect(folderAncestors('/docs/notes/')).toEqual(['/', '/docs/', '/docs/notes/'])
+  })
+
+  it('is just the root for the root', () => {
+    expect(folderAncestors('/')).toEqual(['/'])
   })
 })

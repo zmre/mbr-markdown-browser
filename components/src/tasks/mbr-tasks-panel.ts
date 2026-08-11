@@ -11,7 +11,13 @@ import {
   type DisplayGroup,
   type TaskRow,
 } from './task-groups.js'
-import { buildTaskFolderTree, folderScopeValue, type FolderTreeNode } from './folder-tree.js'
+import {
+  buildTaskFolderTree,
+  folderAncestors,
+  folderOfSourcePath,
+  folderScopeValue,
+  type FolderTreeNode,
+} from './folder-tree.js'
 import { formatDateHeading, progressPercent } from './task-format.js'
 import type {
   DueFilter,
@@ -155,6 +161,22 @@ export class MbrTasksPanelElement extends LitElement {
   @property({ attribute: false })
   locale: string | undefined = undefined
 
+  /**
+   * Repo-relative source path of the page the panel was opened from, in the
+   * same string space as {@link TaskHit.path}; `null` on section and home
+   * pages, which are not files.
+   *
+   * Injected rather than read from `window.frontmatter`, like every other
+   * service here: the resolution lives in `task-toggle.ts`'s
+   * `currentDocumentPath`, which this chunk may not import.
+   *
+   * Drives two things — the folder the panel opens scoped to, and the group
+   * pinned to the top of the category list. Both are about landing the user
+   * near what they were already reading.
+   */
+  @property({ attribute: false })
+  currentPath: string | null = null
+
   // === Query state ===
   @state() private _q = ''
   @state() private _folder: string | null = null
@@ -208,6 +230,17 @@ export class MbrTasksPanelElement extends LitElement {
    */
   private _generation = 0
 
+  /**
+   * Armed by {@link _applyCurrentFolder}, and consumed by the very next query
+   * run: the default folder scope is a *guess*, and one that comes back empty
+   * has to widen rather than open the panel on nothing.
+   *
+   * Consumed at the start of a run rather than on its response, so a first
+   * query the user superseded by typing hands the fallback to nobody. That also
+   * makes looping impossible — the widened re-query is already disarmed.
+   */
+  private _folderFallbackPending = false
+
   override connectedCallback() {
     super.connectedCallback()
     document.addEventListener('keydown', this._handleKeydown)
@@ -228,6 +261,7 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   override firstUpdated() {
+    this._applyCurrentFolder()
     this._input?.focus()
     void this._runQuery()
   }
@@ -235,6 +269,22 @@ export class MbrTasksPanelElement extends LitElement {
   // ========================================
   // Querying
   // ========================================
+
+  /**
+   * Open scoped to the folder of the page the panel was opened from.
+   *
+   * A no-op without a current path (home and section pages) and for a file at
+   * the repository root, whose folder is already the default "no scope".
+   */
+  private _applyCurrentFolder() {
+    const folder = folderOfSourcePath(this.currentPath)
+    if (folder === null) return
+    this._folder = folder
+    // The scoped folder is worthless if its row is buried under a collapsed
+    // ancestor, so open the whole chain down to it.
+    this._expandedFolders = new Set([...this._expandedFolders, ...folderAncestors(folder)])
+    this._folderFallbackPending = true
+  }
 
   /** The exact body posted to `/.mbr/tasks` for the current filter state. */
   public requestBody(): TaskQueryRequest {
@@ -274,6 +324,8 @@ export class MbrTasksPanelElement extends LitElement {
 
     const generation = ++this._generation
     const isStale = () => generation !== this._generation
+    const widenIfEmpty = this._folderFallbackPending
+    this._folderFallbackPending = false
     this._loading = true
     this._error = null
 
@@ -295,6 +347,14 @@ export class MbrTasksPanelElement extends LitElement {
       // Every state write happens after the last await, so a superseded run
       // cannot leave the folder tree describing one query and the groups another.
       if (isStale()) return
+      // Checked before anything is committed, so the guess that missed is never
+      // rendered — the panel stays on "Loading tasks…" until the widened
+      // response lands, rather than flashing "No tasks match these filters."
+      if (widenIfEmpty && data.groups.length === 0) {
+        this._folder = null
+        await this._runQuery()
+        return
+      }
       const focusedKey = options.keepFocus ? this._focusedTaskKey() : null
       const previousRow = this._focusRow
       this._response = data
@@ -331,6 +391,7 @@ export class MbrTasksPanelElement extends LitElement {
     response: TaskQueryResponse | null
     mode: TaskMode
     collapsed: ReadonlySet<string>
+    currentPath: string | null
     groups: DisplayGroup[]
     rows: TaskRow[]
   } | null = null
@@ -341,18 +402,20 @@ export class MbrTasksPanelElement extends LitElement {
       cache &&
       cache.response === this._response &&
       cache.mode === this._mode &&
-      cache.collapsed === this._collapsed
+      cache.collapsed === this._collapsed &&
+      cache.currentPath === this.currentPath
     ) {
       return cache
     }
     // Every input is replaced rather than mutated (`_collapsed` is a fresh Set
     // per toggle), so identity comparison is a sound cache key.
-    const groups = buildDisplayGroups(this._response, this._mode)
+    const groups = buildDisplayGroups(this._response, this._mode, this.currentPath)
     const rows = buildRows(groups, this._collapsed)
     this._viewCache = {
       response: this._response,
       mode: this._mode,
       collapsed: this._collapsed,
+      currentPath: this.currentPath,
       groups,
       rows,
     }

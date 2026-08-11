@@ -7,7 +7,21 @@ import {
   taskAt,
   taskHref,
 } from './task-groups.js'
-import { calendarResponse, categoryResponse, makeHit } from './test-fixtures.js'
+import { calendarResponse, categoryResponse, makeGroup, makeHit, makeResponse } from './test-fixtures.js'
+
+/** Four files in server (lexicographic) order, so a reorder is visible. */
+function fourFiles() {
+  return makeResponse({
+    groups: ['a', 'b', 'c', 'd'].map((name) =>
+      makeGroup({
+        key: `/${name}/`,
+        label: name.toUpperCase(),
+        url_path: `/${name}/`,
+        tasks: [makeHit({ text: name, url_path: `/${name}/`, path: `${name}.md` })],
+      })
+    ),
+  })
+}
 
 describe('buildDisplayGroups (category mode)', () => {
   it('is one-to-one with the server groups and always shows progress', () => {
@@ -29,6 +43,57 @@ describe('buildDisplayGroups (category mode)', () => {
 
   it('is empty for a null response', () => {
     expect(buildDisplayGroups(null, 'category')).toEqual([])
+  })
+})
+
+describe('buildDisplayGroups (pinning the current page)', () => {
+  it('moves the current file to the front and leaves the rest in order', () => {
+    const groups = buildDisplayGroups(fourFiles(), 'category', 'c.md')
+    expect(groups.map((g) => g.key)).toEqual(['/c/', '/a/', '/b/', '/d/'])
+  })
+
+  it('is a stable reorder: only the pinned group moves', () => {
+    const before = buildDisplayGroups(fourFiles(), 'category').map((g) => g.key)
+    const after = buildDisplayGroups(fourFiles(), 'category', 'd.md').map((g) => g.key)
+    expect(after[0]).toBe('/d/')
+    expect(after.slice(1)).toEqual(before.filter((key) => key !== '/d/'))
+  })
+
+  it('matches the source path, which the url_path group key does not determine', () => {
+    // `docs/index.md` is served at `/docs/`, so the key cannot be reconstructed
+    // from the path — the match has to come off the tasks.
+    const response = makeResponse({
+      groups: [
+        makeGroup({ key: '/other/', label: 'Other', tasks: [makeHit({ text: 'x', path: 'other.md' })] }),
+        makeGroup({
+          key: '/docs/',
+          label: 'Docs',
+          tasks: [makeHit({ text: 'y', path: 'docs/index.md' })],
+        }),
+      ],
+    })
+    expect(buildDisplayGroups(response, 'category', 'docs/index.md').map((g) => g.key)).toEqual([
+      '/docs/',
+      '/other/',
+    ])
+  })
+
+  it('leaves the order untouched when the current file is already first', () => {
+    const groups = buildDisplayGroups(fourFiles(), 'category', 'a.md')
+    expect(groups.map((g) => g.key)).toEqual(['/a/', '/b/', '/c/', '/d/'])
+  })
+
+  it('leaves the order untouched when the current file has no tasks in the response', () => {
+    const groups = buildDisplayGroups(fourFiles(), 'category', 'nowhere.md')
+    expect(groups.map((g) => g.key)).toEqual(['/a/', '/b/', '/c/', '/d/'])
+  })
+
+  it('pins nothing in calendar mode, where a group is a date rather than a file', () => {
+    const response = calendarResponse()
+    // The current page's task sits in the middle bucket: pinning would move
+    // "Tomorrow" to the front, and a due date has no business being reordered.
+    response.groups[2].tasks[0].path = 'todo.md'
+    expect(buildDisplayGroups(response, 'calendar', 'todo.md')[0].key).toBe('overdue')
   })
 })
 
