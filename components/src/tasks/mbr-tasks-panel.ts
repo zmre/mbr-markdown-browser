@@ -974,7 +974,7 @@ export class MbrTasksPanelElement extends LitElement {
     `
     return html`
       <div class="mode-tabs" role="tablist" aria-label="Grouping mode">
-        ${tab('category', '▤', 'Category')} ${tab('calendar', '▦', 'Calendar')}
+        ${tab('category', '▤', 'By Note')} ${tab('calendar', '▦', 'By Due')}
       </div>
     `
   }
