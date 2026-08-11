@@ -147,10 +147,21 @@ export class MbrLinkEnhancementElement extends LitElement {
     }
 
     // One delegated listener for the whole document, not per link: it has to
-    // cover the nav, footer and anything a component renders later, and this
-    // element is only ever emitted under `{% if gui_mode %}` in
-    // templates/_footer.html, so it never runs in server mode or a static
-    // build, where the real browser already opens external links correctly.
+    // cover the nav, footer and anything a component renders later.
+    //
+    // The isGuiMode() check above is load-bearing, not belt-and-braces.
+    // _footer.html gates this element on `{% if gui_mode %}`, but
+    // _display_enhancements.html mounts it UNGATED on every markdown page, so
+    // in server mode and static builds the element is still constructed and
+    // that early return is the only thing keeping a document-wide click
+    // listener off the page. Those modes must not have one: a real browser
+    // already opens https:// itself and hands message:// and friends to the
+    // OS, which is the behaviour this listener exists to emulate.
+    //
+    // In GUI mode both mounts are present, so this line runs twice.
+    // addEventListener dedups on (type, listener, capture) and
+    // handleExternalLinkClick is a module-level function, so exactly one
+    // listener is registered and a click cannot open the URL twice.
     document.addEventListener('click', handleExternalLinkClick)
 
     // Wait for DOM to be ready before enhancing links
