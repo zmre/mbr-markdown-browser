@@ -203,7 +203,7 @@ Press **`f`**, **`F`**, or **`T`** to open the Link Explorer - a quick navigatio
 
 - **Fuzzy search** - Type to filter items with intelligent matching
 - **Visibility awareness** - In ToC mode, currently visible headings are prioritized and marked
-- **Internal vs External** - External links open in new tabs, internal links navigate in place
+- **Internal vs External** - External links open in new tabs, internal links navigate in place. In [GUI mode](gui.md#external-links) there are no tabs, so external links go to your default browser instead
 - **Tab cycling** - Press `Tab` to cycle between the three views
 
 ### Layout
@@ -259,10 +259,32 @@ This enables wiki-style bidirectional link navigation without requiring any spec
 |----------|--------|-------------|
 | `/` | GET | Home page (root directory listing) |
 | `/{path}/` | GET | Markdown page or directory |
+| `/{path}` | GET | `301` to the canonical `/{path}/` when it names a markdown page |
 | `/.mbr/site.json` | GET | Full site metadata as JSON |
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/ws/changes` | WS | WebSocket for live reload |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
+
+### Canonical URL Redirects
+
+Markdown pages have exactly one URL: the directory-style one with a trailing
+slash (`docs/guide.md` → `/docs/guide/`). Any other spelling gets a `301`:
+
+```
+GET /docs/guide      → 301 Location: /docs/guide/
+GET /docs/guide.md   → 301 Location: /docs/guide/
+GET /docs            → 301 Location: /docs/          (docs/index.md)
+GET /docs/index/     → 301 Location: /docs/
+GET /docs/guide?x=1  → 301 Location: /docs/guide/?x=1
+```
+
+This is not cosmetic. The trailing slash decides the base a browser uses for the
+page's own relative links: from `/docs/guide/` a `../other/` href reaches
+`/docs/other/`, but from `/docs/guide` it reaches `/other/`. Serving the page in
+place at the slashless URL would break every link *on* it, one click later.
+
+Static files (`/images/photo.png`, `/LICENSE`), directory listings and `/.mbr/*`
+routes are never redirected.
 
 ### Search API
 

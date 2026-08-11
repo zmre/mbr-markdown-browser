@@ -18,8 +18,40 @@
 //! 2. Replacing markdown extensions with trailing slash
 //! 3. Collapsing index file references to their directory
 
+use std::sync::Arc;
+
+/// Answers "does this absolute, percent-decoded site URL address a markdown
+/// page?" for an authored link target that carries no markdown extension.
+///
+/// See [`LinkTransformConfig::markdown_page_probe`] for why this is a
+/// caller-supplied predicate rather than a guess.
+pub type MarkdownPageProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Builds the probe used in server and build mode: ask the *path resolver* —
+/// the very code a live HTTP request goes through — whether the URL resolves to
+/// a markdown file.
+///
+/// Reusing the resolver rather than re-deriving candidate filenames is the
+/// point: this cannot disagree with what the server actually serves, which is
+/// the class of bug that produced the trailing-slash defect in the first place.
+///
+/// The cost is paid only for *extension-less relative* link targets — `.md`
+/// links, root-relative URLs, anchors and external URLs never reach it — and is
+/// a handful of `stat` calls.
+pub fn filesystem_markdown_page_probe(
+    resolver: crate::path_resolver::OwnedPathResolverConfig,
+) -> MarkdownPageProbe {
+    Arc::new(move |absolute_url: &str| {
+        let request_path = crate::path_resolver::normalize_link_target(absolute_url);
+        matches!(
+            crate::path_resolver::resolve_request_path(&resolver.as_config(), &request_path),
+            crate::path_resolver::ResolvedPath::MarkdownFile(_)
+        )
+    })
+}
+
 /// Configuration for link transformation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LinkTransformConfig {
     /// Markdown file extensions (e.g., ["md", "markdown"])
     pub markdown_extensions: Vec<String>,
@@ -37,6 +69,36 @@ pub struct LinkTransformConfig {
     /// current page context (e.g. CLI/QuickLook paths, which never resolve
     /// wikilinks globally).
     pub current_page_url: String,
+    /// Decides whether an **extension-less** relative target names a markdown
+    /// page (`[x](../folder/file)`) or a genuinely extension-less static file
+    /// (`[license](../LICENSE)`).
+    ///
+    /// Markdown pages are served at directory-style URLs, so a link to one must
+    /// end in `/`; a static file must not. Nothing in the href distinguishes
+    /// the two and guessing either way corrupts the other, so the repository
+    /// has to answer. `None` means "no repository context" — CLI/QuickLook
+    /// rendering, link-grep and unit tests — and preserves the historical
+    /// behaviour of treating an extension-less target as a static file.
+    ///
+    /// Called with the target's **absolute** site URL, already resolved against
+    /// [`Self::current_page_url`], so a probe never reimplements relative-path
+    /// arithmetic.
+    pub markdown_page_probe: Option<MarkdownPageProbe>,
+}
+
+/// Hand-written because [`MarkdownPageProbe`] is a closure and cannot derive
+/// `Debug`; only its presence is worth printing.
+impl std::fmt::Debug for LinkTransformConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkTransformConfig")
+            .field("markdown_extensions", &self.markdown_extensions)
+            .field("index_file", &self.index_file)
+            .field("is_index_file", &self.is_index_file)
+            .field("url_depth", &self.url_depth)
+            .field("current_page_url", &self.current_page_url)
+            .field("markdown_page_probe", &self.markdown_page_probe.is_some())
+            .finish()
+    }
 }
 
 impl Default for LinkTransformConfig {
@@ -47,6 +109,7 @@ impl Default for LinkTransformConfig {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         }
     }
 }
@@ -61,7 +124,10 @@ impl Default for LinkTransformConfig {
 ///    [`crate::url_path::is_external_url`]
 /// 3. Root-relative URLs (starts with `/`) → unchanged
 /// 4. Relative markdown links → prepend `../` (if not index file), replace extension with `/`
-/// 5. Relative static files → prepend `../` (if not index file)
+/// 5. Relative **extension-less** targets → prepend `../` (if not index file),
+///    and append `/` when [`LinkTransformConfig::markdown_page_probe`] says the
+///    target is a markdown page
+/// 6. Relative static files → prepend `../` (if not index file)
 ///
 /// # Examples
 ///
@@ -74,6 +140,7 @@ impl Default for LinkTransformConfig {
 ///     is_index_file: false,
 ///     url_depth: None,
 ///     current_page_url: String::new(),
+///     markdown_page_probe: None,
 /// };
 ///
 /// // Regular markdown file: add ../ and trailing slash
@@ -187,14 +254,54 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
         return format!("{}{}{}", prefix, final_path, suffix);
     }
 
-    // Static file: just add ../ prefix
+    // Extension-less target, or a static file. `strip_markdown_extension` is
+    // the *only* markdown detector above, so an extension-less link to a
+    // markdown page (`[x](../folder/file)` — how Obsidian and zk write links)
+    // lands here and used to be emitted verbatim, without the trailing slash
+    // the URL convention requires. The page still resolved, but at a
+    // non-canonical URL, and every relative href on *that* page then resolved
+    // one directory too high. Ask the repository which kind of target this is;
+    // when nobody can answer, keep the historical static-file behaviour.
     let prefix = if config.is_index_file {
         "../".repeat(parent_count)
     } else {
         "../".repeat(parent_count + 1)
     };
 
+    if !remaining_path.ends_with('/') && resolves_to_markdown_page(path, config) {
+        return format!("{}{}/{}", prefix, remaining_path, suffix);
+    }
+
     format!("{}{}{}", prefix, remaining_path, suffix)
+}
+
+/// Asks [`LinkTransformConfig::markdown_page_probe`] whether `authored_path`
+/// (relative, `./` already stripped, no anchor/query) names a markdown page.
+///
+/// The authored path is resolved against the page URL with *markdown*
+/// semantics — `is_index_file` decides whether the page URL's last segment is a
+/// file stem or a real directory — because that is what the author wrote it
+/// relative to. The transform's own `../` compensation happens afterwards and
+/// must not be applied twice.
+fn resolves_to_markdown_page(authored_path: &str, config: &LinkTransformConfig) -> bool {
+    let Some(probe) = &config.markdown_page_probe else {
+        return false;
+    };
+    // Without a page URL there is nothing to resolve against, and guessing
+    // would append slashes to root-level static files.
+    if config.current_page_url.is_empty() {
+        return false;
+    }
+    match crate::link_index::resolve_relative_url_checked(
+        &config.current_page_url,
+        authored_path,
+        config.is_index_file,
+    ) {
+        // A target outside the repository is nobody's markdown page; leaving it
+        // untouched keeps the defect visible to the link validators.
+        None => false,
+        Some(absolute) => probe(&absolute),
+    }
 }
 
 /// Split a URL into path and suffix (anchor # or query ?).
@@ -277,6 +384,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         }
     }
 
@@ -750,6 +858,7 @@ mod proptests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
+            markdown_page_probe: None,
         }
     }
 
@@ -882,6 +991,445 @@ mod proptests {
             let config = regular_config();
             let result = transform_link(&url, &config);
             prop_assert!(result.contains(&format!("?{}", query)), "Query not preserved: {}", result);
+        }
+    }
+}
+
+/// End-to-end link resolution: author an href, run the **real** transform, then
+/// resolve the emitted href the way a browser would against the page's real
+/// served URL, and assert the final absolute URL.
+///
+/// This is the layer whose absence let the reported bug ship. The unit tests
+/// above are string-in/string-out with no page URL at all, so they cannot tell
+/// `../other/` emitted from `/docs/guide/` (correct) from the same string
+/// emitted from `/docs/` (one level too high), and nothing anywhere authored a
+/// `../` href against a real repository. Every case here therefore states the
+/// *destination*, which is the only thing a reader experiences.
+#[cfg(test)]
+mod browser_resolution_tests {
+    use super::*;
+    use crate::path_resolver::OwnedPathResolverConfig;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    // ---------------------------------------------------------------------
+    // RFC 3986 §5.2 relative resolution — a browser, in ~40 lines.
+    // ---------------------------------------------------------------------
+
+    /// RFC 3986 §5.2.4 `remove_dot_segments`, verbatim.
+    ///
+    /// Written out rather than approximated because the whole point of these
+    /// tests is that `.`/`..` handling matches a browser exactly — including
+    /// the clamp on an above-root `..`, which is precisely the behaviour that
+    /// let a defective link look like a working one.
+    fn remove_dot_segments(path: &str) -> String {
+        let mut input = path.to_string();
+        let mut output = String::new();
+
+        fn pop_last_segment(output: &mut String) {
+            match output.rfind('/') {
+                Some(index) => output.truncate(index),
+                None => output.clear(),
+            }
+        }
+
+        while !input.is_empty() {
+            if let Some(rest) = input.strip_prefix("../") {
+                input = rest.to_string();
+            } else if let Some(rest) = input.strip_prefix("./") {
+                input = rest.to_string();
+            } else if let Some(rest) = input.strip_prefix("/./") {
+                input = format!("/{rest}");
+            } else if input == "/." {
+                input = "/".to_string();
+            } else if let Some(rest) = input.strip_prefix("/../") {
+                input = format!("/{rest}");
+                pop_last_segment(&mut output);
+            } else if input == "/.." {
+                input = "/".to_string();
+                pop_last_segment(&mut output);
+            } else if input == "." || input == ".." {
+                input.clear();
+            } else {
+                // Move the first path segment (with its leading "/") to output.
+                let end = if let Some(rest) = input.strip_prefix('/') {
+                    rest.find('/').map(|i| i + 1).unwrap_or(input.len())
+                } else {
+                    input.find('/').unwrap_or(input.len())
+                };
+                output.push_str(&input[..end]);
+                input = input[end..].to_string();
+            }
+        }
+
+        output
+    }
+
+    /// RFC 3986 §5.2.3 `merge`, for a base that has an authority (a site URL
+    /// always does): everything up to and including the base's last `/`.
+    fn merge(base_path: &str, reference_path: &str) -> String {
+        match base_path.rfind('/') {
+            Some(index) => format!("{}{}", &base_path[..=index], reference_path),
+            None => format!("/{reference_path}"),
+        }
+    }
+
+    /// Resolve `reference` against the absolute `base` URL path, as a browser
+    /// does when the user clicks a link on the page served at `base`.
+    fn resolve_in_browser(base: &str, reference: &str) -> String {
+        let (without_fragment, fragment) = match reference.split_once('#') {
+            Some((head, tail)) => (head, format!("#{tail}")),
+            None => (reference, String::new()),
+        };
+        let (ref_path, query) = match without_fragment.split_once('?') {
+            Some((head, tail)) => (head, format!("?{tail}")),
+            None => (without_fragment, String::new()),
+        };
+
+        let target = if ref_path.is_empty() {
+            base.to_string()
+        } else if ref_path.starts_with('/') {
+            remove_dot_segments(ref_path)
+        } else {
+            remove_dot_segments(&merge(base, ref_path))
+        };
+
+        format!("{target}{query}{fragment}")
+    }
+
+    // ---------------------------------------------------------------------
+    // The repository every case is authored against.
+    // ---------------------------------------------------------------------
+
+    /// A layout with a page and an extension-less static file at each depth
+    /// that matters, plus two siblings so the cascade case has somewhere to go.
+    fn fixture() -> TempDir {
+        let dir = TempDir::new().expect("temp repo");
+        let root = dir.path();
+        for folder in ["docs", "folder", "a/b", "static"] {
+            std::fs::create_dir_all(root.join(folder)).expect("create dir");
+        }
+        for page in [
+            "index.md",
+            "root.md",
+            "docs/index.md",
+            "docs/guide.md",
+            "docs/other.md",
+            "folder/file.md",
+            "folder/sibling.md",
+            "a/b/c.md",
+            "a/b/d.md",
+        ] {
+            std::fs::write(root.join(page), "# page").expect("write page");
+        }
+        // Genuinely extension-less *files*: appending a trailing slash to a
+        // link pointing at one of these would corrupt it.
+        for asset in ["LICENSE", "docs/Makefile", "folder/Dockerfile"] {
+            std::fs::write(root.join(asset), "text").expect("write asset");
+        }
+        std::fs::write(root.join("docs/photo.png"), b"\x89PNG").expect("write image");
+        dir
+    }
+
+    fn transform_config(root: &Path, source_rel: &str) -> LinkTransformConfig {
+        let source = root.join(source_rel);
+        let is_index_file = source
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f == "index.md");
+        LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file,
+            url_depth: None,
+            current_page_url: crate::repo::build_markdown_url_path(&source, root, "index.md"),
+            markdown_page_probe: Some(filesystem_markdown_page_probe(OwnedPathResolverConfig {
+                base_dir: root.to_path_buf(),
+                canonical_base_dir: root.canonicalize().ok(),
+                static_folder: "static".to_string(),
+                markdown_extensions: vec!["md".to_string()],
+                index_file: "index.md".to_string(),
+                tag_sources: Vec::new(),
+            })),
+        }
+    }
+
+    /// The page URL `source_rel` is served at.
+    fn page_url(root: &Path, source_rel: &str) -> String {
+        crate::repo::build_markdown_url_path(&root.join(source_rel), root, "index.md")
+    }
+
+    /// Author `href` in `source_rel`, transform it, and follow it like a
+    /// browser. Returns `(emitted href, final absolute URL)`.
+    fn follow(root: &Path, source_rel: &str, href: &str) -> (String, String) {
+        let config = transform_config(root, source_rel);
+        let emitted = transform_link(href, &config);
+        let landed = resolve_in_browser(&config.current_page_url, &emitted);
+        (emitted, landed)
+    }
+
+    fn assert_lands(root: &Path, source_rel: &str, href: &str, expected: &str) {
+        let (emitted, landed) = follow(root, source_rel, href);
+        assert_eq!(
+            landed, expected,
+            "[{source_rel}] `{href}` emitted `{emitted}` and landed on `{landed}`, \
+             expected `{expected}`"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Sanity: the browser model itself.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn browser_model_matches_rfc_3986_examples() {
+        // The normal examples from RFC 3986 §5.4.1, path-only.
+        assert_eq!(resolve_in_browser("/b/c/d;p", "g"), "/b/c/g");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "./g"), "/b/c/g");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "g/"), "/b/c/g/");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "/g"), "/g");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "../g"), "/b/g");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "../../g"), "/g");
+        // §5.4.2: excess `..` is discarded, not an error. This clamp is exactly
+        // why an above-root link looks like it works.
+        assert_eq!(resolve_in_browser("/b/c/d;p", "../../../g"), "/g");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "../../../../g"), "/g");
+        // Query and fragment ride along untouched.
+        assert_eq!(resolve_in_browser("/b/c/d;p", "g?y"), "/b/c/g?y");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "g#s"), "/b/c/g#s");
+        assert_eq!(resolve_in_browser("/b/c/d;p", "g?y#s"), "/b/c/g?y#s");
+        // A directory-style base keeps all of its segments.
+        assert_eq!(
+            resolve_in_browser("/docs/guide/", "../other/"),
+            "/docs/other/"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The table: every depth × every link form × both page kinds.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn every_link_form_lands_on_its_canonical_url() {
+        let dir = fixture();
+        let root = dir.path();
+
+        // (source file, authored href, final absolute URL)
+        let cases: &[(&str, &str, &str)] = &[
+            // --- depth 0, non-index page (/root/) ---
+            ("root.md", "docs/guide.md", "/docs/guide/"),
+            ("root.md", "docs/guide", "/docs/guide/"),
+            ("root.md", "docs/guide/", "/docs/guide/"),
+            ("root.md", "./docs/guide.md", "/docs/guide/"),
+            ("root.md", "docs/index.md", "/docs/"),
+            ("root.md", "docs/guide.md#anchor", "/docs/guide/#anchor"),
+            ("root.md", "docs/guide.md?q=1", "/docs/guide/?q=1"),
+            ("root.md", "LICENSE", "/LICENSE"),
+            ("root.md", "docs/photo.png", "/docs/photo.png"),
+            // --- depth 0, index page (/) ---
+            ("index.md", "docs/guide.md", "/docs/guide/"),
+            ("index.md", "docs/guide", "/docs/guide/"),
+            ("index.md", "root.md", "/root/"),
+            ("index.md", "LICENSE", "/LICENSE"),
+            // --- depth 1, non-index page (/docs/guide/) ---
+            ("docs/guide.md", "other.md", "/docs/other/"),
+            ("docs/guide.md", "other", "/docs/other/"),
+            ("docs/guide.md", "other/", "/docs/other/"),
+            ("docs/guide.md", "./other.md", "/docs/other/"),
+            ("docs/guide.md", "index.md", "/docs/"),
+            ("docs/guide.md", "../root.md", "/root/"),
+            ("docs/guide.md", "../root", "/root/"),
+            // The exact reported repro: an extension-less `../` link to a
+            // markdown page two folders away.
+            ("docs/guide.md", "../folder/file.md", "/folder/file/"),
+            ("docs/guide.md", "../folder/file", "/folder/file/"),
+            ("docs/guide.md", "../index.md", "/"),
+            ("docs/guide.md", "other.md#anchor", "/docs/other/#anchor"),
+            ("docs/guide.md", "other.md?q=1", "/docs/other/?q=1"),
+            ("docs/guide.md", "other#anchor", "/docs/other/#anchor"),
+            // Extension-less STATIC targets must NOT gain a slash.
+            ("docs/guide.md", "Makefile", "/docs/Makefile"),
+            ("docs/guide.md", "../LICENSE", "/LICENSE"),
+            (
+                "docs/guide.md",
+                "../folder/Dockerfile",
+                "/folder/Dockerfile",
+            ),
+            ("docs/guide.md", "photo.png", "/docs/photo.png"),
+            // --- depth 1, index page at the same depth (/docs/) ---
+            ("docs/index.md", "guide.md", "/docs/guide/"),
+            ("docs/index.md", "guide", "/docs/guide/"),
+            ("docs/index.md", "guide/", "/docs/guide/"),
+            ("docs/index.md", "./guide.md", "/docs/guide/"),
+            ("docs/index.md", "../root.md", "/root/"),
+            ("docs/index.md", "../root", "/root/"),
+            ("docs/index.md", "../folder/file", "/folder/file/"),
+            ("docs/index.md", "Makefile", "/docs/Makefile"),
+            ("docs/index.md", "../LICENSE", "/LICENSE"),
+            ("docs/index.md", "guide.md#anchor", "/docs/guide/#anchor"),
+            // --- depth 3, non-index page (/a/b/c/) ---
+            ("a/b/c.md", "d.md", "/a/b/d/"),
+            ("a/b/c.md", "d", "/a/b/d/"),
+            ("a/b/c.md", "./d.md", "/a/b/d/"),
+            ("a/b/c.md", "../../root.md", "/root/"),
+            ("a/b/c.md", "../../root", "/root/"),
+            ("a/b/c.md", "../../docs/guide.md", "/docs/guide/"),
+            ("a/b/c.md", "../../docs/guide", "/docs/guide/"),
+            ("a/b/c.md", "../../LICENSE", "/LICENSE"),
+            ("a/b/c.md", "../../index.md", "/"),
+            ("a/b/c.md", "d.md?q=1#anchor", "/a/b/d/?q=1#anchor"),
+        ];
+
+        for (source, href, expected) in cases {
+            assert_lands(root, source, href, expected);
+        }
+    }
+
+    /// The regression, stated as the thing a reader actually experiences: the
+    /// extension-less form must land in the same place as the `.md` form.
+    #[test]
+    fn extensionless_markdown_link_lands_where_the_dot_md_form_does() {
+        let dir = fixture();
+        let root = dir.path();
+
+        let (with_ext, landed_with_ext) = follow(root, "docs/guide.md", "../folder/file.md");
+        let (without_ext, landed_without_ext) = follow(root, "docs/guide.md", "../folder/file");
+
+        assert_eq!(with_ext, "../../folder/file/");
+        assert_eq!(
+            without_ext, "../../folder/file/",
+            "an extension-less markdown target must get the trailing slash its \
+             canonical URL has"
+        );
+        assert_eq!(landed_with_ext, "/folder/file/");
+        assert_eq!(landed_without_ext, "/folder/file/");
+    }
+
+    /// The cascade — the test that would have caught the reported bug. Follow
+    /// the link, then follow a link *on the page it lands on*. A missing
+    /// trailing slash is invisible on the first hop (the page still serves) and
+    /// only breaks the second.
+    #[test]
+    fn links_on_the_landed_page_still_resolve() {
+        let dir = fixture();
+        let root = dir.path();
+
+        for authored in ["../folder/file.md", "../folder/file", "../folder/file/"] {
+            let (_, landed) = follow(root, "docs/guide.md", authored);
+            assert_eq!(
+                landed,
+                page_url(root, "folder/file.md"),
+                "`{authored}` must land on the target's canonical URL"
+            );
+
+            // Now stand on that page and click its own sibling link.
+            let (emitted, second) = follow(root, "folder/file.md", "sibling.md");
+            assert_eq!(
+                second, "/folder/sibling/",
+                "after following `{authored}`, `sibling.md` (emitted `{emitted}`) \
+                 must still reach /folder/sibling/ — this is the hop the \
+                 trailing-slash defect breaks"
+            );
+
+            // And the second hop is only correct because the first one landed
+            // canonically: resolving the *same* emitted href against the
+            // non-canonical URL goes somewhere else entirely.
+            let non_canonical = landed.trim_end_matches('/');
+            assert_ne!(
+                resolve_in_browser(non_canonical, &emitted),
+                "/folder/sibling/",
+                "sanity: a slashless landing URL must break the next hop, or \
+                 this test proves nothing"
+            );
+        }
+    }
+
+    /// Without a probe (CLI/QuickLook, link-grep, unit tests) the historical
+    /// behaviour is preserved exactly: an extension-less target is treated as a
+    /// static file. Appending a slash on a guess would corrupt `LICENSE`.
+    #[test]
+    fn extensionless_target_is_unchanged_without_a_probe() {
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+            current_page_url: "/docs/guide/".to_string(),
+            markdown_page_probe: None,
+        };
+        assert_eq!(
+            transform_link("../folder/file", &config),
+            "../../folder/file"
+        );
+        assert_eq!(transform_link("../LICENSE", &config), "../../LICENSE");
+    }
+
+    /// A probe is also ignored when there is no page to resolve against, so a
+    /// context without a current page URL can never invent a slash.
+    #[test]
+    fn probe_is_not_consulted_without_a_current_page_url() {
+        let dir = fixture();
+        let root = dir.path();
+        let mut config = transform_config(root, "docs/guide.md");
+        config.current_page_url = String::new();
+        assert_eq!(
+            transform_link("../folder/file", &config),
+            "../../folder/file"
+        );
+    }
+
+    /// A link that climbs above the repository root is left exactly as authored
+    /// (minus the usual `../` compensation): there is no markdown page out
+    /// there to justify a trailing slash, and leaving it alone keeps the defect
+    /// visible to the link validators instead of dressing it up as a page link.
+    #[test]
+    fn above_root_traversal_is_not_dressed_up_as_a_page() {
+        let dir = fixture();
+        let root = dir.path();
+
+        let (emitted, landed) = follow(root, "docs/guide.md", "../../escape/target");
+        assert_eq!(emitted, "../../../escape/target");
+        assert!(
+            !emitted.ends_with('/'),
+            "an above-root target must not be given a page's trailing slash: {emitted}"
+        );
+        // The browser clamps the excess `..`, which is exactly why this needs a
+        // diagnostic rather than a silent repair — see
+        // `page_errors::validate_rendered_links`.
+        assert_eq!(landed, "/escape/target");
+    }
+
+    /// Build mode relativizes root-relative URLs by page depth; that arithmetic
+    /// must land on the same absolute URL a server-mode reader gets.
+    #[test]
+    fn build_mode_root_relative_links_land_on_the_same_url() {
+        let dir = fixture();
+        let root = dir.path();
+
+        for source in [
+            "root.md",
+            "index.md",
+            "docs/guide.md",
+            "docs/index.md",
+            "a/b/c.md",
+        ] {
+            let base = page_url(root, source);
+            let depth = base
+                .trim_matches('/')
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .count();
+            let mut config = transform_config(root, source);
+            config.url_depth = Some(depth);
+
+            for target in ["/docs/guide/", "/folder/file/", "/"] {
+                let emitted = transform_link(target, &config);
+                assert_eq!(
+                    resolve_in_browser(&base, &emitted),
+                    target,
+                    "[{source}] root-relative `{target}` emitted `{emitted}`"
+                );
+            }
         }
     }
 }

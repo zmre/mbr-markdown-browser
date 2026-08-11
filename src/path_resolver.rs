@@ -101,6 +101,75 @@ pub struct PathResolverConfig<'a> {
     pub tag_sources: &'a [String],
 }
 
+/// Owned counterpart of [`PathResolverConfig`].
+///
+/// [`PathResolverConfig`] borrows everything, which is right for a request
+/// handler but impossible for anything that must outlive the borrow — notably
+/// the `'static` closure [`crate::link_transform::LinkTransformConfig`] carries
+/// to answer "does this link target resolve to a markdown page?". Owning the
+/// values costs a handful of small clones per page render and keeps a single
+/// definition of the resolution inputs.
+#[derive(Debug, Clone)]
+pub struct OwnedPathResolverConfig {
+    pub base_dir: PathBuf,
+    pub canonical_base_dir: Option<PathBuf>,
+    pub static_folder: String,
+    pub markdown_extensions: Vec<String>,
+    pub index_file: String,
+    pub tag_sources: Vec<String>,
+}
+
+impl OwnedPathResolverConfig {
+    /// Borrows this configuration as the form [`resolve_request_path`] takes.
+    pub fn as_config(&self) -> PathResolverConfig<'_> {
+        PathResolverConfig {
+            base_dir: &self.base_dir,
+            canonical_base_dir: self.canonical_base_dir.as_deref(),
+            static_folder: &self.static_folder,
+            markdown_extensions: &self.markdown_extensions,
+            index_file: &self.index_file,
+            tag_sources: &self.tag_sources,
+        }
+    }
+}
+
+impl PathResolverConfig<'_> {
+    /// Clones this configuration into its owned form.
+    pub fn to_owned_config(&self) -> OwnedPathResolverConfig {
+        OwnedPathResolverConfig {
+            base_dir: self.base_dir.to_path_buf(),
+            canonical_base_dir: self.canonical_base_dir.map(Path::to_path_buf),
+            static_folder: self.static_folder.to_string(),
+            markdown_extensions: self.markdown_extensions.to_vec(),
+            index_file: self.index_file.to_string(),
+            tag_sources: self.tag_sources.to_vec(),
+        }
+    }
+}
+
+/// Decides whether a request that resolved to a markdown page arrived at a
+/// non-canonical URL, and if so what to redirect to.
+///
+/// Markdown pages are served at directory-style URLs (`docs/guide.md` →
+/// `/docs/guide/`). Serving the same page at `/docs/guide` with a 200 is not
+/// harmless: the browser's base for resolving that page's own relative links
+/// becomes `/docs/` instead of `/docs/guide/`, so every `../`-prefixed href the
+/// renderer emitted lands one directory too high and 404s. The defect surfaces
+/// one click *after* the wrong URL, which is what makes it so hard to trace.
+///
+/// `request_path` is the path axum's catch-all captured: percent-decoded and
+/// without a leading slash. `canonical_url` is the page's canonical URL as
+/// produced by [`crate::repo::build_markdown_url_path`] (leading and trailing
+/// slash). Returns `None` when the request already used the canonical URL.
+///
+/// Note this deliberately also catches `/docs/guide.md`: an extension-bearing
+/// URL is just another non-canonical spelling of the same page, and leaving it
+/// at a 200 has the identical relative-link consequence.
+pub fn canonical_page_redirect(request_path: &str, canonical_url: &str) -> Option<String> {
+    let requested = format!("/{}", request_path.trim_start_matches('/'));
+    (requested != canonical_url).then(|| canonical_url.to_string())
+}
+
 /// Normalizes an authored link target (href) into the request-path form that
 /// [`resolve_request_path`] expects.
 ///

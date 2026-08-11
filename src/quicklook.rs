@@ -229,6 +229,7 @@ pub fn render_preview_with_config(
         // QuickLook previews a single file with no repo index, so body
         // wikilinks never resolve globally; the page URL is unused.
         current_page_url: String::new(),
+        markdown_page_probe: None,
     };
 
     // Create a minimal tokio runtime for async markdown rendering

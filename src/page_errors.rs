@@ -31,7 +31,7 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-use crate::link_index::{OutboundLink, resolve_relative_url};
+use crate::link_index::{OutboundLink, resolve_relative_url, resolve_relative_url_checked};
 use crate::path_resolver::{
     PathResolverConfig, ResolvedPath, normalize_link_target, resolve_request_path,
 };
@@ -156,56 +156,158 @@ pub struct PageErrors {
     pub errors: Vec<PageError>,
 }
 
+/// What is wrong with one link, as judged from the href a browser would
+/// actually follow.
+///
+/// All three surface as [`PageError::BrokenInternalLink`]: the wire format is a
+/// pinned contract with `components/src/mbr-page-errors.ts`, and a variant that
+/// file does not know about would be counted by nothing and rendered by
+/// nothing — an error that "exists" but is invisible is worse than no error.
+/// Every one of these does break a reader's navigation, so the label is honest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkDefect {
+    /// The target does not resolve to anything the server would serve.
+    Missing,
+    /// A `..` climbed above the repository root. Browsers clamp this (RFC 3986
+    /// §5.2.4), so the reader silently lands on an unrelated page instead of
+    /// the one the author meant.
+    EscapesRoot,
+    /// The target is a *page*, but the href does not end in `/`. Pages live at
+    /// directory-style URLs; without the slash the browser resolves the target
+    /// page's own relative links one directory too high, so the damage lands on
+    /// the *next* click, not this one. In server mode a redirect repairs it; in
+    /// a static build nothing does.
+    NonCanonical,
+}
+
+/// Judges one **already-emitted** href exactly as a browser would.
+///
+/// The distinction from validating the *authored* markdown destination is the
+/// whole point: a link transform bug — the wrong number of `../`, a missing
+/// trailing slash — is invisible to a checker that re-derives the target from
+/// the source text, because it re-applies the same (buggy) rules. This reads
+/// what actually went into the HTML.
+///
+/// `page_url` is the page's canonical directory-style URL, so relative
+/// resolution uses `is_index_file = true`: every segment of a URL ending in `/`
+/// is a real directory component. That is the same rationale
+/// [`media_reference_resolves`] documents for media srcs.
+fn classify_emitted_href(
+    href: &str,
+    resolver_config: &PathResolverConfig,
+    page_url: &str,
+) -> Option<LinkDefect> {
+    // Fragment-only links address the current page; validating them would need
+    // target-page parsing, so they are skipped to avoid false positives.
+    if href.is_empty() || href.starts_with('#') {
+        return None;
+    }
+
+    // Off-site targets are not ours to resolve. Anything with a scheme
+    // (`ftp://…`, `magnet:…`) would otherwise be joined onto the base directory
+    // and reported as a false broken link.
+    if is_external_url(href) {
+        return None;
+    }
+
+    // Fragment / query must come off before relative resolution so their
+    // payloads never participate in `.` / `..` segment handling.
+    let path_part = href.split(['#', '?']).next().unwrap_or_default();
+    if path_part.is_empty() {
+        return None;
+    }
+
+    // `_checked`, not the clamping resolver: an above-root `..` is a real
+    // authoring defect and clamping it turns the link into one that points at
+    // whatever page happens to sit at the clamped location.
+    let Some(absolute_url) = resolve_relative_url_checked(page_url, path_part, true) else {
+        return Some(LinkDefect::EscapesRoot);
+    };
+
+    // Normalize (percent-decode, trim slashes) and resolve through the same
+    // pipeline a live HTTP request hits, so this can never disagree with what
+    // the server serves. See `normalize_link_target` for why the decoding has
+    // to match axum's.
+    let request_path = normalize_link_target(&absolute_url);
+    match resolve_request_path(resolver_config, &request_path) {
+        ResolvedPath::NotFound => Some(LinkDefect::Missing),
+        // A static file is addressed by its exact name and must NOT gain a
+        // trailing slash, so it is canonical however it was written.
+        ResolvedPath::StaticFile(_) => None,
+        // Everything else is a page, served at a directory-style URL.
+        // `normalize_link_target` deliberately trims slashes, which makes the
+        // two spellings indistinguishable at that layer — so the check has to
+        // be made here, on the raw href.
+        _ => (!path_part.ends_with('/')).then_some(LinkDefect::NonCanonical),
+    }
+}
+
+/// Validates every `<a href>` in the page's **rendered** HTML.
+///
+/// This is the layer that can see link-transform defects, because it reads the
+/// href that was emitted rather than re-deriving one from the markdown source.
+/// Prefer it over [`validate_internal_links`] wherever the rendered body is
+/// available.
+pub fn validate_rendered_links(
+    html: &str,
+    resolver_config: &PathResolverConfig,
+    page_url: &str,
+) -> Vec<PageError> {
+    let Ok(selector) = Selector::parse("a[href]") else {
+        return Vec::new();
+    };
+    let doc = Html::parse_document(html);
+    let mut seen = std::collections::HashSet::new();
+
+    doc.select(&selector)
+        .filter_map(|element| {
+            let href = element.value().attr("href")?;
+            if !seen.insert(href.to_string()) {
+                return None;
+            }
+            classify_emitted_href(href, resolver_config, page_url)?;
+            let text = element.text().collect::<String>().trim().to_string();
+            let (_, anchor) = crate::link_index::split_url_anchor(href);
+            Some(PageError::BrokenInternalLink {
+                target: href.to_string(),
+                text,
+                anchor,
+            })
+        })
+        .collect()
+}
+
 /// Validates the internal outbound links for a single page.
 ///
-/// Returns a `BrokenInternalLink` for each `OutboundLink` whose target is
-/// internal but does not resolve to any filesystem / tag / directory resource
-/// via the path resolver.
+/// Used where there is no rendered body to read hrefs from — tag pages and tag
+/// indexes, whose outbound links are synthesized as absolute site URLs rather
+/// than authored. For markdown pages use [`validate_rendered_links`], which
+/// sees what the renderer actually emitted.
 pub fn validate_internal_links(
     outbound: &[OutboundLink],
     resolver_config: &PathResolverConfig,
 ) -> Vec<PageError> {
-    let mut errors = Vec::new();
-
-    for link in outbound {
-        if !link.internal {
-            continue;
-        }
-
-        // Fragment-only links (e.g. "#section") cannot be validated without
-        // target-page parsing. v1 skips them to avoid false positives.
-        if link.to.starts_with('#') || link.to.is_empty() {
-            continue;
-        }
-
-        // Off-site targets are not ours to resolve. `link.internal` is the
-        // primary gate, but it is derived at render time and an href reaching
-        // here with a scheme (`ftp://…`, `magnet:…`) would otherwise be joined
-        // onto the base directory and reported as a false broken link.
-        if is_external_url(&link.to) {
-            continue;
-        }
-
-        // Normalize the authored href (strip anchor/query, percent-decode,
-        // trim slashes) exactly as a live HTTP request would be before it
-        // reaches the resolver. See `normalize_link_target` for why this must
-        // match axum's decoding.
-        let request_path = normalize_link_target(&link.to);
-
-        // "" means root, which always resolves when `index_file` exists. We
-        // still run it through the resolver to keep behaviour consistent.
-        let resolved = resolve_request_path(resolver_config, &request_path);
-
-        if matches!(resolved, ResolvedPath::NotFound) {
-            errors.push(PageError::BrokenInternalLink {
-                target: link.to.clone(),
-                text: link.text.clone(),
-                anchor: link.anchor.clone(),
-            });
-        }
-    }
-
-    errors
+    outbound
+        .iter()
+        .filter(|link| link.internal)
+        .filter(|link| {
+            // These targets are already absolute site URLs, so the site root is
+            // the correct base to resolve them against.
+            classify_emitted_href(&link.to, resolver_config, "/").is_some_and(|defect| {
+                // Only genuine 404s are reported here. `OutboundLink.to` for a
+                // markdown page holds the *authored* destination resolved with
+                // markdown semantics (`beta.md` -> `/docs/beta.md/`), which is
+                // not the href a browser follows — judging its canonicality
+                // would be judging a string nobody navigates to.
+                matches!(defect, LinkDefect::Missing | LinkDefect::EscapesRoot)
+            })
+        })
+        .map(|link| PageError::BrokenInternalLink {
+            target: link.to.clone(),
+            text: link.text.clone(),
+            anchor: link.anchor.clone(),
+        })
+        .collect()
 }
 
 /// Validates `<img>`, `<video>`, `<audio>` and `<source>` `src` attributes in
@@ -693,6 +795,183 @@ mod tests {
             &errs[0],
             PageError::BrokenInternalLink { target, .. } if target == "/Nope%20Missing/"
         ));
+    }
+
+    // --- validate_rendered_links -------------------------------------------
+
+    /// The layout from the reported bug: `docs/guide.md` links across to
+    /// `folder/file.md`, which has a sibling.
+    fn rendered_link_setup() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("folder")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# guide").unwrap();
+        std::fs::write(base.join("folder/file.md"), "# file").unwrap();
+        std::fs::write(base.join("folder/sibling.md"), "# sibling").unwrap();
+        std::fs::write(base.join("LICENSE"), "MIT").unwrap();
+        (dir, base)
+    }
+
+    fn rendered_link_errors(html: &str, base: &Path, page_url: &str) -> Vec<PageError> {
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(base, &exts, "index.md", &tags);
+        validate_rendered_links(html, &cfg, page_url)
+    }
+
+    /// The reported defect. `/folder/file` serves 200, so nothing downstream
+    /// looked wrong — but the browser then resolves that page's own relative
+    /// links against `/folder/` and every one of them 404s. The href, not the
+    /// authored destination, is the only place this is visible.
+    #[test]
+    fn page_link_without_trailing_slash_is_reported() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"<a href="../../folder/file">file</a>"#;
+        let errs = rendered_link_errors(html, &base, "/docs/guide/");
+
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(matches!(
+            &errs[0],
+            PageError::BrokenInternalLink { target, text, .. }
+                if target == "../../folder/file" && text == "file"
+        ));
+    }
+
+    #[test]
+    fn page_link_with_trailing_slash_is_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"<a href="../../folder/file/">file</a>"#;
+        assert!(
+            rendered_link_errors(html, &base, "/docs/guide/").is_empty(),
+            "the canonical spelling must not be flagged"
+        );
+    }
+
+    /// A static file is addressed by its exact name; demanding a trailing slash
+    /// would be the mirror-image bug.
+    #[test]
+    fn extensionless_static_file_link_is_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"<a href="../../LICENSE">License</a>"#;
+        assert!(
+            rendered_link_errors(html, &base, "/docs/guide/").is_empty(),
+            "an extension-less static file must not be asked for a trailing slash"
+        );
+    }
+
+    /// Regression: `normalize_link_target` trims slashes, so `/folder/file` and
+    /// `/folder/file/` collapse to the same string and the defect was
+    /// structurally invisible to anything checking only "does it resolve".
+    #[test]
+    fn resolving_alone_cannot_tell_the_two_spellings_apart() {
+        assert_eq!(
+            normalize_link_target("/folder/file"),
+            normalize_link_target("/folder/file/"),
+            "if this ever differs, the trailing-slash check can move earlier"
+        );
+    }
+
+    /// A `..` that climbs out of the repository produced no diagnostic at all:
+    /// `resolve_relative_url` popped an empty segment stack and discarded the
+    /// `None`, so the link silently became one to a real page.
+    #[test]
+    fn above_root_link_is_reported() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"<a href="../../../../escape/target/">escape</a>"#;
+        let errs = rendered_link_errors(html, &base, "/docs/guide/");
+
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(matches!(
+            &errs[0],
+            PageError::BrokenInternalLink { target, .. } if target == "../../../../escape/target/"
+        ));
+    }
+
+    /// An above-root link whose *clamped* destination happens to exist is the
+    /// nastiest shape: the reader lands on a real, wrong page and nothing
+    /// complains.
+    #[test]
+    fn above_root_link_to_an_existing_clamped_target_is_still_reported() {
+        let (_guard, base) = rendered_link_setup();
+        // From /docs/guide/, `../../../folder/file/` climbs one level too far;
+        // a browser clamps it and serves /folder/file/, which exists.
+        let html = r#"<a href="../../../folder/file/">file</a>"#;
+        let errs = rendered_link_errors(html, &base, "/docs/guide/");
+        assert_eq!(
+            errs.len(),
+            1,
+            "a clamped above-root link must still be reported: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn missing_target_is_reported() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"<a href="../../folder/gone/">gone</a>"#;
+        assert_eq!(rendered_link_errors(html, &base, "/docs/guide/").len(), 1);
+    }
+
+    #[test]
+    fn external_fragment_and_empty_hrefs_are_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r##"
+            <a href="https://example.com/x">ext</a>
+            <a href="mailto:a@b.c">mail</a>
+            <a href="#section">anchor</a>
+            <a href="">empty</a>
+            <a href="?q=1">query only</a>
+        "##;
+        let errs = rendered_link_errors(html, &base, "/docs/guide/");
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn anchor_and_query_do_not_hide_a_page_link_defect() {
+        let (_guard, base) = rendered_link_setup();
+        // The path part is what decides canonicality; the suffix must neither
+        // mask a defect nor create one.
+        let bad = r#"<a href="../../folder/file#top">f</a>"#;
+        assert_eq!(rendered_link_errors(bad, &base, "/docs/guide/").len(), 1);
+
+        let good = r#"<a href="../../folder/file/?x=1#top">f</a>"#;
+        assert!(rendered_link_errors(good, &base, "/docs/guide/").is_empty());
+    }
+
+    #[test]
+    fn percent_encoded_href_resolves_before_it_is_judged() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        std::fs::write(base.join("My Page.md"), "# m").unwrap();
+
+        let html = r#"<a href="../../My%20Page/">My Page</a>"#;
+        assert!(rendered_link_errors(html, &base, "/docs/guide/").is_empty());
+    }
+
+    #[test]
+    fn repeated_identical_hrefs_are_deduped() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"
+            <a href="../../folder/gone/">a</a>
+            <a href="../../folder/gone/">b</a>
+        "#;
+        assert_eq!(rendered_link_errors(html, &base, "/docs/guide/").len(), 1);
+    }
+
+    /// The index-page variant: `/docs/` keeps every segment, so a sibling link
+    /// carries no `../`.
+    #[test]
+    fn index_page_sibling_link_is_ignored() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/index.md"), "# i").unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+
+        let html = r#"<a href="guide/">Guide</a>"#;
+        assert!(rendered_link_errors(html, &base, "/docs/").is_empty());
     }
 
     // --- validate_media_references -----------------------------------------
