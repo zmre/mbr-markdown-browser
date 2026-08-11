@@ -941,6 +941,14 @@ a.mbr-link-enhanced[data-tooltip]::after {
 }
 
 /* Permalink anchor — hidden by default, revealed on heading hover/focus */
+/*
+ * The "#" is generated content, not a text node, so that selecting a heading
+ * does not copy it and print/find-in-page never see it. mbr-heading-enhancer.ts
+ * deliberately leaves the element empty; do not move this back into the markup.
+ */
+.mbr-heading-anchor::after {
+  content: "#";
+}
 .mbr-heading-anchor {
   margin-left: 0.4em;
   color: var(--pico-muted-color);

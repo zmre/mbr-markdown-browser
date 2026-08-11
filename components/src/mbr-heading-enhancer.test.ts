@@ -143,7 +143,22 @@ describe('MbrHeadingEnhancerElement._enhance', () => {
     const anchors = main.querySelectorAll('a.mbr-heading-anchor')
     expect(anchors.length).toBe(1)
     expect(anchors[0].getAttribute('href')).toBe('#intro')
-    expect(anchors[0].textContent).toBe('#')
+    expect(anchors[0].getAttribute('aria-label')).toBe('Permalink')
+  })
+
+  // The "#" must stay in theme.css as `.mbr-heading-anchor::after { content }`.
+  // A text node here lands inside the heading's text run, so selecting the
+  // heading copies "Intro#" and print/find-in-page pick the glyph up too.
+  it('leaves the permalink anchor empty so the # is never copied', () => {
+    main.innerHTML = `<h2 id="intro">Intro</h2>`
+    document.body.appendChild(enhancer)
+    runEnhance()
+
+    const anchor = main.querySelector('a.mbr-heading-anchor')!
+    expect(anchor.textContent).toBe('')
+    expect(anchor.childNodes.length).toBe(0)
+    // The whole point: copying the heading yields the heading, nothing else.
+    expect(main.querySelector('h2')!.textContent).toBe('Intro')
   })
 
   it('does not append a permalink to headings without an id', () => {
