@@ -95,6 +95,15 @@ h1 {
 
 This file is loaded **after** the default theme, so your rules take precedence.
 
+That also holds for stylesheets mbr loads on demand — KaTeX, highlight.js and
+reveal.js are fetched only on pages that need them, and they are inserted
+*before* `user.css` so they cannot outrank it.
+
+> **If you override `_head.html`,** keep the `id="mbr-user-css"` on the
+> `user.css` link. That id is the anchor the dynamic loader inserts before.
+> Without it the loader falls back to appending, which puts KaTeX, highlight.js
+> and reveal.js after `user.css` and lets them win at equal specificity.
+
 ## Full Theme Override
 
 To completely replace the default theme, create `.mbr/theme.css`:

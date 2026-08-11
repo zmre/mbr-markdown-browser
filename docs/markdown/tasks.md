@@ -60,7 +60,7 @@ starts unscoped, exactly as it always has.
 
 ## The two modes
 
-### Category (the default)
+### By Note (the default)
 
 One heading per file, tasks in the order they appear in it. The heading is the
 note's title, with its folder underneath in smaller type, and clicking it opens
@@ -75,7 +75,7 @@ including ones the current filter has hidden — so a file showing you one
 matching task can still read `3/7`. That is deliberate: the number answers "how
 far along is this note?", not "how much of what I am looking at is done?".
 
-### Calendar
+### By Due
 
 One heading per due-date bucket, in this order:
 

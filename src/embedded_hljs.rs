@@ -4,35 +4,35 @@
 //! centralized access to syntax highlighting assets.
 
 /// highlight.js dark theme CSS
-pub const HLJS_DARK_CSS: &[u8] = include_bytes!("../templates/hljs.dark.11.11.1.css");
+pub const HLJS_DARK_CSS: &[u8] = include_bytes!("../templates/hljs.dark.11.11.2.css");
 /// highlight.js atom-one-dark theme CSS
 pub const HLJS_ATOM_ONE_DARK_CSS: &[u8] =
-    include_bytes!("../templates/hljs.atom-one-dark.11.11.1.css");
+    include_bytes!("../templates/hljs.atom-one-dark.11.11.2.css");
 
 /// highlight.js core library
-pub const HLJS_JS: &[u8] = include_bytes!("../templates/hljs.11.11.1.js");
+pub const HLJS_JS: &[u8] = include_bytes!("../templates/hljs.11.11.2.js");
 
 // Language modules
-pub const HLJS_LANG_BASH: &[u8] = include_bytes!("../templates/hljs.lang.bash.11.11.1.js");
-pub const HLJS_LANG_CSS: &[u8] = include_bytes!("../templates/hljs.lang.css.11.11.1.js");
+pub const HLJS_LANG_BASH: &[u8] = include_bytes!("../templates/hljs.lang.bash.11.11.2.js");
+pub const HLJS_LANG_CSS: &[u8] = include_bytes!("../templates/hljs.lang.css.11.11.2.js");
 pub const HLJS_LANG_DOCKERFILE: &[u8] =
-    include_bytes!("../templates/hljs.lang.dockerfile.11.11.1.js");
-pub const HLJS_LANG_GO: &[u8] = include_bytes!("../templates/hljs.lang.go.11.11.1.js");
-pub const HLJS_LANG_JAVA: &[u8] = include_bytes!("../templates/hljs.lang.java.11.11.1.js");
+    include_bytes!("../templates/hljs.lang.dockerfile.11.11.2.js");
+pub const HLJS_LANG_GO: &[u8] = include_bytes!("../templates/hljs.lang.go.11.11.2.js");
+pub const HLJS_LANG_JAVA: &[u8] = include_bytes!("../templates/hljs.lang.java.11.11.2.js");
 pub const HLJS_LANG_JAVASCRIPT: &[u8] =
-    include_bytes!("../templates/hljs.lang.javascript.11.11.1.js");
-pub const HLJS_LANG_JSON: &[u8] = include_bytes!("../templates/hljs.lang.json.11.11.1.js");
-pub const HLJS_LANG_MARKDOWN: &[u8] = include_bytes!("../templates/hljs.lang.markdown.11.11.1.js");
-pub const HLJS_LANG_NIX: &[u8] = include_bytes!("../templates/hljs.lang.nix.11.11.1.js");
-pub const HLJS_LANG_PYTHON: &[u8] = include_bytes!("../templates/hljs.lang.python.11.11.1.js");
-pub const HLJS_LANG_RUBY: &[u8] = include_bytes!("../templates/hljs.lang.ruby.11.11.1.js");
-pub const HLJS_LANG_RUST: &[u8] = include_bytes!("../templates/hljs.lang.rust.11.11.1.js");
-pub const HLJS_LANG_SCALA: &[u8] = include_bytes!("../templates/hljs.lang.scala.11.11.1.js");
-pub const HLJS_LANG_SQL: &[u8] = include_bytes!("../templates/hljs.lang.sql.11.11.1.js");
+    include_bytes!("../templates/hljs.lang.javascript.11.11.2.js");
+pub const HLJS_LANG_JSON: &[u8] = include_bytes!("../templates/hljs.lang.json.11.11.2.js");
+pub const HLJS_LANG_MARKDOWN: &[u8] = include_bytes!("../templates/hljs.lang.markdown.11.11.2.js");
+pub const HLJS_LANG_NIX: &[u8] = include_bytes!("../templates/hljs.lang.nix.11.11.2.js");
+pub const HLJS_LANG_PYTHON: &[u8] = include_bytes!("../templates/hljs.lang.python.11.11.2.js");
+pub const HLJS_LANG_RUBY: &[u8] = include_bytes!("../templates/hljs.lang.ruby.11.11.2.js");
+pub const HLJS_LANG_RUST: &[u8] = include_bytes!("../templates/hljs.lang.rust.11.11.2.js");
+pub const HLJS_LANG_SCALA: &[u8] = include_bytes!("../templates/hljs.lang.scala.11.11.2.js");
+pub const HLJS_LANG_SQL: &[u8] = include_bytes!("../templates/hljs.lang.sql.11.11.2.js");
 pub const HLJS_LANG_TYPESCRIPT: &[u8] =
-    include_bytes!("../templates/hljs.lang.typescript.11.11.1.js");
-pub const HLJS_LANG_XML: &[u8] = include_bytes!("../templates/hljs.lang.xml.11.11.1.js");
-pub const HLJS_LANG_YAML: &[u8] = include_bytes!("../templates/hljs.lang.yaml.11.11.1.js");
+    include_bytes!("../templates/hljs.lang.typescript.11.11.2.js");
+pub const HLJS_LANG_XML: &[u8] = include_bytes!("../templates/hljs.lang.xml.11.11.2.js");
+pub const HLJS_LANG_YAML: &[u8] = include_bytes!("../templates/hljs.lang.yaml.11.11.2.js");
 
 /// All highlight.js files as (url_path, bytes, mime_type) tuples.
 ///

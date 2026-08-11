@@ -50,6 +50,24 @@ function clearInjectedAssets(): void {
   document.querySelectorAll('script[src], link[rel="stylesheet"]').forEach((node) => node.remove())
 }
 
+/**
+ * Emit the user.css link exactly as `templates/_head.html` does — it is the
+ * anchor `loadCss` inserts in front of. Cleared by `clearInjectedAssets`.
+ */
+function addUserCssAnchor(): HTMLLinkElement {
+  const anchor = document.createElement('link')
+  anchor.id = 'mbr-user-css'
+  anchor.rel = 'stylesheet'
+  anchor.setAttribute('href', '/.mbr/user.css')
+  document.head.appendChild(anchor)
+  return anchor
+}
+
+/** Position of a node among <head>'s element children, for cascade assertions. */
+function headIndex(node: Element): number {
+  return Array.from(document.head.children).indexOf(node)
+}
+
 // ============================================================================
 // getMbrAssetBase
 // ============================================================================
@@ -354,6 +372,70 @@ describe('loadCss', () => {
     await loadCss('/.mbr/reveal-slides.css')
 
     expect(document.querySelectorAll('link[rel="stylesheet"]')).toHaveLength(2)
+  })
+
+  /**
+   * Cascade order. `_head.html` emits pico -> theme -> user, and user.css is the
+   * per-repo override that must have the last word. Appending to <head> put every
+   * on-demand stylesheet AFTER user.css, so reveal.css / katex.min.css /
+   * hljs.atom-one-dark.css beat the user's rules at equal specificity.
+   */
+  it('inserts the stylesheet before user.css so per-repo overrides still win', async () => {
+    const anchor = addUserCssAnchor()
+
+    await loadCss('/.mbr/hljs.atom-one-dark.css')
+
+    const injected = linkTags('/.mbr/hljs.atom-one-dark.css')[0]
+    expect(injected.parentElement).toBe(document.head)
+    expect(headIndex(injected)).toBeLessThan(headIndex(anchor))
+  })
+
+  it('keeps every dynamic stylesheet ahead of user.css, in load order', async () => {
+    // Among themselves the on-demand sheets must still cascade in the order they
+    // were requested — inserting at a fixed anchor must not reverse them.
+    const anchor = addUserCssAnchor()
+
+    await loadCss('/.mbr/reveal.css')
+    await loadCss('/.mbr/katex.min.css')
+
+    const first = linkTags('/.mbr/reveal.css')[0]
+    const second = linkTags('/.mbr/katex.min.css')[0]
+    expect(headIndex(first)).toBeLessThan(headIndex(second))
+    expect(headIndex(second)).toBeLessThan(headIndex(anchor))
+  })
+
+  it('appends to <head> when the page has no user.css anchor', async () => {
+    // `.mbr/_head.html` is a documented per-repo override, so a custom template
+    // may not carry the id. That must preserve the old behaviour, not throw.
+    expect(document.getElementById('mbr-user-css')).toBeNull()
+
+    await expect(loadCss('/.mbr/katex.min.css')).resolves.toBeUndefined()
+
+    const injected = linkTags('/.mbr/katex.min.css')[0]
+    expect(injected.parentElement).toBe(document.head)
+    expect(document.head.lastElementChild).toBe(injected)
+  })
+
+  it('still short-circuits a duplicate request when the anchor is present', async () => {
+    // The anchor changes where the link lands, not whether the dedupe scan runs.
+    const anchor = addUserCssAnchor()
+
+    await loadCss('/.mbr/reveal-slides.css')
+    await expect(loadCss('/.mbr/reveal-slides.css')).resolves.toBeUndefined()
+
+    const tags = linkTags('/.mbr/reveal-slides.css')
+    expect(tags).toHaveLength(1)
+    expect(headIndex(tags[0])).toBeLessThan(headIndex(anchor))
+  })
+
+  it('does not treat the user.css anchor itself as an already-loaded match', async () => {
+    // Guards the dedupe's suffix test against the one stylesheet now guaranteed
+    // to be in <head>: user.css must not suppress an unrelated on-demand sheet.
+    addUserCssAnchor()
+
+    await loadCss('/.mbr/reveal.css')
+
+    expect(linkTags('/.mbr/reveal.css')).toHaveLength(1)
   })
 
   /**
