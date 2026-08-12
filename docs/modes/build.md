@@ -103,7 +103,7 @@ The three reasons are genuinely different problems:
 
 While rendering, mbr also reports any pages whose YAML frontmatter fails to
 parse. A parse failure discards the **entire** frontmatter block (so otherwise
-valid fields like `title:` or `style: slides` are silently lost), which is why
+valid fields like `title:` or `type: slides` are silently lost), which is why
 it is surfaced explicitly:
 
 ```

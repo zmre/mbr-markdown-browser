@@ -10,21 +10,27 @@ mbr can transform any markdown document into a presentation using [Reveal.js](ht
 
 ## Quick Start
 
-Add `style: slides` to your frontmatter:
+Add `type: slides` to your frontmatter:
 
 ```yaml
 ---
 title: My Presentation
-style: slides
+type: slides
 ---
 ```
+
+> [!NOTE]
+> `style: slides` still works and always will. Both fields feed the page's body
+> class, so existing decks keep rendering unchanged. `type` is now the preferred
+> spelling, because a deck is a kind of note rather than a coat of paint. See
+> [Page Styles and Types](styles/).
 
 Use horizontal rules (`---`) to separate slides:
 
 ```markdown
 ---
 title: My Presentation
-style: slides
+type: slides
 ---
 
 # Welcome
@@ -103,7 +109,7 @@ Create a test presentation:
 ```markdown
 ---
 title: Test Presentation
-style: slides
+type: slides
 ---
 
 # Welcome

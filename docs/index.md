@@ -21,6 +21,7 @@ description: The fast, complete markdown browser and static site generator
 | [In-Browser Editing](modes/editing/) | Edit markdown from the browser (server/GUI) |
 | [Customization](customization/) | Themes, templates, and components |
 | [Markdown Extensions](markdown/) | Extended syntax reference |
+| [Page Styles and Types](markdown/styles/) | Restyle a whole page from frontmatter |
 | [Task Browser](markdown/tasks/) | Find, filter and complete tasks (server/GUI) |
 | [Relationships & Genealogy](markdown/relationships/) | Typed relationships between notes |
 | [CLI Reference](reference/cli/) | Command line options |
