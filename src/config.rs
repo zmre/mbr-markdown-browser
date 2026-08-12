@@ -10,6 +10,7 @@ use figment::{
 };
 
 use crate::errors::ConfigError;
+use crate::task_query::IncludeFilter;
 
 const DEFAULT_PORT: u16 = 5200;
 const DEFAULT_OEMBED_TIMEOUT_MS: u64 = 500;
@@ -65,6 +66,16 @@ fn default_tasks_enabled() -> bool {
 
 fn default_tasks_stamp_done() -> bool {
     true
+}
+
+/// Default for [`Config::tasks_default_include`].
+///
+/// Checkboxes only, not the wire default of [`IncludeFilter::All`]: the panel
+/// widens to `all` on its own when a tasks-only query comes back empty, so a
+/// repository that uses `TODO:` markers and no checkboxes still opens on its
+/// work — while one that uses both is not made to read them mixed together.
+fn default_tasks_default_include() -> IncludeFilter {
+    IncludeFilter::Tasks
 }
 
 /// Default markers that flag work as incomplete.
@@ -493,6 +504,22 @@ pub struct Config {
     /// Default: true (stamp).
     #[serde(default = "default_tasks_stamp_done")]
     pub tasks_stamp_done: bool,
+    /// Which entries the task panel's **Show** filter starts on: `"tasks"`
+    /// (checkboxes), `"markers"` (`TODO:`-style lines), or `"all"`.
+    ///
+    /// Only the starting position — the user can change it in the ⚙ popover for
+    /// the life of that panel, and the panel widens to `all` by itself when the
+    /// configured default returns nothing (see `mbr-tasks-panel.ts`). That
+    /// fallback is why the default is the narrow `"tasks"` rather than `"all"`:
+    /// a repository with no checkboxes at all still opens on its markers, and
+    /// one with both is not made to read them interleaved.
+    ///
+    /// Typed as the real [`IncludeFilter`] rather than a `String` so serde
+    /// rejects a typo at startup, the way an out-of-range `graph_depth` is.
+    /// Config file and `MBR_TASKS_DEFAULT_INCLUDE` only; there is no CLI flag.
+    /// Default: `"tasks"`.
+    #[serde(default = "default_tasks_default_include")]
+    pub tasks_default_include: IncludeFilter,
     /// Glob patterns whose matching files are left out of the **task index**.
     ///
     /// Each pattern is matched against a markdown file's repository-relative
@@ -628,6 +655,7 @@ impl Default for Config {
             mark_incomplete: None,
             tasks_enabled: true, // Task browser enabled by default (server/GUI only)
             tasks_stamp_done: true, // Stamp @done(...) when a task is completed
+            tasks_default_include: default_tasks_default_include(),
             tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
             edit_enabled: false,
             edit_token_hash: None,
@@ -2422,6 +2450,74 @@ mod tests {
             ),
             "expected ConfigError::InvalidTasksIgnoreGlob, got: {err:?}"
         );
+    }
+
+    /// Checkboxes only, deliberately narrower than the wire default of
+    /// [`IncludeFilter::All`]: the panel widens by itself when this returns
+    /// nothing, so the narrow default costs a repo without checkboxes nothing.
+    #[test]
+    fn test_default_tasks_default_include_is_tasks() {
+        assert_eq!(
+            Config::default().tasks_default_include,
+            IncludeFilter::Tasks
+        );
+    }
+
+    #[test]
+    fn test_config_read_tasks_default_include_round_trips_every_value() {
+        let _guard = env_lock();
+        for (written, expected) in [
+            ("all", IncludeFilter::All),
+            ("tasks", IncludeFilter::Tasks),
+            ("markers", IncludeFilter::Markers),
+        ] {
+            let repo = repo_with_mbr_dir(Some(&format!("tasks_default_include = \"{written}\"\n")));
+
+            let config = Config::read(repo.path())
+                .unwrap_or_else(|e| panic!("{written:?} must load, got: {e:?}"));
+
+            assert_eq!(config.tasks_default_include, expected, "for {written:?}");
+        }
+    }
+
+    /// Typed as the real enum rather than a `String` precisely so this fails at
+    /// startup, where it is visible, instead of silently selecting a default.
+    #[test]
+    fn test_config_read_rejects_an_unknown_tasks_default_include() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("tasks_default_include = \"todos\"\n"));
+
+        let err = Config::read(repo.path()).expect_err("an unknown value must abort loading");
+
+        assert!(
+            matches!(err, crate::MbrError::Config(ConfigError::ParseFailed(_))),
+            "expected ConfigError::ParseFailed, got: {err:?}"
+        );
+    }
+
+    /// Env beats the repository's own file, for the reason the whole `MBR_*`
+    /// layer exists: the operator serving a repo need not be its author.
+    #[test]
+    fn test_config_read_tasks_default_include_env_overrides_toml() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("tasks_default_include = \"tasks\"\n"));
+        let _env = EnvVars::set(&[("MBR_TASKS_DEFAULT_INCLUDE", "markers")]);
+
+        let config = Config::read(repo.path()).expect("env must load");
+
+        assert_eq!(config.tasks_default_include, IncludeFilter::Markers);
+    }
+
+    /// A `.mbr/config.toml` written before this option existed must still load.
+    #[test]
+    fn test_config_read_without_tasks_default_include_key_still_loads() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("theme = \"amber\"\nport = 5324\n"));
+
+        let config = Config::read(repo.path()).expect("a config predating the option must load");
+
+        assert_eq!(config.tasks_default_include, IncludeFilter::Tasks);
+        assert_eq!(config.theme, "amber");
     }
 
     #[test]

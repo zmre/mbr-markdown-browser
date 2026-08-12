@@ -10,7 +10,7 @@ import {
   makeResponse,
   markerResponse,
 } from './test-fixtures.js'
-import type { TaskQueryResponse } from './types.js'
+import type { IncludeFilter, TaskQueryResponse } from './types.js'
 
 /** Today for every test here; matches the fixture dates. */
 const TODAY = new Date(2026, 7, 4, 12, 0, 0)
@@ -37,24 +37,43 @@ async function mount(response: TaskQueryResponse = categoryResponse()) {
   return mountBare(null)
 }
 
-/**
- * Mount with a current page, answering each query from `responses` in order —
- * the last one repeats. Opening from a page can cost two queries (the folder
- * scope, then the widened retry), so the tests below need per-call answers.
- */
-async function mountFrom(currentPath: string | null, ...responses: TaskQueryResponse[]) {
+/** Answer each query from `responses` in order; the last one repeats. */
+function queueResponses(responses: TaskQueryResponse[]) {
   for (const response of responses.slice(0, -1)) {
     fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve(response) })
   }
   respondWith(responses[responses.length - 1])
+}
+
+/**
+ * Mount with a current page, answering each query from `responses` in order —
+ * the last one repeats. Opening from a page can cost up to three queries (the
+ * folder scope, the widened Show filter, then the widened folder), so the tests
+ * below need per-call answers.
+ */
+async function mountFrom(currentPath: string | null, ...responses: TaskQueryResponse[]) {
+  queueResponses(responses)
   return mountBare(currentPath)
 }
 
-async function mountBare(currentPath: string | null) {
+/**
+ * {@link mountFrom} with the repository's configured Show default pinned, which
+ * is the other thing that decides how many queries an open costs.
+ */
+async function mountWith(
+  opts: { currentPath?: string | null; defaultInclude?: IncludeFilter },
+  ...responses: TaskQueryResponse[]
+) {
+  queueResponses(responses)
+  return mountBare(opts.currentPath ?? null, opts.defaultInclude)
+}
+
+async function mountBare(currentPath: string | null, defaultInclude?: IncludeFilter) {
   const element = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
   element.today = TODAY
   element.locale = 'en-US'
   element.currentPath = currentPath
+  if (defaultInclude) element.defaultInclude = defaultInclude
   document.body.appendChild(element)
   await flush(element)
   return element
@@ -132,7 +151,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open'],
         priorities: [],
         due: 'any',
-        include: 'all',
+        include: 'tasks',
         mode: 'category',
         limit: 500,
       })
@@ -150,7 +169,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open'],
         priorities: [],
         due: 'any',
-        include: 'all',
+        include: 'tasks',
         mode: 'category',
         limit: 500,
       })
@@ -185,7 +204,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open', 'done'],
         priorities: ['urgent'],
         due: 'overdue',
-        include: 'all',
+        include: 'tasks',
         mode: 'category',
         limit: 500,
       })
@@ -370,9 +389,16 @@ describe('MbrTasksPanelElement', () => {
       expect(headings[0]).toBe('Overdue')
     })
 
+    // A configured Show default of `all` arms the *other* fallback, so these
+    // mount with it to isolate the folder one. The interaction between the two
+    // has its own block, further down.
     describe('the empty-folder fallback', () => {
       it('widens to the whole repository rather than opening on nothing', async () => {
-        element = await mountFrom('docs/notes.md', emptyResponse(), categoryResponse())
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'all' },
+          emptyResponse(),
+          categoryResponse()
+        )
 
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect((bodyAt(0) as { folder: string | null }).folder).toBe('/docs/')
@@ -385,8 +411,8 @@ describe('MbrTasksPanelElement', () => {
 
       it('fires at most once, so an empty folder the user picks stays picked', async () => {
         // 1st: empty (widens), 2nd: the full list, 3rd onwards: empty again.
-        element = await mountFrom(
-          'docs/notes.md',
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'all' },
           emptyResponse(),
           categoryResponse(),
           emptyResponse()
@@ -403,7 +429,11 @@ describe('MbrTasksPanelElement', () => {
       })
 
       it('leaves the folder alone when a typed query is what came back empty', async () => {
-        element = await mountFrom('docs/notes.md', categoryResponse(), emptyResponse())
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'all' },
+          categoryResponse(),
+          emptyResponse()
+        )
         expect(fetchMock).toHaveBeenCalledTimes(1)
 
         const input = element.shadowRoot!.querySelector('#tasks-filter') as HTMLInputElement
@@ -414,6 +444,67 @@ describe('MbrTasksPanelElement', () => {
 
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect((lastBody() as { folder: string | null }).folder).toBe('/docs/')
+      })
+    })
+
+    /**
+     * Both fallbacks armed at once, which is what opening a folder-scoped panel
+     * on a `tasks`-configured repository does.
+     */
+    describe('the two fallbacks together', () => {
+      function includeOf(index: number): string {
+        return (bodyAt(index) as { include: string }).include
+      }
+
+      function folderOf(index: number): string | null {
+        return (bodyAt(index) as { folder: string | null }).folder
+      }
+
+      it('widens the Show filter first, then the folder, then stops', async () => {
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'tasks' },
+          emptyResponse(),
+          emptyResponse(),
+          categoryResponse()
+        )
+
+        expect(fetchMock).toHaveBeenCalledTimes(3)
+        // Content filter first: dropping the folder scope moves the user out of
+        // the part of the repo they were standing in, so it goes last.
+        expect([includeOf(0), folderOf(0)]).toEqual(['tasks', '/docs/'])
+        expect([includeOf(1), folderOf(1)]).toEqual(['all', '/docs/'])
+        expect([includeOf(2), folderOf(2)]).toEqual(['all', null])
+        // Neither miss was ever committed to the screen.
+        expect(rowLabels(element)).toContain('H:Weekly notes')
+        expect(element.shadowRoot!.querySelector('.results-empty')).toBeNull()
+      })
+
+      it('terminates on a repository that is empty however it is asked', async () => {
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'tasks' },
+          emptyResponse()
+        )
+
+        // Three requests and no more: nothing re-arms the include flag, and the
+        // folder flag is re-armed only on the include branch, which runs once.
+        expect(fetchMock).toHaveBeenCalledTimes(3)
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+        expect(selectedFolder(element)).toBe('Home')
+      })
+
+      it('stops at the Show widen when that is enough, keeping the folder scope', async () => {
+        // The carried-forward folder widen is captured and disarmed by the
+        // second run like any other, so a later empty result cannot spend it
+        // behind the user's back.
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'tasks' },
+          emptyResponse(),
+          categoryResponse()
+        )
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(folderOf(1)).toBe('/docs/')
+        expect(selectedFolder(element)).toBe('docs')
       })
     })
   })
@@ -1197,9 +1288,10 @@ describe('MbrTasksPanelElement', () => {
       expect(toggler).toHaveBeenCalledWith({ path: 'notes.md', line: 3, to: 'done' })
     })
 
-    it('sends the Show choice, defaulting to all', async () => {
+    it('sends the Show choice, defaulting to the configured value', async () => {
       element = await mountWithMarkers()
-      expect((lastBody() as { include: string }).include).toBe('all')
+      // The built-in default is `tasks`, not the wire default of `all`.
+      expect((lastBody() as { include: string }).include).toBe('tasks')
 
       await openFilters(element)
       const select = includeSelect(element)
@@ -1223,7 +1315,9 @@ describe('MbrTasksPanelElement', () => {
       // than through `select.value`.)
       const options = Array.from(includeSelect(element).querySelectorAll('option'))
       expect(options.map((o) => o.getAttribute('value'))).toEqual(['all', 'tasks', 'markers'])
-      expect(options.filter((o) => o.hasAttribute('selected')).map((o) => o.value)).toEqual(['all'])
+      expect(options.filter((o) => o.hasAttribute('selected')).map((o) => o.value)).toEqual([
+        'tasks',
+      ])
     })
 
     it('pins Show to tasks in By Due, and restores the choice on the way back', async () => {
@@ -1266,6 +1360,94 @@ describe('MbrTasksPanelElement', () => {
       // On the fieldset, not the <select>: a disabled control suppresses
       // pointer events, so its own tooltip would never render.
       expect(fieldset.getAttribute('title')).toContain('no due date')
+    })
+
+    /**
+     * The narrow default only works because it widens: a repository whose work
+     * is written as `TODO:` lines and not checkboxes must still open on it.
+     */
+    describe('the empty-Show fallback', () => {
+      /** No matches at all — no groups, no folder facets. */
+      function nothing(): TaskQueryResponse {
+        return makeResponse()
+      }
+
+      function includeOf(index: number): string {
+        return (bodyAt(index) as { include: string }).include
+      }
+
+      async function mountDefaulting(
+        defaultInclude: IncludeFilter,
+        ...responses: TaskQueryResponse[]
+      ) {
+        return mountWith({ defaultInclude }, ...responses)
+      }
+
+      it('does not widen when the configured default finds something', async () => {
+        element = await mountDefaulting('tasks', markerResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(includeOf(0)).toBe('tasks')
+      })
+
+      it('widens to all when the configured default finds nothing', async () => {
+        element = await mountDefaulting('tasks', nothing(), markerResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(0)).toBe('tasks')
+        expect(includeOf(1)).toBe('all')
+        // Mutated, not applied invisibly: the control describes what is on
+        // screen, exactly as the folder pane follows a dropped scope.
+        await openFilters(element)
+        expect(includeSelect(element).value).toBe('all')
+        const selected = Array.from(includeSelect(element).querySelectorAll('option')).find((o) =>
+          o.hasAttribute('selected')
+        )
+        expect(selected?.textContent?.trim()).toBe('Tasks + markers')
+      })
+
+      it('widens once, so a repository with nothing in it does not loop', async () => {
+        element = await mountDefaulting('tasks', nothing())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(1)).toBe('all')
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+      })
+
+      it('widens a configured default of markers too', async () => {
+        element = await mountDefaulting('markers', nothing(), categoryResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(0)).toBe('markers')
+        expect(includeOf(1)).toBe('all')
+      })
+
+      it('arms nothing when the configured default is already all', async () => {
+        // There is no wider setting to fall back to, so an empty result is the
+        // honest answer rather than the trigger for a second request.
+        element = await mountDefaulting('all', nothing())
+
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(includeOf(0)).toBe('all')
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+      })
+
+      it('never widens a Show choice the user made, even an empty one', async () => {
+        // Opens on `all`, so nothing is armed; then the user narrows to `tasks`
+        // and gets nothing. An explicit choice must stick.
+        element = await mountDefaulting('all', categoryResponse(), nothing())
+        await openFilters(element)
+
+        const select = includeSelect(element)
+        select.value = 'tasks'
+        select.dispatchEvent(new Event('change'))
+        await flush(element)
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(1)).toBe('tasks')
+        expect(includeSelect(element).value).toBe('tasks')
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+      })
     })
   })
 

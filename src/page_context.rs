@@ -28,6 +28,7 @@ use crate::markdown::HeadingInfo;
 use crate::readability::ReadabilityScores;
 use crate::server::{Breadcrumb, generate_breadcrumbs, get_current_dir_name};
 use crate::tag_index::{TagInfo, TaggedPage};
+use crate::task_query::IncludeFilter;
 
 /// How URLs are emitted into a template context.
 pub enum UrlMode {
@@ -88,6 +89,10 @@ pub struct PageChrome<'a> {
     /// Whether the task browser is available on this page. Always `false` in
     /// static builds: the task index is built from live files.
     pub tasks_enabled: bool,
+    /// Where the task panel's Show filter starts. Emitted even when
+    /// `tasks_enabled` is false (as `graph_depth` is when link tracking is off):
+    /// the key is inert without a panel to read it.
+    pub tasks_default_include: IncludeFilter,
     /// `Some((prefix, suffix))` for content pages; `None` for error pages,
     /// which historically omit `title_prefix`/`title_suffix`.
     pub title_affixes: Option<(&'a str, &'a str)>,
@@ -118,6 +123,10 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
     );
     ctx.insert("graph_depth".to_string(), json!(chrome.graph_depth));
     ctx.insert("tasks_enabled".to_string(), json!(chrome.tasks_enabled));
+    ctx.insert(
+        "tasks_default_include".to_string(),
+        json!(chrome.tasks_default_include),
+    );
     if let Some((prefix, suffix)) = chrome.title_affixes {
         ctx.insert("title_prefix".to_string(), json!(prefix));
         ctx.insert("title_suffix".to_string(), json!(suffix));
@@ -272,6 +281,8 @@ pub struct MarkdownContextOptions<'a> {
     /// not go through [`insert_page_chrome`], so this is the sibling of
     /// [`PageChrome::tasks_enabled`] for them. Always `false` in static builds.
     pub tasks_enabled: bool,
+    /// Sibling of [`PageChrome::tasks_default_include`] for markdown pages.
+    pub tasks_default_include: IncludeFilter,
     pub title_prefix: &'a str,
     pub title_suffix: &'a str,
 }
@@ -346,6 +357,10 @@ pub fn markdown_extra_context(
     );
     ctx.insert("graph_depth".to_string(), json!(opts.graph_depth));
     ctx.insert("tasks_enabled".to_string(), json!(opts.tasks_enabled));
+    ctx.insert(
+        "tasks_default_include".to_string(),
+        json!(opts.tasks_default_include),
+    );
     ctx.insert("title_prefix".to_string(), json!(opts.title_prefix));
     ctx.insert("title_suffix".to_string(), json!(opts.title_suffix));
 
@@ -430,6 +445,7 @@ mod tests {
                 sidebar_max_items: 10,
                 graph_depth: 3,
                 tasks_enabled: true,
+                tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("pre ", " suf")),
             },
         );
@@ -459,6 +475,7 @@ mod tests {
                 sidebar_max_items: 10,
                 graph_depth: 2,
                 tasks_enabled: false,
+                tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: None,
             },
         );
@@ -480,6 +497,7 @@ mod tests {
                 sidebar_max_items: 5,
                 graph_depth: 2,
                 tasks_enabled: false,
+                tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("", "")),
             },
         );
@@ -660,6 +678,7 @@ mod tests {
             sidebar_max_items: 10,
             graph_depth: 2,
             tasks_enabled: true,
+            tasks_default_include: IncludeFilter::Tasks,
             title_prefix: "",
             title_suffix: "",
         }

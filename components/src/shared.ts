@@ -1,4 +1,5 @@
 import { buildFolderTree, type FolderNode, type MarkdownFile } from './sorting.js';
+import type { IncludeFilter } from './tasks/types.js';
 
 /**
  * Tag source configuration for linking tag values.
@@ -20,6 +21,12 @@ declare global {
       guiMode: boolean;
       editEnabled?: boolean;
       tasksEnabled?: boolean;
+      /**
+       * Typed as `string`, not `IncludeFilter`: this is whatever the page's
+       * `_head.html` emitted, and {@link getTasksDefaultInclude} is the thing
+       * that decides whether it is one of the three legal values.
+       */
+      tasksDefaultInclude?: string;
       searchEndpoint?: string;
       basePath?: string;
       tagSources?: TagSourceConfig[];
@@ -68,6 +75,27 @@ export function isEditEnabled(): boolean {
  */
 export function isTasksEnabled(): boolean {
   return window.__MBR_CONFIG__?.tasksEnabled ?? false;
+}
+
+/** The three legal Show values (mirrors Rust's `task_query::IncludeFilter`). */
+const INCLUDE_FILTERS: readonly string[] = ['all', 'tasks', 'markers'];
+
+/** Mirrors Rust's `config::default_tasks_default_include`. */
+const TASKS_DEFAULT_INCLUDE: IncludeFilter = 'tasks';
+
+/**
+ * Where the task panel's Show filter starts (`tasks_default_include` config).
+ *
+ * Validated rather than trusted, like {@link getGraphDepth}: a stale custom
+ * `.mbr/_head.html` can emit anything, and an unrecognised value reaching the
+ * request body would come back a 422 the panel renders as a bare error. Missing
+ * or unknown yields `tasks`, the Rust default.
+ */
+export function getTasksDefaultInclude(): IncludeFilter {
+  const raw = window.__MBR_CONFIG__?.tasksDefaultInclude;
+  return raw !== undefined && INCLUDE_FILTERS.includes(raw)
+    ? (raw as IncludeFilter)
+    : TASKS_DEFAULT_INCLUDE;
 }
 
 /**

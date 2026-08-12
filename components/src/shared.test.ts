@@ -2,7 +2,13 @@
  * Unit tests for shared.ts utility functions (keyboard navigation helpers).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isNewTabModifier, openInNewTab, getCanonicalPath, getGraphDepth } from './shared.ts';
+import {
+  isNewTabModifier,
+  openInNewTab,
+  getCanonicalPath,
+  getGraphDepth,
+  getTasksDefaultInclude,
+} from './shared.ts';
 
 describe('isNewTabModifier', () => {
   function makeKeyboardEvent(opts: Partial<KeyboardEventInit> = {}): KeyboardEvent {
@@ -285,5 +291,49 @@ describe('getGraphDepth', () => {
   it('floors fractional values', () => {
     setDepth(3.9);
     expect(getGraphDepth()).toBe(3);
+  });
+});
+
+describe('getTasksDefaultInclude', () => {
+  const originalConfig = window.__MBR_CONFIG__;
+
+  afterEach(() => {
+    window.__MBR_CONFIG__ = originalConfig;
+  });
+
+  function setInclude(tasksDefaultInclude: unknown): void {
+    window.__MBR_CONFIG__ = {
+      serverMode: true,
+      guiMode: false,
+      tasksDefaultInclude: tasksDefaultInclude as string,
+    };
+  }
+
+  it('defaults to tasks when the config is absent', () => {
+    window.__MBR_CONFIG__ = undefined;
+    expect(getTasksDefaultInclude()).toBe('tasks');
+  });
+
+  it('defaults to tasks when the key is missing, as a static build has none', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false };
+    expect(getTasksDefaultInclude()).toBe('tasks');
+  });
+
+  it('passes through every value the Rust enum can spell', () => {
+    for (const value of ['all', 'tasks', 'markers']) {
+      setInclude(value);
+      expect(getTasksDefaultInclude()).toBe(value);
+    }
+  });
+
+  it('falls back rather than forwarding a value the server would reject', () => {
+    // A stale custom `.mbr/_head.html` can emit anything; sending it on would
+    // come back a 422 that the panel renders as a bare error message.
+    setInclude('todos');
+    expect(getTasksDefaultInclude()).toBe('tasks');
+    setInclude('');
+    expect(getTasksDefaultInclude()).toBe('tasks');
+    setInclude(3);
+    expect(getTasksDefaultInclude()).toBe('tasks');
   });
 });

@@ -47,6 +47,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         incomplete_markers: mbr::config::default_incomplete_markers(),
         tasks_enabled: true,
         tasks_stamp_done: true,
+        tasks_default_include: mbr::task_query::IncludeFilter::Tasks,
         tasks_ignore_globs: Vec::new(),
         edit_enabled: false,
         edit_require_token_on_loopback: false,
@@ -235,6 +236,34 @@ async fn test_head_config_includes_graph_depth() {
     .await;
     let html = server.get_text("/readme/").await;
     assert_html_contains(&html, "graphDepth: 4");
+}
+
+/// The task panel's Show default is a per-repo config option, and the only way
+/// it reaches the panel is this key: the panel is recreated on every open and
+/// reads `window.__MBR_CONFIG__` through the trigger, never the query endpoint.
+#[tokio::test]
+async fn test_head_config_includes_tasks_default_include() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\n- [ ] a task");
+
+    // Default config: checkboxes only, narrower than the wire default of `all`.
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/readme/").await;
+    assert_html_contains(&html, r#"tasksDefaultInclude: "tasks""#);
+
+    // Each configured value flows through verbatim.
+    for include in [
+        mbr::task_query::IncludeFilter::All,
+        mbr::task_query::IncludeFilter::Markers,
+    ] {
+        let server = TestServer::start_with_config_fn(&repo, move |c| {
+            c.tasks_default_include = include;
+        })
+        .await;
+        let html = server.get_text("/readme/").await;
+        let expected = serde_json::to_string(&include).expect("IncludeFilter serializes");
+        assert_html_contains(&html, &format!("tasksDefaultInclude: {expected}"));
+    }
 }
 
 #[tokio::test]

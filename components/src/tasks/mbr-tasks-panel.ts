@@ -109,6 +109,14 @@ const INCLUDE_OPTIONS: ReadonlyArray<{ value: IncludeFilter; label: string }> = 
 ]
 
 /**
+ * Show filter used when the trigger injects nothing.
+ *
+ * Mirrors Rust's `config::default_tasks_default_include`, so a panel built by
+ * hand behaves like one built from a default configuration.
+ */
+const DEFAULT_INCLUDE: IncludeFilter = 'tasks'
+
+/**
  * `<mbr-tasks-panel>` — the two-pane task browser.
  *
  * Lives in the lazy `mbr-tasks.min.js` chunk and imports nothing stateful from
@@ -158,6 +166,19 @@ export class MbrTasksPanelElement extends LitElement {
   toggleTask: TaskToggler | null = null
 
   /**
+   * The repository's configured Show default (`tasks_default_include`),
+   * injected by the trigger from `window.__MBR_CONFIG__`.
+   *
+   * Only the *starting* position of {@link _include}: the panel is destroyed and
+   * rebuilt on every open, so this re-applies each time and a change made in the
+   * popover lasts exactly as long as the panel does. Injected rather than read
+   * from `shared.getTasksDefaultInclude()` for the usual reason — that module is
+   * main-bundle state this chunk may not import.
+   */
+  @property({ attribute: false })
+  defaultInclude: IncludeFilter = DEFAULT_INCLUDE
+
+  /**
    * Today, for overdue marking and date headings. A property so tests can pin
    * it; the server does its own bucketing against its own clock.
    */
@@ -191,10 +212,11 @@ export class MbrTasksPanelElement extends LitElement {
   @state() private _priorities: TaskPriority[] = []
   @state() private _due: DueFilter = 'any'
   /**
-   * The user's Show choice. Read through {@link _effectiveInclude}, never
+   * The user's Show choice, seeded from {@link defaultInclude} in
+   * {@link firstUpdated}. Read through {@link _effectiveInclude}, never
    * directly — calendar mode overrides it without forgetting it.
    */
-  @state() private _include: IncludeFilter = 'all'
+  @state() private _include: IncludeFilter = DEFAULT_INCLUDE
   @state() private _mode: TaskMode = 'category'
 
   // === Response state ===
@@ -253,6 +275,16 @@ export class MbrTasksPanelElement extends LitElement {
    */
   private _folderFallbackPending = false
 
+  /**
+   * The same bargain as {@link _folderFallbackPending}, for the Show filter:
+   * armed by {@link _applyDefaultInclude} and consumed by the very next run.
+   *
+   * A repository configured for `tasks` may contain none — only `TODO:` markers
+   * — and opening the panel on "No tasks match these filters" would be a worse
+   * answer than showing the markers it does have.
+   */
+  private _includeFallbackPending = false
+
   override connectedCallback() {
     super.connectedCallback()
     document.addEventListener('keydown', this._handleKeydown)
@@ -273,6 +305,7 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   override firstUpdated() {
+    this._applyDefaultInclude()
     this._applyCurrentFolder()
     this._input?.focus()
     void this._runQuery()
@@ -281,6 +314,23 @@ export class MbrTasksPanelElement extends LitElement {
   // ========================================
   // Querying
   // ========================================
+
+  /**
+   * Open on the repository's configured Show default, and arm the widen.
+   *
+   * Run from {@link firstUpdated} rather than as a field initialiser because
+   * `defaultInclude` is a property the trigger sets after construction — and
+   * because the panel is rebuilt on every open, which is what makes this the
+   * *default* rather than a one-time migration.
+   *
+   * Nothing is armed when the default is already `all`: there is no wider
+   * setting to fall back to, and an armed flag would only cost a second request
+   * on a repository that genuinely has no tasks at all.
+   */
+  private _applyDefaultInclude() {
+    this._include = this.defaultInclude
+    this._includeFallbackPending = this.defaultInclude !== 'all'
+  }
 
   /**
    * Open scoped to the folder of the page the panel was opened from.
@@ -354,7 +404,12 @@ export class MbrTasksPanelElement extends LitElement {
 
     const generation = ++this._generation
     const isStale = () => generation !== this._generation
-    const widenIfEmpty = this._folderFallbackPending
+    // Both fallbacks are captured and disarmed together, up front: a run the
+    // user supersedes by typing hands its fallbacks to nobody, and a widened
+    // re-query is already disarmed by the time it starts.
+    const widenInclude = this._includeFallbackPending
+    const widenFolder = this._folderFallbackPending
+    this._includeFallbackPending = false
     this._folderFallbackPending = false
     this._loading = true
     this._error = null
@@ -380,8 +435,30 @@ export class MbrTasksPanelElement extends LitElement {
       // Checked before anything is committed, so the guess that missed is never
       // rendered — the panel stays on "Loading tasks…" until the widened
       // response lands, rather than flashing "No tasks match these filters."
-      if (widenIfEmpty && data.groups.length === 0) {
-        this._folder = null
+      //
+      // Both widens can be armed at once (a panel opened folder-scoped on a
+      // repo configured for tasks only), and they are spent one per round trip,
+      // **content filter first**: widening what counts as an entry is the less
+      // destructive of the two, where dropping the folder scope moves the user
+      // out of the part of the repo they were standing in.
+      //
+      // Termination: nothing ever re-arms `_includeFallbackPending`, and
+      // `_folderFallbackPending` is re-armed only on the include branch — which
+      // therefore runs at most once. So the chain is at most three requests
+      // (scoped+narrow, scoped+all, unscoped+all) and then both flags are
+      // permanently false for the life of the panel.
+      if (data.groups.length === 0 && (widenInclude || widenFolder)) {
+        if (widenInclude) {
+          // Mutated, not applied invisibly: the Show select is bound to this, so
+          // it goes on describing what is actually on screen — exactly as the
+          // folder branch below lets the folder pane follow the scope it drops.
+          this._include = 'all'
+          // Carry the folder widen forward rather than spending it here, so a
+          // result that is *still* empty can drop the scope on the next pass.
+          this._folderFallbackPending = widenFolder
+        } else {
+          this._folder = null
+        }
         await this._runQuery()
         return
       }

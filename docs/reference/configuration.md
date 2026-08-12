@@ -227,6 +227,7 @@ the index is built by reading live files, so static builds never expose it —
 |--------|------|---------|-------------|
 | `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
 | `tasks_stamp_done` | bool | `true` | Maintain the `@done(...)` annotation when a task is toggled through `POST /.mbr/task`. Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
+| `tasks_default_include` | string | `"tasks"` | Where the panel's **Show** filter starts: `"tasks"`, `"markers"` or `"all"`. Set with `MBR_TASKS_DEFAULT_INCLUDE`; there is no CLI flag. |
 | `tasks_ignore_globs` | array | `[]` | Glob patterns whose matching files contribute nothing to the task browser. Set with `MBR_TASKS_IGNORE_GLOBS='["templates/**"]'`; there is no CLI flag. |
 
 Example:
@@ -234,6 +235,37 @@ Example:
 # .mbr/config.toml
 tasks_enabled = false
 ```
+
+**Where the Show filter starts (`tasks_default_include`):**
+
+The panel's ⚙ **Show** filter chooses between checkbox tasks, `TODO:`-style
+[incomplete markers](#incomplete-marker-highlighting), or both. This option sets
+where it starts:
+
+```toml
+# .mbr/config.toml
+tasks_default_include = "all"   # "tasks" (default), "markers", or "all"
+```
+
+The default is `"tasks"` — checkboxes only — because the two are different
+kinds of thing: a checkbox is work somebody wrote down as work, while a marker
+is a note to self left in the middle of a sentence. Reading them interleaved by
+default makes the list noisier than the task list of a repository that uses
+checkboxes properly deserves.
+
+That default costs a repository that uses **only** markers nothing, because
+**the panel widens to `all` on its own when the configured default comes back
+empty**. It does so before drawing anything, so you never see a flash of "No
+tasks match these filters", and it moves the Show control to match — the filter
+always describes what is actually on screen. The widening happens at most once
+per open, and never after you have touched the Show select yourself: an explicit
+choice sticks even when it selects nothing.
+
+Set `tasks_default_include = "all"` to start on both, in which case nothing is
+widened — there is no broader setting to fall back to.
+
+A value that is not one of the three aborts startup with a parse error naming
+the option, rather than being quietly ignored.
 
 **Excluding folders from the task browser (`tasks_ignore_globs`):**
 
@@ -1041,6 +1073,7 @@ MBR_INCOMPLETE_MARKERS='["NOTE","DRAFT"]'
 
 # Tasks
 MBR_TASKS_ENABLED=false
+MBR_TASKS_DEFAULT_INCLUDE=all  # where the panel's Show filter starts
 MBR_TASKS_IGNORE_GLOBS='["templates/**","**/archive/**"]'  # kept out of the task browser
 
 # Editing

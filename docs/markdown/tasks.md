@@ -55,6 +55,11 @@ repository by itself rather than opening on an empty list. That happens only on
 the way in: once you are in, a folder you pick yourself stays picked even when
 it turns up empty.
 
+The [**Show** filter](#filtering) widens the same way, and the two are tried in
+order: first what counts as an entry, and only then the folder scope — giving up
+the folder you were standing in is the bigger change of subject, so it goes
+last.
+
 Opening from the home page or a section page — neither of which is a file —
 starts unscoped, exactly as it always has.
 
@@ -115,9 +120,21 @@ The ⚙ button opens the rest of the filters:
   means "incomplete" to the server, which would be confusing to look at).
 - **Priority** — Normal, High, Urgent. Empty means all.
 - **Due** — Any, Overdue, Due today, Due tomorrow, Upcoming, or No due date.
-- **Show** — Tasks + markers (the default), Tasks only, or Markers only. See
+- **Show** — Tasks only (the default), Markers only, or Tasks + markers. See
   [Incomplete markers](#incomplete-markers). Greyed out in **By Due**, which
   lists tasks only.
+
+  It starts on **Tasks only** so the list is your checkboxes and not a mix of
+  those and every `TODO:` in the repository. If that finds nothing — a
+  repository whose work is all written as markers, say — the panel widens to
+  **Tasks + markers** by itself rather than opening on "No tasks match these
+  filters", and moves the control to match, so what you see is always what the
+  filter says. It widens at most once, and never once you have set **Show**
+  yourself: your choice stays put even when it selects nothing.
+
+  A repository can change the starting position with the
+  [`tasks_default_include`](../reference/configuration/#task-settings) config
+  option.
 
 The folder scope is the one filter that does *not* start empty: it starts on
 the folder of the note you were reading (see [Where it
@@ -270,6 +287,7 @@ Highlighting](../reference/configuration/#incomplete-marker-highlighting).
 |--------|---------|--------|
 | `tasks_enabled` | `true` | Turn the panel and its endpoint off (`--no-tasks`) |
 | `tasks_stamp_done` | `true` | Maintain `@done(...)` when a task is completed |
+| `tasks_default_include` | `"tasks"` | Where the **Show** filter starts: `"tasks"`, `"markers"` or `"all"` (config/env only) |
 | `tasks_ignore_globs` | `[]` | Folders whose tasks the panel ignores (config/env only) |
 | `mark_incomplete` | server/GUI on | Also gates [incomplete markers](#incomplete-markers) in the panel (`--no-mark-incomplete`) |
 | `incomplete_markers` | `["TK", "TODO", "FIXME", "XXX"]` | Which words count as a marker |

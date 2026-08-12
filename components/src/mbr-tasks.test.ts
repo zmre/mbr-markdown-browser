@@ -190,6 +190,7 @@ describe('MbrTasksElement', () => {
         guiMode: false,
         tasksEnabled: true,
         editEnabled: true,
+        tasksDefaultInclude: 'markers',
       }
       window.frontmatter = { markdown_source: 'docs/notes.md' }
       element.open()
@@ -201,6 +202,7 @@ describe('MbrTasksElement', () => {
       const panel = element.shadowRoot?.querySelector('mbr-tasks-panel') as unknown as {
         endpoint: string
         editEnabled: boolean
+        defaultInclude: string
         toggleTask: unknown
         resolveHref: unknown
         currentPath: string | null
@@ -209,9 +211,24 @@ describe('MbrTasksElement', () => {
       expect(panel.editEnabled).toBe(true)
       expect(typeof panel.toggleTask).toBe('function')
       expect(typeof panel.resolveHref).toBe('function')
+      // The repo's configured Show default. The chunk cannot read
+      // `window.__MBR_CONFIG__` through `shared.ts` for itself either.
+      expect(panel.defaultInclude).toBe('markers')
       // The page the panel opens scoped to and pins first; the chunk cannot
       // read `window.frontmatter` through `task-toggle.ts` for itself.
       expect(panel.currentPath).toBe('docs/notes.md')
+    })
+
+    it('injects the built-in Show default when the page configures none', async () => {
+      // `beforeEach` emits no `tasksDefaultInclude`, which is what a page from a
+      // server predating the option looks like.
+      element.open()
+      await settle(element)
+
+      const panel = element.shadowRoot?.querySelector('mbr-tasks-panel') as unknown as {
+        defaultInclude: string
+      }
+      expect(panel.defaultInclude).toBe('tasks')
     })
 
     it('injects a null current path from a page that is not a file', async () => {
