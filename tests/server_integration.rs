@@ -568,6 +568,58 @@ async fn test_peer_static_folder_serves_assets_and_ranges() {
     );
 }
 
+/// The same layout two levels up, which is what a framework that owns the
+/// directory structure forces: SvelteKit serves a route from its filesystem
+/// path, so the markdown root has to be `<project>/src/routes`, while the
+/// assets it serves at the site root live in `<project>/static`.
+#[tokio::test]
+async fn test_two_deep_static_folder_serves_assets() {
+    let project = tempfile::tempdir().unwrap();
+    let routes = project.path().join("src/routes");
+    std::fs::create_dir_all(routes.join(".mbr")).unwrap();
+    std::fs::write(routes.join("readme.md"), "# SvelteKit layout").unwrap();
+
+    let images = project.path().join("static/images");
+    std::fs::create_dir_all(&images).unwrap();
+    std::fs::write(images.join("logo.png"), b"PNG bytes").unwrap();
+    std::fs::write(project.path().join("static/favicon.ico"), b"ICO bytes").unwrap();
+    // One level below the anchor, and one inside the markdown root's parent:
+    // neither is under a served root, and reaching two levels up must not have
+    // made either of them servable.
+    std::fs::write(project.path().join("svelte.config.js"), b"secret").unwrap();
+    std::fs::write(project.path().join("src/app.html"), b"secret").unwrap();
+
+    let server = TestServer::start_at_path_with(routes, |config| {
+        config.static_folder = "../../static".to_string();
+    })
+    .await;
+
+    let response = server.get("/images/logo.png").await;
+    assert_eq!(
+        response.status(),
+        200,
+        "an asset two levels up must be served"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"PNG bytes");
+
+    let response = server.get("/favicon.ico").await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"ICO bytes");
+
+    assert_eq!(server.get("/").await.status(), 200);
+
+    // Containment holds at the new depth. Plain names rather than `..` paths
+    // for the reason given in `test_peer_static_folder_serves_assets_and_ranges`:
+    // reqwest normalizes `..` out before the request is sent.
+    for path in ["/svelte.config.js", "/app.html"] {
+        assert_eq!(
+            server.get(path).await.status(),
+            404,
+            "{path} is outside both served roots and must not be served"
+        );
+    }
+}
+
 // Only the macOS and Linux canonicalize() behaviors are asserted below, so the
 // test is gated to those platforms rather than silently passing elsewhere.
 #[cfg(any(target_os = "macos", target_os = "linux"))]

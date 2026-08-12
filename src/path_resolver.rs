@@ -374,8 +374,9 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 /// served file to sit under the repository root would 404 the entire overlay.
 ///
 /// *How far* the overlay may reach is decided once, at load time, by
-/// `Config::validate_static_folder`: inside the root, or a peer of it, and never
-/// via a parent that is `$HOME` or the filesystem root. What this function must
+/// `Config::validate_static_folder`: inside the root, or under a directory at
+/// most two levels above it, never reached through `$HOME` or the filesystem
+/// root, and never a directory containing the root. What this function must
 /// still guarantee — and does — is that a *request path* cannot walk out of
 /// whatever directory that policy settled on, including through a symlink inside
 /// the overlay pointing at, say, `/etc/passwd`: the candidate is canonicalized
@@ -1374,8 +1375,8 @@ mod tests {
     /// Retargeted. This layer used to insist that the overlay itself sit under
     /// the repository root, which 404'd the whole `repo/content` +
     /// `repo/static` layout. Deciding *how far* `static_folder` may reach is
-    /// `Config::validate_static_folder`'s job now (peers only, never via `$HOME`
-    /// or `/`); what this layer owes is that an out-of-root overlay actually
+    /// `Config::validate_static_folder`'s job now (at most two levels up, never
+    /// via `$HOME` or `/`); what this layer owes is that an out-of-root overlay actually
     /// resolves — the regression — while a request path still cannot walk out
     /// of it.
     #[test]

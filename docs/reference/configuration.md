@@ -99,7 +99,7 @@ tasks_ignore_globs = [
 |--------|------|---------|-------------|
 | `markdown_extensions` | array | `["md"]` | File extensions treated as markdown |
 | `index_file` | string | `"index.md"` | Default file for directories |
-| `static_folder` | string | `"static"` | Folder for static file overlay. Must stay inside the markdown root or be a peer of it (`../static`); values reaching past the root's parent — or into `$HOME` or `/` — are rejected at startup, as are absolute paths from a config file. See [Static Folder](#static-folder) |
+| `static_folder` | string | `"static"` | Folder for static file overlay. Must stay inside the markdown root, or land under a directory at most two levels above it (`../static`, `../../static`); values reaching further — or into `$HOME` or `/`, or onto a directory that contains the root — are rejected at startup, as are absolute paths from a config file. See [Static Folder](#static-folder) |
 
 ### Ignore Settings
 
@@ -1108,23 +1108,51 @@ project/
         └── demo.mp4      # available at /videos/demo.mp4
 ```
 
-The boundary is the **parent of the markdown root**, and it is refused when that
-parent is your home directory or the filesystem root. Concretely:
+**Two levels up** is allowed as well, for a framework that owns the directory
+layout. SvelteKit serves a route from its filesystem path, so the markdown root
+has to be `src/routes/`, while the assets it serves at the site root live in the
+project's `static/`:
+
+```
+project/
+├── src/
+│   └── routes/               # markdown root (holds .mbr/)
+│       └── .mbr/config.toml  # static_folder = "../../static"
+└── static/                   # two levels up — allowed
+    └── images/
+        └── logo.png          # available at /images/logo.png
+```
+
+Two levels is the limit. mbr climbs at most that far to find the **anchor** the
+overlay must live under, and it stops short at every step rather than climbing
+into your home directory or the filesystem root — so how far it actually gets
+depends on where the root sits. It also refuses any value that resolves to a
+directory *containing* the markdown root, however few levels up that is: serving
+one would expose every sibling of the root, and the markdown sources themselves
+as raw files. Concretely:
 
 | Value | Markdown root | Result |
 |-------|---------------|--------|
 | `static`, `public/assets` | anywhere | Allowed — inside the root |
 | `../static` | `project/content` | Allowed — a peer of the root |
-| `../static` | `~/notes` | **Refused** — the parent is `$HOME` |
-| `../..`, `../../assets` | anywhere | **Refused** — reaches past the parent |
-| `..` | anywhere | **Refused** — the parent itself, which would expose every sibling |
+| `../../static` | `project/src/routes` | Allowed — under the anchor `project` |
+| `../static` | `~/notes` | **Refused** — the next directory up is `$HOME` |
+| `../../static` | `~/project/content` | **Refused** — the climb stops below `$HOME` |
+| `..`, `../..` | anywhere | **Refused** — contains the markdown root |
+| `../../..`, `../../../assets` | anywhere | **Refused** — past the two-level limit |
 | `/etc` (from `.mbr/config.toml`) | anywhere | **Refused** — see below |
 
+Reaching two levels up is wider than a peer: the anchor is the root's
+grandparent, so the value could have named anything under it — `project/.git`
+and the credentials in its config, `project/node_modules`. mbr logs a `WARN` at
+startup naming the directory it settled on whenever an overlay reaches that far,
+so it is never quietly in effect. Serve untrusted repositories accordingly.
+
 A symlink is judged by where it actually lands, not by how it is spelled: a
-`static` symlink pointing at a peer directory is accepted, one pointing past the
-boundary is refused. Within the folder mbr settles on, request paths are still
-contained — a file inside the static folder that symlinks to `/etc/passwd` is
-not served.
+`static` symlink pointing at an allowed directory is accepted, one pointing past
+the boundary is refused. Within the folder mbr settles on, request paths are
+still contained — a file inside the static folder that symlinks to `/etc/passwd`
+is not served.
 
 ### Absolute paths: environment only
 
@@ -1143,11 +1171,12 @@ static_folder = "/srv/shared-assets"
 The distinction is provenance, not the value: the environment variable is set by
 whoever runs the server, while the config file ships inside the repository. An
 absolute path from the environment is a deliberate operator choice and is used as
-given, with no peer-boundary check.
+given, with no ascent-boundary check.
 
-When the static folder resolves outside the markdown root, mbr logs one `INFO`
-line at startup naming the resolved directory, so an external static root is
-never silently in effect. Run with `-v` to see it.
+When the static folder resolves outside the markdown root, mbr logs one line at
+startup naming the resolved directory, so an external static root is never
+silently in effect. A peer overlay logs at `INFO` (run with `-v` to see it); one
+that reaches two levels up logs at `WARN`, which is visible by default.
 
 ### Indexing an external static folder
 

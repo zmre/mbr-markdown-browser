@@ -46,8 +46,10 @@ pub struct Repo {
     #[serde(skip)]
     static_folder: String,
     /// The static overlay's own directory, when it legitimately resolves
-    /// *outside* `canonical_root` (`static_folder = "../static"` for the
-    /// `repo/content` + `repo/static` layout).
+    /// *outside* `canonical_root` — `static_folder = "../static"` for the
+    /// `repo/content` + `repo/static` layout, or `"../../static"` for a
+    /// framework layout whose markdown root is pinned two levels down
+    /// (SvelteKit's `<project>/src/routes` alongside `<project>/static`).
     ///
     /// `None` when the overlay is disabled, resolves inside the root, or was
     /// refused by the policy — so this is the only directory besides
@@ -803,7 +805,22 @@ impl Repo {
                 }
             } else {
                 // Process static file
-                let url = build_static_url_path(path, &self.canonical_root, &self.static_folder);
+                //
+                // Inside the overlay, strip the *resolved* directory rather than
+                // the configured string. `build_static_url_path` strips the raw
+                // value with a component-wise `strip_prefix`, so `../../static`
+                // and the equivalent `./../../static` — both accepted by the
+                // config policy — do not both match, and the second would leave
+                // a `..` in the URL. `path` is canonical here: `scan_folder`
+                // canonicalizes the walk root and `WalkDir` prefixes every entry
+                // with it.
+                let url = match (location, self.canonical_static_root.as_deref()) {
+                    (ScanLocation::StaticOverlay, Some(overlay)) => format!(
+                        "/{}",
+                        crate::url_path::path_to_url(path.strip_prefix(overlay).unwrap_or(path))
+                    ),
+                    _ => build_static_url_path(path, &self.canonical_root, &self.static_folder),
+                };
                 let other_file = OtherFileInfo {
                     raw_path: path.to_path_buf(),
                     url_path: url,
@@ -2242,10 +2259,43 @@ mod tests {
         let content = tmp.path().join("project/content");
         std::fs::create_dir_all(&content).expect("create content");
 
+        // Two shapes the policy refuses for different reasons: an ancestor of
+        // the markdown root, and a target past the ascent budget. Both must
+        // leave the scanner with nothing extra to walk.
+        for value in ["../..", "../../../elsewhere"] {
+            let repo = Repo::init(
+                content.clone(),
+                value.to_string(),
+                &["md".to_string()],
+                &[],
+                &[],
+                "index.md".to_string(),
+                &[],
+                &[],
+            );
+
+            assert_eq!(
+                repo.canonical_static_root, None,
+                "a static_folder the validator refuses must not be a scan root: {value:?}"
+            );
+        }
+    }
+
+    /// Builds `<tmp>/project/{src/routes,static}` and a `Repo` rooted at
+    /// `src/routes` — the SvelteKit shape, where the overlay is two levels up.
+    fn two_deep_overlay_repo(static_folder: &str) -> (tempfile::TempDir, PathBuf, Repo) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let project = tmp.path().join("project");
+        let routes = project.join("src/routes");
+        std::fs::create_dir_all(routes.join(".mbr")).expect("create routes");
+        std::fs::write(routes.join("README.md"), "# Home").expect("write readme");
+        std::fs::create_dir_all(project.join("static/videos")).expect("create static");
+        std::fs::write(project.join("static/pic.png"), b"PNG bytes").expect("write pic");
+        std::fs::write(project.join("static/videos/demo.mp4"), b"MP4 bytes").expect("write video");
+
         let repo = Repo::init(
-            content,
-            // Climbs past the root's parent: refused by `resolve_static_overlay`.
-            "../../..".to_string(),
+            routes,
+            static_folder.to_string(),
             &["md".to_string()],
             &[],
             &[],
@@ -2253,10 +2303,55 @@ mod tests {
             &[],
             &[],
         );
+        (tmp, project, repo)
+    }
+
+    /// A two-level overlay must index exactly like a peer one: the whole
+    /// overlay prefix stripped, no `..` left in any URL. This is what catches a
+    /// `strip_prefix` regression on a two-component prefix, which a one-level
+    /// fixture cannot distinguish from a working implementation.
+    #[test]
+    fn test_two_deep_overlay_is_scannable_with_clean_urls() {
+        let (_tmp, project, repo) = two_deep_overlay_repo("../../static");
 
         assert_eq!(
-            repo.canonical_static_root, None,
-            "a static_folder the validator refuses must not be a scan root"
+            repo.canonical_static_root,
+            Some(project.join("static").canonicalize().expect("canonicalize")),
+            "a two-level overlay the validator accepts must be a scan root"
+        );
+
+        repo.scan_all().expect("scan must succeed");
+        repo.scan_static_folder().expect("static scan must succeed");
+
+        let other = repo.other_files.pin();
+        let mut urls: Vec<_> = other.iter().map(|(_, i)| i.url_path.clone()).collect();
+        urls.sort();
+        assert_eq!(
+            urls,
+            vec!["/pic.png".to_string(), "/videos/demo.mp4".to_string()],
+            "a two-level static folder's assets must be indexed with the overlay prefix stripped"
+        );
+    }
+
+    /// `../../static` and `./../../static` name the same directory, and the
+    /// config policy accepts both — so indexing must not depend on which
+    /// spelling was written. Stripping the raw configured string does depend on
+    /// it, because `Path::strip_prefix` compares components and keeps a leading
+    /// `.`, which used to leave a `..` in the URL.
+    #[test]
+    fn test_overlay_urls_survive_a_noncanonical_static_folder_spelling() {
+        let (_tmp, _project, repo) = two_deep_overlay_repo("./../../static");
+
+        repo.scan_all().expect("scan must succeed");
+        repo.scan_static_folder().expect("static scan must succeed");
+
+        let other = repo.other_files.pin();
+        let mut urls: Vec<_> = other.iter().map(|(_, i)| i.url_path.clone()).collect();
+        urls.sort();
+        assert_eq!(
+            urls,
+            vec!["/pic.png".to_string(), "/videos/demo.mp4".to_string()],
+            "URLs must come from the resolved overlay, not the configured spelling"
         );
     }
 
