@@ -1722,18 +1722,21 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
     })
 }
 
-/// Generates a URL-safe anchor ID from heading text.
+/// Lowercases `text` and reduces it to alphanumerics and `-`.
 ///
-/// Handles duplicates by appending `-2`, `-3`, … and guarantees the emitted id
-/// is unique across the whole document. `anchor_ids` therefore doubles as the
-/// set of already-issued ids: a bare per-base counter is not sufficient, because
-/// the composed suffix can collide with a *different* heading whose own slug
-/// happens to match it (`["Step 1", "Step 1", "Step 1-2"]` would otherwise hand
-/// out `step-1-2` twice).
-fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> String {
-    // Convert to lowercase and replace spaces and special chars with dashes
-    let base_id = text
-        .to_lowercase()
+/// Whitespace becomes `-`; every other non-alphanumeric character is dropped
+/// *and* splits the text there, with the pieces rejoined by `-`. Punctuation
+/// between two words therefore adds a separator rather than removing one:
+/// `Hello, World!` slugifies to `hello--world`, the comma's rejoin dash landing
+/// beside the one the space already produced. The doubled dash is load bearing
+/// — these slugs are the `#anchor` targets of hand-written links in existing
+/// repositories and cannot be "fixed" without breaking them.
+///
+/// Returns an empty string for input with nothing to keep; callers decide what
+/// an empty slug means (`generate_anchor_id` substitutes `heading`, the body
+/// class builder in `templates.rs` drops it).
+pub(crate) fn slugify(text: &str) -> String {
+    text.to_lowercase()
         .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' {
@@ -1748,7 +1751,19 @@ fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> St
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join("-");
+        .join("-")
+}
+
+/// Generates a URL-safe anchor ID from heading text.
+///
+/// Handles duplicates by appending `-2`, `-3`, … and guarantees the emitted id
+/// is unique across the whole document. `anchor_ids` therefore doubles as the
+/// set of already-issued ids: a bare per-base counter is not sufficient, because
+/// the composed suffix can collide with a *different* heading whose own slug
+/// happens to match it (`["Step 1", "Step 1", "Step 1-2"]` would otherwise hand
+/// out `step-1-2` twice).
+fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> String {
+    let base_id = slugify(text);
 
     // Handle empty IDs
     let base_id = if base_id.is_empty() {
@@ -4508,6 +4523,33 @@ mod tests {
         let result = render_result("## Press <kbd>Ctrl</kbd> now\n").await;
         assert_eq!(result.headings[0].text, "Press Ctrl now");
         assert_eq!(result.headings[0].id, "press-ctrl-now");
+    }
+
+    // ==================== Slugification ====================
+
+    #[test]
+    fn slugify_lowercases_and_separates_words() {
+        assert_eq!(slugify("Hello World"), "hello-world");
+        assert_eq!(slugify("Meeting Notes"), "meeting-notes");
+        assert_eq!(slugify("Ünïcode Heading"), "ünïcode-heading");
+        assert_eq!(slugify("already-slugged"), "already-slugged");
+    }
+
+    /// Trailing punctuation vanishes cleanly; punctuation *between* words
+    /// yields a doubled dash. Pinned rather than endorsed: heading anchors in
+    /// existing repositories link to these exact slugs.
+    #[test]
+    fn slugify_drops_punctuation() {
+        assert_eq!(slugify("Field Note!"), "field-note");
+        assert_eq!(slugify("Hello, World!"), "hello--world");
+    }
+
+    /// `slugify` itself has no fallback — that belongs to callers, and
+    /// `generate_anchor_id`'s `heading` default must not leak into body classes.
+    #[test]
+    fn slugify_returns_empty_for_nothing_to_keep() {
+        assert_eq!(slugify(""), "");
+        assert_eq!(slugify("!!!"), "");
     }
 
     // ==================== Anchor id generation ====================

@@ -457,6 +457,9 @@ The shortcode supports:
 
 **Note:** Pulldown-cmark's smart punctuation converts `"` to curly quotes (`"` `"`), so the regex supports both straight and curly quotes.
 
+**Page Styles and Types:**
+Two frontmatter fields form the `<body>` class list: `style` (a string, a space-separated string, or an array — every entry is a class) and `type` (a single string, slugified via `markdown::slugify` then `collapse_dashes`, e.g. `Meeting Notes` → `meeting-notes`, `Book Review (2024)` → `book-review-2024`). `collapse_dashes` is applied to the class only, never inside `slugify`: `slugify` also generates heading anchor ids, whose doubled dashes (`Hello, World!` → `hello--world`) are frozen because they are live `#anchor` targets in existing repos. `Templates::render_markdown_with_tera` combines them in `body_class_list` (`src/templates.rs`) — type first, styles after, deduped first-seen — and inserts the result as the `style` context variable, so a repo's existing `.mbr/index.html` gains the feature untouched. The `type` context variable stays exactly as authored, because templates gate on its value (`{% if type == "person" %}`). `type` is aligned with the [OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) and is the preferred spelling for a note's kind; `style` remains for pure presentation. Shipped styles with CSS in `templates/theme.css`: `outline`, `kanban`, plus `slides` (`reveal-slides.css`, triggered client-side by the body class in `mbr-slides.ts`). User docs: `docs/markdown/styles.md`.
+
 ### Static Site Generation
 
 The `-b/--build` flag generates a complete static site:

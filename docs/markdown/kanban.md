@@ -84,6 +84,8 @@ This is just for display -- if you want to move items, do it in the editor.  Her
 
 This is useful for tracking projects, issues, tasks, etc., and seeing them in a more visual way.  It keeps the markdown pretty standard (particularly if your whole doc is the kanban and you just add the `style: kanban` bit to the frontmatter).
 
+`kanban` is a presentation choice rather than a kind of note, which is why it stays in `style:` instead of `type:`.  See [Page Styles and Types](styles/) for the difference and for the other styles that ship with mbr.
+
 > [!NOTE]
 > This uses CSS columns and sometimes columns wrap despite being instructed not to.
 

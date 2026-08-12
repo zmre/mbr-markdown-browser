@@ -1,7 +1,7 @@
 ---
 title: Slides Example
 description: A markdown browser, previewer, and static site generator
-style: slides
+type: slides
 ---
 
 # mbr

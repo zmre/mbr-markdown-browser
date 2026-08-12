@@ -331,7 +331,7 @@ figure.theater > figcaption {
 /*   display: none; */
 /* } */
 
-ol li {
+ol > li {
   list-style: decimal;
 }
 
@@ -1168,7 +1168,9 @@ main dl > dt {
   padding-inline-start: calc(
     var(--mbr-dl-marker-size) + var(--mbr-dl-marker-gap)
   );
-  text-indent: calc(-1 * (var(--mbr-dl-marker-size) + var(--mbr-dl-marker-gap)));
+  text-indent: calc(
+    -1 * (var(--mbr-dl-marker-size) + var(--mbr-dl-marker-gap))
+  );
   border-radius: var(--pico-border-radius);
   transition: color var(--mbr-dl-transition-duration)
     var(--mbr-dl-transition-easing);
@@ -1807,4 +1809,194 @@ main dl > dd:focus-within ~ dt ~ dd {
 .kanban ul:last-child,
 .kanban ol:last-child {
   break-after: always;
+}
+
+/************ OUTLINE **********************/
+
+.outline main {
+  font-size: 16px;
+  line-height: 1.6;
+}
+.outline main h1,
+.outline main h2,
+.outline main h3,
+.outline main h4,
+.outline main h5,
+.outline main h6 {
+  font-weight: 600;
+  line-height: 1.1;
+  margin: 36px 24px 16px 0;
+  padding: 0;
+}
+.outline main h1,
+.outline main h2 {
+  border-bottom: 1px solid #eaecef;
+}
+.outline main h1 {
+  font-size: 32px;
+  line-height: 40px;
+  margin: 0 0 16px;
+  padding: 0 0 9.600000381469727px;
+}
+.outline main h2 {
+  font-size: 24px;
+  line-height: 30px;
+  padding: 0 0 7.199999809265137px;
+}
+.outline main h3 {
+  font-size: 20px;
+  line-height: 25px;
+}
+.outline main h4 {
+  font-size: 16px;
+  line-height: 20px;
+  margin: 24px 0 16px;
+  padding: 0;
+}
+.outline main h5 {
+  font-size: 14px;
+  line-height: 17px;
+}
+.outline main h6 {
+  font-size: 13.600000381469727px;
+  line-height: 17px;
+}
+.outline main {
+  line-height: 1.6;
+  padding: 3px;
+}
+.outline main p {
+  margin: 1em 0;
+}
+.outline main > *:first-child {
+  margin-top: 0 !important;
+}
+.outline main > *:last-child {
+  margin-bottom: 0 !important;
+}
+.outline main p,
+.outline main blockquote,
+.outline main ul,
+.outline main ol,
+.outline main dl,
+.outline main table,
+.outline main pre {
+  margin-bottom: 16px;
+}
+.outline main ol,
+.outline main ul {
+  padding-left: 2.6ch;
+}
+.outline main ul > li {
+  list-style-type: disc;
+}
+.outline main ol > li {
+  list-style-type: upper-alpha;
+}
+.outline main ol ol > li {
+  list-style-type: decimal;
+}
+.outline main ol ol ol > li {
+  list-style-type: lower-alpha;
+}
+.outline main ol ol ol ol > li {
+  list-style-type: lower-roman;
+}
+.outline main ol ol,
+.outline main ol ul,
+.outline main ul ul,
+.outline main ul ol {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.outline main li > p {
+  margin-bottom: 0;
+}
+.outline main li p + p {
+  margin-top: 16px;
+}
+.outline main dl {
+  padding: 0;
+}
+.outline main dl dt {
+  padding: 0;
+  margin-top: 16px;
+  font-size: 1em;
+  font-style: italic;
+  font-weight: 700;
+}
+.outline main dl dd {
+  padding: 0 16px;
+  margin-bottom: 16px;
+}
+.outline main blockquote {
+  padding: 0 15px;
+  margin-left: 0;
+  color: #777;
+  border-left: 4px solid #ddd;
+}
+.outline main blockquote > :first-child {
+  margin-top: 0;
+}
+.outline main blockquote > :last-child {
+  margin-bottom: 0;
+}
+@media print {
+  body.outline {
+    background: #fff;
+  }
+  .outline main img,
+  .outline main table,
+  .outline main figure {
+    page-break-inside: avoid;
+  }
+  .outline main {
+    background: #fff;
+    border: none !important;
+    font-size: 12px;
+  }
+  .outline main pre code {
+    overflow: visible;
+  }
+}
+.outline main {
+  counter-reset: H2;
+}
+
+.outline main h2 {
+  counter-reset: H3;
+}
+
+.outline main h2:before {
+  content: counter(H2) ". ";
+  counter-increment: H2;
+  counter-reset: H3;
+  counter-reset: H4;
+  counter-reset: H5;
+}
+
+.outline main h3 {
+  counter-reset: H4;
+}
+
+.outline main h3:before {
+  content: counter(H2) "." counter(H3) ". ";
+  counter-increment: H3;
+  counter-reset: H4;
+  counter-reset: H5;
+}
+
+.outline main h4 {
+  counter-reset: H5;
+}
+
+.outline main h4:before {
+  content: counter(H2) "." counter(H3) "." counter(H4) ". ";
+  counter-increment: H4;
+  counter-reset: H5;
+}
+
+.outline main h5:before {
+  content: counter(H2) "." counter(H3) "." counter(H4) "." counter(H5) ". ";
+  counter-increment: H5;
 }

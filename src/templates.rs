@@ -6,6 +6,7 @@ use std::{
 
 use crate::errors::TemplateError;
 use crate::markdown::SimpleMetadata;
+use itertools::Itertools;
 use parking_lot::RwLock;
 use tera::{Context, Tera};
 
@@ -313,15 +314,19 @@ impl Templates {
 
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
-            // Normalize "style" frontmatter: if it's an array, join with spaces
-            // This allows `style: ['slides', 'other']` to work as body classes
-            if k == "style" {
-                let normalized = normalize_style_value(v);
-                context.insert(k, &normalized);
-            } else {
+            // `style` is skipped here and inserted below from `body_class_list`,
+            // which also folds in `type` — so it has to be inserted even when the
+            // frontmatter carries no `style` key at all.
+            if k != "style" {
                 context.insert(k, v);
             }
         });
+        let body_class = body_class_list(&frontmatter);
+        // Left undefined when there is nothing to say, so `{% if style %}` in a
+        // custom template still distinguishes "no classes" from an empty string.
+        if !body_class.is_empty() {
+            context.insert("style", &body_class);
+        }
         // Add extra context (breadcrumbs, current_dir_name, etc.)
         extra_context.iter().for_each(|(k, v)| {
             context.insert(k, v);
@@ -551,22 +556,68 @@ fn humanize_date(input: &str) -> String {
     input.to_string()
 }
 
-/// Normalize a style frontmatter value to a space-separated string.
+/// Builds the `<body>` class list from the `type` and `style` frontmatter keys.
 ///
-/// Handles:
-/// - String: returned as-is
-/// - Array: elements joined with spaces
-/// - Other: converted to string representation
-fn normalize_style_value(value: &serde_json::Value) -> String {
+/// The OKF `type:` field is folded into `style` rather than surfaced as a new
+/// `body_class` variable so repositories that already ship a customized
+/// `.mbr/index.html` get the feature without touching their template: the class
+/// attribute they render today simply gains the type. The `type` *context*
+/// variable is deliberately left exactly as authored — templates gate on its
+/// value (`{% if type and type == "person" %}` in `_display_enhancements.html`
+/// and `_person_infobox.html`), so handing them a slugified copy would silently
+/// stop matching.
+///
+/// Entries are deduped first-seen, because `type: slides` with `style: slides`
+/// is the natural way to write a page that is both and must not emit the class
+/// twice. Type leads, styles follow: class order means nothing to CSS, but a
+/// fixed one keeps rendered pages byte-stable across runs.
+fn body_class_list(frontmatter: &SimpleMetadata) -> String {
+    let type_class = frontmatter
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(|raw| collapse_dashes(&crate::markdown::slugify(raw)))
+        .filter(|slug| !slug.is_empty());
+
+    type_class
+        .into_iter()
+        .chain(frontmatter.get("style").into_iter().flat_map(style_classes))
+        .unique()
+        .join(" ")
+}
+
+/// Expands a `style` frontmatter value into individual class names.
+///
+/// Strings are split on whitespace rather than passed through whole so that
+/// `style: "a b"` and `style: [a, b]` reach the deduper as the same two
+/// classes. Non-string array elements are ignored; any other value keeps the
+/// historical `to_string()` fallback.
+fn style_classes(value: &serde_json::Value) -> Vec<String> {
     match value {
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => split_classes(s),
         serde_json::Value::Array(arr) => arr
             .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-        other => other.to_string(),
+            .filter_map(serde_json::Value::as_str)
+            .flat_map(split_classes)
+            .collect(),
+        other => vec![other.to_string()],
     }
+}
+
+fn split_classes(s: &str) -> Vec<String> {
+    s.split_whitespace().map(str::to_string).collect()
+}
+
+/// Squeezes runs of `-` out of a slug and trims them from both ends.
+///
+/// Applied to the type class only, never to `slugify` itself: `slugify` is
+/// shared with heading anchors, whose doubled dashes are frozen because they
+/// are the live `#anchor` targets of links already written in existing
+/// repositories. A body class carries no such history and is free to be the
+/// obvious thing, so `type: "Book Review (2024)"` yields `book-review-2024` —
+/// what anyone hand-writing the matching CSS selector would guess — rather than
+/// the anchor spelling `book-review--2024`.
+fn collapse_dashes(slug: &str) -> String {
+    slug.split('-').filter(|part| !part.is_empty()).join("-")
 }
 
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
@@ -678,46 +729,171 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_normalize_style_string() {
-        let value = json!("slides");
-        assert_eq!(normalize_style_value(&value), "slides");
+    // ------------------------------------------------------------------
+    // Body class list (`type` + `style` frontmatter)
+    // ------------------------------------------------------------------
+
+    /// Builds a `SimpleMetadata` from `(key, value)` pairs.
+    fn fm(pairs: &[(&str, serde_json::Value)]) -> SimpleMetadata {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
     }
 
     #[test]
-    fn test_normalize_style_string_with_spaces() {
-        let value = json!("slides other");
-        assert_eq!(normalize_style_value(&value), "slides other");
+    fn test_body_class_style_string() {
+        assert_eq!(
+            body_class_list(&fm(&[("style", json!("slides"))])),
+            "slides"
+        );
     }
 
     #[test]
-    fn test_normalize_style_array() {
-        let value = json!(["slides", "other"]);
-        assert_eq!(normalize_style_value(&value), "slides other");
+    fn test_body_class_style_string_with_spaces() {
+        assert_eq!(
+            body_class_list(&fm(&[("style", json!("slides other"))])),
+            "slides other"
+        );
     }
 
     #[test]
-    fn test_normalize_style_array_single_element() {
-        let value = json!(["slides"]);
-        assert_eq!(normalize_style_value(&value), "slides");
+    fn test_body_class_style_array() {
+        assert_eq!(
+            body_class_list(&fm(&[("style", json!(["slides", "other"]))])),
+            "slides other"
+        );
+        assert_eq!(
+            body_class_list(&fm(&[("style", json!(["slides"]))])),
+            "slides"
+        );
+    }
+
+    /// Array elements are themselves split, so the two spellings of the same
+    /// class list collapse to the same result — and to the same dedupe keys.
+    #[test]
+    fn test_body_class_style_array_elements_are_split() {
+        assert_eq!(
+            body_class_list(&fm(&[("style", json!(["slides other", "third"]))])),
+            "slides other third"
+        );
+    }
+
+    /// Non-string array elements are dropped, matching the historical
+    /// `filter_map(as_str)`; other value kinds keep the `to_string()` fallback.
+    #[test]
+    fn test_body_class_style_non_string_values() {
+        assert_eq!(
+            body_class_list(&fm(&[("style", json!(["slides", 42, null]))])),
+            "slides"
+        );
+        assert_eq!(body_class_list(&fm(&[("style", json!(null))])), "null");
+        assert_eq!(body_class_list(&fm(&[("style", json!(42))])), "42");
     }
 
     #[test]
-    fn test_normalize_style_array_empty() {
-        let value = json!([]);
-        assert_eq!(normalize_style_value(&value), "");
+    fn test_body_class_style_array_empty() {
+        assert_eq!(body_class_list(&fm(&[("style", json!([]))])), "");
+    }
+
+    /// The point of the change: `type` alone produces a body class.
+    #[test]
+    fn test_body_class_type_only() {
+        assert_eq!(body_class_list(&fm(&[("type", json!("slides"))])), "slides");
     }
 
     #[test]
-    fn test_normalize_style_null() {
-        let value = json!(null);
-        assert_eq!(normalize_style_value(&value), "null");
+    fn test_body_class_type_is_slugified() {
+        assert_eq!(
+            body_class_list(&fm(&[("type", json!("Meeting Notes"))])),
+            "meeting-notes"
+        );
+        assert_eq!(
+            body_class_list(&fm(&[("type", json!("Field Note!"))])),
+            "field-note"
+        );
+    }
+
+    /// Punctuation *between* words makes `slugify` emit a doubled dash, which
+    /// heading anchors are stuck with. The body class is not: `collapse_dashes`
+    /// gives the selector the author would actually write.
+    #[test]
+    fn test_body_class_type_collapses_doubled_dashes() {
+        assert_eq!(
+            crate::markdown::slugify("Book Review (2024)"),
+            "book-review--2024",
+            "guards the premise: the shared slugifier really does double here"
+        );
+        assert_eq!(
+            body_class_list(&fm(&[("type", json!("Book Review (2024)"))])),
+            "book-review-2024"
+        );
+        assert_eq!(
+            body_class_list(&fm(&[("type", json!("Meeting, Notes"))])),
+            "meeting-notes"
+        );
+    }
+
+    /// Leading and trailing dashes are trimmed, and a type that is nothing but
+    /// separators drops out entirely rather than emitting a bare `-`.
+    #[test]
+    fn test_body_class_type_trims_edge_dashes() {
+        assert_eq!(body_class_list(&fm(&[("type", json!("-draft-"))])), "draft");
+        assert_eq!(body_class_list(&fm(&[("type", json!("---"))])), "");
+    }
+
+    /// Type leads, styles follow.
+    #[test]
+    fn test_body_class_type_and_style_combined() {
+        assert_eq!(
+            body_class_list(&fm(&[
+                ("style", json!(["wide", "dark"])),
+                ("type", json!("person")),
+            ])),
+            "person wide dark"
+        );
+    }
+
+    /// Writing a page as both `type: slides` and `style: slides` is natural and
+    /// must not emit the class twice.
+    #[test]
+    fn test_body_class_type_and_style_dedupe() {
+        assert_eq!(
+            body_class_list(&fm(&[
+                ("style", json!("slides")),
+                ("type", json!("slides"))
+            ])),
+            "slides"
+        );
+        assert_eq!(
+            body_class_list(&fm(&[
+                ("style", json!("wide slides wide")),
+                ("type", json!("slides")),
+            ])),
+            "slides wide"
+        );
+    }
+
+    /// A non-string `type` (a list, a number) is not a class name; it is ignored
+    /// rather than stringified, so `type: [a, b]` cannot inject markup-ish junk.
+    #[test]
+    fn test_body_class_non_string_type_ignored() {
+        assert_eq!(
+            body_class_list(&fm(&[("type", json!(["person", "place"]))])),
+            ""
+        );
+        assert_eq!(body_class_list(&fm(&[("type", json!(42))])), "");
+        // A type that slugifies to nothing leaves no empty class behind.
+        assert_eq!(body_class_list(&fm(&[("type", json!("!!!"))])), "");
+        assert_eq!(
+            body_class_list(&fm(&[("type", json!("!!!")), ("style", json!("wide"))])),
+            "wide"
+        );
     }
 
     #[test]
-    fn test_normalize_style_number() {
-        let value = json!(42);
-        assert_eq!(normalize_style_value(&value), "42");
+    fn test_body_class_neither_field() {
+        assert_eq!(body_class_list(&fm(&[("title", json!("Hello"))])), "");
     }
 
     #[test]
@@ -1089,6 +1265,89 @@ mod tests {
         assert!(
             tera.get_template("busted.html").is_err(),
             "the malformed template should be skipped"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Rendered `<body>` class attribute
+    // ------------------------------------------------------------------
+
+    /// Extracts the rendered `<body ...>` tag.
+    fn body_tag(html: &str) -> &str {
+        html.lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("<body"))
+            .unwrap_or_else(|| panic!("no <body> tag in:\n{html}"))
+    }
+
+    #[test]
+    fn test_rendered_body_class_from_type_alone() {
+        let html = render_page(
+            SimpleMetadata::from([("type".to_string(), json!("slides"))]),
+            HashMap::new(),
+        );
+        assert_eq!(body_tag(&html), r#"<body class="slides">"#);
+    }
+
+    #[test]
+    fn test_rendered_body_class_from_type_and_style() {
+        let html = render_page(
+            SimpleMetadata::from([
+                ("type".to_string(), json!("Meeting Notes")),
+                ("style".to_string(), json!(["wide", "dark"])),
+            ]),
+            HashMap::new(),
+        );
+        assert_eq!(body_tag(&html), r#"<body class="meeting-notes wide dark">"#);
+    }
+
+    /// Arrays used to render as `[a, b]` and were patched up by a `replace`
+    /// filter in `index.html`; the builder now hands the template a plain
+    /// space-separated string, so no bracket may reach the attribute.
+    #[test]
+    fn test_rendered_body_class_from_style_array_has_no_brackets() {
+        let html = render_page(
+            SimpleMetadata::from([("style".to_string(), json!(["slides", "other"]))]),
+            HashMap::new(),
+        );
+        assert_eq!(body_tag(&html), r#"<body class="slides other">"#);
+    }
+
+    #[test]
+    fn test_rendered_body_has_no_class_without_type_or_style() {
+        let html = render_page(SimpleMetadata::new(), HashMap::new());
+        assert_eq!(body_tag(&html), "<body>");
+    }
+
+    /// The `type` context variable must survive untouched: templates gate on
+    /// `{% if type and type == "person" %}`, so folding a slug into it (or
+    /// dropping it in favor of the body class) silently disables the person
+    /// infobox and the genealogy element.
+    #[test]
+    fn test_type_context_variable_is_passed_through_unmodified() {
+        let html = render_page(
+            SimpleMetadata::from([
+                ("type".to_string(), json!("person")),
+                ("title".to_string(), json!("Ada Lovelace")),
+                ("born".to_string(), json!("1815-12-10")),
+            ]),
+            HashMap::new(),
+        );
+
+        assert!(
+            html.contains("mbr-person-infobox"),
+            "person infobox should render for `type: person`, got:\n{html}"
+        );
+        assert!(
+            html.contains("<mbr-genealogy></mbr-genealogy>"),
+            "genealogy element should render for `type: person`, got:\n{html}"
+        );
+        // …and the same value still reaches the body class.
+        assert_eq!(body_tag(&html), r#"<body class="person">"#);
+        assert_eq!(
+            parse_js_value(&html, "window.frontmatter = ")["type"],
+            json!("person"),
+            "frontmatter payload should carry the authored type"
         );
     }
 }

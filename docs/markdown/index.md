@@ -55,6 +55,7 @@ Frontmatter powers:
 - **Tags**: Navigation and filtering
 - **Custom fields**: Available in templates
 - **Special page types**: like [slides](slides/) or [person](relationships/)
+- **Page styles**: `style` and `type` set the [body class](styles/) that restyles the whole page
 
 ### Supported Fields
 
@@ -65,7 +66,8 @@ Frontmatter powers:
 | `tags` | Comma-separated tags |
 | `date` | Publication date |
 | `author` | Author name |
-| `type` | Note type |
+| `type` | Note type; also becomes a [body class](styles/) |
+| `style` | Display [style(s)](styles/) applied as body classes |
 | Any field | Available via `frontmatter_json` |
 
 ## GitHub-style Alerts
@@ -599,6 +601,7 @@ URLs in angle brackets become clickable:
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
 - [Task Browser](tasks/) - Find, filter and complete tasks across the repository
 - [Relationships & Genealogy](relationships/) - Typed frontmatter relationships and family trees
+- [Page Styles and Types](styles/) - Restyle a whole page with `style` and `type` frontmatter
 - [Presentation Slides](slides/) - Create slide presentations from markdown
 - [Slides Example](test-slides/) - A live example presentation
 
