@@ -7,7 +7,14 @@ import {
   taskAt,
   taskHref,
 } from './task-groups.js'
-import { calendarResponse, categoryResponse, makeGroup, makeHit, makeResponse } from './test-fixtures.js'
+import {
+  calendarResponse,
+  categoryResponse,
+  makeGroup,
+  makeHit,
+  makeMarker,
+  makeResponse,
+} from './test-fixtures.js'
 
 /** Four files in server (lexicographic) order, so a reorder is visible. */
 function fourFiles() {
@@ -212,5 +219,12 @@ describe('taskHref', () => {
   it('routes the page path through the injected resolver (static base paths)', () => {
     const hit = makeHit({ text: 'x', line: 7, url_path: '/docs/guide/' })
     expect(taskHref(hit, (p) => `../..${p}`)).toBe('../../docs/guide/#mbr-task-7')
+  })
+
+  it('uses the marker anchor for a marker, which has no checkbox id', () => {
+    // The two ids come from different code on the server (`task_checkbox_html`
+    // vs the highlight span), so the prefix has to follow the kind.
+    const hit = makeMarker({ text: 'source: TK', line: 9, url_path: '/docs/guide/' })
+    expect(taskHref(hit, (p) => p)).toBe('/docs/guide/#mbr-marker-9')
   })
 })

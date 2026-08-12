@@ -1912,8 +1912,24 @@ impl Server {
         // deliberately left *empty*: it is filled by the first `/.mbr/tasks`
         // request, and `invalidate_file` is a no-op until then, so a server
         // whose user never opens the task panel never reads a file for it.
-        // The ignore patterns are compiled once, by the constructor.
-        let task_index = Arc::new(crate::task_index::TaskIndex::new(&tasks_ignore_globs));
+        // The ignore patterns and the marker rule are compiled once, by the
+        // constructor.
+        //
+        // The panel follows the highlighter deliberately: with `mark_incomplete`
+        // off, the rendered pages carry no `#mbr-marker-N` anchors, so a marker
+        // listed here would be a result that cannot be opened. An empty marker
+        // list is the constructor's off switch.
+        //
+        // Read once, at startup, exactly like `tasks_ignore_globs` — flipping
+        // `mark_incomplete` takes a restart.
+        let task_index = Arc::new(crate::task_index::TaskIndex::with_markers(
+            &tasks_ignore_globs,
+            if mark_incomplete {
+                &incomplete_markers
+            } else {
+                &[]
+            },
+        ));
 
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.

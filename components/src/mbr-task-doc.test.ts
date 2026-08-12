@@ -1,14 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import './mbr-task-doc.js'
-import { flashTask, revealTaskFromHash, taskLineFromHash } from './mbr-task-doc.js'
+import { flashTask, revealTaskFromHash, taskAnchorFromHash } from './mbr-task-doc.js'
 import { resetTaskToggleState, wasSelfWrite } from './task-toggle.js'
 
 /**
- * Rendered markup for one open and one completed task, as `html.rs` emits it.
+ * Rendered markup for one open and one completed task, as `html.rs` emits it,
+ * plus a mid-paragraph incomplete marker as `markdown.rs` emits one.
  *
  * The first task carries a `@due(...)` chip so the completion chip added by a
  * toggle has a neighbour to be ordered against; the second is already done and
  * stamped, so reopening it has a chip to take away.
+ *
+ * The marker is deliberately in a `<p>` rather than a list item: that is the
+ * ordinary case, and it is what makes `flashTarget`'s `closest('li') ?? el`
+ * fallback observable.
  */
 const DOCUMENT = `
   <main id="wrapper">
@@ -20,6 +25,7 @@ const DOCUMENT = `
                  data-mbr-task-line="4" data-mbr-task-status="done" checked disabled>
         <span class="mbr-task-text">second</span> <time class="mbr-task-completed" datetime="2026-08-01">Aug 1</time></li>
     </ul>
+    <p>The market fell 10% (source: <span class="mbr-incomplete" id="mbr-marker-7">TK</span>).</p>
   </main>
 `
 
@@ -77,16 +83,26 @@ function taskCalls(): Array<[string, RequestInit]> {
   ) as Array<[string, RequestInit]>
 }
 
-describe('taskLineFromHash', () => {
-  it('accepts only a whole `mbr-task-<n>` fragment', () => {
-    expect(taskLineFromHash('#mbr-task-42')).toBe(42)
-    expect(taskLineFromHash('mbr-task-1')).toBe(1)
-    // Anything else belongs to some other anchor and must not be hijacked.
-    expect(taskLineFromHash('#mbr-task-42x')).toBeNull()
-    expect(taskLineFromHash('#mbr-tasks')).toBeNull()
-    expect(taskLineFromHash('#my-section')).toBeNull()
-    expect(taskLineFromHash('')).toBeNull()
-    expect(taskLineFromHash('#mbr-task-0')).toBeNull()
+describe('taskAnchorFromHash', () => {
+  it('accepts a whole `mbr-task-<n>` fragment and returns its element id', () => {
+    expect(taskAnchorFromHash('#mbr-task-42')).toBe('mbr-task-42')
+    expect(taskAnchorFromHash('mbr-task-1')).toBe('mbr-task-1')
+  })
+
+  it('accepts the marker anchor too, which has no checkbox to carry an id', () => {
+    expect(taskAnchorFromHash('#mbr-marker-42')).toBe('mbr-marker-42')
+    expect(taskAnchorFromHash('mbr-marker-1')).toBe('mbr-marker-1')
+  })
+
+  it('rejects anything else, so an unrelated anchor is never hijacked', () => {
+    expect(taskAnchorFromHash('#mbr-task-42x')).toBeNull()
+    expect(taskAnchorFromHash('#mbr-marker-42x')).toBeNull()
+    expect(taskAnchorFromHash('#mbr-tasks')).toBeNull()
+    expect(taskAnchorFromHash('#mbr-markers')).toBeNull()
+    expect(taskAnchorFromHash('#my-section')).toBeNull()
+    expect(taskAnchorFromHash('')).toBeNull()
+    expect(taskAnchorFromHash('#mbr-task-0')).toBeNull()
+    expect(taskAnchorFromHash('#mbr-marker-0')).toBeNull()
   })
 })
 
@@ -114,7 +130,20 @@ describe('the jump-to-task fragment handler', () => {
   it('no-ops on a fragment that is not a task, or names a missing line', () => {
     expect(revealTaskFromHash('#some-heading')).toBeNull()
     expect(revealTaskFromHash('#mbr-task-999')).toBeNull()
+    expect(revealTaskFromHash('#mbr-marker-999')).toBeNull()
     expect(document.querySelectorAll('.mbr-task-flash')).toHaveLength(0)
+  })
+
+  it('flashes a marker span itself, having no list item to fall back to', () => {
+    const target = revealTaskFromHash('#mbr-marker-7')
+
+    // The span, NOT an ancestor: a marker usually sits mid-paragraph, and
+    // `flashTarget`'s `closest('li')` finds nothing to widen to.
+    expect(target).toBe(document.getElementById('mbr-marker-7'))
+    expect(target!.tagName).toBe('SPAN')
+    expect(target!.classList.contains('mbr-task-flash')).toBe(true)
+    // The line's checkbox neighbours are untouched.
+    expect(document.querySelectorAll('.mbr-task-flash')).toHaveLength(1)
   })
 
   it('runs on mount and again on hashchange', async () => {
@@ -310,6 +339,20 @@ describe('in-document checkbox toggling', () => {
 
     expect(checkbox(3).dataset.mbrTaskStatus).toBe('open')
     expect(alertMock.mock.calls[0][0]).toMatch(/changed on disk/)
+  })
+
+  it('ignores a click on a marker span, which is nobody’s checkbox', async () => {
+    element = await mount()
+
+    const marker = document.getElementById('mbr-marker-7')!
+    marker.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    marker.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    await flush()
+
+    // `checkboxFrom` demands an `HTMLInputElement.mbr-task-check`, so the
+    // delegated handlers need no marker guard of their own — nothing is sent,
+    // and `POST /.mbr/task` would answer 400 for a marker line anyway.
+    expect(taskCalls()).toHaveLength(0)
   })
 
   it('binds one listener on the wrapper rather than one per checkbox', async () => {

@@ -41,6 +41,16 @@
 //! silently swallowed — a user who mistypes a date should see their typo, not a
 //! task that quietly lost its deadline.
 //!
+//! # Incomplete markers
+//!
+//! A line containing a configured marker word ([`MarkerRule`], from
+//! `incomplete_markers`) is a second, read-only kind of entry:
+//! [`parse_marker_line`] turns it into a [`TaskKind::Marker`] whose text is the
+//! whole line and whose annotations are deliberately not parsed. Nothing here
+//! can write one back — [`patch_task_line`] and [`set_marker`] both go through
+//! the checkbox grammar — so "read-only" is a property of the code, not a
+//! convention.
+//!
 //! # Examples
 //!
 //! ```
@@ -55,14 +65,18 @@
 //! assert!(task.due.is_some() && !task.due_has_time);
 //! ```
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+
+use papaya::HashMap as ConcurrentHashMap;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::TaskPatchError;
-use crate::wikilink::{BlockScanner, LineKind, indent_width};
+use crate::wikilink::{
+    BlockScanner, LineKind, MarkupCursor, indent_width, is_reference_definition,
+};
 
 /// Format of the `@done(...)` timestamp [`set_status`] writes.
 ///
@@ -170,6 +184,23 @@ pub enum TaskPriority {
     Urgent,
 }
 
+/// What kind of source line a [`Task`] came from.
+///
+/// A checkbox is writable and carries the full annotation grammar; an incomplete
+/// marker (`TK`, `TODO`, …) is a read-only pointer at a line somebody left
+/// unfinished. Both are surfaced by the task browser, so the two have to travel
+/// in one type — but almost every behaviour that differs between them keys off
+/// this field, which is why it is not an `Option`-shaped afterthought.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    /// A `- [ ]` checkbox line.
+    #[default]
+    Task,
+    /// A line containing an incomplete marker; see [`MarkerRule`].
+    Marker,
+}
+
 /// One parsed task line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Task {
@@ -177,12 +208,24 @@ pub struct Task {
     pub line: u32,
     /// Display indent level; see [`parse_task_line`] for how it is derived.
     pub depth: u8,
+    /// Whether this came from a checkbox or from an incomplete marker.
+    pub kind: TaskKind,
     /// Completion state.
     pub status: TaskStatus,
     /// Priority, `Normal` unless `!!` or `!!!` appeared.
     pub priority: TaskPriority,
     /// Display text: annotations stripped, whitespace collapsed, trimmed.
     pub text: String,
+    /// Where the marker word sits inside [`Task::text`], as **UTF-16 code unit**
+    /// indices — which is what a JavaScript string index is, so the panel can
+    /// `slice()` with them directly. `None` for a checkbox task.
+    ///
+    /// Sent rather than re-derived in the browser because the grammar is
+    /// markup-aware and the boundary rules are per-alternative; a second
+    /// implementation in TypeScript would drift from this one.
+    pub marker_start: Option<u32>,
+    /// End of the marker word; see [`Task::marker_start`].
+    pub marker_end: Option<u32>,
     /// Tags without the leading `#`, original case, de-duplicated.
     pub tags: Vec<String>,
     /// `@due(...)`, start-of-day when no time was given.
@@ -214,6 +257,220 @@ pub struct Annotations {
     pub done_has_time: bool,
     /// Trailing `> YYYY-MM-DD`.
     pub moved_to: Option<NaiveDate>,
+}
+
+/// The compiled `incomplete_markers` rule: one shared answer to "is this an
+/// incomplete marker?", used by the renderer that highlights them and by the
+/// scanner that indexes them.
+///
+/// It is a newtype rather than a bare `Regex` so that `regex` stays out of this
+/// crate's public API, and so the two consumers cannot drift apart into two
+/// notions of what a marker is.
+///
+/// # Word boundaries
+///
+/// Boundaries are decided **per alternative**, not once around the group. A
+/// single `\b` on the whole alternation demands a word character on the far
+/// side of every marker, whatever the marker ends with — so a marker configured
+/// as `TODO:` would never match `TODO: foo`, because the byte after the colon is
+/// a space. Symmetrically, a leading `\b` would stop `@todo` from matching at the
+/// start of a line, and would demand a word character *before* the `@`. So a
+/// `\b` is prefixed only when the marker's first character is word-ish and
+/// suffixed only when its last one is, where word-ish means
+/// `char::is_alphanumeric() || c == '_'` — the definition the regex crate's own
+/// Unicode `\b` uses.
+///
+/// # Longest match
+///
+/// The regex crate's alternation is leftmost-*first*, not leftmost-longest: in
+/// `TODO|TODOMAYBE` the shorter branch would win. Alternatives are therefore
+/// sorted longest-first at construction, which makes the result independent of
+/// the order the markers appear in the configuration file.
+///
+/// # No prefilter
+///
+/// There is deliberately no hand-rolled pre-check of the kind [`might_be_task`]
+/// performs. The two situations are not the same. [`might_be_task`] exists to
+/// keep [`TASK_LINE`] off the regex crate's *capture-tracking* engine, which is
+/// the slow one — roughly 710ns against 70ns, as documented on [`TASK_LINE`]. A
+/// [`MarkerRule`] search captures nothing, so it runs on the meta engine, which
+/// already extracts the literal alternation and drives a SIMD prefilter over it.
+/// A second prefilter in front of that would duplicate work the regex crate does
+/// better, and would have to be kept in agreement with the boundary rules above.
+#[derive(Debug, Clone)]
+pub struct MarkerRule {
+    pattern: Regex,
+}
+
+impl MarkerRule {
+    /// Compiles a rule from the configured markers, or returns `None` when there
+    /// is nothing to match.
+    ///
+    /// Empty entries are dropped, so `incomplete_markers = [""]` is the same off
+    /// switch as `incomplete_markers = []` — and `None` is the signal to skip the
+    /// pass entirely rather than to run a pattern that matches everywhere.
+    ///
+    /// Markers are `regex::escape`d, so a marker containing metacharacters
+    /// (`FIXME(`) is matched literally instead of breaking compilation.
+    pub fn new(markers: &[String]) -> Option<Self> {
+        let mut parts: Vec<&str> = markers
+            .iter()
+            .map(String::as_str)
+            .filter(|m| !m.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        // Stable, so markers of equal length keep their configured order.
+        parts.sort_by_key(|m| std::cmp::Reverse(m.len()));
+
+        let alternation = parts
+            .iter()
+            .map(|m| bounded_alternative(m))
+            .collect::<Vec<_>>()
+            .join("|");
+        // Escaping makes the pattern valid by construction; `ok()` only absorbs
+        // the pathological case of a marker list large enough to blow the
+        // regex crate's compiled-size limit.
+        Regex::new(&format!("(?:{alternation})"))
+            .ok()
+            .map(|pattern| Self { pattern })
+    }
+
+    /// [`MarkerRule::new`], memoised on the marker list that produced it.
+    ///
+    /// **Use this on any path that runs per file or per request.** Compiling the
+    /// pattern costs ~80µs — three to four times what rendering a small page
+    /// costs in total — because the regex crate builds an NFA, a lazy DFA and a
+    /// literal prefilter. The render pipeline needs a rule for every page it
+    /// renders, and `mark_incomplete` is on by default in server and GUI mode,
+    /// so compiling per render put that 80µs on the default path for every
+    /// request. (Callers that build a rule once and keep it — [`TaskIndex`] does
+    /// — should keep calling [`MarkerRule::new`] and own the result.)
+    ///
+    /// Keyed by the marker list rather than held in a plain `OnceLock` because a
+    /// single process legitimately renders with more than one configuration: the
+    /// test suite does it constantly, and nothing stops a GUI from opening two
+    /// repositories whose `.mbr/config.toml` disagree. A `None` result is cached
+    /// too, so a marker list that cannot compile is not retried per page.
+    ///
+    /// Entries are never evicted. The key space is the set of distinct
+    /// `incomplete_markers` values a process ever sees — one in production, a
+    /// handful under test — so there is nothing to bound.
+    ///
+    /// [`TaskIndex`]: crate::task_index::TaskIndex
+    pub fn cached(markers: &[String]) -> Option<Arc<Self>> {
+        /// Marker list -> the rule it compiles to, or `None` when it compiles to
+        /// nothing. The `Option` is part of the value so a miss is cached too.
+        type Compiled = ConcurrentHashMap<Box<[String]>, Option<Arc<MarkerRule>>>;
+
+        static COMPILED: LazyLock<Compiled> = LazyLock::new(ConcurrentHashMap::new);
+
+        let compiled = COMPILED.pin();
+        if let Some(hit) = compiled.get(markers) {
+            return hit.clone();
+        }
+        // A concurrent miss just compiles twice and one insert wins; the rules
+        // are identical, so there is nothing to serialise on.
+        let rule = Self::new(markers).map(Arc::new);
+        compiled
+            .get_or_insert_with(markers.into(), || rule.clone())
+            .clone()
+    }
+
+    /// Byte length of the marker `text` begins with, or `None` when it begins
+    /// with something else.
+    ///
+    /// This is the renderer's block-initial test, and the direct replacement for
+    /// the old `^(?:M1|M2)\b` pattern.
+    pub fn block_initial_match(&self, text: &str) -> Option<usize> {
+        // Matching is leftmost-first, so if anything matches at 0 this is it.
+        // The prefix `\b` cannot spoil a match at offset 0: it is only ever
+        // added when the marker starts with a word character, which is exactly
+        // when start-of-haystack is a boundary.
+        self.pattern
+            .find(text)
+            .filter(|m| m.start() == 0)
+            .map(|m| m.end())
+    }
+
+    /// Every marker in `text`, as byte ranges, ascending and non-overlapping.
+    pub fn find_iter<'t>(
+        &'t self,
+        text: &'t str,
+    ) -> impl Iterator<Item = std::ops::Range<usize>> + 't {
+        self.pattern.find_iter(text).map(|m| m.range())
+    }
+
+    /// Byte offset of the first marker in a raw source line that a reader would
+    /// actually see, or `None` when the line has none.
+    ///
+    /// Unlike [`MarkerRule::find_iter`] this understands markdown: a marker
+    /// inside a code span, a wikilink target, a link destination or title, an
+    /// autolink or a reference definition does not count. See [`MarkupCursor`].
+    pub fn find_in_line(&self, line: &str) -> Option<usize> {
+        find_marker_outside_markup(line, self).map(|span| span.start)
+    }
+}
+
+/// One alternation branch: the escaped marker, with a `\b` on each side that the
+/// marker's own spelling asks for. See [`MarkerRule`] for why the boundaries are
+/// conditional.
+fn bounded_alternative(marker: &str) -> String {
+    let word_ish = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(marker.len() + 4);
+
+    if marker.chars().next().is_some_and(word_ish) {
+        out.push_str(r"\b");
+    }
+    out.push_str(&regex::escape(marker));
+    if marker.chars().next_back().is_some_and(word_ish) {
+        out.push_str(r"\b");
+    }
+    out
+}
+
+/// First marker in `line` that falls outside markup, as a byte range.
+///
+/// The **range**, not just the start, because the panel highlights the marker
+/// word inside the card the way the rendered page highlights it in the
+/// document, and it cannot recover the end itself: the alternation is
+/// longest-first over a configurable list, so which marker matched is only
+/// known here.
+///
+/// **The order of the two passes is the performance design, not an accident.**
+/// The regex runs first over the whole line and [`MarkupCursor`] is consulted
+/// only about the offsets it returned, because well under one line in a hundred
+/// contains a marker word at all — so on the overwhelming majority of lines the
+/// markup scanner never runs. Segmenting the line first and matching within the
+/// segments would invert that: every line in the repository would be parsed, and
+/// the segments would have to be materialised somewhere.
+///
+/// Only a match's **start** is tested. A marker straddling the edge of a code
+/// span is not a thing an author can write, and testing the whole range would
+/// mean asking the forward-only cursor two questions per match.
+fn find_marker_outside_markup(line: &str, rule: &MarkerRule) -> Option<std::ops::Range<usize>> {
+    // A reference definition is a whole-line judgement rather than a span, so it
+    // is settled before the cursor is built.
+    if is_reference_definition(line) {
+        return None;
+    }
+    let mut cursor = MarkupCursor::new(line);
+    // `find_iter` yields ascending, non-overlapping ranges, which is exactly the
+    // non-decreasing query order the cursor requires.
+    rule.find_iter(line).find(|m| !cursor.excludes(m.start))
+}
+
+/// Byte offset within `s` re-expressed as a count of **UTF-16 code units**.
+///
+/// The panel slices [`Task::text`] with these, and a JavaScript string index
+/// *is* a UTF-16 code unit index: a Rust byte offset would land mid-character
+/// the moment the line contains anything outside ASCII, so `"café … TODO"`
+/// would highlight the wrong span (or, past the end, none at all). Saturating
+/// into `u32` costs nothing real — a source line long enough to overflow it is
+/// not a line anybody is reading.
+fn utf16_offset(s: &str, byte_offset: usize) -> u32 {
+    u32::try_from(s[..byte_offset].encode_utf16().count()).unwrap_or(u32::MAX)
 }
 
 /// Parses a single line as a task, returning `None` if it is not one.
@@ -264,15 +521,106 @@ pub fn parse_task_line(line: &str, line_number: u32) -> Option<Task> {
     Some(Task {
         line: line_number,
         depth,
+        kind: TaskKind::Task,
         status,
         priority: annotations.priority,
         text,
+        // A checkbox task has no marker word to point at.
+        marker_start: None,
+        marker_end: None,
         tags: annotations.tags,
         due: annotations.due,
         due_has_time: annotations.due_has_time,
         done: annotations.done,
         done_has_time: annotations.done_has_time,
         moved_to: annotations.moved_to,
+    })
+}
+
+/// Parses a single line as an incomplete *marker* — a `TK`, `TODO`, `FIXME`
+/// that a reader would actually see — returning `None` when it has none.
+///
+/// The result is a read-only pseudo-task: `status` is [`TaskStatus::Open`],
+/// `priority` is [`TaskPriority::Normal`], and `tags`/`due`/`done`/`moved_to`
+/// are all empty. Nothing here is inferred from the line, because there is no
+/// checkbox to write back to — [`patch_task_line`] refuses a marker line, and
+/// [`set_marker`] cannot match one — so an inferred field would be a value the
+/// user can never correct.
+///
+/// # Text
+///
+/// [`Task::text`] is the **whole line**, whitespace-collapsed and otherwise
+/// verbatim: the marker word, any `#tag`, `!!` or `@due(...)` all survive. A
+/// marker is a pointer at a line somebody left unfinished, and the annotation
+/// grammar is the checkbox grammar — parsing `#docs` out of
+/// `TODO: cross-link #docs` would strip text the reader wrote as prose and file
+/// the entry under a tag they never applied to a task.
+///
+/// [`Task::marker_start`] and [`Task::marker_end`] say where in that text the
+/// marker word itself sits, so the panel can give it the same wash the rendered
+/// page does without re-implementing the grammar.
+///
+/// # Matching
+///
+/// Whether a line carries a marker is [`MarkerRule::find_in_line`]'s judgement,
+/// which is markup-aware: a marker inside a code span, a wikilink target, a
+/// link destination or an autolink does not count. That is the same call the
+/// renderer's highlighting makes, so a line that shows a highlight is a line
+/// the panel lists, and only that.
+///
+/// # Depth
+///
+/// Indentation is measured exactly as [`parse_task_line`] measures it, so a
+/// marker nested inside a list indents alongside the tasks around it.
+///
+/// # Examples
+///
+/// ```
+/// use mbr::tasks::{MarkerRule, TaskKind, TaskStatus, parse_marker_line};
+///
+/// let rule = MarkerRule::new(&["TODO".to_string()]).expect("one marker compiles");
+///
+/// let marker = parse_marker_line("  the source is  TODO #docs", 7, &rule).unwrap();
+/// assert_eq!(marker.line, 7);
+/// assert_eq!(marker.kind, TaskKind::Marker);
+/// assert_eq!(marker.status, TaskStatus::Open);
+/// assert_eq!(marker.text, "the source is TODO #docs");
+/// assert_eq!((marker.marker_start, marker.marker_end), (Some(14), Some(18)));
+/// assert!(marker.tags.is_empty());
+///
+/// // A marker inside a code span is markup, not a marker.
+/// assert!(parse_marker_line("call `TODO()` later", 1, &rule).is_none());
+/// ```
+pub fn parse_marker_line(line: &str, line_number: u32, rule: &MarkerRule) -> Option<Task> {
+    // Gate on the RAW line, so what counts as a marker stays decided by the
+    // bytes the author actually wrote.
+    find_marker_outside_markup(line, rule)?;
+    // Same measurement as `parse_task_line`, deliberately: see its `# Depth`.
+    let depth = u8::try_from(indent_width(line) / 2).unwrap_or(u8::MAX);
+    // Every token survives: markers get no annotation parsing at all.
+    let text = collapse_whitespace(line, |_| true);
+    // Located a second time, because the raw-line offset does not index `text`
+    // once runs of whitespace have been collapsed. Collapsing whitespace cannot
+    // change markup structure, so this finds the same occurrence. If it somehow
+    // does not, the panel just renders the line without a highlight — a missing
+    // wash is invisible, a wrong one is a lie.
+    let span = find_marker_outside_markup(&text, rule);
+
+    Some(Task {
+        line: line_number,
+        depth,
+        kind: TaskKind::Marker,
+        status: TaskStatus::Open,
+        priority: TaskPriority::Normal,
+        marker_start: span.as_ref().map(|s| utf16_offset(&text, s.start)),
+        marker_end: span.as_ref().map(|s| utf16_offset(&text, s.end)),
+        text,
+        tags: Vec::new(),
+        due: None,
+        due_has_time: false,
+        done: None,
+        done_has_time: false,
+        moved_to: None,
     })
 }
 
@@ -513,6 +861,9 @@ fn done_annotations(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> 
 
 /// Scans a whole markdown source for task lines.
 ///
+/// Checkboxes only; [`scan_source_tasks_with_markers`] is the same pass with
+/// incomplete markers turned on.
+///
 /// Line numbers are 1-based and count every physical line, including the ones
 /// skipped below. Lines are *not* treated as tasks when they fall inside:
 ///
@@ -533,6 +884,48 @@ fn done_annotations(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> 
 /// assert_eq!(tasks[0].text, "real task");
 /// ```
 pub fn scan_source_tasks(source: &str) -> Vec<Task> {
+    scan_source_tasks_with_markers(source, None)
+}
+
+/// [`scan_source_tasks`], additionally recording incomplete markers.
+///
+/// `None` scans checkboxes only and is exactly [`scan_source_tasks`]; `Some`
+/// also records a [`TaskKind::Marker`] entry for every line carrying a marker
+/// the rule recognises. The two skip rules are shared, so a `TODO` inside
+/// frontmatter or a fenced code block is no more a marker than a `- [ ]` there
+/// is a task.
+///
+/// # One entry per source line
+///
+/// The composition below **is** the precedence rule, structurally rather than
+/// by inspection:
+///
+/// ```text
+/// parse_task_line(line, n).or_else(|| markers.and_then(|r| parse_marker_line(line, n, r)))
+/// ```
+///
+/// `- [ ] TODO: ship it` is a task and never also a marker, because
+/// [`parse_task_line`] answering first short-circuits the `or_else`. And since
+/// the whole thing sits inside a `filter_map`, a line can yield at most one
+/// entry — which is what makes "one entry per source line" hold by
+/// construction, and with it the uniqueness of the `#mbr-marker-{line}` anchor
+/// the panel deep-links to.
+///
+/// # Examples
+///
+/// ```
+/// use mbr::tasks::{MarkerRule, TaskKind, scan_source_tasks_with_markers};
+///
+/// let rule = MarkerRule::new(&["TODO".to_string()]).expect("one marker compiles");
+/// let source = "- [ ] TODO: ship it\n\nthe rest is TODO\n";
+/// let found = scan_source_tasks_with_markers(source, Some(&rule));
+///
+/// assert_eq!(found.len(), 2, "the checkbox line is one entry, not two");
+/// assert_eq!(found[0].kind, TaskKind::Task);
+/// assert_eq!(found[1].kind, TaskKind::Marker);
+/// assert_eq!(found[1].line, 3);
+/// ```
+pub fn scan_source_tasks_with_markers(source: &str, markers: Option<&MarkerRule>) -> Vec<Task> {
     let skip = frontmatter_line_count(source);
     let mut blocks = BlockScanner::new();
 
@@ -558,7 +951,12 @@ pub fn scan_source_tasks(source: &str) -> Vec<Task> {
             if blocks.classify(line) == LineKind::Code {
                 return None;
             }
-            parse_task_line(line, u32::try_from(index + 1).unwrap_or(u32::MAX))
+            let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            // See `# One entry per source line`: the `or_else` is the checkbox
+            // precedence rule, and the enclosing `filter_map` is the
+            // one-entry-per-line rule.
+            parse_task_line(line, number)
+                .or_else(|| markers.and_then(|rule| parse_marker_line(line, number, rule)))
         })
         .collect()
 }
@@ -825,6 +1223,30 @@ fn strip_tags(text: &str, annotations: &mut Annotations) -> String {
     .into_owned()
 }
 
+/// Collapses runs of whitespace to single spaces, keeping only the tokens
+/// `keep` accepts.
+///
+/// This is the one definition of what [`Task::text`] is made of, and it is
+/// shared on purpose: a checkbox drops its `!!` here while a marker keeps every
+/// token, but "whitespace-collapsed and trimmed" has to mean the same thing for
+/// both kinds or the panel would render two subtly different sorts of text.
+///
+/// `keep` is `FnMut` because the priority pass consumes the tokens it rejects.
+fn collapse_whitespace(text: &str, mut keep: impl FnMut(&str) -> bool) -> String {
+    let mut display = String::with_capacity(text.len());
+
+    for token in text.split_whitespace() {
+        if !keep(token) {
+            continue;
+        }
+        if !display.is_empty() {
+            display.push(' ');
+        }
+        display.push_str(token);
+    }
+    display
+}
+
 /// Collapses whitespace to single spaces and lifts out `!!` / `!!!` priority
 /// markers in the same pass.
 ///
@@ -833,20 +1255,17 @@ fn strip_tags(text: &str, annotations: &mut Annotations) -> String {
 /// register as priorities.
 fn collapse_taking_priority(text: &str) -> (String, TaskPriority) {
     let mut priority = TaskPriority::Normal;
-    let mut display = String::with_capacity(text.len());
-
-    for token in text.split_whitespace() {
-        match token {
-            "!!!" => priority = priority.max(TaskPriority::Urgent),
-            "!!" => priority = priority.max(TaskPriority::High),
-            _ => {
-                if !display.is_empty() {
-                    display.push(' ');
-                }
-                display.push_str(token);
-            }
+    let display = collapse_whitespace(text, |token| match token {
+        "!!!" => {
+            priority = priority.max(TaskPriority::Urgent);
+            false
         }
-    }
+        "!!" => {
+            priority = priority.max(TaskPriority::High);
+            false
+        }
+        _ => true,
+    });
     (display, priority)
 }
 
@@ -915,6 +1334,26 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d)
             .and_then(|date| date.and_hms_opt(h, min, 0))
             .expect("test datetime is valid")
+    }
+
+    /// The shipped `incomplete_markers` default, which is what almost every
+    /// marker test wants.
+    const DEFAULT_MARKERS: &[&str] = &["TK", "TODO", "FIXME", "XXX"];
+
+    /// An `&str` marker list as the `Vec<String>` the config carries, so tests
+    /// are not littered with `to_string()`.
+    fn owned(markers: &[&str]) -> Vec<String> {
+        markers.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// Compiles a [`MarkerRule`] from an `&str` list.
+    fn rule(markers: &[&str]) -> MarkerRule {
+        MarkerRule::new(&owned(markers)).expect("a non-empty marker list compiles")
+    }
+
+    /// The default rule's markup-aware search, which most Stage-2 tests drive.
+    fn find(line: &str) -> Option<usize> {
+        rule(DEFAULT_MARKERS).find_in_line(line)
     }
 
     fn parse(line: &str) -> Task {
@@ -1311,9 +1750,12 @@ mod tests {
             Task {
                 line: 1,
                 depth: 0,
+                kind: TaskKind::Task,
                 status: TaskStatus::Open,
                 priority: TaskPriority::Normal,
                 text: "this is a task due tomorrow".to_string(),
+                marker_start: None,
+                marker_end: None,
                 tags: vec![],
                 due: Some(dt(2026, 8, 5, 0, 0)),
                 due_has_time: false,
@@ -1329,9 +1771,12 @@ mod tests {
             Task {
                 line: 1,
                 depth: 0,
+                kind: TaskKind::Task,
                 status: TaskStatus::Done,
                 priority: TaskPriority::Normal,
                 text: "this task was done yesterday".to_string(),
+                marker_start: None,
+                marker_end: None,
                 tags: vec![],
                 due: None,
                 due_has_time: false,
@@ -1347,9 +1792,12 @@ mod tests {
             Task {
                 line: 1,
                 depth: 0,
+                kind: TaskKind::Task,
                 status: TaskStatus::Open,
                 priority: TaskPriority::Urgent,
                 text: "this task is urgent".to_string(),
+                marker_start: None,
+                marker_end: None,
                 tags: vec!["hotlist".to_string(), "work".to_string()],
                 due: Some(dt(2026, 8, 4, 15, 0)),
                 due_has_time: true,
@@ -1982,6 +2430,493 @@ mod tests {
         assert_eq!(priority, TaskPriority::High);
     }
 
+    // ---- MarkerRule ----------------------------------------------------------
+
+    #[test]
+    fn the_default_markers_match_at_the_start_of_a_block() {
+        let rule = rule(DEFAULT_MARKERS);
+        assert_eq!(rule.block_initial_match("TK"), Some(2));
+        assert_eq!(rule.block_initial_match("TK rewrite this"), Some(2));
+        assert_eq!(rule.block_initial_match("TODO foo"), Some(4));
+        assert_eq!(rule.block_initial_match("FIXME(name)"), Some(5));
+        assert_eq!(rule.block_initial_match("XXX:"), Some(3));
+
+        // Word boundaries rule out TKTK / TODOs / Tk / lowercase.
+        assert_eq!(rule.block_initial_match("TKTK"), None);
+        assert_eq!(rule.block_initial_match("TODOs"), None);
+        assert_eq!(rule.block_initial_match("Tk"), None);
+        assert_eq!(rule.block_initial_match("todo"), None);
+        assert_eq!(rule.block_initial_match("Tomato"), None);
+    }
+
+    #[test]
+    fn a_block_initial_match_must_be_at_the_very_start() {
+        let rule = rule(DEFAULT_MARKERS);
+        assert_eq!(rule.block_initial_match("see TODO here"), None);
+    }
+
+    #[test]
+    fn an_empty_marker_list_compiles_to_no_rule() {
+        // The documented `incomplete_markers = []` off switch: `None` tells the
+        // caller to skip the pass, rather than handing back a rule.
+        assert!(MarkerRule::new(&[]).is_none());
+        // An entry that is only an empty string is the same off switch.
+        assert!(MarkerRule::new(&["".to_string()]).is_none());
+    }
+
+    #[test]
+    fn caching_hands_back_the_same_rule_for_the_same_markers() {
+        // The point of `cached` is that the render pipeline stops paying ~80µs
+        // of regex compilation per page, so what matters is that the second call
+        // returns the *same allocation*, not merely an equal one.
+        let markers = owned(DEFAULT_MARKERS);
+        let first = MarkerRule::cached(&markers).expect("the default markers compile");
+        let second = MarkerRule::cached(&markers).expect("the default markers compile");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn caching_keys_on_the_marker_list_not_the_process() {
+        // A plain `OnceLock` would be wrong here: the test suite alone renders
+        // with several marker sets, and nothing stops a GUI from opening two
+        // repositories whose `.mbr/config.toml` disagree.
+        let custom = MarkerRule::cached(&owned(&["NOTE"])).expect("one marker compiles");
+        let default = MarkerRule::cached(&owned(DEFAULT_MARKERS)).expect("defaults compile");
+
+        assert!(custom.find_in_line("NOTE check this").is_some());
+        assert!(custom.find_in_line("TODO check this").is_none());
+        assert!(default.find_in_line("TODO check this").is_some());
+    }
+
+    #[test]
+    fn caching_remembers_a_marker_list_that_compiles_to_nothing() {
+        // `None` is cached as a value, so the off switch does not re-attempt
+        // compilation on every page.
+        assert!(MarkerRule::cached(&[]).is_none());
+        assert!(MarkerRule::cached(&[]).is_none());
+    }
+
+    #[test]
+    fn regex_metacharacters_in_a_marker_are_matched_literally() {
+        // Without `regex::escape` the unbalanced `(` would fail to compile and
+        // take its sibling markers down with it.
+        let rule = rule(&["FOO(", "BAR"]);
+        assert_eq!(rule.block_initial_match("BAR foo"), Some(3));
+        assert_eq!(rule.block_initial_match("FOO(bar)"), Some(4));
+        assert_eq!(rule.block_initial_match("Tomato"), None);
+    }
+
+    #[test]
+    fn a_marker_ending_in_punctuation_does_not_require_a_word_after_it() {
+        // The bug the per-alternative boundaries fix: one `\b` on the whole
+        // group demanded a word character after the colon, so this never
+        // matched at all.
+        let rule = rule(&["TODO:"]);
+        let line = "see TODO: here";
+        assert_eq!(rule.find_in_line(line), line.find("TODO:"));
+        assert_eq!(rule.block_initial_match("TODO: here"), Some(5));
+    }
+
+    #[test]
+    fn a_marker_starting_with_punctuation_does_not_require_a_word_before_it() {
+        let rule = rule(&["@todo"]);
+        // A leading `\b` would demand a word character in front of the `@`...
+        assert_eq!(rule.find_in_line(" @todo "), Some(1));
+        // ...and would equally reject the case where one is present.
+        assert_eq!(rule.find_in_line("x@todo"), Some(1));
+    }
+
+    #[test]
+    fn the_longest_marker_wins_regardless_of_configuration_order() {
+        // Alternation is leftmost-first, so without the longest-first sort the
+        // answer would depend on how the user happened to order their config.
+        for order in [["TODO", "TODOMAYBE"], ["TODOMAYBE", "TODO"]] {
+            let rule = rule(&order);
+            assert_eq!(
+                rule.block_initial_match("TODOMAYBE later"),
+                Some(9),
+                "for {order:?}"
+            );
+        }
+    }
+
+    // ---- MarkupCursor exclusions ---------------------------------------------
+
+    #[test]
+    fn a_marker_embedded_in_prose_is_found() {
+        // The motivating case: not block-initial, and invisible to the old rule.
+        let line = "The market fell 10% (source: TK).";
+        assert_eq!(find(line), line.find("TK"));
+    }
+
+    #[test]
+    fn a_marker_inside_an_inline_code_span_is_not_found() {
+        assert_eq!(find("run `TODO` later"), None);
+    }
+
+    #[test]
+    fn a_marker_after_an_inline_code_span_is_found() {
+        let line = "run `x` then TODO";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_longer_backtick_span_hides_a_shorter_run_inside_it() {
+        // Only a run of exactly two backticks closes this span, so the single
+        // ones are content — which is why the scan needs `code_span_end` rather
+        // than a pattern.
+        assert_eq!(find("``a ` TODO ` b``"), None);
+    }
+
+    #[test]
+    fn an_unmatched_backtick_does_not_swallow_the_rest_of_the_line() {
+        let line = "a ` b TODO";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_marker_inside_a_wikilink_target_is_not_found() {
+        assert_eq!(find("see [[TODO list]] here"), None);
+    }
+
+    #[test]
+    fn a_marker_in_a_wikilink_alias_is_found() {
+        // pulldown-cmark emits the alias as `Event::Text`, so a reader sees it.
+        let line = "[[page|TODO fix]]";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn an_unclosed_double_bracket_does_not_hide_a_later_marker() {
+        let line = "[[page and TODO";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_marker_in_a_link_destination_is_not_found() {
+        assert_eq!(find("[link](/TODO/page)"), None);
+    }
+
+    #[test]
+    fn a_marker_in_a_link_title_is_not_found() {
+        assert_eq!(find("[link](/page \"TODO\")"), None);
+    }
+
+    #[test]
+    fn a_marker_in_link_text_is_found() {
+        let line = "[TODO fix](/page)";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_marker_in_image_alt_text_is_found_but_not_in_its_destination() {
+        // No rule of its own: the `](` case fires on the `]` that ends the alt
+        // text, so the alt stays included and the destination is excluded.
+        let line = "![TODO](/img/shot.png)";
+        assert_eq!(find(line), line.find("TODO"));
+        assert_eq!(find("![alt](/img/TODO.png)"), None);
+    }
+
+    #[test]
+    fn a_link_destination_with_balanced_parentheses_is_skipped_whole() {
+        let line = "[x](/a(TODO)b) TODO";
+        assert_eq!(find(line), line.rfind("TODO"));
+    }
+
+    #[test]
+    fn an_unclosed_link_destination_does_not_hide_a_later_marker() {
+        let line = "[x](/a and TODO";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_marker_inside_an_autolink_is_not_found() {
+        assert_eq!(find("<https://example.com/TODO>"), None);
+    }
+
+    #[test]
+    fn a_marker_inside_an_inline_html_tag_is_not_found() {
+        assert_eq!(find("a <!--TODO--> b"), None);
+        // The delimiters are markup; what sits between two of them is not.
+        let line = "<kbd>TODO</kbd>";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_less_than_sign_in_prose_is_not_mistaken_for_a_tag() {
+        // Whitespace inside the brackets is what tells these apart, and it is
+        // also what pulldown-cmark uses to decide this is text.
+        let line = "a < b TODO > c";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_marker_in_a_bare_url_is_found_the_way_the_renderer_sees_it() {
+        // A bare URL is `Event::Text`, so the page highlights it; agreeing with
+        // the renderer beats being clever about what the author meant.
+        let line = "see https://example.com/TODO now";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn a_reference_link_definition_never_yields_a_marker() {
+        assert_eq!(find("[TODO]: /some/path"), None);
+        assert_eq!(find("[label]: /TODO/path \"TODO\""), None);
+        // Up to three columns of indent is still a definition.
+        assert_eq!(find("   [label]: /TODO/path"), None);
+    }
+
+    #[test]
+    fn a_footnote_definition_is_not_a_reference_definition() {
+        // `[^1]:` is a footnote, and its body really is `Event::Text`.
+        let line = "[^1]: TODO fix this";
+        assert_eq!(find(line), line.find("TODO"));
+    }
+
+    #[test]
+    fn the_first_qualifying_marker_wins_when_an_excluded_one_comes_first() {
+        let line = "`TODO` then FIXME";
+        assert_eq!(find(line), line.find("FIXME"));
+    }
+
+    // ---- parse_marker_line ---------------------------------------------------
+
+    /// Parses a marker line with the default rule, panicking if it is not one.
+    fn marker(line: &str) -> Task {
+        parse_marker_line(line, 1, &rule(DEFAULT_MARKERS))
+            .unwrap_or_else(|| panic!("expected a marker from {line:?}"))
+    }
+
+    #[test]
+    fn a_marker_line_becomes_an_open_normal_priority_pseudo_task() {
+        let found = marker("The market fell 10% (source: TK).");
+        assert_eq!(found.kind, TaskKind::Marker);
+        assert_eq!(found.status, TaskStatus::Open);
+        assert_eq!(found.priority, TaskPriority::Normal);
+        assert_eq!(found.line, 1);
+        assert!(found.tags.is_empty());
+        assert_eq!(found.due, None);
+        assert_eq!(found.done, None);
+        assert_eq!(found.moved_to, None);
+        assert!(!found.due_has_time && !found.done_has_time);
+
+        // A line with no marker is not one, and neither is a marker hidden in
+        // markup — `find_in_line` is the whole test.
+        let rule = rule(DEFAULT_MARKERS);
+        assert!(parse_marker_line("ordinary prose", 1, &rule).is_none());
+        assert!(parse_marker_line("call `TODO()` later", 1, &rule).is_none());
+    }
+
+    #[test]
+    fn marker_text_is_the_whole_line_whitespace_collapsed() {
+        // The marker word itself stays in the text: it is the reason the entry
+        // exists, and stripping it would leave a card the reader cannot place.
+        assert_eq!(
+            marker("  TK   check   this\tagain  ").text,
+            "TK check this again"
+        );
+        // Prose around a mid-line marker is kept on both sides.
+        assert_eq!(
+            marker("The market fell 10% (source: TK).").text,
+            "The market fell 10% (source: TK)."
+        );
+    }
+
+    #[test]
+    fn marker_text_keeps_tags_priority_and_date_annotations_verbatim() {
+        // A marker gets no annotation parsing at all: the checkbox grammar is
+        // the checkbox's, and applying it here would strip prose the author
+        // wrote and file the entry under a tag they never applied to a task.
+        let found = marker("TODO cross-link #docs !! before @due(2026-08-05)");
+        assert_eq!(
+            found.text,
+            "TODO cross-link #docs !! before @due(2026-08-05)"
+        );
+        assert!(found.tags.is_empty());
+        assert_eq!(found.priority, TaskPriority::Normal);
+        assert_eq!(found.due, None);
+    }
+
+    /// `text[start..end]` for a marker, sliced the way the panel slices it —
+    /// by UTF-16 code unit, not by byte.
+    fn marker_word(found: &Task) -> String {
+        let (start, end) = (
+            found.marker_start.expect("a marker carries a span") as usize,
+            found.marker_end.expect("a marker carries a span") as usize,
+        );
+        let units: Vec<u16> = found.text.encode_utf16().collect();
+        String::from_utf16(&units[start..end]).expect("the span is on a boundary")
+    }
+
+    #[test]
+    fn a_marker_span_covers_the_marker_word_in_the_display_text() {
+        let found = marker("The market fell 10% (source: TK).");
+        assert_eq!((found.marker_start, found.marker_end), (Some(29), Some(31)));
+        assert_eq!(marker_word(&found), "TK");
+    }
+
+    #[test]
+    fn a_marker_span_is_in_utf16_units_so_non_ascii_before_it_does_not_shift_it() {
+        // The test that fails if these are ever byte offsets: `é` is two bytes
+        // and `€`/`—` are three, so the byte offset of `TODO` here is nine past
+        // its UTF-16 index — a JavaScript `slice()` with the former would cut
+        // the wrong nine characters.
+        let found = marker("café costs 5€ — TODO check");
+        assert_eq!(marker_word(&found), "TODO");
+        assert_eq!((found.marker_start, found.marker_end), (Some(16), Some(20)));
+        assert_ne!(
+            found.marker_start.unwrap() as usize,
+            found.text.find("TODO").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_checkbox_task_carries_no_marker_span() {
+        // Not "a span covering nothing": there is no marker word, and a client
+        // that highlights on presence must see absence.
+        let task = parse_task_line("- [ ] TODO looks like a marker but is a task", 1).unwrap();
+        assert_eq!(task.marker_start, None);
+        assert_eq!(task.marker_end, None);
+    }
+
+    #[test]
+    fn a_marker_span_survives_whitespace_collapsing() {
+        // The raw-line offset of `TODO` is 7; the collapsed text puts it at 4.
+        // Locating twice is what keeps the span an index into `text`.
+        let found = marker("foo    TODO   bar");
+        assert_eq!(found.text, "foo TODO bar");
+        assert_eq!((found.marker_start, found.marker_end), (Some(4), Some(8)));
+        assert_eq!(marker_word(&found), "TODO");
+    }
+
+    #[test]
+    fn a_marker_span_points_at_the_occurrence_the_rule_accepted() {
+        // The first `TODO` is inside a code span, so it is not the marker — and
+        // a client re-deriving the position with a naive `indexOf` would wash
+        // the wrong word. This is the case that makes sending the span the
+        // point of the exercise.
+        let found = marker("Set `TODO` in config and TK fix it");
+        assert_eq!(marker_word(&found), "TK");
+        assert_eq!((found.marker_start, found.marker_end), (Some(25), Some(27)));
+    }
+
+    #[test]
+    fn marker_depth_comes_from_indentation_like_a_task() {
+        // Same measurement `parse_task_line` makes, so a marker inside a list
+        // indents alongside the tasks around it.
+        assert_eq!(marker("TK top level").depth, 0);
+        assert_eq!(marker("  TK two spaces").depth, 1);
+        assert_eq!(marker("    TK four spaces").depth, 2);
+        assert_eq!(marker("\tTK one tab").depth, 2);
+        assert_eq!(marker("- TK inside a bullet").depth, 0);
+    }
+
+    #[test]
+    fn a_marker_line_cannot_be_patched() {
+        // The read-only guarantee, pinned at the API rather than left to the
+        // frontend: `patch_task_line` goes through `parse_task_line`, which
+        // never produces a marker, so the endpoint answers 400.
+        let source = "notes\nTODO: write this up\n";
+        let error = patch_task_line(
+            source,
+            2,
+            "TODO: write this up",
+            TaskStatus::Done,
+            Some(dt(2026, 8, 4, 14, 32)),
+        )
+        .expect_err("a marker line is not patchable");
+        assert_eq!(error, TaskPatchError::NotATask { line: 2 });
+
+        // ...and the lower-level rewrite refuses it too, so there is no way in.
+        assert!(set_marker("TODO: write this up", TaskStatus::Done).is_none());
+        assert!(set_status("TODO: write this up", TaskStatus::Done, None).is_none());
+    }
+
+    // ---- scan_source_tasks_with_markers --------------------------------------
+
+    /// Scans with the default marker rule.
+    fn scan_with_markers(source: &str) -> Vec<Task> {
+        scan_source_tasks_with_markers(source, Some(&rule(DEFAULT_MARKERS)))
+    }
+
+    #[test]
+    fn a_checkbox_line_that_also_says_todo_is_one_task_not_two() {
+        let found = scan_with_markers("- [ ] TODO: ship it\n");
+        assert_eq!(found.len(), 1, "checkbox wins, and yields one entry");
+        assert_eq!(found[0].kind, TaskKind::Task);
+        // Parsed as a task, annotations and all.
+        assert_eq!(found[0].text, "TODO: ship it");
+        assert_eq!(found[0].status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn scanning_without_a_marker_rule_matches_the_old_behaviour() {
+        let source = concat!(
+            "# TODO list\n",
+            "\n",
+            "- [ ] real task\n",
+            "The market fell 10% (source: TK).\n",
+            "- [x] FIXME later\n",
+        );
+        assert_eq!(
+            scan_source_tasks(source),
+            scan_source_tasks_with_markers(source, None)
+        );
+        // ...and the rule really would have found something, so the equality
+        // above is not vacuous.
+        assert!(scan_with_markers(source).len() > scan_source_tasks(source).len());
+    }
+
+    #[test]
+    fn markers_and_tasks_come_back_in_source_order() {
+        let source = concat!(
+            "TK intro needs a source\n", // 1
+            "\n",                        // 2
+            "- [ ] real task\n",         // 3
+            "prose with a FIXME here\n", // 4
+            "- [x] done thing\n",        // 5
+        );
+        let found = scan_with_markers(source);
+        assert_eq!(
+            found.iter().map(|t| (t.line, t.kind)).collect::<Vec<_>>(),
+            vec![
+                (1, TaskKind::Marker),
+                (3, TaskKind::Task),
+                (4, TaskKind::Marker),
+                (5, TaskKind::Task),
+            ]
+        );
+    }
+
+    #[test]
+    fn markers_are_skipped_inside_fenced_code() {
+        // The fence state machine is shared with the checkbox scan, so a code
+        // sample full of `// TODO:` stays invisible.
+        let source =
+            "TK real\n\n```rust\n// TODO: fake\nlet x = 1; // FIXME fake\n```\n\nXXX also real\n";
+        let found = scan_with_markers(source);
+        assert_eq!(found.iter().map(|t| t.line).collect::<Vec<_>>(), vec![1, 8]);
+
+        // An indented code block is skipped too.
+        let indented = "Some prose.\n\n    TODO: fake\n\nTK real\n";
+        assert_eq!(
+            scan_with_markers(indented)
+                .iter()
+                .map(|t| t.line)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn markers_are_skipped_inside_yaml_frontmatter() {
+        let source = "---\ntitle: TODO pick a title\nstatus: TK\n---\n\nTK real\n";
+        let found = scan_with_markers(source);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].line, 6);
+        assert_eq!(found[0].text, "TK real");
+    }
+
     // ---- property tests ------------------------------------------------------
 
     /// A small alphabet that can actually spell annotations, so the invariants
@@ -1997,7 +2932,102 @@ mod tests {
         .prop_map(|parts| parts.concat())
     }
 
+    /// Lines for the marker properties: arbitrary text, plus text drawn from an
+    /// alphabet that can actually spell markup and markers.
+    ///
+    /// The union is deliberate. `.*` gets the multi-byte characters that stress
+    /// the byte-wise scan's char-boundary handling, but almost never happens to
+    /// spell `](` or a marker word, so on its own it would exercise
+    /// [`MarkupCursor`] barely at all.
+    fn markerish_line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ".*",
+            proptest::collection::vec(
+                prop::sample::select(vec![
+                    "a", " ", "`", "[", "]", "(", ")", "<", ">", "|", "\"", "\\", ":", "!", "TK",
+                    "TODO", "FIXME", "XXX", "todo", "é",
+                ]),
+                0..40,
+            )
+            .prop_map(|parts| parts.concat()),
+        ]
+    }
+
     proptest! {
+        /// Every offset the scanner reports lands on a character boundary and on
+        /// a configured marker.
+        ///
+        /// The offset is handed straight to a slice by the renderer, so a stale
+        /// or mid-character one is a panic in production.
+        #[test]
+        fn a_returned_marker_offset_always_lands_on_a_marker(line in markerish_line()) {
+            if let Some(at) = rule(DEFAULT_MARKERS).find_in_line(&line) {
+                prop_assert!(
+                    line.is_char_boundary(at),
+                    "offset {} splits a character in {:?}", at, line
+                );
+                prop_assert!(
+                    DEFAULT_MARKERS.iter().any(|m| line[at..].starts_with(m)),
+                    "offset {} in {:?} is not a marker", at, line
+                );
+            }
+        }
+
+        /// A marker inside a code span is never reported, whatever surrounds it.
+        ///
+        /// The alphabet contains neither a backtick nor a marker, so the span in
+        /// the middle is the only candidate the generated line can contain.
+        #[test]
+        fn a_marker_wrapped_in_a_code_span_is_never_found(
+            prefix in "[a-z ]{0,20}",
+            suffix in "[a-z ]{0,20}",
+        ) {
+            let line = format!("{prefix}`x TODO y`{suffix}");
+            prop_assert_eq!(rule(DEFAULT_MARKERS).find_in_line(&line), None);
+        }
+
+        /// The scanner is fed whatever is on disk, so it must not panic on any
+        /// of it — including bytes that are not markdown at all.
+        #[test]
+        fn finding_a_marker_never_panics_on_arbitrary_input(line in markerish_line()) {
+            let rule = rule(DEFAULT_MARKERS);
+            let _ = rule.find_in_line(&line);
+            let _ = rule.block_initial_match(&line);
+            let _ = rule.find_iter(&line).count();
+        }
+
+        /// The marker scan is fed whatever is on disk too, and it runs over
+        /// every line of every file rather than only over candidate ones.
+        #[test]
+        fn scanning_with_markers_never_panics_on_arbitrary_input(s in ".*") {
+            let rule = rule(DEFAULT_MARKERS);
+            let _ = scan_source_tasks_with_markers(&s, Some(&rule));
+            let _ = parse_marker_line(&s, 1, &rule);
+        }
+
+        /// A source line yields at most one entry, so line numbers come back
+        /// strictly increasing.
+        ///
+        /// This is the invariant the `#mbr-marker-{line}` anchor rests on: two
+        /// entries for one line would be two cards pointing at one id, and one
+        /// of them could never be reached.
+        #[test]
+        fn every_source_line_yields_at_most_one_entry(source in markerish_line()) {
+            let with_newlines = source.replace(' ', "\n");
+            let found = scan_source_tasks_with_markers(
+                &with_newlines,
+                Some(&rule(DEFAULT_MARKERS)),
+            );
+            for pair in found.windows(2) {
+                prop_assert!(
+                    pair[0].line < pair[1].line,
+                    "line {} repeated or out of order in {:?}",
+                    pair[1].line,
+                    with_newlines
+                );
+            }
+        }
+
         /// The parser is fed whatever is on disk, so it must not panic on any of it.
         #[test]
         fn parse_task_line_never_panics_on_arbitrary_input(s in ".*") {

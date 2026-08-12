@@ -112,11 +112,12 @@ pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, Search
 pub use sorting::sort_files;
 pub use task_index::{FileTasks, TaskIndex};
 pub use task_query::{
-    DueBucket, DueFilter, TaskGroup, TaskMode, TaskQuery, TaskQueryResponse, due_bucket,
-    parse_task_query, run_query,
+    DueBucket, DueFilter, IncludeFilter, TaskGroup, TaskMode, TaskQuery, TaskQueryResponse,
+    due_bucket, parse_task_query, run_query,
 };
 pub use tasks::{
-    Annotations, Task, TaskPriority, TaskStatus, parse_task_line, scan_source_tasks, set_marker,
+    Annotations, MarkerRule, Task, TaskKind, TaskPriority, TaskStatus, parse_marker_line,
+    parse_task_line, scan_source_tasks, scan_source_tasks_with_markers, set_marker,
     strip_annotations,
 };
 #[cfg(feature = "media-metadata")]

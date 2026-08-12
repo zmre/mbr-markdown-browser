@@ -15,8 +15,10 @@ export { MbrTasksPanelElement } from './mbr-tasks-panel.js'
 export type {
   DueFilter,
   FolderFacet,
+  IncludeFilter,
   TaskGroup,
   TaskHit,
+  TaskKind,
   TaskMode,
   TaskPriority,
   TaskQueryRequest,

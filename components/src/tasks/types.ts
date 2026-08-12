@@ -21,6 +21,18 @@ export type TaskPriority = 'normal' | 'high' | 'urgent'
 /** `task_query::DueFilter`. Note `none`, not `nodue`. */
 export type DueFilter = 'any' | 'overdue' | 'today' | 'tomorrow' | 'upcoming' | 'none'
 
+/** `tasks::TaskKind`, serialized lowercase. See {@link TaskHit.kind}. */
+export type TaskKind = 'task' | 'marker'
+
+/**
+ * `task_query::IncludeFilter` — which kinds of entry a query wants back.
+ *
+ * Single-select rather than an array like `statuses`: the three options are
+ * mutually exclusive and exhaust the space, so an array would admit two states
+ * that mean nothing (empty, and both at once).
+ */
+export type IncludeFilter = 'all' | 'tasks' | 'markers'
+
 /** `task_query::TaskMode`. */
 export type TaskMode = 'category' | 'calendar'
 
@@ -41,6 +53,8 @@ export interface TaskQueryRequest {
   priorities: TaskPriority[]
   /** Due-date filter. */
   due: DueFilter
+  /** Checkbox tasks, incomplete markers, or both. */
+  include: IncludeFilter
   /** How results are grouped. */
   mode: TaskMode
   /** Cap on returned tasks across all groups. Never affects a count. */
@@ -55,14 +69,46 @@ export interface TaskQueryRequest {
  * parsed as local time — see `parseNaive` in `task-format.ts`.
  */
 export interface TaskHit {
-  /** 1-based source line, and the `#mbr-task-<line>` deep-link target. */
+  /**
+   * Checkbox or incomplete marker — **first, because it decides how every
+   * field below it reads.**
+   *
+   * A `'marker'` is a read-only pointer at a line somebody left unfinished
+   * (`TK`, `TODO`, …; see `tasks::MarkerRule`), and the server pins it flat:
+   * `status` is always `'open'`, `priority` always `'normal'`, `tags` empty,
+   * and `due`/`done`/`moved_to` all `null`. Its `text` is the **whole source
+   * line, verbatim** — the marker word included, and `#tag`/`!!`/`@due(...)`
+   * neither parsed nor stripped, because a marker has no annotation grammar.
+   * Its deep-link fragment is `#mbr-marker-<line>`, not `#mbr-task-<line>`:
+   * the two ids come from different places in the renderer (see `taskHref`).
+   *
+   * Markers can never be written — `POST /.mbr/task` answers 400 for one —
+   * and never move a note's `done`/`total`.
+   */
+  kind: TaskKind
+  /** 1-based source line, and the deep-link target (see {@link kind}). */
   line: number
   /** Display indent level for subtasks. */
   depth: number
   status: TaskStatus
   priority: TaskPriority
-  /** Display text with annotations stripped. */
+  /** Display text with annotations stripped (but see {@link kind}). */
   text: string
+  /**
+   * Where the marker word sits inside {@link text}, as indices into that
+   * string — `null` for a `'task'`.
+   *
+   * These are UTF-16 code unit offsets, which is exactly what a JavaScript
+   * string index is, so `text.slice(marker_start, marker_end)` is the marker
+   * word. The server sends them rather than letting the card find the word
+   * itself: the marker grammar is markup-aware (a `TODO` inside a code span or
+   * a link destination is not one) and its word boundaries are decided per
+   * configured alternative, so an `indexOf` here would highlight the wrong
+   * word on `Set \`TODO\` in config and TK fix it`. See `tasks::Task`.
+   */
+  marker_start: number | null
+  /** End of the marker word; see {@link marker_start}. */
+  marker_end: number | null
   /** Tags without the leading `#`. */
   tags: string[]
   due: string | null

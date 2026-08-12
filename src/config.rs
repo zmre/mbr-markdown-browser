@@ -67,16 +67,19 @@ fn default_tasks_stamp_done() -> bool {
     true
 }
 
-/// Default markers that flag a block as incomplete.
+/// Default markers that flag work as incomplete.
 ///
-/// A block whose first text matches `^(MARKER)\b` (uppercase, word boundary)
-/// gets wrapped in `<span class="mbr-incomplete">…</span>`.
+/// A marker is highlighted anywhere in a line, case-sensitively and with a
+/// conditional word boundary on each side; see [`crate::tasks::MarkerRule`]. A
+/// block that *starts* with one is wrapped whole, any other occurrence is
+/// wrapped on its own, and the first wrapper on a source line also carries an
+/// `id="mbr-marker-{line}"` deep-link anchor.
 pub fn default_incomplete_markers() -> Vec<String> {
     vec![
         "TK".to_string(),
-        "TODO".to_string(),
+        "TODO:".to_string(),
         "FIXME".to_string(),
-        "XXX".to_string(),
+        "XXXX".to_string(),
     ]
 }
 
@@ -459,9 +462,11 @@ pub struct Config {
     /// Default: empty string (no suffix).
     #[serde(default)]
     pub title_suffix: String,
-    /// Markers that flag a block as incomplete. A paragraph, heading, list
-    /// item, or table cell whose first text matches `^(MARKER)\b` gets
-    /// wrapped in `<span class="mbr-incomplete">…</span>`.
+    /// Markers that flag work as incomplete, matched anywhere in a line and
+    /// wrapped in `<span class="mbr-incomplete">…</span>`. A paragraph,
+    /// heading, list item, or table cell whose *first* text starts with one is
+    /// wrapped whole. Never matched inside code, image alt text, link
+    /// destinations or frontmatter.
     /// Default: `["TK", "TODO", "FIXME", "XXX"]`.
     #[serde(default = "default_incomplete_markers")]
     pub incomplete_markers: Vec<String>,

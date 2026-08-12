@@ -194,9 +194,20 @@ export function taskAt(groups: readonly DisplayGroup[], row: TaskRow | undefined
 }
 
 /**
- * Deep link to a task: its page plus the `#mbr-task-<line>` fragment that the
- * rendered checkbox carries (`html.rs::task_checkbox_html`).
+ * Deep link to a hit: its page plus the fragment the renderer gave that line.
+ *
+ * The prefix follows `hit.kind` because the two ids are emitted by different
+ * code on the server and are not interchangeable: a checkbox gets
+ * `#mbr-task-<line>` from `html.rs::task_checkbox_html`, while a marker gets
+ * `#mbr-marker-<line>` from the highlight span `markdown.rs` wraps around the
+ * marker word. Asking for the wrong one lands on a fragment that does not
+ * exist, which scrolls nowhere and flashes nothing.
+ *
+ * The single implementation is the point: every caller that navigates to a hit
+ * routes through here, so click and `Enter` cannot disagree with the rendered
+ * `href`.
  */
 export function taskHref(hit: TaskHit, resolveHref: (path: string) => string): string {
-  return `${resolveHref(hit.url_path)}#mbr-task-${hit.line}`
+  const prefix = hit.kind === 'marker' ? 'mbr-marker' : 'mbr-task'
+  return `${resolveHref(hit.url_path)}#${prefix}-${hit.line}`
 }

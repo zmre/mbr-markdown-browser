@@ -305,8 +305,14 @@ async fn test_server_marks_incomplete_blocks_by_default() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/drafts/").await;
     assert!(
-        html.contains(r#"<span class="mbr-incomplete">"#),
+        html.contains(r#"<span class="mbr-incomplete""#),
         "Server should highlight TK paragraph by default: {html}"
+    );
+    // The wrapper doubles as the deep-link target the task browser points at;
+    // `TK rewrite this paragraph.` is on line 3 of the fixture.
+    assert!(
+        html.contains(r#"id="mbr-marker-3""#),
+        "Server should anchor the marker to its source line: {html}"
     );
 }
 
@@ -7733,6 +7739,175 @@ async fn test_tasks_refresh_after_watcher_sees_external_edit() {
     }
 }
 
+// ---- incomplete markers -----------------------------------------------------
+
+/// A repository carrying incomplete markers as well as checkboxes, including a
+/// note whose only entry is a marker and one marker hidden inside a code span.
+///
+/// Line numbers matter to the assertions below, so they are spelled out.
+fn marker_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "inbox.md",
+        concat!(
+            "# Inbox\n",                           // 1
+            "\n",                                  // 2
+            "- [ ] write the report #work\n",      // 3
+            "- [x] file the receipts\n",           // 4
+            "\n",                                  // 5
+            "The market fell 10% (source: TK).\n", // 6
+        ),
+    );
+    repo.create_markdown(
+        "prose.md",
+        concat!(
+            "# Prose\n",                                              // 1
+            "\n",                                                     // 2
+            "Nothing to check off, but FIXME the numbers here.\n",    // 3
+            "\n",                                                     // 4
+            "A `TODO` inside a code span is markup, not a marker.\n", // 5
+        ),
+    );
+    repo
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_includes_markers_by_default() {
+    let repo = marker_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+    assert_eq!(
+        task_texts(&body),
+        vec![
+            "write the report",
+            "The market fell 10% (source: TK).",
+            "Nothing to check off, but FIXME the numbers here.",
+        ],
+        "the code-span TODO is markup and must not be listed"
+    );
+
+    // The marker on the wire: read-only, unparsed, and addressable.
+    let marker = &body["groups"][0]["tasks"][1];
+    assert_eq!(marker["kind"], "marker");
+    assert_eq!(marker["status"], "open");
+    assert_eq!(marker["priority"], "normal");
+    assert_eq!(marker["tags"], serde_json::json!([]));
+    assert!(marker["due"].is_null());
+    assert!(marker["done"].is_null());
+    assert_eq!(marker["line"], 6);
+    assert_eq!(marker["url_path"], "/inbox/");
+    assert_eq!(marker["path"], "inbox.md");
+
+    // A checkbox is still a task, and carries its parsed annotations.
+    let task = &body["groups"][0]["tasks"][0];
+    assert_eq!(task["kind"], "task");
+    assert_eq!(task["tags"][0], "work");
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_include_filter() {
+    let repo = marker_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let tasks_only = tasks_query(&server, r#"{"include": "tasks"}"#).await;
+    assert_eq!(task_texts(&tasks_only), vec!["write the report"]);
+    assert_eq!(tasks_only["total_matches"], 1);
+
+    let markers_only = tasks_query(&server, r#"{"include": "markers"}"#).await;
+    assert_eq!(
+        task_texts(&markers_only),
+        vec![
+            "The market fell 10% (source: TK).",
+            "Nothing to check off, but FIXME the numbers here.",
+        ]
+    );
+    assert_eq!(markers_only["total_matches"], 2);
+}
+
+/// The panel follows the highlighter: with `mark_incomplete` off there are no
+/// `#mbr-marker-N` anchors on the page, so a listed marker could not be opened.
+#[tokio::test]
+async fn test_tasks_endpoint_omits_markers_when_mark_incomplete_is_off() {
+    let repo = marker_repo();
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.mark_incomplete = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+    assert_eq!(task_texts(&body), vec!["write the report"]);
+    assert_eq!(
+        body["groups"]
+            .as_array()
+            .expect("groups array")
+            .iter()
+            .map(|g| g["key"].as_str().expect("key"))
+            .collect::<Vec<_>>(),
+        vec!["/inbox/"],
+        "a note with only markers must not be indexed at all"
+    );
+
+    // Asking for markers explicitly cannot bring them back: none were scanned.
+    let markers_only = tasks_query(&server, r#"{"include": "markers"}"#).await;
+    assert_eq!(markers_only["total_matches"], 0);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_markers_absent_in_calendar_mode() {
+    let repo = marker_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, r#"{"mode": "calendar"}"#).await;
+    assert_eq!(task_texts(&body), vec!["write the report"]);
+
+    // A marker has no due date, so the only bucket it could reach is the
+    // undated one — and it must neither create nor inflate it.
+    let groups = body["groups"].as_array().expect("groups array");
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g["key"].as_str().expect("key"))
+            .collect::<Vec<_>>(),
+        vec!["none"]
+    );
+    // Calendar totals ignore the status filter, so both undated checkboxes are
+    // counted — but not the marker, which would have made this 3.
+    assert_eq!(groups[0]["total"], 2);
+    assert_eq!(groups[0]["done"], 1);
+}
+
+#[tokio::test]
+async fn test_tasks_endpoint_markers_do_not_change_group_totals() {
+    let repo = marker_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(&server, "{}").await;
+    let groups = body["groups"].as_array().expect("groups array");
+
+    // inbox.md has one open and one done checkbox plus a marker: the marker is
+    // listed but the progress numbers still describe the two checkboxes.
+    assert_eq!(groups[0]["key"], "/inbox/");
+    assert_eq!(groups[0]["tasks"].as_array().expect("tasks").len(), 2);
+    assert_eq!(
+        (groups[0]["done"].clone(), groups[0]["total"].clone()),
+        (serde_json::json!(1), serde_json::json!(2))
+    );
+
+    // prose.md has no checkbox at all, so it reads 0/0 rather than 0/1.
+    assert_eq!(groups[1]["key"], "/prose/");
+    assert_eq!(groups[1]["tasks"].as_array().expect("tasks").len(), 1);
+    assert_eq!(
+        (groups[1]["done"].clone(), groups[1]["total"].clone()),
+        (serde_json::json!(0), serde_json::json!(0))
+    );
+}
+
 // ============================================================================
 // Task toggle (`POST /.mbr/task`)
 // ============================================================================
@@ -7936,6 +8111,44 @@ async fn test_task_toggle_rejects_a_line_that_is_not_a_task() {
     .await;
     assert_eq!(past_end.status(), 400, "a missing line must be 400");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+/// A marker is read-only, and that is enforced at the endpoint rather than in
+/// the panel: `patch_task_line` goes through the checkbox grammar, which never
+/// matches a marker line, so there is no request that can write one.
+#[tokio::test]
+async fn test_task_toggle_rejects_a_marker_line() {
+    const SOURCE: &str = "# Notes\n\nThe market fell 10% (source: TK).\n- [ ] real task\n";
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // The marker really is listed, so this is the line a panel would send.
+    let listed = tasks_query(&server, r#"{"include": "markers"}"#).await;
+    let hit = &listed["groups"][0]["tasks"][0];
+    assert_eq!(hit["kind"], "marker");
+    assert_eq!(hit["line"], 3);
+
+    // `expected` matches the file byte for byte: the only thing wrong with the
+    // request is that line 3 is not a task.
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": hit["path"],
+            "line": hit["line"],
+            "expected": "The market fell 10% (source: TK).",
+            "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "a marker line must be 400");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        SOURCE,
+        "a rejected toggle must not touch the file"
+    );
 }
 
 #[tokio::test]

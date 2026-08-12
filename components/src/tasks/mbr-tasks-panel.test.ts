@@ -1,7 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import './mbr-tasks-panel.js'
 import type { MbrTasksPanelElement } from './mbr-tasks-panel.js'
-import { calendarResponse, categoryResponse, makeGroup, makeHit, makeResponse } from './test-fixtures.js'
+import {
+  calendarResponse,
+  categoryResponse,
+  makeGroup,
+  makeHit,
+  makeMarker,
+  makeResponse,
+  markerResponse,
+} from './test-fixtures.js'
 import type { TaskQueryResponse } from './types.js'
 
 /** Today for every test here; matches the fixture dates. */
@@ -124,6 +132,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open'],
         priorities: [],
         due: 'any',
+        include: 'all',
         mode: 'category',
         limit: 500,
       })
@@ -141,6 +150,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open'],
         priorities: [],
         due: 'any',
+        include: 'all',
         mode: 'category',
         limit: 500,
       })
@@ -162,7 +172,9 @@ describe('MbrTasksPanelElement', () => {
       checkboxes[5].click() // + urgent
       await flush(element)
 
-      const select = root.querySelector('.filter-popover select') as HTMLSelectElement
+      // By id, not by position: the popover has two selects now, and reaching
+      // for "the first one" would make this test depend on fieldset order.
+      const select = root.querySelector('#tasks-due-filter') as HTMLSelectElement
       select.value = 'overdue'
       select.dispatchEvent(new Event('change'))
       await flush(element)
@@ -173,6 +185,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open', 'done'],
         priorities: ['urgent'],
         due: 'overdue',
+        include: 'all',
         mode: 'category',
         limit: 500,
       })
@@ -730,7 +743,7 @@ describe('MbrTasksPanelElement', () => {
       element = await mount()
       element.shadowRoot!.querySelector<HTMLButtonElement>('.filter-button')!.click()
       await element.updateComplete
-      const select = element.shadowRoot!.querySelector('.filter-popover select') as HTMLSelectElement
+      const select = element.shadowRoot!.querySelector('#tasks-due-filter') as HTMLSelectElement
 
       select.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, composed: true })
@@ -995,6 +1008,264 @@ describe('MbrTasksPanelElement', () => {
       await element.updateComplete
 
       expect(toggler).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('markers', () => {
+    /**
+     * The marker fixture, with editing on and a stub toggler wired in — so a
+     * marker that declines a write is declining it on its own account rather
+     * than because nothing could have written anyway.
+     */
+    async function mountWithMarkers(toggler = vi.fn().mockResolvedValue({ ok: true })) {
+      respondWith(markerResponse())
+      const el = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
+      el.today = TODAY
+      el.locale = 'en-US'
+      el.editEnabled = true
+      el.toggleTask = toggler as unknown as MbrTasksPanelElement['toggleTask']
+      document.body.appendChild(el)
+      await flush(el)
+      return el
+    }
+
+    /** `[task card, marker card]` — the fixture's source order. */
+    function cards(el: MbrTasksPanelElement): HTMLElement[] {
+      return Array.from(el.shadowRoot!.querySelectorAll('.task-card'))
+    }
+
+    function includeSelect(el: MbrTasksPanelElement): HTMLSelectElement {
+      return el.shadowRoot!.querySelector('#tasks-include-filter') as HTMLSelectElement
+    }
+
+    async function openFilters(el: MbrTasksPanelElement): Promise<void> {
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.filter-button')!.click()
+      await el.updateComplete
+    }
+
+    it('renders a spacer instead of a checkbox, while its neighbour keeps one', async () => {
+      element = await mountWithMarkers()
+      const [task, marker] = cards(element)
+
+      // Absent, not disabled: `data-mbr-task-line` / `-status` are exactly what
+      // `task-toggle.ts` reads back, and markup that is not there cannot be
+      // mistargeted.
+      expect(marker.querySelector('.mbr-task-check')).toBeNull()
+      expect(marker.querySelector('.mbr-task-check-spacer')).not.toBeNull()
+      // The task beside it proves the branch rather than merely its absence.
+      expect(task.querySelector('.mbr-task-check')).not.toBeNull()
+      expect(task.querySelector('.mbr-task-check-spacer')).toBeNull()
+    })
+
+    it('draws no chips, and keeps the priority rail with a spacer', async () => {
+      element = await mountWithMarkers()
+      const marker = cards(element)[1]
+
+      expect(marker.querySelector('.task-chips')).toBeNull()
+      expect(marker.querySelector('.mbr-task-pri')).toBeNull()
+      expect(marker.querySelector('.mbr-task-pri-spacer')).not.toBeNull()
+      // The text is the whole source line, marker word included.
+      expect(marker.querySelector('.task-link')?.textContent?.trim()).toBe(
+        'The market fell 10% (source: TK).'
+      )
+    })
+
+    it('washes only the marker word, leaving the rest of the line untouched', async () => {
+      element = await mountWithMarkers()
+      const [task, marker] = cards(element)
+      const link = marker.querySelector('.task-link')!
+
+      const washed = link.querySelectorAll('.task-marker')
+      expect(washed.length).toBe(1)
+      expect(washed[0].textContent).toBe('TK')
+      // The line still reads verbatim: the span splits the text, it does not
+      // rewrite it. Highlighting the whole card would say the sentence is
+      // unfinished rather than pointing at the word that says so.
+      expect(link.textContent).toBe('The market fell 10% (source: TK).')
+      // The task beside it proves the branch rather than merely its absence.
+      expect(task.querySelector('.task-marker')).toBeNull()
+    })
+
+    it('never washes a checkbox task, even one whose own text says TODO', async () => {
+      // A task carries no span, so the word is prose. The card keys off the
+      // server's range, not off the string — an `indexOf` here would wash this.
+      respondWith(
+        makeResponse({
+          groups: [
+            makeGroup({
+              key: '/notes/',
+              url_path: '/notes/',
+              total: 1,
+              tasks: [makeHit({ text: 'rename the TODO list page', line: 3 })],
+            }),
+          ],
+          total_matches: 1,
+        })
+      )
+      element = await mountBare(null)
+
+      const link = element.shadowRoot!.querySelector('.task-link')!
+      expect(link.querySelector('.task-marker')).toBeNull()
+      expect(link.textContent).toBe('rename the TODO list page')
+    })
+
+    it('degrades an unusable span to plain text instead of mis-slicing', async () => {
+      // Three ways the range can be wrong — past the end of a text that got
+      // shorter, inverted, and absent on a hit that still claims to be a
+      // marker. A missing wash is invisible; a mis-sliced one corrupts the
+      // words the reader came here to find.
+      const line = 'The market fell 10% (source: TK).'
+      respondWith(
+        makeResponse({
+          groups: [
+            makeGroup({
+              key: '/notes/',
+              url_path: '/notes/',
+              tasks: [
+                makeMarker({ text: line, line: 1, marker_end: line.length + 40 }),
+                makeMarker({ text: line, line: 2, marker_start: 31, marker_end: 29 }),
+                makeMarker({ text: line, line: 3, marker_start: null, marker_end: null }),
+              ],
+            }),
+          ],
+          total_matches: 3,
+        })
+      )
+      element = await mountBare(null)
+
+      const links = Array.from(element.shadowRoot!.querySelectorAll('.task-link'))
+      expect(links.length).toBe(3)
+      for (const link of links) {
+        expect(link.querySelector('.task-marker')).toBeNull()
+        expect(link.textContent).toBe(line)
+      }
+    })
+
+    it('deep links to #mbr-marker-N, which is a different id from a task’s', async () => {
+      element = await mountWithMarkers()
+      const [task, marker] = cards(element)
+
+      expect(marker.querySelector('.task-link')?.getAttribute('href')).toBe('/notes/#mbr-marker-9')
+      expect(task.querySelector('.task-link')?.getAttribute('href')).toBe('/notes/#mbr-task-3')
+    })
+
+    it('navigates a click to that same href, not to a #mbr-task-N that does not exist', async () => {
+      element = await mountWithMarkers()
+      const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {})
+
+      cards(element)[1].click()
+
+      // The card's own navigation and the rendered href come from one function;
+      // a second hand-built fragment here is what this catches.
+      expect(assign).toHaveBeenCalledWith('/notes/#mbr-marker-9')
+    })
+
+    it('leaves Space and x to the filter field when a marker is focused', async () => {
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      element = await mountWithMarkers(toggler)
+
+      press('ArrowDown') // heading
+      press('ArrowDown') // the real task
+      press('ArrowDown') // the marker
+      await element.updateComplete
+      expect(focusedLabel(element)).toBe('T:The market fell 10% (source: TK).')
+
+      // Not prevented: the guard has to return BEFORE `preventDefault()`, so
+      // the key falls back to the field exactly as it does on a heading — a
+      // swallowed keystroke would cost the user a character for nothing.
+      const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+      document.dispatchEvent(space)
+      const cancel = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
+      document.dispatchEvent(cancel)
+      await flush(element)
+
+      expect(space.defaultPrevented).toBe(false)
+      expect(cancel.defaultPrevented).toBe(false)
+      expect(toggler).not.toHaveBeenCalled()
+    })
+
+    it('still toggles the real task in the same list', async () => {
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      element = await mountWithMarkers(toggler)
+
+      press('ArrowDown')
+      press('ArrowDown')
+      await element.updateComplete
+      press(' ')
+      await flush(element)
+
+      expect(toggler).toHaveBeenCalledWith({ path: 'notes.md', line: 3, to: 'done' })
+    })
+
+    it('sends the Show choice, defaulting to all', async () => {
+      element = await mountWithMarkers()
+      expect((lastBody() as { include: string }).include).toBe('all')
+
+      await openFilters(element)
+      const select = includeSelect(element)
+      select.value = 'markers'
+      select.dispatchEvent(new Event('change'))
+      await flush(element)
+
+      expect((lastBody() as { include: string }).include).toBe('markers')
+    })
+
+    it('marks the initial option selected, which is what survives the first render', async () => {
+      element = await mountWithMarkers()
+      await openFilters(element)
+
+      // The `?selected` half of the double binding, asserted as the ATTRIBUTE
+      // it actually sets. On the first render Lit commits the <select>'s
+      // `.value` PropertyPart before the options ChildPart exists, so in a real
+      // browser `.value` is dropped and this attribute is the only thing
+      // carrying the initial selection. (happy-dom's <select> is more forgiving
+      // about `.value` without options, so this is asserted directly rather
+      // than through `select.value`.)
+      const options = Array.from(includeSelect(element).querySelectorAll('option'))
+      expect(options.map((o) => o.getAttribute('value'))).toEqual(['all', 'tasks', 'markers'])
+      expect(options.filter((o) => o.hasAttribute('selected')).map((o) => o.value)).toEqual(['all'])
+    })
+
+    it('pins Show to tasks in By Due, and restores the choice on the way back', async () => {
+      element = await mountWithMarkers()
+      await openFilters(element)
+
+      const select = includeSelect(element)
+      select.value = 'markers'
+      select.dispatchEvent(new Event('change'))
+      await flush(element)
+      expect(select.disabled).toBe(false)
+
+      // A marker has no due date, so no bucket could hold one and "Markers
+      // only" would ask for a guaranteed-empty list.
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[1].click()
+      await flush(element)
+      expect((lastBody() as { include: string }).include).toBe('tasks')
+      expect(includeSelect(element).disabled).toBe(true)
+      // The `.value` half of the double binding: `?selected` alone would not
+      // move a selection that is already committed.
+      expect(includeSelect(element).value).toBe('tasks')
+
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[0].click()
+      await flush(element)
+      // Derived, not assigned: the user's category-mode choice survived.
+      expect((lastBody() as { include: string }).include).toBe('markers')
+      expect(includeSelect(element).disabled).toBe(false)
+      expect(includeSelect(element).value).toBe('markers')
+    })
+
+    it('explains the pin on the fieldset, where a disabled control cannot', async () => {
+      element = await mountWithMarkers()
+      await openFilters(element)
+      const fieldset = includeSelect(element).closest('fieldset')!
+
+      expect(fieldset.getAttribute('title')).toBeNull()
+
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[1].click()
+      await flush(element)
+      // On the fieldset, not the <select>: a disabled control suppresses
+      // pointer events, so its own tooltip would never render.
+      expect(fieldset.getAttribute('title')).toContain('no due date')
     })
   })
 

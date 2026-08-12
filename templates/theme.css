@@ -42,9 +42,8 @@
   --mbr-alert-caution-border: #c62828;
   --mbr-alert-caution-icon-color: #c62828;
 
-  /* Incomplete-block marker (TK/TODO/FIXME/XXX) */
+  /* Incomplete marker (TK/TODO/FIXME/XXX) — a wash only, no underline. */
   --mbr-incomplete-bg: rgba(255, 235, 59, 0.18);
-  --mbr-incomplete-border: #f57c00;
 
   /* Task annotations (!! / !!! priority, #tag, @due, @done, [-] canceled) */
   --mbr-task-pri-high-color: #f57c00;
@@ -586,14 +585,23 @@ blockquote.markdown-alert-caution > p:first-of-type::before {
   color: var(--mbr-alert-caution-icon-color);
 }
 
-/* Incomplete-block marker — wraps blocks starting with TK/TODO/FIXME/XXX
- * (or whatever incomplete_markers configures). Highlights drafts in
- * server/GUI mode; off by default in static builds. */
+/* Incomplete marker — TK/TODO/FIXME/XXX, or whatever incomplete_markers
+ * configures. A block whose first text starts with a marker is wrapped whole;
+ * every other occurrence has just the marker word wrapped. The first wrapper on
+ * a source line also carries an id="mbr-marker-{line}" deep-link anchor.
+ * Highlights drafts in server/GUI mode; off by default in static builds. */
 .mbr-incomplete {
   background: var(--mbr-incomplete-bg);
-  border-bottom: 2px dotted var(--mbr-incomplete-border);
   padding: 0 0.15rem;
   border-radius: 2px;
+}
+
+/* A block-initial wrap containing a later inline wrap would otherwise stack two
+ * translucent washes on the same word. The outer span already says "this block
+ * is incomplete"; the inner one has nothing left to add. */
+.mbr-incomplete .mbr-incomplete {
+  background: none;
+  padding: 0;
 }
 
 /* ==================== Task Lists ==================== */

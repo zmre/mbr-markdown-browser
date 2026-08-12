@@ -115,6 +115,9 @@ The ⚙ button opens the rest of the filters:
   means "incomplete" to the server, which would be confusing to look at).
 - **Priority** — Normal, High, Urgent. Empty means all.
 - **Due** — Any, Overdue, Due today, Due tomorrow, Upcoming, or No due date.
+- **Show** — Tasks + markers (the default), Tasks only, or Markers only. See
+  [Incomplete markers](#incomplete-markers). Greyed out in **By Due**, which
+  lists tasks only.
 
 The folder scope is the one filter that does *not* start empty: it starts on
 the folder of the note you were reading (see [Where it
@@ -144,14 +147,17 @@ so it should feel familiar.
 Typing goes to the filter field, which keeps focus the whole time. `Space`,
 `x`, `←` and `→` only take over once you have moved onto a task with the arrow
 keys — and any keystroke in the filter field hands them back — so filtering for
-"buy milk" works exactly as you would expect.
+"buy milk" works exactly as you would expect. `Space` and `x` stay with the
+field on a heading and on an [incomplete marker](#incomplete-markers), neither
+of which has a status to change.
 
 ## Jumping to a task
 
 `Enter` (or a click on the task's text) opens the note it lives in and scrolls
 straight to the line, clear of the sticky header, with a brief highlight so you
 can see which one you came for. The link is an ordinary fragment
-(`/docs/notes/#mbr-task-42`), so it can be bookmarked, shared, or opened in a
+(`/docs/notes/#mbr-task-42`, or `#mbr-marker-42` for an [incomplete
+marker](#incomplete-markers)), so it can be bookmarked, shared, or opened in a
 new tab.
 
 ## Toggling a task
@@ -185,6 +191,79 @@ endpoint behind it.
 Without editing enabled, the checkboxes stay inert and `Space` / `x` stay
 unbound — no control appears that cannot do anything.
 
+## Incomplete markers
+
+Not every loose end gets a checkbox. A sentence like
+
+```markdown
+The market fell 10% (source: TK).
+```
+
+is unfinished work too, and the panel lists it beside your real tasks.
+
+Any line containing one of the `incomplete_markers` — `TK`, `TODO`, `FIXME` or
+`XXX` by default — becomes a **marker** entry. Matching happens *anywhere* in
+the line, not just at the start, and is case-sensitive and word-boundaried, so
+`TODO` matches but `Tomato` and `todo` do not.
+
+Markers are skipped where the word is obviously not a note to self:
+
+- inside inline code spans — `` `TODO` `` is documentation, not a task
+- inside fenced and indented code blocks
+- in the target of a `[[wikilink]]` (the alias half is ordinary text, so it
+  still counts)
+- in a link or image destination or title
+- in link reference definitions, and in YAML frontmatter
+
+A line is only ever **one** entry. `- [ ] TODO: ship it` is a task, never also
+a marker — the checkbox wins.
+
+### They are read-only
+
+A marker is a pointer at a line, not a state you can change. There is no
+checkbox on its card — not a disabled one, none at all — and `Space` and `x` do
+nothing to it, staying with the filter field the way they do on a heading. There
+is no marker byte in the file to rewrite, so the write endpoint refuses one
+outright.
+
+Everything else about the card follows from that: a marker's text is the whole
+source line verbatim (`#tags`, `!!` and `@due(...)` are neither parsed nor
+stripped, because a marker has no annotation grammar), it carries no tag pills
+or date chips, and its priority is always normal.
+
+Inside that line, the marker word itself — and only the marker word — carries
+the same highlight the rendered page gives it, so a card and the paragraph it
+points at read as the same thing. The server sends the word's position along
+with the text, so the card highlights exactly the occurrence that made the line
+a marker: in ``Set `TODO` in config and TK fix it`` the backticked `TODO` is
+code, and it is the `TK` that lights up.
+
+### Where they appear, and where they do not
+
+| | |
+|---|---|
+| **By Note** | Yes — in source order, among that note's tasks |
+| **By Due** | Never. A marker has no due date, so no bucket could hold one; the **Show** filter is greyed out and pinned to "Tasks only" there, and your choice comes back when you switch to **By Note** |
+| **Progress counters** | Never counted. A note's `x/y` and its bar describe its checkboxes alone, so a stray `TODO:` cannot make a finished note look unfinished |
+| **Folder counts** | Counted — they are real matches |
+
+Clicking one jumps to its line and flashes it, exactly as a task does. The
+fragment is `#mbr-marker-42` rather than `#mbr-task-42`, because the anchor
+lives on the highlight instead of on a checkbox.
+
+### Turning them off
+
+Markers in the panel follow the same switch as the highlighting on the page:
+[`mark_incomplete`](../reference/configuration/#incomplete-marker-highlighting).
+With it off there is no highlight and therefore no anchor to link to, so there
+are no markers in the panel either — `mbr -s --no-mark-incomplete` gives you
+back a panel of checkboxes only. Setting `incomplete_markers = []` does the same
+thing.
+
+For the highlighting itself — the two shapes of wash, the exact match rule, and
+the `id="mbr-marker-{line}"` anchor — see [Incomplete-Marker
+Highlighting](../reference/configuration/#incomplete-marker-highlighting).
+
 ## Configuration
 
 | Option | Default | Effect |
@@ -192,8 +271,13 @@ unbound — no control appears that cannot do anything.
 | `tasks_enabled` | `true` | Turn the panel and its endpoint off (`--no-tasks`) |
 | `tasks_stamp_done` | `true` | Maintain `@done(...)` when a task is completed |
 | `tasks_ignore_globs` | `[]` | Folders whose tasks the panel ignores (config/env only) |
+| `mark_incomplete` | server/GUI on | Also gates [incomplete markers](#incomplete-markers) in the panel (`--no-mark-incomplete`) |
+| `incomplete_markers` | `["TK", "TODO", "FIXME", "XXX"]` | Which words count as a marker |
 
-See [Task Settings](../reference/configuration/#task-settings) for the details.
+See [Task Settings](../reference/configuration/#task-settings) and
+[Incomplete-Marker
+Highlighting](../reference/configuration/#incomplete-marker-highlighting) for
+the details.
 
 ## Hiding a folder from the panel
 
@@ -244,6 +328,9 @@ you wait.
 ## See Also
 
 - [Task syntax](./#tasks) — markers, annotations and date formats
+- [Incomplete-Marker
+  Highlighting](../reference/configuration/#incomplete-marker-highlighting) —
+  how `TK`/`TODO` are matched and highlighted on the page
 - [In-Browser Editing](../modes/editing/) — enabling writes
 - [Keyboard Shortcuts](../reference/keyboard-shortcuts/)
 - [Configuration Reference](../reference/configuration/#task-settings)

@@ -20,6 +20,12 @@
 //! they are dropped outright — they cannot appear, be counted, or create a
 //! bucket — because a canceled task has no meaningful due date.
 //!
+//! Incomplete markers ([`crate::tasks::TaskKind::Marker`]) are category-mode
+//! only, dropped in calendar mode by the same rule and for a stronger reason:
+//! they can never carry a due date. They are real matches everywhere else —
+//! `total_matches` and the folder facets count them — but never move a note's
+//! `done`/`total`, which [`FileTasks`] derives from checkboxes alone.
+//!
 //! `limit` truncates the tasks that are *returned*; it never affects a count.
 //! `total_matches` is the pre-truncation number of matching tasks.
 
@@ -30,7 +36,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::task_index::FileTasks;
-use crate::tasks::{Task, TaskPriority, TaskStatus};
+use crate::tasks::{Task, TaskKind, TaskPriority, TaskStatus};
 
 /// Default cap on returned tasks.
 pub const DEFAULT_TASK_LIMIT: usize = 500;
@@ -54,6 +60,8 @@ pub struct TaskQuery {
     pub priorities: Vec<TaskPriority>,
     /// Due-date filter.
     pub due: DueFilter,
+    /// Which kinds of entry to show: checkboxes, incomplete markers, or both.
+    pub include: IncludeFilter,
     /// How results are grouped.
     pub mode: TaskMode,
     /// Maximum number of tasks returned across all groups.
@@ -68,6 +76,7 @@ impl Default for TaskQuery {
             statuses: Vec::new(),
             priorities: Vec::new(),
             due: DueFilter::Any,
+            include: IncludeFilter::All,
             mode: TaskMode::Category,
             limit: DEFAULT_TASK_LIMIT,
         }
@@ -105,6 +114,37 @@ impl DueFilter {
             Self::Tomorrow => matches!(bucket, DueBucket::Tomorrow),
             Self::Upcoming => matches!(bucket, DueBucket::Upcoming(_)),
             Self::NoDue => matches!(bucket, DueBucket::NoDue),
+        }
+    }
+}
+
+/// Which kinds of entry a query wants back.
+///
+/// **Single-select, like [`DueFilter`], rather than an array like
+/// `statuses`.** The three options are mutually exclusive and exhaust the
+/// space, so an array would admit two states that mean nothing — the empty
+/// array, and both values at once — and the client would need exactly the
+/// "refuses to clear the last one" guard `statuses` already carries. One enum
+/// with a default makes both unrepresentable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IncludeFilter {
+    /// Checkbox tasks and incomplete markers.
+    #[default]
+    All,
+    /// Checkbox tasks only.
+    Tasks,
+    /// Incomplete markers only.
+    Markers,
+}
+
+impl IncludeFilter {
+    /// Whether an entry of this kind passes the filter.
+    pub fn matches(self, kind: TaskKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Tasks => kind == TaskKind::Task,
+            Self::Markers => kind == TaskKind::Marker,
         }
     }
 }
@@ -353,6 +393,7 @@ struct Filters {
     statuses: Vec<TaskStatus>,
     priorities: Vec<TaskPriority>,
     due: DueFilter,
+    include: IncludeFilter,
     today: NaiveDate,
     calendar: bool,
 }
@@ -369,15 +410,39 @@ impl Filters {
             },
             priorities: query.priorities.clone(),
             due: query.due,
+            include: query.include,
             today,
             calendar: query.mode == TaskMode::Calendar,
         }
     }
 
-    /// Calendar mode ignores canceled tasks entirely: they never show, never
-    /// count, and never create a bucket.
+    /// Whether an entry may take part in this query *at all* — before any
+    /// question about which group it lands in or whether it matches the text.
+    ///
+    /// Two rules live here, and they live here rather than in
+    /// [`Self::matches_except_status`] because [`group_by_due`] consults this
+    /// one **before** incrementing a bucket's `total`, so anything rejected
+    /// cannot leak into a count or conjure a bucket that has no visible tasks:
+    ///
+    /// - the `include` filter, which is a property of the entry and not of the
+    ///   view;
+    /// - calendar mode, which drops canceled tasks (no meaningful due date) and
+    ///   incomplete markers (no due date at all, and nothing to complete). A
+    ///   marker would otherwise pile into the "No due date" bucket, which is
+    ///   the one calendar heading that is a place for tasks whose deadline is
+    ///   still to be set.
+    ///
+    /// Everything else about a marker falls out of the ordinary filters without
+    /// a special case: its bucket is `NoDue`, its priority is `Normal` and its
+    /// status is `Open`.
     fn admissible(&self, task: &Task) -> bool {
-        !(self.calendar && task.status == TaskStatus::Canceled)
+        if !self.include.matches(task.kind) {
+            return false;
+        }
+        if self.calendar {
+            return task.kind == TaskKind::Task && task.status != TaskStatus::Canceled;
+        }
+        true
     }
 
     /// Every filter *except* status. This is the predicate the calendar-mode
@@ -664,7 +729,7 @@ fn truncate_groups(groups: &mut Vec<TaskGroup>, limit: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::scan_source_tasks;
+    use crate::tasks::{MarkerRule, scan_source_tasks, scan_source_tasks_with_markers};
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).expect("valid test date")
@@ -684,6 +749,31 @@ mod tests {
             title.map(str::to_string),
             scan_source_tasks(body),
         ))
+    }
+
+    /// [`file`], with the default `incomplete_markers` turned on, so the entries
+    /// come back merged and in source order exactly as the index stores them.
+    fn marked_file(url: &str, raw: &str, body: &str) -> Arc<FileTasks> {
+        let markers: Vec<String> = ["TK", "TODO", "FIXME", "XXX"]
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect();
+        let rule = MarkerRule::new(&markers).expect("the default markers compile");
+        Arc::new(FileTasks::new(
+            url,
+            std::path::PathBuf::from(raw),
+            None,
+            scan_source_tasks_with_markers(body, Some(&rule)),
+        ))
+    }
+
+    /// Every returned entry's kind, in response order.
+    fn kinds(response: &TaskQueryResponse) -> Vec<TaskKind> {
+        response
+            .groups
+            .iter()
+            .flat_map(|g| g.tasks.iter().map(|t| t.task.kind))
+            .collect()
     }
 
     fn query() -> TaskQuery {
@@ -1446,13 +1536,18 @@ mod tests {
         let parsed: TaskQuery = serde_json::from_str("{}").expect("empty object is a query");
         assert_eq!(parsed, TaskQuery::default());
         assert_eq!(parsed.limit, DEFAULT_TASK_LIMIT);
+        // The container-level `#[serde(default)]` reads this off the manual
+        // `Default` impl, so a client that predates the field still gets both
+        // kinds rather than an empty panel.
+        assert_eq!(parsed.include, IncludeFilter::All);
     }
 
     #[test]
     fn a_query_deserializes_every_field() {
         let parsed: TaskQuery = serde_json::from_str(
             r#"{"q":"report #work","folder":"/docs/","statuses":["open","done"],
-                "priorities":["urgent"],"due":"overdue","mode":"calendar","limit":10}"#,
+                "priorities":["urgent"],"due":"overdue","include":"markers",
+                "mode":"calendar","limit":10}"#,
         )
         .expect("full object is a query");
 
@@ -1461,13 +1556,225 @@ mod tests {
         assert_eq!(parsed.statuses, [TaskStatus::Open, TaskStatus::Done]);
         assert_eq!(parsed.priorities, [TaskPriority::Urgent]);
         assert_eq!(parsed.due, DueFilter::Overdue);
+        assert_eq!(parsed.include, IncludeFilter::Markers);
         assert_eq!(parsed.mode, TaskMode::Calendar);
         assert_eq!(parsed.limit, 10);
+
+        // Single-select, lowercase on the wire, like `due` and `mode`.
+        let tasks: TaskQuery =
+            serde_json::from_str(r#"{"include":"tasks"}"#).expect("include is a query field");
+        assert_eq!(tasks.include, IncludeFilter::Tasks);
     }
 
     #[test]
     fn the_no_due_filter_is_spelled_none_on_the_wire() {
         let parsed: TaskQuery = serde_json::from_str(r#"{"due":"none"}"#).expect("query");
         assert_eq!(parsed.due, DueFilter::NoDue);
+    }
+
+    // ---- incomplete markers --------------------------------------------------
+
+    /// One file carrying both kinds, interleaved, so source order is testable.
+    fn mixed_kind_file() -> Vec<Arc<FileTasks>> {
+        vec![marked_file(
+            "/notes/",
+            "notes.md",
+            concat!(
+                "TK verify this figure\n",   // 1, marker
+                "\n",                        // 2
+                "- [ ] write the report\n",  // 3, task
+                "prose with a FIXME here\n"  // 4, marker
+            ),
+        )]
+    }
+
+    #[test]
+    fn markers_appear_in_category_mode_in_source_order() {
+        let response = run_query(&mixed_kind_file(), &query(), today());
+        assert_eq!(
+            texts(&response),
+            [
+                "TK verify this figure",
+                "write the report",
+                "prose with a FIXME here"
+            ]
+        );
+        assert_eq!(
+            kinds(&response),
+            [TaskKind::Marker, TaskKind::Task, TaskKind::Marker]
+        );
+        assert_eq!(response.total_matches, 3, "markers are real matches");
+    }
+
+    #[test]
+    fn markers_never_appear_in_calendar_mode() {
+        let q = TaskQuery {
+            mode: TaskMode::Calendar,
+            ..query()
+        };
+        let response = run_query(&mixed_kind_file(), &q, today());
+
+        assert_eq!(texts(&response), ["write the report"]);
+        // The one bucket a marker could have landed in is the undated one, and
+        // `admissible` runs before the bucket total is incremented — so the
+        // markers neither create it nor inflate it.
+        let none = response
+            .groups
+            .iter()
+            .find(|g| g.key == "none")
+            .expect("the undated task still makes a bucket");
+        assert_eq!((none.done, none.total), (0, 1));
+        assert_eq!(response.total_matches, 1);
+
+        // And with nothing but markers there is no bucket at all.
+        let markers_only = vec![marked_file("/prose/", "prose.md", "the source is TK\n")];
+        let response = run_query(&markers_only, &q, today());
+        assert!(
+            response.groups.is_empty(),
+            "a marker must not conjure a calendar bucket: {:?}",
+            response.groups
+        );
+        assert_eq!(response.total_matches, 0);
+    }
+
+    #[test]
+    fn include_filter_selects_tasks_markers_or_both() {
+        let files = mixed_kind_file();
+        for (include, expected) in [
+            (
+                IncludeFilter::All,
+                vec![TaskKind::Marker, TaskKind::Task, TaskKind::Marker],
+            ),
+            (IncludeFilter::Tasks, vec![TaskKind::Task]),
+            (IncludeFilter::Markers, vec![TaskKind::Marker; 2]),
+        ] {
+            let q = TaskQuery { include, ..query() };
+            let response = run_query(&files, &q, today());
+            assert_eq!(kinds(&response), expected, "for {include:?}");
+            assert_eq!(response.total_matches, expected.len(), "for {include:?}");
+        }
+    }
+
+    #[test]
+    fn markers_pass_the_default_status_and_priority_filters() {
+        // Nothing about a marker is special-cased in `matches_except_status` or
+        // `matches_status`: it is `Open` and `Normal`, so the default view shows
+        // it and an explicit filter for those values still does.
+        let files = mixed_kind_file();
+        for q in [
+            TaskQuery {
+                statuses: vec![TaskStatus::Open],
+                ..query()
+            },
+            TaskQuery {
+                priorities: vec![TaskPriority::Normal],
+                ..query()
+            },
+        ] {
+            assert_eq!(run_query(&files, &q, today()).total_matches, 3);
+        }
+
+        // ...and a filter they cannot satisfy drops them, with no extra rule.
+        let done_only = TaskQuery {
+            statuses: vec![TaskStatus::Done],
+            ..query()
+        };
+        assert_eq!(run_query(&files, &done_only, today()).total_matches, 0);
+    }
+
+    #[test]
+    fn markers_are_dropped_by_a_dated_due_filter_but_kept_by_none() {
+        let files = mixed_kind_file();
+
+        // A marker has no due date, so `due_bucket(None)` is `NoDue` and every
+        // dated filter excludes it without a kind check.
+        for due in [DueFilter::Overdue, DueFilter::Today, DueFilter::Upcoming] {
+            let q = TaskQuery { due, ..query() };
+            assert_eq!(
+                run_query(&files, &q, today()).total_matches,
+                0,
+                "for {due:?}"
+            );
+        }
+
+        let undated = TaskQuery {
+            due: DueFilter::NoDue,
+            ..query()
+        };
+        assert_eq!(run_query(&files, &undated, today()).total_matches, 3);
+    }
+
+    #[test]
+    fn a_word_query_matches_marker_text_but_a_tag_query_never_does() {
+        // A marker's text is the whole line, so a bare word searches it the way
+        // it searches a task.
+        let files = vec![marked_file(
+            "/notes/",
+            "notes.md",
+            "TODO cross-link this #docs\n",
+        )];
+        let word = TaskQuery {
+            q: "cross-link".to_string(),
+            ..query()
+        };
+        assert_eq!(run_query(&files, &word, today()).total_matches, 1);
+
+        // But a `#tag` token matches *tags*, and a marker has none — even when
+        // the line literally contains `#docs`. That is intentional: markers get
+        // no annotation parsing, so `#docs` here is prose the author wrote, not
+        // a tag they applied, and letting it match would file the entry under a
+        // label that exists nowhere else.
+        let tag = TaskQuery {
+            q: "#docs".to_string(),
+            ..query()
+        };
+        assert_eq!(run_query(&files, &tag, today()).total_matches, 0);
+    }
+
+    #[test]
+    fn folder_facets_count_markers() {
+        // Markers are real matches, so the folder pane counts them and its
+        // numbers keep agreeing with what selecting a folder would show.
+        let files = vec![
+            marked_file("/docs/notes/", "docs/notes.md", "the source is TK\n"),
+            marked_file("/inbox/", "inbox.md", "- [ ] write the report\n"),
+        ];
+        let response = run_query(&files, &query(), today());
+        let counts: Vec<(&str, u32)> = response
+            .folders
+            .iter()
+            .map(|f| (f.path.as_str(), f.count))
+            .collect();
+        assert_eq!(counts, vec![("/", 2), ("/docs/", 1)]);
+
+        // Narrowing to tasks only takes the marker back out of the facet.
+        let tasks_only = TaskQuery {
+            include: IncludeFilter::Tasks,
+            ..query()
+        };
+        let response = run_query(&files, &tasks_only, today());
+        assert_eq!(
+            response
+                .folders
+                .iter()
+                .map(|f| (f.path.as_str(), f.count))
+                .collect::<Vec<_>>(),
+            vec![("/", 1)]
+        );
+    }
+
+    #[test]
+    fn a_group_of_only_markers_reports_zero_of_zero() {
+        // The progress bar describes checkboxes, and this file has none — so
+        // the heading reads 0/0 rather than a total nobody can ever complete.
+        let files = vec![marked_file(
+            "/prose/",
+            "prose.md",
+            "The market fell 10% (source: TK).\nand FIXME that too\n",
+        )];
+        let response = run_query(&files, &query(), today());
+        let group = &response.groups[0];
+        assert_eq!((group.done, group.total), (0, 0));
+        assert_eq!(group.tasks.len(), 2);
     }
 }
