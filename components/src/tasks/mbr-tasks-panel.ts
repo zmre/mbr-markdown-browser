@@ -21,6 +21,7 @@ import {
 import { formatDateHeading, progressPercent } from './task-format.js'
 import type {
   DueFilter,
+  IncludeFilter,
   TaskHit,
   TaskMode,
   TaskPriority,
@@ -101,6 +102,20 @@ const DUE_OPTIONS: ReadonlyArray<{ value: DueFilter; label: string }> = [
   { value: 'none', label: 'No due date' },
 ]
 
+const INCLUDE_OPTIONS: ReadonlyArray<{ value: IncludeFilter; label: string }> = [
+  { value: 'all', label: 'Tasks + markers' },
+  { value: 'tasks', label: 'Tasks only' },
+  { value: 'markers', label: 'Markers only' },
+]
+
+/**
+ * Show filter used when the trigger injects nothing.
+ *
+ * Mirrors Rust's `config::default_tasks_default_include`, so a panel built by
+ * hand behaves like one built from a default configuration.
+ */
+const DEFAULT_INCLUDE: IncludeFilter = 'tasks'
+
 /**
  * `<mbr-tasks-panel>` — the two-pane task browser.
  *
@@ -151,6 +166,19 @@ export class MbrTasksPanelElement extends LitElement {
   toggleTask: TaskToggler | null = null
 
   /**
+   * The repository's configured Show default (`tasks_default_include`),
+   * injected by the trigger from `window.__MBR_CONFIG__`.
+   *
+   * Only the *starting* position of {@link _include}: the panel is destroyed and
+   * rebuilt on every open, so this re-applies each time and a change made in the
+   * popover lasts exactly as long as the panel does. Injected rather than read
+   * from `shared.getTasksDefaultInclude()` for the usual reason — that module is
+   * main-bundle state this chunk may not import.
+   */
+  @property({ attribute: false })
+  defaultInclude: IncludeFilter = DEFAULT_INCLUDE
+
+  /**
    * Today, for overdue marking and date headings. A property so tests can pin
    * it; the server does its own bucketing against its own clock.
    */
@@ -183,6 +211,12 @@ export class MbrTasksPanelElement extends LitElement {
   @state() private _statuses: TaskStatus[] = ['open']
   @state() private _priorities: TaskPriority[] = []
   @state() private _due: DueFilter = 'any'
+  /**
+   * The user's Show choice, seeded from {@link defaultInclude} in
+   * {@link firstUpdated}. Read through {@link _effectiveInclude}, never
+   * directly — calendar mode overrides it without forgetting it.
+   */
+  @state() private _include: IncludeFilter = DEFAULT_INCLUDE
   @state() private _mode: TaskMode = 'category'
 
   // === Response state ===
@@ -241,6 +275,16 @@ export class MbrTasksPanelElement extends LitElement {
    */
   private _folderFallbackPending = false
 
+  /**
+   * The same bargain as {@link _folderFallbackPending}, for the Show filter:
+   * armed by {@link _applyDefaultInclude} and consumed by the very next run.
+   *
+   * A repository configured for `tasks` may contain none — only `TODO:` markers
+   * — and opening the panel on "No tasks match these filters" would be a worse
+   * answer than showing the markers it does have.
+   */
+  private _includeFallbackPending = false
+
   override connectedCallback() {
     super.connectedCallback()
     document.addEventListener('keydown', this._handleKeydown)
@@ -261,6 +305,7 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   override firstUpdated() {
+    this._applyDefaultInclude()
     this._applyCurrentFolder()
     this._input?.focus()
     void this._runQuery()
@@ -269,6 +314,23 @@ export class MbrTasksPanelElement extends LitElement {
   // ========================================
   // Querying
   // ========================================
+
+  /**
+   * Open on the repository's configured Show default, and arm the widen.
+   *
+   * Run from {@link firstUpdated} rather than as a field initialiser because
+   * `defaultInclude` is a property the trigger sets after construction — and
+   * because the panel is rebuilt on every open, which is what makes this the
+   * *default* rather than a one-time migration.
+   *
+   * Nothing is armed when the default is already `all`: there is no wider
+   * setting to fall back to, and an armed flag would only cost a second request
+   * on a repository that genuinely has no tasks at all.
+   */
+  private _applyDefaultInclude() {
+    this._include = this.defaultInclude
+    this._includeFallbackPending = this.defaultInclude !== 'all'
+  }
 
   /**
    * Open scoped to the folder of the page the panel was opened from.
@@ -286,6 +348,23 @@ export class MbrTasksPanelElement extends LitElement {
     this._folderFallbackPending = true
   }
 
+  /**
+   * The Show filter as the server should see it.
+   *
+   * Calendar mode pins it to `tasks`: a marker has no due date, so no bucket
+   * could hold one, and "Markers only" there would ask for a list that is
+   * guaranteed empty. (The server ignores markers in calendar mode regardless;
+   * this keeps the request honest and lets the control show what will happen.)
+   *
+   * Derived rather than assigned, which is why `_setMode` needs no change at
+   * all — both the pin on the way into calendar mode and the un-pin on the way
+   * out fall out of this getter, and `_include` goes on remembering the user's
+   * category-mode choice across the round trip.
+   */
+  private get _effectiveInclude(): IncludeFilter {
+    return this._mode === 'calendar' ? 'tasks' : this._include
+  }
+
   /** The exact body posted to `/.mbr/tasks` for the current filter state. */
   public requestBody(): TaskQueryRequest {
     return {
@@ -294,6 +373,7 @@ export class MbrTasksPanelElement extends LitElement {
       statuses: [...this._statuses],
       priorities: [...this._priorities],
       due: this._due,
+      include: this._effectiveInclude,
       mode: this._mode,
       limit: TASK_LIMIT,
     }
@@ -324,7 +404,12 @@ export class MbrTasksPanelElement extends LitElement {
 
     const generation = ++this._generation
     const isStale = () => generation !== this._generation
-    const widenIfEmpty = this._folderFallbackPending
+    // Both fallbacks are captured and disarmed together, up front: a run the
+    // user supersedes by typing hands its fallbacks to nobody, and a widened
+    // re-query is already disarmed by the time it starts.
+    const widenInclude = this._includeFallbackPending
+    const widenFolder = this._folderFallbackPending
+    this._includeFallbackPending = false
     this._folderFallbackPending = false
     this._loading = true
     this._error = null
@@ -350,8 +435,30 @@ export class MbrTasksPanelElement extends LitElement {
       // Checked before anything is committed, so the guess that missed is never
       // rendered — the panel stays on "Loading tasks…" until the widened
       // response lands, rather than flashing "No tasks match these filters."
-      if (widenIfEmpty && data.groups.length === 0) {
-        this._folder = null
+      //
+      // Both widens can be armed at once (a panel opened folder-scoped on a
+      // repo configured for tasks only), and they are spent one per round trip,
+      // **content filter first**: widening what counts as an entry is the less
+      // destructive of the two, where dropping the folder scope moves the user
+      // out of the part of the repo they were standing in.
+      //
+      // Termination: nothing ever re-arms `_includeFallbackPending`, and
+      // `_folderFallbackPending` is re-armed only on the include branch — which
+      // therefore runs at most once. So the chain is at most three requests
+      // (scoped+narrow, scoped+all, unscoped+all) and then both flags are
+      // permanently false for the life of the panel.
+      if (data.groups.length === 0 && (widenInclude || widenFolder)) {
+        if (widenInclude) {
+          // Mutated, not applied invisibly: the Show select is bound to this, so
+          // it goes on describing what is actually on screen — exactly as the
+          // folder branch below lets the folder pane follow the scope it drops.
+          this._include = 'all'
+          // Carry the folder widen forward rather than spending it here, so a
+          // result that is *still* empty can drop the scope on the next pass.
+          this._folderFallbackPending = widenFolder
+        } else {
+          this._folder = null
+        }
         await this._runQuery()
         return
       }
@@ -493,6 +600,12 @@ export class MbrTasksPanelElement extends LitElement {
     void this._runQuery()
   }
 
+  /** Set the Show filter. Mirrors {@link _setDue}: immediate, no debounce. */
+  private _setInclude(value: IncludeFilter) {
+    this._include = value
+    void this._runQuery()
+  }
+
   // ========================================
   // Toggling
   // ========================================
@@ -548,7 +661,10 @@ export class MbrTasksPanelElement extends LitElement {
    */
   private async _writeStatus(hit: TaskHit, to: TaskStatus): Promise<void> {
     const toggle = this.toggleTask
-    if (!this.editEnabled || !toggle) return
+    // `hit.kind` is defence in depth — `_renderTaskRow` and the keyboard branch
+    // both already refuse a marker, and this is the one place a future caller
+    // could route around them into a request the server answers with a 400.
+    if (hit.kind === 'marker' || !this.editEnabled || !toggle) return
     const key = taskKey(hit)
     if (this._inFlight.has(key)) return
 
@@ -707,6 +823,12 @@ export class MbrTasksPanelElement extends LitElement {
         if (!this.editEnabled) return
         const hit = taskAt(this._groups, this._rows[this._focusRow])
         if (!hit) return
+        // A focused MARKER declines the key the same way a focused heading
+        // does — before `preventDefault()`, so it falls back to the filter
+        // field rather than being swallowed into a no-op. Nothing about a
+        // marker can be written, so eating the keystroke would buy nothing and
+        // cost the user a character.
+        if (hit.kind === 'marker') return
         e.preventDefault()
         if (e.key === 'x') {
           this._toggleCanceled(hit)
@@ -774,13 +896,20 @@ export class MbrTasksPanelElement extends LitElement {
       return
     }
     const hit = taskAt(this._groups, row)
-    if (hit) this._navigateTo(hit.url_path, hit.line)
+    if (hit) this._navigateTo(hit)
   }
 
-  private _navigateTo(urlPath: string, line: number) {
-    const href = safeHref(`${this.resolveHref(urlPath)}#mbr-task-${line}`)
-    // Plain navigation: the scroll/flash handler for the fragment is phase 9.
-    window.location.assign(href)
+  /**
+   * Open a hit's page at its line.
+   *
+   * The fragment comes from {@link taskHref} rather than being rebuilt here,
+   * which is the whole point: it differs by kind (`#mbr-marker-N` for a
+   * marker), and a second hand-written copy would let `Enter` and a click land
+   * somewhere the rendered `href` does not.
+   */
+  private _navigateTo(hit: TaskHit) {
+    // Plain navigation; `<mbr-task-doc>` does the scroll and flash on arrival.
+    window.location.assign(safeHref(taskHref(hit, this.resolveHref)))
   }
 
   private _activePaneElement(): Element | null {
@@ -945,6 +1074,7 @@ export class MbrTasksPanelElement extends LitElement {
         <fieldset>
           <legend>Due</legend>
           <select
+            id="tasks-due-filter"
             aria-label="Due date filter"
             @change=${(e: Event) => this._setDue((e.target as HTMLSelectElement).value as DueFilter)}
           >
@@ -957,7 +1087,60 @@ export class MbrTasksPanelElement extends LitElement {
             )}
           </select>
         </fieldset>
+        ${this._renderIncludeFilter()}
       </div>
+    `
+  }
+
+  /**
+   * The "Show" fieldset: checkbox tasks, incomplete markers, or both.
+   *
+   * **Rendered last in the popover, and a `<select>` rather than radios.**
+   * A select because the popover styles only `input[type='checkbox']` and
+   * `select`, `ownsEnter` does not cover radios, and the arrow-key exemption in
+   * `_handleKeydown` tests `tag === 'SELECT'`. Last because a bare
+   * `querySelector('.filter-popover select')` used to be how the tests reached
+   * the Due select; both selects now carry ids and the tests use them, so the
+   * ordering is no longer load-bearing — but it still matches the wire order.
+   *
+   * # Two bindings for one selection
+   *
+   * `.value` **and** `?selected` are both bound, and both are needed. On the
+   * first render Lit commits the `<select>`'s PropertyPart before the options
+   * ChildPart, so `.value` lands on an option-less element and is dropped —
+   * `?selected` is what gets the initial selection right. On every later render
+   * the options exist and `.value` is what actually *moves* the selection,
+   * which is how calendar mode's pin becomes visible.
+   *
+   * # The title is on the fieldset
+   *
+   * A disabled control suppresses pointer events, so a `title` on the
+   * `<select>` would never render for the one state that needs explaining.
+   */
+  private _renderIncludeFilter(): TemplateResult {
+    const pinned = this._mode === 'calendar'
+    return html`
+      <fieldset
+        title=${pinned ? 'Markers have no due date, so By Due lists tasks only' : nothing}
+      >
+        <legend>Show</legend>
+        <select
+          id="tasks-include-filter"
+          aria-label="Show tasks or markers"
+          ?disabled=${pinned}
+          .value=${this._effectiveInclude}
+          @change=${(e: Event) =>
+            this._setInclude((e.target as HTMLSelectElement).value as IncludeFilter)}
+        >
+          ${INCLUDE_OPTIONS.map(
+            (option) => html`
+              <option value=${option.value} ?selected=${this._effectiveInclude === option.value}>
+                ${option.label}
+              </option>
+            `
+          )}
+        </select>
+      </fieldset>
     `
   }
 
@@ -1085,7 +1268,10 @@ export class MbrTasksPanelElement extends LitElement {
     rowIndex: number
   ): TemplateResult {
     const hit = group.tasks[taskIndex]
-    const editable = this.editEnabled && this.toggleTask !== null
+    // A marker is never editable, whatever the server allows: there is no
+    // checkbox on its line to rewrite, and `POST /.mbr/task` refuses it with a
+    // 400. `renderTaskCard` omits the box entirely on the strength of this.
+    const editable = hit.kind === 'task' && this.editEnabled && this.toggleTask !== null
     return renderTaskCard({
       hit,
       status: this._statusOf(hit),
@@ -1095,7 +1281,7 @@ export class MbrTasksPanelElement extends LitElement {
       today: this.today,
       locale: this.locale,
       onFocus: () => (this._focusRow = rowIndex),
-      onActivate: () => this._navigateTo(hit.url_path, hit.line),
+      onActivate: () => this._navigateTo(hit),
       onToggle: editable ? () => this._toggleDone(hit) : undefined,
       onCancel: editable ? () => this._toggleCanceled(hit) : undefined,
     })
@@ -1389,6 +1575,11 @@ export class MbrTasksPanelElement extends LitElement {
       color: var(--pico-color, #333);
     }
 
+    .filter-popover select:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
     /* ---- Mode tabs ---- */
 
     .mode-tabs {
@@ -1592,8 +1783,16 @@ export class MbrTasksPanelElement extends LitElement {
       overflow-wrap: anywhere;
     }
 
-    .task-link:hover {
-      text-decoration: underline;
+    /* Mirrors .mbr-incomplete in templates/theme.css, so the marker word in a
+     * card reads as the same thing as the one highlighted in the document — a
+     * wash only, no underline. The --mbr-incomplete-* properties inherit across
+     * the shadow boundary but the rule using them does not, hence the
+     * restatement — same arrangement as the --mbr-task-* chips above,
+     * fallbacks included. */
+    .task-marker {
+      background: var(--mbr-incomplete-bg, rgba(255, 235, 59, 0.18));
+      padding: 0 2px;
+      border-radius: 2px;
     }
 
     .task-chips {
@@ -1606,6 +1805,15 @@ export class MbrTasksPanelElement extends LitElement {
     .mbr-task-check {
       vertical-align: middle;
       margin: 0;
+      flex-shrink: 0;
+    }
+
+    /* Stands in for the checkbox a marker card does not render, so its text
+     * starts on the same rail as every task's. Same trick as
+     * .mbr-task-pri-spacer above. */
+    .mbr-task-check-spacer {
+      display: inline-block;
+      width: var(--mbr-task-check-size, 0.85em);
       flex-shrink: 0;
     }
 

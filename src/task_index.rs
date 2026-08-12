@@ -33,7 +33,7 @@ use serde::Serialize;
 
 use crate::errors::TaskIndexError;
 use crate::repo::{MarkdownInfo, Repo};
-use crate::tasks::{Task, TaskStatus, scan_source_tasks};
+use crate::tasks::{MarkerRule, Task, TaskKind, TaskStatus, scan_source_tasks_with_markers};
 use crate::watcher::ChangeEventType;
 
 /// Largest markdown file the task scanner will read, in bytes.
@@ -127,9 +127,22 @@ impl FileTasks {
     }
 }
 
-/// Counts tasks with the given status, saturating rather than wrapping.
+/// Counts **checkbox** tasks with the given status, saturating rather than
+/// wrapping.
+///
+/// Incomplete markers are excluded, and that exclusion is what keeps the
+/// progress indicator honest. A marker is always `Open` and can never be
+/// completed, so counting one would put a note that merely says `TODO: expand
+/// this` at a permanent `0/1`, and would inflate the open count of every note
+/// containing the word — numbers no reader could ever move.
 fn count_with(tasks: &[Task], status: TaskStatus) -> u32 {
-    u32::try_from(tasks.iter().filter(|t| t.status == status).count()).unwrap_or(u32::MAX)
+    u32::try_from(
+        tasks
+            .iter()
+            .filter(|t| t.kind == TaskKind::Task && t.status == status)
+            .count(),
+    )
+    .unwrap_or(u32::MAX)
 }
 
 /// URL-shaped folder for a repo-relative source path.
@@ -147,9 +160,12 @@ fn folder_of(raw_path: &Path) -> String {
 
 /// Lazy, thread-safe index of every markdown file that contains tasks.
 ///
-/// Files without tasks are deliberately **absent** rather than stored empty:
-/// on a repository of tens of thousands of notes, only a fraction carry tasks,
-/// and skipping the rest keeps both memory and every query's iteration small.
+/// Files with neither a task nor a marker are deliberately **absent** rather
+/// than stored empty, which keeps both memory and every query's iteration
+/// proportional to the notes that actually have something to show. How large a
+/// share of a repository that is depends on the configuration: with markers
+/// enabled a note needs only the word `TODO` in a sentence to qualify, so the
+/// index is no longer the small minority of files it is with checkboxes alone.
 ///
 /// Files matching `tasks_ignore_globs` are absent too. Excluding them *here*,
 /// at the one place the index is filled, is what makes the exclusion complete:
@@ -169,6 +185,9 @@ pub struct TaskIndex {
     /// `tasks_ignore_globs`, compiled once at construction. See
     /// [`TaskIndex::is_ignored`].
     ignore_globs: Vec<glob::Pattern>,
+    /// `incomplete_markers`, compiled once at construction, or `None` when
+    /// marker scanning is off. See [`TaskIndex::with_markers`].
+    marker_rule: Option<MarkerRule>,
 }
 
 impl Default for TaskIndex {
@@ -191,10 +210,28 @@ impl TaskIndex {
     /// rejects one at startup, so the only way to reach here with a bad pattern
     /// is to bypass config loading entirely.
     pub fn new(ignore_globs: &[String]) -> Self {
+        Self::with_markers(ignore_globs, &[])
+    }
+
+    /// [`TaskIndex::new`], additionally indexing the incomplete markers in
+    /// `markers` (the `incomplete_markers` config option).
+    ///
+    /// An **empty slice disables marker scanning**, the same equivalence
+    /// `incomplete_markers = []` already has for the renderer — which is also
+    /// how a caller says "highlighting is off", since a marker with no
+    /// highlight has no `#mbr-marker-N` anchor for the panel to link to.
+    ///
+    /// The rule is compiled **here, once**, for the reason the ignore globs are:
+    /// the build reads every markdown file in the repository, so re-compiling a
+    /// regex per file would dwarf the matching. [`MarkerRule`] is `Send + Sync`
+    /// (it wraps a `Regex`), which is what lets the whole index be shared as an
+    /// `Arc` into `spawn_blocking`.
+    pub fn with_markers(ignore_globs: &[String], markers: &[String]) -> Self {
         Self {
             files: HashMap::new(),
             built: tokio::sync::OnceCell::new(),
             ignore_globs: compile_ignore_globs(ignore_globs),
+            marker_rule: MarkerRule::new(markers),
         }
     }
 
@@ -332,7 +369,8 @@ impl TaskIndex {
                 }
 
                 let mut buffer = String::new();
-                match target.scan(root_dir, &mut buffer) {
+                // Borrowed, not cloned: one compiled rule serves every scan.
+                match target.scan(root_dir, &mut buffer, self.marker_rule.as_ref()) {
                     // A file that lost its last task must leave the index, or
                     // it lingers as an empty group forever.
                     Some(file_tasks) => {
@@ -420,7 +458,7 @@ impl TaskIndex {
         for target in targets {
             // Bound before the `if let` so the borrow of `target` has ended by
             // the time its `abs_path` is moved out.
-            let scanned = target.scan(root_dir, &mut buffer);
+            let scanned = target.scan(root_dir, &mut buffer, self.marker_rule.as_ref());
             if let Some(file_tasks) = scanned {
                 found.push((target.abs_path, Arc::new(file_tasks)));
             }
@@ -459,8 +497,16 @@ impl ScanTarget {
     }
 
     /// Reads and scans the file, returning `None` when it cannot be read or
-    /// contains no tasks.
-    fn scan(&self, root_dir: &Path, buffer: &mut String) -> Option<FileTasks> {
+    /// contains nothing to index.
+    ///
+    /// `markers` is the index's compiled [`MarkerRule`], borrowed rather than
+    /// cloned so a repository-wide pass compiles nothing per file.
+    fn scan(
+        &self,
+        root_dir: &Path,
+        buffer: &mut String,
+        markers: Option<&MarkerRule>,
+    ) -> Option<FileTasks> {
         // `raw_path` is repo-relative, so rejoin the root before touching the
         // filesystem — the same rejoin `SearchEngine::search_file_content`
         // makes. The map key would also work, but going through `raw_path`
@@ -472,7 +518,10 @@ impl ScanTarget {
             return None;
         }
 
-        let tasks = scan_source_tasks(buffer);
+        // Tasks and markers come back merged, in source order, which is why the
+        // emptiness test below needs no change: "no tasks *and* no markers" is
+        // one question about one Vec.
+        let tasks = scan_source_tasks_with_markers(buffer, markers);
         if tasks.is_empty() {
             return None;
         }
@@ -1184,5 +1233,116 @@ mod tests {
             .collect();
         urls.sort();
         assert_eq!(urls, vec!["/a/", "/docs/b/"]);
+    }
+
+    // ---- incomplete markers --------------------------------------------------
+
+    /// The shipped `incomplete_markers` default, owned for the constructor.
+    fn default_markers() -> Vec<String> {
+        ["TK", "TODO", "FIXME", "XXX"]
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect()
+    }
+
+    /// Builds and returns an index over `fixture` with the given markers.
+    async fn index_with_markers(fixture: &TestRepo, markers: &[String]) -> Arc<TaskIndex> {
+        let index = Arc::new(TaskIndex::with_markers(&[], markers));
+        index
+            .ensure_built(&fixture.repo, &fixture.root)
+            .await
+            .expect("build succeeds");
+        index
+    }
+
+    /// Every indexed entry of one file, as `(line, kind)`.
+    fn entries(index: &TaskIndex, path: &Path) -> Vec<(u32, TaskKind)> {
+        index
+            .get(path)
+            .map(|f| f.tasks.iter().map(|t| (t.line, t.kind)).collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn markers_are_indexed_only_when_configured() {
+        let fixture = repo_over(&[("notes.md", "- [ ] a task\n\nthe rest is TODO\n")]);
+        let path = fixture.path("notes.md");
+
+        // `new` — and therefore the `Default` impl — leaves marker scanning off,
+        // which is what keeps every existing caller on the old behaviour.
+        let off = Arc::new(TaskIndex::new(&[]));
+        off.ensure_built(&fixture.repo, &fixture.root)
+            .await
+            .expect("build succeeds");
+        assert_eq!(entries(&off, &path), vec![(1, TaskKind::Task)]);
+
+        // An empty marker list is the same off switch, exactly as
+        // `incomplete_markers = []` is for the renderer.
+        let empty = index_with_markers(&fixture, &[]).await;
+        assert_eq!(entries(&empty, &path), vec![(1, TaskKind::Task)]);
+
+        let on = index_with_markers(&fixture, &default_markers()).await;
+        assert_eq!(
+            entries(&on, &path),
+            vec![(1, TaskKind::Task), (3, TaskKind::Marker)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_with_only_markers_is_indexed() {
+        // The whole point of the feature: a note with no checkbox in it is
+        // still somewhere somebody left work unfinished.
+        let fixture = repo_over(&[
+            ("prose.md", "# Notes\n\nThe market fell 10% (source: TK).\n"),
+            ("clean.md", "# Notes\n\nNothing outstanding here.\n"),
+        ]);
+        let index = index_with_markers(&fixture, &default_markers()).await;
+
+        assert_eq!(index.len(), 1, "only the file with a marker is stored");
+        let stored = index.get(&fixture.path("prose.md")).expect("indexed");
+        assert_eq!(stored.tasks.len(), 1);
+        assert_eq!(stored.tasks[0].kind, TaskKind::Marker);
+        assert_eq!(stored.tasks[0].text, "The market fell 10% (source: TK).");
+        assert_eq!(stored.url_path, "/prose/");
+    }
+
+    #[tokio::test]
+    async fn markers_do_not_count_toward_progress() {
+        // A marker can never be completed, so counting one would peg this note
+        // below 100% forever and inflate the open count of every note that
+        // happens to contain the word.
+        let fixture = repo_over(&[(
+            "notes.md",
+            "- [ ] open one\n- [x] done one\nTODO: expand this\nand FIXME that\n",
+        )]);
+        let index = index_with_markers(&fixture, &default_markers()).await;
+
+        let stored = index.get(&fixture.path("notes.md")).expect("indexed");
+        assert_eq!(stored.tasks.len(), 4, "all four entries are indexed");
+        assert_eq!((stored.open, stored.done, stored.tracked()), (1, 1, 2));
+    }
+
+    #[tokio::test]
+    async fn invalidate_drops_a_file_that_lost_its_last_marker() {
+        // The marker half of `invalidate_drops_a_file_that_lost_its_last_task`:
+        // one merged Vec means "no tasks *and* no markers" is one emptiness
+        // test, so a file that stops qualifying leaves by the same path.
+        let fixture = repo_over(&[("prose.md", "the source for this is TK\n")]);
+        let index = index_with_markers(&fixture, &default_markers()).await;
+        assert_eq!(index.len(), 1);
+
+        let path = fixture.write("prose.md", "the source is Smith 2024\n");
+        index.invalidate_file(
+            &path,
+            &ChangeEventType::Modified,
+            &fixture.repo,
+            &fixture.root,
+        );
+
+        assert!(
+            index.get(&path).is_none(),
+            "a file with neither a task nor a marker must leave the index"
+        );
+        assert!(index.is_empty());
     }
 }

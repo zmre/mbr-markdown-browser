@@ -1,5 +1,5 @@
 /**
- * In-document task behaviour: clickable checkboxes and the `#mbr-task-N` jump.
+ * In-document task behaviour: clickable checkboxes and the deep-link jump.
  *
  * Two small jobs that both belong to the rendered page rather than to the task
  * panel, and therefore ship in the main bundle:
@@ -10,13 +10,21 @@
  *    (TASKS_SPEC.md's editing section). One listener, not one per box: a daily
  *    note can carry hundreds.
  * 2. **Jumping.** The task panel's `Enter` navigates to
- *    `{url_path}#mbr-task-42`; this element scrolls that line clear of the
- *    sticky header and flashes it, on load and on every `hashchange`.
+ *    `{url_path}#mbr-task-42` for a checkbox, or `{url_path}#mbr-marker-42`
+ *    for an incomplete marker (`TK`/`TODO`/…, which has no checkbox to carry
+ *    an id, so `markdown.rs` puts one on the highlight span instead). This
+ *    element handles **both**: it scrolls that line clear of the sticky header
+ *    and flashes it, on load and on every `hashchange`.
  *
  * The jump half runs everywhere, including static builds: `task_checkbox_html`
  * emits the `id` in every mode, so a bookmarked deep link works on a built site
- * even though nothing there can produce one. The toggle half self-gates on
- * `isEditEnabled()`, which is false in a build.
+ * even though nothing there can produce one. (Marker anchors additionally
+ * depend on `mark_incomplete`, which is off by default in a build.) The toggle
+ * half self-gates on `isEditEnabled()`, which is false in a build.
+ *
+ * Only the checkbox half is writable, and it needs no marker guard of its own:
+ * `checkboxFrom` requires an `HTMLInputElement` carrying `.mbr-task-check`,
+ * which a marker's `<span class="mbr-incomplete">` can never be.
  *
  * # Why the page does not reload any more
  *
@@ -58,16 +66,23 @@ const SCROLL_PADDING = 24
 const FLASH_TIMEOUT_MS = 2500
 
 /**
- * The 1-based task line a fragment names, or `null`.
+ * The element **id** a task-ish fragment names, or `null`.
  *
- * Deliberately strict: `#mbr-task-4` is a jump, `#mbr-task-4x` and
- * `#mbr-tasks` are not, so an unrelated anchor never reaches the flash.
+ * Returns the id rather than the line number so one regex covers both anchors
+ * the renderer emits — `mbr-task-<n>` on a checkbox (`html.rs`) and
+ * `mbr-marker-<n>` on an incomplete-marker highlight (`markdown.rs`) — and the
+ * caller can hand it straight to `getElementById` without re-deciding which
+ * prefix it just matched.
+ *
+ * Deliberately strict: `#mbr-task-4` and `#mbr-marker-4` are jumps;
+ * `#mbr-task-4x`, `#mbr-tasks` and `#mbr-markers` are somebody else's anchor
+ * and must never reach the flash.
  */
-export function taskLineFromHash(hash: string): number | null {
-  const match = /^#?mbr-task-(\d+)$/.exec(hash)
+export function taskAnchorFromHash(hash: string): string | null {
+  const match = /^#?(mbr-(?:task|marker)-(\d+))$/.exec(hash)
   if (!match) return null
-  const line = Number(match[1])
-  return Number.isSafeInteger(line) && line > 0 ? line : null
+  const line = Number(match[2])
+  return Number.isSafeInteger(line) && line > 0 ? match[1] : null
 }
 
 /** Height of the sticky page header, which a jump must not land underneath. */
@@ -126,16 +141,20 @@ export function flashTask(element: HTMLElement): void {
 }
 
 /**
- * Reveal the task named by `hash`. Returns the element it acted on, or `null`
- * when the fragment is not a task link or names a line that is not on the page.
+ * Reveal the task or marker named by `hash`. Returns the element it acted on,
+ * or `null` when the fragment is neither, or names a line not on this page.
  */
 export function revealTaskFromHash(hash: string): HTMLElement | null {
-  const line = taskLineFromHash(hash)
-  if (line === null) return null
-  const input = document.getElementById(`mbr-task-${line}`)
-  if (!input) return null
+  const anchor = taskAnchorFromHash(hash)
+  if (anchor === null) return null
+  const element = document.getElementById(anchor)
+  if (!element) return null
 
-  const target = flashTarget(input)
+  // Generalises to a marker for free: `flashTarget` falls back to the element
+  // itself when there is no enclosing `<li>` — which is the usual case for a
+  // marker span in a paragraph — and `theme.css` styles the bare
+  // `.mbr-task-flash` class rather than a checkbox-specific selector.
+  const target = flashTarget(element)
   scrollTaskIntoView(target, stickyHeaderHeight())
   flashTask(target)
   return target

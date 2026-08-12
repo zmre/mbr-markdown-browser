@@ -25,6 +25,7 @@ use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_pat
 use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
 use crate::sorting::sort_files;
+use crate::task_query::IncludeFilter;
 use crate::templates;
 #[cfg(feature = "media-metadata")]
 use crate::video_metadata_cache::VideoMetadataCache;
@@ -1097,6 +1098,8 @@ pub struct ServerConfig {
     /// Maintain the `@done(...)` annotation when `POST /.mbr/task` toggles a
     /// task's status.
     pub tasks_stamp_done: bool,
+    /// Where the task panel's Show filter starts (`tasks`/`markers`/`all`).
+    pub tasks_default_include: IncludeFilter,
     /// Globs matched against repo-relative paths whose files are kept out of the
     /// task index (e.g. `templates/**`). Empty by default.
     pub tasks_ignore_globs: Vec<String>,
@@ -1163,6 +1166,7 @@ impl From<&crate::config::Config> for ServerConfig {
             incomplete_markers: config.incomplete_markers.clone(),
             tasks_enabled: config.tasks_enabled,
             tasks_stamp_done: config.tasks_stamp_done,
+            tasks_default_include: config.tasks_default_include,
             tasks_ignore_globs: config.tasks_ignore_globs.clone(),
             edit_enabled: config.edit_enabled,
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
@@ -1286,6 +1290,11 @@ pub struct ServerState {
     /// Whether `POST /.mbr/task` maintains the `@done(...)` annotation when it
     /// toggles a task's status.
     pub tasks_stamp_done: bool,
+    /// Where the task panel's Show filter starts (`tasks`/`markers`/`all`).
+    /// Reaches the frontend as `window.__MBR_CONFIG__.tasksDefaultInclude`;
+    /// the query endpoint itself has no opinion, since the panel always sends
+    /// an explicit `include`.
+    pub tasks_default_include: IncludeFilter,
     /// Lazy index of the repository's markdown tasks.
     ///
     /// Deliberately *not* built at startup: it is filled on the first task
@@ -1686,6 +1695,7 @@ impl Server {
             incomplete_markers,
             tasks_enabled,
             tasks_stamp_done,
+            tasks_default_include,
             tasks_ignore_globs,
             edit_enabled,
             edit_require_token_on_loopback,
@@ -1912,8 +1922,24 @@ impl Server {
         // deliberately left *empty*: it is filled by the first `/.mbr/tasks`
         // request, and `invalidate_file` is a no-op until then, so a server
         // whose user never opens the task panel never reads a file for it.
-        // The ignore patterns are compiled once, by the constructor.
-        let task_index = Arc::new(crate::task_index::TaskIndex::new(&tasks_ignore_globs));
+        // The ignore patterns and the marker rule are compiled once, by the
+        // constructor.
+        //
+        // The panel follows the highlighter deliberately: with `mark_incomplete`
+        // off, the rendered pages carry no `#mbr-marker-N` anchors, so a marker
+        // listed here would be a result that cannot be opened. An empty marker
+        // list is the constructor's off switch.
+        //
+        // Read once, at startup, exactly like `tasks_ignore_globs` — flipping
+        // `mark_incomplete` takes a restart.
+        let task_index = Arc::new(crate::task_index::TaskIndex::with_markers(
+            &tasks_ignore_globs,
+            if mark_incomplete {
+                &incomplete_markers
+            } else {
+                &[]
+            },
+        ));
 
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
@@ -2212,6 +2238,7 @@ impl Server {
             incomplete_markers,
             tasks_enabled,
             tasks_stamp_done,
+            tasks_default_include,
             task_index,
             edit_enabled,
             edit_require_token_on_loopback,
@@ -3840,6 +3867,7 @@ impl Server {
                     config.sidebar_max_items,
                     config.graph_depth,
                     config.tasks_enabled,
+                    config.tasks_default_include,
                 );
             }
         };
@@ -3860,6 +3888,7 @@ impl Server {
                     config.sidebar_max_items,
                     config.graph_depth,
                     config.tasks_enabled,
+                    config.tasks_default_include,
                 );
             }
         };
@@ -3881,6 +3910,7 @@ impl Server {
                         config.sidebar_max_items,
                         config.graph_depth,
                         config.tasks_enabled,
+                        config.tasks_default_include,
                     );
                 }
                 Err(MbrError::InvalidMediaPath(msg)) => {
@@ -3896,6 +3926,7 @@ impl Server {
                         config.sidebar_max_items,
                         config.graph_depth,
                         config.tasks_enabled,
+                        config.tasks_default_include,
                     );
                 }
                 Err(e) => {
@@ -3911,6 +3942,7 @@ impl Server {
                         config.sidebar_max_items,
                         config.graph_depth,
                         config.tasks_enabled,
+                        config.tasks_default_include,
                     );
                 }
             };
@@ -3960,6 +3992,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -3990,6 +4023,7 @@ impl Server {
                     config.sidebar_max_items,
                     config.graph_depth,
                     config.tasks_enabled,
+                    config.tasks_default_include,
                 )
             }
         }
@@ -4163,6 +4197,7 @@ impl Server {
         sidebar_max_items: usize,
         graph_depth: usize,
         tasks_enabled: bool,
+        tasks_default_include: IncludeFilter,
     ) -> Response<Body> {
         use std::collections::HashMap;
 
@@ -4189,6 +4224,7 @@ impl Server {
                 sidebar_max_items,
                 graph_depth,
                 tasks_enabled,
+                tasks_default_include,
                 title_affixes: None,
             },
         );
@@ -4426,6 +4462,7 @@ impl Server {
                     config.sidebar_max_items,
                     config.graph_depth,
                     config.tasks_enabled,
+                    config.tasks_default_include,
                 ))
             }
         }
@@ -6323,6 +6360,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                tasks_default_include: config.tasks_default_include,
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
             },
@@ -6542,6 +6580,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6620,6 +6659,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );
@@ -6663,6 +6703,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
         );

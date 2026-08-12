@@ -1,8 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import './mbr-tasks-panel.js'
 import type { MbrTasksPanelElement } from './mbr-tasks-panel.js'
-import { calendarResponse, categoryResponse, makeGroup, makeHit, makeResponse } from './test-fixtures.js'
-import type { TaskQueryResponse } from './types.js'
+import {
+  calendarResponse,
+  categoryResponse,
+  makeGroup,
+  makeHit,
+  makeMarker,
+  makeResponse,
+  markerResponse,
+} from './test-fixtures.js'
+import type { IncludeFilter, TaskQueryResponse } from './types.js'
 
 /** Today for every test here; matches the fixture dates. */
 const TODAY = new Date(2026, 7, 4, 12, 0, 0)
@@ -29,24 +37,43 @@ async function mount(response: TaskQueryResponse = categoryResponse()) {
   return mountBare(null)
 }
 
-/**
- * Mount with a current page, answering each query from `responses` in order —
- * the last one repeats. Opening from a page can cost two queries (the folder
- * scope, then the widened retry), so the tests below need per-call answers.
- */
-async function mountFrom(currentPath: string | null, ...responses: TaskQueryResponse[]) {
+/** Answer each query from `responses` in order; the last one repeats. */
+function queueResponses(responses: TaskQueryResponse[]) {
   for (const response of responses.slice(0, -1)) {
     fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve(response) })
   }
   respondWith(responses[responses.length - 1])
+}
+
+/**
+ * Mount with a current page, answering each query from `responses` in order —
+ * the last one repeats. Opening from a page can cost up to three queries (the
+ * folder scope, the widened Show filter, then the widened folder), so the tests
+ * below need per-call answers.
+ */
+async function mountFrom(currentPath: string | null, ...responses: TaskQueryResponse[]) {
+  queueResponses(responses)
   return mountBare(currentPath)
 }
 
-async function mountBare(currentPath: string | null) {
+/**
+ * {@link mountFrom} with the repository's configured Show default pinned, which
+ * is the other thing that decides how many queries an open costs.
+ */
+async function mountWith(
+  opts: { currentPath?: string | null; defaultInclude?: IncludeFilter },
+  ...responses: TaskQueryResponse[]
+) {
+  queueResponses(responses)
+  return mountBare(opts.currentPath ?? null, opts.defaultInclude)
+}
+
+async function mountBare(currentPath: string | null, defaultInclude?: IncludeFilter) {
   const element = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
   element.today = TODAY
   element.locale = 'en-US'
   element.currentPath = currentPath
+  if (defaultInclude) element.defaultInclude = defaultInclude
   document.body.appendChild(element)
   await flush(element)
   return element
@@ -124,6 +151,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open'],
         priorities: [],
         due: 'any',
+        include: 'tasks',
         mode: 'category',
         limit: 500,
       })
@@ -141,6 +169,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open'],
         priorities: [],
         due: 'any',
+        include: 'tasks',
         mode: 'category',
         limit: 500,
       })
@@ -162,7 +191,9 @@ describe('MbrTasksPanelElement', () => {
       checkboxes[5].click() // + urgent
       await flush(element)
 
-      const select = root.querySelector('.filter-popover select') as HTMLSelectElement
+      // By id, not by position: the popover has two selects now, and reaching
+      // for "the first one" would make this test depend on fieldset order.
+      const select = root.querySelector('#tasks-due-filter') as HTMLSelectElement
       select.value = 'overdue'
       select.dispatchEvent(new Event('change'))
       await flush(element)
@@ -173,6 +204,7 @@ describe('MbrTasksPanelElement', () => {
         statuses: ['open', 'done'],
         priorities: ['urgent'],
         due: 'overdue',
+        include: 'tasks',
         mode: 'category',
         limit: 500,
       })
@@ -357,9 +389,16 @@ describe('MbrTasksPanelElement', () => {
       expect(headings[0]).toBe('Overdue')
     })
 
+    // A configured Show default of `all` arms the *other* fallback, so these
+    // mount with it to isolate the folder one. The interaction between the two
+    // has its own block, further down.
     describe('the empty-folder fallback', () => {
       it('widens to the whole repository rather than opening on nothing', async () => {
-        element = await mountFrom('docs/notes.md', emptyResponse(), categoryResponse())
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'all' },
+          emptyResponse(),
+          categoryResponse()
+        )
 
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect((bodyAt(0) as { folder: string | null }).folder).toBe('/docs/')
@@ -372,8 +411,8 @@ describe('MbrTasksPanelElement', () => {
 
       it('fires at most once, so an empty folder the user picks stays picked', async () => {
         // 1st: empty (widens), 2nd: the full list, 3rd onwards: empty again.
-        element = await mountFrom(
-          'docs/notes.md',
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'all' },
           emptyResponse(),
           categoryResponse(),
           emptyResponse()
@@ -390,7 +429,11 @@ describe('MbrTasksPanelElement', () => {
       })
 
       it('leaves the folder alone when a typed query is what came back empty', async () => {
-        element = await mountFrom('docs/notes.md', categoryResponse(), emptyResponse())
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'all' },
+          categoryResponse(),
+          emptyResponse()
+        )
         expect(fetchMock).toHaveBeenCalledTimes(1)
 
         const input = element.shadowRoot!.querySelector('#tasks-filter') as HTMLInputElement
@@ -401,6 +444,67 @@ describe('MbrTasksPanelElement', () => {
 
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect((lastBody() as { folder: string | null }).folder).toBe('/docs/')
+      })
+    })
+
+    /**
+     * Both fallbacks armed at once, which is what opening a folder-scoped panel
+     * on a `tasks`-configured repository does.
+     */
+    describe('the two fallbacks together', () => {
+      function includeOf(index: number): string {
+        return (bodyAt(index) as { include: string }).include
+      }
+
+      function folderOf(index: number): string | null {
+        return (bodyAt(index) as { folder: string | null }).folder
+      }
+
+      it('widens the Show filter first, then the folder, then stops', async () => {
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'tasks' },
+          emptyResponse(),
+          emptyResponse(),
+          categoryResponse()
+        )
+
+        expect(fetchMock).toHaveBeenCalledTimes(3)
+        // Content filter first: dropping the folder scope moves the user out of
+        // the part of the repo they were standing in, so it goes last.
+        expect([includeOf(0), folderOf(0)]).toEqual(['tasks', '/docs/'])
+        expect([includeOf(1), folderOf(1)]).toEqual(['all', '/docs/'])
+        expect([includeOf(2), folderOf(2)]).toEqual(['all', null])
+        // Neither miss was ever committed to the screen.
+        expect(rowLabels(element)).toContain('H:Weekly notes')
+        expect(element.shadowRoot!.querySelector('.results-empty')).toBeNull()
+      })
+
+      it('terminates on a repository that is empty however it is asked', async () => {
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'tasks' },
+          emptyResponse()
+        )
+
+        // Three requests and no more: nothing re-arms the include flag, and the
+        // folder flag is re-armed only on the include branch, which runs once.
+        expect(fetchMock).toHaveBeenCalledTimes(3)
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+        expect(selectedFolder(element)).toBe('Home')
+      })
+
+      it('stops at the Show widen when that is enough, keeping the folder scope', async () => {
+        // The carried-forward folder widen is captured and disarmed by the
+        // second run like any other, so a later empty result cannot spend it
+        // behind the user's back.
+        element = await mountWith(
+          { currentPath: 'docs/notes.md', defaultInclude: 'tasks' },
+          emptyResponse(),
+          categoryResponse()
+        )
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(folderOf(1)).toBe('/docs/')
+        expect(selectedFolder(element)).toBe('docs')
       })
     })
   })
@@ -730,7 +834,7 @@ describe('MbrTasksPanelElement', () => {
       element = await mount()
       element.shadowRoot!.querySelector<HTMLButtonElement>('.filter-button')!.click()
       await element.updateComplete
-      const select = element.shadowRoot!.querySelector('.filter-popover select') as HTMLSelectElement
+      const select = element.shadowRoot!.querySelector('#tasks-due-filter') as HTMLSelectElement
 
       select.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, composed: true })
@@ -995,6 +1099,355 @@ describe('MbrTasksPanelElement', () => {
       await element.updateComplete
 
       expect(toggler).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('markers', () => {
+    /**
+     * The marker fixture, with editing on and a stub toggler wired in — so a
+     * marker that declines a write is declining it on its own account rather
+     * than because nothing could have written anyway.
+     */
+    async function mountWithMarkers(toggler = vi.fn().mockResolvedValue({ ok: true })) {
+      respondWith(markerResponse())
+      const el = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
+      el.today = TODAY
+      el.locale = 'en-US'
+      el.editEnabled = true
+      el.toggleTask = toggler as unknown as MbrTasksPanelElement['toggleTask']
+      document.body.appendChild(el)
+      await flush(el)
+      return el
+    }
+
+    /** `[task card, marker card]` — the fixture's source order. */
+    function cards(el: MbrTasksPanelElement): HTMLElement[] {
+      return Array.from(el.shadowRoot!.querySelectorAll('.task-card'))
+    }
+
+    function includeSelect(el: MbrTasksPanelElement): HTMLSelectElement {
+      return el.shadowRoot!.querySelector('#tasks-include-filter') as HTMLSelectElement
+    }
+
+    async function openFilters(el: MbrTasksPanelElement): Promise<void> {
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.filter-button')!.click()
+      await el.updateComplete
+    }
+
+    it('renders a spacer instead of a checkbox, while its neighbour keeps one', async () => {
+      element = await mountWithMarkers()
+      const [task, marker] = cards(element)
+
+      // Absent, not disabled: `data-mbr-task-line` / `-status` are exactly what
+      // `task-toggle.ts` reads back, and markup that is not there cannot be
+      // mistargeted.
+      expect(marker.querySelector('.mbr-task-check')).toBeNull()
+      expect(marker.querySelector('.mbr-task-check-spacer')).not.toBeNull()
+      // The task beside it proves the branch rather than merely its absence.
+      expect(task.querySelector('.mbr-task-check')).not.toBeNull()
+      expect(task.querySelector('.mbr-task-check-spacer')).toBeNull()
+    })
+
+    it('draws no chips, and keeps the priority rail with a spacer', async () => {
+      element = await mountWithMarkers()
+      const marker = cards(element)[1]
+
+      expect(marker.querySelector('.task-chips')).toBeNull()
+      expect(marker.querySelector('.mbr-task-pri')).toBeNull()
+      expect(marker.querySelector('.mbr-task-pri-spacer')).not.toBeNull()
+      // The text is the whole source line, marker word included.
+      expect(marker.querySelector('.task-link')?.textContent?.trim()).toBe(
+        'The market fell 10% (source: TK).'
+      )
+    })
+
+    it('washes only the marker word, leaving the rest of the line untouched', async () => {
+      element = await mountWithMarkers()
+      const [task, marker] = cards(element)
+      const link = marker.querySelector('.task-link')!
+
+      const washed = link.querySelectorAll('.task-marker')
+      expect(washed.length).toBe(1)
+      expect(washed[0].textContent).toBe('TK')
+      // The line still reads verbatim: the span splits the text, it does not
+      // rewrite it. Highlighting the whole card would say the sentence is
+      // unfinished rather than pointing at the word that says so.
+      expect(link.textContent).toBe('The market fell 10% (source: TK).')
+      // The task beside it proves the branch rather than merely its absence.
+      expect(task.querySelector('.task-marker')).toBeNull()
+    })
+
+    it('never washes a checkbox task, even one whose own text says TODO', async () => {
+      // A task carries no span, so the word is prose. The card keys off the
+      // server's range, not off the string — an `indexOf` here would wash this.
+      respondWith(
+        makeResponse({
+          groups: [
+            makeGroup({
+              key: '/notes/',
+              url_path: '/notes/',
+              total: 1,
+              tasks: [makeHit({ text: 'rename the TODO list page', line: 3 })],
+            }),
+          ],
+          total_matches: 1,
+        })
+      )
+      element = await mountBare(null)
+
+      const link = element.shadowRoot!.querySelector('.task-link')!
+      expect(link.querySelector('.task-marker')).toBeNull()
+      expect(link.textContent).toBe('rename the TODO list page')
+    })
+
+    it('degrades an unusable span to plain text instead of mis-slicing', async () => {
+      // Three ways the range can be wrong — past the end of a text that got
+      // shorter, inverted, and absent on a hit that still claims to be a
+      // marker. A missing wash is invisible; a mis-sliced one corrupts the
+      // words the reader came here to find.
+      const line = 'The market fell 10% (source: TK).'
+      respondWith(
+        makeResponse({
+          groups: [
+            makeGroup({
+              key: '/notes/',
+              url_path: '/notes/',
+              tasks: [
+                makeMarker({ text: line, line: 1, marker_end: line.length + 40 }),
+                makeMarker({ text: line, line: 2, marker_start: 31, marker_end: 29 }),
+                makeMarker({ text: line, line: 3, marker_start: null, marker_end: null }),
+              ],
+            }),
+          ],
+          total_matches: 3,
+        })
+      )
+      element = await mountBare(null)
+
+      const links = Array.from(element.shadowRoot!.querySelectorAll('.task-link'))
+      expect(links.length).toBe(3)
+      for (const link of links) {
+        expect(link.querySelector('.task-marker')).toBeNull()
+        expect(link.textContent).toBe(line)
+      }
+    })
+
+    it('deep links to #mbr-marker-N, which is a different id from a task’s', async () => {
+      element = await mountWithMarkers()
+      const [task, marker] = cards(element)
+
+      expect(marker.querySelector('.task-link')?.getAttribute('href')).toBe('/notes/#mbr-marker-9')
+      expect(task.querySelector('.task-link')?.getAttribute('href')).toBe('/notes/#mbr-task-3')
+    })
+
+    it('navigates a click to that same href, not to a #mbr-task-N that does not exist', async () => {
+      element = await mountWithMarkers()
+      const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {})
+
+      cards(element)[1].click()
+
+      // The card's own navigation and the rendered href come from one function;
+      // a second hand-built fragment here is what this catches.
+      expect(assign).toHaveBeenCalledWith('/notes/#mbr-marker-9')
+    })
+
+    it('leaves Space and x to the filter field when a marker is focused', async () => {
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      element = await mountWithMarkers(toggler)
+
+      press('ArrowDown') // heading
+      press('ArrowDown') // the real task
+      press('ArrowDown') // the marker
+      await element.updateComplete
+      expect(focusedLabel(element)).toBe('T:The market fell 10% (source: TK).')
+
+      // Not prevented: the guard has to return BEFORE `preventDefault()`, so
+      // the key falls back to the field exactly as it does on a heading — a
+      // swallowed keystroke would cost the user a character for nothing.
+      const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+      document.dispatchEvent(space)
+      const cancel = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
+      document.dispatchEvent(cancel)
+      await flush(element)
+
+      expect(space.defaultPrevented).toBe(false)
+      expect(cancel.defaultPrevented).toBe(false)
+      expect(toggler).not.toHaveBeenCalled()
+    })
+
+    it('still toggles the real task in the same list', async () => {
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      element = await mountWithMarkers(toggler)
+
+      press('ArrowDown')
+      press('ArrowDown')
+      await element.updateComplete
+      press(' ')
+      await flush(element)
+
+      expect(toggler).toHaveBeenCalledWith({ path: 'notes.md', line: 3, to: 'done' })
+    })
+
+    it('sends the Show choice, defaulting to the configured value', async () => {
+      element = await mountWithMarkers()
+      // The built-in default is `tasks`, not the wire default of `all`.
+      expect((lastBody() as { include: string }).include).toBe('tasks')
+
+      await openFilters(element)
+      const select = includeSelect(element)
+      select.value = 'markers'
+      select.dispatchEvent(new Event('change'))
+      await flush(element)
+
+      expect((lastBody() as { include: string }).include).toBe('markers')
+    })
+
+    it('marks the initial option selected, which is what survives the first render', async () => {
+      element = await mountWithMarkers()
+      await openFilters(element)
+
+      // The `?selected` half of the double binding, asserted as the ATTRIBUTE
+      // it actually sets. On the first render Lit commits the <select>'s
+      // `.value` PropertyPart before the options ChildPart exists, so in a real
+      // browser `.value` is dropped and this attribute is the only thing
+      // carrying the initial selection. (happy-dom's <select> is more forgiving
+      // about `.value` without options, so this is asserted directly rather
+      // than through `select.value`.)
+      const options = Array.from(includeSelect(element).querySelectorAll('option'))
+      expect(options.map((o) => o.getAttribute('value'))).toEqual(['all', 'tasks', 'markers'])
+      expect(options.filter((o) => o.hasAttribute('selected')).map((o) => o.value)).toEqual([
+        'tasks',
+      ])
+    })
+
+    it('pins Show to tasks in By Due, and restores the choice on the way back', async () => {
+      element = await mountWithMarkers()
+      await openFilters(element)
+
+      const select = includeSelect(element)
+      select.value = 'markers'
+      select.dispatchEvent(new Event('change'))
+      await flush(element)
+      expect(select.disabled).toBe(false)
+
+      // A marker has no due date, so no bucket could hold one and "Markers
+      // only" would ask for a guaranteed-empty list.
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[1].click()
+      await flush(element)
+      expect((lastBody() as { include: string }).include).toBe('tasks')
+      expect(includeSelect(element).disabled).toBe(true)
+      // The `.value` half of the double binding: `?selected` alone would not
+      // move a selection that is already committed.
+      expect(includeSelect(element).value).toBe('tasks')
+
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[0].click()
+      await flush(element)
+      // Derived, not assigned: the user's category-mode choice survived.
+      expect((lastBody() as { include: string }).include).toBe('markers')
+      expect(includeSelect(element).disabled).toBe(false)
+      expect(includeSelect(element).value).toBe('markers')
+    })
+
+    it('explains the pin on the fieldset, where a disabled control cannot', async () => {
+      element = await mountWithMarkers()
+      await openFilters(element)
+      const fieldset = includeSelect(element).closest('fieldset')!
+
+      expect(fieldset.getAttribute('title')).toBeNull()
+
+      element.shadowRoot!.querySelectorAll<HTMLButtonElement>('.mode-tab')[1].click()
+      await flush(element)
+      // On the fieldset, not the <select>: a disabled control suppresses
+      // pointer events, so its own tooltip would never render.
+      expect(fieldset.getAttribute('title')).toContain('no due date')
+    })
+
+    /**
+     * The narrow default only works because it widens: a repository whose work
+     * is written as `TODO:` lines and not checkboxes must still open on it.
+     */
+    describe('the empty-Show fallback', () => {
+      /** No matches at all — no groups, no folder facets. */
+      function nothing(): TaskQueryResponse {
+        return makeResponse()
+      }
+
+      function includeOf(index: number): string {
+        return (bodyAt(index) as { include: string }).include
+      }
+
+      async function mountDefaulting(
+        defaultInclude: IncludeFilter,
+        ...responses: TaskQueryResponse[]
+      ) {
+        return mountWith({ defaultInclude }, ...responses)
+      }
+
+      it('does not widen when the configured default finds something', async () => {
+        element = await mountDefaulting('tasks', markerResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(includeOf(0)).toBe('tasks')
+      })
+
+      it('widens to all when the configured default finds nothing', async () => {
+        element = await mountDefaulting('tasks', nothing(), markerResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(0)).toBe('tasks')
+        expect(includeOf(1)).toBe('all')
+        // Mutated, not applied invisibly: the control describes what is on
+        // screen, exactly as the folder pane follows a dropped scope.
+        await openFilters(element)
+        expect(includeSelect(element).value).toBe('all')
+        const selected = Array.from(includeSelect(element).querySelectorAll('option')).find((o) =>
+          o.hasAttribute('selected')
+        )
+        expect(selected?.textContent?.trim()).toBe('Tasks + markers')
+      })
+
+      it('widens once, so a repository with nothing in it does not loop', async () => {
+        element = await mountDefaulting('tasks', nothing())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(1)).toBe('all')
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+      })
+
+      it('widens a configured default of markers too', async () => {
+        element = await mountDefaulting('markers', nothing(), categoryResponse())
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(0)).toBe('markers')
+        expect(includeOf(1)).toBe('all')
+      })
+
+      it('arms nothing when the configured default is already all', async () => {
+        // There is no wider setting to fall back to, so an empty result is the
+        // honest answer rather than the trigger for a second request.
+        element = await mountDefaulting('all', nothing())
+
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(includeOf(0)).toBe('all')
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+      })
+
+      it('never widens a Show choice the user made, even an empty one', async () => {
+        // Opens on `all`, so nothing is armed; then the user narrows to `tasks`
+        // and gets nothing. An explicit choice must stick.
+        element = await mountDefaulting('all', categoryResponse(), nothing())
+        await openFilters(element)
+
+        const select = includeSelect(element)
+        select.value = 'tasks'
+        select.dispatchEvent(new Event('change'))
+        await flush(element)
+
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(includeOf(1)).toBe('tasks')
+        expect(includeSelect(element).value).toBe('tasks')
+        expect(element.shadowRoot!.querySelector('.results-empty')).not.toBeNull()
+      })
     })
   })
 

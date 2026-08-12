@@ -164,12 +164,29 @@ pub(crate) struct AmbiguousNameReport<'a> {
 /// Logs ambiguous-name warnings, capped at [`AMBIGUOUS_WARN_CAP`] individual
 /// lines plus one summary line for the remainder.
 ///
-/// `kind` names the thing that was ambiguous ("relationship endpoint",
-/// "wikilink") and is interpolated into the message. Shared with
-/// [`crate::wikilink_index`], which has its own index but the identical
-/// first-wins behaviour to report on. The per-page `errors.json` payload is
+/// `kind` names the thing that was ambiguous ("relationship endpoint") and is
+/// interpolated into the message. The per-page `errors.json` payload is
 /// deliberately *not* capped — a reader only ever sees their own page's
 /// problems, so there is nothing to bury there.
+///
+/// # Only authored endpoints belong here
+///
+/// [`crate::wikilink_index`] used to call this too, from `rebuild`, and it was
+/// wrong twice over: `rebuild` sees notes rather than links, so it warned about
+/// every colliding name in the repository whether or not anything referenced
+/// one — repositories containing no `[[wikilinks]]` at all got flooded — and it
+/// named the lexicographically smallest URL as the winner, while
+/// [`WikilinkIndex::resolve_wikilink`] is current-folder-first. Wikilink
+/// ambiguity is a property of a *link site*, not of the repository, so it is
+/// reported per page through `ambiguous_wikilink` in `errors.json`, which is
+/// the only thing that knows the linking page's folder. Do not wire this back
+/// up to an index build.
+///
+/// A relationship endpoint is different, and may legitimately warn from a
+/// build: it is *authored* in frontmatter, so a collision is always a real
+/// reference to something.
+///
+/// [`WikilinkIndex::resolve_wikilink`]: crate::wikilink_index::WikilinkIndex::resolve_wikilink
 pub(crate) fn warn_ambiguous_names(kind: &str, reports: &[AmbiguousNameReport<'_>]) {
     for report in reports.iter().take(AMBIGUOUS_WARN_CAP) {
         tracing::warn!(

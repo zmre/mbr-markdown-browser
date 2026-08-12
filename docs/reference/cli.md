@@ -59,8 +59,8 @@ Supported media types are detected by file extension:
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking | `false` |
 | `--no-tasks` | Disable the task browser. The `/.mbr/tasks` endpoint returns `404` and no task index is ever built. Server/GUI only — static builds never include tasks either way. | `false` |
-| `--mark-incomplete` | Highlight blocks starting with TK/TODO/FIXME/XXX | server/GUI: on, build: off |
-| `--no-mark-incomplete` | Disable incomplete-block highlighting | server/GUI: off, build: on (no effect) |
+| `--mark-incomplete` | Highlight TK/TODO/FIXME/XXX anywhere in a line | server/GUI: on, build: off |
+| `--no-mark-incomplete` | Disable incomplete-marker highlighting | server/GUI: off, build: on (no effect) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
 | `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding to 720p/480p (server/GUI mode only). Not needed for [automatic playback recovery](configuration.md#automatic-playback-recovery), which is a stream copy and is always available. | `false` |

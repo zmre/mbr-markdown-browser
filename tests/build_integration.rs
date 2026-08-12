@@ -291,8 +291,14 @@ async fn test_build_incomplete_spans_when_opted_in() {
     let html_path = output_dir.join("drafts").join("index.html");
     let html = fs::read_to_string(&html_path).expect("rendered html");
     assert!(
-        html.contains(r#"<span class="mbr-incomplete">"#),
+        html.contains(r#"<span class="mbr-incomplete""#),
         "Opted-in build should include mbr-incomplete spans: {html}"
+    );
+    // The wrapper doubles as the deep-link target the task browser points at;
+    // `TK rewrite this paragraph.` is on line 3 of the fixture.
+    assert!(
+        html.contains(r#"id="mbr-marker-3""#),
+        "Opted-in build should anchor the marker to its source line: {html}"
     );
 }
 

@@ -172,11 +172,21 @@ enum LinkDefect {
     /// §5.2.4), so the reader silently lands on an unrelated page instead of
     /// the one the author meant.
     EscapesRoot,
-    /// The target is a *page*, but the href does not end in `/`. Pages live at
-    /// directory-style URLs; without the slash the browser resolves the target
-    /// page's own relative links one directory too high, so the damage lands on
-    /// the *next* click, not this one. In server mode a redirect repairs it; in
-    /// a static build nothing does.
+    /// The target is a *markdown page*, but the href does not end in `/`.
+    /// Markdown pages live at directory-style URLs; without the slash the
+    /// browser resolves the target page's own relative links one directory too
+    /// high, so the damage lands on the *next* click, not this one. In server
+    /// mode a redirect repairs it; in a static build nothing does.
+    ///
+    /// Deliberately **markdown-only**. Every other thing the resolver serves at
+    /// a directory-style URL — a directory listing, a tag page, a tag source
+    /// index — is rendered from a template whose links are site-absolute
+    /// (server mode) or root-anchored `../`-chains (build mode), and neither
+    /// form depends on the base's trailing slash. Only a markdown *body*
+    /// carries links authored relative to the page's own location, so only a
+    /// markdown target can suffer the next-click damage this variant predicts.
+    /// See [`classify_emitted_href`] for why widening it also breaks the
+    /// checker's central invariant.
     NonCanonical,
 }
 
@@ -192,6 +202,26 @@ enum LinkDefect {
 /// resolution uses `is_index_file = true`: every segment of a URL ending in `/`
 /// is a real directory component. That is the same rationale
 /// [`media_reference_resolves`] documents for media srcs.
+///
+/// # The trailing-slash check must use the *renderer's* notion of "page"
+///
+/// Only one thing puts a trailing slash on an emitted href:
+/// `link_transform::transform_link`, via
+/// [`crate::link_transform::LinkTransformConfig::markdown_page_probe`], which
+/// answers yes for [`ResolvedPath::MarkdownFile`] and nothing else. So
+/// [`LinkDefect::NonCanonical`] is checked for exactly that one variant. Asking
+/// for a slash on any other kind reports a defect the pipeline is structurally
+/// incapable of producing — the checker flagging its own renderer's output,
+/// which is the failure this module's header claims cannot happen.
+///
+/// It would also be wrong on the merits. `/tags/rust`, `/tags` and a directory
+/// listing are all served **200 in place**, with no redirect
+/// (`path_resolver::canonical_page_redirect` fires only for markdown pages), and
+/// the templates behind them emit site-absolute links in server mode and
+/// root-anchored `../`-chains in build mode. Both forms resolve identically
+/// whether or not the base URL ends in `/`, so there is no next-click damage to
+/// warn about. [`ResolvedPath::Redirect`] is likewise safe: the browser is sent
+/// to the canonical URL before it resolves anything.
 fn classify_emitted_href(
     href: &str,
     resolver_config: &PathResolverConfig,
@@ -231,14 +261,19 @@ fn classify_emitted_href(
     let request_path = normalize_link_target(&absolute_url);
     match resolve_request_path(resolver_config, &request_path) {
         ResolvedPath::NotFound => Some(LinkDefect::Missing),
-        // A static file is addressed by its exact name and must NOT gain a
-        // trailing slash, so it is canonical however it was written.
-        ResolvedPath::StaticFile(_) => None,
-        // Everything else is a page, served at a directory-style URL.
+        // The one target whose body links are authored relative to its own
+        // location, and the one target the renderer can spell canonically.
         // `normalize_link_target` deliberately trims slashes, which makes the
         // two spellings indistinguishable at that layer — so the check has to
         // be made here, on the raw href.
-        _ => (!path_part.ends_with('/')).then_some(LinkDefect::NonCanonical),
+        ResolvedPath::MarkdownFile(_) => {
+            (!path_part.ends_with('/')).then_some(LinkDefect::NonCanonical)
+        }
+        // A static file is addressed by its exact name and must NOT gain a
+        // trailing slash. Directory listings, tag pages, tag source indexes and
+        // `/x/index`-style redirects are all canonical however they were
+        // written — see the doc comment above.
+        _ => None,
     }
 }
 
@@ -958,6 +993,232 @@ mod tests {
             <a href="../../folder/gone/">b</a>
         "#;
         assert_eq!(rendered_link_errors(html, &base, "/docs/guide/").len(), 1);
+    }
+
+    /// Regression (false positive introduced with `validate_rendered_links`):
+    /// a link to a *directory* without a trailing slash was reported broken.
+    ///
+    /// Nothing in the pipeline can emit the "canonical" spelling —
+    /// `markdown_page_probe` answers yes only for a markdown file, so
+    /// `transform_link` leaves an extension-less directory target exactly as
+    /// authored — and the server answers `/folder` with 200 in place, no
+    /// redirect. The listing it renders links site-absolutely, so the
+    /// next-click damage `NonCanonical` exists to predict cannot occur.
+    #[test]
+    fn directory_listing_link_without_trailing_slash_is_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        // `folder/` holds file.md and sibling.md but no index, so it resolves
+        // to a DirectoryListing.
+        let html = r#"<a href="../../folder">folder</a>"#;
+        assert!(
+            rendered_link_errors(html, &base, "/docs/guide/").is_empty(),
+            "a directory listing is served in place and must not be flagged"
+        );
+    }
+
+    /// Same defect via an absolute href, which is how the browse UI and hand-
+    /// written navigation spell directory links.
+    #[test]
+    fn absolute_directory_link_without_trailing_slash_is_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"<a href="/folder">folder</a>"#;
+        assert!(
+            rendered_link_errors(html, &base, "/docs/guide/").is_empty(),
+            "an absolute directory link must not be flagged"
+        );
+    }
+
+    /// Tag pages and tag source indexes have no filesystem existence at all and
+    /// are served 200 at either spelling. Their templates emit absolute URLs, so
+    /// the trailing slash cannot change what a subsequent click resolves to.
+    #[test]
+    fn tag_urls_without_trailing_slash_are_ignored() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string(), "people".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"
+            <a href="/tags/rust">tag page</a>
+            <a href="/tags">tag index</a>
+            <a href="/people/jane_doe">person</a>
+        "#;
+        let errs = validate_rendered_links(html, &cfg, "/docs/guide/");
+        assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
+    }
+
+    /// The canonical spellings must stay clean too — a fix that silenced the
+    /// slashless form by silencing the whole variant would pass the tests above
+    /// and this one, so the markdown case below is what pins the behaviour.
+    #[test]
+    fn tag_and_directory_urls_with_trailing_slash_are_ignored() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("folder")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        std::fs::write(base.join("folder/file.md"), "# f").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"
+            <a href="/tags/rust/">tag page</a>
+            <a href="/tags/">tag index</a>
+            <a href="/folder/">folder</a>
+        "#;
+        let errs = validate_rendered_links(html, &cfg, "/docs/guide/");
+        assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
+    }
+
+    /// The narrowing must not reach the defect the variant was added for: a
+    /// *markdown* page link with no trailing slash is still reported. Paired
+    /// with the tests above, this pins `NonCanonical` to exactly the set
+    /// `markdown_page_probe` can canonicalize.
+    #[test]
+    fn narrowing_keeps_reporting_markdown_page_links() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("folder")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        std::fs::write(base.join("folder/file.md"), "# f").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<a href="/folder/file">file</a>"#;
+        assert_eq!(
+            validate_rendered_links(html, &cfg, "/docs/guide/").len(),
+            1,
+            "a markdown page link without its trailing slash is still a defect"
+        );
+    }
+
+    /// An href that still carries `.md` is a defect, in every spelling.
+    ///
+    /// `link_transform::strip_markdown_extension` normally removes the
+    /// extension and adds the slash, so a surviving `.md` means the transform
+    /// did not fire — and the result is exactly what [`LinkDefect::NonCanonical`]
+    /// exists for: the server 301s `/docs/guide.md` to `/docs/guide/`, but a
+    /// static build emits no such redirect, so the link dies there.
+    ///
+    /// Pinned separately from the extension-less case because the narrowing to
+    /// [`ResolvedPath::MarkdownFile`] is what keeps these reported, and an
+    /// over-eager future widening of the `_ => None` arm would silence them.
+    ///
+    /// Asserts the exact [`LinkDefect`] rather than "something was reported".
+    /// The distinction matters: an href that merely fails to *resolve* also
+    /// produces an error, so a count-based assertion goes green even when the
+    /// canonicality rule has stopped working. (Written the sloppy way first,
+    /// this test passed while proving nothing — `../folder/file.md` from
+    /// `/docs/guide/` is `/docs/folder/file.md`, which is simply `Missing`.)
+    #[test]
+    fn a_markdown_href_keeping_its_md_extension_is_not_canonical() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("folder")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        std::fs::write(base.join("folder/file.md"), "# f").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        // `../../` because the page itself sits one directory down: from
+        // `/docs/guide/`, `../` is `/docs/` and `../../` is the root.
+        for href in [
+            "/folder/file.md",      // site-absolute
+            "../../folder/file.md", // page-relative
+            "/folder/file.md#top",  // a fragment must not excuse it
+            "/folder/file.md?v=2",  // nor a query
+        ] {
+            assert_eq!(
+                classify_emitted_href(href, &cfg, "/docs/guide/"),
+                Some(LinkDefect::NonCanonical),
+                "`{href}` still names the file, so it needs the trailing slash"
+            );
+        }
+
+        // Same rule for an extension-less page link, which is the shape the
+        // transform actually emits when its probe fails.
+        assert_eq!(
+            classify_emitted_href("/folder/file", &cfg, "/docs/guide/"),
+            Some(LinkDefect::NonCanonical)
+        );
+    }
+
+    /// The trailing slash is the whole difference: the same targets, spelled
+    /// canonically, are silent.
+    ///
+    /// Guards the other direction of the narrowing — repairing the false
+    /// positives must not start reporting correct links.
+    #[test]
+    fn a_markdown_href_with_its_trailing_slash_is_silent() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("folder")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        std::fs::write(base.join("folder/file.md"), "# f").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        for href in [
+            "/folder/file/",
+            "../../folder/file/",
+            "/folder/file/#top",
+            "/folder/file/?v=2",
+        ] {
+            assert_eq!(
+                classify_emitted_href(href, &cfg, "/docs/guide/"),
+                None,
+                "`{href}` is exactly what the renderer emits and must be silent"
+            );
+        }
+    }
+
+    /// A missing target and a non-canonical one are different defects, and the
+    /// relative arithmetic decides which. Pins that they cannot be confused —
+    /// the trap the two tests above were written to avoid.
+    #[test]
+    fn a_relative_md_href_that_resolves_nowhere_is_missing_not_non_canonical() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("folder")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        std::fs::write(base.join("folder/file.md"), "# f").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        // One `../` short: this addresses /docs/folder/file.md, which is not there.
+        assert_eq!(
+            classify_emitted_href("../folder/file.md", &cfg, "/docs/guide/"),
+            Some(LinkDefect::Missing)
+        );
+    }
+
+    /// A genuinely missing target keeps being reported no matter how it is
+    /// spelled — the narrowing touches canonicality only, never existence.
+    #[test]
+    fn narrowing_does_not_hide_missing_targets() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/guide.md"), "# g").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags = vec!["tags".to_string()];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        // `/nope` is neither a file, a directory, nor a configured tag source.
+        let html = r#"<a href="/nope">gone</a><a href="/nope/">gone too</a>"#;
+        assert_eq!(validate_rendered_links(html, &cfg, "/docs/guide/").len(), 2);
     }
 
     /// The index-page variant: `/docs/` keeps every segment, so a sibling link

@@ -5,7 +5,7 @@ use crate::link_transform::{LinkTransformConfig, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
-use crate::tasks::{self, TaskStatus};
+use crate::tasks::{self, MarkerRule, TaskStatus};
 use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use crate::wikilink_index::WikilinkIndex;
@@ -13,7 +13,6 @@ use pulldown_cmark::{
     BlockQuoteKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind, Options,
     Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
 };
-use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
@@ -123,8 +122,11 @@ pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
     // Task markup is skipped: this entry point returns an event stream for
     // callers to render themselves, and only reads the events here for
     // headings, frontmatter and word counts.
-    let (events, headings, _section_attrs) =
-        collect_events_and_headings(&markdown_input, TaskMarkup::Skip);
+    let (events, headings, _section_attrs) = collect_events_and_headings(
+        &markdown_input,
+        TaskMarkup::Skip,
+        &mut TextLines::disabled(),
+    );
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
     // Single pass: extract frontmatter and count words
@@ -495,6 +497,175 @@ impl LineIndex {
     }
 }
 
+/// The source line one `Event::Text` came from, addressed by its slot in the
+/// pass-1 output.
+struct TextLine {
+    /// Index of the event in the vector [`collect_events_and_headings`] returns.
+    at: u32,
+    /// 1-based source line the run starts on.
+    line: u32,
+}
+
+/// Source lines for the text runs of a document, carried from pass 1
+/// ([`collect_events_and_headings`], the only place byte ranges exist) to pass 3
+/// ([`mark_incomplete_blocks`], which needs them for `#mbr-marker-{line}`
+/// anchors and has no ranges of its own).
+///
+/// # Why an event index is enough
+///
+/// [`process_all_events`] sits between the two passes and is a strict 1:1 map
+/// (see its `# Invariant`), so a slot recorded in pass 1 still holds the same
+/// run in pass 3.
+///
+/// # Why the run's *start* is enough
+///
+/// `SoftBreak` and `HardBreak` are their own events and therefore terminate a
+/// [`TextMergeWithOffset`] merge, so outside code blocks a merged `Event::Text`
+/// never spans a source line break. Every marker in a run is on the run's first
+/// line, which means no offset-into-text mapping is needed — and that matters,
+/// because [`markdown_options`] enables smart punctuation, so `--` → `–` and
+/// `"` → `“` have already desynchronised text bytes from source bytes by the
+/// time pass 3 sees them. (Code-block text *is* the one run that spans
+/// newlines; pass 3 skips it for exactly that reason.)
+///
+/// # Why every run is recorded
+///
+/// Recording only runs in marker-eligible blocks would mean restating pass 3's
+/// frame rules 300 lines away with nothing forcing the two to agree. One
+/// 8-byte record per run is cheap, and it is only paid when recording is on.
+struct TextLines {
+    /// Ascending by `at`.
+    entries: Vec<TextLine>,
+    /// False for the callers that never run pass 3, which then never build a
+    /// [`LineIndex`] either. `extract_outbound_links_sync` depends on this: it
+    /// runs over every markdown file in the repository to build the backlink
+    /// index.
+    enabled: bool,
+}
+
+impl TextLines {
+    /// A table that will be filled in — for a render that will run pass 3.
+    fn recording() -> Self {
+        Self {
+            entries: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// A table that stays empty, and whose `record` calls compile down to a
+    /// single branch.
+    fn disabled() -> Self {
+        Self {
+            entries: Vec::new(),
+            enabled: false,
+        }
+    }
+
+    /// Notes that the event about to occupy slot `at` is a text run beginning on
+    /// `line`. A no-op when disabled or when `line` is `None`.
+    fn record(&mut self, at: usize, line: Option<u32>) {
+        if !self.enabled {
+            return;
+        }
+        let Some(line) = line else {
+            return;
+        };
+        let at = u32::try_from(at).unwrap_or(u32::MAX);
+        debug_assert!(
+            self.entries.last().is_none_or(|last| last.at < at),
+            "text-line records must be strictly ascending; the monotone cursor \
+             that reads them back cannot recover from a repeat or a rewind"
+        );
+        self.entries.push(TextLine { at, line });
+    }
+
+    /// Drops the records for slots at or beyond `len`, after the caller has
+    /// shortened the event vector.
+    fn truncate_to(&mut self, len: usize) {
+        // Ascending by `at`, so the split point is a binary search.
+        let keep = self
+            .entries
+            .partition_point(|entry| (entry.at as usize) < len);
+        self.entries.truncate(keep);
+    }
+
+    fn cursor(&self) -> TextLineCursor<'_> {
+        TextLineCursor {
+            entries: &self.entries,
+            next: 0,
+        }
+    }
+}
+
+/// Reads a [`TextLines`] table back in ascending index order.
+///
+/// A cursor rather than a binary search per lookup: pass 3 walks the event
+/// vector from the front, so the queries are non-decreasing and each one costs
+/// O(1) amortised.
+struct TextLineCursor<'a> {
+    entries: &'a [TextLine],
+    next: usize,
+}
+
+impl TextLineCursor<'_> {
+    /// The source line of the text run at `index`, or `None` when nothing was
+    /// recorded for it.
+    ///
+    /// `index` must not go backwards between calls.
+    fn line_at(&mut self, index: usize) -> Option<u32> {
+        while self
+            .entries
+            .get(self.next)
+            .is_some_and(|entry| (entry.at as usize) < index)
+        {
+            self.next += 1;
+        }
+        self.entries
+            .get(self.next)
+            .filter(|entry| entry.at as usize == index)
+            .map(|entry| entry.line)
+    }
+}
+
+/// Pushes `event`, recording `line` against its slot when it is an
+/// `Event::Text`.
+///
+/// Every push in [`collect_events_and_headings`] goes through this, so a future
+/// arm cannot forget to record and leave pass 3 anchoring a marker to the wrong
+/// line. `line` is `None` for every event that is not the current input text
+/// run, which makes the guard here belt-and-braces rather than the only check.
+fn push_event<'a>(
+    events: &mut Vec<Event<'a>>,
+    text_lines: &mut TextLines,
+    event: Event<'a>,
+    line: Option<u32>,
+) {
+    if matches!(event, Event::Text(_)) {
+        text_lines.record(events.len(), line);
+    }
+    events.push(event);
+}
+
+/// Pops the last event, keeping the [`TextLines`] table addressed to the
+/// shortened vector.
+///
+/// The rule-attrs rewrite pops a *recorded* `Text` and reuses its slot for a
+/// `Rule`, so without this the table would hold a record for an event that is no
+/// longer there. As the grammar stands today the stale record is inert —
+/// [`TextLineCursor`] matches on an exact index and the vacated slot is always
+/// refilled by a `Start`, never by another `Text` — but "inert" here depends on
+/// pulldown-cmark never emitting a `Text` straight after a thematic break, which
+/// is not a promise anyone made us. A stale record that *did* get shadowed would
+/// either trip `TextLines::record`'s ascending assertion or hand a marker the
+/// rule's line. Both pop sites go through this, including the remark-hint one
+/// that pops an unrecorded `Start`, so a future edit cannot reintroduce the
+/// hazard by moving a `push` above a `pop`.
+fn pop_event<'a>(events: &mut Vec<Event<'a>>, text_lines: &mut TextLines) -> Option<Event<'a>> {
+    let popped = events.pop();
+    text_lines.truncate_to(events.len());
+    popped
+}
+
 /// Whether [`collect_events_and_headings`] should also rewrite task list items
 /// into mbr's checkbox-and-chips markup.
 ///
@@ -626,11 +797,19 @@ fn is_inline_event(event: &Event<'_>) -> bool {
 /// `transform_wikilinks` only ever rewrites within a single line: a wikilink
 /// that spans a line break is not a wikilink (see `wikilink::push_transformed`),
 /// so no rewrite can add or remove a newline.
-fn collect_events_and_headings(
-    markdown_input: &str,
+///
+/// # Text lines
+///
+/// `text_lines` is an out-parameter rather than a fourth tuple field: the
+/// return type is already at the limit of what reads. It is filled only when
+/// the caller passes a [`TextLines::recording`] table, which is exactly when
+/// [`mark_incomplete_blocks`] will run.
+fn collect_events_and_headings<'a>(
+    markdown_input: &'a str,
     task_markup: TaskMarkup,
+    text_lines: &mut TextLines,
 ) -> (
-    Vec<Event<'_>>,
+    Vec<Event<'a>>,
     Vec<HeadingInfo>,
     HashMap<usize, ParsedAttrs>,
 ) {
@@ -651,6 +830,15 @@ fn collect_events_and_headings(
     let mut pending_task: Option<PendingTask> = None;
 
     for (event, range) in parser {
+        // Computed once here rather than at each push site, and only when
+        // somebody is going to read it: building the `LineIndex` is the whole
+        // cost, and a document nobody will highlight must not pay it.
+        let text_line = if text_lines.enabled && matches!(event, Event::Text(_)) {
+            let index = line_index.get_or_insert_with(|| LineIndex::build(markdown_input));
+            Some(index.line_of(range.start))
+        } else {
+            None
+        };
         let was_at_item_start = at_item_start;
         // A loose list item wraps its content in a paragraph, so the marker
         // arrives one event later there than in a tight list.
@@ -667,13 +855,21 @@ fn collect_events_and_headings(
                 let index = line_index.get_or_insert_with(|| LineIndex::build(markdown_input));
                 let line = index.line_of(range.start);
 
-                events.push(Event::Html(CowStr::from(crate::html::task_checkbox_html(
-                    status,
-                    Some(line),
-                ))));
-                events.push(Event::Html(CowStr::from(crate::html::task_text_open(
-                    status,
-                ))));
+                push_event(
+                    &mut events,
+                    text_lines,
+                    Event::Html(CowStr::from(crate::html::task_checkbox_html(
+                        status,
+                        Some(line),
+                    ))),
+                    text_line,
+                );
+                push_event(
+                    &mut events,
+                    text_lines,
+                    Event::Html(CowStr::from(crate::html::task_text_open(status))),
+                    text_line,
+                );
 
                 let mut task = PendingTask {
                     text_at: Vec::new(),
@@ -685,7 +881,14 @@ fn collect_events_and_headings(
                     && let Some((_, rest)) = split_extended_marker(text)
                 {
                     task.text_at.push(events.len());
-                    events.push(Event::Text(CowStr::from(rest.to_string())));
+                    // The remainder is a slice of the same run, so it starts on
+                    // the same source line the run did.
+                    push_event(
+                        &mut events,
+                        text_lines,
+                        Event::Text(CowStr::from(rest.to_string())),
+                        text_line,
+                    );
                 }
                 pending_task = Some(task);
                 // The marker event itself is replaced, so it is never pushed.
@@ -703,7 +906,7 @@ fn collect_events_and_headings(
                     if matches!(event, Event::Text(_)) {
                         task.text_at.push(events.len());
                     }
-                    events.push(event);
+                    push_event(&mut events, text_lines, event, text_line);
                     continue;
                 }
                 // End of the task's own line: close the text span and emit the
@@ -719,7 +922,7 @@ fn collect_events_and_headings(
             // --- Heading extraction ---
             Event::Start(Tag::Heading { .. }) => {
                 in_heading_text = Some(String::new());
-                events.push(event);
+                push_event(&mut events, text_lines, event, text_line);
             }
             // Heading label accumulation. `Event::Code` (inline code spans) and
             // `Event::InlineMath` carry visible heading text and must be
@@ -736,7 +939,9 @@ fn collect_events_and_headings(
                 if let Some(ref mut heading_text) = in_heading_text {
                     heading_text.push_str(text);
                 }
-                events.push(event);
+                // `text_line` is `None` for the `Code` / `InlineMath` halves of
+                // this pattern, so only the `Text` half is recorded.
+                push_event(&mut events, text_lines, event, text_line);
             }
 
             // --- remark-hint syntax detection (inline) ---
@@ -744,14 +949,35 @@ fn collect_events_and_headings(
             // matching GitHub-style alert blockquote (Tip/Warning/Caution).
             Event::Text(text) if matches!(events.last(), Some(Event::Start(Tag::Paragraph))) => {
                 if let Some((kind, rest)) = detect_hint_prefix(text) {
-                    events.pop(); // remove the Start(Paragraph)
-                    events.push(Event::Start(Tag::BlockQuote(Some(kind))));
-                    events.push(Event::Start(Tag::Paragraph));
-                    events.push(Event::Text(CowStr::from(rest.to_owned())));
+                    // A `Start(Paragraph)` is never recorded, so this pop cannot
+                    // orphan anything today; routing it through `pop_event`
+                    // anyway means a future edit here cannot silently corrupt
+                    // the table.
+                    pop_event(&mut events, text_lines); // remove the Start(Paragraph)
+                    push_event(
+                        &mut events,
+                        text_lines,
+                        Event::Start(Tag::BlockQuote(Some(kind))),
+                        text_line,
+                    );
+                    push_event(
+                        &mut events,
+                        text_lines,
+                        Event::Start(Tag::Paragraph),
+                        text_line,
+                    );
+                    // The hint prefix is stripped from the front of the same
+                    // run, so the remainder is still on the run's line.
+                    push_event(
+                        &mut events,
+                        text_lines,
+                        Event::Text(CowStr::from(rest.to_owned())),
+                        text_line,
+                    );
                     hint_open = true;
                     continue;
                 }
-                events.push(event);
+                push_event(&mut events, text_lines, event, text_line);
             }
             Event::End(TagEnd::Heading(heading_level)) => {
                 if let Some(text) = in_heading_text.take() {
@@ -790,7 +1016,7 @@ fn collect_events_and_headings(
                         }
                     }
                 }
-                events.push(event);
+                push_event(&mut events, text_lines, event, text_line);
             }
 
             // --- Rule attrs detection (inline) ---
@@ -801,8 +1027,13 @@ fn collect_events_and_headings(
                 // the blockquote end. A hint paragraph never matches the em-dash rule
                 // pattern, so handling it first is safe.
                 if hint_open {
-                    events.push(event);
-                    events.push(Event::End(TagEnd::BlockQuote(None)));
+                    push_event(&mut events, text_lines, event, text_line);
+                    push_event(
+                        &mut events,
+                        text_lines,
+                        Event::End(TagEnd::BlockQuote(None)),
+                        text_line,
+                    );
                     hint_open = false;
                     continue;
                 }
@@ -833,12 +1064,14 @@ fn collect_events_and_headings(
                             None
                         };
 
-                        // Remove the Start(Paragraph) and Text events
-                        events.pop(); // Text
-                        events.pop(); // Start(Paragraph)
+                        // Remove the Start(Paragraph) and Text events. The Text
+                        // is recorded, and the `Rule` pushed below reuses its
+                        // slot, so the table has to shrink with the vector.
+                        pop_event(&mut events, text_lines); // Text
+                        pop_event(&mut events, text_lines); // Start(Paragraph)
 
                         // Emit a Rule event instead
-                        events.push(Event::Rule);
+                        push_event(&mut events, text_lines, Event::Rule, text_line);
                         section_index += 1;
 
                         if let Some(attrs) = parsed {
@@ -848,17 +1081,17 @@ fn collect_events_and_headings(
                         continue;
                     }
                 }
-                events.push(event);
+                push_event(&mut events, text_lines, event, text_line);
             }
 
             // Track real Rule events for section counting
             Event::Rule => {
                 section_index += 1;
-                events.push(event);
+                push_event(&mut events, text_lines, event, text_line);
             }
 
             _ => {
-                events.push(event);
+                push_event(&mut events, text_lines, event, text_line);
             }
         }
     }
@@ -984,8 +1217,21 @@ pub async fn render_with_cache(
     // and a separate task pass into one iteration). Running the task rewrite
     // here rather than after `process_all_events` also means the annotations
     // are gone before text is counted for readability and scanned for bare URLs.
+    //
+    // The marker rule is fetched *before* pass 1 because it decides whether
+    // pass 1 has to record the source line of every text run for pass 3.
+    // `cached`, not `new`: compiling the pattern costs ~80µs, which is several
+    // times a small page's entire render, and this runs per page.
+    let marker_rule = mark_incomplete
+        .then(|| MarkerRule::cached(incomplete_markers))
+        .flatten();
+    let mut text_lines = if marker_rule.is_some() {
+        TextLines::recording()
+    } else {
+        TextLines::disabled()
+    };
     let (events_with_ids, headings, section_attrs) =
-        collect_events_and_headings(&markdown_input, TaskMarkup::Render);
+        collect_events_and_headings(&markdown_input, TaskMarkup::Render, &mut text_lines);
 
     // Detect if the first heading is an H1 (used for conditional title rendering in templates)
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -1019,15 +1265,10 @@ pub async fn render_with_cache(
         wikilink_index,
     );
 
-    // Pass 3 (optional): wrap blocks starting with TK/TODO/FIXME/XXX in
-    // <span class="mbr-incomplete">…</span>. Off by default in build mode.
-    let processed_events = if mark_incomplete {
-        match build_incomplete_marker_regex(incomplete_markers) {
-            Some(re) => mark_incomplete_blocks(processed_events, &re),
-            None => processed_events,
-        }
-    } else {
-        processed_events
+    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build mode.
+    let processed_events = match &marker_rule {
+        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines),
+        None => processed_events,
     };
 
     // Generate HTML output and extract frontmatter
@@ -1049,6 +1290,14 @@ pub async fn render_with_cache(
 ///
 /// `file_path` is only used to name the file in diagnostics (e.g. a YAML
 /// frontmatter parse warning); it is never read from.
+///
+/// # Invariant
+///
+/// The output has exactly as many events as the input, in the same order —
+/// [`process_event`] is a 1:1 map. [`TextLines`] depends on it: it records event
+/// *indices* in pass 1 and reads them back in pass 3, on the far side of this
+/// function. The `debug_assert_eq!` below is what keeps that from being a
+/// comment nobody checks.
 #[allow(clippy::too_many_arguments)]
 fn process_all_events<'a>(
     events: Vec<Event<'a>>,
@@ -1086,7 +1335,8 @@ fn process_all_events<'a>(
         frontmatter_error: None,
         ambiguous_wikilinks: Vec::new(),
     };
-    let mut processed_events = Vec::with_capacity(events.len());
+    let expected_len = events.len();
+    let mut processed_events = Vec::with_capacity(expected_len);
 
     for event in events {
         let (processed, new_state) = process_event(event, state);
@@ -1094,34 +1344,137 @@ fn process_all_events<'a>(
         processed_events.push(processed);
     }
 
+    debug_assert_eq!(
+        processed_events.len(),
+        expected_len,
+        "process_event must map one event to one event: `TextLines` addresses \
+         pass-3 events by their pass-1 index"
+    );
+
     (processed_events, state)
 }
 
 const INCOMPLETE_SPAN_OPEN: &str = "<span class=\"mbr-incomplete\">";
 const INCOMPLETE_SPAN_CLOSE: &str = "</span>";
 
-/// Build a `^(?:M1|M2|...)\b` regex from `markers`. Empty markers → None
-/// (caller should skip the pass). Markers are escaped via `regex::escape`.
-pub(crate) fn build_incomplete_marker_regex(markers: &[String]) -> Option<Regex> {
-    let parts: Vec<String> = markers
-        .iter()
-        .filter(|m| !m.is_empty())
-        .map(|m| regex::escape(m))
-        .collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let pattern = format!("^(?:{})\\b", parts.join("|"));
-    Regex::new(&pattern).ok()
+/// Opening tag for one highlight, carrying the `#mbr-marker-{line}` deep-link
+/// anchor when this is the first highlight on its source line.
+///
+/// The class is written *before* the id so an assertion can match on the class
+/// prefix alone whether or not an anchor was attached.
+///
+/// The id is attached only when `line` is strictly greater than the highest line
+/// already anchored. A `>` rather than a `!=` makes a duplicate id impossible
+/// even if block order ever stopped following source order — table cells, which
+/// share a line by construction, are the case that made this matter. Later
+/// markers on the same line are still highlighted, just not linkable: duplicate
+/// ids are invalid HTML and leave `getElementById` free to pick either one.
+fn open_incomplete_span(line: Option<u32>, highest_anchored_line: &mut u32) -> Event<'static> {
+    let html = match line {
+        Some(line) if line > *highest_anchored_line => {
+            *highest_anchored_line = line;
+            CowStr::from(format!(
+                "<span class=\"mbr-incomplete\" id=\"mbr-marker-{line}\">"
+            ))
+        }
+        _ => CowStr::Borrowed(INCOMPLETE_SPAN_OPEN),
+    };
+    Event::Html(html)
 }
 
-/// Wrap inline content of blocks whose first text matches `marker_re` in
-/// `<span class="mbr-incomplete">…</span>`.
+/// Slices `text` without giving up its borrow when it has one.
 ///
-/// Eligible (innermost) blocks: `Paragraph`, `Heading{..}`, `Item`, `TableCell`.
-/// Other container tags (`BlockQuote`, `List`, `Table`, code blocks, etc.) are
-/// skipped — their inner Paragraph (or absence thereof) is what we evaluate.
-fn mark_incomplete_blocks<'a>(events: Vec<Event<'a>>, marker_re: &Regex) -> Vec<Event<'a>> {
+/// A `CowStr::Borrowed` run points straight into the parser's source, so the
+/// slice is free; a `Boxed` run (one `TextMergeWithOffset` had to concatenate,
+/// which is what smart punctuation produces) and an `Inlined` one (living inside
+/// the event value) have to be copied. Byte offsets from a regex match over
+/// valid UTF-8 always land on char boundaries, so the slice cannot panic.
+fn slice_cow<'a>(text: &CowStr<'a>, range: std::ops::Range<usize>) -> CowStr<'a> {
+    match text {
+        CowStr::Borrowed(source) => CowStr::Borrowed(&source[range]),
+        owned => CowStr::from(owned[range].to_string()),
+    }
+}
+
+/// Pushes `text`, wrapping each marker at or after `skip_before` in its own
+/// `<span class="mbr-incomplete">`.
+///
+/// `skip_before` is how a block-initial marker avoids being wrapped a second
+/// time inside the block-wide span that its own presence opened.
+fn push_marked_text<'a>(
+    output: &mut Vec<Event<'a>>,
+    text: CowStr<'a>,
+    rule: &MarkerRule,
+    skip_before: usize,
+    line: Option<u32>,
+    highest_anchored_line: &mut u32,
+) {
+    // `find_iter` yields ascending, non-overlapping ranges. Collecting an empty
+    // iterator does not allocate, so the fast path below stays free.
+    let found: Vec<std::ops::Range<usize>> = rule
+        .find_iter(&text)
+        .filter(|range| range.start >= skip_before)
+        .collect();
+
+    // Fast path, and essentially all text: nothing matched, so the run goes
+    // through untouched — no clone, no allocation, no re-escaping.
+    if found.is_empty() {
+        output.push(Event::Text(text));
+        return;
+    }
+
+    let mut at = 0usize;
+    for range in found {
+        if range.start > at {
+            output.push(Event::Text(slice_cow(&text, at..range.start)));
+        }
+        output.push(open_incomplete_span(line, highest_anchored_line));
+        at = range.end;
+        output.push(Event::Text(slice_cow(&text, range)));
+        output.push(Event::Html(CowStr::Borrowed(INCOMPLETE_SPAN_CLOSE)));
+    }
+    if at < text.len() {
+        output.push(Event::Text(slice_cow(&text, at..text.len())));
+    }
+}
+
+/// Highlights markers (TK/TODO/FIXME/XXX, or whatever `incomplete_markers`
+/// configures) in `<span class="mbr-incomplete">…</span>`, and gives the first
+/// highlight on each source line a `#mbr-marker-{line}` anchor.
+///
+/// Two shapes of highlight, deliberately:
+///
+/// * A block whose **first** text starts with a marker has its whole inline
+///   content wrapped, so `TK rewrite this paragraph.` washes the paragraph.
+///   Eligible (innermost) blocks: `Paragraph`, `Heading{..}`, `Item`,
+///   `TableCell`. Other container tags (`BlockQuote`, `List`, `Table`, code
+///   blocks, …) are skipped — their inner `Paragraph`, or its absence, is what
+///   gets evaluated.
+/// * Every **other** occurrence has just the marker word wrapped, so
+///   `The market fell 10% (source: TK).` highlights the `TK` and nothing else.
+///
+/// What counts as a marker lives in [`MarkerRule`], shared with the task
+/// scanner so that a highlighted block and an indexed marker cannot disagree.
+///
+/// # Two things this pass must not touch
+///
+/// * **Code blocks.** A fence or an indented block *inside a list item* leaves
+///   the `Item` frame open with no text seen yet, so before `code_depth` existed
+///   `-␣␣␣␣␣TK not a task` emitted `<li><span class="mbr-incomplete"><pre>…`.
+///   The old `test_incomplete_negative_code_block` missed it by only covering a
+///   top-level fence. Matching anywhere in the line would have widened that from
+///   one wrong wrap to every marker in every fenced block in every list item —
+///   and each would have been attributed to the wrong line, because code-block
+///   text is the one run that spans source newlines (see [`TextLines`]).
+/// * **Image alt text.** `html::raw_text` has an `Html(_) => {}` arm: it
+///   silently drops any injected `Event::Html`. A span emitted inside alt text
+///   would vanish from the output *and* consume that line's one permitted
+///   anchor id on the way out.
+fn mark_incomplete_blocks<'a>(
+    events: Vec<Event<'a>>,
+    rule: &MarkerRule,
+    text_lines: &TextLines,
+) -> Vec<Event<'a>> {
     struct Frame {
         start_idx: usize,
         has_seen_text: bool,
@@ -1130,9 +1483,82 @@ fn mark_incomplete_blocks<'a>(events: Vec<Event<'a>>, marker_re: &Regex) -> Vec<
 
     let mut output: Vec<Event<'a>> = Vec::with_capacity(events.len());
     let mut stack: Vec<Frame> = Vec::new();
+    let mut cursor = text_lines.cursor();
+    // Depths rather than booleans: `![a ![b](c) d](e)` nests, and a `<pre>`
+    // never should but costs nothing to survive.
+    let mut code_depth: usize = 0;
+    let mut image_depth: usize = 0;
+    // Zero, so the first line of the document can still claim an anchor.
+    let mut highest_anchored_line: u32 = 0;
 
-    for event in events {
+    // The index is the *input* position, which is what `TextLines` recorded;
+    // `output` drifts from it as spans are inserted.
+    for (index, event) in events.into_iter().enumerate() {
+        // Text is split out ahead of the dispatch below so this arm can take
+        // ownership of the `CowStr` and hand its borrow on to the slices.
+        let event = match event {
+            Event::Text(text) => {
+                // Outside every eligible block there is nothing to wrap and
+                // nowhere to hang the wrap from: frontmatter and raw HTML
+                // blocks both land here.
+                if code_depth > 0 || image_depth > 0 || stack.is_empty() {
+                    output.push(Event::Text(text));
+                    continue;
+                }
+                let line = cursor.line_at(index);
+
+                // A block-initial marker keeps the historical whole-block wash.
+                let mut skip_before = 0;
+                if let Some(top) = stack.last_mut()
+                    && !top.has_seen_text
+                {
+                    top.has_seen_text = true;
+                    let indent = text.len() - text.trim_start().len();
+                    if let Some(end) = rule.block_initial_match(text.trim_start()) {
+                        // Immediately after this frame's Start event.
+                        output.insert(
+                            top.start_idx + 1,
+                            open_incomplete_span(line, &mut highest_anchored_line),
+                        );
+                        top.marker_open = true;
+                        // The block-wide span already covers this occurrence.
+                        skip_before = indent + end;
+                    }
+                }
+
+                push_marked_text(
+                    &mut output,
+                    text,
+                    rule,
+                    skip_before,
+                    line,
+                    &mut highest_anchored_line,
+                );
+                continue;
+            }
+            other => other,
+        };
+
         match &event {
+            Event::Start(Tag::CodeBlock(_)) => {
+                code_depth += 1;
+                output.push(event);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                code_depth = code_depth.saturating_sub(1);
+                output.push(event);
+            }
+            // A media embed (`![](clip.mp4)`) has already become `Html` by now,
+            // so this only sees real `<img>`s — the ones whose inner text is
+            // consumed into an `alt` attribute.
+            Event::Start(Tag::Image { .. }) => {
+                image_depth += 1;
+                output.push(event);
+            }
+            Event::End(TagEnd::Image) => {
+                image_depth = image_depth.saturating_sub(1);
+                output.push(event);
+            }
             Event::Start(Tag::Paragraph)
             | Event::Start(Tag::Heading { .. })
             | Event::Start(Tag::Item)
@@ -1152,23 +1578,7 @@ fn mark_incomplete_blocks<'a>(events: Vec<Event<'a>>, marker_re: &Regex) -> Vec<
                 if let Some(frame) = stack.pop()
                     && frame.marker_open
                 {
-                    output.push(Event::Html(CowStr::from(INCOMPLETE_SPAN_CLOSE)));
-                }
-                output.push(event);
-            }
-            Event::Text(text) => {
-                if let Some(top) = stack.last_mut()
-                    && !top.has_seen_text
-                {
-                    top.has_seen_text = true;
-                    if marker_re.is_match(text.trim_start()) {
-                        // Insert span open immediately after this frame's Start event.
-                        output.insert(
-                            top.start_idx + 1,
-                            Event::Html(CowStr::from(INCOMPLETE_SPAN_OPEN)),
-                        );
-                        top.marker_open = true;
-                    }
+                    output.push(Event::Html(CowStr::Borrowed(INCOMPLETE_SPAN_CLOSE)));
                 }
                 output.push(event);
             }
@@ -1278,9 +1688,19 @@ pub fn render_sync(
     };
 
     // Single merged pass: collect events, extract headings with anchor IDs,
-    // detect `--- {attrs}` rule patterns, and rewrite task list items.
+    // detect `--- {attrs}` rule patterns, and rewrite task list items. As in
+    // `render_with_cache`, the marker rule is compiled first because it decides
+    // whether pass 1 records text-run source lines for pass 3.
+    let marker_rule = mark_incomplete
+        .then(|| MarkerRule::cached(incomplete_markers))
+        .flatten();
+    let mut text_lines = if marker_rule.is_some() {
+        TextLines::recording()
+    } else {
+        TextLines::disabled()
+    };
     let (events_with_ids, headings, section_attrs) =
-        collect_events_and_headings(&markdown_input, TaskMarkup::Render);
+        collect_events_and_headings(&markdown_input, TaskMarkup::Render, &mut text_lines);
 
     // Detect if the first heading is an H1
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -1313,15 +1733,10 @@ pub fn render_sync(
         wikilink_index,
     );
 
-    // Pass 3 (optional): wrap blocks starting with TK/TODO/FIXME/XXX in
-    // <span class="mbr-incomplete">…</span>. Off by default in build mode.
-    let processed_events = if mark_incomplete {
-        match build_incomplete_marker_regex(incomplete_markers) {
-            Some(re) => mark_incomplete_blocks(processed_events, &re),
-            None => processed_events,
-        }
-    } else {
-        processed_events
+    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build mode.
+    let processed_events = match &marker_rule {
+        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines),
+        None => processed_events,
     };
 
     // Generate HTML output and extract frontmatter
@@ -1375,9 +1790,14 @@ pub fn extract_outbound_links_sync(
 
     // Task markup is skipped: it rewrites text runs, never link destinations,
     // so it cannot change which links this function collects -- and this runs
-    // over every markdown file in the repository.
-    let (events_with_ids, _headings, _section_attrs) =
-        collect_events_and_headings(&markdown_input, TaskMarkup::Skip);
+    // over every markdown file in the repository. Text-line recording is off for
+    // the same reason: there is no pass 3 here, and a `LineIndex` per file in
+    // the repository would be pure waste.
+    let (events_with_ids, _headings, _section_attrs) = collect_events_and_headings(
+        &markdown_input,
+        TaskMarkup::Skip,
+        &mut TextLines::disabled(),
+    );
 
     let prefetched_oembed = collect_local_embeds(&events_with_ids);
 
@@ -1798,6 +2218,16 @@ fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> St
 /// This function is now synchronous because all async work (oembed fetching)
 /// is done in the prefetch phase. Bare URLs are looked up in the prefetched
 /// results instead of being fetched inline.
+///
+/// # Invariant
+///
+/// Exactly one event out for one event in. Arms may *rewrite* an event — a bare
+/// URL and a `{{ vid(…) }}` shortcode both turn a `Text` into an `Html`, and a
+/// media `Start(Image)` / `End(Image)` pair becomes two `Html`s — but nothing
+/// here may insert, drop or reorder. [`TextLines`] records event indices before
+/// this pass and reads them back after it, so a single inserted event would
+/// silently misattribute every marker anchor after it. A rewritten `Text` is
+/// harmless: its record simply goes unread.
 fn process_event(
     event: pulldown_cmark::Event<'_>,
     mut state: EventState,
@@ -2129,6 +2559,12 @@ mod tests {
 
     /// Render with `mark_incomplete = true` and the given marker list.
     async fn render_markdown_marked(content: &str, markers: &[&str]) -> String {
+        render_result_marked(content, markers).await.html
+    }
+
+    /// As [`render_markdown_marked`], but keeps the headings and frontmatter
+    /// alongside the HTML.
+    async fn render_result_marked(content: &str, markers: &[&str]) -> MarkdownRenderResult {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
@@ -2142,7 +2578,7 @@ mod tests {
             markdown_page_probe: None,
         };
         let owned: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
-        let result = render(
+        render(
             path,
             &root,
             0,
@@ -2155,8 +2591,7 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
-        result.html
+        .unwrap()
     }
 
     async fn render_result(content: &str) -> MarkdownRenderResult {
@@ -2785,7 +3220,7 @@ mod tests {
     #[tokio::test]
     async fn incomplete_markers_still_fire_inside_a_task() {
         let html = render_markdown_marked("- [ ] TODO: write it up #docs", &["TODO"]).await;
-        assert!(html.contains(INCOMPLETE_SPAN_OPEN), "{html}");
+        assert!(html.contains(INCOMPLETE_SPAN_PREFIX), "{html}");
         assert!(html.contains("TODO: write it up"), "{html}");
         assert!(
             html.contains(r#"<span class="mbr-task-tag">#docs</span>"#),
@@ -2793,7 +3228,10 @@ mod tests {
         );
         // One open, one close: the two passes must not interleave their spans
         // into overlapping tags.
-        assert_eq!(html.matches(INCOMPLETE_SPAN_OPEN).count(), 1, "{html}");
+        assert_eq!(incomplete_span_count(&html), 1, "{html}");
+        // Both deep links exist for the same line, and they do not collide.
+        assert!(html.contains(r#"id="mbr-task-1""#), "{html}");
+        assert!(html.contains(r#"id="mbr-marker-1""#), "{html}");
     }
 
     /// The parser is handed the *wikilink-transformed* source, not the file on
@@ -3627,87 +4065,88 @@ mod tests {
 
     const DEFAULT_MARKERS: &[&str] = &["TK", "TODO", "FIXME", "XXX"];
 
-    #[test]
-    fn test_build_incomplete_marker_regex_defaults() {
-        let markers = default_incomplete_markers_for_test();
-        let re = build_incomplete_marker_regex(&markers).expect("regex");
-        assert!(re.is_match("TK"));
-        assert!(re.is_match("TK rewrite this"));
-        assert!(re.is_match("TODO foo"));
-        assert!(re.is_match("FIXME(name)"));
-        assert!(re.is_match("XXX:"));
-        // Word boundary blocks TKTK / TODOs / Tk / lowercase.
-        assert!(!re.is_match("TKTK"));
-        assert!(!re.is_match("TODOs"));
-        assert!(!re.is_match("Tk"));
-        assert!(!re.is_match("todo"));
-        assert!(!re.is_match("Tomato"));
+    // What counts as a marker is tested against `MarkerRule` in `tasks.rs`; the
+    // tests below cover only what this module adds — which blocks get wrapped,
+    // which occurrences get wrapped, and which line each anchor claims.
+
+    /// A highlight's opening tag up to but not including its optional anchor,
+    /// so a structural assertion does not have to restate a line number.
+    const INCOMPLETE_SPAN_PREFIX: &str = "<span class=\"mbr-incomplete\"";
+
+    /// Number of highlights in `html`, anchored or not.
+    fn incomplete_span_count(html: &str) -> usize {
+        html.matches(INCOMPLETE_SPAN_PREFIX).count()
     }
 
-    #[test]
-    fn test_build_incomplete_marker_regex_empty() {
-        // Empty list → no regex (caller short-circuits).
-        let markers: Vec<String> = Vec::new();
-        assert!(build_incomplete_marker_regex(&markers).is_none());
-        // Empty strings filtered out too.
-        let markers = vec!["".to_string()];
-        assert!(build_incomplete_marker_regex(&markers).is_none());
+    /// The lines claimed by every `#mbr-marker-N` anchor in `html`, in order.
+    fn marker_anchor_lines(html: &str) -> Vec<u32> {
+        const ATTR: &str = "id=\"mbr-marker-";
+        html.match_indices(ATTR)
+            .map(|(at, _)| {
+                let rest = &html[at + ATTR.len()..];
+                let end = rest.find('"').expect("unterminated attribute");
+                rest[..end].parse().expect("numeric line")
+            })
+            .collect()
     }
 
-    #[test]
-    fn test_build_incomplete_marker_regex_escapes_metachars() {
-        // Markers containing regex metacharacters must not crash regex
-        // compilation. Without `regex::escape`, an unbalanced `(` would
-        // produce an invalid pattern and `Regex::new` would return None.
-        let markers = vec!["FOO(".to_string(), "BAR".to_string()];
-        let re = build_incomplete_marker_regex(&markers).expect("regex compiles");
-        // BAR still matches normally (word-boundary check applies).
-        assert!(re.is_match("BAR foo"));
-        // And the metachar marker doesn't break sibling markers.
-        assert!(!re.is_match("Tomato"));
-    }
-
-    fn default_incomplete_markers_for_test() -> Vec<String> {
-        DEFAULT_MARKERS.iter().map(|s| s.to_string()).collect()
+    /// `html` with every marker anchor attribute deleted, so the surrounding
+    /// markup can be asserted exactly. Anchors are checked separately with
+    /// [`marker_anchor_lines`].
+    fn without_marker_ids(html: &str) -> String {
+        const ATTR: &str = " id=\"mbr-marker-";
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(at) = rest.find(ATTR) {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at + ATTR.len()..];
+            let close = tail.find('"').expect("unterminated marker id");
+            rest = &tail[close + 1..];
+        }
+        out.push_str(rest);
+        out
     }
 
     #[tokio::test]
     async fn test_incomplete_paragraph() {
         let html = render_markdown_marked("TK rewrite this paragraph.", DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            without_marker_ids(&html).contains(r#"<p><span class="mbr-incomplete">"#),
             "Paragraph should have span as first child. Got: {html}"
         );
         assert!(html.contains("TK rewrite"), "TK text preserved: {html}");
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
     }
 
     #[tokio::test]
     async fn test_incomplete_heading() {
         let html = render_markdown_marked("## TODO finish this", DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<span class="mbr-incomplete">"#),
+            html.contains(INCOMPLETE_SPAN_PREFIX),
             "Span should be present in heading. Got: {html}"
         );
         // Span must be inside the <h2>, not wrapping it.
         assert!(html.contains("<h2"), "h2 element present: {html}");
         let h2_start = html.find("<h2").unwrap();
-        let span_start = html.find(r#"<span class="mbr-incomplete">"#).unwrap();
+        let span_start = html.find(INCOMPLETE_SPAN_PREFIX).unwrap();
         assert!(span_start > h2_start, "span should be inside h2: {html}");
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
     }
 
     #[tokio::test]
     async fn test_incomplete_tight_list_item() {
         let html = render_markdown_marked("- TK item one\n- normal item", DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<li><span class="mbr-incomplete">"#),
+            without_marker_ids(&html).contains(r#"<li><span class="mbr-incomplete">"#),
             "Span should follow <li> for tight list: {html}"
         );
         // Only the TK item is wrapped.
         assert_eq!(
-            html.matches(r#"<span class="mbr-incomplete">"#).count(),
+            incomplete_span_count(&html),
             1,
             "Only one span expected: {html}"
         );
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
     }
 
     #[tokio::test]
@@ -3716,15 +4155,17 @@ mod tests {
         // in <p>. The inner <p> is the innermost block, so the span goes there.
         let md = "- TK draft this\n\n- finished item\n";
         let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        let bare = without_marker_ids(&html);
         assert!(
-            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            bare.contains(r#"<p><span class="mbr-incomplete">"#),
             "Span should wrap inner <p> in loose list: {html}"
         );
         // The <li> itself should not have the span as a direct child.
         assert!(
-            !html.contains(r#"<li><span class="mbr-incomplete">"#),
+            !bare.contains(r#"<li><span class="mbr-incomplete">"#),
             "Loose-list <li> should not have direct span child: {html}"
         );
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
     }
 
     #[tokio::test]
@@ -3732,9 +4173,10 @@ mod tests {
         let md = "| H |\n|---|\n| TK cell |\n";
         let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<td><span class="mbr-incomplete">"#),
+            without_marker_ids(&html).contains(r#"<td><span class="mbr-incomplete">"#),
             "Span should follow <td> for incomplete cell: {html}"
         );
+        assert_eq!(marker_anchor_lines(&html), vec![3], "{html}");
     }
 
     #[tokio::test]
@@ -3843,7 +4285,7 @@ mod tests {
         // Blockquote itself is not eligible; its inner Paragraph is.
         let html = render_markdown_marked("> TK quote me", DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            without_marker_ids(&html).contains(r#"<p><span class="mbr-incomplete">"#),
             "Inner <p> should carry the span, not <blockquote>: {html}"
         );
         assert!(
@@ -3857,8 +4299,28 @@ mod tests {
         // Span goes immediately after <p>, so it wraps the <strong>.
         let html = render_markdown_marked("**TK** finish later", DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<p><span class="mbr-incomplete"><strong>TK</strong>"#),
+            without_marker_ids(&html)
+                .contains(r#"<p><span class="mbr-incomplete"><strong>TK</strong>"#),
             "Span should wrap <strong>TK</strong>: {html}"
+        );
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
+    }
+
+    /// The block-initial wrap already covers the marker that opened it, so the
+    /// per-occurrence pass must skip that occurrence. Without the skip range
+    /// `**TK** and later TK` would emit a third span nested inside the first.
+    #[tokio::test]
+    async fn block_initial_marker_inside_strong_is_not_wrapped_twice() {
+        let html = render_markdown_marked("**TK** and later TK", DEFAULT_MARKERS).await;
+        assert_eq!(
+            incomplete_span_count(&html),
+            2,
+            "block wrap plus one inline wrap, not three: {html}"
+        );
+        assert!(
+            without_marker_ids(&html)
+                .contains(r#"<p><span class="mbr-incomplete"><strong>TK</strong>"#),
+            "the block wrap must still start at <strong>: {html}"
         );
     }
 
@@ -3868,7 +4330,7 @@ mod tests {
         let html =
             render_markdown_marked("[TK](https://example.com) check this", DEFAULT_MARKERS).await;
         assert!(
-            html.contains(r#"<p><span class="mbr-incomplete"><a "#),
+            without_marker_ids(&html).contains(r#"<p><span class="mbr-incomplete"><a "#),
             "Span should wrap the link: {html}"
         );
     }
@@ -3912,15 +4374,25 @@ mod tests {
         );
     }
 
+    /// Inverted deliberately: a marker anywhere in a line is now highlighted.
+    /// Only the marker *word* is wrapped, though — the block-wide wash stays
+    /// reserved for a block that opens with one.
     #[tokio::test]
-    async fn test_incomplete_negative_mid_paragraph() {
+    async fn incomplete_mid_paragraph_highlights_the_marker_word() {
         let html =
             render_markdown_marked("This paragraph mentions TK in the middle.", DEFAULT_MARKERS)
                 .await;
         assert!(
-            !html.contains("mbr-incomplete"),
-            "Mid-paragraph TK should not match: {html}"
+            without_marker_ids(&html).contains(
+                r#"This paragraph mentions <span class="mbr-incomplete">TK</span> in the middle."#
+            ),
+            "only the marker word should be wrapped: {html}"
         );
+        assert!(
+            !without_marker_ids(&html).contains(r#"<p><span class="mbr-incomplete">"#),
+            "the block itself must not be wrapped: {html}"
+        );
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
     }
 
     #[tokio::test]
@@ -3931,6 +4403,28 @@ mod tests {
         assert!(
             !html.contains("mbr-incomplete"),
             "TK in code block should not match: {html}"
+        );
+    }
+
+    /// A code block *inside a list item* keeps the `Item` frame open with no
+    /// text seen yet, so before the `code_depth` guard the block-initial test
+    /// ran on the code's own text and wrapped the whole `<li>`. Both spellings
+    /// of "code inside a list item" are covered: the fence and the five-space
+    /// indent that CommonMark also reads as code.
+    #[tokio::test]
+    async fn marker_in_a_code_block_inside_a_list_item_is_not_highlighted() {
+        let fenced = "- ```\n  TK not a task\n  ```\n";
+        let html = render_markdown_marked(fenced, DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "fenced code in a list item must not be highlighted: {html}"
+        );
+
+        let indented = "-     TK not a task\n";
+        let html = render_markdown_marked(indented, DEFAULT_MARKERS).await;
+        assert!(
+            !html.contains("mbr-incomplete"),
+            "indented code in a list item must not be highlighted: {html}"
         );
     }
 
@@ -3958,7 +4452,7 @@ mod tests {
     async fn test_incomplete_custom_markers() {
         let html = render_markdown_marked("NOTE this draft.", &["NOTE"]).await;
         assert!(
-            html.contains(r#"<p><span class="mbr-incomplete">"#),
+            without_marker_ids(&html).contains(r#"<p><span class="mbr-incomplete">"#),
             "Custom marker NOTE should match: {html}"
         );
         // TK is not in the custom marker list now.
@@ -3977,6 +4471,317 @@ mod tests {
             !html.contains("mbr-incomplete"),
             "Empty marker list should not inject spans: {html}"
         );
+    }
+
+    // ---- markers anywhere in a line -----------------------------------------
+
+    /// The case the whole feature exists for: a marker buried in prose used to
+    /// be invisible both on the page and to the task browser.
+    #[tokio::test]
+    async fn marker_embedded_in_prose_is_highlighted() {
+        let html =
+            render_markdown_marked("The market fell 10% (source: TK).", DEFAULT_MARKERS).await;
+        assert_eq!(incomplete_span_count(&html), 1, "{html}");
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
+    }
+
+    #[tokio::test]
+    async fn several_markers_in_one_run_each_get_a_span() {
+        let html =
+            render_markdown_marked("Fix TODO then FIXME then XXX later.", DEFAULT_MARKERS).await;
+        assert_eq!(
+            incomplete_span_count(&html),
+            3,
+            "one span per occurrence: {html}"
+        );
+    }
+
+    /// The split must not drop, duplicate or re-escape the text around a marker.
+    #[tokio::test]
+    async fn text_before_and_after_a_marker_survives_intact() {
+        let html =
+            render_markdown_marked("The market fell 10% (source: TK).", DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(concat!(
+                r#"<p>The market fell 10% (source: "#,
+                r#"<span class="mbr-incomplete" id="mbr-marker-1">TK</span>).</p>"#
+            )),
+            "{html}"
+        );
+    }
+
+    /// Smart punctuation (`Options::all()`) rewrites `--` and `"` before pass 3
+    /// sees the text, so text byte offsets no longer match source byte offsets.
+    /// Anchors survive because they come from the run's *range*, never from an
+    /// offset into the run.
+    #[tokio::test]
+    async fn smart_punctuation_does_not_shift_the_anchor_line() {
+        let md = concat!(
+            "An em -- dash and \"quotes\" on line one.\n",
+            "\n",
+            "More -- dashes and \"quotes\" here.\n",
+            "\n",
+            "Now a TK appears -- after more punctuation.\n",
+        );
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert!(
+            html.contains('\u{2013}'),
+            "smart punctuation must actually have run: {html}"
+        );
+        assert_eq!(marker_anchor_lines(&html), vec![5], "{html}");
+    }
+
+    /// A `SoftBreak` terminates a text merge, so the second line is its own run
+    /// and reports its own line.
+    #[tokio::test]
+    async fn marker_in_a_soft_wrapped_paragraph_gets_its_own_line() {
+        let html = render_markdown_marked(
+            "First line of prose.\nSecond line has TK here.",
+            DEFAULT_MARKERS,
+        )
+        .await;
+        assert_eq!(marker_anchor_lines(&html), vec![2], "{html}");
+        assert!(
+            !without_marker_ids(&html).contains(r#"<p><span class="mbr-incomplete">"#),
+            "a mid-paragraph marker must not wash the block: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_after_a_hard_break_gets_its_own_line() {
+        let html = render_markdown_marked("First line.\\\nTK second.", DEFAULT_MARKERS).await;
+        assert_eq!(marker_anchor_lines(&html), vec![2], "{html}");
+        assert!(html.contains("<br />"), "hard break expected: {html}");
+    }
+
+    /// Duplicate ids are invalid HTML and leave `getElementById` free to pick
+    /// either one, so only the first highlight on a line is anchored.
+    #[tokio::test]
+    async fn two_markers_on_one_line_share_no_id() {
+        let html = render_markdown_marked("See TK here and TK there.", DEFAULT_MARKERS).await;
+        assert_eq!(incomplete_span_count(&html), 2, "{html}");
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
+    }
+
+    /// Table cells share a source line by construction, which is what made a
+    /// per-line anchor budget necessary in the first place.
+    #[tokio::test]
+    async fn two_table_cells_on_one_line_share_no_id() {
+        let md = "| A | B |\n|---|---|\n| TK a | TK b |\n";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert_eq!(incomplete_span_count(&html), 2, "{html}");
+        assert_eq!(marker_anchor_lines(&html), vec![3], "{html}");
+    }
+
+    // ---- what stays unhighlighted -------------------------------------------
+
+    /// An inline code span is `Event::Code`, never `Event::Text`, so it never
+    /// reaches the wrap.
+    #[tokio::test]
+    async fn marker_in_inline_code_is_not_highlighted() {
+        let html = render_markdown_marked("Some `TODO` here.", DEFAULT_MARKERS).await;
+        assert!(!html.contains("mbr-incomplete"), "{html}");
+        assert!(html.contains("<code>TODO</code>"), "{html}");
+    }
+
+    /// Destinations and titles are attributes on the `Start` tag, not text.
+    #[tokio::test]
+    async fn marker_in_a_link_destination_is_not_highlighted() {
+        let html = render_markdown_marked(
+            r#"See [the notes](https://example.com/TODO-list "TODO later") for context."#,
+            DEFAULT_MARKERS,
+        )
+        .await;
+        assert!(!html.contains("mbr-incomplete"), "{html}");
+        assert!(html.contains("TODO-list"), "destination preserved: {html}");
+    }
+
+    /// `html::raw_text` drops injected `Event::Html`, so a span inside alt text
+    /// would vanish *and* consume the line's one anchor. The marker after the
+    /// image must therefore still be the one that gets it.
+    #[tokio::test]
+    async fn marker_in_image_alt_text_is_not_highlighted() {
+        let html = render_markdown_marked("![TK](x.png) and TK", DEFAULT_MARKERS).await;
+        assert!(html.contains(r#"alt="TK""#), "alt text intact: {html}");
+        assert_eq!(
+            incomplete_span_count(&html),
+            1,
+            "only the marker outside the image is wrapped: {html}"
+        );
+        assert_eq!(marker_anchor_lines(&html), vec![1], "{html}");
+    }
+
+    // ---- anchors survive every pass-1 rewrite -------------------------------
+
+    /// The `--- {attrs}` rewrite pops a *recorded* `Text` and reuses its slot
+    /// for a `Rule`. If the text-line table were not truncated with the vector,
+    /// a stale record could claim the slot a later run lands in and anchor the
+    /// marker to the rule's line instead of its own.
+    #[tokio::test]
+    async fn rule_attrs_paragraph_does_not_orphan_a_text_line_record() {
+        let md = "Intro prose.\n\n--- {#intro}\n\nTK draft this section.\n";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert!(
+            html.contains(r#"id="intro""#),
+            "the rule attrs must still be applied: {html}"
+        );
+        assert_eq!(marker_anchor_lines(&html), vec![5], "{html}");
+    }
+
+    /// The hint rewrite pushes a *new* `Text` for the remainder of the line;
+    /// it has to carry the line the original run came from.
+    #[tokio::test]
+    async fn remark_hint_paragraph_carries_its_marker_line() {
+        let html = render_markdown_marked("Intro.\n\n!> TK check this\n", DEFAULT_MARKERS).await;
+        assert!(html.contains("markdown-alert-tip"), "{html}");
+        assert_eq!(marker_anchor_lines(&html), vec![3], "{html}");
+    }
+
+    /// `[-]` and `[>]` arrive glued to the display text, so pass 1 puts the
+    /// remainder back as a fresh `Text` — which must keep the line too.
+    #[tokio::test]
+    async fn extended_task_marker_carries_its_marker_line() {
+        let html = render_markdown_marked("Intro.\n\n- [-] TK abandoned\n", DEFAULT_MARKERS).await;
+        assert!(html.contains(r#"data-mbr-task-line="3""#), "{html}");
+        assert_eq!(marker_anchor_lines(&html), vec![3], "{html}");
+    }
+
+    #[tokio::test]
+    async fn crlf_line_endings_do_not_shift_marker_anchors() {
+        let html =
+            render_markdown_marked("TK one\r\n\r\nprose\r\n\r\nTK two\r\n", DEFAULT_MARKERS).await;
+        assert_eq!(marker_anchor_lines(&html), vec![1, 5], "{html}");
+    }
+
+    #[tokio::test]
+    async fn frontmatter_does_not_shift_marker_anchors() {
+        let md = "---\ntitle: TK rename later\n---\n\nTK here.\n";
+        let html = render_markdown_marked(md, DEFAULT_MARKERS).await;
+        assert_eq!(
+            incomplete_span_count(&html),
+            1,
+            "the frontmatter marker is not highlighted: {html}"
+        );
+        assert_eq!(marker_anchor_lines(&html), vec![5], "{html}");
+    }
+
+    /// Heading labels are harvested in pass 1, long before pass 3 injects any
+    /// markup, so the table of contents must stay plain text.
+    #[tokio::test]
+    async fn heading_toc_text_has_no_marker_markup() {
+        let result = render_result_marked("# TODO write the intro\n", DEFAULT_MARKERS).await;
+        assert_eq!(result.headings[0].text, "TODO write the intro");
+        assert!(
+            result.html.contains(INCOMPLETE_SPAN_PREFIX),
+            "the heading itself is still highlighted: {}",
+            result.html
+        );
+    }
+
+    /// The async and rayon entry points duplicate the whole pipeline, so they
+    /// have to be shown to agree rather than assumed to.
+    #[tokio::test]
+    async fn render_sync_and_render_agree_on_marker_anchors() {
+        let md = concat!(
+            "---\ntitle: T\n---\n\n",
+            "# TODO heading\n\n",
+            "Prose with a TK in the middle and another TK after it.\n",
+            "A soft-wrapped TK line.\n\n",
+            "- [ ] TODO: a task\n",
+            "- plain item\n\n",
+            "```\nTK in code\n```\n\n",
+            "| A | B |\n|---|---|\n| TK a | TK b |\n",
+        );
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+            current_page_url: String::new(),
+            markdown_page_probe: None,
+        };
+        let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
+
+        let async_html = render(
+            path.clone(),
+            &root,
+            0,
+            config.clone(),
+            false,
+            false,
+            HashSet::new(),
+            true,
+            &markers,
+            None,
+        )
+        .await
+        .unwrap()
+        .html;
+        let sync_html = render_sync(
+            path,
+            &root,
+            0,
+            config,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            true,
+            &markers,
+            None,
+        )
+        .unwrap()
+        .html;
+
+        assert_eq!(async_html, sync_html);
+        assert!(!marker_anchor_lines(&async_html).is_empty(), "{async_html}");
+    }
+
+    /// `TextLines` addresses pass-3 events by their pass-1 index, which is only
+    /// sound because pass 2 neither inserts nor drops.
+    #[test]
+    fn process_all_events_maps_one_event_to_one_event() {
+        let md = concat!(
+            "---\ntitle: T\n---\n\n",
+            "# Heading\n\n",
+            "Prose with a [link](other.md) and an image ![alt](pic.png).\n\n",
+            "https://youtu.be/dQw4w9WgXcQ\n\n",
+            "{{ vid(path=\"clip.mp4\") }}\n\n",
+            "- [ ] a task @due(2026-01-01)\n",
+            "- item with `code`\n\n",
+            "```rust\nfn main() {}\n```\n\n",
+            "| a | b |\n|---|---|\n| c | d |\n\n",
+            "> quote\n\n",
+            "--- {#id .cls}\n\n",
+            "!> hint\n",
+        );
+        let mut text_lines = TextLines::recording();
+        let (events, _, _) = collect_events_and_headings(md, TaskMarkup::Render, &mut text_lines);
+        let expected = events.len();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+            current_page_url: String::new(),
+            markdown_page_probe: None,
+        };
+        let (processed, _state) = process_all_events(
+            events,
+            Path::new("/tmp"),
+            Path::new("/tmp/note.md"),
+            config,
+            HashMap::new(),
+            false,
+            false,
+            HashSet::new(),
+            None,
+        );
+        assert_eq!(processed.len(), expected);
     }
 
     // Wikilink and tag link tests
@@ -4424,14 +5229,18 @@ mod tests {
         let (fenced, _, _) = collect_events_and_headings(
             "```\nhttps://example.com/in-code\n```\n",
             TaskMarkup::Skip,
+            &mut TextLines::disabled(),
         );
         assert!(
             collect_bare_urls(&fenced).is_empty(),
             "code-block URLs must not be queued for fetching"
         );
 
-        let (prose, _, _) =
-            collect_events_and_headings("https://example.com/outside\n", TaskMarkup::Skip);
+        let (prose, _, _) = collect_events_and_headings(
+            "https://example.com/outside\n",
+            TaskMarkup::Skip,
+            &mut TextLines::disabled(),
+        );
         assert_eq!(
             collect_bare_urls(&prose).len(),
             1,
@@ -4638,7 +5447,8 @@ mod tests {
         // Every URL here short-circuits in `PageInfo::new_from_url` via the
         // no-network embed path, so this exercises the bounded stream with no I/O.
         let md = "https://youtu.be/aaaaaaaaaaa\n\nhttps://youtu.be/bbbbbbbbbbb\n\nhttps://youtu.be/ccccccccccc\n";
-        let (events, _, _) = collect_events_and_headings(md, TaskMarkup::Skip);
+        let (events, _, _) =
+            collect_events_and_headings(md, TaskMarkup::Skip, &mut TextLines::disabled());
         let results = prefetch_oembed_urls(&events, 500, &None).await;
         assert_eq!(results.len(), 3);
         assert!(results.values().all(|info| info.embed_html.is_some()));
@@ -4664,6 +5474,122 @@ mod proptests {
                 .collect();
             let unique: HashSet<&String> = ids.iter().collect();
             prop_assert_eq!(unique.len(), ids.len());
+        }
+    }
+
+    // ---- incomplete-marker invariants ----------------------------------------
+
+    const PROP_MARKERS: &[&str] = &["TK", "TODO", "FIXME", "XXX"];
+
+    /// One markdown line, drawn from the constructs the marker pass has to cope
+    /// with: block-initial and mid-line markers, tables (several cells per
+    /// source line), code fences, images, inline code, tasks, hints and the
+    /// `--- {attrs}` rewrite.
+    fn line_fragment() -> impl Strategy<Value = &'static str> {
+        prop_oneof![
+            Just("TK"),
+            Just("TODO: fix this up"),
+            Just("plain prose with nothing in it"),
+            Just("some TK buried in the middle of a line"),
+            Just("two TK on one TK line"),
+            Just("- [ ] TK a task"),
+            Just("- [-] TODO abandoned"),
+            Just("# TODO heading"),
+            Just("> TK quoted"),
+            Just("| TK a | TK b |"),
+            Just("|---|---|"),
+            Just("```"),
+            Just("![TK](x.png) and TK"),
+            Just("`TK` in code and TK outside"),
+            Just("[TK](https://example.com/TODO) trailing XXX"),
+            Just("--- {#sec}"),
+            Just("!> TK hint"),
+            Just("FIXME -- with \"smart\" punctuation"),
+            Just(""),
+        ]
+    }
+
+    fn document() -> impl Strategy<Value = String> {
+        proptest::collection::vec(line_fragment(), 0..25).prop_map(|lines| {
+            let mut doc = lines.join("\n");
+            doc.push('\n');
+            doc
+        })
+    }
+
+    /// Runs passes 1 and 3 over `md`, returning the events before and after the
+    /// marker pass. Pass 2 is skipped: it is a strict 1:1 map (pinned by
+    /// `process_all_events_maps_one_event_to_one_event`), so it cannot change
+    /// which slot a text run occupies.
+    fn marked_events(md: &str) -> (Vec<Event<'_>>, Vec<Event<'_>>) {
+        let owned: Vec<String> = PROP_MARKERS.iter().map(|m| m.to_string()).collect();
+        let rule = MarkerRule::new(&owned).expect("a non-empty marker list compiles");
+        let mut text_lines = TextLines::recording();
+        let (events, _headings, _attrs) =
+            collect_events_and_headings(md, TaskMarkup::Render, &mut text_lines);
+        let marked = mark_incomplete_blocks(events.clone(), &rule, &text_lines);
+        (events, marked)
+    }
+
+    fn incomplete_opens(events: &[Event<'_>]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(event, Event::Html(html) if html.starts_with("<span class=\"mbr-incomplete\""))
+            })
+            .count()
+    }
+
+    fn span_closes(events: &[Event<'_>]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Html(html) if html.as_ref() == INCOMPLETE_SPAN_CLOSE))
+            .count()
+    }
+
+    proptest! {
+        /// Every highlight the pass opens must be closed, whatever the document
+        /// does. An unbalanced span leaks the wash over the rest of the page.
+        #[test]
+        fn marker_spans_are_always_balanced(md in document()) {
+            let (before, after) = marked_events(&md);
+            let opened = incomplete_opens(&after);
+            // Pass 1 emits `</span>` of its own for task text, so only the
+            // *growth* in closes belongs to this pass.
+            let closed = span_closes(&after) - span_closes(&before);
+            prop_assert_eq!(opened, closed);
+        }
+
+        /// Duplicate ids are invalid HTML and make `getElementById` pick an
+        /// arbitrary element, so every `mbr-` anchor in a document must be
+        /// unique — marker anchors and task anchors share one namespace and are
+        /// both deep-link targets.
+        ///
+        /// Author-supplied ids are deliberately out of scope: two `--- {#sec}`
+        /// rules really do emit two `<section id="sec">`, which is a
+        /// pre-existing property of section attributes and no business of this
+        /// pass.
+        #[test]
+        fn no_duplicate_ids(md in document()) {
+            let owned: Vec<String> = PROP_MARKERS.iter().map(|m| m.to_string()).collect();
+            let rule = MarkerRule::new(&owned).expect("a non-empty marker list compiles");
+            let mut text_lines = TextLines::recording();
+            let (events, _headings, section_attrs) =
+                collect_events_and_headings(&md, TaskMarkup::Render, &mut text_lines);
+            let marked = mark_incomplete_blocks(events, &rule, &text_lines);
+            let mut html = String::new();
+            crate::html::push_html_mbr_with_attrs(&mut html, marked.into_iter(), section_attrs);
+
+            const ATTR: &str = "id=\"mbr-";
+            let ids: Vec<&str> = html
+                .match_indices(ATTR)
+                .map(|(at, _)| {
+                    let rest = &html[at + ATTR.len()..];
+                    &rest[..rest.find('"').expect("unterminated id")]
+                })
+                .collect();
+            let unique: HashSet<&&str> = ids.iter().collect();
+            prop_assert_eq!(unique.len(), ids.len(), "duplicate id in: {}", html);
         }
     }
 }

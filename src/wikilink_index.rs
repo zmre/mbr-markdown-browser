@@ -25,9 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use papaya::HashMap as ConcurrentHashMap;
 
-use crate::relationships::{
-    AmbiguousNameReport, NoteRelInput, normalize_name, warn_ambiguous_names,
-};
+use crate::relationships::{NoteRelInput, normalize_name};
 
 /// A bare body wikilink whose name is shared by several notes.
 ///
@@ -96,9 +94,28 @@ impl WikilinkIndex {
     /// deterministically to the lexicographically-smallest URL (first insertion
     /// wins), matching [`crate::relationships`]' name resolution.
     ///
-    /// Also records which names *are* ambiguous and warns about them (capped —
-    /// see [`warn_ambiguous_names`]). Detection only: the resolution tables above
+    /// Also records which names *are* ambiguous, populating the two tables
+    /// [`Self::ambiguity_for`] reads. Detection only: the resolution tables above
     /// are built exactly as before.
+    ///
+    /// **Deliberately silent** — nothing here logs. Reporting is
+    /// [`Self::ambiguity_for`]'s job, surfaced as the per-page
+    /// `ambiguous_wikilink` entry in `errors.json`, for two reasons this function
+    /// cannot work around:
+    ///
+    /// - It is passed notes, never links, so it cannot tell a collision someone
+    ///   wrote `[[Name]]` for from one nothing in the repository references. A
+    ///   name two notes merely share is not a problem; only a *link* through it
+    ///   is. Warning from here means a repository with no wikilinks at all
+    ///   getting a screenful of warnings — on every scan, and again on every
+    ///   watcher batch and editor save.
+    /// - Ambiguity is decided per link site, not globally: a single same-folder
+    ///   owner wins outright ([`Self::resolve_wikilink`] is current-folder-first),
+    ///   so the same name is ambiguous from one page and unambiguous from its
+    ///   neighbour, and the winner depends on where the link is. Only
+    ///   [`Self::ambiguity_for`] knows the folder — a warning built from these
+    ///   tables alone would name the lexicographically-smallest URL as the
+    ///   winner and contradict the resolver.
     pub fn rebuild(&self, notes: &[NoteRelInput]) {
         let mut sorted: Vec<&NoteRelInput> = notes.iter().collect();
         sorted.sort_by(|a, b| a.url.cmp(&b.url));
@@ -107,8 +124,10 @@ impl WikilinkIndex {
         let mut by_alias: HashMap<String, String> = HashMap::new();
         let mut by_stem: HashMap<String, String> = HashMap::new();
         let mut by_dir_stem: HashMap<(String, String), String> = HashMap::new();
-        // Owner lists for ambiguity detection. `BTreeMap` so the warning order
-        // is stable; each list stays in sorted-URL order because `sorted` is.
+        // Owner lists for ambiguity detection. `BTreeMap` so a rebuild is
+        // reproducible; each list stays in sorted-URL order because `sorted` is,
+        // which is what lets `ambiguity_for` subtract the winner and report the
+        // rest in a stable order.
         let mut name_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut dir_stem_owners: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
 
@@ -159,22 +178,6 @@ impl WikilinkIndex {
 
         let ambiguous_names = retain_ambiguous(name_owners);
         let ambiguous_dir_stems = retain_ambiguous(dir_stem_owners);
-        // A same-folder stem collision is also a global stem collision, so
-        // warning from the global table alone covers both without duplicating.
-        warn_ambiguous_names(
-            "wikilink",
-            &ambiguous_names
-                .iter()
-                .filter_map(|(name, urls)| {
-                    let (winner, others) = urls.split_first()?;
-                    Some(AmbiguousNameReport {
-                        name,
-                        winner,
-                        others: others.iter().map(String::as_str).collect(),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        );
         swap_in_values(&self.ambiguous_names, ambiguous_names);
         swap_in_values(&self.ambiguous_dir_stems, ambiguous_dir_stems);
     }
@@ -764,39 +767,111 @@ mod tests {
         assert!(idx.ambiguity_for("note", "/x/y/", false).is_some());
     }
 
+    /// 2 * `count` notes, pairwise sharing a title, in distinct folders.
+    fn colliding_notes(count: usize) -> Vec<NoteRelInput> {
+        (0..count)
+            .flat_map(|i| {
+                [
+                    note(
+                        &format!("/a{i:02}/"),
+                        &format!("Dup {i:02}"),
+                        &format!("a{i:02}"),
+                        false,
+                    ),
+                    note(
+                        &format!("/b{i:02}/"),
+                        &format!("Dup {i:02}"),
+                        &format!("b{i:02}"),
+                        false,
+                    ),
+                ]
+            })
+            .collect()
+    }
+
     #[test]
-    fn ambiguity_warnings_are_capped_with_a_summary() {
-        // Detection is ungated and runs for every repository, so an ambiguous-
-        // name-heavy repo must not drown the log.
-        let mut notes = Vec::new();
-        for i in 0..25 {
-            notes.push(note(
-                &format!("/a{i:02}/"),
-                &format!("Dup {i:02}"),
-                &format!("a{i:02}"),
-                false,
-            ));
-            notes.push(note(
-                &format!("/b{i:02}/"),
-                &format!("Dup {i:02}"),
-                &format!("b{i:02}"),
-                false,
-            ));
-        }
+    fn ambiguity_detection_is_complete_and_silent() {
+        // `rebuild` detects every ambiguous name and logs none of them.
+        //
+        // Silence is the point, not an oversight. Detection is ungated and runs
+        // for every repository on every scan, watcher batch and editor save,
+        // while `rebuild` is handed *notes* and never links: it cannot tell a
+        // collision someone actually wrote `[[Dup 07]]` for from one nothing
+        // references, so a warning here fires for repositories containing no
+        // wikilinks at all. And it could not state the outcome correctly even
+        // when a link does exist — resolution is current-folder-first, so the
+        // winner depends on the linking page (see
+        // `resolution_winner_is_folder_first_not_the_smallest_url`), which is
+        // known only at the link site. That is `ambiguity_for`'s job, and its
+        // findings reach the author as the per-page `ambiguous_wikilink` entry
+        // in `errors.json`.
+        let notes = colliding_notes(25);
         let idx = WikilinkIndex::new();
         let (_built, logs) = crate::test_support::capture_tracing(|| idx.rebuild(&notes));
 
-        assert_eq!(
-            logs.matches("ambiguous wikilink name `").count(),
-            20,
-            "{logs}"
-        );
         assert!(
-            logs.contains("and 5 more ambiguous wikilink names"),
-            "{logs}"
+            !logs.to_lowercase().contains("ambiguous"),
+            "rebuild must not log about ambiguity: {logs}"
         );
-        // Detection is still complete regardless of the log cap.
-        assert!(idx.ambiguity_for("Dup 24", "/x/", false).is_some());
+        // Stronger, and the invariant that actually keeps a quiet startup: an
+        // index build is a bookkeeping pass and has nothing to say.
+        assert!(logs.is_empty(), "rebuild must not log at all: {logs}");
+
+        // Detection itself is untouched and complete — every collision, not just
+        // the first 20 that the removed log would have named.
+        for i in 0..25 {
+            let name = format!("Dup {i:02}");
+            let found = idx
+                .ambiguity_for(&name, "/x/", false)
+                .unwrap_or_else(|| panic!("`{name}` is owned by two notes"));
+            assert_eq!(found.raw, format!("[[{name}]]"));
+            assert_eq!(found.resolved_to, format!("/a{i:02}/"));
+            assert_eq!(found.candidates, vec![format!("/b{i:02}/")]);
+        }
+    }
+
+    #[test]
+    fn rebuild_is_silent_without_any_wikilink_in_the_repository() {
+        // The regression: notes sharing a name are not a problem, a *link*
+        // through a shared name is. `rebuild`'s input carries no links at all,
+        // so a repository that uses zero `[[ ]]` wikilinks must see nothing in
+        // its log no matter how many titles collide.
+        let idx = WikilinkIndex::new();
+        let (_built, logs) = crate::test_support::capture_tracing(|| {
+            idx.rebuild(&colliding_notes(3));
+        });
+        assert!(logs.is_empty(), "silent index build expected, got: {logs}");
+
+        // Rebuilding over an existing index stays silent too — this runs again
+        // on every watcher batch and every editor save.
+        let (_rebuilt, logs) = crate::test_support::capture_tracing(|| {
+            idx.rebuild(&colliding_notes(3));
+        });
+        assert!(logs.is_empty(), "silent rebuild expected, got: {logs}");
+    }
+
+    #[test]
+    fn resolution_winner_is_folder_first_not_the_smallest_url() {
+        // Why a warning built from the global owner table would have been wrong,
+        // and not merely noisy: it can only name the lexicographically-smallest
+        // URL, which is *not* who wins. `ambiguity_for_same_folder_win_is_not_
+        // ambiguous` covers the reporting side of the folder-first rule; this
+        // pins the winner itself disagreeing with the smallest URL.
+        let idx = WikilinkIndex::new();
+        idx.rebuild(&[
+            note("/a/sam/", "Sam", "sam", false),
+            note("/z/sam/", "Sam", "sam", false),
+            note("/z/other/", "Other", "other", false),
+        ]);
+
+        // From /z/other/, the sibling in /z/ wins — not /a/sam/, the smallest.
+        // Spelled `SAM` so the answer is the URL itself rather than the "default
+        // relative transform already reaches it" `None`.
+        assert_eq!(
+            idx.resolve_wikilink("SAM", "/z/other/", false),
+            Some("/z/sam/".to_string())
+        );
+        assert_eq!(idx.ambiguity_for("SAM", "/z/other/", false), None);
     }
 
     #[test]

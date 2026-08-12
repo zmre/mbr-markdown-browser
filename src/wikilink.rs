@@ -343,9 +343,9 @@ fn strip_block_markers(line: &str) -> &str {
     rest
 }
 
-/// Length of the leading run of `marker` bytes.
-fn marker_run(text: &str, marker: u8) -> usize {
-    text.bytes().take_while(|b| *b == marker).count()
+/// Length of the leading run of `delimiter` bytes.
+fn delimiter_run(text: &str, delimiter: u8) -> usize {
+    text.bytes().take_while(|b| *b == delimiter).count()
 }
 
 /// Returns the fence marker and run length when `line` (block markers already
@@ -355,7 +355,7 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
     if marker != b'`' && marker != b'~' {
         return None;
     }
-    let len = marker_run(line, marker);
+    let len = delimiter_run(line, marker);
     // A backtick info string may not contain a backtick (CommonMark), which is
     // what keeps ``code`` spans from being mistaken for fences.
     if len < 3 || (marker == b'`' && line[len..].contains('`')) {
@@ -368,7 +368,7 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
 /// times, with nothing but whitespace after the run.
 fn is_fence_close(line: &str, marker: u8, len: usize) -> bool {
     let bare = strip_block_markers(line);
-    let run = marker_run(bare, marker);
+    let run = delimiter_run(bare, marker);
     run >= len && bare[run..].trim().is_empty()
 }
 
@@ -407,7 +407,7 @@ fn push_transformed(result: &mut String, text: &str, valid_sources: &HashSet<Str
     while pos < bytes.len() {
         match bytes[pos] {
             b'`' => {
-                let run = marker_run(&text[pos..], b'`');
+                let run = delimiter_run(&text[pos..], b'`');
                 pos += run;
                 // Unclosed backticks are literal text, so scanning simply
                 // continues after them.
@@ -470,7 +470,7 @@ fn code_span_end(text: &str, open: usize) -> Option<usize> {
             b'`' => {
                 // Only an exactly equal run closes the span; longer or shorter
                 // runs are span content.
-                let run = marker_run(&text[pos..], b'`');
+                let run = delimiter_run(&text[pos..], b'`');
                 pos += run;
                 if run == open {
                     return Some(pos);
@@ -491,6 +491,281 @@ fn code_span_end(text: &str, open: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Decides whether a byte offset in a raw source line falls inside markup that
+/// pulldown-cmark would **not** emit as an `Event::Text`.
+///
+/// The consumer is the incomplete-marker scanner: a `TODO` inside a code span,
+/// a wikilink target or a link destination is not a note-to-self, it is part of
+/// the machinery of the document. Reporting one would put an untoggleable entry
+/// in the task browser pointing at a line whose rendered form shows no marker at
+/// all.
+///
+/// # Why hand-rolled and not a regex
+///
+/// Two of the four rules are not regular. A backtick span needs a
+/// *backreference* — a run of *n* backticks is closed only by a run of exactly
+/// *n*, which is why [`code_span_end`] takes the opening length as a parameter.
+/// And a link destination may contain balanced parentheses, so `](…)` needs a
+/// counter rather than a pattern. A regex could approximate both and would be
+/// wrong in exactly the cases an author notices.
+///
+/// # Usage
+///
+/// Forward-only: [`MarkupCursor::excludes`] must be called with **non-decreasing**
+/// offsets, which is what lets one left-to-right pass answer every query. That
+/// is not a burden in practice — the caller feeds it the ascending,
+/// non-overlapping match starts of a single regex pass over the same line.
+///
+/// The input is one raw source line. A line break is never markup here: the
+/// constructs that could otherwise run away are all bounded to the line.
+///
+/// # Rules
+///
+/// | At byte | Excluded |
+/// |---------|----------|
+/// | `` ` `` | the delimiters and the span content, when the run closes |
+/// | `[[`    | the wikilink *target* only, up to `\|` or `]]` |
+/// | `](`    | the link destination **and** its title |
+/// | `<`     | through the closing `>`, for autolinks and inline HTML tags |
+///
+/// Everything else is text. In particular `![alt](dest)` needs no rule of its
+/// own: the `](` case fires on the `]` that ends the alt text, so the alt stays
+/// included — it really is an `Event::Text` — and the destination is excluded.
+///
+/// Bare URLs are deliberately **not** excluded, because pulldown-cmark emits
+/// them as `Event::Text` and agreement with the renderer is the tiebreaker
+/// whenever a rule is arguable. An autolink is the one place that cuts the other
+/// way: `<https://example.com/TODO>` is emitted as `Text` too, but the angle
+/// brackets are an explicit markup delimiter and a marker inside a URL the
+/// author pasted is not a task.
+///
+/// Only ASCII bytes are ever treated as sentinels and slices are only ever taken
+/// at one, so the scan can walk bytes without splitting a multi-byte character.
+pub(crate) struct MarkupCursor<'a> {
+    line: &'a str,
+    /// How far the scan has classified. Everything before it is decided.
+    pos: usize,
+    /// The most recently found excluded range. `end` is monotonically
+    /// non-decreasing, which is what makes the query loop terminate.
+    span: std::ops::Range<usize>,
+}
+
+impl<'a> MarkupCursor<'a> {
+    /// Starts a cursor over one raw source line.
+    pub(crate) fn new(line: &'a str) -> Self {
+        Self {
+            line,
+            pos: 0,
+            span: 0..0,
+        }
+    }
+
+    /// Whether `offset` falls inside markup.
+    ///
+    /// `offset` must be greater than or equal to every offset passed before it;
+    /// an out-of-order query silently answers about the wrong region rather than
+    /// rewinding, because rewinding is what the forward-only design buys.
+    pub(crate) fn excludes(&mut self, offset: usize) -> bool {
+        // Advance until the known span could contain `offset`, or the line runs
+        // out. `next_span` always moves `pos` forward, so this terminates.
+        while self.span.end <= offset && self.pos < self.line.len() {
+            self.span = self.next_span();
+        }
+        self.span.contains(&offset)
+    }
+
+    /// Scans forward from `pos` to the next excluded range, or to the end of the
+    /// line — in which case an empty range there is returned, which no offset
+    /// into the line can contain.
+    fn next_span(&mut self) -> std::ops::Range<usize> {
+        let bytes = self.line.as_bytes();
+
+        while self.pos < bytes.len() {
+            let at = self.pos;
+            match bytes[at] {
+                b'`' => {
+                    let run = delimiter_run(&self.line[at..], b'`');
+                    // A run that closes nowhere is literal text, so only the run
+                    // itself is stepped over. Swallowing the rest of the line
+                    // instead would hide every later marker behind one stray
+                    // backtick.
+                    self.pos = at + run;
+                    if let Some(end) = code_span_end(&self.line[at + run..], run) {
+                        self.pos = at + run + end;
+                        return at..self.pos;
+                    }
+                }
+                b'[' if bytes.get(at + 1) == Some(&b'[') => {
+                    if let Some(target_end) = self.wikilink_target_end(at + 2) {
+                        // Only the target is markup. pulldown-cmark has
+                        // ENABLE_WIKILINKS on (`Options::all()`) and emits the
+                        // alias as `Text`, so the alias keeps being scanned.
+                        self.pos = target_end;
+                        return at..target_end;
+                    }
+                    self.pos = at + 2;
+                }
+                b']' if bytes.get(at + 1) == Some(&b'(') => {
+                    if let Some(end) = self.destination_end(at + 1) {
+                        self.pos = end;
+                        return at..end;
+                    }
+                    self.pos = at + 2;
+                }
+                b'<' => {
+                    if let Some(end) = self.tag_end(at) {
+                        self.pos = end;
+                        return at..end;
+                    }
+                    self.pos = at + 1;
+                }
+                // Continuation bytes of a multi-byte character land here and are
+                // stepped over one at a time, which is safe precisely because
+                // nothing above ever slices at a non-sentinel offset.
+                _ => self.pos = at + 1,
+            }
+        }
+        self.pos..self.pos
+    }
+
+    /// End of a `[[target|alias]]` target that opens at `inner_start`, or `None`
+    /// when the `]]` never arrives.
+    ///
+    /// A wikilink may not span a line break, so the search stops at one — the
+    /// same rule, for the same reason, that [`push_transformed`] enforces.
+    fn wikilink_target_end(&self, inner_start: usize) -> Option<usize> {
+        let rest = self.line.get(inner_start..)?;
+        let stop = rest.find('\n').unwrap_or(rest.len());
+        let close = inner_start + rest[..stop].find("]]")?;
+        // `|` is ASCII, so this offset is always a character boundary.
+        Some(
+            self.line[inner_start..close]
+                .find('|')
+                .map_or(close, |at| inner_start + at),
+        )
+    }
+
+    /// End of a link destination (and title) whose `(` is at `open`, or `None`
+    /// when the parentheses never balance on this line.
+    ///
+    /// An unbalanced destination is not a link at all in CommonMark, so `None`
+    /// correctly leaves the text after it visible to the scan.
+    fn destination_end(&self, open: usize) -> Option<usize> {
+        let bytes = self.line.as_bytes();
+        let mut depth = 0usize;
+        let mut at = open;
+
+        while at < bytes.len() {
+            match bytes[at] {
+                // A backslash escape hides whatever follows it, `)` included.
+                b'\\' => at += 2,
+                // A destination is an inline construct; it cannot cross a line.
+                b'\n' => return None,
+                b'(' => {
+                    depth += 1;
+                    at += 1;
+                }
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    at += 1;
+                    if depth == 0 {
+                        return Some(at);
+                    }
+                }
+                // A title. Its contents are markup too, and a `)` inside one
+                // does not close the destination.
+                b'"' | b'\'' => at = skip_delimited(bytes, at, bytes[at])?,
+                // The `<dest>` spelling, in which a bare `)` is literal.
+                b'<' => at = skip_delimited(bytes, at, b'>')?,
+                _ => at += 1,
+            }
+        }
+        None
+    }
+
+    /// End of an autolink or inline HTML tag opening at `at`, or `None` when
+    /// this `<` is just a less-than sign.
+    ///
+    /// The inner text must be non-empty, free of whitespace and of a second `<`,
+    /// and must start with a letter (a tag name or a URL scheme), `/` (a closing
+    /// tag), `!` (a comment or doctype) or `?` (a processing instruction).
+    /// Refusing whitespace is what keeps `a < b TODO > c` — prose, and text to
+    /// pulldown-cmark as well — from being read as a tag. It also declines the
+    /// attribute-bearing `<a href="x">`, which costs nothing here: the scan
+    /// simply treats that tag's bytes as text, and they contain no marker.
+    fn tag_end(&self, at: usize) -> Option<usize> {
+        let bytes = self.line.as_bytes();
+        let first = *bytes.get(at + 1)?;
+        if !(first.is_ascii_alphabetic() || matches!(first, b'/' | b'!' | b'?')) {
+            return None;
+        }
+        // Bailing on the first whitespace keeps this linear in the tag's length
+        // rather than in the line's.
+        let mut i = at + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'>' => return Some(i + 1),
+                b'<' => return None,
+                b if b.is_ascii_whitespace() => return None,
+                _ => i += 1,
+            }
+        }
+        None
+    }
+}
+
+/// Offset just past the `close` byte that ends a run starting at `at`, honouring
+/// backslash escapes and refusing to cross a line break.
+///
+/// Shared by the title (`"…"`, `'…'`) and angle-destination (`<…>`) cases of
+/// [`MarkupCursor::destination_end`], which differ only in the closing byte.
+fn skip_delimited(bytes: &[u8], at: usize, close: u8) -> Option<usize> {
+    let mut i = at + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'\n' => return None,
+            b if b == close => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// True when `line` is a link reference definition — `[label]: /destination`.
+///
+/// Its destination is never rendered, so a marker anywhere in such a line is
+/// invisible to a reader and must not become a task entry.
+///
+/// The `^` guard is load-bearing rather than defensive: `[^1]: TODO fix this` is
+/// a *footnote* definition, and everything after the colon really is
+/// `Event::Text` on the page.
+///
+/// # Known false positive
+///
+/// CommonMark says a link reference definition cannot interrupt a paragraph, so
+/// a `[a]: /b`-shaped line in the middle of one is ordinary text and this
+/// wrongly excludes it. Closing that gap needs a "was the previous line blank?"
+/// flag threaded through the whole scan, for a shape nobody writes mid-paragraph
+/// on purpose.
+pub(crate) fn is_reference_definition(line: &str) -> bool {
+    // Four columns of indent opens an indented code block instead.
+    if indent_width(line) > 3 {
+        return false;
+    }
+    let Some(rest) = strip_block_markers(line).strip_prefix('[') else {
+        return false;
+    };
+    if rest.starts_with('^') {
+        return false;
+    }
+    let Some(close) = rest.find(']') else {
+        return false;
+    };
+    // A label must have content, and the colon must follow the bracket directly.
+    !rest[..close].trim().is_empty() && rest[close + 1..].starts_with(':')
 }
 
 /// Parses the inner content of a wikilink (`Source:value`).

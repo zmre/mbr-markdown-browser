@@ -1233,6 +1233,7 @@ impl Builder {
                 // Static builds never carry the task browser: the task index
                 // reads live files, which a published site does not have.
                 tasks_enabled: false,
+                tasks_default_include: self.config.tasks_default_include,
                 title_prefix: &self.config.title_prefix,
                 title_suffix: &self.config.title_suffix,
             },
@@ -1484,6 +1485,7 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1710,6 +1712,7 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -1781,6 +1784,7 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
         );
@@ -2228,6 +2232,7 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                tasks_default_include: self.config.tasks_default_include,
                 title_affixes: None,
             },
         );
@@ -2313,6 +2318,7 @@ impl Builder {
                     graph_depth: self.config.graph_depth,
                     // The task browser needs a live server; a published site has none.
                     tasks_enabled: false,
+                    tasks_default_include: self.config.tasks_default_include,
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 },
             );

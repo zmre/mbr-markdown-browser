@@ -130,8 +130,8 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking (named frontmatter relationships) |
 | `tasks_enabled` | bool | `true` | Enable the task browser (server/GUI only). See [Task Settings](#task-settings). |
-| `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight blocks starting with TK/TODO/FIXME/XXX |
-| `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag a block as incomplete |
+| `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight TK/TODO/FIXME/XXX anywhere in a line |
+| `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag work as incomplete |
 
 ### Navigation Settings
 
@@ -227,6 +227,7 @@ the index is built by reading live files, so static builds never expose it —
 |--------|------|---------|-------------|
 | `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
 | `tasks_stamp_done` | bool | `true` | Maintain the `@done(...)` annotation when a task is toggled through `POST /.mbr/task`. Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
+| `tasks_default_include` | string | `"tasks"` | Where the panel's **Show** filter starts: `"tasks"`, `"markers"` or `"all"`. Set with `MBR_TASKS_DEFAULT_INCLUDE`; there is no CLI flag. |
 | `tasks_ignore_globs` | array | `[]` | Glob patterns whose matching files contribute nothing to the task browser. Set with `MBR_TASKS_IGNORE_GLOBS='["templates/**"]'`; there is no CLI flag. |
 
 Example:
@@ -234,6 +235,37 @@ Example:
 # .mbr/config.toml
 tasks_enabled = false
 ```
+
+**Where the Show filter starts (`tasks_default_include`):**
+
+The panel's ⚙ **Show** filter chooses between checkbox tasks, `TODO:`-style
+[incomplete markers](#incomplete-marker-highlighting), or both. This option sets
+where it starts:
+
+```toml
+# .mbr/config.toml
+tasks_default_include = "all"   # "tasks" (default), "markers", or "all"
+```
+
+The default is `"tasks"` — checkboxes only — because the two are different
+kinds of thing: a checkbox is work somebody wrote down as work, while a marker
+is a note to self left in the middle of a sentence. Reading them interleaved by
+default makes the list noisier than the task list of a repository that uses
+checkboxes properly deserves.
+
+That default costs a repository that uses **only** markers nothing, because
+**the panel widens to `all` on its own when the configured default comes back
+empty**. It does so before drawing anything, so you never see a flash of "No
+tasks match these filters", and it moves the Show control to match — the filter
+always describes what is actually on screen. The widening happens at most once
+per open, and never after you have touched the Show select yourself: an explicit
+choice sticks even when it selects nothing.
+
+Set `tasks_default_include = "all"` to start on both, in which case nothing is
+widened — there is no broader setting to fall back to.
+
+A value that is not one of the three aborts startup with a parse error naming
+the option, rather than being quietly ignored.
 
 **Excluding folders from the task browser (`tasks_ignore_globs`):**
 
@@ -536,16 +568,38 @@ link_tracking = false
 
 When disabled, the `links.json` endpoint returns 404, no link files are generated during builds, and the info panel's link sections and mini link graph don't appear.
 
-### Incomplete-Block Highlighting
+### Incomplete-Marker Highlighting
 
-mbr can highlight blocks (paragraphs, headings, list items, table cells) whose
-first text starts with an incomplete-marker like `TK`, `TODO`, `FIXME`, or
-`XXX`. Highlighted blocks are wrapped in `<span class="mbr-incomplete">…</span>`
-and styled with a yellow background and dotted orange underline.
+mbr highlights incomplete-markers like `TK`, `TODO`, `FIXME`, or `XXX` wherever
+they appear in a line. Highlights are wrapped in
+`<span class="mbr-incomplete">…</span>` and styled with a yellow background
+wash (`--mbr-incomplete-bg`).
 
-Match rule: uppercase only, word-boundary at the end of the marker. So `TK`,
-`TK:`, `TODO foo`, and `FIXME(name)` match; `Tk`, `todo`, `Tomato`, `TKTK`,
-and `TODOs` do not.
+There are two shapes of highlight:
+
+- **A block that *starts* with a marker** — a paragraph, heading, list item, or
+  table cell whose first text begins with one — has its whole content wrapped,
+  so `TK rewrite this paragraph.` washes the paragraph.
+- **Every other occurrence** has just the marker word wrapped, so
+  `The market fell 10% (source: TK).` highlights the `TK` and nothing else.
+
+Each wrapper doubles as a deep-link target: the **first** highlight on a source
+line also carries `id="mbr-marker-{line}"`, so `…/notes/draft/#mbr-marker-42`
+jumps to it. Later markers on the same line — the two cells of
+`| TK a | TK b |`, say — are still highlighted, but only one of them can hold
+the anchor, because duplicate HTML ids are invalid.
+
+Markers are **not** highlighted inside code blocks, inline code spans, image alt
+text, link destinations and titles, or YAML frontmatter.
+
+Match rule: matching is case-sensitive, and a word boundary is required on each
+side of the marker — but only on a side whose own spelling calls for one. So
+`TK`, `TK:`, `TODO foo`, and `FIXME(name)` match; `Tk`, `todo`, `Tomato`,
+`TKTK`, and `TODOs` do not. Making each boundary conditional is what lets a
+custom marker that begins or ends in punctuation work at all: `TODO:` matches
+`TODO: ship it`, and `@todo` matches at the start of a line. When two configured
+markers can both match in the same place, the longer one wins, whatever order
+they appear in `incomplete_markers`.
 
 | Mode | Default | Reason |
 |------|---------|--------|
@@ -570,8 +624,8 @@ Configuration file:
 # Force a value (overrides the per-mode default; CLI flag still wins)
 mark_incomplete = true
 
-# Customize the marker list. Markers are matched uppercase only at the
-# start of a block, with a word boundary on the right edge.
+# Customize the marker list. Matching is case-sensitive and word-boundaried;
+# see the match rule above.
 incomplete_markers = ["TK", "TODO", "FIXME", "XXX"]
 ```
 
@@ -609,8 +663,11 @@ The last three come from the relationship index and are additionally gated on
 `relationship_tracking` (`ambiguous_wikilink` excepted — wikilink resolution is
 always on). See
 [Relationships → Data problems mbr reports](../markdown/relationships/#data-problems-mbr-reports)
-for what each one means and how to fix it; all of them are also logged as `WARN`
-lines at startup, in both server and build mode.
+for what each one means and how to fix it. `relationship_cycle` and
+`ambiguous_relationship_endpoint` are also logged as `WARN` lines at startup, in
+both server and build mode; `ambiguous_wikilink` is not, because whether a shared
+name is ambiguous — and which note it resolves to — depends on the page the link
+was written on, which only this endpoint knows.
 
 The response is JSON with a stable, tagged shape:
 
@@ -1016,6 +1073,7 @@ MBR_INCOMPLETE_MARKERS='["NOTE","DRAFT"]'
 
 # Tasks
 MBR_TASKS_ENABLED=false
+MBR_TASKS_DEFAULT_INCLUDE=all  # where the panel's Show filter starts
 MBR_TASKS_IGNORE_GLOBS='["templates/**","**/archive/**"]'  # kept out of the task browser
 
 # Editing
