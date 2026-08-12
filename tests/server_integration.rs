@@ -1306,6 +1306,61 @@ async fn test_errors_json_stays_silent_for_canonical_links() {
     );
 }
 
+/// Regression: `NonCanonical` was applied to everything the resolver did not
+/// call a static file, so a link to a directory listing, a tag page or a tag
+/// source index without a trailing slash was reported `broken_internal_link` —
+/// while the same URL served 200 in place, with no redirect.
+///
+/// The test asserts both halves, because "reported broken" is only a defect in
+/// combination with "actually serves": each target is fetched without following
+/// redirects and must answer 200 on the exact slashless URL that was flagged.
+#[tokio::test]
+async fn test_errors_json_ignores_slashless_directory_and_tag_links() {
+    let repo = TestRepo::new();
+    // Raw hrefs, so the link transform cannot quietly rewrite them; this is the
+    // spelling a hand-authored nav or an absolute link produces.
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n<a href=\"/gallery\">directory</a>\n\n\
+         <a href=\"/tags/rust\">tag page</a>\n\n\
+         <a href=\"/tags\">tag index</a>\n",
+    );
+    // `gallery/` has no index file, so it resolves to a DirectoryListing.
+    repo.create_markdown("gallery/one.md", "# One");
+    repo.create_markdown("tagged.md", "---\ntags: [rust]\n---\n\n# Tagged");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    for path in ["/gallery", "/tags/rust", "/tags"] {
+        assert_eq!(
+            server.get_no_redirect(path).await.status(),
+            200,
+            "{path} must serve in place — not even a redirect repairs a spelling \
+             that was never wrong, which is what makes flagging it a false positive"
+        );
+    }
+
+    let json: serde_json::Value = server
+        .get("/docs/guide/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    let targets: Vec<&str> = errors
+        .iter()
+        .filter(|e| e["type"] == "broken_internal_link")
+        .filter_map(|e| e["target"].as_str())
+        .collect();
+
+    assert!(
+        targets.is_empty(),
+        "directory, tag page and tag index links are canonical however they are \
+         spelled, but these were reported: {targets:?}"
+    );
+}
+
 // ==================== Backlink Resolution Tests ====================
 
 /// Regression for the double-compensated backlink target. `docs/beta.md` is
