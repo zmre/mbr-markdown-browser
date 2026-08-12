@@ -26,8 +26,9 @@ These are pulldown-cmark's built-in extensions:
 | [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
 
 When several notes answer to one wikilink name, mbr picks the first
-(lexicographically smallest URL) and reports the ambiguity — in the startup log
-and in the page-problems panel. See
+(lexicographically smallest URL) and reports the ambiguity in the page-problems
+panel of the page containing the link — the only place that can say which note
+*that* link reached, since resolution is current-folder first. See
 [Data problems mbr reports](relationships/#data-problems-mbr-reports).
 
 ## YAML Frontmatter

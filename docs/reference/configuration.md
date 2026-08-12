@@ -631,8 +631,11 @@ The last three come from the relationship index and are additionally gated on
 `relationship_tracking` (`ambiguous_wikilink` excepted — wikilink resolution is
 always on). See
 [Relationships → Data problems mbr reports](../markdown/relationships/#data-problems-mbr-reports)
-for what each one means and how to fix it; all of them are also logged as `WARN`
-lines at startup, in both server and build mode.
+for what each one means and how to fix it. `relationship_cycle` and
+`ambiguous_relationship_endpoint` are also logged as `WARN` lines at startup, in
+both server and build mode; `ambiguous_wikilink` is not, because whether a shared
+name is ambiguous — and which note it resolves to — depends on the page the link
+was written on, which only this endpoint knows.
 
 The response is JSON with a stable, tagged shape:
 

@@ -429,7 +429,11 @@ attaching an edge to the wrong namesake.
 Two notes answering to one name — a John Doe Sr and a John Doe Jr, a maiden name
 that is also someone else's title. mbr resolves these first-wins (smallest URL)
 and always has; what is new is that it says so, for both relationship endpoints
-and body `[[Wikilinks]]`:
+and body `[[Wikilinks]]`.
+
+Both appear in the page-problems panel. Relationship endpoints additionally warn
+at startup, because a relationship is declared in a note's frontmatter and mbr
+reads every one of them while indexing:
 
 ```text
 WARN ambiguous relationship endpoint name `[[john doe]]`: resolved to
@@ -437,6 +441,14 @@ WARN ambiguous relationship endpoint name `[[john doe]]`: resolved to
      first — rename a note, give it a distinguishing `aliases:` entry, or name
      the file explicitly to choose
 ```
+
+Wikilinks are reported **only** on the page containing the link, never in the
+log. Two notes sharing a name is not itself a problem — a link written through
+that name is — and the index has no way to know which shared names anything
+links to. It also cannot know the answer: wikilinks resolve **current-folder
+first**, so `[[Sam]]` next to a `Sam.md` is unambiguous however many other Sams
+the repository holds, and elsewhere it resolves to a different note entirely.
+Which one you got depends on the page, so that is where it is reported.
 
 To disambiguate, pick any of:
 
@@ -450,8 +462,9 @@ endpoint; a wikilink problem on the page that **contains** the link. Namesakes
 that merely share a name and declare nothing are not flagged.
 
 Genealogy repositories can have dozens of shared names, so the startup log shows
-at most 20 individual warnings followed by a one-line summary of the rest. The
-page-problems panel is never truncated — each page always lists all of its own.
+at most 20 individual endpoint warnings followed by a one-line summary of the
+rest. The page-problems panel is never truncated — each page always lists all of
+its own.
 
 ### Frontmatter parse errors
 
