@@ -168,6 +168,14 @@ report three kinds of problem — a target that does not exist, a page link
 missing its trailing slash, and a `../` chain that escapes the repository root
 (which browsers silently clamp).
 
+Links into mbr's own `/.mbr/` namespace are skipped in server/GUI mode: the
+media viewers (`/.mbr/videos/?path=…` and friends) and the JSON endpoints are
+axum routes with no file behind them, and `/.mbr/theme.css`-style assets fall
+back to the compiled-in defaults when the repository has no `.mbr/` folder. The
+path resolver never sees any of it, so its verdict would be a 404 claim about a
+URL that serves 200. A static build has no such gap — it writes that whole tree
+itself, so those files are checked like any other.
+
 ## Design Decisions
 
 ### On-the-Fly Rendering

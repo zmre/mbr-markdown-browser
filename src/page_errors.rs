@@ -190,6 +190,38 @@ enum LinkDefect {
     NonCanonical,
 }
 
+/// URL prefix mbr reserves for its own endpoints and assets.
+const MBR_URL_PREFIX: &str = "/.mbr/";
+
+/// Whether a resolved site URL addresses mbr's own namespace rather than the
+/// markdown repository.
+///
+/// Nothing under `/.mbr/` goes through [`resolve_request_path`]. In server mode
+/// axum answers it from explicit routes registered *before* the catch-all: the
+/// four media viewers (`/.mbr/videos/?path=…`, `pdfs`, `audio`, `images`), the
+/// JSON endpoints (`site.json`, `search`, `tasks`, …), and the asset route that
+/// serves the repository's `.mbr/` folder *falling back to compiled-in
+/// defaults*. In a static build `src/build.rs` writes that whole tree itself.
+///
+/// So the resolver has no opinion worth having here, and asking it produces
+/// `NotFound` for URLs that serve 200 — the checker contradicting its own
+/// server, which is the one failure this module is built to make impossible.
+/// Two independent ways it happens today:
+///
+/// - `/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4` — the viewer is a route, and
+///   `base_dir/.mbr/videos` is not a file or directory anywhere.
+/// - `/.mbr/theme.css` on a repo with no `.mbr/` folder at all — served from the
+///   binary, absent from disk.
+///
+/// The trade is deliberate: a link to a genuinely missing `.mbr/` asset is no
+/// longer reported. Silence on a namespace whose truth lives in the router and
+/// the binary beats a 404 claim about a URL that works.
+fn is_mbr_namespace_url(absolute_url: &str) -> bool {
+    // `resolve_relative_url_checked` normalizes every non-root result to a
+    // trailing slash, so bare `/.mbr` arrives here as `/.mbr/`.
+    absolute_url.starts_with(MBR_URL_PREFIX)
+}
+
 /// Judges one **already-emitted** href exactly as a browser would.
 ///
 /// The distinction from validating the *authored* markdown destination is the
@@ -222,6 +254,11 @@ enum LinkDefect {
 /// whether or not the base URL ends in `/`, so there is no next-click damage to
 /// warn about. [`ResolvedPath::Redirect`] is likewise safe: the browser is sent
 /// to the canonical URL before it resolves anything.
+///
+/// # `/.mbr/` is not the resolver's to judge
+///
+/// See [`is_mbr_namespace_url`]. Those URLs are answered by explicit routes, not
+/// by path resolution, so the resolver's verdict on them means nothing.
 fn classify_emitted_href(
     href: &str,
     resolver_config: &PathResolverConfig,
@@ -253,6 +290,12 @@ fn classify_emitted_href(
     let Some(absolute_url) = resolve_relative_url_checked(page_url, path_part, true) else {
         return Some(LinkDefect::EscapesRoot);
     };
+
+    // Judged *after* relative resolution, so `../../.mbr/videos/` is recognized
+    // as readily as the site-absolute spelling authors actually write.
+    if is_mbr_namespace_url(&absolute_url) {
+        return None;
+    }
 
     // Normalize (percent-decode, trim slashes) and resolve through the same
     // pipeline a live HTTP request hits, so this can never disagree with what
@@ -1072,6 +1115,60 @@ mod tests {
         "#;
         let errs = validate_rendered_links(html, &cfg, "/docs/guide/");
         assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
+    }
+
+    /// Regression: a page listing its media linked every file through the
+    /// viewer endpoint (`/.mbr/videos/?path=…`), and every one of those working
+    /// links was reported broken. The viewer is an axum route; nothing named
+    /// `.mbr/videos` exists on disk, so the resolver answered `NotFound` for a
+    /// URL that serves 200.
+    #[test]
+    fn media_viewer_links_are_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"
+            <a href="/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4">demo.mp4</a>
+            <a href="/.mbr/pdfs/?path=%2Fdocs%2Fpaper.pdf">paper.pdf</a>
+            <a href="/.mbr/audio/?path=%2Fmusic%2Fsong.mp3">song.mp3</a>
+            <a href="/.mbr/images/?path=%2Fimages%2Fphoto.jpg">photo.jpg</a>
+        "#;
+        let errs = rendered_link_errors(html, &base, "/docs/guide/");
+        assert!(
+            errs.is_empty(),
+            "media viewer endpoints are routes, not files: {errs:?}"
+        );
+    }
+
+    /// The rest of the namespace, including the relative spelling and the
+    /// compiled-in assets that exist in the binary rather than on disk.
+    #[test]
+    fn mbr_namespace_links_are_ignored() {
+        let (_guard, base) = rendered_link_setup();
+        // `rendered_link_setup` creates no `.mbr/` folder, which is the common
+        // case: these are served from compiled-in defaults.
+        let html = r#"
+            <a href="/.mbr/site.json">site index</a>
+            <a href="/.mbr/theme.css">theme</a>
+            <a href="../../.mbr/videos/?path=%2Fvideos%2Fdemo.mp4">relative viewer</a>
+        "#;
+        let errs = rendered_link_errors(html, &base, "/docs/guide/");
+        assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
+    }
+
+    /// The exclusion is the `/.mbr/` namespace, not "anything starting with a
+    /// dot" and not a substring match — a repository directory that merely
+    /// looks similar is still checked.
+    #[test]
+    fn lookalike_paths_are_still_checked() {
+        let (_guard, base) = rendered_link_setup();
+        let html = r#"
+            <a href="/.mbrx/gone/">not the namespace</a>
+            <a href="/docs/.mbr/gone/">not at the root</a>
+        "#;
+        assert_eq!(
+            rendered_link_errors(html, &base, "/docs/guide/").len(),
+            2,
+            "only the site-root `/.mbr/` prefix is mbr's"
+        );
     }
 
     /// The narrowing must not reach the defect the variant was added for: a

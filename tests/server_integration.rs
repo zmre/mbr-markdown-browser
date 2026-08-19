@@ -1390,6 +1390,72 @@ async fn test_errors_json_ignores_slashless_directory_and_tag_links() {
     );
 }
 
+/// Regression: a page whose body linked its media through the viewer endpoints
+/// had every one of those links reported `broken_internal_link`, while each URL
+/// served the viewer perfectly. `/.mbr/*` is answered by axum routes, not by
+/// `resolve_request_path`, so the resolver's `NotFound` verdict on
+/// `.mbr/videos` said nothing about whether the link works.
+///
+/// Asserts both halves — the URLs serve 200 *and* nothing is reported — because
+/// "reported broken" is only a defect in combination with "actually serves".
+#[tokio::test]
+async fn test_errors_json_ignores_media_viewer_links() {
+    let repo = TestRepo::new();
+    repo.create_static_file("videos/demo.mp4", b"\x00\x00\x00\x18ftypmp42");
+    repo.create_static_file("images/photo.jpg", b"\xff\xd8\xff\xe0");
+    // Markdown syntax for the viewer links, because that is how a generated
+    // media index is authored and it puts the link transform in the loop; a raw
+    // href for the asset, the spelling hand-written navigation uses.
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n\
+         [demo](/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4)\n\n\
+         [photo](/.mbr/images/?path=%2Fimages%2Fphoto.jpg)\n\n\
+         <a href=\"/.mbr/site.json\">site index</a>\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // The transform must leave these alone: an href it rewrote would be a
+    // different bug wearing the same symptom.
+    let html = server.get_text("/docs/guide/").await;
+    assert_html_contains(&html, "href=\"/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4\"");
+    assert_html_contains(&html, "href=\"/.mbr/images/?path=%2Fimages%2Fphoto.jpg\"");
+
+    for path in [
+        "/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4",
+        "/.mbr/images/?path=%2Fimages%2Fphoto.jpg",
+        "/.mbr/site.json",
+    ] {
+        assert_eq!(
+            server.get_no_redirect(path).await.status(),
+            200,
+            "{path} must serve — flagging a working URL is the whole bug"
+        );
+    }
+
+    let json: serde_json::Value = server
+        .get("/docs/guide/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let targets: Vec<&str> = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "broken_internal_link")
+        .filter_map(|e| e["target"].as_str())
+        .collect();
+
+    assert!(
+        targets.is_empty(),
+        "`/.mbr/` is mbr's own namespace and is not the resolver's to judge, \
+         but these were reported: {targets:?}"
+    );
+}
+
 // ==================== Backlink Resolution Tests ====================
 
 /// Regression for the double-compensated backlink target. `docs/beta.md` is
