@@ -34,6 +34,26 @@ interface WindowWithMermaid extends Window {
   }
 }
 
+/** Shared mermaid.initialize() options, themed by color-scheme preference. */
+function mermaidInitOptions(prefersDark: boolean): MermaidConfig {
+  return {
+    startOnLoad: false,
+    theme: prefersDark ? 'dark' : 'default',
+    // Diagram source is whatever markdown the repo happens to contain, so pin
+    // the sanitizer level rather than inheriting mermaid's implicit default
+    // (currently 'strict', but that is a config default that could change in
+    // a future major version).
+    //
+    // 'strict' runs every label through DOMPurify and disables `click`/
+    // callback directives, while still allowing the `<br/>` line breaks the
+    // diagrams in docs/ rely on. The one stricter level, 'sandbox', re-hosts
+    // each diagram in a `data:` URL iframe: that HTML-escapes label markup,
+    // drops the page theme/CSS and breaks in-diagram links, so it is not
+    // usable here.
+    securityLevel: 'strict',
+  }
+}
+
 @customElement('mbr-mermaid')
 export class MbrMermaidElement extends LitElement {
   private _initialized = false
@@ -64,27 +84,45 @@ export class MbrMermaidElement extends LitElement {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
     const mermaid = (window as WindowWithMermaid).mermaid
 
-    mermaid?.initialize({
-      startOnLoad: false,
-      theme: prefersDark ? 'dark' : 'default',
-      // Diagram source is whatever markdown the repo happens to contain, so pin
-      // the sanitizer level rather than inheriting mermaid's implicit default
-      // (currently 'strict', but that is a config default that could change in
-      // a future major version).
-      //
-      // 'strict' runs every label through DOMPurify and disables `click`/
-      // callback directives, while still allowing the `<br/>` line breaks the
-      // diagrams in docs/ rely on. The one stricter level, 'sandbox', re-hosts
-      // each diagram in a `data:` URL iframe: that HTML-escapes label markup,
-      // drops the page theme/CSS and breaks in-diagram links, so it is not
-      // usable here.
-      securityLevel: 'strict',
-    })
+    // Snapshot each block's outerHTML *before* mermaid mutates it in place, so
+    // a print re-render (see below) can rebuild an unprocessed element from
+    // markup rather than needing mermaid's own re-run/`data-processed` guard
+    // semantics, which are not something this component can rely on.
+    const originalBlocks = Array.from(mermaidBlocks) as HTMLElement[]
+    const snapshots = originalBlocks.map((el) => el.outerHTML)
+
+    mermaid?.initialize(mermaidInitOptions(prefersDark))
 
     // Manually render the diagrams we found
     mermaid?.run({
-      nodes: Array.from(mermaidBlocks) as HTMLElement[]
+      nodes: originalBlocks,
     })
+
+    // Mermaid bakes its theme's colors into the rendered SVG once, so a
+    // prefers-color-scheme: dark render never gets light on paper from CSS
+    // alone -- unlike the rest of the page, which pico already keeps light on
+    // paper via `only screen` gating (see theme.css). Re-render in the light
+    // theme just before printing and restore dark after. Skipped entirely for
+    // light-preference users: there is nothing to swap.
+    if (prefersDark) {
+      let currentElements = originalBlocks
+
+      const rerender = (rerenderPrefersDark: boolean): void => {
+        const freshElements = snapshots.map((html) => {
+          const container = document.createElement('div')
+          container.innerHTML = html
+          return container.firstElementChild as HTMLElement
+        })
+        currentElements.forEach((el, i) => el.replaceWith(freshElements[i]))
+        currentElements = freshElements
+
+        mermaid?.initialize(mermaidInitOptions(rerenderPrefersDark))
+        mermaid?.run({ nodes: freshElements })
+      }
+
+      window.addEventListener('beforeprint', () => rerender(false))
+      window.addEventListener('afterprint', () => rerender(true))
+    }
   }
 
   // This component renders nothing - it only loads resources

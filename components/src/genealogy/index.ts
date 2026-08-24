@@ -89,7 +89,7 @@ const BASE_CSS = `
   --mbr-gen-focus-fill: #ffe0b2;
 }
 
-@media (prefers-color-scheme: dark) {
+@media only screen and (prefers-color-scheme: dark) {
   .mbr-genealogy-root {
     --mbr-gen-male: #64b5f6;
     --mbr-gen-female: #f48fb1;

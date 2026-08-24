@@ -290,9 +290,13 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     if (active) {
       // A real Selection as well: free, matches native behaviour, and it is the
       // whole fallback when ::highlight() is unsupported or a custom template
-      // dropped theme.css.
+      // dropped theme.css. WebKit blurs whatever was focused when the document
+      // selection changes outside it, which would otherwise steal focus from
+      // the input mid-keystroke on every settled scan.
+      const hadFocus = this.shadowRoot?.activeElement === this._input;
       this._selectRange(active);
       scrollRangeIntoView(active, this._barHeight());
+      if (hadFocus) this._input?.focus();
     }
   }
 
