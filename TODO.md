@@ -10,15 +10,7 @@
   * [ ] Edit-mode support for structured person data: a friendlier way to view/edit the person frontmatter (born, died, born_place, gender, aliases, relationships) than hand-editing raw YAML in the in-browser editor — e.g. a small form for the known fields.
   * [ ] Wire the editor to the person `image` frontmatter field — pick/replace the portrait. Image upload itself is done (`editor-crepe.ts` `uploadFile` → `POST /.mbr/upload`, reachable from the upload button, drag-drop and paste), but every result path targets a ProseMirror body node; nothing writes a frontmatter key, so the portrait is still set by hand-typing `image:` into the raw YAML textarea.
 
-* **Tasks** (see [docs](docs/markdown/tasks.md))
-  * [x] Scan for `TODO:` / `FIXME:` style markers as well as markdown checkboxes @done(2026-08-11). Built on the existing `incomplete_markers` list rather than a second one. "A task with no checkbox to toggle" resolved as: a read-only pseudo-task, always open/normal-priority/undated, `text` the whole source line verbatim, category mode only, never counted in a note's progress, and gated on the same `mark_incomplete` that drives highlighting — because the `#mbr-marker-{line}` deep-link anchor is emitted by the highlighting pass. Markers are matched **anywhere** in a line (`(source: TK)`), excluding inline code, wikilink targets, link destinations, code fences and frontmatter. `POST /.mbr/tasks` gained an `include` filter (`all`/`tasks`/`markers`). Note this also changed *rendering*: a mid-line marker now gets the marker word wrapped, where before only block-initial markers were highlighted.
-    * [ ] Markers are deliberately **not** scanned in non-markdown files — mbr is a markdown browser, not a code browser. Revisit only if someone asks.
-    * [ ] Marker `text` is unbounded by line length (`MAX_SCAN_BYTES` is 4 MB and `limit` bounds only what is *returned*, not what is held). Truncating at ~300 chars on a `char_indices` boundary is cheap insurance if a repo with very long lines ever shows up.
-    * [ ] A marker inside an HTML block, or in a code span that wraps a line break, is indexed even though the renderer does not highlight it — the line scanner cannot see either. Documented in `find_marker_outside_markup`; acceptable.
-
-* [ ] Should we allow tabs for viewing multiple markdown files in one session (gui)?
 * [ ] CriticMarkup support?
-* [ ] Use light background default and light mode when printing. The print stylesheet itself is done (`theme.css` `@media print`, documented in docs/customization/themes.md), but it never forces a light color scheme — colors still follow the page theme and theme.css just leaves a "use light mode" tip for the user.
 * [ ] Export to PDF
   * _After research, my options here are pretty ugly. I don't want to compile in chromium or anything and don't want to rely on it being installed in a common place, either. Current browser widget I use doesn't give me a print to pdf option. Need to look for a reasonable way to make this happen cross platform with reliable output._
   * Start with the current page as an option.

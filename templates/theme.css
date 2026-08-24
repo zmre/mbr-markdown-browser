@@ -1391,8 +1391,14 @@ main dl > dd:focus-within ~ dt ~ dd {
   }
 
   /* Reduce font size (~40% smaller than base) */
+  /* `color-scheme: light` is defense-in-depth, not a fix: pico's base colors
+   * are already light on paper because its dark override is gated on
+   * `screen` (see the "Dark Mode Overrides" `only screen` idiom above). This
+   * just makes that intent explicit and nudges native UI (form controls,
+   * scrollbars) light. */
   :root {
     --pico-font-size: 62.5%;
+    color-scheme: light;
   }
 
   /* The paper margins live HERE, not on `@page` -- see the note by the `@page`

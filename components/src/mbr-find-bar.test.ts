@@ -146,6 +146,26 @@ describe('MbrFindBarElement searching', () => {
     expect(registry.get('mbr-find-active')?.size).toBe(1)
   })
 
+  it('keeps focus in the input when a settled scan changes the document selection', async () => {
+    // WebKit blurs whatever was focused when window.getSelection() changes
+    // outside it. Simulate that so a settled scan mid-keystroke cannot regress
+    // to stealing focus from the input.
+    const realAddRange = Selection.prototype.addRange
+    vi.spyOn(Selection.prototype, 'addRange').mockImplementation(function (this: Selection, range: Range) {
+      realAddRange.call(this, range)
+      const active = bar.shadowRoot?.activeElement as HTMLElement | null
+      active?.blur()
+    })
+
+    const input = bar.shadowRoot!.querySelector('#find-input') as HTMLInputElement
+    input.focus()
+    expect(bar.shadowRoot?.activeElement).toBe(input)
+
+    await type('alpha')
+
+    expect(bar.shadowRoot?.activeElement).toBe(input)
+  })
+
   it('honours the case-sensitivity toggle', async () => {
     await type('GUIDE')
     expect(status()).toBe('1 of 1')

@@ -424,8 +424,12 @@ long document and only ever print from Chrome, you can put them back:
 
 ### Best results
 
-For best results when printing, use light mode and enable "Print backgrounds"
-in the browser's print dialog.
+Printing always renders in light mode, regardless of the page's or OS's
+dark-mode preference — the base page, the genealogy chart and mermaid diagrams
+all switch to their light colors for the printed output. Still enable "Print
+backgrounds" in the browser's print dialog: browsers won't paint background
+fills and colors without it (for example, the genealogy family chart's card
+fills).
 
 ## Dark Mode
 
