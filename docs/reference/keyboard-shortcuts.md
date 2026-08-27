@@ -152,3 +152,39 @@ In GUI mode (`mbr -g`), standard macOS shortcuts are available:
 | `Cmd+Q` | Quit application |
 
 Standard Edit menu shortcuts (Cut, Copy, Paste, Undo, Redo, Select All) work as expected in text fields.
+
+## Linux GUI Mode
+
+In GUI mode (`mbr -g`) on Linux the menu bar is **hidden by default** — it is a
+`GtkMenuBar` drawn inside the window, which no modern GTK application of this shape
+shows, and a tiling Wayland compositor has no global menu to move it to.
+
+Every shortcut below works whether or not the bar is on screen. GTK will not activate an
+accelerator belonging to a hidden menu item, so mbr answers these keys itself while the
+bar is hidden and hands them back to GTK when it is shown — one route at a time, so a
+key never fires twice.
+
+| Key | Action |
+|-----|--------|
+| `F10` | Show / hide the menu bar |
+| `Ctrl+O` | Open folder |
+| `Ctrl+R` | Reload page |
+| `Ctrl+Shift+P` | Print |
+| `Ctrl+F` | Find in page |
+| `F3` / `Shift+F3` | Find next / previous |
+| `Alt+←` / `Alt+→` | History back / forward |
+| `Ctrl+Shift+I` | Toggle developer tools |
+| `Ctrl+W` / `Ctrl+Q` | Quit |
+
+Editing keys (`Ctrl+C`, `Ctrl+V`, `Ctrl+X`, `Ctrl+Z`, `Ctrl+A`) are handled by WebKit
+inside the page and never depended on the menu bar.
+
+Print is `Ctrl+Shift+P`, not `Ctrl+P`: plain `Ctrl+P` is "previous item" in mbr's own
+lists (paired with `Ctrl+N`), and a native accelerator would take it from the page.
+
+Set [`gui_menu_bar`](configuration.md) to `"always"` to start with the bar visible, or
+`"never"` to turn it off for good (`F10` then does nothing).
+
+Because mbr claims `F10`, GTK's own "F10 moves keyboard focus into the menu bar"
+behaviour is off in this window. The bar is still usable with the pointer, and every
+item has its own accelerator.

@@ -415,6 +415,56 @@
       # Shared environment variables for builds
       # All builds use static ffmpeg — no FFMPEG_DIR (which forces build.rs to skip
       # pkg-config). Instead, PKG_CONFIG_PATH lets ffmpeg-sys-next discover our static libs.
+      # EGL fallback for a Nix-built GUI on a non-NixOS host.
+      #
+      # WebKitGTK 2.52's web process calls `eglGetDisplay` during page creation
+      # and `CRASH()`es outright if it comes back `EGL_NO_DISPLAY` -- there is no
+      # software path and no environment variable that opts out
+      # (WEBKIT_DISABLE_DMABUF_RENDERER and WEBKIT_DISABLE_COMPOSITING_MODE were
+      # both tried; the abort is in `initializePlatformDisplayIfNeeded`, upstream
+      # of either). So the display has to exist.
+      #
+      # Nix's libglvnd looks for EGL vendor ICDs in, in order,
+      # /run/opengl-driver/share/glvnd/egl_vendor.d, /etc/glvnd/egl_vendor.d and
+      # /usr/share/glvnd/egl_vendor.d. On NixOS the first is the system driver
+      # and everything works. On Arch (and any other non-NixOS host) only the
+      # third exists, and the vendor it names cannot be loaded from a Nix process
+      # -- `/usr/lib/libEGL_mesa.so.0` needs the host's `libgallium-*.so`, which
+      # is not on a Nix binary's search path and could not safely be put there
+      # (it is built against a different glibc). glvnd then finds no vendor at
+      # all, `eglGetDisplay` returns EGL_NO_DISPLAY with EGL_BAD_PARAMETER, and
+      # the web process aborts before the first paint.
+      #
+      # So: append nixpkgs' own Mesa as a last-resort vendor. It is *appended*,
+      # never substituted -- the host's driver still wins wherever there is one,
+      # which keeps NixOS (and nixGL, which exports these same variables) on the
+      # exact driver it was going to use.
+      #
+      # Cost: ~805 MiB of extra closure on a host that has no Mesa in its store,
+      # most of it llvm, which every Gallium driver links. On NixOS it is
+      # near-zero, because the system already depends on this Mesa.
+      glvndVendorDefaults =
+        "/run/opengl-driver/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d";
+      mesaEglVendorDir = "${pkgs.mesa}/share/glvnd/egl_vendor.d";
+      mesaDriDir = "${pkgs.mesa}/lib/dri";
+
+      # Same story one layer down: with an EGL display in hand, WebKit's DMA-BUF
+      # renderer asks gbm for buffers, and Nix's mesa-libgbm looks for its backend
+      # in `/run/opengl-driver/lib/gbm` alone --
+      #
+      #   MESA-LOADER: failed to open dri: /run/opengl-driver/lib/gbm/dri_gbm.so
+      #
+      # after which rendering falls back to a slower path. Not fatal, which is why
+      # it only became visible once the abort above was fixed.
+      #
+      # `GBM_BACKENDS_PATH` is colon-separated (verified: adding the store path
+      # after the default silences the message and keeps the host's backend
+      # first), so the same append-never-substitute rule applies. That ordering
+      # matters more here than for EGL: on a NixOS box with a proprietary driver
+      # the host's gbm backend is the *only* correct one.
+      mesaGbmDir = "${pkgs.mesa}/lib/gbm";
+      gbmBackendsDefault = "/run/opengl-driver/lib/gbm";
+
       commonEnvVars = {
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         PKG_CONFIG_PATH = "${ffmpegMinimalStatic}/lib/pkgconfig";
@@ -768,7 +818,33 @@
                 installPhase = ''
                   mkdir -p $out/bin
                   makeBinaryWrapper ${packages.mbr-cli}/bin/mbr $out/bin/mbr \
-                    --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+                    --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib" \
+                    --set-default __EGL_VENDOR_LIBRARY_DIRS "${glvndVendorDefaults}" \
+                    --suffix __EGL_VENDOR_LIBRARY_DIRS : "${mesaEglVendorDir}" \
+                    --suffix LIBGL_DRIVERS_PATH : "${mesaDriDir}" \
+                    --set-default GBM_BACKENDS_PATH "${gbmBackendsDefault}" \
+                    --suffix GBM_BACKENDS_PATH : "${mesaGbmDir}"
+
+                  # XDG desktop integration -- the Linux counterpart of MBR.app.
+                  #
+                  # Without an entry, an application launcher has only the bare
+                  # binary to go on, cannot tell a GUI program from a CLI one, and
+                  # runs it through a terminal: two windows, a console and the
+                  # browser. The entry says `Terminal=false` and the launcher
+                  # execs it directly, which is what makes the console go away.
+                  #
+                  # It only takes effect once mbr is on an XDG data path, so a
+                  # bare `nix build` + `./result/bin/mbr` still shows nothing to a
+                  # launcher -- `nix profile install` (or a Home Manager package)
+                  # is what puts it under a directory in $XDG_DATA_DIRS.
+                  install -Dm644 ${./linux/mbr.desktop} \
+                    $out/share/applications/mbr.desktop
+
+                  # 256x256 is the icon's real size; naming the directory
+                  # honestly lets the theme scale from it rather than up from a
+                  # wrong-sized "512x512".
+                  install -Dm644 ${./mbr-icon.png} \
+                    $out/share/icons/hicolor/256x256/apps/mbr.png
                 '';
                 meta = packages.mbr-cli.meta;
               };
@@ -1116,6 +1192,14 @@
       # rust-src belong. Keeping them out of craneLib is what keeps them out of
       # every cached build derivation's closure.
       devShells.default = craneLibDev.devShell (commonEnvVars
+        // (pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # `cargo run -- -g` inside this shell links the *Nix* WebKitGTK from
+          # `inputsFrom`, so it hits the same missing-EGL abort the packaged
+          # binary does and needs the same fallback. See `mesaEglVendorDir`.
+          __EGL_VENDOR_LIBRARY_DIRS = "${glvndVendorDefaults}:${mesaEglVendorDir}";
+          LIBGL_DRIVERS_PATH = mesaDriDir;
+          GBM_BACKENDS_PATH = "${gbmBackendsDefault}:${mesaGbmDir}";
+        })
         // {
           # Include checks to ensure dev environment matches CI
           checks = self.checks.${system};

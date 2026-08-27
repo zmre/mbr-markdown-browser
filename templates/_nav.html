@@ -5,8 +5,8 @@
           {% if sidebar_style != "single" %}<li><mbr-browse></mbr-browse></li>{% endif %}
           <li><mbr-slides></mbr-slides></li>
         </ul>
-        <ul>
-          <li><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>
+        <ul class="mbr-title-group">
+          <li class="mbr-nav-title"><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>
         </ul>
         <ul>
           {% if server_mode %}<li><mbr-page-errors></mbr-page-errors></li>{% endif %}

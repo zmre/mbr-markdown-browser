@@ -303,6 +303,44 @@ vim.keymap.set(
 (add-hook 'markdown-mode-hook 'start-mbr-server)
 ```
 
+## Linux Desktop Integration
+
+Launching `mbr -g` from an application launcher rather than a shell needs an XDG desktop
+entry. Without one a launcher has only the bare binary to go on, cannot tell a GUI
+program from a command-line one, and runs it through a terminal — so you get **two**
+windows, a console and the browser.
+
+The Nix package installs the entry and icon itself:
+
+```
+share/applications/mbr.desktop
+share/icons/hicolor/256x256/apps/mbr.png
+```
+
+They only take effect once mbr sits on a path in `$XDG_DATA_DIRS`. A bare `nix build`
+leaves the entry inside `./result`, where no launcher looks — install it into a profile
+instead:
+
+```bash
+nix profile install github:zmre/mbr        # or .#mbr from a checkout
+```
+
+If you install some other way, copy `linux/mbr.desktop` from the repository to
+`~/.local/share/applications/` and the icon to
+`~/.local/share/icons/hicolor/256x256/apps/mbr.png`, then run
+`update-desktop-database ~/.local/share/applications`. Make sure `mbr` is on the `PATH`
+your session sees, since the entry's `Exec=` does not hardcode a path.
+
+The entry sets `Path=/` deliberately. `mbr`'s path argument defaults to the working
+directory, and a launcher's working directory is arbitrary — often `$HOME`, which would
+set a markdown browser scanning an entire home directory. A root working directory makes
+mbr open its folder picker instead, matching what `MBR.app` does on macOS. Opening a
+`.md` file from a file manager passes the file explicitly, so the picker is skipped.
+
+**Windows** has the same two-window symptom from a different cause: the binary is built
+for the console subsystem, so Explorer allocates a console for it. That is not fixed by a
+desktop entry and is not addressed yet.
+
 ## Browser Extensions
 
 mbr works with standard browser extensions:
