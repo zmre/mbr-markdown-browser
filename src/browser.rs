@@ -17,11 +17,15 @@ use std::sync::Arc;
 use tao::{
     event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    keyboard::{Key, ModifiersState},
+    keyboard::ModifiersState,
     window::{Icon, WindowBuilder},
 };
-// Only the non-Linux history arm reads raw key codes; Linux routes every
-// shortcut through `linux_shortcut_for`, which matches on `logical_key`.
+// The two keyboard routes read different halves of a key event, and each half is
+// dead weight on the other's platforms. Linux matches the key's *meaning*
+// through `linux_shortcut_for`; everywhere else the lone Alt+arrow arm reads the
+// raw key code.
+#[cfg(target_os = "linux")]
+use tao::keyboard::Key;
 #[cfg(not(target_os = "linux"))]
 use tao::keyboard::KeyCode;
 use tokio::task::JoinHandle;
@@ -520,9 +524,13 @@ fn menu_bar_starts_visible(setting: MenuBarVisibility, auto: bool) -> bool {
 
 /// Whether F10 may reveal or dismiss the bar at runtime.
 ///
+/// Linux-only, like the key it guards: macOS hangs the menu off the application
+/// and Windows keeps its bar unconditionally, so neither has a toggle to gate.
+///
 /// `never` means never: a user who has turned the bar off in `config.toml` did
 /// not ask for a key that brings it back. `auto` and `always` both toggle, so
 /// the Linux default — hidden — is still one keystroke from discoverable.
+#[cfg(target_os = "linux")]
 fn menu_bar_toggle_allowed(setting: MenuBarVisibility) -> bool {
     !matches!(setting, MenuBarVisibility::Never)
 }
@@ -554,6 +562,14 @@ enum Shortcut {
     FindOpen,
     FindNext,
     FindPrev,
+    /// Quit, or close the only window — the same thing in a one-window app.
+    ///
+    /// Linux-only, and the one variant with no menu item behind it: Quit and
+    /// Close Window are `PredefinedMenuItem`s that the platform activates
+    /// itself. It exists because those items go down with a hidden menu bar
+    /// along with everything else on it, so the keyboard route has to carry
+    /// them — and nothing else does.
+    #[cfg(target_os = "linux")]
     Quit,
 }
 
@@ -600,7 +616,12 @@ fn perform_shortcut(
     webview: &wry::WebView,
     current_url: &str,
     proxy: &EventLoopProxy<UserEvent>,
-    control_flow: &mut ControlFlow,
+    // Read by the `Quit` arm alone, which is Linux-only: everywhere else Quit and
+    // Close Window are `PredefinedMenuItem`s the platform activates itself, so
+    // nothing that reaches this function ends the event loop. Scoped to this one
+    // parameter rather than the whole function, so a genuinely unused argument
+    // added later is still a hard error.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] control_flow: &mut ControlFlow,
 ) {
     match shortcut {
         Shortcut::OpenFolder => {
@@ -637,6 +658,7 @@ fn perform_shortcut(
             tracing::debug!("Find previous requested");
             let _ = webview.evaluate_script(FIND_PREV_SCRIPT);
         }
+        #[cfg(target_os = "linux")]
         Shortcut::Quit => {
             tracing::debug!("Quit requested");
             *control_flow = ControlFlow::Exit;
@@ -1168,6 +1190,8 @@ mod tests {
     }
 
     // `never` is a decision, not a starting position: F10 must not undo it.
+    // Linux-gated with the function it exercises.
+    #[cfg(target_os = "linux")]
     #[test]
     fn only_never_refuses_the_f10_toggle() {
         assert!(menu_bar_toggle_allowed(MenuBarVisibility::Auto));
@@ -1300,6 +1324,7 @@ mod tests {
 
     // A config that pins the bar off should still start hidden after a toggle
     // check, and one that pins it on should start shown regardless of platform.
+    #[cfg(target_os = "linux")]
     #[test]
     fn starting_state_and_toggle_permission_agree_for_never() {
         let setting = MenuBarVisibility::Never;
