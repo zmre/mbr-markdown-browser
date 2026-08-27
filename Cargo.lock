@@ -3022,6 +3022,7 @@ dependencies = [
  "glob",
  "grep-regex",
  "grep-searcher",
+ "gtk",
  "html-escape",
  "image",
  "itertools 0.15.0",

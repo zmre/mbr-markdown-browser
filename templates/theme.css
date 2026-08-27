@@ -908,6 +908,67 @@ pre.mermaid {
   padding: var(--pico-typography-spacing-vertical);
 }
 
+/* ==================== Header Title ==================== */
+
+/*
+ * The page title sits between two groups of buttons in a Pico `nav`, which is
+ * `display: flex; justify-content: space-between`. A flex item will not shrink
+ * below its content by default (`min-width: auto`), so a long title -- or a
+ * narrow window, or a large font -- pushed the buttons on either side out of
+ * the header instead of giving way.
+ *
+ * `min-width: 0` on the title's own group and item is what allows the shrink;
+ * the clamp then falls to the `<strong>`. Deliberately scoped to this one group
+ * by class rather than applied to `nav > ul`, because the button groups must
+ * keep sizing to their contents.
+ */
+body > header nav > ul.mbr-title-group,
+body > header nav > ul.mbr-title-group > li.mbr-nav-title {
+  min-width: 0;
+}
+
+/*
+ * One line, clipped with an ellipsis. `display: block` because `text-overflow`
+ * does nothing on an inline box, and `<strong>` is inline by default.
+ *
+ * The clipping lives here and *not* on the `<li>`: the li carries Pico's
+ * `data-tooltip`, whose bubble is an absolutely-positioned pseudo-element, and
+ * an `overflow: hidden` ancestor would cut it off.
+ */
+body > header nav > ul.mbr-title-group > li.mbr-nav-title > strong {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/*
+ * The tooltip is Pico's, added by `components/src/nav-title.ts` only while the
+ * text is actually clipped -- so the focus ring below appears only on a title
+ * that has something hidden to reveal.
+ */
+body > header nav > ul.mbr-title-group > li.mbr-nav-title[data-tooltip] {
+  cursor: help;
+}
+
+body > header nav > ul.mbr-title-group > li.mbr-nav-title[data-tooltip]::before {
+  /*
+   * Long titles are the whole reason this exists, so let the bubble wrap rather
+   * than run off the edge of a narrow window.
+   *
+   * `width: max-content` is doing the real work. Pico's bubble is absolutely
+   * positioned, so without an explicit width it shrink-to-fits *within its
+   * containing block* -- which is this `<li>`, the one element on the page we
+   * have just made as narrow as possible. The result was a one-word-per-line
+   * column. `max-content` sizes it to the text instead, and `max-width` is what
+   * then brings it back under the viewport.
+   */
+  width: max-content;
+  max-width: min(90vw, 40rem);
+  white-space: normal;
+  text-align: center;
+}
+
 /* ==================== Link Enhancement Tooltips (GUI Mode) ==================== */
 
 /*

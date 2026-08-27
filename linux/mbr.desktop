@@ -1,0 +1,32 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=mbr
+GenericName=Markdown Browser
+Comment=A markdown viewer, browser, and static site generator
+Keywords=markdown;md;notes;wiki;preview;
+Exec=mbr -g %f
+Icon=mbr
+Terminal=false
+# Exactly one main category (Office), so the entry appears once in a menu
+# that groups by main category. `Viewer` is an additional category and
+# needs no `Utility` alongside it here.
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+
+# Hyprland, sway and GNOME match a window to its launcher by app_id. tao sets
+# the GTK application id to the binary name, which is what `hyprctl clients`
+# reports as `class: mbr`; without this the window is an orphan in the taskbar
+# and the launcher shows a second, "unknown" entry for it.
+StartupWMClass=mbr
+
+# Launch with the filesystem root as the working directory, on purpose.
+#
+# `mbr`'s path argument defaults to `.`, and a launcher's idea of `.` is
+# arbitrary -- often $HOME, which would set a markdown browser scanning an
+# entire home directory. `main.rs::needs_folder_picker` treats a root-ish
+# working directory as "started as an app with nothing to show" and opens the
+# folder picker instead, which is the behaviour MBR.app already has on macOS.
+# When the entry *is* given a file (%f, from a file manager or `xdg-open`),
+# that argument wins and this line does nothing.
+Path=/

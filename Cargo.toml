@@ -44,6 +44,7 @@ gui = [
     "dep:objc2-foundation",
     "dep:windows-sys",
     "dep:gio",
+    "dep:gtk",
 ]
 # Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
 media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile"]
@@ -138,6 +139,11 @@ muda = { version = "0.19", features = ["gtk", "libxdo"], optional = true }
 # aware equivalent of xdg-open without the process spawn. Already in the tree
 # via gtk/webkit2gtk at this exact version, so this adds no crate.
 gio = { version = "0.18", optional = true }
+# `browser`: the menu bar is a `GtkMenuBar` inside the window on Linux, so
+# hiding it (and making the hide survive a later `show_all()`) needs `WidgetExt`.
+# Same situation as gio above — gtk 0.18.2 is already in the tree via
+# tao/muda/webkit2gtk at this exact version, so naming it adds no crate.
+gtk = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # `external_open`: ShellExecuteW. windows-sys 0.61.2 is already in the tree many

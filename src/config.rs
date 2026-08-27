@@ -112,6 +112,35 @@ fn default_graph_depth() -> usize {
     2
 }
 
+/// Whether the native menu bar is shown in the window.
+///
+/// Only Linux ever consults this. macOS puts the menu in the system-wide bar
+/// at the top of the screen, where it costs the window nothing, and Windows
+/// treats an in-window menu bar as the native convention; on both, the value is
+/// ignored. On Linux the bar is a `GtkMenuBar` packed into the window itself,
+/// which under a tiling compositor with no global-menu protocol is a strip of
+/// chrome above every page.
+///
+/// Hiding it costs discoverability and nothing else: `muda` attaches the
+/// accelerator group to the *window*, not to the bar, so every shortcut keeps
+/// working while the bar is hidden. See `browser::menu_bar_starts_visible`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MenuBarVisibility {
+    /// Follow the platform convention: hidden on Linux, shown elsewhere.
+    #[default]
+    Auto,
+    /// Always start with the bar visible.
+    Always,
+    /// Never show the bar. F10 does not reveal it.
+    Never,
+}
+
+/// Serde default for [`Config::gui_menu_bar`].
+fn default_gui_menu_bar() -> MenuBarVisibility {
+    MenuBarVisibility::Auto
+}
+
 fn default_upload_max_bytes() -> usize {
     DEFAULT_UPLOAD_MAX_BYTES
 }
@@ -465,6 +494,14 @@ pub struct Config {
     /// Default: 2.
     #[serde(default = "default_graph_depth")]
     pub graph_depth: usize,
+    /// Whether the GUI window shows the native menu bar. `"auto"` (default)
+    /// follows the platform convention — hidden on Linux, shown on macOS and
+    /// Windows; `"always"` and `"never"` pin it.
+    ///
+    /// GUI mode only, and only Linux reads it; see [`MenuBarVisibility`] for
+    /// why. On Linux, F10 toggles the bar at runtime unless this is `"never"`.
+    #[serde(default = "default_gui_menu_bar")]
+    pub gui_menu_bar: MenuBarVisibility,
     /// Text to prepend to all page titles (e.g., "My Site: ").
     /// Default: empty string (no prefix).
     #[serde(default)]
@@ -649,6 +686,7 @@ impl Default for Config {
             sidebar_style: default_sidebar_style(),
             sidebar_max_items: default_sidebar_max_items(),
             graph_depth: default_graph_depth(),
+            gui_menu_bar: default_gui_menu_bar(),
             title_prefix: String::new(),
             title_suffix: String::new(),
             incomplete_markers: default_incomplete_markers(),
@@ -1463,6 +1501,43 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_default_gui_menu_bar_is_auto() {
+        let config = Config::default();
+        assert_eq!(config.gui_menu_bar, MenuBarVisibility::Auto);
+    }
+
+    // Typed rather than a `String` so a misspelling is a startup error, not a
+    // setting that is silently ignored for the life of the window.
+    #[test]
+    fn test_gui_menu_bar_parses_each_variant() {
+        for (text, expected) in [
+            ("auto", MenuBarVisibility::Auto),
+            ("always", MenuBarVisibility::Always),
+            ("never", MenuBarVisibility::Never),
+        ] {
+            let parsed: MenuBarVisibility = serde_json::from_str(&format!("\"{text}\"")).unwrap();
+            assert_eq!(parsed, expected, "parsing {text}");
+        }
+    }
+
+    #[test]
+    fn test_gui_menu_bar_rejects_unknown_value() {
+        let parsed: Result<MenuBarVisibility, _> = serde_json::from_str("\"sometimes\"");
+        assert!(parsed.is_err(), "an unknown visibility must not parse");
+    }
+
+    // The config-file path, not just the bare enum: a `.mbr/config.toml` that
+    // sets this must actually reach `Config`.
+    #[test]
+    fn test_gui_menu_bar_from_config_file() {
+        let config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("gui_menu_bar = \"always\""))
+            .extract()
+            .unwrap();
+        assert_eq!(config.gui_menu_bar, MenuBarVisibility::Always);
     }
 
     #[test]

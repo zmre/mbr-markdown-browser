@@ -140,8 +140,45 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 | `sidebar_style` | string | `"panel"` | Sidebar navigation style: `"panel"` (modal 3-pane) or `"single"` (persistent sidebar) |
 | `sidebar_max_items` | number | `100` | Maximum items per section in sidebar navigation |
 | `graph_depth` | number | `2` | Default depth (`1`–`5`) of the link graph shown in the info panel; startup fails on out-of-range values |
+| `gui_menu_bar` | string | `"auto"` | GUI window's native menu bar: `"auto"`, `"always"`, or `"never"`. Linux only — see below |
 | `title_prefix` | string | `""` | Text to prepend to all page titles |
 | `title_suffix` | string | `""` | Text to append to all page titles |
+
+**Native menu bar (`gui_menu_bar`):**
+
+GUI mode only, and only Linux reads it.
+
+| Value | Effect |
+|-------|--------|
+| `"auto"` (default) | Hidden on Linux, shown on macOS and Windows |
+| `"always"` | Start with the bar visible |
+| `"never"` | Never show the bar; `F10` does not reveal it |
+
+On Linux the menu bar is a `GtkMenuBar` drawn *inside* the window, above the
+page. macOS puts the same menu in the system-wide bar at the top of the screen,
+where the window pays nothing for it, and Windows treats an in-window bar as the
+native convention — so only on Linux is it chrome you might not want, and only
+there is a tiling Wayland compositor with no global-menu protocol to move it to.
+
+**The shortcuts keep working while it is hidden**, but not by themselves. GTK
+refuses to activate an accelerator whose menu item is not on screen, so mbr
+handles those keys directly whenever the bar is hidden: `Ctrl+O`, `Ctrl+R`,
+`Ctrl+Shift+P`, `Ctrl+F`, `F3`, `Shift+F3`, `Alt+←`/`Alt+→`, `Ctrl+W` and `Ctrl+Q`.
+Exactly one route is live at a time — showing the bar hands the keys back to
+GTK — so nothing fires twice.
+
+Editing keys (`Ctrl+C`, `Ctrl+V`, `Ctrl+Z`, …) are unaffected either way: WebKit
+handles those inside the page, not through the menu.
+
+Press **`F10`** to show or hide the bar at any time (unless set to `"never"`).
+mbr claims `F10` for this, which means GTK's own "F10 moves focus into the menu
+bar" behaviour is off — the bar is still reachable with the pointer.
+
+```toml
+gui_menu_bar = "always"   # keep the native menu bar on screen
+```
+
+Environment variable: `MBR_GUI_MENU_BAR`. There is no CLI flag.
 
 **Sidebar styles:**
 
