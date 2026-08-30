@@ -1064,6 +1064,10 @@ pub struct ServerConfig {
     pub ignore_dirs: Vec<String>,
     pub ignore_globs: Vec<String>,
     pub watcher_ignore_dirs: Vec<String>,
+    /// Repo-relative hidden directories named on the command line, exempt from
+    /// the scanner's and watcher's leading-dot rule. See
+    /// [`crate::config::explicit_hidden_dirs`].
+    pub explicit_hidden_dirs: Vec<std::path::PathBuf>,
     pub index_file: String,
     pub oembed_timeout_ms: u64,
     pub oembed_cache_size: usize,
@@ -1142,6 +1146,7 @@ impl From<&crate::config::Config> for ServerConfig {
             ignore_dirs: config.ignore_dirs.clone(),
             ignore_globs: config.ignore_globs.clone(),
             watcher_ignore_dirs: config.watcher_ignore_dirs.clone(),
+            explicit_hidden_dirs: config.explicit_hidden_dirs.clone(),
             index_file: config.index_file.clone(),
             oembed_timeout_ms: config.oembed_timeout_ms,
             oembed_cache_size: config.oembed_cache_size,
@@ -1672,6 +1677,7 @@ impl Server {
             ignore_dirs,
             ignore_globs,
             watcher_ignore_dirs,
+            explicit_hidden_dirs,
             index_file,
             oembed_timeout_ms,
             oembed_cache_size,
@@ -1753,16 +1759,19 @@ impl Server {
         let templates = templates::Templates::new(base_dir.as_path(), template_folder.as_deref())
             .map_err(ServerError::TemplateInit)?;
 
-        let repo = Arc::new(Repo::init(
-            &base_dir,
-            &static_folder,
-            &markdown_extensions,
-            &ignore_dirs,
-            &ignore_globs,
-            &index_file,
-            &tag_sources,
-            &relationship_types,
-        ));
+        let repo = Arc::new(
+            Repo::init(
+                &base_dir,
+                &static_folder,
+                &markdown_extensions,
+                &ignore_dirs,
+                &ignore_globs,
+                &index_file,
+                &tag_sources,
+                &relationship_types,
+            )
+            .with_explicit_hidden_dirs(&explicit_hidden_dirs),
+        );
 
         // Spawn background repo scan so site.json is ready before first request.
         // Phase 1: basic scan (file listing + frontmatter). Phase 2: media metadata (ffmpeg/lopdf).
@@ -1805,6 +1814,7 @@ impl Server {
         let template_folder_for_watcher = template_folder.clone();
         let watcher_ignore_dirs_for_watcher = watcher_ignore_dirs.clone();
         let ignore_globs_for_watcher = ignore_globs.clone();
+        let explicit_hidden_dirs_for_watcher = explicit_hidden_dirs.clone();
 
         // Create a handle to store the watcher once it's initialized.
         // This ensures proper cleanup when Server is dropped.
@@ -1818,6 +1828,7 @@ impl Server {
                 template_folder_for_watcher.as_deref(),
                 &watcher_ignore_dirs_for_watcher,
                 &ignore_globs_for_watcher,
+                &explicit_hidden_dirs_for_watcher,
                 tx_for_watcher,
             ) {
                 Ok(watcher) => {

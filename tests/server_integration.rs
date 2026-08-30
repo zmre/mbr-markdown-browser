@@ -17,6 +17,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         markdown_extensions: vec!["md".to_string()],
         ignore_dirs: vec!["target".to_string(), "node_modules".to_string()],
         ignore_globs: vec!["*.log".to_string()],
+        explicit_hidden_dirs: Vec::new(),
         watcher_ignore_dirs: vec![
             ".direnv".to_string(),
             ".git".to_string(),
@@ -769,6 +770,57 @@ async fn test_site_json_endpoint() {
     assert_eq!(response.status(), 200);
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("application/json"));
+}
+
+/// Serving a hidden directory by name (`mbr -s .scratch`) must index it.
+///
+/// Root discovery deliberately walks *upward* to the enclosing repository, so
+/// the root here is the temp repo and `.scratch` is just another hidden
+/// directory as far as the scanner's leading-dot rule is concerned. It used to
+/// be skipped, which produced the worst possible symptom: `/.scratch/alpha/`
+/// served 200 (path resolution hits the disk) while `site.json`, the directory
+/// listing and search all reported the folder as empty.
+#[tokio::test]
+async fn test_site_json_includes_an_explicitly_named_hidden_dir() {
+    let repo = TestRepo::new();
+    repo.create_markdown(".scratch/alpha.md", "# Alpha");
+    repo.create_markdown(".scratch/beta.md", "# Beta");
+    // Nested inside the named directory, so still tooling state, still skipped.
+    repo.create_markdown(".scratch/.obsidian/workspace.md", "# Tooling");
+    // A hidden sibling nobody named.
+    repo.create_markdown(".private/secret.md", "# Secret");
+
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.explicit_hidden_dirs = vec![PathBuf::from(".scratch")];
+    })
+    .await;
+
+    let body = server.get_text("/.mbr/site.json").await;
+    let site: serde_json::Value = serde_json::from_str(&body).expect("site.json must be JSON");
+    let urls: Vec<&str> = site["markdown_files"]
+        .as_array()
+        .expect("markdown_files array")
+        .iter()
+        .filter_map(|file| file["url_path"].as_str())
+        .collect();
+
+    assert!(
+        urls.contains(&"/.scratch/alpha/") && urls.contains(&"/.scratch/beta/"),
+        "the named hidden directory must be indexed, got {urls:?}"
+    );
+    assert!(
+        !urls.iter().any(|url| url.contains("workspace")),
+        "a dot directory nested inside the named one must stay ignored, got {urls:?}"
+    );
+    assert!(
+        !urls.iter().any(|url| url.contains("secret")),
+        "an unnamed sibling hidden directory must stay ignored, got {urls:?}"
+    );
+
+    // The listing was the other half of the symptom, and is served from the
+    // same index, so it must agree.
+    let listing = server.get_text("/.scratch/").await;
+    assert_html_contains(&listing, "alpha");
 }
 
 #[tokio::test]

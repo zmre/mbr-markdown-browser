@@ -283,7 +283,13 @@ These functions have been extracted for testability:
 - `markdown_file_to_json()` - Converts file metadata to JSON
 
 **repo.rs:**
-- `should_ignore()` - Checks if path should be ignored
+- `should_ignore()` - Checks if path should be ignored. The leading-dot half is
+  factored into `is_ignored_hidden`, shared with `should_ignore_compiled` so the
+  exemption cannot drift between the two. Exemptions must be in the same base as
+  the path: absolute for the scanner, repo-relative for the watcher. `link_grep`
+  and `link_rewrite` pass an empty slice — their `is_file` guard means the rule
+  only ever sees file basenames there, and their walkers never apply it to a
+  directory
 - `build_markdown_url_path()` - Generates URL for markdown file
 - `build_static_url_path()` - Generates URL for static file
 - `is_markdown_extension()` - Checks file extension
@@ -316,6 +322,22 @@ not be its author.
 The root directory is found by searching upward for common repository markers:
 - **Directories** (in order): `.mbr/`, `.git/`, `.zk/`, `.obsidian/`
 - **Files** (if no dirs found): `book.toml`, `mkdocs.yml`, `docusaurus.config.js`
+
+`config::explicit_hidden_dirs` is the counterpart to `find_root_dir`, and exists
+because the two disagree by design. Root discovery walks *upward*, so `mbr -s
+.scratch` roots at the enclosing checkout — and the scanner's leading-dot rule
+then skipped `.scratch`, indexing the whole repo except the folder that was
+asked for (with `/.scratch/alpha/` still serving 200, because `path_resolver`
+hits the disk and only the *index* was blind). The function returns the hidden
+directories on the chain from the root down to the CLI target, root-relative and
+purely lexically — no `is_dir` probe, so it is testable without a filesystem.
+`Config::explicit_hidden_dirs` carries them; it is the one `#[serde(skip)]` field
+besides `root_dir`'s reassignment, because a repository's own `config.toml` must
+not be able to nominate which of its hidden directories an operator's scan walks
+into. `Config::read` fills it beside `root_dir` — the only place holding both
+halves — so QuickLook and the server derive it identically. Consumers rebase once
+at construction (`Repo::with_explicit_hidden_dirs` joins onto `canonical_root`;
+the watcher keeps the repo-relative form its callback already compares in).
 
 The `static_folder` config option (default: `"static"`) creates a URL overlay - files in `static/images/` become available at `/images/`. It may also point *outside* the markdown root, up to two levels above it (`../static` for `project/content` + `project/static`; `../../static` for SvelteKit's `src/routes` + `static`). `config::resolve_static_overlay` is the single statement of that policy — the validator and the repo scanner share the one call so they cannot drift — and it refuses anything past the two-level budget, anything reached through `$HOME` or the filesystem root, and any directory that *contains* the root.
 

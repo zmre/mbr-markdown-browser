@@ -438,7 +438,12 @@ fn markdown_files<'a>(
             if !markdown_extensions.contains(&ext) {
                 return None;
             }
-            if should_ignore(path, ignore_dirs, ignore_globs) {
+            // Empty exemptions for the same reason as `link_grep`: the `is_file`
+            // guard above leaves the leading-dot rule looking only at file
+            // basenames, and this walker's `filter_entry` never applies the rule
+            // to a directory, so files under a hidden directory are already
+            // reached.
+            if should_ignore(path, ignore_dirs, ignore_globs, &[]) {
                 return None;
             }
             let (page_url, folder_url) =

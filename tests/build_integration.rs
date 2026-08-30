@@ -2853,3 +2853,41 @@ fn collect_links_files(output_dir: &Path) -> std::collections::BTreeMap<String, 
     walk(output_dir, output_dir, &mut out);
     out
 }
+
+/// `mbr -b .scratch` has the same blindness the server did, and the same fix:
+/// the builder shares `Repo::init_from_config`, so the exemption `Config::read`
+/// derives from the CLI target is what makes the pages exist at all.
+#[tokio::test]
+async fn build_renders_an_explicitly_named_hidden_dir() {
+    let repo = TestRepo::new();
+    repo.create_markdown(".scratch/alpha.md", "# Alpha");
+    // Nested inside the named directory, so still tooling state, still skipped.
+    repo.create_markdown(".scratch/.obsidian/workspace.md", "# Tooling");
+    // A hidden sibling nobody named.
+    repo.create_markdown(".private/secret.md", "# Secret");
+
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        explicit_hidden_dirs: vec![std::path::PathBuf::from(".scratch")],
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+
+    assert!(
+        output_dir.join(".scratch/alpha/index.html").exists(),
+        "the named hidden directory must be built"
+    );
+    assert!(
+        !output_dir
+            .join(".scratch/.obsidian/workspace/index.html")
+            .exists(),
+        "a dot directory nested inside the named one must stay ignored"
+    );
+    assert!(
+        !output_dir.join(".private/secret/index.html").exists(),
+        "an unnamed sibling hidden directory must stay ignored"
+    );
+}

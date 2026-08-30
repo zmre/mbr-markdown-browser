@@ -399,6 +399,18 @@ pub struct IpArray(pub [u8; 4]);
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub root_dir: PathBuf,
+    /// Hidden (leading-dot) directories the user *named on the command line*,
+    /// as root-relative paths. Exempted from the scanner's leading-dot rule —
+    /// see [`explicit_hidden_dirs`] for why, and [`crate::repo::should_ignore`]
+    /// for where.
+    ///
+    /// `serde(skip)`, like nothing else in this struct: it is derived at
+    /// startup from the invocation, so `.mbr/config.toml` and `MBR_*` must not
+    /// be able to name it. A repository that could set it would be declaring
+    /// which of *its own* hidden directories the operator's scan walks into,
+    /// which is the config file asserting a fact about the command line.
+    #[serde(skip)]
+    pub explicit_hidden_dirs: Vec<PathBuf>,
     pub host: IpArray,
     pub port: u16,
     pub static_folder: String,
@@ -638,6 +650,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             root_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            explicit_hidden_dirs: Vec::new(),
             host: IpArray([127, 0, 0, 1]),
             port: DEFAULT_PORT,
             static_folder: "static".to_string(),
@@ -768,6 +781,49 @@ fn contains_home_dir(path: &Path) -> bool {
     }
 }
 
+/// The hidden (leading-dot) directories on the chain from `root_dir` down to
+/// `target`, as root-relative paths, in root-to-target order.
+///
+/// This is the counterpart to [`find_root_dir`], and exists because the two
+/// disagree by design. Root discovery walks *upward* to the enclosing
+/// repository, so `mbr -s .scratch` inside a git checkout correctly roots at the
+/// checkout — but the scanner's leading-dot rule then skips `.scratch`, and mbr
+/// indexes everything except the one directory it was asked to serve. The set
+/// returned here is what re-admits it: a hidden directory the user *named* is
+/// content by definition, whatever the general rule says about dot directories.
+///
+/// Only the chain itself is returned, never anything below it. `mbr -s .scratch`
+/// is a statement about `.scratch`, not a blanket waiver — a `.git` or
+/// `.obsidian` *inside* it is tooling state there for exactly the reason it is
+/// anywhere else, and stays hidden.
+///
+/// Paths are root-relative because that is the one base every consumer can
+/// rebase from cheaply, and because they are compared against the scanner's
+/// canonicalized root rather than the CLI string. Purely lexical: a target
+/// outside the root (`strip_prefix` fails) yields an empty set, as does a target
+/// equal to the root. A *file* target contributes only its hidden ancestors,
+/// since its own name is what it is — no `is_dir` probe is needed, and none is
+/// done, which is what keeps this testable without a filesystem.
+pub fn explicit_hidden_dirs(root_dir: &Path, target: &Path) -> Vec<PathBuf> {
+    let Ok(relative) = target.strip_prefix(root_dir) else {
+        return Vec::new();
+    };
+
+    relative
+        .components()
+        .scan(PathBuf::new(), |walked, component| {
+            walked.push(component);
+            Some(walked.clone())
+        })
+        .filter(|chain| {
+            chain
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .collect()
+}
+
 /// Search upward from the given path to find a repository root directory.
 ///
 /// Searches for directory markers (`.mbr`, `.git`, `.zk`, `.obsidian`) then
@@ -846,6 +902,11 @@ impl Config {
             .map_err(|e| ConfigError::ParseFailed(Box::new(e)))?;
         tracing::debug!("Loaded config: {:?}", &config);
         config.root_dir = root_dir;
+        // Assigned here, beside `root_dir`, because this is the only place that
+        // holds both halves of the derivation at once: the discovered root and
+        // the path the user actually named. Doing it in `main` would leave every
+        // other entry point (QuickLook) silently blind to its own argument.
+        config.explicit_hidden_dirs = explicit_hidden_dirs(&config.root_dir, search_config_from);
         config.reject_repo_supplied_absolute_static_folder(&figment)?;
         config.validate()?;
         config.log_external_static_folder();
@@ -2348,6 +2409,89 @@ mod tests {
         std::fs::write(&note, "# Plan").unwrap();
 
         assert_eq!(find_root_dir(&note), leaf);
+    }
+
+    // ==================== explicit_hidden_dirs Tests ====================
+    //
+    // Purely lexical, so none of these touch the filesystem.
+
+    #[test]
+    fn explicit_hidden_dirs_target_equal_to_root_is_empty() {
+        let root = Path::new("/repo");
+        assert_eq!(explicit_hidden_dirs(root, root), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn explicit_hidden_dirs_target_is_a_dot_dir() {
+        assert_eq!(
+            explicit_hidden_dirs(Path::new("/repo"), Path::new("/repo/.scratch")),
+            vec![PathBuf::from(".scratch")]
+        );
+    }
+
+    /// `mbr -s .scratch/sub`: the *chain* is exempt, so `.scratch` is re-admitted
+    /// even though the user named something below it. `sub` is not hidden and so
+    /// contributes nothing — it never needed re-admitting.
+    #[test]
+    fn explicit_hidden_dirs_target_nested_under_a_dot_dir() {
+        assert_eq!(
+            explicit_hidden_dirs(Path::new("/repo"), Path::new("/repo/.scratch/sub")),
+            vec![PathBuf::from(".scratch")]
+        );
+    }
+
+    /// Every hidden link in the chain is returned, not just the outermost: the
+    /// scanner prunes at each level, so exempting only `.a` would still leave
+    /// `.a/.b` unreachable.
+    #[test]
+    fn explicit_hidden_dirs_returns_every_hidden_link_in_the_chain() {
+        assert_eq!(
+            explicit_hidden_dirs(Path::new("/repo"), Path::new("/repo/.a/plain/.b/notes.md")),
+            vec![PathBuf::from(".a"), PathBuf::from(".a/plain/.b")]
+        );
+    }
+
+    #[test]
+    fn explicit_hidden_dirs_target_under_a_normal_dir_is_empty() {
+        assert_eq!(
+            explicit_hidden_dirs(Path::new("/repo"), Path::new("/repo/docs/guide.md")),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// A target that is not under the root cannot name anything the scan would
+    /// reach, so it exempts nothing rather than exempting by coincidence of name.
+    #[test]
+    fn explicit_hidden_dirs_target_outside_root_is_empty() {
+        assert_eq!(
+            explicit_hidden_dirs(Path::new("/repo"), Path::new("/elsewhere/.scratch")),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// The field is derived from the invocation, so `Config::read` must fill it
+    /// in — and `.mbr/config.toml` must not be able to.
+    #[test]
+    fn test_config_read_derives_explicit_hidden_dirs_from_the_target() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("explicit_hidden_dirs = [\".sneaky\"]\n"));
+        let scratch = repo.path().join(".scratch");
+        std::fs::create_dir(&scratch).unwrap();
+
+        let config = Config::read(&scratch).expect("config must load");
+
+        assert_eq!(config.root_dir, repo.path());
+        assert_eq!(config.explicit_hidden_dirs, vec![PathBuf::from(".scratch")]);
+    }
+
+    #[test]
+    fn test_config_read_leaves_explicit_hidden_dirs_empty_for_a_plain_target() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+
+        let config = Config::read(repo.path()).expect("config must load");
+
+        assert!(config.explicit_hidden_dirs.is_empty());
     }
 
     // ==================== Config::read Layering Tests ====================

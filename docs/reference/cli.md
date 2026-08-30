@@ -18,6 +18,20 @@ mbr [OPTIONS] [PATH]
 
 If `PATH` is omitted, mbr uses the current directory.
 
+`PATH` selects the page (or folder) to open; the *repository root* is discovered
+separately, by searching upward for a marker such as `.mbr/`, `.git/` or
+`.obsidian/` (see [Configuration](configuration.md)). The two are usually
+different, and deliberately: `mbr -s docs/guide.md` inside a checkout serves the
+whole checkout with that page open.
+
+**Hidden directories named on the command line are scanned.** mbr normally skips
+every path component beginning with `.`, since those hold tooling state rather
+than notes. Naming one is a statement that it holds notes, so `mbr -s .scratch`
+(or `mbr -b .scratch`) indexes `.scratch` and everything under it, even though
+the root is the enclosing repository. The waiver covers only the directories on
+the path from the root down to `PATH` — a `.git` or `.obsidian` *inside*
+`.scratch` is still skipped, and so is a hidden directory elsewhere in the repo.
+
 ## Mode Flags
 
 These flags are mutually exclusive:

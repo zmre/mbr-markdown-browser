@@ -71,6 +71,13 @@ pub struct Repo {
     ignore_globs: Vec<String>,
     #[serde(skip)]
     compiled_ignore_globs: Vec<glob::Pattern>,
+    /// Hidden directories the leading-dot rule must let through, as absolute
+    /// paths under `canonical_root`. Rebased once in
+    /// [`Repo::with_explicit_hidden_dirs`] from the root-relative form
+    /// `Config` carries, so the per-entry check is a plain path comparison
+    /// against what `WalkDir` already hands it. Empty for almost every run.
+    #[serde(skip)]
+    exempt_hidden_dirs: Vec<PathBuf>,
     #[serde(skip)]
     pub scanned_folders: HashSet<PathBuf>,
     #[serde(skip)]
@@ -593,6 +600,28 @@ impl Repo {
             &c.tag_sources[..],
             &c.relationship_types[..],
         )
+        .with_explicit_hidden_dirs(&c.explicit_hidden_dirs)
+    }
+
+    /// Re-admits the hidden directories the user named on the command line
+    /// (`Config::explicit_hidden_dirs`) to the scan.
+    ///
+    /// A builder rather than an [`Self::init`] parameter: `init` already carries
+    /// eight positional arguments, and every caller but the two live entry
+    /// points wants the default of "no exemptions".
+    ///
+    /// Rebasing happens here, once, and onto `canonical_root` rather than the
+    /// configured root — `WalkDir` descends from the canonicalized root, so an
+    /// exemption built from the *configured* spelling would silently never match
+    /// wherever the two differ (`/tmp` vs `/private/tmp` on macOS).
+    #[must_use]
+    pub fn with_explicit_hidden_dirs(mut self, explicit_hidden_dirs: &[PathBuf]) -> Self {
+        let absolute = explicit_hidden_dirs
+            .iter()
+            .map(|relative| self.canonical_root.join(relative))
+            .collect();
+        self.exempt_hidden_dirs = absolute;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -641,6 +670,7 @@ impl Repo {
             ignore_dirs: ignore_dirs.to_vec(),
             ignore_globs: ignore_globs.to_vec(),
             compiled_ignore_globs,
+            exempt_hidden_dirs: Vec::new(),
             index_file: index_file.into(),
             scanned_folders: HashSet::new(),
             queued_folders: HashMap::new(),
@@ -744,7 +774,12 @@ impl Repo {
             .max_depth(1)
             .into_iter()
             .filter_entry(|e| {
-                !should_ignore_compiled(e.path(), &self.ignore_dirs, &self.compiled_ignore_globs)
+                !should_ignore_compiled(
+                    e.path(),
+                    &self.ignore_dirs,
+                    &self.compiled_ignore_globs,
+                    &self.exempt_hidden_dirs,
+                )
             });
 
         let mut markdown = std::collections::HashMap::new();
@@ -1550,17 +1585,51 @@ pub fn repo_relative_within_root(root: &Path, abs_path: &Path) -> Option<PathBuf
     (!escapes).then_some(relative)
 }
 
+/// The leading-dot rule, and its one exemption.
+///
+/// Hidden entries are skipped because a repository's dot directories are tooling
+/// state rather than content — `.git`, `.direnv`, `.obsidian`. The exemption is
+/// for the case where that inference is provably wrong: the user *named* the
+/// directory on the command line. `mbr -s .scratch` still roots at the enclosing
+/// checkout (root discovery walks upward, and must — see
+/// [`crate::config::find_root_dir`]), so without this the scan would index the
+/// whole repository *except* the one folder that was asked for.
+///
+/// Only the chain from the root down to that target is exempt. A dot directory
+/// nested *inside* it was not named and gets no waiver: naming `.scratch` says
+/// something about `.scratch`, not about a `.git` that happens to live under it.
+///
+/// `exempt_hidden_dirs` is empty for every invocation that named no hidden
+/// directory, and non-empty ones hold one or two entries. `starts_with('.')`
+/// short-circuits ahead of the scan, so on the per-entry hot path this costs the
+/// same character comparison it always did — no allocation, no canonicalization.
+#[inline]
+fn is_ignored_hidden(path: &Path, file_name: &str, exempt_hidden_dirs: &[PathBuf]) -> bool {
+    file_name.starts_with('.') && !exempt_hidden_dirs.iter().any(|dir| dir == path)
+}
+
 /// Checks if a path should be ignored based on the given rules.
 ///
 /// A path is ignored if:
-/// - Its name starts with '.'
+/// - Its name starts with '.', unless it is one of `exempt_hidden_dirs`
+///   (see [`is_ignored_hidden`])
 /// - It's a directory matching one of the ignore_dirs
 /// - It matches one of the ignore_globs patterns
-pub fn should_ignore(path: &Path, ignore_dirs: &[String], ignore_globs: &[String]) -> bool {
+///
+/// `exempt_hidden_dirs` must be expressed in the same base as `path`: callers
+/// that pass absolute paths pass absolute exemptions, and the watcher — which
+/// works entirely in repo-relative space so its glob matching stays anchored at
+/// the root — passes repo-relative ones.
+pub fn should_ignore(
+    path: &Path,
+    ignore_dirs: &[String],
+    ignore_globs: &[String],
+    exempt_hidden_dirs: &[PathBuf],
+) -> bool {
     let file_name = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
 
     // Hidden files/dirs (starting with .)
-    if file_name.starts_with('.') {
+    if is_ignored_hidden(path, file_name, exempt_hidden_dirs) {
         return true;
     }
 
@@ -1583,11 +1652,12 @@ fn should_ignore_compiled(
     path: &Path,
     ignore_dirs: &[String],
     compiled_patterns: &[glob::Pattern],
+    exempt_hidden_dirs: &[PathBuf],
 ) -> bool {
     let file_name = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
 
     // Hidden files/dirs (starting with .)
-    if file_name.starts_with('.') {
+    if is_ignored_hidden(path, file_name, exempt_hidden_dirs) {
         return true;
     }
 
@@ -1757,33 +1827,87 @@ mod tests {
     #[test]
     fn test_should_ignore_hidden_file() {
         let path = Path::new(".hidden");
-        assert!(should_ignore(path, &[], &[]));
+        assert!(should_ignore(path, &[], &[], &[]));
     }
 
     #[test]
     fn test_should_ignore_hidden_dir() {
         let path = Path::new(".git");
-        assert!(should_ignore(path, &[], &[]));
+        assert!(should_ignore(path, &[], &[], &[]));
     }
 
     #[test]
     fn test_should_ignore_normal_file() {
         let path = Path::new("readme.md");
-        assert!(!should_ignore(path, &[], &[]));
+        assert!(!should_ignore(path, &[], &[], &[]));
     }
 
     #[test]
     fn test_should_ignore_glob_pattern() {
         let path = Path::new("test.log");
         let globs = vec!["*.log".to_string()];
-        assert!(should_ignore(path, &[], &globs));
+        assert!(should_ignore(path, &[], &globs, &[]));
     }
 
     #[test]
     fn test_should_ignore_glob_no_match() {
         let path = Path::new("test.md");
         let globs = vec!["*.log".to_string()];
-        assert!(!should_ignore(path, &[], &globs));
+        assert!(!should_ignore(path, &[], &globs, &[]));
+    }
+
+    // ---- the leading-dot exemption ------------------------------------------
+
+    /// The whole point: a hidden directory the user named is not tooling state.
+    #[test]
+    fn test_should_ignore_exempts_an_explicitly_named_hidden_dir() {
+        let exempt = vec![PathBuf::from("/repo/.scratch")];
+        assert!(!should_ignore(
+            Path::new("/repo/.scratch"),
+            &[],
+            &[],
+            &exempt
+        ));
+    }
+
+    /// Naming `.scratch` says nothing about a dot directory *inside* it, which
+    /// stays tooling state and stays skipped.
+    #[test]
+    fn test_should_ignore_still_skips_a_dot_dir_nested_in_an_exempt_one() {
+        let exempt = vec![PathBuf::from("/repo/.scratch")];
+        assert!(should_ignore(
+            Path::new("/repo/.scratch/.git"),
+            &[],
+            &[],
+            &exempt
+        ));
+    }
+
+    /// Exemption is by exact path, not by name: a same-named hidden directory
+    /// elsewhere in the repository was never on the target's chain.
+    #[test]
+    fn test_should_ignore_exemption_does_not_match_a_same_named_dir_elsewhere() {
+        let exempt = vec![PathBuf::from("/repo/.scratch")];
+        assert!(should_ignore(
+            Path::new("/repo/docs/.scratch"),
+            &[],
+            &[],
+            &exempt
+        ));
+    }
+
+    /// The exemption waives *only* the leading-dot rule; the other two rules are
+    /// untouched, so an exempt directory still loses to an ignore glob.
+    #[test]
+    fn test_should_ignore_exemption_does_not_override_ignore_globs() {
+        let exempt = vec![PathBuf::from("/repo/.scratch")];
+        let globs = vec!["**/.scratch".to_string()];
+        assert!(should_ignore(
+            Path::new("/repo/.scratch"),
+            &[],
+            &globs,
+            &exempt
+        ));
     }
 
     #[test]
@@ -2017,6 +2141,65 @@ mod tests {
             &[],
             &[],
         )
+    }
+
+    /// The bug this exemption exists for: `mbr -s .scratch` roots at the
+    /// enclosing repository (correctly), and the scan then skipped the one
+    /// directory the user asked for — `site.json` and the directory listing for
+    /// `/.scratch/` both came back empty while `/.scratch/alpha/` served 200,
+    /// because `path_resolver` hits the disk and only the *index* was blind.
+    #[test]
+    fn test_scan_indexes_an_explicitly_named_hidden_dir() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let scratch = root.path().join(".scratch");
+        std::fs::create_dir(&scratch).expect("create .scratch");
+        std::fs::write(scratch.join("alpha.md"), "# Alpha").expect("write alpha");
+        std::fs::write(scratch.join("beta.md"), "# Beta").expect("write beta");
+        // Nested, and therefore never named: still tooling state, still skipped.
+        let nested = scratch.join(".obsidian");
+        std::fs::create_dir(&nested).expect("create nested dot dir");
+        std::fs::write(nested.join("workspace.md"), "# Tooling").expect("write nested");
+        // A sibling hidden directory the user did not name.
+        let other = root.path().join(".private");
+        std::fs::create_dir(&other).expect("create .private");
+        std::fs::write(other.join("secret.md"), "# Secret").expect("write secret");
+
+        let repo = test_repo(root.path()).with_explicit_hidden_dirs(&[PathBuf::from(".scratch")]);
+        repo.scan_all().expect("scan must succeed");
+
+        let markdown = repo.markdown_files.pin();
+        let urls: Vec<&str> = markdown.iter().map(|(_, i)| i.url_path.as_str()).collect();
+
+        assert!(
+            urls.contains(&"/.scratch/alpha/") && urls.contains(&"/.scratch/beta/"),
+            "the named hidden directory must be indexed, got {urls:?}"
+        );
+        assert!(
+            !urls.iter().any(|url| url.contains("workspace")),
+            "a dot directory nested inside the named one must stay ignored, got {urls:?}"
+        );
+        assert!(
+            !urls.iter().any(|url| url.contains("secret")),
+            "an unnamed sibling hidden directory must stay ignored, got {urls:?}"
+        );
+    }
+
+    /// Without the exemption the same tree indexes nothing — this is the
+    /// pre-fix behaviour, kept so the test above cannot pass vacuously.
+    #[test]
+    fn test_scan_skips_a_hidden_dir_that_was_not_named() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let scratch = root.path().join(".scratch");
+        std::fs::create_dir(&scratch).expect("create .scratch");
+        std::fs::write(scratch.join("alpha.md"), "# Alpha").expect("write alpha");
+
+        let repo = test_repo(root.path());
+        repo.scan_all().expect("scan must succeed");
+
+        assert!(
+            repo.markdown_files.pin().is_empty(),
+            "a hidden directory nobody named must not be indexed"
+        );
     }
 
     #[test]
@@ -2645,8 +2828,8 @@ mod proptests {
             ignore_globs in proptest::collection::vec("[*][.][a-z]{1,5}", 0..3),
         ) {
             let path = Path::new(&name);
-            let result1 = should_ignore(path, &ignore_dirs, &ignore_globs);
-            let result2 = should_ignore(path, &ignore_dirs, &ignore_globs);
+            let result1 = should_ignore(path, &ignore_dirs, &ignore_globs, &[]);
+            let result2 = should_ignore(path, &ignore_dirs, &ignore_globs, &[]);
             prop_assert_eq!(result1, result2);
         }
 
@@ -2654,7 +2837,7 @@ mod proptests {
         #[test]
         fn prop_hidden_files_always_ignored(name in "[.][a-zA-Z0-9]{1,15}") {
             let path = Path::new(&name);
-            prop_assert!(should_ignore(path, &[], &[]));
+            prop_assert!(should_ignore(path, &[], &[], &[]));
         }
 
         /// Non-hidden files without matching globs are not ignored
@@ -2662,7 +2845,7 @@ mod proptests {
         fn prop_normal_files_not_ignored(name in "[a-zA-Z][a-zA-Z0-9]{0,15}") {
             let path = Path::new(&name);
             // No ignore patterns configured
-            prop_assert!(!should_ignore(path, &[], &[]));
+            prop_assert!(!should_ignore(path, &[], &[], &[]));
         }
 
         /// is_markdown_extension is deterministic
