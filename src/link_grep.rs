@@ -532,8 +532,14 @@ pub fn find_inbound_links(
             continue;
         }
 
-        // Skip ignored files
-        if should_ignore(path, ignore_dirs, ignore_globs) {
+        // Skip ignored files. No hidden-directory exemptions are threaded in
+        // here, and none are needed: the `is_file` guard above means the only
+        // thing the leading-dot rule ever sees is a *file* basename, while an
+        // exemption names a directory on the CLI target's chain. The walker
+        // reaches files under a hidden directory either way, since its
+        // `filter_entry` prunes on `ignore_dirs` alone and never applies the
+        // dot rule to directories.
+        if should_ignore(path, ignore_dirs, ignore_globs, &[]) {
             continue;
         }
 

@@ -119,6 +119,24 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 *.log, *.bak, *.lock, *.sh, *.css, *.scss, *.js, *.ts
 ```
 
+**Hidden files and directories** (names beginning with `.`) are skipped in
+addition to the lists above, and this is not configurable — there is no option
+that re-admits them in general.
+
+There is one exception, and it is derived from the invocation rather than from
+configuration: the hidden directories on the path from the repository root down
+to the `PATH` argument are scanned. `mbr -s .scratch` roots at the enclosing
+repository (root discovery always walks upward) but still indexes `.scratch`,
+because naming a directory is a statement that it holds content. Only that chain
+is exempt; hidden directories *inside* it, or anywhere else in the repository,
+are skipped as usual. `ignore_dirs` and `ignore_globs` still apply to an exempt
+directory — the exception waives the leading-dot rule alone.
+
+This cannot be set from `.mbr/config.toml` or an `MBR_*` variable. The config
+file ships inside the repository being served, and letting it nominate which of
+its own hidden directories an operator's scan walks into would let the repository
+assert a fact about the command line that was never typed.
+
 ### Behavior Settings
 
 | Option | Type | Default | Description |

@@ -11,7 +11,7 @@ use crate::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, trace};
 
@@ -63,6 +63,9 @@ impl FileWatcher {
     /// * `template_folder` - Optional template folder to also watch for hot reload
     /// * `ignore_dirs` - Directory names to ignore (e.g., "target", ".git")
     /// * `ignore_globs` - Glob patterns to ignore (e.g., "*.log")
+    /// * `explicit_hidden_dirs` - Repo-relative hidden directories the user named
+    ///   on the command line (`Config::explicit_hidden_dirs`), which must keep
+    ///   emitting events despite the leading-dot rule
     ///
     /// # Returns
     ///
@@ -72,10 +75,17 @@ impl FileWatcher {
         template_folder: Option<&Path>,
         ignore_dirs: &[String],
         ignore_globs: &[String],
+        explicit_hidden_dirs: &[PathBuf],
     ) -> Result<(Self, broadcast::Receiver<FileChangeEvent>), WatcherError> {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let watcher =
-            Self::new_with_sender(base_dir, template_folder, ignore_dirs, ignore_globs, tx)?;
+        let watcher = Self::new_with_sender(
+            base_dir,
+            template_folder,
+            ignore_dirs,
+            ignore_globs,
+            explicit_hidden_dirs,
+            tx,
+        )?;
         Ok((watcher, rx))
     }
 
@@ -90,12 +100,15 @@ impl FileWatcher {
     /// * `template_folder` - Optional template folder to also watch for hot reload
     /// * `ignore_dirs` - Directory names to ignore (e.g., "target", ".git")
     /// * `ignore_globs` - Glob patterns to ignore (e.g., "*.log")
+    /// * `explicit_hidden_dirs` - Repo-relative hidden directories the user named
+    ///   on the command line (`Config::explicit_hidden_dirs`)
     /// * `sender` - An existing broadcast sender to use for file change events
     pub fn new_with_sender(
         base_dir: &Path,
         template_folder: Option<&Path>,
         ignore_dirs: &[String],
         ignore_globs: &[String],
+        explicit_hidden_dirs: &[PathBuf],
         sender: broadcast::Sender<FileChangeEvent>,
     ) -> Result<Self, WatcherError> {
         let tx = sender;
@@ -121,6 +134,12 @@ impl FileWatcher {
         let ignore_set: HashSet<String> = ignore_dirs.iter().cloned().collect();
         // Own the ignore globs so they can move into the watcher callback.
         let ignore_globs: Vec<String> = ignore_globs.to_vec();
+        // Already repo-relative, which is the base the callback compares in, so
+        // this is an owning copy and nothing more. Kept in that base rather than
+        // joined onto `base_dir`: the callback deliberately relativizes before
+        // testing anything (see `is_ignored`), and rebasing here would make the
+        // exemption the one check in it that reasons about absolute paths.
+        let exempt_hidden_dirs: Vec<PathBuf> = explicit_hidden_dirs.to_vec();
 
         let tx_clone = tx.clone();
         let base_dir_clone = base_dir.clone();
@@ -145,7 +164,8 @@ impl FileWatcher {
                     let under_ignored_dir = relative.components().any(|comp| {
                         ignore_set.contains(comp.as_os_str().to_string_lossy().as_ref())
                     });
-                    under_ignored_dir || should_ignore(&relative, &[], &ignore_globs)
+                    under_ignored_dir
+                        || should_ignore(&relative, &[], &ignore_globs, &exempt_hidden_dirs)
                 };
 
                 match res {
@@ -303,7 +323,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path();
 
-        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &[], &[]).unwrap();
+        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &[], &[], &[]).unwrap();
 
         // Create a test file
         let test_file = base_path.join("test.md");
@@ -325,7 +345,7 @@ mod tests {
 
         // Create watcher with target in ignore list
         let ignore_dirs = vec!["target".to_string()];
-        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &ignore_dirs, &[]).unwrap();
+        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &ignore_dirs, &[], &[]).unwrap();
 
         // Create a file in the base directory - this should be visible
         let visible_file = base_path.join("visible.md");
@@ -381,7 +401,8 @@ mod tests {
         let base_path = base_path.canonicalize().unwrap();
 
         let ignore_dirs = vec!["build".to_string()];
-        let (_watcher, mut rx) = FileWatcher::new(&base_path, None, &ignore_dirs, &[]).unwrap();
+        let (_watcher, mut rx) =
+            FileWatcher::new(&base_path, None, &ignore_dirs, &[], &[]).unwrap();
 
         let test_file = base_path.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
@@ -415,7 +436,7 @@ mod tests {
         // Watch through the symlink: the path an operator configured, not the
         // canonical one notify will report events for.
         let link_notes = link_root.join("notes");
-        let (_watcher, mut rx) = FileWatcher::new(&link_notes, None, &[], &[]).unwrap();
+        let (_watcher, mut rx) = FileWatcher::new(&link_notes, None, &[], &[], &[]).unwrap();
 
         fs::write(link_notes.join("test.md"), "# Test").unwrap();
 
@@ -439,7 +460,8 @@ mod tests {
 
         // Ignore any *.log file via ignore_globs (matched against repo-relative path)
         let ignore_globs = vec!["*.log".to_string()];
-        let (_watcher, mut rx) = FileWatcher::new(base_path, None, &[], &ignore_globs).unwrap();
+        let (_watcher, mut rx) =
+            FileWatcher::new(base_path, None, &[], &ignore_globs, &[]).unwrap();
 
         // A normal markdown file must still fire an event...
         let note_file = base_path.join("note.md");
@@ -478,7 +500,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path();
 
-        let (watcher, mut rx1) = FileWatcher::new(base_path, None, &[], &[]).unwrap();
+        let (watcher, mut rx1) = FileWatcher::new(base_path, None, &[], &[], &[]).unwrap();
         let mut rx2 = watcher.subscribe();
 
         // Create a test file
@@ -510,7 +532,7 @@ mod tests {
         let template_path = template_dir.path();
 
         let (_watcher, mut rx) =
-            FileWatcher::new(base_path, Some(template_path), &[], &[]).unwrap();
+            FileWatcher::new(base_path, Some(template_path), &[], &[], &[]).unwrap();
 
         // Create a file in the template folder (not base dir)
         let template_file = template_path.join("custom.css");
