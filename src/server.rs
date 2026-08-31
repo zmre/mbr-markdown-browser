@@ -1099,6 +1099,8 @@ pub struct ServerConfig {
     pub incomplete_markers: Vec<String>,
     /// Enable the task browser (`POST /.mbr/tasks`).
     pub tasks_enabled: bool,
+    /// Emit `data-mbr-line` source lines on block elements.
+    pub review_enabled: bool,
     /// Maintain the `@done(...)` annotation when `POST /.mbr/task` toggles a
     /// task's status.
     pub tasks_stamp_done: bool,
@@ -1170,6 +1172,7 @@ impl From<&crate::config::Config> for ServerConfig {
             mark_incomplete: config.mark_incomplete.unwrap_or(true),
             incomplete_markers: config.incomplete_markers.clone(),
             tasks_enabled: config.tasks_enabled,
+            review_enabled: config.review_enabled,
             tasks_stamp_done: config.tasks_stamp_done,
             tasks_default_include: config.tasks_default_include,
             tasks_ignore_globs: config.tasks_ignore_globs.clone(),
@@ -1292,6 +1295,8 @@ pub struct ServerState {
     pub incomplete_markers: Vec<String>,
     /// Whether the task browser (`POST /.mbr/tasks`) is enabled.
     pub tasks_enabled: bool,
+    /// Whether block elements carry `data-mbr-line` source lines.
+    pub review_enabled: bool,
     /// Whether `POST /.mbr/task` maintains the `@done(...)` annotation when it
     /// toggles a task's status.
     pub tasks_stamp_done: bool,
@@ -1700,6 +1705,7 @@ impl Server {
             mark_incomplete,
             incomplete_markers,
             tasks_enabled,
+            review_enabled,
             tasks_stamp_done,
             tasks_default_include,
             tasks_ignore_globs,
@@ -2248,6 +2254,7 @@ impl Server {
             mark_incomplete,
             incomplete_markers,
             tasks_enabled,
+            review_enabled,
             tasks_stamp_done,
             tasks_default_include,
             task_index,
@@ -4003,6 +4010,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
@@ -4235,6 +4243,12 @@ impl Server {
                 sidebar_max_items,
                 graph_depth,
                 tasks_enabled,
+                // An error page has no markdown body, so there is nothing on it a
+                // review anchor could point at. Inline rather than a parameter:
+                // `render_error_page` already takes `tasks_enabled: bool`, and a
+                // second adjacent bool would be silently swappable at eight call
+                // sites.
+                review_enabled: false,
                 tasks_default_include,
                 title_affixes: None,
             },
@@ -5015,6 +5029,9 @@ impl Server {
                         true,  // server_mode
                         false, // transcode_enabled (not needed for link extraction)
                         valid_tag_sources,
+                        // A links-only render: nothing consumes the HTML, so `data-mbr-line` would
+                        // be pure cost.
+                        markdown::ReviewLines::Omit,
                         false, // mark_incomplete: not needed for link extraction
                         &config.incomplete_markers,
                         Some(config.repo.wikilink_index.clone()),
@@ -5303,6 +5320,8 @@ impl Server {
                     true,  // server_mode
                     false, // transcode_enabled (not needed for error scan)
                     valid_tag_sources,
+                    // The error scan reads hrefs, never `data-mbr-line`.
+                    markdown::ReviewLines::Omit,
                     false, // mark_incomplete: not needed for error scan
                     &config.incomplete_markers,
                     Some(config.repo.wikilink_index.clone()),
@@ -6251,6 +6270,8 @@ impl Server {
             true, // server_mode is always true in server
             transcode_enabled,
             valid_tag_sources,
+            // The one place the feature is ever on: the real page render.
+            markdown::ReviewLines::from(config.review_enabled),
             config.mark_incomplete,
             &config.incomplete_markers,
             Some(config.repo.wikilink_index.clone()),
@@ -6371,6 +6392,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
@@ -6591,6 +6613,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
@@ -6670,6 +6693,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
@@ -6714,6 +6738,7 @@ impl Server {
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
                 tasks_enabled: config.tasks_enabled,
+                review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
             },
@@ -7203,6 +7228,14 @@ const CACHE_CONTROL_NO_STORE: &str = "no-store";
 /// into a static site would be dead weight behind a button that cannot exist.
 pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
 
+/// [`DEFAULT_FILES`] route of the lazy review-notes chunk.
+///
+/// Skipped by `build.rs` for the same reason as [`TASKS_CHUNK_ROUTE`]: review
+/// notes anchor to the `data-mbr-line` attributes only a server/GUI render
+/// emits, so `<mbr-review>` never renders in a static site and the chunk would
+/// be an unreachable payload in every generated page.
+pub const REVIEW_CHUNK_ROUTE: &str = "/components/mbr-review.min.js";
+
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/favicon.png",
@@ -7255,6 +7288,14 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         // `TASKS_CHUNK_ROUTE` in build.rs.
         TASKS_CHUNK_ROUTE,
         include_bytes!("../templates/components-js/mbr-tasks.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Review-notes panel and form, lazy-loaded by <mbr-review> the first
+        // time a note is written or the list is opened. Deliberately excluded
+        // from static builds — see `REVIEW_CHUNK_ROUTE` in build.rs.
+        REVIEW_CHUNK_ROUTE,
+        include_bytes!("../templates/components-js/mbr-review.min.js"),
         "application/javascript",
     ),
     (

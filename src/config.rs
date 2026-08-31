@@ -64,6 +64,10 @@ fn default_tasks_enabled() -> bool {
     true
 }
 
+fn default_review_enabled() -> bool {
+    true
+}
+
 fn default_tasks_stamp_done() -> bool {
     true
 }
@@ -543,6 +547,20 @@ pub struct Config {
     /// Default: true (enabled). CLI flag `--no-tasks` disables it.
     #[serde(default = "default_tasks_enabled")]
     pub tasks_enabled: bool,
+    /// Emit `data-mbr-line="{1-based source line}"` on block-level elements, so
+    /// a frontend feature can anchor a text selection back to `file.md:LINE`.
+    ///
+    /// Server/GUI only: a static build, the CLI and QuickLook pass
+    /// `ReviewLines::Omit` unconditionally rather than reading this, because an
+    /// anchor is only meaningful against a live file. Setting it in a
+    /// `.mbr/config.toml` therefore has no effect on `mbr -b`.
+    ///
+    /// Default: true (enabled). CLI flag `--no-review` disables it.
+    ///
+    /// Deliberately absent from `validate`: a bool has no invalid state, and an
+    /// entry there would be a line of code asserting `true || false`.
+    #[serde(default = "default_review_enabled")]
+    pub review_enabled: bool,
     /// Maintain the `@done(YYYY-MM-DD HH:MM)` annotation when a task's status
     /// is toggled through `POST /.mbr/task`: stamp it on completion, remove it
     /// when the task is reopened or canceled.
@@ -705,6 +723,7 @@ impl Default for Config {
             incomplete_markers: default_incomplete_markers(),
             mark_incomplete: None,
             tasks_enabled: true, // Task browser enabled by default (server/GUI only)
+            review_enabled: true, // `data-mbr-line` emitted by default (server/GUI only)
             tasks_stamp_done: true, // Stamp @done(...) when a task is completed
             tasks_default_include: default_tasks_default_include(),
             tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
@@ -2669,6 +2688,36 @@ mod tests {
             ),
             "expected ConfigError::InvalidTasksIgnoreGlob, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn default_review_enabled_is_true() {
+        assert!(Config::default().review_enabled);
+    }
+
+    /// The repository's own config file and the env layer both reach it, on the
+    /// documented precedence (env wins).
+    #[test]
+    fn test_config_read_review_enabled_from_toml_and_env() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("review_enabled = false\n"));
+
+        let config = Config::read(repo.path()).expect("toml must load");
+        assert!(!config.review_enabled);
+
+        let _env = EnvVars::set(&[("MBR_REVIEW_ENABLED", "true")]);
+        let config = Config::read(repo.path()).expect("env must load");
+        assert!(config.review_enabled, "env overrides .mbr/config.toml");
+    }
+
+    /// A config file written before the key existed must still load.
+    #[test]
+    fn test_config_read_without_review_enabled_key_still_loads() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("tasks_enabled = false\n"));
+
+        let config = Config::read(repo.path()).expect("toml must load");
+        assert!(config.review_enabled, "serde default applies");
     }
 
     /// Checkboxes only, deliberately narrower than the wire default of

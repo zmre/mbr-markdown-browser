@@ -15,14 +15,13 @@
 import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { waitForDom, scheduleIdleTask } from './dynamic-loader.ts'
+import { positionAnchored } from './anchored-popover.ts'
 
 const ENHANCED_CLASS = 'mbr-footnote-enhanced'
 const POPOVER_CLASS = 'mbr-footnote-popover'
 const POPOVER_ID = 'mbr-footnote-popover'
 /** Grace period before hiding, so the pointer can travel into the card. */
 const HIDE_DELAY_MS = 120
-/** Gap (px) between the reference and the popover, and viewport clamp margin. */
-const GAP_PX = 8
 
 /**
  * Resolve the footnote definition element a reference anchor points to.
@@ -128,35 +127,7 @@ export class MbrFootnotePreviewElement extends LitElement {
     popover.style.display = 'block'
     this._activeAnchor = anchor
     anchor.setAttribute('aria-describedby', POPOVER_ID)
-    this._position(anchor, popover)
-  }
-
-  /**
-   * Position the popover near the reference using fixed coordinates. Prefer
-   * placing it above the reference; flip below when there's no room. Clamp
-   * horizontally and vertically to the viewport.
-   */
-  private _position(anchor: HTMLElement, popover: HTMLElement): void {
-    const rect = anchor.getBoundingClientRect()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-
-    // Measure at a neutral origin first so max-width/height take effect.
-    popover.style.left = '0px'
-    popover.style.top = '0px'
-    const pop = popover.getBoundingClientRect()
-
-    // Horizontal: center on the reference, clamped to the viewport.
-    let left = rect.left + rect.width / 2 - pop.width / 2
-    left = Math.max(GAP_PX, Math.min(left, vw - pop.width - GAP_PX))
-
-    // Vertical: prefer above; flip below when it would overflow the top.
-    let top = rect.top - pop.height - GAP_PX
-    if (top < GAP_PX) top = rect.bottom + GAP_PX
-    top = Math.max(GAP_PX, Math.min(top, vh - pop.height - GAP_PX))
-
-    popover.style.left = `${left}px`
-    popover.style.top = `${top}px`
+    positionAnchored(anchor, popover)
   }
 
   private _scheduleHide(): void {

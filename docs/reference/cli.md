@@ -73,6 +73,7 @@ Supported media types are detected by file extension:
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking | `false` |
 | `--no-tasks` | Disable the task browser. The `/.mbr/tasks` endpoint returns `404` and no task index is ever built. Server/GUI only — static builds never include tasks either way. | `false` |
+| `--no-review` | Disable `data-mbr-line` source-line attributes on block elements. Server/GUI only — static builds, the CLI and QuickLook never emit them either way. | `false` |
 | `--mark-incomplete` | Highlight TK/TODO/FIXME/XXX anywhere in a line | server/GUI: on, build: off |
 | `--no-mark-incomplete` | Disable incomplete-marker highlighting | server/GUI: off, build: on (no effect) |
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |

@@ -3,3 +3,9 @@
     {% if server_mode %}<mbr-live-reload></mbr-live-reload>{% endif %}
     {% if gui_mode %}<mbr-link-enhancement></mbr-link-enhancement>{% endif %}
     {% if gui_mode %}<mbr-find-bar></mbr-find-bar>{% endif %}
+    {# Review notes (r / R). Here rather than in _nav.html on purpose: the
+       feature has no header button — its entry points are the two shortcuts and
+       a floating action button that appears only once a note exists. Gated on
+       server_mode because notes anchor to `data-mbr-line`, which a static build
+       does not emit. #}
+    {% if server_mode and review_enabled %}<mbr-review></mbr-review>{% endif %}

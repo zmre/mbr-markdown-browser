@@ -1952,6 +1952,8 @@ mod tests {
                 true,
                 false,
                 HashSet::new(),
+                // Only the outbound links are read; the HTML is discarded.
+                crate::markdown::ReviewLines::Omit,
                 false,
                 &[],
                 None,

@@ -256,6 +256,9 @@ pub fn render_preview_with_config(
                 false,                            // server_mode is false in QuickLook
                 false,                            // transcode is disabled in QuickLook
                 std::collections::HashSet::new(), // No tag sources in QuickLook
+                // Hardcoded off: a QuickLook preview is a static, scriptless
+                // panel with nothing to anchor a review selection to.
+                markdown::ReviewLines::Omit,
                 mark_incomplete,
                 &incomplete_markers,
                 None, // no repo wikilink index in QuickLook

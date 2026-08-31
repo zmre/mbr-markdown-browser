@@ -344,6 +344,9 @@ async fn main() -> Result<(), MbrError> {
             false, // server_mode is false in CLI mode
             false, // transcode is disabled in CLI mode
             valid_tag_sources,
+            // Hardcoded off: CLI mode writes HTML to stdout, with no page and no
+            // server for a review anchor to reach.
+            markdown::ReviewLines::Omit,
             mark_incomplete,
             &config.incomplete_markers,
             None, // no repo wikilink index in CLI stdout mode

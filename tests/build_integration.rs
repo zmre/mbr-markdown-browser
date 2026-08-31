@@ -1924,6 +1924,36 @@ async fn test_build_omits_the_tasks_chunk_and_the_tasks_trigger() {
 }
 
 #[tokio::test]
+async fn test_build_omits_the_review_chunk_and_the_review_trigger() {
+    // Review notes anchor to `data-mbr-line`, which a static build never emits
+    // (build.rs renders with `ReviewLines::Omit`, unconditionally — see
+    // `build_emits_no_data_mbr_line_even_when_config_enables_review`). So there
+    // is nothing here for a note to anchor to, `<mbr-review>` never renders,
+    // and the generic DEFAULT_FILES loop would otherwise ship the chunk into
+    // every generated site as an unreachable payload.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\nSome prose to annotate.\n");
+
+    let output = build_site(&repo).await;
+
+    let chunk = output
+        .join(".mbr")
+        .join("components")
+        .join("mbr-review.min.js");
+    assert!(
+        !chunk.exists(),
+        "the review chunk must not be written to a static build: {}",
+        chunk.display()
+    );
+
+    let html = fs::read_to_string(output.join("test").join("index.html")).expect("test index.html");
+    assert!(
+        !html.contains("<mbr-review"),
+        "a built page must not carry the review trigger: {html}"
+    );
+}
+
+#[tokio::test]
 async fn test_build_body_wikilink_resolves_globally() {
     let repo = TestRepo::new();
     // Target file in one folder; referencing page in a *different* folder.
@@ -2871,6 +2901,7 @@ async fn build_renders_an_explicitly_named_hidden_dir() {
         explicit_hidden_dirs: vec![std::path::PathBuf::from(".scratch")],
         ..Default::default()
     };
+
     let output_dir = repo.path().join("build");
     let builder =
         mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
@@ -2890,4 +2921,102 @@ async fn build_renders_an_explicitly_named_hidden_dir() {
         !output_dir.join(".private/secret/index.html").exists(),
         "an unnamed sibling hidden directory must stay ignored"
     );
+}
+
+// ============================================================================
+// data-mbr-line (review anchors) — never present in a static build
+// ============================================================================
+
+/// Every `index.html` under `dir`, recursively.
+fn all_generated_pages(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut pages = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current).expect("readable output dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == "index.html") {
+                pages.push(path);
+            }
+        }
+    }
+    pages
+}
+
+/// A repository exercising every tag that can carry the attribute.
+fn review_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "index.md",
+        "# Home\n\nIntro paragraph.\n\n- item\n\n> quote\n",
+    );
+    repo.create_markdown(
+        "docs/guide.md",
+        concat!(
+            "# Guide\n\n",
+            "Body text.\n\n",
+            "```rust\nfn main() {}\n```\n\n",
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n",
+            "- [ ] a task\n\n",
+            "TODO finish this.\n",
+        ),
+    );
+    repo
+}
+
+/// `mbr -b` passes `ReviewLines::Omit` unconditionally, so no built page can
+/// carry a source-line anchor: it would point at a file the built site has no
+/// way to reach.
+#[tokio::test]
+async fn build_emits_no_data_mbr_line() {
+    let repo = review_repo();
+    let output_dir = build_site(&repo).await;
+
+    let pages = all_generated_pages(&output_dir);
+    assert!(!pages.is_empty(), "the build produced pages to check");
+    for page in &pages {
+        let html = fs::read_to_string(page).expect("readable page");
+        assert!(
+            !html.contains("data-mbr-line=\""),
+            "{} must carry no review anchors",
+            page.display()
+        );
+        assert!(
+            html.contains("reviewEnabled: false"),
+            "{} must report the feature off",
+            page.display()
+        );
+    }
+}
+
+/// The same, with `review_enabled` forced **on** in the config. This is what
+/// proves the build hardcodes `ReviewLines::Omit` rather than merely inheriting
+/// a default that happens to be off.
+#[tokio::test]
+async fn build_emits_no_data_mbr_line_even_when_config_enables_review() {
+    let repo = review_repo();
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        review_enabled: true,
+        mark_incomplete: Some(true),
+        ..Default::default()
+    };
+    assert!(config.review_enabled, "the flag really is on");
+
+    let output_dir = repo.path().join("build");
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+
+    let pages = all_generated_pages(&output_dir);
+    assert!(!pages.is_empty(), "the build produced pages to check");
+    for page in &pages {
+        let html = fs::read_to_string(page).expect("readable page");
+        assert!(
+            !html.contains("data-mbr-line=\""),
+            "{} must carry no review anchors even with review_enabled = true",
+            page.display()
+        );
+    }
 }

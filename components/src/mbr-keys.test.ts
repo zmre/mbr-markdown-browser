@@ -14,7 +14,9 @@ import './mbr-browse-single.js'
 import './mbr-fuzzy-nav.js'
 import './mbr-find-bar.js'
 import './mbr-tasks.js'
+import './mbr-review.js'
 import { setTasksChunkImporter } from './mbr-tasks.js'
+import { setReviewChunkImporter } from './mbr-review.js'
 
 /**
  * Tests for the shared keyboard-guard helpers. `isInputTarget` must see the
@@ -98,6 +100,7 @@ const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay &
   { tag: 'mbr-fuzzy-nav', create: () => document.createElement('mbr-fuzzy-nav') },
   { tag: 'mbr-find-bar', create: () => document.createElement('mbr-find-bar') },
   { tag: 'mbr-tasks', create: () => document.createElement('mbr-tasks') },
+  { tag: 'mbr-review', create: () => document.createElement('mbr-review') },
 ]
 
 describe('isModalOpen', () => {
@@ -105,11 +108,13 @@ describe('isModalOpen', () => {
     // `tasksEnabled` matters here: <mbr-tasks> refuses to open without the
     // endpoint, since an invisible "open" overlay would suppress every
     // bare-letter shortcut on the page.
-    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: true }
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: true, reviewEnabled: true }
     window.headings = []
     // <mbr-tasks>.open() lazy-imports its panel chunk from a runtime URL, which
     // happy-dom cannot execute; stub the seam.
     setTasksChunkImporter(() => Promise.resolve({}))
+    // <mbr-review> lazy-imports its panel chunk the same way.
+    setReviewChunkImporter(() => Promise.resolve({}))
     // <mbr-fuzzy-nav>.open() kicks off a links.json fetch; keep it well-formed
     // so the modal can render without the shared cache seeing garbage.
     vi.stubGlobal(

@@ -38,6 +38,12 @@ export const SEARCH_ROOT_SELECTOR = 'main#wrapper';
  * - `.mbr-heading-anchor` — `mbr-heading-enhancer` appends a `#` permalink to
  *   every heading; without this a search for `#` matches every heading.
  * - `.katex-mathml` — KaTeX emits MathML *and* HTML for the same formula.
+ * - `.mbr-review-marker` — the review feature injects one of these into a block
+ *   for every anchored note. Its glyph is `::before` generated content so it is
+ *   already outside the text run, which makes this belt and braces — but a
+ *   marker that ever gained real text would otherwise land inside the quotes
+ *   the review feature itself captures through this index, and a note would
+ *   start quoting its own marker.
  * - `.sectionhidden` / `[hidden]` / `[aria-hidden="true"]` — `display: none`,
  *   so a match there has no rect to scroll to.
  */
@@ -50,6 +56,7 @@ export const BLOCKED_SELECTOR = [
   'math',
   '.sr-only',
   '.mbr-heading-anchor',
+  '.mbr-review-marker',
   '.katex-mathml',
   '.sectionhidden',
   '[hidden]',
@@ -283,8 +290,15 @@ export function scrollRangeIntoView(range: Range, topInset: number): void {
   window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - top), behavior: 'auto' });
 }
 
-/** Index of the chunk containing `offset`: the last chunk starting at or before it. */
-function chunkIndexAt(starts: Int32Array, offset: number): number {
+/**
+ * Index of the chunk containing `offset`: the last chunk starting at or before it.
+ *
+ * Exported for `review/anchor.ts`, which maps a selection to offsets and back
+ * the other way. Duplicating this search there would mean two copies of the
+ * same off-by-one-prone `(low + high + 1) >> 1` bias, with nothing forcing them
+ * to agree about which chunk owns a boundary offset.
+ */
+export function chunkIndexAt(starts: Int32Array, offset: number): number {
   let low = 0;
   let high = starts.length - 1;
   while (low < high) {

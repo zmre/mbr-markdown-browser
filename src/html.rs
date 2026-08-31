@@ -77,6 +77,20 @@ use pulldown_cmark::{
 // MBR EXTENSION: Configuration
 // ============================================================================
 
+/// The source line one block-level element was written on, addressed by the
+/// element's `Start` event's index in the stream handed to the writer.
+///
+/// Built by [`crate::markdown`], which is the only place the parser's byte
+/// offsets exist. See `markdown::BlockLines` for the table and for why the
+/// index survives the three render passes.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockLine {
+    /// Index of the block's `Start` event in the event stream.
+    pub at: u32,
+    /// 1-based source line the block starts on.
+    pub line: u32,
+}
+
 /// Configuration for MBR-specific HTML extensions.
 ///
 /// This struct controls all custom behavior beyond pulldown-cmark's standard
@@ -107,6 +121,18 @@ pub struct HtmlConfig {
     ///
     /// Use syntax like `--- {#id .class data-attr="value"}` in markdown to set attrs.
     pub section_attrs: HashMap<usize, ParsedAttrs>,
+
+    /// Source lines for block-level elements, ascending by `at`.
+    ///
+    /// **Empty means the feature is off**, which is what every caller that does
+    /// not opt in gets: `HtmlConfig::default()` and [`HtmlConfig::mbr_defaults`]
+    /// both leave it empty, so the writer's output is byte-for-byte what it was
+    /// before `data-mbr-line` existed.
+    ///
+    /// When non-empty, the writer emits ` data-mbr-line="N"` on the six block
+    /// tags listed in `markdown::is_review_block_start` — the single definition
+    /// of that set, which the arms here must not drift from.
+    pub block_lines: Vec<BlockLine>,
 }
 
 impl HtmlConfig {
@@ -116,6 +142,7 @@ impl HtmlConfig {
             enable_sections: true,
             enable_mermaid: true,
             section_attrs: HashMap::new(),
+            block_lines: Vec::new(),
         }
     }
 
@@ -125,6 +152,24 @@ impl HtmlConfig {
             enable_sections: true,
             enable_mermaid: true,
             section_attrs,
+            block_lines: Vec::new(),
+        }
+    }
+
+    /// Standard MBR configuration with section attributes and `data-mbr-line`
+    /// source lines.
+    ///
+    /// An empty `block_lines` is exactly [`HtmlConfig::mbr_with_section_attrs`],
+    /// so a caller that computed no lines pays nothing and emits nothing.
+    pub fn mbr_with_attrs_and_block_lines(
+        section_attrs: HashMap<usize, ParsedAttrs>,
+        block_lines: Vec<BlockLine>,
+    ) -> Self {
+        Self {
+            enable_sections: true,
+            enable_mermaid: true,
+            section_attrs,
+            block_lines,
         }
     }
 }
@@ -172,6 +217,21 @@ struct HtmlWriter<'a, I, W> {
     // list, list item, table cell, footnote definition, definition list) are
     // currently open. A `<section>` boundary may only be emitted at depth 0.
     container_depth: usize,
+
+    // MBR EXTENSION: `data-mbr-line` - how many events have been pulled off
+    // `iter`, which is the key `config.block_lines` is addressed by. Maintained
+    // by `next_event` and by nothing else; see that method.
+    event_index: usize,
+
+    // MBR EXTENSION: `data-mbr-line` - cursor into `config.block_lines`. The
+    // writer's lookups are non-decreasing (it walks the stream front to back),
+    // so this walks rather than binary-searching, exactly like
+    // `markdown::TextLineCursor`.
+    block_line_next: usize,
+
+    // MBR EXTENSION: `data-mbr-line` - hoisted `!config.block_lines.is_empty()`
+    // so the off path (every build, CLI and QuickLook render) is one branch.
+    emit_block_lines: bool,
 }
 
 /// Block containers that a `<section>` boundary must never be emitted inside.
@@ -440,6 +500,7 @@ where
     }
 
     fn new_with_config(iter: I, writer: W, config: HtmlConfig) -> Self {
+        let emit_block_lines = !config.block_lines.is_empty();
         Self {
             iter,
             writer,
@@ -454,6 +515,69 @@ where
             section_started: false,
             current_section: 0,
             container_depth: 0,
+            event_index: 0,
+            block_line_next: 0,
+            emit_block_lines,
+        }
+    }
+
+    /// MBR EXTENSION: the **only** way to pull an event off `iter`.
+    ///
+    /// # Why this must be the only way
+    ///
+    /// `config.block_lines` is keyed by an event's position in the stream, so
+    /// the counter has to see every event the writer consumes — and the writer
+    /// consumes events from *two* loops, not one: [`Self::run`] and
+    /// [`Self::raw_text`], which drains an image's inner events into its `alt`
+    /// attribute. A counter incremented in `run` alone would desynchronise
+    /// permanently after the first image on the page, and every `data-mbr-line`
+    /// after it would name the wrong source line — with well-formed HTML, no
+    /// panic and no error anywhere. `block_line_index_survives_image_alt_text`
+    /// pins this.
+    #[inline]
+    fn next_event(&mut self) -> Option<Event<'a>> {
+        let event = self.iter.next();
+        if event.is_some() {
+            self.event_index += 1;
+        }
+        event
+    }
+
+    /// MBR EXTENSION: writes ` data-mbr-line="N"` for the event currently being
+    /// rendered, when the table has a line for it.
+    ///
+    /// [`Self::event_index`] is post-incremented by [`Self::next_event`], so the
+    /// event in hand sits at `event_index - 1`. That off-by-one is hidden here
+    /// rather than repeated at each of the six call sites.
+    fn write_block_line(&mut self) -> Result<(), W::Error> {
+        let index = match self.event_index.checked_sub(1) {
+            Some(index) => index,
+            // Unreachable: a tag is only written for an event already pulled.
+            None => return Ok(()),
+        };
+        // Advance the cursor past everything the writer has already gone by.
+        while self
+            .config
+            .block_lines
+            .get(self.block_line_next)
+            .is_some_and(|entry| (entry.at as usize) < index)
+        {
+            self.block_line_next += 1;
+        }
+        // Copied out before `self.write`, which borrows `self` mutably.
+        let line = self
+            .config
+            .block_lines
+            .get(self.block_line_next)
+            .filter(|entry| entry.at as usize == index)
+            .map(|entry| entry.line);
+        match line {
+            Some(line) => {
+                self.write(" data-mbr-line=\"")?;
+                write!(&mut self.writer, "{}", line)?;
+                self.write("\"")
+            }
+            None => Ok(()),
         }
     }
 
@@ -486,6 +610,19 @@ where
         }
     }
 
+    /// MBR EXTENSION: opens a `<pre>`, carrying `data-mbr-line` when the feature
+    /// is on. With it off this writes exactly `<pre>`, so the three code-block
+    /// shapes stay byte-identical to what they were.
+    fn write_pre_open(&mut self) -> Result<(), W::Error> {
+        if self.emit_block_lines {
+            self.write("<pre")?;
+            self.write_block_line()?;
+            self.write(">")
+        } else {
+            self.write("<pre>")
+        }
+    }
+
     fn run(mut self) -> Result<(), W::Error> {
         // MBR EXTENSION: Emit opening section tag with optional attrs
         if self.config.enable_sections {
@@ -499,7 +636,9 @@ where
             self.section_started = true;
         }
 
-        while let Some(event) = self.iter.next() {
+        // MBR EXTENSION: `next_event`, never `self.iter.next()` — see that
+        // method for why the counter must see every consumed event.
+        while let Some(event) = self.next_event() {
             match event {
                 Start(tag) => {
                     self.start_tag(tag)?;
@@ -611,8 +750,14 @@ where
         }
         match tag {
             Tag::HtmlBlock => Ok(()),
+            // MBR EXTENSION: `data-mbr-line`. One of the six tags in
+            // `markdown::is_review_block_start`; keep the two sets in step.
             Tag::Paragraph => {
-                if self.end_newline {
+                if self.emit_block_lines {
+                    self.write(if self.end_newline { "<p" } else { "\n<p" })?;
+                    self.write_block_line()?;
+                    self.write(">")
+                } else if self.end_newline {
                     self.write("<p>")
                 } else {
                     self.write("\n<p>")
@@ -630,6 +775,14 @@ where
                     self.write("\n<")?;
                 }
                 write!(&mut self.writer, "{}", level)?;
+                // MBR EXTENSION: `data-mbr-line`, emitted after the level and
+                // *before* the author's own id/classes/attrs. An HTML parser
+                // keeps the FIRST occurrence of a duplicate attribute, so going
+                // first is what makes ours authoritative against a heading
+                // written as `## Title {data-mbr-line=99}`.
+                if self.emit_block_lines {
+                    self.write_block_line()?;
+                }
                 if let Some(id) = id {
                     self.write(" id=\"")?;
                     escape_html(&mut self.writer, &id)?;
@@ -658,9 +811,19 @@ where
                 }
                 self.write(">")
             }
+            // MBR EXTENSION: `data-mbr-line` goes on the `<table>`, not on the
+            // cells: every cell in a row shares one source line, so per-cell
+            // attributes triple the byte cost of a table-heavy document to say
+            // the same thing.
             Tag::Table(alignments) => {
                 self.table_alignments = alignments;
-                self.write("<table>")
+                if self.emit_block_lines {
+                    self.write("<table")?;
+                    self.write_block_line()?;
+                    self.write(">")
+                } else {
+                    self.write("<table>")
+                }
             }
             Tag::TableHead => {
                 self.table_state = TableState::Head;
@@ -698,7 +861,17 @@ where
                         BlockQuoteKind::Caution => " class=\"markdown-alert-caution\"",
                     },
                 };
-                if self.end_newline {
+                // MBR EXTENSION: `data-mbr-line`.
+                if self.emit_block_lines {
+                    self.write(if self.end_newline {
+                        "<blockquote"
+                    } else {
+                        "\n<blockquote"
+                    })?;
+                    self.write(class_str)?;
+                    self.write_block_line()?;
+                    self.write(">\n")
+                } else if self.end_newline {
                     self.write(&format!("<blockquote{}>\n", class_str))
                 } else {
                     self.write(&format!("\n<blockquote{}>\n", class_str))
@@ -709,22 +882,33 @@ where
                     self.write_newline()?;
                 }
                 self.codeblock_state = Some("</code></pre>".into());
+                // MBR EXTENSION: `data-mbr-line` belongs on the `<pre>` in every
+                // shape below — it is the element that stands for the block.
                 match info {
                     CodeBlockKind::Fenced(info) => {
                         let lang = info.split(' ').next().unwrap_or_default();
                         if lang.is_empty() {
-                            self.write("<pre><code>")
+                            self.write_pre_open()?;
+                            self.write("<code>")
                         // MBR EXTENSION: Mermaid diagram support
                         } else if self.config.enable_mermaid && lang == "mermaid" {
                             self.codeblock_state = Some("</pre>".into());
-                            self.write("<pre class=\"mermaid\">")
+                            self.write("<pre class=\"mermaid\"")?;
+                            if self.emit_block_lines {
+                                self.write_block_line()?;
+                            }
+                            self.write(">")
                         } else {
-                            self.write("<pre><code class=\"language-")?;
+                            self.write_pre_open()?;
+                            self.write("<code class=\"language-")?;
                             escape_html(&mut self.writer, lang)?;
                             self.write("\">")
                         }
                     }
-                    CodeBlockKind::Indented => self.write("<pre><code>"),
+                    CodeBlockKind::Indented => {
+                        self.write_pre_open()?;
+                        self.write("<code>")
+                    }
                 }
             }
             Tag::List(Some(1)) => {
@@ -750,8 +934,15 @@ where
                     self.write("\n<ul>\n")
                 }
             }
+            // MBR EXTENSION: `data-mbr-line` on the `<li>`, never on the
+            // enclosing `<ul>`/`<ol>` — a list's own line always equals its
+            // first item's, so an attribute there is pure duplication.
             Tag::Item => {
-                if self.end_newline {
+                if self.emit_block_lines {
+                    self.write(if self.end_newline { "<li" } else { "\n<li" })?;
+                    self.write_block_line()?;
+                    self.write(">")
+                } else if self.end_newline {
                     self.write("<li>")
                 } else {
                     self.write("\n<li>")
@@ -954,7 +1145,11 @@ where
     // run raw text, consuming end tag
     fn raw_text(&mut self) -> Result<(), W::Error> {
         let mut nest = 0;
-        while let Some(event) = self.iter.next() {
+        // MBR EXTENSION: this is the second of the writer's two event loops, and
+        // the reason `next_event` exists. Consuming an image's inner events
+        // without counting them would shift every later `data-mbr-line` by the
+        // size of the alt text.
+        while let Some(event) = self.next_event() {
             match event {
                 Start(_) => nest += 1,
                 End(_) => {
@@ -1364,6 +1559,7 @@ mod tests {
             enable_sections: false,
             enable_mermaid: false,
             section_attrs: HashMap::new(),
+            block_lines: Vec::new(),
         };
         let html = render_with_config("Hello\n\n---\n\nWorld", config);
 
@@ -1430,6 +1626,7 @@ mod tests {
             enable_sections: false,
             enable_mermaid: false,
             section_attrs: HashMap::new(),
+            block_lines: Vec::new(),
         };
         let html = render_with_config("```mermaid\ngraph TD\n```", config);
 
@@ -1448,6 +1645,7 @@ mod tests {
             enable_sections: false,
             enable_mermaid: true,
             section_attrs: HashMap::new(),
+            block_lines: Vec::new(),
         };
         let html = render_with_config("```mermaid\ngraph TD\n```", config);
 
@@ -1834,5 +2032,298 @@ mod tests {
                 "{dest:?} should not be blocked"
             );
         }
+    }
+
+    // ---- data-mbr-line (review anchors) --------------------------------------
+
+    /// Renders `events` with a `block_lines` table built from `(at, line)` pairs.
+    fn render_with_block_lines(events: Vec<Event<'static>>, pairs: &[(u32, u32)]) -> String {
+        let block_lines = pairs
+            .iter()
+            .map(|&(at, line)| BlockLine { at, line })
+            .collect();
+        let config = HtmlConfig {
+            enable_sections: false,
+            enable_mermaid: true,
+            section_attrs: HashMap::new(),
+            block_lines,
+        };
+        let mut html = String::new();
+        push_html_with_config(&mut html, events.into_iter(), config);
+        html
+    }
+
+    /// Parses `markdown` and renders it with a table built by finding the
+    /// indices of the events matching `pick`.
+    fn render_markdown_with_block_lines(
+        markdown: &str,
+        pick: impl Fn(&Event<'_>) -> bool,
+    ) -> String {
+        let events: Vec<Event<'static>> = Parser::new_ext(markdown, Options::all())
+            .map(|e| owned_event(&e))
+            .collect();
+        let pairs: Vec<(u32, u32)> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| pick(e))
+            .map(|(i, _)| (i as u32, (i as u32) + 1))
+            .collect();
+        render_with_block_lines(events, &pairs)
+    }
+
+    /// A `'static` clone of `event`, so test tables can outlive the parser.
+    fn owned_event(event: &Event<'_>) -> Event<'static> {
+        // Round-tripping through the writer is not needed; only the few shapes
+        // these tests use have to survive, and `CowStr::from(String)` is owned.
+        match event {
+            Start(tag) => Start(owned_tag(tag)),
+            End(tag) => End(*tag),
+            Text(t) => Text(CowStr::from(t.to_string())),
+            Code(t) => Code(CowStr::from(t.to_string())),
+            Html(t) => Html(CowStr::from(t.to_string())),
+            InlineHtml(t) => InlineHtml(CowStr::from(t.to_string())),
+            InlineMath(t) => InlineMath(CowStr::from(t.to_string())),
+            DisplayMath(t) => DisplayMath(CowStr::from(t.to_string())),
+            FootnoteReference(t) => FootnoteReference(CowStr::from(t.to_string())),
+            SoftBreak => SoftBreak,
+            HardBreak => HardBreak,
+            Rule => Rule,
+            TaskListMarker(b) => TaskListMarker(*b),
+        }
+    }
+
+    fn owned_tag(tag: &Tag<'_>) -> Tag<'static> {
+        match tag {
+            Tag::Paragraph => Tag::Paragraph,
+            Tag::Heading {
+                level,
+                id,
+                classes,
+                attrs,
+            } => Tag::Heading {
+                level: *level,
+                id: id.as_ref().map(|i| CowStr::from(i.to_string())),
+                classes: classes
+                    .iter()
+                    .map(|c| CowStr::from(c.to_string()))
+                    .collect(),
+                attrs: attrs
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            CowStr::from(k.to_string()),
+                            v.as_ref().map(|v| CowStr::from(v.to_string())),
+                        )
+                    })
+                    .collect(),
+            },
+            Tag::BlockQuote(kind) => Tag::BlockQuote(*kind),
+            Tag::CodeBlock(CodeBlockKind::Fenced(info)) => {
+                Tag::CodeBlock(CodeBlockKind::Fenced(CowStr::from(info.to_string())))
+            }
+            Tag::CodeBlock(CodeBlockKind::Indented) => Tag::CodeBlock(CodeBlockKind::Indented),
+            Tag::List(start) => Tag::List(*start),
+            Tag::Item => Tag::Item,
+            Tag::Table(a) => Tag::Table(a.clone()),
+            Tag::TableHead => Tag::TableHead,
+            Tag::TableRow => Tag::TableRow,
+            Tag::TableCell => Tag::TableCell,
+            Tag::Emphasis => Tag::Emphasis,
+            Tag::Strong => Tag::Strong,
+            Tag::Strikethrough => Tag::Strikethrough,
+            Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            } => Tag::Image {
+                link_type: *link_type,
+                dest_url: CowStr::from(dest_url.to_string()),
+                title: CowStr::from(title.to_string()),
+                id: CowStr::from(id.to_string()),
+            },
+            Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            } => Tag::Link {
+                link_type: *link_type,
+                dest_url: CowStr::from(dest_url.to_string()),
+                title: CowStr::from(title.to_string()),
+                id: CowStr::from(id.to_string()),
+            },
+            Tag::HtmlBlock => Tag::HtmlBlock,
+            other => panic!("unhandled tag in test helper: {other:?}"),
+        }
+    }
+
+    /// Each of the six tags carries the attribute, from a hand-built table.
+    #[test]
+    fn block_line_attribute_on_each_tag() {
+        let events: Vec<Event<'static>> = vec![
+            Start(Tag::Paragraph),       // 0
+            Text(CowStr::Borrowed("p")), // 1
+            End(TagEnd::Paragraph),      // 2
+            Start(Tag::Heading {
+                // 3
+                level: pulldown_cmark::HeadingLevel::H2,
+                id: None,
+                classes: vec![],
+                attrs: vec![],
+            }),
+            Text(CowStr::Borrowed("h")),                            // 4
+            End(TagEnd::Heading(pulldown_cmark::HeadingLevel::H2)), // 5
+            Start(Tag::List(None)),                                 // 6
+            Start(Tag::Item),                                       // 7
+            Text(CowStr::Borrowed("li")),                           // 8
+            End(TagEnd::Item),                                      // 9
+            End(TagEnd::List(false)),                               // 10
+            Start(Tag::BlockQuote(None)),                           // 11
+            End(TagEnd::BlockQuote(None)),                          // 12
+            Start(Tag::CodeBlock(CodeBlockKind::Fenced(CowStr::Borrowed("")))), // 13
+            End(TagEnd::CodeBlock),                                 // 14
+            Start(Tag::Table(vec![Alignment::None])),               // 15
+            Start(Tag::TableHead),                                  // 16
+            Start(Tag::TableCell),                                  // 17
+            End(TagEnd::TableCell),                                 // 18
+            End(TagEnd::TableHead),                                 // 19
+            End(TagEnd::Table),                                     // 20
+        ];
+        // A distinct line per block, so a mix-up cannot pass.
+        let html = render_with_block_lines(
+            events,
+            &[
+                (0, 11),  // <p>
+                (3, 22),  // <h2>
+                (6, 33),  // Tag::List — recorded here on purpose; see below
+                (7, 44),  // <li>
+                (11, 55), // <blockquote>
+                (13, 66), // <pre>
+                (15, 77), // <table>
+                (17, 88), // Tag::TableCell — likewise
+            ],
+        );
+
+        assert!(html.contains(r#"<p data-mbr-line="11">"#), "{html}");
+        assert!(html.contains(r#"<h2 data-mbr-line="22">"#), "{html}");
+        assert!(html.contains(r#"<li data-mbr-line="44">"#), "{html}");
+        assert!(
+            html.contains(r#"<blockquote data-mbr-line="55">"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<pre data-mbr-line="66"><code>"#), "{html}");
+        assert!(html.contains(r#"<table data-mbr-line="77">"#), "{html}");
+
+        // The excluded tags stay bare even when the table names them, which is
+        // what keeps `markdown::is_review_block_start` the single definition of
+        // the set: an entry it never records cannot leak through the writer.
+        assert!(html.contains("<ul>"), "no attribute on <ul>: {html}");
+        assert!(html.contains("<th>"), "no attribute on <th>: {html}");
+        assert!(!html.contains(r#""33""#), "{html}");
+        assert!(!html.contains(r#""88""#), "{html}");
+    }
+
+    /// GOTCHA: `raw_text` is the writer's *second* event loop. If it consumed
+    /// events without counting them, every `data-mbr-line` after the first image
+    /// on the page would name the wrong line. Route `raw_text` back through
+    /// `self.iter.next()` instead of `next_event` and this test fails.
+    #[test]
+    fn block_line_index_survives_image_alt_text() {
+        // The alt text carries inline markup, so `raw_text` eats several events
+        // (`Start(Emphasis)`, `Text`, `End(Emphasis)`, …) before the image's
+        // `End`. Every one of them has to advance the counter.
+        let markdown =
+            "![alt *with* `markup` and **more**](img.png)\n\nSecond paragraph.\n\nThird one.\n";
+        let events: Vec<Event<'static>> = Parser::new_ext(markdown, Options::all())
+            .map(|e| owned_event(&e))
+            .collect();
+
+        // Find the two later paragraph starts and give them recognisable lines.
+        let paragraph_starts: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, Start(Tag::Paragraph)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            paragraph_starts.len(),
+            3,
+            "the image paragraph plus two more: {events:?}"
+        );
+        let pairs = [
+            (paragraph_starts[0] as u32, 1),
+            (paragraph_starts[1] as u32, 3),
+            (paragraph_starts[2] as u32, 5),
+        ];
+
+        let html = render_with_block_lines(events, &pairs);
+        assert!(
+            html.contains(r#"<p data-mbr-line="3">Second paragraph.</p>"#),
+            "the paragraph after the image must keep its own line: {html}"
+        );
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">Third one.</p>"#),
+            "and so must the one after that: {html}"
+        );
+    }
+
+    #[test]
+    fn empty_block_lines_emits_no_attribute() {
+        let html = render_with_block_lines(
+            vec![
+                Start(Tag::Paragraph),
+                Text(CowStr::Borrowed("p")),
+                End(TagEnd::Paragraph),
+            ],
+            &[],
+        );
+        assert_eq!(html, "<p>p</p>\n");
+        assert!(!html.contains("data-mbr-line"));
+    }
+
+    /// An HTML parser keeps the *first* of a pair of duplicate attributes, so
+    /// ours must precede any the author wrote.
+    #[test]
+    fn our_heading_line_precedes_author_attrs() {
+        let html =
+            render_markdown_with_block_lines("## Title {#custom .cls data-mbr-line=99}\n", |e| {
+                matches!(e, Start(Tag::Heading { .. }))
+            });
+        let ours = html.find(r#"data-mbr-line="1""#).expect(&html);
+        let theirs = html.find(r#"data-mbr-line="99""#).expect(&html);
+        assert!(
+            ours < theirs,
+            "ours must come first so a parser prefers it: {html}"
+        );
+        // And it must not have displaced the author's id or classes.
+        assert!(html.contains(r#"id="custom""#), "{html}");
+        assert!(html.contains(r#"class="cls""#), "{html}");
+    }
+
+    #[test]
+    fn mermaid_pre_carries_block_line() {
+        let html = render_markdown_with_block_lines("```mermaid\ngraph TD\n```\n", |e| {
+            matches!(e, Start(Tag::CodeBlock(_)))
+        });
+        assert!(
+            html.contains(r#"<pre class="mermaid" data-mbr-line="1">"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<code"),
+            "mermaid keeps its bare <pre>: {html}"
+        );
+    }
+
+    #[test]
+    fn fenced_lang_pre_carries_block_line() {
+        let html = render_markdown_with_block_lines("```rust\nfn main() {}\n```\n", |e| {
+            matches!(e, Start(Tag::CodeBlock(_)))
+        });
+        assert!(
+            html.contains(r#"<pre data-mbr-line="1"><code class="language-rust">"#),
+            "{html}"
+        );
     }
 }

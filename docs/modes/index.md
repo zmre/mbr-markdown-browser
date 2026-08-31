@@ -97,3 +97,11 @@ mbr -b --output ./public ~/notes
 - [Server Mode](server/) - Web server with live reload
 - [Build Mode](build/) - Static site generation
 - [QuickLook](quicklook/) - macOS Finder preview integration
+
+## Server and GUI Only
+
+Two capabilities need live files behind the page, so they exist in server and
+GUI mode and are absent from a static build:
+
+- [In-Browser Editing](editing/) - Edit markdown from the browser (off by default; `--edit`)
+- [Review Notes](review/) - Annotate a page and copy the review out as markdown (`r` / `R`)
