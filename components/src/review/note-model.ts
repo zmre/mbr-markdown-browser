@@ -14,7 +14,13 @@
 
 import { DEFAULT_NOTE_TYPE, isNoteType, type AnchorState, type NoteDraft, type ReviewNote } from './types.ts'
 
-/** `localStorage` key. `mbr_*` is the house convention (`mbr_genealogy_chart`, `mbr_recent_files`). */
+/**
+ * `localStorage` key prefix. `mbr_*` is the house convention
+ * (`mbr_genealogy_chart`, `mbr_recent_files`). `review-store.ts`'s
+ * `storageKey()` suffixes this with `:<repoId>` to scope notes per
+ * repository as well as per origin; the bare value here is what it falls
+ * back to when there is no repo id (and what a pre-scoping store used).
+ */
 export const STORAGE_KEY = 'mbr_review_notes'
 
 /** Envelope version this build reads and writes. */

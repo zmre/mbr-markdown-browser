@@ -171,9 +171,9 @@ does not claim them.
 
 ## Where notes live
 
-Notes are stored in your **browser's `localStorage`**, under the key
-`mbr_review_notes`. Nothing is written to your markdown files and nothing is sent
-to the server.
+Notes are stored in your **browser's `localStorage`**, under a key derived from
+`mbr_review_notes` and the served repository. Nothing is written to your
+markdown files and nothing is sent to the server.
 
 That buys the thing the feature needs most: durability across a re-render. Fix a
 typo in the file you are reviewing, let live reload redraw the page, and your
@@ -187,10 +187,12 @@ read-modify-write against storage rather than a write of a cached list.
   another laptop, another browser, or a private window.
 - **Clearing site data deletes it.** So does any "clear cookies and site data"
   sweep, and so does a browser configured to clear storage on exit.
-- It is scoped to the **origin**, not to the repository. Serving two different
-  repos from `127.0.0.1:5200` at different times puts their notes in the same
-  store; notes for files the current repo does not have render with their
-  location as plain text rather than a link.
+- It is scoped to **origin and repository together**, not just the origin.
+  Serving two different repos from `127.0.0.1:5200` at different times keeps
+  their notes in separate stores, but the scoping key is derived from the
+  server's root directory, not a repository identity: point mbr at the same
+  folder under a different path (or a clone) and it looks like a different
+  repository to the store.
 - Nothing is backed up. There is no undo.
 
 Copying the review out is what makes it portable, and it is worth doing before

@@ -7,6 +7,7 @@ import {
   openInNewTab,
   getCanonicalPath,
   getGraphDepth,
+  getRepoId,
   getTasksDefaultInclude,
 } from './shared.ts';
 
@@ -291,6 +292,29 @@ describe('getGraphDepth', () => {
   it('floors fractional values', () => {
     setDepth(3.9);
     expect(getGraphDepth()).toBe(3);
+  });
+});
+
+describe('getRepoId', () => {
+  const originalConfig = window.__MBR_CONFIG__;
+
+  afterEach(() => {
+    window.__MBR_CONFIG__ = originalConfig;
+  });
+
+  it('returns empty string when the config is absent', () => {
+    window.__MBR_CONFIG__ = undefined;
+    expect(getRepoId()).toBe('');
+  });
+
+  it('returns empty string when repoId is missing, as a static build has none', () => {
+    window.__MBR_CONFIG__ = { serverMode: false, guiMode: false };
+    expect(getRepoId()).toBe('');
+  });
+
+  it('passes through the configured value', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'abc123' };
+    expect(getRepoId()).toBe('abc123');
   });
 });
 

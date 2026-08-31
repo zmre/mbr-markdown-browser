@@ -16,6 +16,9 @@
       // - tasksDefaultInclude is where the panel's Show filter starts
       // - reviewEnabled reports whether blocks carry data-mbr-line source lines;
       //   always false in static builds, the CLI and QuickLook
+      // - repoId scopes browser storage (currently just review notes) to the
+      //   served repository as well as the origin; omitted (empty string) for
+      //   static builds and error pages, same as reviewEnabled
       // - tagSources: configuration for tag linking in info panel
       window.__MBR_CONFIG__ = {
         serverMode: {% if server_mode %}true{% else %}false{% endif %},
@@ -27,6 +30,7 @@
         searchEndpoint: "{{ asset_base | safe }}search",
         basePath: "{{ relative_root | default(value='') | safe }}",
         tagSources: {{ tag_sources | default(value="[]") | safe }},
-        graphDepth: {{ graph_depth | default(value=2) }}
+        graphDepth: {{ graph_depth | default(value=2) }},
+        repoId: "{{ repo_id | default(value='') | safe }}"
       };
     </script>

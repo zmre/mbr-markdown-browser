@@ -32,6 +32,7 @@ declare global {
       basePath?: string;
       tagSources?: TagSourceConfig[];
       graphDepth?: number;
+      repoId?: string;
     };
   }
 }
@@ -88,6 +89,18 @@ export function isTasksEnabled(): boolean {
  */
 export function isReviewEnabled(): boolean {
   return window.__MBR_CONFIG__?.reviewEnabled ?? false;
+}
+
+/**
+ * Stable per-repository id (a hash of the server's root directory), used to
+ * scope browser storage — currently just review notes — per repository
+ * rather than per origin. Several repos served from the same host:port
+ * (GUI mode's fixed default port, or a reused dev port) must not share
+ * state. Empty string when absent: static builds, the CLI, QuickLook, and
+ * error pages, none of which have review notes to scope.
+ */
+export function getRepoId(): string {
+  return window.__MBR_CONFIG__?.repoId ?? '';
 }
 
 /** The three legal Show values (mirrors Rust's `task_query::IncludeFilter`). */
