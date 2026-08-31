@@ -21,6 +21,8 @@ export * from './mbr-footnote-preview.ts';
 export * from './mbr-genealogy.ts';
 // Trigger only — the two-pane panel lives in the lazy mbr-tasks.min.js chunk.
 export * from './mbr-tasks.ts';
+// Trigger, markers and popover; the panel and form live in mbr-review.min.js.
+export * from './mbr-review.ts';
 // In-document task checkboxes and the #mbr-task-N jump.
 export * from './mbr-task-doc.ts';
 // Dynamic enhancement loaders

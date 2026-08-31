@@ -184,6 +184,8 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'Ctrl+g', description: 'Toggle info panel' },
       { keys: 't', description: 'Open task browser (server/GUI only)' },
       { keys: 'e', description: 'Open editor (when editing enabled)' },
+      { keys: 'r', description: 'Add a review note (anchored to the selection)' },
+      { keys: 'R', description: 'Open review notes (server/GUI only)' },
       { keys: 'Esc', description: 'Close panel' },
     ],
   },
@@ -240,6 +242,18 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'x', description: 'Cancel / reopen focused task (editing on)' },
       { keys: 'Tab', description: 'Switch pane' },
       { keys: 'Ctrl+d / Ctrl+u', description: 'Scroll active pane' },
+    ],
+  },
+  {
+    title: 'Review Notes (when open)',
+    shortcuts: [
+      { keys: '↑ / ↓', description: 'Navigate notes' },
+      { keys: 'Ctrl+n / Ctrl+p', description: 'Navigate notes' },
+      { keys: 'Enter', description: 'Open the focused note' },
+      { keys: 'e', description: 'Edit the focused note' },
+      { keys: 'd', description: 'Delete the focused note (confirms)' },
+      { keys: 'c', description: 'Copy the review as markdown' },
+      { keys: 'Esc', description: 'Close' },
     ],
   },
   {

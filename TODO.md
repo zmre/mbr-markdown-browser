@@ -10,7 +10,34 @@
   * [ ] Edit-mode support for structured person data: a friendlier way to view/edit the person frontmatter (born, died, born_place, gender, aliases, relationships) than hand-editing raw YAML in the in-browser editor — e.g. a small form for the known fields.
   * [ ] Wire the editor to the person `image` frontmatter field — pick/replace the portrait. Image upload itself is done (`editor-crepe.ts` `uploadFile` → `POST /.mbr/upload`, reachable from the upload button, drag-drop and paste), but every result path targets a ProseMirror body node; nothing writes a frontmatter key, so the portrait is still set by hand-typing `image:` into the raw YAML textarea.
 
-* [ ] CriticMarkup support?
+* [ ] Prose critique support
+  * There are two use cases here: one, someone sends me something to review and I want a way to make edits inline.  CriticMarkup is a reasonable approach although usually when I'm in this scenario, the markdown is in github and we're commenting on diffs.
+  * Most of the time though I don't really want or need critic markup (viewing or generating). It doesn't really come up for me.  However, I would like to be able to indicate suggested changes and comments in the GUI.  Moreover, I want to be able to add notes and suggestions.
+    * The primary use case for this these days is to generate feedback to AI that captures file, line number, and type of change.
+    * To that end, take a look at github:zmre/pwnvim and what I'm doing there.  It can pull review comments from GitHub, but can also generate them on specific lines.  Then I can export the review info as markdown that looks like this:
+
+    ```markdown
+    # Code Review
+
+    1. **[SUGGESTION]** `flake.nix:26`
+      Did you know that numtide's llm-agents repo https://github.com/numtide/llm-agents.nix has omp?  And they build into binary caches, which would speed this up (probably) if you used that as the input.
+
+    2. **[NOTE]** `flake.nix:35`
+      If you use the numtide version, this update stuff can go away - you just need to update the flake lock
+
+    3. **[QUESTION]** `PLAN.md:7`
+      Not sure what it means by the four-cli toolchain dead weight. The priv options? The other codex and gemini stuff?
+
+    4. **[NOTE]** `PLAN.md:15`
+      I dunno, I kind of like the predictable wrapup. When I use claude without it I just have a wall of text to sort through.
+    ```
+
+    * And in the UI it has little markers showing when there's a comment (and we already have a facility for this with `>>>` blocks, I think).
+    * So ideally I'd be able to add a bunch of feedback in a doc and then copy it out as markdown, but also view it inline. If suggesting changes, it would show the diffs inline and work sort of like how github comments work in that case.  But instead of showing diffs inline in a unified style, something more like criticmarkup styles (cross outs for delete, green text for additions, etc.).  But for now we don't need to use criticmarkup in the markdown file or to be able to read or save that.
+    * We'd want to store the pending comments in some sort of localstorage so a reload of the file when it changes doesn't obliterate what we already have.
+    * Need to work out how to adjust line numbers of comments if we edit the file (assuming edit mode is on).  If it is edited on the server, that might be tougher / unsupported.
+    * pwnvim doesn't yet handle pushing things back up to github review comments, nor adding change suggestions as diff recommendations, but we will want to support those things.
+    * I think no icon in the header is necessary. We'll make this trigger in one of two ways: by pressing `r` to make a generic note (no specific line), or by selecting text and then we show a floating menu item about adding a note, which can be triggered also with `r` but this time with an anchoring spot. Capital `R` should bring up a list of everything and when there is anything, a floating button icon of a chat bubble in the bottom right should do the same.  From the list of all there should be a copy button/icon to copy out the markdown.  When adding, it should work similarly to github reviews so in our case we'll have a list of types of notes in a dropdown and if "suggestion" is chosen, we'll give a code block with the selected line(s) so it can be modified.
 * [ ] Export to PDF
   * _After research, my options here are pretty ugly. I don't want to compile in chromium or anything and don't want to rely on it being installed in a common place, either. Current browser widget I use doesn't give me a print to pdf option. Need to look for a reasonable way to make this happen cross platform with reliable output._
   * Start with the current page as an option.

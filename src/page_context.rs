@@ -89,6 +89,10 @@ pub struct PageChrome<'a> {
     /// Whether the task browser is available on this page. Always `false` in
     /// static builds: the task index is built from live files.
     pub tasks_enabled: bool,
+    /// Whether this page carries `data-mbr-line` source-line attributes.
+    /// Always `false` in static builds: an anchor is only meaningful against a
+    /// live file, so `mbr -b` never emits one.
+    pub review_enabled: bool,
     /// Where the task panel's Show filter starts. Emitted even when
     /// `tasks_enabled` is false (as `graph_depth` is when link tracking is off):
     /// the key is inert without a panel to read it.
@@ -123,6 +127,7 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
     );
     ctx.insert("graph_depth".to_string(), json!(chrome.graph_depth));
     ctx.insert("tasks_enabled".to_string(), json!(chrome.tasks_enabled));
+    ctx.insert("review_enabled".to_string(), json!(chrome.review_enabled));
     ctx.insert(
         "tasks_default_include".to_string(),
         json!(chrome.tasks_default_include),
@@ -281,6 +286,8 @@ pub struct MarkdownContextOptions<'a> {
     /// not go through [`insert_page_chrome`], so this is the sibling of
     /// [`PageChrome::tasks_enabled`] for them. Always `false` in static builds.
     pub tasks_enabled: bool,
+    /// Sibling of [`PageChrome::review_enabled`] for markdown pages.
+    pub review_enabled: bool,
     /// Sibling of [`PageChrome::tasks_default_include`] for markdown pages.
     pub tasks_default_include: IncludeFilter,
     pub title_prefix: &'a str,
@@ -357,6 +364,7 @@ pub fn markdown_extra_context(
     );
     ctx.insert("graph_depth".to_string(), json!(opts.graph_depth));
     ctx.insert("tasks_enabled".to_string(), json!(opts.tasks_enabled));
+    ctx.insert("review_enabled".to_string(), json!(opts.review_enabled));
     ctx.insert(
         "tasks_default_include".to_string(),
         json!(opts.tasks_default_include),
@@ -445,6 +453,7 @@ mod tests {
                 sidebar_max_items: 10,
                 graph_depth: 3,
                 tasks_enabled: true,
+                review_enabled: false,
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("pre ", " suf")),
             },
@@ -475,6 +484,7 @@ mod tests {
                 sidebar_max_items: 10,
                 graph_depth: 2,
                 tasks_enabled: false,
+                review_enabled: false,
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: None,
             },
@@ -497,6 +507,7 @@ mod tests {
                 sidebar_max_items: 5,
                 graph_depth: 2,
                 tasks_enabled: false,
+                review_enabled: false,
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("", "")),
             },
@@ -678,6 +689,7 @@ mod tests {
             sidebar_max_items: 10,
             graph_depth: 2,
             tasks_enabled: true,
+            review_enabled: false,
             tasks_default_include: IncludeFilter::Tasks,
             title_prefix: "",
             title_suffix: "",

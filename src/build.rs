@@ -1138,6 +1138,11 @@ impl Builder {
             false, // server_mode is false in build mode
             false, // transcode is disabled in build mode
             valid_tag_sources,
+            // Hardcoded, not read from config: `data-mbr-line` anchors a review
+            // selection back to a *live* file, and a static build has no server
+            // to send it to. Same treatment as `tasks_enabled` below, and it is
+            // what makes `build_emits_no_data_mbr_line` unconditional.
+            markdown::ReviewLines::Omit,
             mark_incomplete,
             &self.config.incomplete_markers,
             Some(self.repo.wikilink_index.clone()),
@@ -1233,6 +1238,9 @@ impl Builder {
                 // Static builds never carry the task browser: the task index
                 // reads live files, which a published site does not have.
                 tasks_enabled: false,
+                // Hardcoded, exactly as `tasks_enabled` is: a static build never
+                // emits `data-mbr-line`, so the page must not claim it did.
+                review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_prefix: &self.config.title_prefix,
                 title_suffix: &self.config.title_suffix,
@@ -1485,6 +1493,9 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                // Hardcoded, exactly as `tasks_enabled` is: a static build never
+                // emits `data-mbr-line`, so the page must not claim it did.
+                review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
@@ -1712,6 +1723,9 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                // Hardcoded, exactly as `tasks_enabled` is: a static build never
+                // emits `data-mbr-line`, so the page must not claim it did.
+                review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
@@ -1784,6 +1798,9 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                // Hardcoded, exactly as `tasks_enabled` is: a static build never
+                // emits `data-mbr-line`, so the page must not claim it did.
+                review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
             },
@@ -2054,6 +2071,14 @@ impl Builder {
                 continue;
             }
 
+            // Skip the review-notes chunk, for the same reason. A note anchors
+            // to a `data-mbr-line` attribute, and a static build renders with
+            // `ReviewLines::Omit` — so there is nothing here to anchor to,
+            // `<mbr-review>` never renders, and the chunk is unreachable.
+            if *route == crate::server::REVIEW_CHUNK_ROUTE {
+                continue;
+            }
+
             // Strip leading / from route to get filename
             let filename = route.trim_start_matches('/');
             let output_path = mbr_output.join(filename);
@@ -2232,6 +2257,9 @@ impl Builder {
                 graph_depth: self.config.graph_depth,
                 // The task browser needs a live server; a published site has none.
                 tasks_enabled: false,
+                // Hardcoded, exactly as `tasks_enabled` is: a static build never
+                // emits `data-mbr-line`, so the page must not claim it did.
+                review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: None,
             },
@@ -2318,6 +2346,9 @@ impl Builder {
                     graph_depth: self.config.graph_depth,
                     // The task browser needs a live server; a published site has none.
                     tasks_enabled: false,
+                    // Hardcoded, exactly as `tasks_enabled` is: a static build never
+                    // emits `data-mbr-line`, so the page must not claim it did.
+                    review_enabled: false,
                     tasks_default_include: self.config.tasks_default_include,
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 },

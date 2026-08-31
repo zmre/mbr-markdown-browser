@@ -47,6 +47,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         mark_incomplete: true,
         incomplete_markers: mbr::config::default_incomplete_markers(),
         tasks_enabled: true,
+        review_enabled: true,
         tasks_stamp_done: true,
         tasks_default_include: mbr::task_query::IncludeFilter::Tasks,
         tasks_ignore_globs: Vec::new(),
@@ -194,7 +195,10 @@ async fn test_serve_markdown_file() {
     assert_eq!(response.status(), 200);
 
     let html = response.text().await.unwrap();
-    assert_html_contains(&html, "<h1 id=\"hello-world\">Hello World</h1>");
+    assert_html_contains(
+        &html,
+        "<h1 data-mbr-line=\"1\" id=\"hello-world\">Hello World</h1>",
+    );
     assert_html_contains(&html, "This is a test.");
 }
 
@@ -372,7 +376,10 @@ async fn test_serve_index_at_subdirectory() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/home/").await;
 
-    assert_html_contains(&html, "<h1 id=\"home-page\">Home Page</h1>");
+    assert_html_contains(
+        &html,
+        "<h1 data-mbr-line=\"1\" id=\"home-page\">Home Page</h1>",
+    );
 }
 
 #[tokio::test]
@@ -384,7 +391,10 @@ async fn test_serve_directory_index() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/docs/").await;
 
-    assert_html_contains(&html, "<h1 id=\"documentation\">Documentation</h1>");
+    assert_html_contains(
+        &html,
+        "<h1 data-mbr-line=\"1\" id=\"documentation\">Documentation</h1>",
+    );
 }
 
 #[tokio::test]
@@ -395,7 +405,10 @@ async fn test_serve_nested_markdown() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/blog/posts/first/").await;
 
-    assert_html_contains(&html, "<h1 id=\"first-post\">First Post</h1>");
+    assert_html_contains(
+        &html,
+        "<h1 data-mbr-line=\"1\" id=\"first-post\">First Post</h1>",
+    );
 }
 
 #[tokio::test]
@@ -1916,7 +1929,7 @@ async fn test_template_folder_overrides_html_templates() {
         "Should render with custom wrapper"
     );
     assert!(
-        html.contains("<h1 id=\"test-page\">Test Page</h1>"),
+        html.contains("<h1 data-mbr-line=\"1\" id=\"test-page\">Test Page</h1>"),
         "Should still render markdown content"
     );
 }
@@ -2789,9 +2802,9 @@ async fn test_components_js_bundle_served() {
 
 #[tokio::test]
 async fn test_graph_chunks_served() {
-    // The lazy-loaded mini-graph, genealogy and task-panel chunks are compiled
-    // into the binary (DEFAULT_FILES) and must be served alongside the main
-    // bundle.
+    // The lazy-loaded mini-graph, genealogy, task-panel and review chunks are
+    // compiled into the binary (DEFAULT_FILES) and must be served alongside the
+    // main bundle.
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
@@ -2800,6 +2813,7 @@ async fn test_graph_chunks_served() {
         "/.mbr/components/mbr-graph.min.js",
         "/.mbr/components/mbr-genealogy.min.js",
         "/.mbr/components/mbr-tasks.min.js",
+        "/.mbr/components/mbr-review.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -2856,14 +2870,17 @@ async fn test_components_js_bundle_no_missing_imports() {
         );
     }
 
-    // The mini-graph, genealogy and task-panel chunks are lazy-loaded through
-    // runtime-computed URLs (asset base + "components/<chunk>.min.js"), so
-    // they never appear as literal import() targets. If the bundle references
-    // any of those chunk filenames, that chunk must actually be served.
+    // The mini-graph, genealogy, task-panel and review chunks are lazy-loaded
+    // through runtime-computed URLs (asset base + "components/<chunk>.min.js"),
+    // so they never appear as literal import() targets — which is also why the
+    // absolute-import assertion above needs no exemption for them. If the
+    // bundle references any of those chunk filenames, that chunk must actually
+    // be served.
     for chunk in [
         "mbr-graph.min.js",
         "mbr-genealogy.min.js",
         "mbr-tasks.min.js",
+        "mbr-review.min.js",
     ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");
@@ -8484,5 +8501,76 @@ async fn test_head_config_includes_tasks_enabled() {
     .await;
     for path in ["/readme/", "/"] {
         assert_html_contains(&server.get_text(path).await, "tasksEnabled: false");
+    }
+}
+
+// ============================================================================
+// data-mbr-line (review anchors)
+// ============================================================================
+
+#[tokio::test]
+async fn test_served_markdown_carries_data_mbr_line() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes.md",
+        concat!(
+            "# Heading\n\n",        // 1
+            "First paragraph.\n\n", // 3
+            "- an item\n\n",        // 5
+            "> a quote\n\n",        // 7
+            "Last paragraph.\n",    // 9
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/notes/").await;
+
+    // Our attribute precedes the generated heading id, so a parser prefers ours.
+    assert_html_contains(&html, r#"<h1 data-mbr-line="1" id="heading">"#);
+    assert_html_contains(&html, r#"<p data-mbr-line="3">First paragraph.</p>"#);
+    assert_html_contains(&html, r#"<li data-mbr-line="5">"#);
+    assert_html_contains(&html, r#"<blockquote data-mbr-line="7">"#);
+    assert_html_contains(&html, r#"<p data-mbr-line="9">Last paragraph.</p>"#);
+    // The excluded tags stay bare.
+    assert_html_contains(&html, "<ul>");
+}
+
+#[tokio::test]
+async fn test_review_disabled_removes_data_mbr_line() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes.md", "# Heading\n\nFirst paragraph.\n");
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.review_enabled = false;
+    })
+    .await;
+    let html = server.get_text("/notes/").await;
+
+    // The attribute form, not the bare name: `_head.html`'s comment block
+    // mentions `data-mbr-line` in prose on every page.
+    assert!(
+        !html.contains("data-mbr-line=\""),
+        "review_enabled = false must emit no anchors: {html}"
+    );
+    // …and the page still renders, with the heading id untouched.
+    assert_html_contains(&html, r#"<h1 id="heading">Heading</h1>"#);
+}
+
+#[tokio::test]
+async fn test_head_config_includes_review_enabled() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\nBody.");
+
+    let server = TestServer::start(&repo).await;
+    for path in ["/readme/", "/"] {
+        assert_html_contains(&server.get_text(path).await, "reviewEnabled: true");
+    }
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.review_enabled = false;
+    })
+    .await;
+    for path in ["/readme/", "/"] {
+        assert_html_contains(&server.get_text(path).await, "reviewEnabled: false");
     }
 }

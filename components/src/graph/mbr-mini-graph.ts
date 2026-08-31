@@ -32,6 +32,7 @@ import { filterToDepth, type MiniGraph, type MiniGraphNode } from './build.js'
 import { expandNeighborhood, type FetchPageLinks } from './bfs.js'
 import { DRAG_THRESHOLD_PX, clientPointToSvg, parseViewBox } from './viewport.js'
 import { SvgViewportController } from './viewport-controller.js'
+import { positionAnchored } from '../anchored-popover.js'
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -76,8 +77,6 @@ const DEPTH_MAX = 5
 
 /** Grace period before hiding the hover card (pointer travel time). */
 const HOVER_HIDE_DELAY_MS = 120
-/** Gap between a node and its hover card, and the viewport clamp margin. */
-const HOVER_GAP_PX = 8
 
 /** Synchronous tick count for the reduced-motion / test static layout. */
 const STATIC_TICKS = 150
@@ -586,19 +585,7 @@ export class MbrMiniGraphElement extends LitElement {
     card.style.display = 'block'
 
     // Position near the node, clamped to the viewport (footnote-card pattern).
-    const rect = target.getBoundingClientRect()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    card.style.left = '0px'
-    card.style.top = '0px'
-    const pop = card.getBoundingClientRect()
-    let left = rect.left + rect.width / 2 - pop.width / 2
-    left = Math.max(HOVER_GAP_PX, Math.min(left, vw - pop.width - HOVER_GAP_PX))
-    let top = rect.top - pop.height - HOVER_GAP_PX
-    if (top < HOVER_GAP_PX) top = rect.bottom + HOVER_GAP_PX
-    top = Math.max(HOVER_GAP_PX, Math.min(top, vh - pop.height - HOVER_GAP_PX))
-    card.style.left = `${left}px`
-    card.style.top = `${top}px`
+    positionAnchored(target, card)
   }
 
   private _scheduleHoverHide(): void {

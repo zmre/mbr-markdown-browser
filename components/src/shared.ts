@@ -21,6 +21,7 @@ declare global {
       guiMode: boolean;
       editEnabled?: boolean;
       tasksEnabled?: boolean;
+      reviewEnabled?: boolean;
       /**
        * Typed as `string`, not `IncludeFilter`: this is whatever the page's
        * `_head.html` emitted, and {@link getTasksDefaultInclude} is the thing
@@ -75,6 +76,18 @@ export function isEditEnabled(): boolean {
  */
 export function isTasksEnabled(): boolean {
   return window.__MBR_CONFIG__?.tasksEnabled ?? false;
+}
+
+/**
+ * Check whether this page's block elements carry `data-mbr-line` source lines,
+ * which a review anchor needs to name `file.md:LINE`.
+ *
+ * Driven by the server config (`review_enabled`); always false in static
+ * builds, the CLI and QuickLook, which pass `ReviewLines::Omit` unconditionally
+ * because an anchor is only meaningful against a live file.
+ */
+export function isReviewEnabled(): boolean {
+  return window.__MBR_CONFIG__?.reviewEnabled ?? false;
 }
 
 /** The three legal Show values (mirrors Rust's `task_query::IncludeFilter`). */

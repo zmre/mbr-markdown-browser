@@ -77,6 +77,9 @@ fn render_pipeline(markdown: &str) -> String {
         false, // server_mode
         false, // transcode_enabled
         std::collections::HashSet::new(),
+        // The corpus pins task markup; `data-mbr-line` would add an attribute to
+        // every block in it and pin nothing this file is about.
+        mbr::markdown::ReviewLines::Omit,
         false, // mark_incomplete
         &[],
         None, // no wikilink index

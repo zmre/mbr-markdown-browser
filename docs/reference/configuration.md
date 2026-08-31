@@ -148,6 +148,7 @@ assert a fact about the command line that was never typed.
 | `link_tracking` | bool | `true` | Enable bidirectional link tracking (backlinks) |
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking (named frontmatter relationships) |
 | `tasks_enabled` | bool | `true` | Enable the task browser (server/GUI only). See [Task Settings](#task-settings). |
+| `review_enabled` | bool | `true` | Emit `data-mbr-line` source lines on block elements (server/GUI only). See [Review Settings](#review-settings). |
 | `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight TK/TODO/FIXME/XXX anywhere in a line |
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag work as incomplete |
 
@@ -622,6 +623,61 @@ link_tracking = false
 ```
 
 When disabled, the `links.json` endpoint returns 404, no link files are generated during builds, and the info panel's link sections and mini link graph don't appear.
+
+### Review Settings
+
+Every block-level element on a served page carries
+`data-mbr-line="{1-based source line}"`, so a frontend feature can turn a text
+selection into an anchor of the form `file.md:LINE` — a review comment that
+survives a re-render, because it names the source rather than the HTML.
+
+It is **server/GUI only**. `mbr -b`, the CLI (`mbr file.md`) and the macOS
+QuickLook preview pass `ReviewLines::Omit` unconditionally rather than reading
+this option, because an anchor is only meaningful against a live file that
+something can be asked about. `review_enabled` therefore has no effect on
+`mbr -b`, and built pages always report `reviewEnabled: false` to the frontend.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `review_enabled` | bool | `true` | Emit `data-mbr-line` on block elements. Disable with `--no-review` or `MBR_REVIEW_ENABLED=false`. |
+
+Example:
+```toml
+# .mbr/config.toml
+review_enabled = false
+```
+
+**Which elements carry the attribute:**
+
+| Element | Markdown |
+|---------|----------|
+| `<p>` | a paragraph |
+| `<h1>`–`<h6>` | a heading |
+| `<li>` | a list item |
+| `<blockquote>` | a block quote |
+| `<pre>` | a fenced or indented code block |
+| `<table>` | a table |
+
+On a heading the attribute is written **before** any `{#id .class}` the author
+supplied, because an HTML parser keeps the first of a pair of duplicate
+attributes — so a heading written as `## Title {data-mbr-line=99}` cannot
+displace the real source line.
+
+**Which elements deliberately do not, and why:**
+
+- **`<ul>` / `<ol>`** — a list's source line is always its first `<li>`'s, so an
+  attribute there would be pure duplication.
+- **`<td>` / `<th>`** — every cell in a row shares one source line, so per-cell
+  attributes roughly triple the byte cost of a table-heavy document to repeat
+  the row's line over and over. The `<table>` carries the line instead.
+- **Inline elements** (`<em>`, `<a>`, …) — anchoring one would need a byte
+  offset *within* a text run, and mbr enables smart punctuation, which has
+  already desynchronised text bytes from source bytes by the time the HTML is
+  written.
+
+**Known gap:** in a *tight* definition list the `<dd>`/`<dt>` prose is not
+wrapped in a `<p>`, so those lines have no ancestor carrying `data-mbr-line`.
+A selection there anchors to the nearest enclosing block instead.
 
 ### Incomplete-Marker Highlighting
 

@@ -58,6 +58,20 @@
   /* Arrival flash for a #mbr-task-N deep link. */
   --mbr-task-flash-color: rgba(255, 213, 79, 0.55);
 
+  /* Review notes (r / R). One accent per note type, matching the six in
+   * components/src/review/types.ts. The panel restates its rules against these
+   * same properties inside its shadow root -- custom properties cross that
+   * boundary but the rules using them do not. */
+  --mbr-review-issue-color: #c62828;
+  --mbr-review-suggestion-color: #f57c00;
+  --mbr-review-note-color: #1976d2;
+  --mbr-review-praise-color: #388e3c;
+  --mbr-review-question-color: #7b1fa2;
+  --mbr-review-insight-color: #0288d1;
+  --mbr-review-stale-color: var(--pico-muted-color, #5c6b73);
+  --mbr-review-highlight-bg: rgba(255, 193, 7, 0.28);
+  --mbr-review-marker-size: 0.8em;
+
   /* Paper margins. Applied as padding on the content box rather than as an
    * `@page` margin -- see the "Print Styles" section for the Safari reason. */
   --mbr-print-margin-block: 0.5in;
@@ -372,6 +386,15 @@ li::marker {
     --mbr-task-tag-bg: rgba(148, 163, 184, 0.2);
     --mbr-task-chip-bg: rgba(148, 163, 184, 0.14);
     --mbr-task-flash-color: rgba(255, 213, 79, 0.28);
+
+    /* Review notes - Dark Mode */
+    --mbr-review-issue-color: #ef5350;
+    --mbr-review-suggestion-color: #ffa726;
+    --mbr-review-note-color: #64b5f6;
+    --mbr-review-praise-color: #66bb6a;
+    --mbr-review-question-color: #ba68c8;
+    --mbr-review-insight-color: #4fc3f7;
+    --mbr-review-highlight-bg: rgba(255, 193, 7, 0.22);
   }
 }
 
@@ -410,6 +433,15 @@ li::marker {
   --mbr-task-tag-bg: rgba(148, 163, 184, 0.2);
   --mbr-task-chip-bg: rgba(148, 163, 184, 0.14);
   --mbr-task-flash-color: rgba(255, 213, 79, 0.28);
+
+  /* Review notes - Dark Mode */
+  --mbr-review-issue-color: #ef5350;
+  --mbr-review-suggestion-color: #ffa726;
+  --mbr-review-note-color: #64b5f6;
+  --mbr-review-praise-color: #66bb6a;
+  --mbr-review-question-color: #ba68c8;
+  --mbr-review-insight-color: #4fc3f7;
+  --mbr-review-highlight-bg: rgba(255, 193, 7, 0.22);
 }
 
 /* ==================== Standard Block Quotes (> - Level 1 Nesting) ==================== */
@@ -1081,6 +1113,252 @@ a.mbr-link-enhanced[data-tooltip]::after {
   color: #000;
 }
 
+/*
+ * Review-note wash. Same document-scoped-registry reasoning as the find rules
+ * above: `<mbr-review>` registers ranges that point into the light DOM under
+ * main#wrapper, so these cannot live in the element's own shadow styles.
+ *
+ * Only color, background-color, text-decoration*, text-shadow and
+ * -webkit-text-stroke are honoured inside ::highlight(), which is why the
+ * quoted span gets a wash and an underline rather than a border. An engine
+ * without the Custom Highlight API drops this rule and keeps every marker --
+ * the marker, not the wash, is what a reader clicks.
+ */
+::highlight(mbr-review) {
+  background-color: var(--mbr-review-highlight-bg, rgba(255, 193, 7, 0.28));
+  text-decoration: underline dotted;
+  text-underline-offset: 0.15em;
+}
+
+/* ==================== Review Note Markers (r / R) ==================== */
+
+/*
+ * One marker per anchored note, injected into the block it belongs to by
+ * `components/src/review/markers.ts`.
+ *
+ * The element is deliberately EMPTY -- its glyph is generated content. A real
+ * text node inside the block would join the block's text run, so selecting a
+ * paragraph would copy its markers, every `textContent` reader would see them,
+ * and the review feature would end up quoting its own markers. Generated
+ * content is excluded from the copy buffer in every engine. Same trick as
+ * `.mbr-heading-anchor::after`.
+ */
+/*
+ * The marker sits in the margin beside the block's FIRST line -- the line the
+ * note actually refers to -- rather than in the text flow.
+ *
+ * Appended as the block's last child, an inline marker lands after the last
+ * word of a wrapped paragraph, which reads as a mark floating between two
+ * lines and points at the wrong line entirely. Taking it out of flow and
+ * pinning it to `top: 0` puts it level with the line whose number the note
+ * stores. Same placement idea as the `>>>` marginalia dagger above.
+ *
+ * `left: 100%` puts it in the container's own horizontal padding, which exists
+ * at every viewport width, so this needs no breakpoint. `:has()` scopes the
+ * positioning context to blocks that actually carry a marker -- making every
+ * `<p>` on the page a containing block would change stacking for anything
+ * absolutely positioned inside one.
+ */
+[data-mbr-line]:has(> .mbr-review-marker) {
+  position: relative;
+}
+
+/*
+ * The marker is a flex box holding one inline `<svg>`.
+ *
+ * # Why so many resets
+ *
+ * The element is `role="button"`, and Pico styles `[role=button]` as a full
+ * button: `padding: var(--pico-form-element-spacing-vertical) ...-horizontal`
+ * (~0.75rem 1rem), a border, and `background-color: var(--pico-primary-background)`.
+ * Combined with Pico's global `box-sizing: border-box` on `*`, a fixed `width`
+ * on this box left a content area of ZERO -- and the `<svg>` inside, being a
+ * shrinkable flex item, collapsed to nothing. The visible result was a solid
+ * blue rectangle: Pico's primary button background, with no icon in it.
+ *
+ * So: no fixed width (the box shrink-wraps icon + padding, which makes
+ * box-sizing irrelevant), `flex: none` on the icon so it can never be shrunk
+ * away again, and an explicit reset of every button property Pico sets. None
+ * of the declarations below is decorative.
+ */
+.mbr-review-marker {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 0.25rem;
+
+  /* Resets of Pico's [role=button] styling. */
+  width: auto;
+  height: auto;
+  padding: 6px;
+  border: none;
+  box-shadow: none;
+  font-size: var(--mbr-review-marker-size, 0.8em);
+  font-weight: inherit;
+  line-height: 1;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--pico-border-radius, 4px);
+
+  /* Colour goes on the BACKGROUND, with a white icon on top. Tinting the icon
+   * itself and leaving the background transparent put a mid-saturation stroke
+   * on the page background, which failed contrast at this size. */
+  background-color: var(--mbr-review-note-color, #1976d2);
+  color: #fff;
+  transition: filter 0.15s ease;
+}
+
+.mbr-review-marker > svg {
+  display: block;
+  /* Never shrink: as a flex item the icon is otherwise the first thing to be
+   * squeezed out when anything constrains the box. */
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+}
+
+.mbr-review-marker:hover,
+.mbr-review-marker:focus-visible {
+  filter: brightness(1.15);
+}
+
+.mbr-review-marker[data-mbr-review-type="issue"] {
+  background-color: var(--mbr-review-issue-color, #c62828);
+}
+
+.mbr-review-marker[data-mbr-review-type="suggestion"] {
+  background-color: var(--mbr-review-suggestion-color, #f57c00);
+}
+
+.mbr-review-marker[data-mbr-review-type="praise"] {
+  background-color: var(--mbr-review-praise-color, #388e3c);
+}
+
+.mbr-review-marker[data-mbr-review-type="question"] {
+  background-color: var(--mbr-review-question-color, #7b1fa2);
+}
+
+.mbr-review-marker[data-mbr-review-type="insight"] {
+  background-color: var(--mbr-review-insight-color, #0288d1);
+}
+
+/* A note whose quoted text can no longer be found. It keeps its last known
+ * line and is never deleted, so the marker says so instead. */
+.mbr-review-marker[data-mbr-review-stale="true"] {
+  background-color: var(--mbr-review-stale-color, #5c6b73);
+  opacity: 0.75;
+}
+
+/*
+ * More than one note on the same anchor: one marker, a count badge.
+ * Absolutely positioned so it cannot push the icon off centre -- as a flex
+ * sibling it would share the box and shift the icon left.
+ */
+.mbr-review-marker[data-mbr-review-count]:not([data-mbr-review-count="1"])::after {
+  content: attr(data-mbr-review-count);
+  position: absolute;
+  top: -0.35em;
+  right: -0.35em;
+  min-width: 1.15em;
+  padding: 0 0.15em;
+  font-size: 0.7em;
+  line-height: 1.15em;
+  text-align: center;
+  font-weight: 700;
+  color: var(--pico-color, #333);
+  background: var(--pico-background-color, #fff);
+  border: 1px solid var(--pico-muted-border-color, #ccc);
+  border-radius: 1em;
+}
+
+/*
+ * The note card shown when a marker is hovered, focused or clicked.
+ *
+ * Lives here and not in `<mbr-review>`'s `static styles` for the same reason
+ * the footnote card's rules do: the element is appended to `document.body`, so
+ * a rule inside the component's shadow root would not reach it. Without these
+ * rules the card is `position: static` and lands unstyled at the very end of
+ * the document -- present, but invisible where the reader is looking.
+ */
+.mbr-review-popover {
+  position: fixed;
+  z-index: 1000;
+  max-width: min(380px, 90vw);
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.875em;
+  line-height: 1.5;
+  color: var(--pico-color);
+  background: var(--pico-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  box-shadow: var(--pico-box-shadow, 0 4px 16px rgba(0, 0, 0, 0.18));
+}
+
+.mbr-review-popover-card + .mbr-review-popover-card {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--pico-muted-border-color);
+}
+
+.mbr-review-popover-head {
+  font-size: 0.75em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--pico-muted-color, #5c6b73);
+  margin-bottom: 0.2rem;
+}
+
+.mbr-review-popover-body {
+  white-space: pre-wrap;
+}
+
+.mbr-review-popover pre {
+  margin: 0.4rem 0 0;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  background: var(--pico-card-background-color, #f8f9fa);
+  border-radius: var(--pico-border-radius);
+}
+
+.mbr-review-popover-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+/*
+ * These are real <button>s in the light DOM, so Pico styles them as full
+ * buttons -- the same trap that collapsed the marker. Every property below
+ * that looks redundant is overriding something Pico sets. (The panel and the
+ * note form are inside shadow roots, where Pico cannot reach them.)
+ */
+.mbr-review-popover-actions button {
+  width: auto;
+  margin: 0;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8em;
+  font-weight: inherit;
+  line-height: 1.4;
+  background: transparent;
+  color: var(--pico-primary, #0172ad);
+  border: 1px solid var(--pico-muted-border-color, #ccc);
+  border-radius: var(--pico-border-radius, 4px);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.mbr-review-popover-actions button:hover {
+  background: var(--pico-secondary-background, rgba(0, 0, 0, 0.05));
+}
+
 /* ==================== Footnotes (GitHub-Flavored Markdown) ==================== */
 
 /*
@@ -1443,6 +1721,14 @@ main dl > dd:focus-within ~ dt ~ dd {
    *     in `.mbr/_footer_custom.html`. Without it their content would vanish
    *     from the page with no clue why. */
   body > *:not(main, mbr-genealogy, .mbr-print-keep) {
+    display: none !important;
+  }
+
+  /* Review markers are injected *inside* `<main>`, so the rule above does not
+   * reach them. They are UI, not content -- a printed page should carry the
+   * document, not the reader's private annotations on it. The popover and the
+   * panel are `body >` children and are already hidden. */
+  .mbr-review-marker {
     display: none !important;
   }
 

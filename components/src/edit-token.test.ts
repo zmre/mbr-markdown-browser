@@ -391,11 +391,24 @@ describe('durable web storage across the whole frontend', () => {
     //   mbr-browse.ts        — recently viewed pages and pinned shortcuts (URLs)
     //   mbr-video-extras.ts  — playback position per video, in seconds
     //   genealogy/selector.ts — which genealogy chart the reader last picked
+    //   review-store.ts      — the reader's own review notes: a type, a body they
+    //     typed, a quote of text already rendered on the page, and the file and
+    //     line it came from. Nothing is a credential and nothing crosses an
+    //     origin. It is durable *on purpose*: the feature exists so that a live
+    //     reload after an edit, or a navigation to check another page, does not
+    //     throw away a review in progress — an in-memory store would lose the
+    //     work on the first file change, which is the case it is built for.
     // Adding a file here means arguing that its contents are not sensitive.
+    //
+    // Note the scan is a substring match over each module's own source, so a
+    // shared storage wrapper would hide every consumer behind one entry. That
+    // is why `review-store.ts` calls `localStorage` itself and is the only part
+    // of the review feature that does.
     expect(modulesUsing('localStorage')).toEqual([
       'genealogy/selector.ts',
       'mbr-browse.ts',
       'mbr-video-extras.ts',
+      'review-store.ts',
     ])
   })
 

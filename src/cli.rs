@@ -134,6 +134,12 @@ pub struct Args {
     #[arg(long)]
     pub no_tasks: bool,
 
+    /// Disable `data-mbr-line` source-line attributes on block elements
+    /// (server/GUI only). Static builds, the CLI and QuickLook never emit them
+    /// either way.
+    #[arg(long)]
+    pub no_review: bool,
+
     /// Highlight blocks that start with an incomplete-marker (TK/TODO/FIXME/XXX).
     /// Default: on for server/GUI mode, off for static builds.
     #[arg(long, conflicts_with = "no_mark_incomplete")]
@@ -280,6 +286,10 @@ pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, Config
     if args.no_tasks {
         config.tasks_enabled = false;
     }
+    // Apply no_review from CLI
+    if args.no_review {
+        config.review_enabled = false;
+    }
     // Apply mark_incomplete / no_mark_incomplete from CLI (mutually exclusive)
     if args.mark_incomplete {
         config.mark_incomplete = Some(true);
@@ -335,6 +345,7 @@ mod tests {
             no_link_tracking: false,
             no_relationship_tracking: false,
             no_tasks: false,
+            no_review: false,
             mark_incomplete: false,
             no_mark_incomplete: false,
             title_prefix: None,
@@ -545,6 +556,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_no_review() {
+        let args = Args::parse_from(["mbr", "--no-review"]);
+        assert!(args.no_review);
+        assert!(!Args::parse_from(["mbr"]).no_review);
+    }
+
+    #[test]
+    fn test_no_review_disables_the_config_flag() {
+        // Default is on; only the flag turns it off.
+        let mut config = Config::default();
+        assert!(config.review_enabled);
+
+        let args = Args::parse_from(["mbr", "--no-review"]);
+        config = apply_overrides(config, &args).expect("overrides apply");
+        assert!(!config.review_enabled);
+    }
+
+    #[test]
     fn test_no_tasks_disables_the_config_flag() {
         // Default is on; only the flag turns it off.
         let mut config = Config::default();
@@ -692,6 +721,8 @@ mod tests {
         assert_eq!(config.link_tracking, base.link_tracking);
         assert_eq!(config.relationship_tracking, base.relationship_tracking);
         assert_eq!(config.edit_enabled, base.edit_enabled);
+        assert_eq!(config.tasks_enabled, base.tasks_enabled);
+        assert_eq!(config.review_enabled, base.review_enabled);
     }
 
     #[test]
@@ -747,6 +778,8 @@ mod tests {
         assert!(overridden(&["mbr", "-b", "--skip-link-checks"]).skip_link_checks);
         assert!(!overridden(&["mbr", "--no-link-tracking"]).link_tracking);
         assert!(!overridden(&["mbr", "--no-relationship-tracking"]).relationship_tracking);
+        assert!(!overridden(&["mbr", "--no-tasks"]).tasks_enabled);
+        assert!(!overridden(&["mbr", "--no-review"]).review_enabled);
         assert_eq!(
             overridden(&["mbr", "--mark-incomplete"]).mark_incomplete,
             Some(true)

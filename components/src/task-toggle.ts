@@ -70,7 +70,7 @@ export type { TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 const lineCache = new Map<string, string[]>()
 
 /** The outcome of reading a file's source, with the status when it failed. */
-type SourceRead = { ok: true; lines: string[] } | { ok: false; status: number }
+export type SourceRead = { ok: true; lines: string[] } | { ok: false; status: number }
 
 /** In-flight raw reads, so two quick clicks on one file fetch it once. */
 const pendingReads = new Map<string, Promise<SourceRead>>()
@@ -153,7 +153,14 @@ async function fetchSourceLines(path: string): Promise<SourceRead> {
   return { ok: true, lines }
 }
 
-/** The source lines of `path`, fetched at most once per page and per read. */
+/**
+ * The source lines of `path`, fetched at most once per page and per read.
+ *
+ * Exported as {@link readSourceLines} for the review feature's suggestion
+ * prefill. Sharing this rather than opening a second reader is not tidiness:
+ * a second cache would reintroduce the interleaved-read hazard the two comments
+ * below exist to close, and it would miss the invalidation a task write does.
+ */
 async function sourceLines(path: string): Promise<SourceRead> {
   const cached = lineCache.get(path)
   if (cached) return { ok: true, lines: cached }
@@ -333,6 +340,21 @@ export function applyCheckboxStatus(input: HTMLInputElement, status: TaskStatus)
   input.checked = status === 'done'
   const text = input.parentElement?.querySelector<HTMLElement>('.mbr-task-text')
   text?.classList.toggle('mbr-task-canceled', status === 'canceled')
+}
+
+/**
+ * Read a file's source lines through this module's cache.
+ *
+ * The review feature's suggestion prefill needs the *source* of the lines a
+ * note is anchored to, which is the same read a task toggle makes to source its
+ * `expected`. One reader, one cache, one single-flight — see {@link sourceLines}.
+ *
+ * `{ ok: false, status: 403 }` is the ordinary answer on a server started
+ * without `--edit`, not an error: `/.mbr/raw` sits behind `check_edit_access`.
+ * Callers are expected to degrade rather than report a failure.
+ */
+export function readSourceLines(path: string): Promise<SourceRead> {
+  return sourceLines(path)
 }
 
 /** Repo-relative source path of the page being viewed, if it is a markdown page. */

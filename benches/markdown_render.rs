@@ -36,7 +36,29 @@ fn bench_render(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(content.len() as u64));
 
-        for (label, mark_incomplete) in [("render", false), ("render_marked", true)] {
+        // Four variants, and the pairing is the point.
+        //
+        // `render` / `render_marked` are the OFF path and exist to prove that
+        // adding `data-mbr-line` cost the modes that do not emit it nothing —
+        // a static build, the CLI and QuickLook all pass `Omit`, and their
+        // output is byte-identical (see `review_off_is_byte_identical`). A
+        // regression there means the `emit_block_lines` fast path was missed
+        // somewhere.
+        //
+        // `render_review_marked` is the real server/GUI default, since
+        // `mark_incomplete` also defaults on there, and it is the only variant
+        // that exercises the pass-3 index remap. Compare it against
+        // `render_marked`, not against `render`.
+        for (label, mark_incomplete, review) in [
+            ("render", false, mbr::markdown::ReviewLines::Omit),
+            ("render_marked", true, mbr::markdown::ReviewLines::Omit),
+            ("render_review", false, mbr::markdown::ReviewLines::Emit),
+            (
+                "render_review_marked",
+                true,
+                mbr::markdown::ReviewLines::Emit,
+            ),
+        ] {
             group.bench_with_input(BenchmarkId::new(label, name), content, |b, _| {
                 b.to_async(&rt).iter(|| {
                     let file = file.clone();
@@ -53,6 +75,7 @@ fn bench_render(c: &mut Criterion) {
                             false, // server_mode
                             false, // transcode_enabled
                             tag_sources,
+                            review,
                             mark_incomplete,
                             &markers,
                             None, // no wikilink index in benchmarks

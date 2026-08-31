@@ -35,6 +35,8 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `Ctrl+g` | Toggle info panel |
 | `t` | Open the task browser (server and GUI modes only) |
 | `e` | Open the editor for the current file (when [editing](../modes/editing/) is enabled) |
+| `r` | Add a [review note](../modes/review/), anchored to the selection (server and GUI modes only) |
+| `R` | Open the review panel (server and GUI modes only) |
 | `Esc` | Close current panel |
 
 ## Quick Navigation (Fuzzy Nav)
@@ -89,6 +91,34 @@ server and GUI modes only — a static build has no files to re-read. Disable it
 The filter field keeps focus the whole time, so `Space`, `x`, `←` and `→` reach it
 until you move onto a task with the arrow keys — and typing in the field hands them
 back. Filtering for "buy milk" therefore works as you would expect.
+
+## Review Notes (when open)
+
+Review notes (`r` to add one, `R` for the list) anchor to the `data-mbr-line`
+source lines the renderer emits, which a static build never emits — so the feature
+exists in server and GUI modes only. Disable it with `--no-review`. See
+[Review Notes](../modes/review/) for the full guide.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+n` / `Ctrl+p` | Navigate file headings and notes |
+| `↑` / `↓` | Navigate file headings and notes |
+| `Enter` | Open the focused note (scrolls when it is on this page, navigates otherwise) |
+| `e` | Edit the focused note |
+| `d` | Delete the focused note — press `d` again to confirm |
+| `c` | Copy the whole review as markdown |
+| `Ctrl+d` / `Ctrl+u` | Scroll the list half a page |
+| `Ctrl+f` / `Ctrl+b` | Scroll the list a full page |
+| `Esc` | Back out of a clear-all confirmation, then close the edit form, then the panel |
+
+`d` arms and a second `d` fires, because nothing in the feature has an undo. The
+bare letters yield to whatever you are typing in: while the edit form is open, or
+focus is in a text field, `e`, `d` and `c` are ordinary characters.
+
+**Clear all** — which deletes every note in every file — is a header button with
+its own confirmation and has deliberately **no shortcut**: every key above
+affects a single note, and a whole-review delete should not be one keystroke away
+from a typo.
 
 ## Task Checkboxes (in a page)
 

@@ -126,6 +126,7 @@ pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
         &markdown_input,
         TaskMarkup::Skip,
         &mut TextLines::disabled(),
+        &mut BlockLines::disabled(),
     );
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
@@ -627,42 +628,256 @@ impl TextLineCursor<'_> {
     }
 }
 
+/// Whether the render should emit `data-mbr-line` source lines on block-level
+/// elements, for a frontend feature that anchors a text selection to
+/// `file.md:LINE`.
+///
+/// An enum rather than a fourth `bool`: the render entry points already take
+/// three positional booleans under `#[allow(clippy::too_many_arguments)]`, and a
+/// fourth would be swappable with any of them without the compiler noticing.
+/// Same reasoning, and the same shape, as [`TaskMarkup`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewLines {
+    Emit,
+    Omit,
+}
+
+impl From<bool> for ReviewLines {
+    fn from(enabled: bool) -> Self {
+        if enabled { Self::Emit } else { Self::Omit }
+    }
+}
+
+/// The **single** definition of which blocks carry a `data-mbr-line` attribute.
+///
+/// `src/html.rs` renders the attribute; its six `start_tag` arms name this
+/// function in their comments so the two cannot drift apart.
+///
+/// # What is deliberately excluded
+///
+/// * **`Tag::List`** (`<ul>`/`<ol>`) — a list's source line is always its first
+///   `<li>`'s, so an attribute there says nothing the item does not.
+/// * **`Tag::TableCell`** (`<td>`/`<th>`) — every cell in a row shares one
+///   source line, so per-cell attributes roughly triple the byte cost of a
+///   table-heavy document to repeat the row's line over and over. The `<table>`
+///   carries the line instead.
+/// * **Inline tags** (`<em>`, `<a>`, …) — anchoring one would need a byte offset
+///   *within* a text run, and smart punctuation has already desynchronised text
+///   bytes from source bytes by the time the writer sees them (see
+///   [`TextLines`]' "Why the run's *start* is enough").
+///
+/// # Known gap
+///
+/// A **tight** definition list's `<dd>`/`<dt>` prose is not wrapped in a `<p>`,
+/// so such a line has no ancestor carrying `data-mbr-line` at all. Closing that
+/// is two more match arms here and in `html.rs`
+/// (`DefinitionListTitle`/`DefinitionListDefinition`); it is documented rather
+/// than fixed because nothing needs it yet.
+fn is_review_block_start(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Start(
+            Tag::Paragraph
+                | Tag::Heading { .. }
+                | Tag::Item
+                | Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::Table(_)
+        )
+    )
+}
+
+/// Source lines for the block-level elements of a document, carried from pass 1
+/// ([`collect_events_and_headings`], the only place byte ranges exist) to the
+/// HTML writer, which emits them as `data-mbr-line`.
+///
+/// # Why an event index is enough
+///
+/// The same reason [`TextLines`] gives: [`process_all_events`] is a strict 1:1
+/// map (see its `# Invariant`), so a slot recorded in pass 1 still holds the
+/// same event afterwards.
+///
+/// # …until pass 3 rewrites it
+///
+/// [`mark_incomplete_blocks`] is **not** 1:1 — it pushes highlight spans and, in
+/// one case, *inserts* one behind an already-emitted `Start`. It therefore
+/// rebuilds this table against its own output vector, and what reaches the
+/// writer is keyed on output indices, not pass-1 ones. See that function's
+/// `# Index alignment`.
+///
+/// # Why a separate table from [`TextLines`]
+///
+/// The two answer to independent switches — `TextLines` to `mark_incomplete`,
+/// this to `review_enabled` — so neither flag can serve both, and a single
+/// monotone [`TextLineCursor`] cannot serve two consumers walking different
+/// vectors.
+struct BlockLines {
+    /// Ascending by `at`, strictly.
+    entries: Vec<crate::html::BlockLine>,
+    /// False for every caller that does not want `data-mbr-line`, whose
+    /// `record` calls then compile down to a single branch. Builds, the CLI,
+    /// QuickLook and the repository-wide backlink scan are all disabled.
+    enabled: bool,
+}
+
+impl BlockLines {
+    /// A table that will be filled in — for a render that wants `data-mbr-line`.
+    fn recording() -> Self {
+        Self {
+            entries: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// A table that stays empty. An empty table is also how `html.rs` knows the
+    /// feature is off, so a disabled render costs one branch and emits nothing.
+    fn disabled() -> Self {
+        Self {
+            entries: Vec::new(),
+            enabled: false,
+        }
+    }
+
+    /// Notes that the event about to occupy slot `at` is a block start on
+    /// `line`. A no-op when disabled or when `line` is `None`.
+    fn record(&mut self, at: usize, line: Option<u32>) {
+        if !self.enabled {
+            return;
+        }
+        let Some(line) = line else {
+            return;
+        };
+        let at = u32::try_from(at).unwrap_or(u32::MAX);
+        debug_assert!(
+            self.entries.last().is_none_or(|last| last.at < at),
+            "block-line records must be strictly ascending; the monotone cursors \
+             that read them back cannot recover from a repeat or a rewind"
+        );
+        self.entries.push(crate::html::BlockLine { at, line });
+    }
+
+    /// Shifts every record at or after `at` up by one, after the caller has
+    /// *inserted* an event at `at`.
+    ///
+    /// Strict ascension survives: the last untouched entry is `< at`, and the
+    /// first bumped one was `>= at`, so it lands `> at` and stays above it.
+    fn shift_from(&mut self, at: usize) {
+        let at = u32::try_from(at).unwrap_or(u32::MAX);
+        let first = self.entries.partition_point(|entry| entry.at < at);
+        for entry in &mut self.entries[first..] {
+            entry.at += 1;
+        }
+    }
+
+    /// Drops the records for slots at or beyond `len`, after the caller has
+    /// shortened the event vector.
+    fn truncate_to(&mut self, len: usize) {
+        let keep = self
+            .entries
+            .partition_point(|entry| (entry.at as usize) < len);
+        self.entries.truncate(keep);
+    }
+
+    fn cursor(&self) -> BlockLineCursor<'_> {
+        BlockLineCursor {
+            entries: &self.entries,
+            next: 0,
+        }
+    }
+
+    /// Hands the table to [`crate::html::HtmlConfig`], which owns it from here.
+    fn into_entries(self) -> Vec<crate::html::BlockLine> {
+        self.entries
+    }
+}
+
+/// Reads a [`BlockLines`] table back in ascending index order.
+///
+/// A twin of [`TextLineCursor`] over the other record type, and for the same
+/// reason: pass 3 walks the event vector from the front, so the queries are
+/// non-decreasing and each costs O(1) amortised.
+struct BlockLineCursor<'a> {
+    entries: &'a [crate::html::BlockLine],
+    next: usize,
+}
+
+impl BlockLineCursor<'_> {
+    /// The source line of the block start at `index`, or `None` when nothing was
+    /// recorded for it.
+    ///
+    /// `index` must not go backwards between calls.
+    fn line_at(&mut self, index: usize) -> Option<u32> {
+        while self
+            .entries
+            .get(self.next)
+            .is_some_and(|entry| (entry.at as usize) < index)
+        {
+            self.next += 1;
+        }
+        self.entries
+            .get(self.next)
+            .filter(|entry| entry.at as usize == index)
+            .map(|entry| entry.line)
+    }
+}
+
 /// Pushes `event`, recording `line` against its slot when it is an
-/// `Event::Text`.
+/// `Event::Text` (for [`TextLines`]) or a block start (for [`BlockLines`]).
 ///
 /// Every push in [`collect_events_and_headings`] goes through this, so a future
 /// arm cannot forget to record and leave pass 3 anchoring a marker to the wrong
-/// line. `line` is `None` for every event that is not the current input text
-/// run, which makes the guard here belt-and-braces rather than the only check.
+/// line. `line` is `None` for every event that is not the current input event,
+/// which makes the guards here belt-and-braces rather than the only check.
+///
+/// The two record kinds are mutually exclusive — a `Start` is not a `Text` — so
+/// one `else if` covers both tables.
 fn push_event<'a>(
     events: &mut Vec<Event<'a>>,
     text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
     event: Event<'a>,
     line: Option<u32>,
 ) {
     if matches!(event, Event::Text(_)) {
         text_lines.record(events.len(), line);
+    // `enabled` first, so the off path is one predictable branch rather than
+    // the six-variant `matches!` behind it.
+    } else if block_lines.enabled && is_review_block_start(&event) {
+        block_lines.record(events.len(), line);
     }
     events.push(event);
 }
 
-/// Pops the last event, keeping the [`TextLines`] table addressed to the
-/// shortened vector.
+/// Pops the last event, keeping the [`TextLines`] and [`BlockLines`] tables
+/// addressed to the shortened vector.
 ///
-/// The rule-attrs rewrite pops a *recorded* `Text` and reuses its slot for a
-/// `Rule`, so without this the table would hold a record for an event that is no
-/// longer there. As the grammar stands today the stale record is inert —
-/// [`TextLineCursor`] matches on an exact index and the vacated slot is always
-/// refilled by a `Start`, never by another `Text` — but "inert" here depends on
-/// pulldown-cmark never emitting a `Text` straight after a thematic break, which
-/// is not a promise anyone made us. A stale record that *did* get shadowed would
-/// either trip `TextLines::record`'s ascending assertion or hand a marker the
-/// rule's line. Both pop sites go through this, including the remark-hint one
-/// that pops an unrecorded `Start`, so a future edit cannot reintroduce the
+/// For [`TextLines`] this is belt-and-braces. The rule-attrs rewrite pops a
+/// *recorded* `Text` and reuses its slot for a `Rule`, so without this the table
+/// would hold a record for an event that is no longer there. As the grammar
+/// stands today the stale record is inert — [`TextLineCursor`] matches on an
+/// exact index and the vacated slot is always refilled by a `Start`, never by
+/// another `Text` — but "inert" here depends on pulldown-cmark never emitting a
+/// `Text` straight after a thematic break, which is not a promise anyone made
+/// us.
+///
+/// For [`BlockLines`] it is **load-bearing**, not belt-and-braces: both pop
+/// sites pop a recorded `Start(Tag::Paragraph)`. The remark-hint rewrite
+/// replaces one with a `Start(BlockQuote)` — also a recorded block — and the
+/// rule-attrs rewrite replaces one with an unrecorded `Event::Rule`. Without the
+/// truncation the first would trip `BlockLines::record`'s ascending assertion,
+/// and the second would leave a stale record pointing at whatever later refilled
+/// the slot, putting the paragraph's line on an unrelated element.
+///
+/// Both pop sites go through this, so a future edit cannot reintroduce the
 /// hazard by moving a `push` above a `pop`.
-fn pop_event<'a>(events: &mut Vec<Event<'a>>, text_lines: &mut TextLines) -> Option<Event<'a>> {
+fn pop_event<'a>(
+    events: &mut Vec<Event<'a>>,
+    text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
+) -> Option<Event<'a>> {
     let popped = events.pop();
     text_lines.truncate_to(events.len());
+    block_lines.truncate_to(events.len());
     popped
 }
 
@@ -798,16 +1013,19 @@ fn is_inline_event(event: &Event<'_>) -> bool {
 /// that spans a line break is not a wikilink (see `wikilink::push_transformed`),
 /// so no rewrite can add or remove a newline.
 ///
-/// # Text lines
+/// # Text lines and block lines
 ///
-/// `text_lines` is an out-parameter rather than a fourth tuple field: the
-/// return type is already at the limit of what reads. It is filled only when
-/// the caller passes a [`TextLines::recording`] table, which is exactly when
-/// [`mark_incomplete_blocks`] will run.
+/// `text_lines` and `block_lines` are out-parameters rather than further tuple
+/// fields: the return type is already at the limit of what reads. Each is filled
+/// only when the caller passes a `recording()` table — [`TextLines`] exactly
+/// when [`mark_incomplete_blocks`] will run, [`BlockLines`] exactly when the
+/// page wants `data-mbr-line`. The two switches are independent, which is why
+/// they are two tables.
 fn collect_events_and_headings<'a>(
     markdown_input: &'a str,
     task_markup: TaskMarkup,
     text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
 ) -> (
     Vec<Event<'a>>,
     Vec<HeadingInfo>,
@@ -832,8 +1050,13 @@ fn collect_events_and_headings<'a>(
     for (event, range) in parser {
         // Computed once here rather than at each push site, and only when
         // somebody is going to read it: building the `LineIndex` is the whole
-        // cost, and a document nobody will highlight must not pay it.
-        let text_line = if text_lines.enabled && matches!(event, Event::Text(_)) {
+        // cost, and a document nobody will highlight or anchor must not pay it.
+        // Either table wanting this event's line is enough to build the index —
+        // and once built it is reused, so the two features together cost no more
+        // than one.
+        let source_line = if (text_lines.enabled && matches!(event, Event::Text(_)))
+            || (block_lines.enabled && is_review_block_start(&event))
+        {
             let index = line_index.get_or_insert_with(|| LineIndex::build(markdown_input));
             Some(index.line_of(range.start))
         } else {
@@ -858,17 +1081,19 @@ fn collect_events_and_headings<'a>(
                 push_event(
                     &mut events,
                     text_lines,
+                    block_lines,
                     Event::Html(CowStr::from(crate::html::task_checkbox_html(
                         status,
                         Some(line),
                     ))),
-                    text_line,
+                    source_line,
                 );
                 push_event(
                     &mut events,
                     text_lines,
+                    block_lines,
                     Event::Html(CowStr::from(crate::html::task_text_open(status))),
-                    text_line,
+                    source_line,
                 );
 
                 let mut task = PendingTask {
@@ -886,8 +1111,9 @@ fn collect_events_and_headings<'a>(
                     push_event(
                         &mut events,
                         text_lines,
+                        block_lines,
                         Event::Text(CowStr::from(rest.to_string())),
-                        text_line,
+                        source_line,
                     );
                 }
                 pending_task = Some(task);
@@ -906,7 +1132,7 @@ fn collect_events_and_headings<'a>(
                     if matches!(event, Event::Text(_)) {
                         task.text_at.push(events.len());
                     }
-                    push_event(&mut events, text_lines, event, text_line);
+                    push_event(&mut events, text_lines, block_lines, event, source_line);
                     continue;
                 }
                 // End of the task's own line: close the text span and emit the
@@ -922,7 +1148,7 @@ fn collect_events_and_headings<'a>(
             // --- Heading extraction ---
             Event::Start(Tag::Heading { .. }) => {
                 in_heading_text = Some(String::new());
-                push_event(&mut events, text_lines, event, text_line);
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
             // Heading label accumulation. `Event::Code` (inline code spans) and
             // `Event::InlineMath` carry visible heading text and must be
@@ -939,9 +1165,9 @@ fn collect_events_and_headings<'a>(
                 if let Some(ref mut heading_text) = in_heading_text {
                     heading_text.push_str(text);
                 }
-                // `text_line` is `None` for the `Code` / `InlineMath` halves of
-                // this pattern, so only the `Text` half is recorded.
-                push_event(&mut events, text_lines, event, text_line);
+                // `source_line` is `None` for the `Code` / `InlineMath` halves
+                // of this pattern, so only the `Text` half is recorded.
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
 
             // --- remark-hint syntax detection (inline) ---
@@ -953,31 +1179,34 @@ fn collect_events_and_headings<'a>(
                     // orphan anything today; routing it through `pop_event`
                     // anyway means a future edit here cannot silently corrupt
                     // the table.
-                    pop_event(&mut events, text_lines); // remove the Start(Paragraph)
+                    pop_event(&mut events, text_lines, block_lines); // remove the Start(Paragraph)
                     push_event(
                         &mut events,
                         text_lines,
+                        block_lines,
                         Event::Start(Tag::BlockQuote(Some(kind))),
-                        text_line,
+                        source_line,
                     );
                     push_event(
                         &mut events,
                         text_lines,
+                        block_lines,
                         Event::Start(Tag::Paragraph),
-                        text_line,
+                        source_line,
                     );
                     // The hint prefix is stripped from the front of the same
                     // run, so the remainder is still on the run's line.
                     push_event(
                         &mut events,
                         text_lines,
+                        block_lines,
                         Event::Text(CowStr::from(rest.to_owned())),
-                        text_line,
+                        source_line,
                     );
                     hint_open = true;
                     continue;
                 }
-                push_event(&mut events, text_lines, event, text_line);
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
             Event::End(TagEnd::Heading(heading_level)) => {
                 if let Some(text) = in_heading_text.take() {
@@ -1016,7 +1245,7 @@ fn collect_events_and_headings<'a>(
                         }
                     }
                 }
-                push_event(&mut events, text_lines, event, text_line);
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
 
             // --- Rule attrs detection (inline) ---
@@ -1027,12 +1256,13 @@ fn collect_events_and_headings<'a>(
                 // the blockquote end. A hint paragraph never matches the em-dash rule
                 // pattern, so handling it first is safe.
                 if hint_open {
-                    push_event(&mut events, text_lines, event, text_line);
+                    push_event(&mut events, text_lines, block_lines, event, source_line);
                     push_event(
                         &mut events,
                         text_lines,
+                        block_lines,
                         Event::End(TagEnd::BlockQuote(None)),
-                        text_line,
+                        source_line,
                     );
                     hint_open = false;
                     continue;
@@ -1067,11 +1297,17 @@ fn collect_events_and_headings<'a>(
                         // Remove the Start(Paragraph) and Text events. The Text
                         // is recorded, and the `Rule` pushed below reuses its
                         // slot, so the table has to shrink with the vector.
-                        pop_event(&mut events, text_lines); // Text
-                        pop_event(&mut events, text_lines); // Start(Paragraph)
+                        pop_event(&mut events, text_lines, block_lines); // Text
+                        pop_event(&mut events, text_lines, block_lines); // Start(Paragraph)
 
                         // Emit a Rule event instead
-                        push_event(&mut events, text_lines, Event::Rule, text_line);
+                        push_event(
+                            &mut events,
+                            text_lines,
+                            block_lines,
+                            Event::Rule,
+                            source_line,
+                        );
                         section_index += 1;
 
                         if let Some(attrs) = parsed {
@@ -1081,17 +1317,17 @@ fn collect_events_and_headings<'a>(
                         continue;
                     }
                 }
-                push_event(&mut events, text_lines, event, text_line);
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
 
             // Track real Rule events for section counting
             Event::Rule => {
                 section_index += 1;
-                push_event(&mut events, text_lines, event, text_line);
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
 
             _ => {
-                push_event(&mut events, text_lines, event, text_line);
+                push_event(&mut events, text_lines, block_lines, event, source_line);
             }
         }
     }
@@ -1116,6 +1352,14 @@ struct PendingTask {
 
 /// Closes an open task: strips the annotations out of its text runs, rewrites
 /// them in place, and appends the closing span plus the annotation chips.
+///
+/// # Why this may bypass `push_event`
+///
+/// The only events it appends are `Event::Html`, which is neither an
+/// `Event::Text` nor a block start, so it owes neither [`TextLines`] nor
+/// [`BlockLines`] a record. Anything block-shaped added here in future must go
+/// through [`push_event`] instead, or the `data-mbr-line` table will address the
+/// wrong slots from that point on.
 fn close_task(output: &mut Vec<Event<'_>>, task: PendingTask) {
     let (stripped, annotations) = {
         let runs: Vec<&str> = task
@@ -1150,6 +1394,7 @@ pub async fn render(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    review: ReviewLines,
     mark_incomplete: bool,
     incomplete_markers: &[String],
     wikilink_index: Option<Arc<WikilinkIndex>>,
@@ -1163,6 +1408,7 @@ pub async fn render(
         server_mode,
         transcode_enabled,
         valid_tag_sources,
+        review,
         mark_incomplete,
         incomplete_markers,
         wikilink_index,
@@ -1179,6 +1425,7 @@ pub async fn render(
 /// - `server_mode`: True in server/GUI mode, false in build/CLI mode
 /// - `transcode_enabled`: True when dynamic video transcoding is enabled
 /// - `valid_tag_sources`: Set of valid tag source names for wikilink transformation
+/// - `review`: whether to emit `data-mbr-line` on block elements
 #[allow(clippy::too_many_arguments)]
 pub async fn render_with_cache(
     file: PathBuf,
@@ -1189,6 +1436,7 @@ pub async fn render_with_cache(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    review: ReviewLines,
     mark_incomplete: bool,
     incomplete_markers: &[String],
     wikilink_index: Option<Arc<WikilinkIndex>>,
@@ -1230,8 +1478,18 @@ pub async fn render_with_cache(
     } else {
         TextLines::disabled()
     };
-    let (events_with_ids, headings, section_attrs) =
-        collect_events_and_headings(&markdown_input, TaskMarkup::Render, &mut text_lines);
+    // Independent of the marker rule: `review_enabled` and `mark_incomplete` are
+    // separate switches, which is why these are two tables.
+    let mut block_lines = match review {
+        ReviewLines::Emit => BlockLines::recording(),
+        ReviewLines::Omit => BlockLines::disabled(),
+    };
+    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
+        &markdown_input,
+        TaskMarkup::Render,
+        &mut text_lines,
+        &mut block_lines,
+    );
 
     // Detect if the first heading is an H1 (used for conditional title rendering in templates)
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -1265,9 +1523,11 @@ pub async fn render_with_cache(
         wikilink_index,
     );
 
-    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build mode.
+    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
+    // mode. It also re-keys `block_lines` onto its own output; skipping it
+    // leaves the pass-1 keying, which is correct because passes 1 and 2 are 1:1.
     let processed_events = match &marker_rule {
-        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines),
+        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines, &mut block_lines),
         None => processed_events,
     };
 
@@ -1279,6 +1539,7 @@ pub async fn render_with_cache(
         &markdown_input,
         headings,
         has_h1,
+        block_lines,
     )
 }
 
@@ -1470,10 +1731,43 @@ fn push_marked_text<'a>(
 ///   silently drops any injected `Event::Html`. A span emitted inside alt text
 ///   would vanish from the output *and* consume that line's one permitted
 ///   anchor id on the way out.
+///
+/// # Index alignment
+///
+/// This is the **only** place in the codebase where an index table has to cross
+/// to the *output* side of a pass that is not 1:1, and the reason is one line of
+/// code: everything here is `output.push`, except the single
+/// `output.insert(top.start_idx + 1, …)` that puts a block-wide wash span behind
+/// an already-emitted `Start`. That insert shifts every output index recorded
+/// after `top.start_idx`, and it fires in the **default** configuration:
+///
+/// ```markdown
+/// - - inner
+///   TODO outer text
+/// ```
+///
+/// The inner `<li>` opens *and closes* before the outer item sees any text, so
+/// the span lands at `outer.start_idx + 1` — behind the inner item's already
+/// recorded output index — and that record, plus every block after it, needs a
+/// `+1`.
+///
+/// [`BlockLines`] therefore cannot simply be carried through. It is **rebuilt**:
+/// `block_cursor` reads the incoming (pass-1-keyed) table, `remapped` is written
+/// with `output.len()` as the key, and `remapped.shift_from` repairs it at the
+/// insert. `output.len()` is exactly the slot the event is about to occupy —
+/// every block `Start` reaches an arm that ends in `output.push`, and the frame
+/// arms already compute `let start_idx = output.len();` immediately before
+/// pushing. The recording sits at the very top of the loop body, ahead of every
+/// `continue`; a block start is never an `Event::Text`, so the early text path
+/// can never reach it.
+///
+/// [`TextLines`] needs none of this: it is read on the *input* side, by the
+/// `enumerate()` counter.
 fn mark_incomplete_blocks<'a>(
     events: Vec<Event<'a>>,
     rule: &MarkerRule,
     text_lines: &TextLines,
+    block_lines: &mut BlockLines,
 ) -> Vec<Event<'a>> {
     struct Frame {
         start_idx: usize,
@@ -1484,6 +1778,15 @@ fn mark_incomplete_blocks<'a>(
     let mut output: Vec<Event<'a>> = Vec::with_capacity(events.len());
     let mut stack: Vec<Frame> = Vec::new();
     let mut cursor = text_lines.cursor();
+    // The block table is rebuilt against `output` rather than carried; see
+    // `# Index alignment`. `block_cursor` reads the incoming pass-1 keying,
+    // `remapped` collects the output keying.
+    let mut block_cursor = block_lines.cursor();
+    let mut remapped = if block_lines.enabled {
+        BlockLines::recording()
+    } else {
+        BlockLines::disabled()
+    };
     // Depths rather than booleans: `![a ![b](c) d](e)` nests, and a `<pre>`
     // never should but costs nothing to survive.
     let mut code_depth: usize = 0;
@@ -1494,6 +1797,16 @@ fn mark_incomplete_blocks<'a>(
     // The index is the *input* position, which is what `TextLines` recorded;
     // `output` drifts from it as spans are inserted.
     for (index, event) in events.into_iter().enumerate() {
+        // Re-key this event's `data-mbr-line` record onto the slot it is about
+        // to occupy in `output`. Must stay at the very top of the body: every
+        // path below either pushes the event or `continue`s past it, and the
+        // text path continues. See `# Index alignment`.
+        if block_lines.enabled
+            && let Some(line) = block_cursor.line_at(index)
+        {
+            remapped.record(output.len(), Some(line));
+        }
+
         // Text is split out ahead of the dispatch below so this arm can take
         // ownership of the `CowStr` and hand its borrow on to the slices.
         let event = match event {
@@ -1520,6 +1833,12 @@ fn mark_incomplete_blocks<'a>(
                             top.start_idx + 1,
                             open_incomplete_span(line, &mut highest_anchored_line),
                         );
+                        // The one non-`push` in this function, and therefore the
+                        // one place the output keying has to be repaired. See
+                        // `# Index alignment`.
+                        if block_lines.enabled {
+                            remapped.shift_from(top.start_idx + 1);
+                        }
                         top.marker_open = true;
                         // The block-wide span already covers this occurrence.
                         skip_before = indent + end;
@@ -1588,14 +1907,23 @@ fn mark_incomplete_blocks<'a>(
         }
     }
 
+    // Hand the output-keyed table back to the caller, which passes it to the
+    // HTML writer. The pass-1 keying is dead from here on.
+    *block_lines = remapped;
+
     output
 }
 
 /// Generates final HTML output and constructs the MarkdownRenderResult.
 ///
 /// Shared finalization logic for both `render_with_cache` and `render_sync`:
-/// deduplicates outbound links, generates HTML via `push_html_mbr_with_attrs`,
-/// extracts frontmatter, and injects H1 title fallback.
+/// deduplicates outbound links, generates HTML, extracts frontmatter, and
+/// injects H1 title fallback.
+///
+/// `block_lines` is taken by value because the writer owns it from here. When it
+/// is empty — every caller that did not ask for `data-mbr-line` — the config is
+/// exactly `HtmlConfig::mbr_with_section_attrs`, so the output is byte-identical
+/// to what `push_html_mbr_with_attrs` produced before the attribute existed.
 fn finalize_render(
     processed_events: Vec<Event<'_>>,
     state: EventState,
@@ -1603,6 +1931,7 @@ fn finalize_render(
     markdown_input: &str,
     headings: Vec<HeadingInfo>,
     has_h1: bool,
+    block_lines: BlockLines,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Write to a new String buffer with MBR extensions (sections, mermaid)
     let mut html_output = String::with_capacity(markdown_input.len() * 2);
@@ -1616,10 +1945,13 @@ fn finalize_render(
         .filter(|link| seen_targets.insert(link.to.clone()))
         .collect();
 
-    crate::html::push_html_mbr_with_attrs(
+    crate::html::push_html_with_config(
         &mut html_output,
         processed_events.into_iter(),
-        section_attrs,
+        crate::html::HtmlConfig::mbr_with_attrs_and_block_lines(
+            section_attrs,
+            block_lines.into_entries(),
+        ),
     );
 
     // Extract frontmatter and inject H1 title if no frontmatter title exists
@@ -1668,6 +2000,7 @@ pub fn render_sync(
     server_mode: bool,
     transcode_enabled: bool,
     valid_tag_sources: HashSet<String>,
+    review: ReviewLines,
     mark_incomplete: bool,
     incomplete_markers: &[String],
     wikilink_index: Option<Arc<WikilinkIndex>>,
@@ -1699,8 +2032,17 @@ pub fn render_sync(
     } else {
         TextLines::disabled()
     };
-    let (events_with_ids, headings, section_attrs) =
-        collect_events_and_headings(&markdown_input, TaskMarkup::Render, &mut text_lines);
+    // Independent of the marker rule, exactly as in `render_with_cache`.
+    let mut block_lines = match review {
+        ReviewLines::Emit => BlockLines::recording(),
+        ReviewLines::Omit => BlockLines::disabled(),
+    };
+    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
+        &markdown_input,
+        TaskMarkup::Render,
+        &mut text_lines,
+        &mut block_lines,
+    );
 
     // Detect if the first heading is an H1
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
@@ -1733,9 +2075,10 @@ pub fn render_sync(
         wikilink_index,
     );
 
-    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build mode.
+    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
+    // mode. It also re-keys `block_lines` onto its own output.
     let processed_events = match &marker_rule {
-        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines),
+        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines, &mut block_lines),
         None => processed_events,
     };
 
@@ -1747,6 +2090,7 @@ pub fn render_sync(
         &markdown_input,
         headings,
         has_h1,
+        block_lines,
     )
 }
 
@@ -1790,13 +2134,14 @@ pub fn extract_outbound_links_sync(
 
     // Task markup is skipped: it rewrites text runs, never link destinations,
     // so it cannot change which links this function collects -- and this runs
-    // over every markdown file in the repository. Text-line recording is off for
-    // the same reason: there is no pass 3 here, and a `LineIndex` per file in
-    // the repository would be pure waste.
+    // over every markdown file in the repository. Text-line and block-line
+    // recording are off for the same reason: there is no pass 3 and no HTML
+    // here, and a `LineIndex` per file in the repository would be pure waste.
     let (events_with_ids, _headings, _section_attrs) = collect_events_and_headings(
         &markdown_input,
         TaskMarkup::Skip,
         &mut TextLines::disabled(),
+        &mut BlockLines::disabled(),
     );
 
     let prefetched_oembed = collect_local_embeds(&events_with_ids);
@@ -2513,6 +2858,7 @@ mod tests {
             server_mode,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -2548,6 +2894,7 @@ mod tests {
             false,
             false,
             tag_sources,
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -2586,6 +2933,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             true,
             &owned,
             None,
@@ -2615,6 +2963,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -2651,6 +3000,7 @@ mod tests {
             true, // server_mode
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             wikilink_index,
@@ -2837,6 +3187,7 @@ mod tests {
                 true,
                 false,
                 HashSet::new(),
+                ReviewLines::Omit,
                 false,
                 &[],
                 None,
@@ -3342,6 +3693,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -3413,6 +3765,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -3445,6 +3798,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -3478,6 +3832,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -3515,6 +3870,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -3552,6 +3908,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -4714,6 +5071,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             true,
             &markers,
             None,
@@ -4730,6 +5088,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             true,
             &markers,
             None,
@@ -4760,7 +5119,12 @@ mod tests {
             "!> hint\n",
         );
         let mut text_lines = TextLines::recording();
-        let (events, _, _) = collect_events_and_headings(md, TaskMarkup::Render, &mut text_lines);
+        let (events, _, _) = collect_events_and_headings(
+            md,
+            TaskMarkup::Render,
+            &mut text_lines,
+            &mut BlockLines::disabled(),
+        );
         let expected = events.len();
         let config = LinkTransformConfig {
             markdown_extensions: vec!["md".to_string()],
@@ -5230,6 +5594,7 @@ mod tests {
             "```\nhttps://example.com/in-code\n```\n",
             TaskMarkup::Skip,
             &mut TextLines::disabled(),
+            &mut BlockLines::disabled(),
         );
         assert!(
             collect_bare_urls(&fenced).is_empty(),
@@ -5240,6 +5605,7 @@ mod tests {
             "https://example.com/outside\n",
             TaskMarkup::Skip,
             &mut TextLines::disabled(),
+            &mut BlockLines::disabled(),
         );
         assert_eq!(
             collect_bare_urls(&prose).len(),
@@ -5276,6 +5642,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -5291,6 +5658,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            ReviewLines::Omit,
             false,
             &[],
             None,
@@ -5447,11 +5815,489 @@ mod tests {
         // Every URL here short-circuits in `PageInfo::new_from_url` via the
         // no-network embed path, so this exercises the bounded stream with no I/O.
         let md = "https://youtu.be/aaaaaaaaaaa\n\nhttps://youtu.be/bbbbbbbbbbb\n\nhttps://youtu.be/ccccccccccc\n";
-        let (events, _, _) =
-            collect_events_and_headings(md, TaskMarkup::Skip, &mut TextLines::disabled());
+        let (events, _, _) = collect_events_and_headings(
+            md,
+            TaskMarkup::Skip,
+            &mut TextLines::disabled(),
+            &mut BlockLines::disabled(),
+        );
         let results = prefetch_oembed_urls(&events, 500, &None).await;
         assert_eq!(results.len(), 3);
         assert!(results.values().all(|info| info.embed_html.is_some()));
+    }
+
+    // ---- data-mbr-line (review anchors) --------------------------------------
+
+    /// Runs pass 1 only and returns the events plus the recorded
+    /// `(event index, source line)` block pairs.
+    ///
+    /// Both tables record, which is the default server configuration
+    /// (`review_enabled` and `mark_incomplete` are both on). It also matters for
+    /// the rewrites: a synthesized block start inherits the line of the *input*
+    /// event that triggered it, and that line is only computed when some table
+    /// asks for it.
+    fn pass_one<'a>(md: &'a str) -> (Vec<Event<'a>>, Vec<(u32, u32)>) {
+        let mut block_lines = BlockLines::recording();
+        let (events, _, _) = collect_events_and_headings(
+            md,
+            TaskMarkup::Render,
+            &mut TextLines::recording(),
+            &mut block_lines,
+        );
+        let recorded = block_lines
+            .into_entries()
+            .into_iter()
+            .map(|entry| (entry.at, entry.line))
+            .collect();
+        (events, recorded)
+    }
+
+    /// [`pass_one`], keeping only the block records.
+    fn recorded_block_lines(md: &str) -> Vec<(u32, u32)> {
+        pass_one(md).1
+    }
+
+    /// Renders `md` through the async entry point with `data-mbr-line` on, and
+    /// optionally with incomplete-marker highlighting.
+    async fn render_review(md: &str, mark_incomplete: bool) -> String {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
+        render(
+            path,
+            &root,
+            0,
+            LinkTransformConfig {
+                markdown_extensions: vec!["md".to_string()],
+                index_file: "index.md".to_string(),
+                is_index_file: false,
+                url_depth: None,
+                current_page_url: String::new(),
+                markdown_page_probe: None,
+            },
+            false,
+            false,
+            HashSet::new(),
+            ReviewLines::Emit,
+            mark_incomplete,
+            &markers,
+            None,
+        )
+        .await
+        .unwrap()
+        .html
+    }
+
+    /// Every `data-mbr-line` value in `html`, in document order.
+    fn emitted_block_lines(html: &str) -> Vec<u32> {
+        const ATTR: &str = "data-mbr-line=\"";
+        html.match_indices(ATTR)
+            .map(|(at, _)| {
+                let rest = &html[at + ATTR.len()..];
+                rest[..rest.find('"').expect("unterminated data-mbr-line")]
+                    .parse()
+                    .expect("numeric line")
+            })
+            .collect()
+    }
+
+    /// The `data-mbr-line` on the first tag in `html` starting with `prefix`
+    /// (e.g. `"<pre"`), or `None` if that tag carries none.
+    fn block_line_of_tag(html: &str, prefix: &str) -> Option<u32> {
+        let open = html
+            .find(prefix)
+            .unwrap_or_else(|| panic!("{prefix:?} not in: {html}"));
+        let close = open + html[open..].find('>').expect("a closed tag");
+        let tag = &html[open..close];
+        const ATTR: &str = "data-mbr-line=\"";
+        let value_at = tag.find(ATTR)? + ATTR.len();
+        let rest = &tag[value_at..];
+        Some(
+            rest[..rest.find('"').expect("unterminated")]
+                .parse()
+                .expect("numeric line"),
+        )
+    }
+
+    /// The `data-mbr-line` carried by the first element whose opening tag
+    /// contains `needle`, or `None` if that element carries none.
+    fn block_line_of(html: &str, needle: &str) -> Option<u32> {
+        let at = html
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not in: {html}"));
+        // Back up to the `<` that opens the tag `needle` sits in.
+        let open = html[..at].rfind('<').expect("an opening tag");
+        let close = open + html[open..].find('>').expect("a closed tag");
+        let tag = &html[open..close];
+        const ATTR: &str = "data-mbr-line=\"";
+        let value_at = tag.find(ATTR)? + ATTR.len();
+        let rest = &tag[value_at..];
+        Some(
+            rest[..rest.find('"').expect("unterminated")]
+                .parse()
+                .expect("numeric line"),
+        )
+    }
+
+    #[test]
+    fn block_lines_records_the_six_block_starts() {
+        // Line-by-line, with the block starts each line produces:
+        //   1  `# H`         Start(Heading)
+        //   3  `Para.`       Start(Paragraph)
+        //   5  `- item`      Start(List) — not recorded — then Start(Item)
+        //   7  `> quote`     Start(BlockQuote), then its inner Start(Paragraph)
+        //   9  ```` ``` ```` Start(CodeBlock)
+        //   13 `| A |`       Start(Table); its Start(TableCell)s are not recorded
+        let md = concat!(
+            "# H\n\n",             // 1
+            "Para.\n\n",           // 3
+            "- item\n\n",          // 5
+            "> quote\n\n",         // 7
+            "```\ncode\n```\n\n",  // 9-11
+            "| A |\n|---|\n| b |", // 13-15
+        );
+        let recorded = recorded_block_lines(md);
+        let lines: Vec<u32> = recorded.iter().map(|(_, line)| *line).collect();
+        assert_eq!(
+            lines,
+            vec![1, 3, 5, 7, 7, 9, 13],
+            "heading, paragraph, item, blockquote + its inner paragraph, code \
+             block, table: {recorded:?}"
+        );
+
+        // The exact slots, so a change in what pass 1 emits cannot go unnoticed.
+        assert_eq!(
+            recorded,
+            vec![(0, 1), (3, 3), (7, 5), (11, 7), (12, 7), (16, 9), (19, 13)],
+            "recorded (event index, source line) pairs"
+        );
+
+        // `<ul>` and `<td>` are deliberately not in the set.
+        assert_eq!(
+            recorded.len(),
+            7,
+            "no record for Tag::List or Tag::TableCell: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn block_lines_disabled_records_nothing() {
+        let md = "# H\n\nPara.\n\n- item\n\n> quote\n";
+        let mut block_lines = BlockLines::disabled();
+        let _ = collect_events_and_headings(
+            md,
+            TaskMarkup::Render,
+            &mut TextLines::disabled(),
+            &mut block_lines,
+        );
+        assert!(block_lines.into_entries().is_empty());
+    }
+
+    /// Both pass-1 rewrites pop a *recorded* `Start(Tag::Paragraph)` and put
+    /// something else in its slot. Without the truncation in `pop_event`, the
+    /// remark-hint case re-records the vacated slot and trips
+    /// `BlockLines::record`'s strictly-ascending assertion, while the rule-attrs
+    /// case leaves a record addressing whatever later refills the slot.
+    #[test]
+    fn pop_event_truncates_block_lines() {
+        // Rule-attrs: `--- {#intro}` reaches pass 1 as a paragraph and leaves as
+        // an `Event::Rule`, which is not a recorded block at all.
+        let (events, recorded) = pass_one("Before.\n\n--- {#intro}\n\nAfter.\n");
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Rule)),
+            "the rewrite really did fire"
+        );
+        assert_eq!(
+            recorded.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            vec![1, 5],
+            "only the two real paragraphs; the rule is not a recorded block: \
+             {recorded:?}"
+        );
+        for (at, _) in &recorded {
+            assert!(
+                matches!(events[*at as usize], Event::Start(Tag::Paragraph)),
+                "record {at} must still address a paragraph, not {:?}",
+                events[*at as usize]
+            );
+        }
+
+        // Remark hints: `!> tip` swaps the `Start(Paragraph)` for a
+        // `Start(BlockQuote)` — another *recorded* block, reusing the same slot.
+        // This is the case that would trip the ascending assertion.
+        let (events, recorded) = pass_one("Intro.\n\n!> a tip\n\nAfter.\n");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Start(Tag::BlockQuote(Some(_))))),
+            "the rewrite really did fire"
+        );
+        assert_eq!(
+            recorded.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            vec![1, 3, 3, 5],
+            "intro paragraph, the hint's blockquote and its paragraph, after: \
+             {recorded:?}"
+        );
+        for (at, _) in &recorded {
+            assert!(
+                is_review_block_start(&events[*at as usize]),
+                "record {at} must address a block start, not {:?}",
+                events[*at as usize]
+            );
+        }
+    }
+
+    /// The gotcha this whole remap exists for. `mark_incomplete_blocks` inserts
+    /// a wash span behind an *already emitted* `Start`, which shifts every
+    /// output index recorded after it. Removing the `shift_from` call in
+    /// `mark_incomplete_blocks` makes this test fail.
+    ///
+    /// # Why this fixture
+    ///
+    /// The insert lands at `frame.start_idx + 1`, so it only shifts anything
+    /// when the frame's start is *not* the last thing in `output` — i.e. when a
+    /// complete nested block sits between the frame's `Start` and its own first
+    /// text. A nested **list** does not produce that: `- - inner` followed by an
+    /// indented line makes the second line a lazy continuation of the *inner*
+    /// item, and separating them with a blank line wraps the outer text in its
+    /// own `Paragraph` frame, whose insert is an append. A fenced code block in
+    /// a **tight** list item is the shape that does it: the item's first text
+    /// arrives after `End(CodeBlock)`, with the item frame still text-less, so
+    /// the span is inserted behind the code block's already-recorded slot.
+    #[tokio::test]
+    async fn block_lines_survive_pass_three_insertion() {
+        let md = concat!(
+            "- ```\n",           // 1  item + code fence open
+            "  code\n",          // 2
+            "  ```\n",           // 3
+            "  TODO after\n\n",  // 4  the item's own first text
+            "Later paragraph\n", // 6
+        );
+        let html = render_review(md, true).await;
+
+        assert!(
+            html.contains(INCOMPLETE_SPAN_PREFIX),
+            "the insertion really did happen: {html}"
+        );
+        // Recorded before the insert, and therefore the record that needs the
+        // `+1`. Without `shift_from` it addresses the inserted span instead —
+        // an `Event::Html`, which no writer arm asks for a line — so the `<pre>`
+        // silently loses its attribute.
+        assert_eq!(
+            block_line_of_tag(&html, "<pre"),
+            Some(1),
+            "the code block opens on line 1: {html}"
+        );
+        assert_eq!(
+            block_line_of_tag(&html, "<li"),
+            Some(1),
+            "the list item opens on line 1: {html}"
+        );
+        // Recorded after the insert, so it is right either way; it is here to
+        // show `shift_from` does not over-correct.
+        assert_eq!(
+            block_line_of(&html, "Later paragraph"),
+            Some(6),
+            "the later paragraph is on line 6: {html}"
+        );
+    }
+
+    /// The other, far commoner pass-3 shape: `push_marked_text` turns one text
+    /// run into three events. Those are pushes, not inserts, so nothing needs
+    /// shifting — but the remap has to key off `output.len()` for that to hold.
+    #[tokio::test]
+    async fn block_lines_survive_pass_three_span_pushes() {
+        let md = concat!(
+            "Alpha with a TK mid-run and another TK too.\n\n", // 1
+            "Beta with a FIXME mid-run.\n\n",                  // 3
+            "# Gamma has an XXX in it\n\n",                    // 5
+            "Delta is plain.\n",                               // 7
+        );
+        let html = render_review(md, true).await;
+        assert_eq!(
+            emitted_block_lines(&html),
+            vec![1, 3, 5, 7],
+            "one attribute per block, at its true line: {html}"
+        );
+        assert_eq!(block_line_of(&html, "Delta is plain."), Some(7), "{html}");
+    }
+
+    /// With the feature off the writer must produce exactly the bytes it
+    /// produced before `data-mbr-line` existed.
+    #[tokio::test]
+    async fn review_off_is_byte_identical() {
+        let md = concat!(
+            "---\ntitle: Fixture\n---\n\n",
+            "# Heading {#custom}\n\n",
+            "A paragraph with *emphasis*, `code` and a [link](other.md).\n\n",
+            "> A quote\n>\n> with two paragraphs.\n\n",
+            "- one\n- two\n  - nested\n\n",
+            "1. first\n2. second\n\n",
+            "- [ ] a task @due(2026-08-05)\n\n",
+            "```rust\nfn main() {}\n```\n\n",
+            "```mermaid\ngraph TD\n```\n\n",
+            "    indented code\n\n",
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n",
+            "![alt with *markup*](img.png)\n\n",
+            "--- {#sec .highlight}\n\n",
+            "!> a tip\n\n",
+            "Term\n: Definition\n\n",
+            "Final paragraph.\n",
+        );
+        let with = render_review(md, false).await;
+        let without = {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(md.as_bytes()).unwrap();
+            let path = file.path().to_path_buf();
+            let root = path.parent().unwrap().to_path_buf();
+            render(
+                path,
+                &root,
+                0,
+                LinkTransformConfig {
+                    markdown_extensions: vec!["md".to_string()],
+                    index_file: "index.md".to_string(),
+                    is_index_file: false,
+                    url_depth: None,
+                    current_page_url: String::new(),
+                    markdown_page_probe: None,
+                },
+                false,
+                false,
+                HashSet::new(),
+                ReviewLines::Omit,
+                false,
+                &[],
+                None,
+            )
+            .await
+            .unwrap()
+            .html
+        };
+
+        assert!(
+            with.contains("data-mbr-line="),
+            "the Emit render really did emit some: {with}"
+        );
+        let stripped = strip_block_line_attrs(&with);
+        assert_eq!(
+            stripped, without,
+            "stripping the attribute must recover the Omit output exactly"
+        );
+    }
+
+    /// Removes every ` data-mbr-line="N"` occurrence, the regex-free equivalent
+    /// of `/ data-mbr-line="\d+"/g`.
+    fn strip_block_line_attrs(html: &str) -> String {
+        const ATTR: &str = " data-mbr-line=\"";
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(at) = rest.find(ATTR) {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + ATTR.len()..];
+            let end = after.find('"').expect("unterminated data-mbr-line");
+            assert!(
+                after[..end].chars().all(|c| c.is_ascii_digit()),
+                "data-mbr-line must hold digits only, got {:?}",
+                &after[..end]
+            );
+            rest = &after[end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The two entry points duplicate the whole pipeline, so they have to be
+    /// shown to agree rather than assumed to — as with marker anchors.
+    #[tokio::test]
+    async fn sync_and_async_agree_with_review_on() {
+        let md = concat!(
+            "---\ntitle: T\n---\n\n",
+            "# TODO heading\n\n",
+            "Prose with a TK in the middle.\n\n",
+            "- [ ] TODO: a task\n",
+            "- - inner\n  TODO outer\n\n",
+            "> quoted TK\n\n",
+            "```\nTK in code\n```\n\n",
+            "| A | B |\n|---|---|\n| TK a | TK b |\n",
+        );
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(md.as_bytes()).unwrap();
+        let path = file.path().to_path_buf();
+        let root = path.parent().unwrap().to_path_buf();
+        let config = LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file: false,
+            url_depth: None,
+            current_page_url: String::new(),
+            markdown_page_probe: None,
+        };
+        let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
+
+        let async_html = render(
+            path.clone(),
+            &root,
+            0,
+            config.clone(),
+            false,
+            false,
+            HashSet::new(),
+            ReviewLines::Emit,
+            true,
+            &markers,
+            None,
+        )
+        .await
+        .unwrap()
+        .html;
+        let sync_html = render_sync(
+            path,
+            &root,
+            0,
+            config,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            ReviewLines::Emit,
+            true,
+            &markers,
+            None,
+        )
+        .unwrap()
+        .html;
+
+        assert_eq!(async_html, sync_html);
+        assert!(
+            !emitted_block_lines(&async_html).is_empty(),
+            "the fixture really does carry attributes: {async_html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_emitted_line_is_in_range() {
+        let md = concat!(
+            "---\ntitle: T\n---\n\n",
+            "# Heading\n\n",
+            "Paragraph one.\n\n",
+            "> quote\n\n",
+            "- item\n- item two\n\n",
+            "```\ncode\n```\n\n",
+            "| A |\n|---|\n| b |\n\n",
+            "Last paragraph.\n",
+        );
+        let line_count = md.lines().count() as u32;
+        let html = render_review(md, true).await;
+        let emitted = emitted_block_lines(&html);
+        assert!(!emitted.is_empty(), "{html}");
+        for line in emitted {
+            assert!(
+                (1..=line_count).contains(&line),
+                "line {line} outside 1..={line_count}: {html}"
+            );
+        }
     }
 }
 
@@ -5525,9 +6371,18 @@ mod proptests {
         let owned: Vec<String> = PROP_MARKERS.iter().map(|m| m.to_string()).collect();
         let rule = MarkerRule::new(&owned).expect("a non-empty marker list compiles");
         let mut text_lines = TextLines::recording();
-        let (events, _headings, _attrs) =
-            collect_events_and_headings(md, TaskMarkup::Render, &mut text_lines);
-        let marked = mark_incomplete_blocks(events.clone(), &rule, &text_lines);
+        let (events, _headings, _attrs) = collect_events_and_headings(
+            md,
+            TaskMarkup::Render,
+            &mut text_lines,
+            &mut BlockLines::disabled(),
+        );
+        let marked = mark_incomplete_blocks(
+            events.clone(),
+            &rule,
+            &text_lines,
+            &mut BlockLines::disabled(),
+        );
         (events, marked)
     }
 
@@ -5575,8 +6430,13 @@ mod proptests {
             let rule = MarkerRule::new(&owned).expect("a non-empty marker list compiles");
             let mut text_lines = TextLines::recording();
             let (events, _headings, section_attrs) =
-                collect_events_and_headings(&md, TaskMarkup::Render, &mut text_lines);
-            let marked = mark_incomplete_blocks(events, &rule, &text_lines);
+                collect_events_and_headings(
+                &md,
+                TaskMarkup::Render,
+                &mut text_lines,
+                &mut BlockLines::disabled(),
+            );
+            let marked = mark_incomplete_blocks(events, &rule, &text_lines, &mut BlockLines::disabled());
             let mut html = String::new();
             crate::html::push_html_mbr_with_attrs(&mut html, marked.into_iter(), section_attrs);
 
