@@ -4013,6 +4013,7 @@ impl Server {
                 review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+                root_dir: Some(&config.base_dir),
             },
         );
 
@@ -4251,6 +4252,10 @@ impl Server {
                 review_enabled: false,
                 tasks_default_include,
                 title_affixes: None,
+                // `render_error_page` has no `Config`/`ServerState` in scope
+                // (discrete parameters only) and an error page has no
+                // markdown body to scope review storage against anyway.
+                root_dir: None,
             },
         );
 
@@ -6396,6 +6401,7 @@ impl Server {
                 tasks_default_include: config.tasks_default_include,
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
+                root_dir: Some(&config.base_dir),
             },
             &page_context::UrlMode::Absolute,
         );
@@ -6616,6 +6622,7 @@ impl Server {
                 review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+                root_dir: Some(&config.base_dir),
             },
         );
 
@@ -6696,6 +6703,7 @@ impl Server {
                 review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+                root_dir: Some(&config.base_dir),
             },
         );
 
@@ -6741,6 +6749,7 @@ impl Server {
                 review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+                root_dir: Some(&config.base_dir),
             },
         );
 

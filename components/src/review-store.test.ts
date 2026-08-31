@@ -248,3 +248,83 @@ describe('reviewStore (the chunk-facing view)', () => {
     expect(reviewStore.all()).toHaveLength(1)
   })
 })
+
+describe('repo-scoped storage', () => {
+  const originalConfig = window.__MBR_CONFIG__
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  afterEach(() => {
+    window.__MBR_CONFIG__ = originalConfig
+  })
+
+  it('falls back to the bare STORAGE_KEY when no repoId is configured', () => {
+    // Unchanged from before repo scoping existed: static builds, the CLI and
+    // QuickLook never set repoId, and a pre-scoping store lived here too.
+    addNote({ file: 'doc.md', type: 'note', body: 'x', line: 1 })
+    expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull()
+  })
+
+  it('writes under a repo-scoped key, leaving the bare key untouched', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-a' }
+    addNote({ file: 'doc.md', type: 'note', body: 'x', line: 1 })
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(localStorage.getItem(`${STORAGE_KEY}:repo-a`)).not.toBeNull()
+  })
+
+  it('keeps two repos independent, surviving resetStoreCache()', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-a' }
+    addNote({ file: 'doc.md', type: 'note', body: 'from a', line: 1 })
+    resetStoreCache()
+
+    // Switching repos (same origin, different served repo) must not see
+    // repo-a's note.
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-b' }
+    resetStoreCache()
+    expect(allNotes()).toEqual([])
+    addNote({ file: 'doc.md', type: 'note', body: 'from b', line: 2 })
+    resetStoreCache()
+    expect(allNotes().map((n) => n.body)).toEqual(['from b'])
+
+    // Switching back to repo-a still finds its own note, undisturbed.
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-a' }
+    resetStoreCache()
+    expect(allNotes().map((n) => n.body)).toEqual(['from a'])
+  })
+
+  it('refreshes on a storage event for the current repo-scoped key', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-a' }
+    const listener = vi.fn()
+    const off = subscribe(listener)
+    expect(noteCount()).toBe(0)
+
+    localStorage.setItem(`${STORAGE_KEY}:repo-a`, serializeEnvelope([makeNote()]))
+    window.dispatchEvent(new StorageEvent('storage', { key: `${STORAGE_KEY}:repo-a` }))
+
+    expect(listener).toHaveBeenCalled()
+    expect(noteCount()).toBe(1)
+    off()
+  })
+
+  it('ignores a storage event for a different repo-scoped key', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-a' }
+    const listener = vi.fn()
+    const off = subscribe(listener)
+
+    window.dispatchEvent(new StorageEvent('storage', { key: `${STORAGE_KEY}:repo-b` }))
+    expect(listener).not.toHaveBeenCalled()
+    off()
+  })
+
+  it('ignores a storage event for the legacy unscoped key once a repoId is configured', () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, repoId: 'repo-a' }
+    const listener = vi.fn()
+    const off = subscribe(listener)
+
+    window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY }))
+    expect(listener).not.toHaveBeenCalled()
+    off()
+  })
+})

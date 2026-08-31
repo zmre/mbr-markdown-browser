@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 use crate::build::{relative_base, relative_root};
 use crate::config::TagSource;
+use crate::edit_auth::content_hash;
 use crate::link_transform::make_relative_url;
 use crate::markdown::HeadingInfo;
 use crate::readability::ReadabilityScores;
@@ -100,6 +101,13 @@ pub struct PageChrome<'a> {
     /// `Some((prefix, suffix))` for content pages; `None` for error pages,
     /// which historically omit `title_prefix`/`title_suffix`.
     pub title_affixes: Option<(&'a str, &'a str)>,
+    /// Repository root directory, used to derive `repo_id` (a stable per-repo
+    /// id the frontend uses to scope browser storage — currently just review
+    /// notes — to the served repository, not just the origin). `None` means
+    /// there is no live repository to scope against: a static build (the
+    /// review feature is unconditionally off there) or an error page (no
+    /// markdown body, nothing to review).
+    pub root_dir: Option<&'a Path>,
 }
 
 /// Inserts the shared chrome key set into a template context.
@@ -135,6 +143,24 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
     if let Some((prefix, suffix)) = chrome.title_affixes {
         ctx.insert("title_prefix".to_string(), json!(prefix));
         ctx.insert("title_suffix".to_string(), json!(suffix));
+    }
+    insert_repo_id(ctx, chrome.root_dir);
+}
+
+/// Inserts `repo_id`, a stable per-repository id derived from the server's
+/// root directory, used by the frontend to scope browser storage (currently
+/// just review notes) to the served repository as well as the browser
+/// origin — several repos served from the same host:port (GUI mode's fixed
+/// default port, or a reused dev port) must not share state. The path itself
+/// is hashed rather than passed through, so a repo's local filesystem path is
+/// never embedded in page HTML. Omits the key entirely (not just empty) when
+/// `root_dir` is `None`.
+fn insert_repo_id(ctx: &mut HashMap<String, Value>, root_dir: Option<&Path>) {
+    if let Some(root_dir) = root_dir {
+        ctx.insert(
+            "repo_id".to_string(),
+            json!(content_hash(root_dir.to_string_lossy().as_bytes())),
+        );
     }
 }
 
@@ -292,6 +318,8 @@ pub struct MarkdownContextOptions<'a> {
     pub tasks_default_include: IncludeFilter,
     pub title_prefix: &'a str,
     pub title_suffix: &'a str,
+    /// Sibling of [`PageChrome::root_dir`] for markdown pages.
+    pub root_dir: Option<&'a Path>,
 }
 
 /// Builds the `extra_context` map shared by server-mode and static-build
@@ -371,6 +399,7 @@ pub fn markdown_extra_context(
     );
     ctx.insert("title_prefix".to_string(), json!(opts.title_prefix));
     ctx.insert("title_suffix".to_string(), json!(opts.title_suffix));
+    insert_repo_id(&mut ctx, opts.root_dir);
 
     // Modified date from file metadata
     if let Some(secs) = params.modified_secs {
@@ -456,6 +485,7 @@ mod tests {
                 review_enabled: false,
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("pre ", " suf")),
+                root_dir: Some(Path::new("/repo/root")),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(true)));
@@ -468,6 +498,10 @@ mod tests {
         assert_eq!(ctx.get("title_prefix"), Some(&json!("pre ")));
         assert_eq!(ctx.get("title_suffix"), Some(&json!(" suf")));
         assert!(!ctx.contains_key("relative_root"));
+        assert_eq!(
+            ctx.get("repo_id"),
+            Some(&json!(content_hash(b"/repo/root")))
+        );
     }
 
     #[test]
@@ -487,6 +521,7 @@ mod tests {
                 review_enabled: false,
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: None,
+                root_dir: None,
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(true)));
@@ -494,6 +529,7 @@ mod tests {
         assert!(!ctx.contains_key("relative_base"));
         assert!(!ctx.contains_key("title_prefix"));
         assert!(!ctx.contains_key("title_suffix"));
+        assert!(!ctx.contains_key("repo_id"));
     }
 
     #[test]
@@ -510,6 +546,9 @@ mod tests {
                 review_enabled: false,
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("", "")),
+                // Static builds never have a live repo to scope storage
+                // against.
+                root_dir: None,
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(false)));
@@ -518,6 +557,7 @@ mod tests {
         assert!(!ctx.contains_key("gui_mode"));
         // Static builds never carry the task browser: its index reads live files.
         assert_eq!(ctx.get("tasks_enabled"), Some(&json!(false)));
+        assert!(!ctx.contains_key("repo_id"));
     }
 
     #[test]
@@ -682,7 +722,10 @@ mod tests {
         assert!(!ctx.contains_key("error_message"));
     }
 
-    fn markdown_opts(sources: &[TagSource]) -> MarkdownContextOptions<'_> {
+    fn markdown_opts<'a>(
+        sources: &'a [TagSource],
+        root_dir: Option<&'a Path>,
+    ) -> MarkdownContextOptions<'a> {
         MarkdownContextOptions {
             tag_sources: sources,
             sidebar_style: "auto",
@@ -693,6 +736,7 @@ mod tests {
             tasks_default_include: IncludeFilter::Tasks,
             title_prefix: "",
             title_suffix: "",
+            root_dir,
         }
     }
 
@@ -723,7 +767,12 @@ mod tests {
             current_url: "/docs/b/",
             siblings: &siblings,
         };
-        let ctx = markdown_extra_context(&params, &markdown_opts(&[]), &UrlMode::Absolute);
+        let root_dir = Path::new("/repo/root");
+        let ctx = markdown_extra_context(
+            &params,
+            &markdown_opts(&[], Some(root_dir)),
+            &UrlMode::Absolute,
+        );
 
         assert_eq!(ctx.get("has_h1"), Some(&json!(true)));
         assert_eq!(ctx.get("tasks_enabled"), Some(&json!(true)));
@@ -742,6 +791,10 @@ mod tests {
         // Mode flags are the caller's responsibility (frontmatter)
         assert!(!ctx.contains_key("server_mode"));
         assert!(!ctx.contains_key("gui_mode"));
+        assert_eq!(
+            ctx.get("repo_id"),
+            Some(&json!(content_hash(root_dir.to_string_lossy().as_bytes())))
+        );
     }
 
     #[test]
@@ -765,12 +818,17 @@ mod tests {
             current_url: "/docs/b/",
             siblings: &siblings,
         };
-        let ctx =
-            markdown_extra_context(&params, &markdown_opts(&[]), &UrlMode::RelativeToDepth(2));
+        // Static builds never have a live repo to scope storage against.
+        let ctx = markdown_extra_context(
+            &params,
+            &markdown_opts(&[], None),
+            &UrlMode::RelativeToDepth(2),
+        );
 
         // None scores serialize as JSON null
         assert_eq!(ctx.get("flesch_reading_ease"), Some(&json!(null)));
         assert!(!ctx.contains_key("modified_timestamp"));
+        assert!(!ctx.contains_key("repo_id"));
         // Static mode: relative path variables present
         assert_eq!(ctx.get("relative_base"), Some(&json!("../../.mbr/")));
         assert_eq!(ctx.get("relative_root"), Some(&json!("../../")));
@@ -799,7 +857,7 @@ mod tests {
             current_url: "/not-in-list/",
             siblings: &[],
         };
-        let ctx = markdown_extra_context(&params, &markdown_opts(&[]), &UrlMode::Absolute);
+        let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert!(!ctx.contains_key("prev_page"));
         assert!(!ctx.contains_key("next_page"));
     }

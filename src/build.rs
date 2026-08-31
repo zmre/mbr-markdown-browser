@@ -1244,6 +1244,8 @@ impl Builder {
                 tasks_default_include: self.config.tasks_default_include,
                 title_prefix: &self.config.title_prefix,
                 title_suffix: &self.config.title_suffix,
+                // No live repo to scope review storage against in a static build.
+                root_dir: None,
             },
             &page_context::UrlMode::RelativeToDepth(depth),
         );
@@ -1498,6 +1500,8 @@ impl Builder {
                 review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+                // No live repo to scope review storage against in a static build.
+                root_dir: None,
             },
         );
 
@@ -1728,6 +1732,8 @@ impl Builder {
                 review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+                // No live repo to scope review storage against in a static build.
+                root_dir: None,
             },
         );
 
@@ -1803,6 +1809,8 @@ impl Builder {
                 review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+                // No live repo to scope review storage against in a static build.
+                root_dir: None,
             },
         );
 
@@ -2262,6 +2270,8 @@ impl Builder {
                 review_enabled: false,
                 tasks_default_include: self.config.tasks_default_include,
                 title_affixes: None,
+                // No live repo to scope review storage against in a static build.
+                root_dir: None,
             },
         );
 
@@ -2351,6 +2361,8 @@ impl Builder {
                     review_enabled: false,
                     tasks_default_include: self.config.tasks_default_include,
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+                    // No live repo to scope review storage against in a static build.
+                    root_dir: None,
                 },
             );
 

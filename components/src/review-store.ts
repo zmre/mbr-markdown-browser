@@ -43,6 +43,7 @@ import {
 } from './review/note-model.ts'
 import { sortNotes } from './review/note-order.ts'
 import type { NoteDraft, ReviewNote, ReviewStoreApi } from './review/types.ts'
+import { getRepoId } from './shared.ts'
 
 /** Cached view of the store, or `null` before the first read. */
 let cache: ParsedEnvelope | null = null
@@ -54,6 +55,21 @@ const listeners = new Set<() => void>()
 let listening = false
 
 /**
+ * The `localStorage` key this page's notes live under.
+ *
+ * `STORAGE_KEY` suffixed with the served repository's id, so two repos
+ * served from the same origin (GUI mode's fixed default port, or a reused
+ * dev port) get independent stores instead of bleeding into each other. When
+ * `getRepoId()` is empty — static builds, the CLI, QuickLook, none of which
+ * have review notes — this falls back to the bare `STORAGE_KEY`, which is
+ * also what a store written before this scoping existed used.
+ */
+function storageKey(): string {
+  const repoId = getRepoId()
+  return repoId === '' ? STORAGE_KEY : `${STORAGE_KEY}:${repoId}`
+}
+
+/**
  * Read the raw string, tolerating storage that is absent, disabled or throwing.
  *
  * Private-browsing modes and enterprise policies both make `localStorage`
@@ -61,7 +77,7 @@ let listening = false
  */
 function readRaw(): string | null {
   try {
-    return localStorage.getItem(STORAGE_KEY)
+    return localStorage.getItem(storageKey())
   } catch {
     return null
   }
@@ -70,7 +86,7 @@ function readRaw(): string | null {
 /** Write the raw string. Returns false when storage refused it (quota, policy). */
 function writeRaw(value: string): boolean {
   try {
-    localStorage.setItem(STORAGE_KEY, value)
+    localStorage.setItem(storageKey(), value)
     return true
   } catch {
     // Quota exceeded, disabled storage, private mode. The caller surfaces this
@@ -93,9 +109,12 @@ function ensureListening(): void {
   if (listening || typeof window === 'undefined') return
   listening = true
   // Fires only for changes made by *other* documents on this origin, which is
-  // exactly the case the in-memory cache cannot observe.
+  // exactly the case the in-memory cache cannot observe. Compared against
+  // storageKey(), not the bare STORAGE_KEY, so a write to a *different*
+  // repo's scoped key (or the unscoped legacy key) does not wrongly
+  // invalidate this repo's cache.
   window.addEventListener('storage', (event) => {
-    if (event.key !== null && event.key !== STORAGE_KEY) return
+    if (event.key !== null && event.key !== storageKey()) return
     cache = null
     notify()
   })
