@@ -22,7 +22,7 @@
     "@types/d3-force": "^3.0.10",
     "@vitest/browser": "^4.1.10",
     "happy-dom": "^20.11.2",
-    "terser": "^5.49.2",
+    "terser": "^5.51.2",
     "typescript": "~7.0.2",
     "vite": "^8.2.1",
     "vitest": "^4.1.10"
