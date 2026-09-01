@@ -138,7 +138,7 @@ muda = { version = "0.19", features = ["gtk", "libxdo"], optional = true }
 # `external_open`: gio's AppInfo::launch_default_for_uri is the desktop-portal
 # aware equivalent of xdg-open without the process spawn. Already in the tree
 # via gtk/webkit2gtk at this exact version, so this adds no crate.
-gio = { version = "0.18", optional = true }
+gio = { version = "0.21", optional = true }
 # `browser`: the menu bar is a `GtkMenuBar` inside the window on Linux, so
 # hiding it (and making the hide survive a later `show_all()`) needs `WidgetExt`.
 # Same situation as gio above — gtk 0.18.2 is already in the tree via
