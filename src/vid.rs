@@ -19,7 +19,7 @@ static EXTENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\.([0-9a-zA-Z]+)([?#].*)?$").expect("Invalid EXTENSION_RE regex pattern")
 });
 static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"#t=([0-9]+(:[0-9]+)*)(,([0-9]+(:[0-9]+)*))?$")
+    Regex::new(r"^t=([0-9]+(:[0-9]+)*)([,-]([0-9]+(:[0-9]+)*))?$")
         .expect("Invalid TIME_RE regex pattern")
 });
 
@@ -255,19 +255,30 @@ impl Vid {
         }
     }
 
+    /// Split a `#...` fragment off the base URL and, if present, parse it as a
+    /// media time range.
+    ///
+    /// The fragment is stripped **unconditionally** whenever one is present —
+    /// even if it doesn't parse as `t=START[,END]` (or the hyphen-separated
+    /// `t=START-END` variant). Coupling the strip to a successful parse left a
+    /// malformed fragment (e.g. a dash instead of a comma) attached to the
+    /// base URL; every derived attribute built by string concatenation in
+    /// `to_html` (`.cover.jpg`, `.captions.en.vtt`, `.chapters.en.vtt`,
+    /// `-720p.m3u8`) then had that fragment appended *after* it, i.e. inside
+    /// the URL fragment rather than the path. A URL fragment is never sent in
+    /// an HTTP request, so those sidecar fetches actually requested the raw
+    /// video file itself, which the frontend then tried to parse as text —
+    /// pinning the CPU and hanging the page. See `test_to_html_...` below.
     fn start_stop_from_url(url: &str) -> (Option<String>, Option<String>, &str) {
-        match TIME_RE.captures(url) {
-            Some(cap) => {
-                let url = match url.rsplit_once('#') {
-                    Some((base, _)) => base,
-                    None => url,
-                };
-                (
+        match url.rsplit_once('#') {
+            Some((base, fragment)) => match TIME_RE.captures(fragment) {
+                Some(cap) => (
                     cap.get(1).map(|t| t.as_str().to_string()),
                     cap.get(4).map(|t| t.as_str().to_string()),
-                    url,
-                )
-            }
+                    base,
+                ),
+                None => (None, None, base),
+            },
             None => (None, None, url),
         }
     }
@@ -638,6 +649,103 @@ mod tests {
         assert!(start.is_none());
         assert!(end.is_none());
         assert_eq!(url, "foo.mp4");
+    }
+
+    #[test]
+    fn test_start_stop_from_url_strips_unparseable_fragment() {
+        // A fragment that isn't a valid `t=...` expression must still be
+        // stripped from the base URL, not left attached: this is the actual
+        // bug fix. Regression test for the double-video hang.
+        let (start, end, url) = Vid::start_stop_from_url("foo.mp4#nonsense");
+        assert!(start.is_none());
+        assert!(end.is_none());
+        assert_eq!(url, "foo.mp4");
+    }
+
+    #[test]
+    fn test_start_stop_from_url_hyphen_separator() {
+        // Hyphen is now accepted as an equivalent separator to comma, since
+        // it's an easy, natural mistake to make and previously silently
+        // corrupted the URL instead of failing loudly.
+        let (start, end, url) = Vid::start_stop_from_url("foo.mp4#t=10-20");
+        assert_eq!(start, Some("10".to_string()));
+        assert_eq!(end, Some("20".to_string()));
+        assert_eq!(url, "foo.mp4");
+
+        let (start, end, url) = Vid::start_stop_from_url("foo.mp4#t=1:14:43-1:15:55");
+        assert_eq!(start, Some("1:14:43".to_string()));
+        assert_eq!(end, Some("1:15:55".to_string()));
+        assert_eq!(url, "foo.mp4");
+    }
+
+    #[test]
+    fn test_start_stop_from_url_garrett_thomas_regression() {
+        // Exact case reported in the field: a `#t=START-END` (hyphen)
+        // fragment on a real path with percent-encoded spaces. Before the
+        // fix, `start_stop_from_url` returned the URL untouched (fragment
+        // still attached), which corrupted every derived sidecar URL built
+        // by concatenation in `to_html` and hung the GUI window.
+        let vid = Vid::from_url_and_title(
+            "/videos/Garrett%20Thomas/gt-opus-hd.mp4#t=4483-4555",
+            "caption",
+        )
+        .unwrap();
+        assert_eq!(vid.start.as_deref(), Some("4483"));
+        assert_eq!(vid.end.as_deref(), Some("4555"));
+        assert!(
+            !vid.url.contains('#'),
+            "no fragment should survive into the base URL: {}",
+            vid.url
+        );
+    }
+
+    #[test]
+    fn test_to_html_unparseable_fragment_does_not_leak_into_derived_attrs() {
+        // Pins the hang fix at the to_html level: a fragment that fails to
+        // parse as a time expression must not survive into any of the
+        // derived attributes built by string concatenation onto `self.url`.
+        // A `#` surviving into `poster=`, `<track src=` or
+        // `<mbr-video-extras src=` means those requests actually fetch the
+        // raw video file (fragments are never sent over HTTP) instead of the
+        // small sidecar file, which is exactly what pinned the CPU and hung
+        // the page in the field.
+        let (_, _, base) = Vid::start_stop_from_url("/videos/foo.mp4#garbage");
+        let vid = Vid {
+            url: base.to_string(),
+            ext: Some("mp4".to_string()),
+            start: None,
+            end: None,
+            caption: Some("Caption".to_string()),
+        };
+        let html = vid.to_html(false, false, false);
+
+        let poster = html
+            .split("poster=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("poster attribute present");
+        assert!(!poster.contains('#'), "poster leaked a fragment: {poster}");
+
+        for track_src in html
+            .split("<track")
+            .skip(1)
+            .filter_map(|s| s.split("src=\"").nth(1).and_then(|s| s.split('"').next()))
+        {
+            assert!(
+                !track_src.contains('#'),
+                "track src leaked a fragment: {track_src}"
+            );
+        }
+
+        let extras_src = html
+            .split("<mbr-video-extras src='")
+            .nth(1)
+            .and_then(|s| s.split('\'').next())
+            .expect("mbr-video-extras src attribute present");
+        assert!(
+            !extras_src.contains('#'),
+            "mbr-video-extras src leaked a fragment: {extras_src}"
+        );
     }
 
     #[test]
