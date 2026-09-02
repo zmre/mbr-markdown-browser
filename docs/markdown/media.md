@@ -53,7 +53,7 @@ Specify start and end times:
 ![Highlight](video.mp4#t=10,30)
 ```
 
-Format: `#t=START,END` where times are in seconds.
+Format: `#t=START,END` where times are in seconds. A hyphen (`#t=START-END`) is also accepted as an equivalent separator.
 
 More examples:
 ```markdown
