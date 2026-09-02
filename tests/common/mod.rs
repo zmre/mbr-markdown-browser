@@ -168,12 +168,27 @@ mod tests {
 
     #[test]
     fn test_find_available_port() {
-        let port = find_available_port();
-        assert!(port > 0);
+        // `find_available_port()` only guarantees the port was free at the instant
+        // it checked; something else on the host can still grab it before this
+        // test's own re-verification runs (the same race every real caller already
+        // accepts — they just try to bind and let it fail loudly if it happens).
+        // Retry a handful of times so a single unlucky race doesn't fail CI, the
+        // same tolerance find_available_port()'s own loop already has.
+        for attempt in 0..5 {
+            let port = find_available_port();
+            assert!(port > 0);
 
-        // Verify the port is actually available
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port));
-        assert!(listener.is_ok());
+            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+
+            if attempt == 4 {
+                panic!(
+                    "port {port} was reported available but failed to bind on \
+                     the immediate re-check, 5 times in a row"
+                );
+            }
+        }
     }
 
     #[test]
