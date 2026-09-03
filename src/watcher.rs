@@ -274,24 +274,49 @@ mod tests {
     // RecommendedWatcher delivers events faster than PollWatcher, but allow headroom
     const WATCH_TIMEOUT_SECS: u64 = 5;
 
-    /// Drain events from the receiver until one matches the predicate, or timeout.
+    /// Drain events from the receiver until one matches the predicate.
     ///
     /// Filesystem watchers can emit spurious events (directory metadata, temp files)
     /// so tests must not assume the *first* event is the one they care about.
+    ///
+    /// On failure the events that *did* arrive come back with the error: a bare
+    /// "no event" is indistinguishable from "the wrong event", and the two have
+    /// different causes.
     async fn recv_matching(
         rx: &mut broadcast::Receiver<FileChangeEvent>,
         predicate: impl Fn(&FileChangeEvent) -> bool,
-    ) -> Option<FileChangeEvent> {
+    ) -> Result<FileChangeEvent, Vec<FileChangeEvent>> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(WATCH_TIMEOUT_SECS);
-        while tokio::time::Instant::now() < deadline {
+        let mut seen = Vec::new();
+        loop {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(event)) if predicate(&event) => return Some(event),
-                Ok(Ok(_)) => continue, // spurious event, keep draining
-                Ok(Err(_)) => return None,
-                Err(_) => return None, // timed out
+                Ok(Ok(event)) if predicate(&event) => return Ok(event),
+                Ok(Ok(event)) => seen.push(event),
+                // A burst that overruns the channel drops the oldest events; the
+                // one being waited on may still be behind it.
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) => return Err(seen),
+                Err(_) => return Err(seen),
             }
         }
-        None
+    }
+
+    /// Blocks until the watcher is demonstrably delivering events for `dir`.
+    ///
+    /// FSEvents resolves `kFSEventStreamEventIdSinceNow` in `fseventsd`, not in
+    /// `FSEventStreamStart`, so a write issued the instant `watch()` returns can
+    /// land ahead of the stream's start point. The create is then never reported
+    /// and the write arrives alone as `Modified`, which is why asserting the kind
+    /// of the first event for a freshly written file fails under load. One
+    /// throwaway file establishes the boundary: once its event has been observed,
+    /// every later change has a higher event id.
+    async fn wait_until_live(dir: &Path, rx: &mut broadcast::Receiver<FileChangeEvent>) {
+        let probe = dir.join("watcher-readiness-probe");
+        fs::write(&probe, "probe").unwrap();
+        recv_matching(rx, |e| e.path.ends_with("watcher-readiness-probe"))
+            .await
+            .expect("watcher delivered no event for its readiness probe");
+        fs::remove_file(&probe).unwrap();
     }
 
     #[test]
@@ -325,17 +350,17 @@ mod tests {
 
         let (_watcher, mut rx) = FileWatcher::new(base_path, None, &[], &[], &[]).unwrap();
 
+        wait_until_live(base_path, &mut rx).await;
+
         // Create a test file
         let test_file = base_path.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
         // Wait for an event matching our file (skip spurious events)
-        let change = recv_matching(&mut rx, |e| e.relative_path.contains("test.md")).await;
-        assert!(
-            change.is_some(),
-            "Should receive file change event for test.md"
-        );
-        assert_eq!(change.unwrap().event, ChangeEventType::Created);
+        let change = recv_matching(&mut rx, |e| e.relative_path.contains("test.md"))
+            .await
+            .expect("should receive file change event for test.md");
+        assert_eq!(change.event, ChangeEventType::Created);
     }
 
     #[tokio::test]
@@ -352,8 +377,9 @@ mod tests {
         fs::write(&visible_file, "visible content").unwrap();
 
         // Wait for an event matching our file (skip spurious events)
-        let change = recv_matching(&mut rx, |e| e.relative_path.contains("visible.md")).await;
-        assert!(change.is_some(), "Should receive event for visible.md");
+        recv_matching(&mut rx, |e| e.relative_path.contains("visible.md"))
+            .await
+            .expect("should receive event for visible.md");
 
         // Now create an ignored directory and file
         let target_dir = base_path.join("target");
@@ -407,11 +433,9 @@ mod tests {
         let test_file = base_path.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
-        let change = recv_matching(&mut rx, |e| e.relative_path.contains("test.md")).await;
-        assert!(
-            change.is_some(),
-            "Should receive event for test.md even though an ancestor of the root is named 'build'"
-        );
+        recv_matching(&mut rx, |e| e.relative_path.contains("test.md"))
+            .await
+            .expect("should receive event for test.md even though an ancestor of the root is named 'build'");
     }
 
     // Symlink creation on Windows needs Developer Mode or elevation, so this is
@@ -471,8 +495,9 @@ mod tests {
         fs::write(&log_file, "log line").unwrap();
 
         // The normal path invokes the reload callback (broadcasts an event).
-        let change = recv_matching(&mut rx, |e| e.relative_path.contains("note.md")).await;
-        assert!(change.is_some(), "Should receive event for note.md");
+        recv_matching(&mut rx, |e| e.relative_path.contains("note.md"))
+            .await
+            .expect("should receive event for note.md");
 
         // The ignored glob path must never invoke the reload callback.
         let mut saw_log = false;
@@ -534,16 +559,16 @@ mod tests {
         let (_watcher, mut rx) =
             FileWatcher::new(base_path, Some(template_path), &[], &[], &[]).unwrap();
 
+        wait_until_live(template_path, &mut rx).await;
+
         // Create a file in the template folder (not base dir)
         let template_file = template_path.join("custom.css");
         fs::write(&template_file, "/* custom css */").unwrap();
 
         // Wait for an event matching our file (skip spurious events)
-        let change = recv_matching(&mut rx, |e| e.path.contains("custom.css")).await;
-        assert!(
-            change.is_some(),
-            "Should receive file change event for custom.css from template folder"
-        );
-        assert_eq!(change.unwrap().event, ChangeEventType::Created);
+        let change = recv_matching(&mut rx, |e| e.path.contains("custom.css"))
+            .await
+            .expect("should receive file change event for custom.css from template folder");
+        assert_eq!(change.event, ChangeEventType::Created);
     }
 }

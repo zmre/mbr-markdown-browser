@@ -108,8 +108,10 @@ fn decode_pdf_string(bytes: &[u8]) -> Option<String> {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
         // UTF-16BE encoded
         let utf16: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&chunk| u16::from_be_bytes(chunk))
             .collect();
         String::from_utf16(&utf16).ok()
     } else {
