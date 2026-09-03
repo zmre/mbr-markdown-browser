@@ -5654,7 +5654,7 @@ impl Server {
         cache: &Arc<crate::video_transcode_cache::HlsCache>,
         key: crate::video_transcode_cache::HlsCacheKey,
         generate: F,
-    ) -> Result<Arc<Vec<u8>>, Response<Body>>
+    ) -> Result<Arc<Vec<u8>>, Box<Response<Body>>>
     where
         F: FnOnce() -> Result<Vec<u8>, crate::video_transcode::TranscodeError> + Send + 'static,
     {
@@ -5665,14 +5665,14 @@ impl Server {
                 let handle = HlsCache::spawn_generation(cache, key.clone(), notify, generate);
                 match handle.await {
                     Ok(Ok(data)) => Ok(data),
-                    Ok(Err(error)) => Err(Self::build_remux_error_response(&error)),
+                    Ok(Err(error)) => Err(Box::new(Self::build_remux_error_response(&error))),
                     // The detached task itself failed to finish; its guard has
                     // released the claim, so a retry can succeed.
                     Err(join_error) => {
                         tracing::warn!("remux generation task did not finish: {join_error}");
-                        Err(Self::build_remux_retry_response(
+                        Err(Box::new(Self::build_remux_retry_response(
                             "generation did not complete",
-                        ))
+                        )))
                     }
                 }
             }
@@ -5685,13 +5685,13 @@ impl Server {
                     // Not complete: either the producer recorded a failure, or
                     // the wait timed out / the claim was released. Distinguish
                     // them so the client is told something true.
-                    None => Err(Self::remux_incomplete_response(cache, &key)),
+                    None => Err(Box::new(Self::remux_incomplete_response(cache, &key))),
                 }
             }
             HlsCacheStartResult::AlreadyComplete(data) => Ok(data),
             HlsCacheStartResult::PreviouslyFailed(message) => {
                 tracing::debug!("previous remux generation failed: {message}");
-                Err(Self::build_remux_unprocessable_response(&message))
+                Err(Box::new(Self::build_remux_unprocessable_response(&message)))
             }
             // With caching off there is no entry to settle, but the work is still
             // detached so a disconnect cannot orphan a half-finished mux.
@@ -5700,12 +5700,12 @@ impl Server {
                 let handle = HlsCache::spawn_generation(cache, key, notify, generate);
                 match handle.await {
                     Ok(Ok(data)) => Ok(data),
-                    Ok(Err(error)) => Err(Self::build_remux_error_response(&error)),
+                    Ok(Err(error)) => Err(Box::new(Self::build_remux_error_response(&error))),
                     Err(join_error) => {
                         tracing::warn!("remux generation task did not finish: {join_error}");
-                        Err(Self::build_remux_retry_response(
+                        Err(Box::new(Self::build_remux_retry_response(
                             "generation did not complete",
-                        ))
+                        )))
                     }
                 }
             }
@@ -5844,7 +5844,7 @@ impl Server {
         Some(
             match Self::generate_remux_part(&config.hls_cache, cache_key, generate).await {
                 Ok(data) => Self::build_remux_response(part, data),
-                Err(response) => response,
+                Err(response) => *response,
             },
         )
     }
