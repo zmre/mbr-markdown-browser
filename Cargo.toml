@@ -111,7 +111,7 @@ parking_lot = "0.12"
 argon2 = { version = "0.5", features = ["std"] }
 sha2 = "0.11"
 rpassword = "7"
-yaml-rust2 = "0.11"
+yaml-rust2 = "0.12"
 # GUI dependencies (optional, enabled by default "gui" feature)
 wry = { version = "0.55", default-features = true, features = ["devtools", "fullscreen"], optional = true }
 
