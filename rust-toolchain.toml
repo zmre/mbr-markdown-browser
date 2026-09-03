@@ -17,5 +17,5 @@
 # actions-rust-lang/setup-rust-toolchain.
 [toolchain]
 profile = "minimal"
-channel = "1.98.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
