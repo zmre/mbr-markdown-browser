@@ -24,14 +24,14 @@ mbr provides platform-appropriate menus:
 
 **macOS:**
 - **mbr** menu: About, Preferences, Quit (Cmd+Q)
-- **File**: Open Folder (Cmd+O)
+- **File**: Open… (Cmd+O)
 - **Edit**: Copy, Paste, Select All, Find… (Cmd+F), Find Next (Cmd+G), Find Previous (Shift+Cmd+G)
 - **View**: Reload (Cmd+R), Toggle DevTools (Cmd+Option+I)
 - **History**: Back (Cmd+[), Forward (Cmd+])
 - **Window**: Minimize, Zoom, Close (Cmd+W)
 
 **Windows/Linux:**
-- **File**: Open Folder, Exit
+- **File**: Open…, Exit
 - **Edit**: Copy, Paste, Select All, Find… (Ctrl+F), Find Next (F3), Find Previous (Shift+F3)
 - **View**: Reload, Toggle DevTools
 - **History**: Back, Forward
@@ -56,7 +56,7 @@ include it, so your browser's native find is left untouched.
 
 | Action | macOS | Windows/Linux |
 |--------|-------|---------------|
-| Open Folder | Cmd+O | Ctrl+O |
+| Open folder or file | Cmd+O | Ctrl+O |
 | Reload Page | Cmd+R | Ctrl+R |
 | Go Back | Cmd+[ | Alt+Left |
 | Go Forward | Cmd+] | Alt+Right |
@@ -84,9 +84,16 @@ When files change on disk, the GUI automatically reloads the current page. This 
 2. Edit files in your preferred editor
 3. See changes instantly in mbr
 
-### Switching Directories
+### Switching Directories or Opening a File
 
-Use **File → Open Folder** (Cmd+O) to switch to a different markdown repository without restarting mbr.
+Use **File → Open…** (Cmd+O) to switch to a different markdown repository, or open a
+single markdown file, without restarting mbr.
+
+On macOS this shows one dialog that accepts either a folder or a markdown file — the
+same combined picker Xcode's own Open dialog uses. On Windows and Linux, where the
+native file picker cannot offer both at once, a short prompt asks which kind of dialog
+to open first. Picking a file opens directly to that file's rendered page rather than
+the repository root it belongs to.
 
 ### External Links
 
@@ -169,6 +176,20 @@ The macOS release includes `MBR.app`, a proper application bundle that:
 ```bash
 open -a MBR /path/to/notes
 ```
+
+### Opening a Markdown File from Finder
+
+`MBR.app` registers as a viewer for markdown files, so right-click → **Open
+With → MBR**, or a plain double-click once MBR is the default handler,
+launches straight into that file's rendered page — the same result as
+running `mbr /path/to/file.md` from a terminal. It does not show the folder
+picker.
+
+Each Finder-initiated launch starts its own independent mbr process on its own
+port, exactly like separate CLI invocations. mbr does not consolidate these
+into a single window: opening a second file while one is already open opens a
+second window backed by a second process, and closing either one leaves the
+other untouched.
 
 ### Command-Line Access
 

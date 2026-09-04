@@ -19,7 +19,7 @@ mbr ~/notes           # Browse a folder in GUI
 This opens a native window with:
 
 - Native menu bar (File, Edit, View, History)
-- Keyboard shortcuts (Cmd+O to open folder, Cmd+R to reload)
+- Keyboard shortcuts (Cmd+O to open a folder or file, Cmd+R to reload)
 - History navigation (Cmd+[ and Cmd+])
 - Developer tools (Cmd+Option+I)
 

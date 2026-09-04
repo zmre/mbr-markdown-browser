@@ -15,7 +15,7 @@ use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tao::{
-    event::{ElementState, Event, WindowEvent},
+    event::{ElementState, Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Icon, WindowBuilder},
@@ -69,8 +69,12 @@ const FIND_PREV_SCRIPT: &str = "(()=>{\
 /// Custom user events for the event loop
 enum UserEvent {
     MenuEvent(MenuEvent),
-    FolderSelected(PathBuf),
-    /// A server asked for by `Open Folder…` is listening.
+    /// The user picked a folder or a markdown file to open, from
+    /// [`spawn_open_picker`]. Which one it is gets sorted out by
+    /// [`start_server_for`]/[`crate::launch_url::resolve_launch_url_path`],
+    /// not here — the event loop only needs somewhere to land.
+    PathSelected(PathBuf),
+    /// A server asked for by `Open…` is listening.
     ///
     /// Carries the `JoinHandle` so the event loop — the only place that knows
     /// which server is current — can abort the one being replaced.
@@ -78,7 +82,7 @@ enum UserEvent {
         handle: JoinHandle<()>,
         url: String,
     },
-    /// A server asked for by `Open Folder…` never came up. The old one is still
+    /// A server asked for by `Open…` never came up. The old one is still
     /// running, so the window keeps working; `path` is only for the message.
     ServerFailed {
         path: PathBuf,
@@ -91,6 +95,55 @@ pub struct BrowserContext {
     pub server_handle: JoinHandle<()>,
     pub config: Config,
     pub tokio_runtime: tokio::runtime::Handle,
+}
+
+/// What the initial window should show.
+///
+/// `Known` is every launch there has ever been until now: `main.rs` resolves
+/// a URL and starts a server synchronously, before the window exists at all.
+///
+/// `Deferred` is macOS-only, and reachable in exactly the one case `Known`
+/// cannot cover: `main::needs_folder_picker` found no meaningful CLI path,
+/// which normally means "show the picker" — except the same launch may
+/// really be Finder asking to open a specific file (right-click → Open
+/// With, or a plain double-click once `MBR.app` claims the extension — see
+/// `CFBundleDocumentTypes` in `macos/MBR.app-template/Contents/Info.plist`).
+/// Finder's request reaches this process as a `tao::event::Event::Opened`,
+/// wrapping `application(_:open:)`, which Apple documents as firing
+/// *before* `applicationDidFinishLaunching`.
+///
+/// That ordering is what makes a race-free (no timeout, no "wait and see")
+/// implementation possible, but only once one more fact is pinned down: tao
+/// wires `application(_:open:)`/`applicationDidFinishLaunching:` straight
+/// through to the callback installed by `AppState::set_callback`, which
+/// `EventLoop::run` calls immediately before `[NSApp run]` — i.e. before
+/// either can fire. So as long as a callback is installed (this function
+/// always installs one, whether or not the target is known yet), tao
+/// delivers `Event::Opened` synchronously ahead of
+/// `Event::NewEvents(StartCause::Init)` when Finder asked for a file, and
+/// only `Init` (with no preceding `Opened`) when it did not. A `Deferred`
+/// launch builds its window on a placeholder page and lets the first tick of
+/// the event loop decide between the two — see the `Event::Opened` /
+/// `Event::NewEvents(StartCause::Init)` arms in [`launch_browser`] — then
+/// hands off to the exact same `UserEvent::PathSelected` →
+/// [`start_server_for`] → `UserEvent::ServerReady` pipeline `Open…`
+/// already uses, so a Finder-opened file resolves to a URL through the one
+/// path every other launch already goes through
+/// ([`crate::launch_url::resolve_launch_url_path`]).
+///
+/// This type only covers the *first* decision. `Event::Opened` can arrive
+/// again later, in either `Known` or `Deferred` process — see the
+/// `Event::Opened` arm in [`launch_browser`] for why a later one repoints the
+/// window instead of being ignored.
+pub enum InitialLaunch {
+    /// Boxed because `BrowserContext` (carrying the full [`Config`]) is far
+    /// larger than the handful of bytes in `Deferred`, and `clippy` flags the
+    /// gap.
+    Known(Box<BrowserContext>),
+    #[cfg(target_os = "macos")]
+    Deferred {
+        tokio_runtime: tokio::runtime::Handle,
+    },
 }
 
 /// About metadata for the application
@@ -431,14 +484,24 @@ fn open_with_system_handler(url: &str) {
     }
 }
 
-/// Spawn a thread to show folder picker dialog and send result via event loop proxy
-fn spawn_folder_picker(proxy: EventLoopProxy<UserEvent>) {
+/// Spawn a thread to show the open picker and send the result via the event
+/// loop proxy.
+///
+/// A thread, not a direct call, because the picker must not block the tao
+/// event loop thread while the user is looking at the dialog — the window
+/// backing it (and every other window's paint/input) is pumped from here.
+/// `crate::open_picker::pick_file_or_folder` is itself safe to call off the
+/// main thread on every platform: its macOS path already dispatches through
+/// rfd's `run_on_main`, which this code relied on even before there was a
+/// combined file-or-folder picker to call.
+fn spawn_open_picker(proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("Open Markdown Folder")
-            .pick_folder()
-        {
-            let _ = proxy.send_event(UserEvent::FolderSelected(path));
+        let markdown_extensions = Config::default().markdown_extensions;
+        if let Some(path) = crate::open_picker::pick_file_or_folder(
+            "Open a Markdown Folder or File",
+            &markdown_extensions,
+        ) {
+            let _ = proxy.send_event(UserEvent::PathSelected(path));
         }
     });
 }
@@ -454,10 +517,17 @@ fn spawn_folder_picker(proxy: EventLoopProxy<UserEvent>) {
 /// > function (like `block_on`) attempted to block the current thread while the
 /// > thread is being used to drive asynchronous tasks.
 ///
-/// so **Open Folder aborted the process on every platform**, the moment a folder
+/// so **Open… aborted the process on every platform**, the moment a folder
 /// was chosen. The port now comes back through the event loop instead
 /// ([`UserEvent::ServerReady`]), which also keeps the window responsive while a
 /// large repository is scanned.
+///
+/// `path` may now name a markdown file as well as a folder — the picker
+/// behind `Open…` can return either — so the returned URL is not always the
+/// bare repository root: [`crate::launch_url::resolve_launch_url_path`] picks
+/// the same directory/media-viewer/markdown-page URL `main.rs` resolves for
+/// the initial launch, so a picked file opens directly rather than dropping
+/// the user at the repository root they'd have to navigate away from.
 async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), BrowserError> {
     let absolute_path = path.canonicalize().map_err(|e| {
         tracing::error!("Failed to canonicalize path: {e}");
@@ -468,6 +538,14 @@ async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), Bro
         tracing::error!("Failed to read config: {e}");
         BrowserError::ServerStartFailed
     })?;
+
+    let is_directory = absolute_path.is_dir();
+    // `find_root_dir` (via `Config::read`) always derives `root_dir` from an
+    // ancestor of `absolute_path`, so this can only fail if that invariant is
+    // ever broken — treated as "no meaningful relative path" rather than a
+    // hard error, since a wrong root URL is far less disruptive than refusing
+    // to open the folder at all.
+    let relative_path = pathdiff::diff_paths(&absolute_path, &config.root_dir).unwrap_or_default();
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
 
@@ -495,7 +573,21 @@ async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), Bro
         BrowserError::ServerStartFailed
     })?;
 
-    Ok((handle, format!("http://{}:{}/", config.host, port)))
+    let url_path = crate::launch_url::resolve_launch_url_path(
+        &relative_path,
+        is_directory,
+        &config.markdown_extensions,
+    );
+    let base_url = url::Url::parse(&format!("http://{}:{}/", config.host, port)).map_err(|e| {
+        tracing::error!("Failed to build server URL: {e}");
+        BrowserError::ServerStartFailed
+    })?;
+    let url = base_url.join(&url_path).map_err(|e| {
+        tracing::error!("Failed to build launch URL: {e}");
+        BrowserError::ServerStartFailed
+    })?;
+
+    Ok((handle, url.to_string()))
 }
 
 /// Whether the platform shows the menu bar by default under
@@ -554,7 +646,9 @@ fn menu_bar_toggle_allowed(setting: MenuBarVisibility) -> bool {
 /// route is Linux-only, for the reason given on [`linux_shortcut_for`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shortcut {
-    OpenFolder,
+    /// Opens the picker, which can return either a folder or a markdown file
+    /// — see [`spawn_open_picker`].
+    Open,
     Reload,
     Print,
     Back,
@@ -591,7 +685,7 @@ struct ShortcutIds {
 
 fn shortcut_for_menu_id(id: &muda::MenuId, ids: &ShortcutIds) -> Option<Shortcut> {
     let table = [
-        (&ids.open, Shortcut::OpenFolder),
+        (&ids.open, Shortcut::Open),
         (&ids.reload, Shortcut::Reload),
         (&ids.print, Shortcut::Print),
         (&ids.back, Shortcut::Back),
@@ -624,9 +718,9 @@ fn perform_shortcut(
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] control_flow: &mut ControlFlow,
 ) {
     match shortcut {
-        Shortcut::OpenFolder => {
-            tracing::debug!("Open folder requested");
-            spawn_folder_picker(proxy.clone());
+        Shortcut::Open => {
+            tracing::debug!("Open requested");
+            spawn_open_picker(proxy.clone());
         }
         Shortcut::Reload => {
             tracing::debug!("Reload requested");
@@ -697,7 +791,7 @@ fn linux_shortcut_for(key: &Key<'_>, modifiers: ModifiersState) -> Option<Shortc
         // still `Character("o")` with Ctrl held. Lowercased anyway: Caps Lock
         // reaches the keyval, and Ctrl+O should not depend on it.
         Key::Character(c) if ctrl => match c.to_ascii_lowercase().as_str() {
-            "o" => Some(Shortcut::OpenFolder),
+            "o" => Some(Shortcut::Open),
             "r" => Some(Shortcut::Reload),
             "f" => Some(Shortcut::FindOpen),
             // Close Window and Quit are the same thing in a one-window app, and
@@ -769,8 +863,12 @@ fn set_gtk_menu_bar_visible(menu_bar: &Menu, window: &tao::window::Window, visib
     }
 }
 
-/// Launch the browser window with full context for server management
-pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
+/// Launch the browser window.
+///
+/// `launch` decides what the window shows first — see [`InitialLaunch`] for
+/// the macOS-only ambiguity that requires deferring the decision into the
+/// event loop itself.
+pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
     // The only place in the codebase that arms `open_external`. Until this runs,
     // handing a URL to the operating system fails closed with
     // `ExternalOpenError::GuiOnly`, so a server-mode process — which links this
@@ -807,9 +905,49 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     menu_bar.init_for_nsapp();
 
     // Resolved before the window exists so both the initial state and the F10
-    // handler read one decision. `ctx.config` is the merged config, so an
-    // `MBR_GUI_MENU_BAR` env var and `.mbr/config.toml` are already folded in.
-    let menu_bar_setting = ctx.config.gui_menu_bar;
+    // handler read one decision. For a `Known` launch this is the merged
+    // config, so an `MBR_GUI_MENU_BAR` env var and `.mbr/config.toml` are
+    // already folded in. A `Deferred` launch has no config yet — nothing has
+    // been read from disk, because no path is known yet either — so it falls
+    // back to the compiled-in default, the same bootstrapping value
+    // `main::needs_folder_picker`'s own picker already uses for its file
+    // filter. That value never changes once the real config is known, which
+    // matches `Open…`: a repoint already leaves this setting where the
+    // *original* launch left it.
+    //
+    // The rest of the initial state — server handle, URL, and the runtime
+    // used to start a server for it — comes from the same match. A
+    // `Deferred` launch has no server yet, so it starts with a placeholder
+    // page and an already-finished no-op task in `server_handle`'s place;
+    // `UserEvent::ServerReady`'s unconditional `server_handle.abort()` is a
+    // harmless no-op against a task that has already completed, so nothing
+    // downstream needs to know the difference.
+    let (
+        menu_bar_setting,
+        initial_url,
+        initial_server_handle,
+        tokio_runtime,
+        mut awaiting_open_decision,
+    ) = match launch {
+        InitialLaunch::Known(ctx) => (
+            ctx.config.gui_menu_bar,
+            ctx.url,
+            ctx.server_handle,
+            ctx.tokio_runtime,
+            false,
+        ),
+        #[cfg(target_os = "macos")]
+        InitialLaunch::Deferred { tokio_runtime } => {
+            let placeholder_handle = tokio_runtime.spawn(async {});
+            (
+                Config::default().gui_menu_bar,
+                "about:blank".to_string(),
+                placeholder_handle,
+                tokio_runtime,
+                true,
+            )
+        }
+    };
     let mut menu_bar_visible = menu_bar_starts_visible(menu_bar_setting, MENU_BAR_AUTO_VISIBLE);
 
     let icon = load_icon()?;
@@ -863,16 +1001,16 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
         set_gtk_menu_bar_visible(&menu_bar, &window, menu_bar_visible);
     }
 
-    // Shared because the policy has to follow the server: `Open Folder…`
-    // restarts it, usually on a different port, and a stale origin would send
-    // every internal link to the system browser.
-    let site_origin = Arc::new(RwLock::new(SiteOrigin::new(&ctx.url)));
+    // Shared because the policy has to follow the server: `Open…` restarts
+    // it, usually on a different port, and a stale origin would send every
+    // internal link to the system browser.
+    let site_origin = Arc::new(RwLock::new(SiteOrigin::new(&initial_url)));
     let new_window_origin = Arc::clone(&site_origin);
     let ipc_origin = Arc::clone(&site_origin);
 
     let builder = WebViewBuilder::new()
         .with_devtools(true)
-        .with_url(&ctx.url)
+        .with_url(&initial_url)
         // Without a handler wry allows every navigation, so an application
         // scheme silently did nothing: WKWebView, unlike UIKit, does not fall
         // back to NSWorkspace for a scheme it cannot render.
@@ -966,11 +1104,10 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
     let mut modifiers = ModifiersState::empty();
 
     // Mutable state for server management
-    let mut server_handle = ctx.server_handle;
-    let mut current_url = ctx.url;
-    let tokio_runtime = ctx.tokio_runtime;
+    let mut server_handle = initial_server_handle;
+    let mut current_url = initial_url;
 
-    // Create proxy for folder picker
+    // Create proxy for the open picker
     let event_proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _target, control_flow| {
@@ -984,8 +1121,8 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                     perform_shortcut(shortcut, &webview, &current_url, &event_proxy, control_flow);
                 }
             }
-            Event::UserEvent(UserEvent::FolderSelected(new_path)) => {
-                tracing::info!("Switching to new folder: {}", new_path.display());
+            Event::UserEvent(UserEvent::PathSelected(new_path)) => {
+                tracing::info!("Opening: {}", new_path.display());
 
                 // Hand the work to the runtime and return to the event loop
                 // immediately; the result arrives as `ServerReady`/`ServerFailed`.
@@ -993,7 +1130,7 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                 // `start_server_for`.
                 //
                 // The current server is deliberately left running. It is aborted
-                // only once a replacement is listening, so a folder that fails to
+                // only once a replacement is listening, so a path that fails to
                 // open leaves the window exactly as it was — which is what the
                 // error message below has always claimed.
                 let proxy = event_proxy.clone();
@@ -1001,7 +1138,7 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                     let event = match start_server_for(new_path.clone()).await {
                         Ok((handle, url)) => UserEvent::ServerReady { handle, url },
                         Err(e) => {
-                            tracing::error!("Failed to open folder: {e}");
+                            tracing::error!("Failed to open {}: {e}", new_path.display());
                             UserEvent::ServerFailed { path: new_path }
                         }
                     };
@@ -1026,14 +1163,74 @@ pub fn launch_browser(ctx: BrowserContext) -> Result<(), BrowserError> {
                 std::thread::spawn(move || {
                     rfd::MessageDialog::new()
                         .set_level(rfd::MessageLevel::Error)
-                        .set_title("Failed to Open Folder")
+                        .set_title("Failed to Open")
                         .set_description(format!(
-                            "Could not open folder: {}\n\nThe current folder will remain active.",
+                            "Could not open: {}\n\nThe current folder will remain active.",
                             path.display()
                         ))
                         .set_buttons(rfd::MessageButtons::Ok)
                         .show();
                 });
+            }
+            // macOS only in practice: tao's Windows and Linux backends never
+            // construct `Event::Opened`, so `awaiting_open_decision` is always
+            // `false` there (only `InitialLaunch::Known` exists off macOS) and
+            // the `awaiting_open_decision` branch below never runs. See
+            // `InitialLaunch::Deferred` for the launch-ordering guarantee the
+            // *first* `Event::Opened` relies on: if one is coming at all for
+            // this launch, it is delivered before this event loop ever sees
+            // `Event::NewEvents(StartCause::Init)` below — never after, so
+            // there is no race to lose.
+            //
+            // This arm is not one-shot, and that is deliberate, not an
+            // oversight: measured on this system, `open -a MBR.app <file>`
+            // against an *already-running* mbr — even with
+            // `LSMultipleInstancesProhibited` explicitly `false` — does not
+            // always launch a second process. It sometimes redelivers the
+            // request to the running one as a second `Event::Opened`
+            // (`open`'s own `-n` flag, "open a new instance even if one is
+            // already running", only makes sense because its absence is a
+            // real, observed code path). A second `Event::Opened` therefore
+            // has to do something other than silently vanish, so past the
+            // initial decision this behaves exactly like `Open…`/Cmd+O: hand
+            // the path to the same `PathSelected` pipeline and repoint this
+            // window, rather than dropping a click the user can see happen.
+            Event::Opened { urls } => match crate::macos_open::first_local_path(&urls) {
+                Some(path) => {
+                    awaiting_open_decision = false;
+                    tracing::info!("Finder asked to open: {}", path.display());
+                    let _ = event_proxy.send_event(UserEvent::PathSelected(path));
+                }
+                // No usable local file: fall back to the picker only if this
+                // was the launch decision. A later `Opened` with nothing
+                // openable (a bare `mbr://` deep link, say) has no window
+                // state to change, so it is ignored rather than reopening the
+                // picker out of nowhere on an already-running window.
+                None if awaiting_open_decision => {
+                    awaiting_open_decision = false;
+                    tracing::warn!(
+                        "Received Event::Opened with no local file among {urls:?}; showing the picker instead"
+                    );
+                    spawn_open_picker(event_proxy.clone());
+                }
+                None => {
+                    tracing::debug!("Ignoring Event::Opened with no local file: {urls:?}");
+                }
+            },
+            // Fires exactly once, right after `applicationDidFinishLaunching`
+            // — the deterministic "no `Opened` is coming" signal a `Deferred`
+            // launch waits for before showing the picker. Reaching here with
+            // `awaiting_open_decision` still `true` means Finder did not ask
+            // for a file, so this is the ordinary "open the picker" launch
+            // path, just resolved one tick later than every other launch mode.
+            Event::NewEvents(StartCause::Init) => {
+                if awaiting_open_decision {
+                    awaiting_open_decision = false;
+                    tracing::debug!(
+                        "No Event::Opened arrived by the end of launch; showing the open picker"
+                    );
+                    spawn_open_picker(event_proxy.clone());
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -1199,7 +1396,7 @@ mod tests {
         assert!(!menu_bar_toggle_allowed(MenuBarVisibility::Never));
     }
 
-    // Regression test for the crash that made `Open Folder…` unusable on every
+    // Regression test for the crash that made `Open…` unusable on every
     // platform: the old synchronous `reinit_server` called `Handle::block_on`
     // from the event-loop callback, which `main` runs inside `#[tokio::main]`'s
     // runtime, and tokio aborts the process for that.
@@ -1259,7 +1456,7 @@ mod tests {
 
         #[test]
         fn every_menu_shortcut_has_a_keyboard_route() {
-            assert_eq!(look(Key::Character("o"), CTRL), Some(Shortcut::OpenFolder));
+            assert_eq!(look(Key::Character("o"), CTRL), Some(Shortcut::Open));
             assert_eq!(look(Key::Character("r"), CTRL), Some(Shortcut::Reload));
             assert_eq!(
                 look(Key::Character("P"), CTRL | SHIFT),
@@ -1282,7 +1479,7 @@ mod tests {
         // Caps Lock reaches the keyval, and Ctrl+O should not depend on it.
         #[test]
         fn character_matching_ignores_case() {
-            assert_eq!(look(Key::Character("O"), CTRL), Some(Shortcut::OpenFolder));
+            assert_eq!(look(Key::Character("O"), CTRL), Some(Shortcut::Open));
         }
 
         // A superset of the modifiers is a *different* chord, and claiming it

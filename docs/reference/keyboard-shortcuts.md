@@ -171,7 +171,7 @@ In GUI mode (`mbr -g`), standard macOS shortcuts are available:
 
 | Key | Action |
 |-----|--------|
-| `Cmd+O` | Open folder |
+| `Cmd+O` | Open folder or file |
 | `Cmd+R` | Reload page |
 | `Cmd+[` | History back |
 | `Cmd+]` | History forward |
@@ -197,7 +197,7 @@ key never fires twice.
 | Key | Action |
 |-----|--------|
 | `F10` | Show / hide the menu bar |
-| `Ctrl+O` | Open folder |
+| `Ctrl+O` | Open folder or file |
 | `Ctrl+R` | Reload page |
 | `Ctrl+Shift+P` | Print |
 | `Ctrl+F` | Find in page |

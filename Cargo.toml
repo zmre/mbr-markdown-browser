@@ -131,7 +131,11 @@ image = { version = "0.25.8", default-features = false, features = ["png", "jpeg
 # GUI dependencies (optional, enabled by default "gui" feature)
 tao = { version = "0.37.0", optional = true }
 muda = { version = "0.19", optional = true }
-rfd = { version = "0.17", optional = true }
+# `common-controls-v6`: renders the "Open Folder"/"Open File" prompt
+# (`open_picker.rs`, Windows/Linux only — macOS gets a single combined
+# NSOpenPanel and never shows this prompt) with its actual button labels via
+# `TaskDialogIndirect` instead of a generic OK/Cancel `MessageBoxW`.
+rfd = { version = "0.17", optional = true, features = ["common-controls-v6"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 muda = { version = "0.19", features = ["gtk", "libxdo"], optional = true }
