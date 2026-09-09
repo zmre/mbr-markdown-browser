@@ -245,6 +245,21 @@
               </array>
             </dict>
           </array>
+          <!--
+            Explicitly false so a deliberate second instance (`open -n`, or a
+            second `mbr <file>` from the CLI -- mbr's users already run
+            several at once, each on its own port) is never blocked. This does
+            NOT make an ordinary Finder "Open With"/double-click spawn a new
+            process: measured on this system, a plain `open -a MBR.app <file>`
+            against an already-running mbr redelivers the request to that same
+            process via a second `application(_:open:)` either way, with or
+            without this key. That common case is instead handled in
+            `browser::launch_browser`'s `Event::Opened` arm, which repoints
+            the existing window rather than dropping the request -- see its
+            comment for what was actually observed.
+          -->
+          <key>LSMultipleInstancesProhibited</key>
+          <false/>
           <key>LSApplicationCategoryType</key>
           <string>public.app-category.productivity</string>
           <key>LSMinimumSystemVersion</key>

@@ -1,6 +1,4 @@
 use std::path::Path;
-#[cfg(feature = "gui")]
-use std::path::PathBuf;
 
 use clap::Parser;
 #[cfg(feature = "gui")]
@@ -32,15 +30,6 @@ fn needs_folder_picker(path: &Path) -> bool {
             || canonical.starts_with(r"C:\Program Files")
             || canonical.starts_with(r"C:\Program Files (x86)")
     }
-}
-
-/// Show a folder picker dialog and return the selected path.
-/// Returns None if the user cancels.
-#[cfg(feature = "gui")]
-fn show_folder_picker() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Select Markdown Folder")
-        .pick_folder()
 }
 
 #[tokio::main]
@@ -109,10 +98,42 @@ async fn main() -> Result<(), MbrError> {
     #[cfg(not(feature = "gui"))]
     let _is_gui_mode = false;
 
-    // Check if we need to show a folder picker (only in GUI mode when path is root/system dir)
+    // Whether a folder/file picker is needed: GUI mode with no meaningful CLI
+    // path (`needs_folder_picker`). No repo config is loaded yet, so the
+    // picker's file filter falls back to the compiled-in default markdown
+    // extensions.
     #[cfg(feature = "gui")]
-    let input_path = if is_gui_mode && needs_folder_picker(&args.path) {
-        match show_folder_picker() {
+    let needs_picker = is_gui_mode && needs_folder_picker(&args.path);
+
+    // macOS: a picker-eligible launch might really be Finder asking to open a
+    // specific file ("Open With → MBR", or a plain double-click once MBR.app
+    // is the default handler). That only reaches this process as a
+    // `tao::event::Event::Opened`, and tao can only surface it once its event
+    // loop is pumping — after this point in `main`, and after a picker shown
+    // here would already be on screen. So on macOS the picker-or-not decision
+    // (and the server start and window that follow from it) move into the
+    // event loop itself; see `browser::InitialLaunch::Deferred` for the
+    // launch-ordering guarantee this relies on. `launch_browser` does not
+    // return except on setup failure, same as the ordinary GUI launch below.
+    #[cfg(all(feature = "gui", target_os = "macos"))]
+    if needs_picker {
+        return browser::launch_browser(browser::InitialLaunch::Deferred {
+            tokio_runtime: tokio::runtime::Handle::current(),
+        })
+        .map_err(MbrError::from);
+    }
+
+    // Every other case resolves a concrete path synchronously, exactly as
+    // before Finder integration existed: a real CLI path, or (off macOS,
+    // where `Event::Opened` never fires and so there is nothing to race)
+    // the picker dialog shown right here.
+    #[cfg(all(feature = "gui", not(target_os = "macos")))]
+    let input_path = if needs_picker {
+        let default_markdown_extensions = Config::default().markdown_extensions;
+        match mbr::open_picker::pick_file_or_folder(
+            "Select a Markdown Folder or File",
+            &default_markdown_extensions,
+        ) {
             Some(path) => path,
             None => {
                 // User cancelled - exit gracefully
@@ -122,6 +143,9 @@ async fn main() -> Result<(), MbrError> {
     } else {
         args.path.clone()
     };
+    // `needs_picker` was handled by the early return above.
+    #[cfg(all(feature = "gui", target_os = "macos"))]
+    let input_path = args.path.clone();
     #[cfg(not(feature = "gui"))]
     let input_path = args.path.clone();
 
@@ -367,7 +391,7 @@ async fn main() -> Result<(), MbrError> {
         let server_config = server::ServerConfig::from(&config).with_gui_mode(false);
         let server = server::Server::init(server_config)?;
 
-        let url_path = build_url_path(
+        let url_path = mbr::launch_url::build_url_path(
             &path_relative_to_root,
             is_directory,
             &config.markdown_extensions,
@@ -420,30 +444,14 @@ async fn main() -> Result<(), MbrError> {
             let base_url =
                 url::Url::parse(format!("http://{}:{}/", config.host, actual_port).as_str())?;
 
-            // For media files, redirect to the appropriate viewer URL
-            let url = if !is_directory {
-                if let Some(media_type) = server::MediaViewerType::from_path(&path_relative_to_root)
-                {
-                    let file_url_path =
-                        build_url_path(&path_relative_to_root, false, &config.markdown_extensions);
-                    let viewer_url = build_media_viewer_url(media_type, &file_url_path);
-                    base_url.join(&viewer_url)?
-                } else {
-                    let url_path = build_url_path(
-                        &path_relative_to_root,
-                        is_directory,
-                        &config.markdown_extensions,
-                    );
-                    base_url.join(&url_path)?
-                }
-            } else {
-                let url_path = build_url_path(
-                    &path_relative_to_root,
-                    is_directory,
-                    &config.markdown_extensions,
-                );
-                base_url.join(&url_path)?
-            };
+            // Directory listing, media viewer or markdown page, whichever
+            // `absolute_path` names — see `mbr::launch_url` for the branch.
+            let url_path = mbr::launch_url::resolve_launch_url_path(
+                &path_relative_to_root,
+                is_directory,
+                &config.markdown_extensions,
+            );
+            let url = base_url.join(&url_path)?;
 
             // Launch browser with full context for server management
             let ctx = BrowserContext {
@@ -453,7 +461,7 @@ async fn main() -> Result<(), MbrError> {
                 tokio_runtime: tokio::runtime::Handle::current(),
             };
 
-            browser::launch_browser(ctx)?;
+            browser::launch_browser(browser::InitialLaunch::Known(Box::new(ctx)))?;
             // Note: server handle is now managed by the browser context
             // It will be aborted when the browser window closes or when switching folders
         }
@@ -485,188 +493,11 @@ fn warn_if_non_loopback_bind(host: &mbr::config::IpArray) {
     }
 }
 
-/// Builds a URL path from a relative filesystem path.
-///
-/// - For directories: returns the path with a trailing slash
-/// - For markdown files: replaces the extension with a trailing slash
-/// - For other files: returns the path as-is
-pub fn build_url_path(
-    relative_path: &std::path::Path,
-    is_directory: bool,
-    markdown_extensions: &[String],
-) -> String {
-    // `path_to_url` keeps the result `/`-separated on Windows, where
-    // `to_str()` would hand back `docs\guide.md`.
-    let relative_str = mbr::url_path::path_to_url(relative_path);
-
-    if is_directory {
-        if relative_str.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", relative_str)
-        }
-    } else {
-        replace_markdown_extension_with_slash(&relative_str, markdown_extensions)
-    }
-}
-
-fn replace_markdown_extension_with_slash(s: &str, extensions: &[String]) -> String {
-    if let Some((base, extension)) = s.rsplit_once('.') {
-        match extensions
-            .iter()
-            .find(|cur_ext| extension == cur_ext.as_str())
-        {
-            Some(_) => format!("{}/", base), // one of the sought extensions is there, replace with a "/"
-            None => s.to_string(), // no sought extensions found, just return input as provided
-        }
-    } else {
-        s.to_string() // no extension, so return input as provided
-    }
-}
-
-/// Builds a media viewer URL for the given media type and file path.
-///
-/// The returned path is relative to the server root, e.g.,
-/// `/.mbr/videos/?path=%2Fvideos%2Fexample.mp4`.
-///
-/// The `file_url_path` should be the URL path to the file (as returned by `build_url_path`),
-/// without a leading slash (e.g., `videos/example.mp4`).
-///
-/// Only called from the GUI launch path (and tests), so it is compiled out of
-/// non-test builds without the `gui` feature to avoid dead-code warnings.
-#[cfg(any(test, feature = "gui"))]
-fn build_media_viewer_url(media_type: server::MediaViewerType, file_url_path: &str) -> String {
-    use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-
-    // Encode the path for use as a query parameter value.
-    // We need to encode everything except unreserved characters.
-    const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
-        .add(b' ')
-        .add(b'"')
-        .add(b'#')
-        .add(b'%')
-        .add(b'&')
-        .add(b'+')
-        .add(b'=')
-        .add(b'?');
-
-    // Ensure the file path has a leading slash for the query param
-    let full_path = if file_url_path.starts_with('/') {
-        file_url_path.to_string()
-    } else {
-        format!("/{file_url_path}")
-    };
-
-    let encoded_path = utf8_percent_encode(&full_path, QUERY_ENCODE_SET).to_string();
-    format!("{}?path={}", media_type.route_path(), encoded_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "gui")]
     use std::path::Path;
-
-    #[test]
-    fn test_build_url_path_root_directory() {
-        let path = Path::new("");
-        let extensions = vec!["md".to_string()];
-        assert_eq!(build_url_path(path, true, &extensions), "");
-    }
-
-    #[test]
-    fn test_build_url_path_subdirectory() {
-        let path = Path::new("docs/api");
-        let extensions = vec!["md".to_string()];
-        assert_eq!(build_url_path(path, true, &extensions), "docs/api/");
-    }
-
-    #[test]
-    fn test_build_url_path_markdown_file() {
-        let path = Path::new("readme.md");
-        let extensions = vec!["md".to_string()];
-        assert_eq!(build_url_path(path, false, &extensions), "readme/");
-    }
-
-    #[test]
-    fn test_build_url_path_markdown_file_in_subdir() {
-        let path = Path::new("docs/guide.md");
-        let extensions = vec!["md".to_string()];
-        assert_eq!(build_url_path(path, false, &extensions), "docs/guide/");
-    }
-
-    #[test]
-    fn test_build_url_path_alternate_extension() {
-        let path = Path::new("notes.markdown");
-        let extensions = vec!["md".to_string(), "markdown".to_string()];
-        assert_eq!(build_url_path(path, false, &extensions), "notes/");
-    }
-
-    #[test]
-    fn test_build_url_path_non_markdown_file() {
-        let path = Path::new("image.png");
-        let extensions = vec!["md".to_string()];
-        assert_eq!(build_url_path(path, false, &extensions), "image.png");
-    }
-
-    #[test]
-    fn test_replace_markdown_extension_with_slash() {
-        let extensions = ["md".to_string()];
-        assert_eq!(
-            replace_markdown_extension_with_slash("test.md", &extensions),
-            "test/"
-        );
-        assert_eq!(
-            replace_markdown_extension_with_slash("test.txt", &extensions),
-            "test.txt"
-        );
-        assert_eq!(
-            replace_markdown_extension_with_slash("noext", &extensions),
-            "noext"
-        );
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_video() {
-        let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/example.mp4");
-        assert_eq!(url, "/.mbr/videos/?path=/videos/example.mp4");
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_audio() {
-        let url = build_media_viewer_url(server::MediaViewerType::Audio, "music/song.mp3");
-        assert_eq!(url, "/.mbr/audio/?path=/music/song.mp3");
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_image() {
-        let url = build_media_viewer_url(server::MediaViewerType::Image, "images/photo.jpg");
-        assert_eq!(url, "/.mbr/images/?path=/images/photo.jpg");
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_pdf() {
-        let url = build_media_viewer_url(server::MediaViewerType::Pdf, "docs/paper.pdf");
-        assert_eq!(url, "/.mbr/pdfs/?path=/docs/paper.pdf");
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_with_leading_slash() {
-        let url = build_media_viewer_url(server::MediaViewerType::Video, "/videos/example.mp4");
-        assert_eq!(url, "/.mbr/videos/?path=/videos/example.mp4");
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_encodes_spaces() {
-        let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/my video.mp4");
-        assert!(url.contains("path=/videos/my%20video.mp4"));
-    }
-
-    #[test]
-    fn test_build_media_viewer_url_encodes_special_chars() {
-        let url = build_media_viewer_url(server::MediaViewerType::Video, "videos/file#1&2=3.mp4");
-        // Hash, ampersand, and equals should be encoded
-        assert!(url.contains("path=/videos/file%231%262%3D3.mp4"));
-    }
 
     #[test]
     fn test_is_loopback_host_loopback_addresses() {

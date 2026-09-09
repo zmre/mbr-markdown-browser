@@ -49,14 +49,19 @@ pub mod errors;
 #[cfg(feature = "gui")]
 pub mod external_open;
 pub mod html;
+pub mod launch_url;
 pub mod link_grep;
 pub mod link_index;
 pub mod link_rewrite;
 pub mod link_transform;
+#[cfg(feature = "gui")]
+mod macos_open;
 pub mod markdown;
 pub mod media;
 pub mod oembed;
 pub mod oembed_cache;
+#[cfg(feature = "gui")]
+pub mod open_picker;
 pub mod page_context;
 pub mod page_errors;
 pub mod path_resolver;
