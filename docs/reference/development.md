@@ -270,8 +270,13 @@ unsigned.
 
 Proper signing happens later, in `scripts/make-macos-dmg.sh`, which runs on the
 CI runner outside the sandbox where `codesign` works, and gates itself with
-`codesign --verify --deep --strict`. This is why the DMG was correctly signed
-while the raw tarball was not.
+`codesign --verify --deep --strict`. In CI, when the release secrets are
+present, that script signs with a real Developer ID identity and notarizes and
+staples both the app and the DMG; otherwise (a local run, or a `dry_run`
+release dispatch) it falls back to the same ad-hoc signing described above. See
+[`docs/releasing.md`](../releasing.md) for the signing/notarization pipeline
+and the secrets it needs. Either way, the raw `.tar.gz` app bundle is never
+touched by this script and ships only ad-hoc signed.
 
 ```bash
 # Both should print "Signature=adhoc" (or better) and then exit 0
