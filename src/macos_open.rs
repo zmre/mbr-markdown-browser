@@ -35,16 +35,25 @@ pub(crate) fn first_local_path(urls: &[url::Url]) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// A `file://` URL for `name`, built via `Url::from_file_path` rather
+    /// than a hardcoded `file:///tmp/...` literal — `to_file_path`'s parsing
+    /// is platform-specific (Windows requires a drive letter; Unix does not),
+    /// so a Unix-shaped literal fails to round-trip on Windows and the test
+    /// itself is what breaks, not the function under test. `from_file_path`
+    /// and `to_file_path` are each other's inverse on whatever platform the
+    /// test actually runs on, so this is correct everywhere without `cfg`.
+    fn file_url(path: &std::path::Path) -> url::Url {
+        url::Url::from_file_path(path).expect("std::env::temp_dir() is always absolute")
+    }
+
     #[test]
     fn finds_the_first_file_url() {
+        let path = std::env::temp_dir().join("readme.md");
         let urls = vec![
             url::Url::parse("https://example.com").unwrap(),
-            url::Url::parse("file:///tmp/notes/readme.md").unwrap(),
+            file_url(&path),
         ];
-        assert_eq!(
-            first_local_path(&urls),
-            Some(PathBuf::from("/tmp/notes/readme.md"))
-        );
+        assert_eq!(first_local_path(&urls), Some(path));
     }
 
     #[test]
@@ -63,10 +72,9 @@ mod tests {
 
     #[test]
     fn picks_the_first_of_several_file_urls() {
-        let urls = vec![
-            url::Url::parse("file:///tmp/a.md").unwrap(),
-            url::Url::parse("file:///tmp/b.md").unwrap(),
-        ];
-        assert_eq!(first_local_path(&urls), Some(PathBuf::from("/tmp/a.md")));
+        let a = std::env::temp_dir().join("a.md");
+        let b = std::env::temp_dir().join("b.md");
+        let urls = vec![file_url(&a), file_url(&b)];
+        assert_eq!(first_local_path(&urls), Some(a));
     }
 }
