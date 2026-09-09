@@ -22,6 +22,22 @@
 //! Windows and Linux have no native mixed picker, so there a small two-button
 //! prompt asks which kind of dialog to open first, then rfd's separate
 //! `pick_folder`/`pick_file` runs exactly as it always has.
+//!
+//! That prompt is plain `MessageButtons::YesNo`, not `OkCancelCustom` — rfd
+//! only renders custom button *labels* through `TaskDialogIndirect`, gated
+//! behind its `common-controls-v6` Cargo feature, and that function is
+//! exported only by the side-by-side, manifest-activated v6 `comctl32.dll`.
+//! A Rust binary embeds no such manifest by default, so the statically
+//! linked import resolves against the older `comctl32.dll` every Windows
+//! ships for compatibility — which does not export `TaskDialogIndirect` at
+//! all. That is not a graceful degrade to plain buttons; it is
+//! `STATUS_ENTRYPOINT_NOT_FOUND` at process launch, for every invocation of
+//! the binary that reaches this code in its static call graph, including one
+//! that never shows the dialog — confirmed the hard way, as two Windows CI
+//! legs failing every `cli_integration.rs` subprocess test with that exact
+//! NTSTATUS the first time this feature was enabled. `YesNo` has called
+//! `MessageBoxW` unconditionally since Windows 1.0, so it has no comctl32
+//! version to get wrong.
 
 use std::path::PathBuf;
 
@@ -58,42 +74,27 @@ enum OpenKind {
     File,
 }
 
-#[cfg(not(target_os = "macos"))]
-const FOLDER_LABEL: &str = "Open Folder";
-#[cfg(not(target_os = "macos"))]
-const FILE_LABEL: &str = "Open File";
-
 /// Asks whether to open a folder or a file. `None` means the user cancelled.
-///
-/// Windows renders the custom `FOLDER_LABEL`/`FILE_LABEL` buttons only with
-/// rfd's `common-controls-v6` feature (enabled in `Cargo.toml`), via
-/// `TaskDialogIndirect`. As a defensive fallback for whatever reason that
-/// dialog might not appear as configured (no application manifest opting
-/// into ComCtl32 v6, say), a bare `Ok` — the first button in every backend's
-/// button order — is also read as "open a folder", so the common case stays
-/// reachable either way; only the file path depends on the custom label.
 #[cfg(not(target_os = "macos"))]
 fn prompt_open_kind(title: &str) -> Option<OpenKind> {
     let result = rfd::MessageDialog::new()
         .set_title(title)
-        .set_description("Open a folder to browse, or pick a single markdown file?")
-        .set_buttons(rfd::MessageButtons::OkCancelCustom(
-            FOLDER_LABEL.to_string(),
-            FILE_LABEL.to_string(),
-        ))
+        .set_description(
+            "Open a folder to browse? Choose \"No\" to pick a single markdown file instead.",
+        )
+        .set_buttons(rfd::MessageButtons::YesNo)
         .show();
 
     interpret_open_kind(result)
 }
 
-/// Pure match behind [`prompt_open_kind`], split out so the button-label
-/// interpretation is testable without a real dialog.
+/// Pure match behind [`prompt_open_kind`], split out so it is testable
+/// without a real dialog.
 #[cfg(not(target_os = "macos"))]
 fn interpret_open_kind(result: rfd::MessageDialogResult) -> Option<OpenKind> {
     match result {
-        rfd::MessageDialogResult::Custom(label) if label == FOLDER_LABEL => Some(OpenKind::Folder),
-        rfd::MessageDialogResult::Custom(label) if label == FILE_LABEL => Some(OpenKind::File),
-        rfd::MessageDialogResult::Ok => Some(OpenKind::Folder),
+        rfd::MessageDialogResult::Yes => Some(OpenKind::Folder),
+        rfd::MessageDialogResult::No => Some(OpenKind::File),
         _ => None,
     }
 }
@@ -103,33 +104,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_folder_label_opens_a_folder() {
+    fn yes_opens_a_folder() {
         assert_eq!(
-            interpret_open_kind(rfd::MessageDialogResult::Custom(FOLDER_LABEL.to_string())),
+            interpret_open_kind(rfd::MessageDialogResult::Yes),
             Some(OpenKind::Folder)
         );
     }
 
     #[test]
-    fn custom_file_label_opens_a_file() {
+    fn no_opens_a_file() {
         assert_eq!(
-            interpret_open_kind(rfd::MessageDialogResult::Custom(FILE_LABEL.to_string())),
+            interpret_open_kind(rfd::MessageDialogResult::No),
             Some(OpenKind::File)
-        );
-    }
-
-    #[test]
-    fn bare_ok_falls_back_to_folder() {
-        assert_eq!(
-            interpret_open_kind(rfd::MessageDialogResult::Ok),
-            Some(OpenKind::Folder)
         );
     }
 
     #[test]
     fn cancel_and_unrecognized_results_cancel_the_picker() {
         assert_eq!(interpret_open_kind(rfd::MessageDialogResult::Cancel), None);
-        assert_eq!(interpret_open_kind(rfd::MessageDialogResult::No), None);
+        assert_eq!(interpret_open_kind(rfd::MessageDialogResult::Ok), None);
         assert_eq!(
             interpret_open_kind(rfd::MessageDialogResult::Custom("unexpected".to_string())),
             None

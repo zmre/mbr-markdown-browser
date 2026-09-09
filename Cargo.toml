@@ -131,11 +131,14 @@ image = { version = "0.25.8", default-features = false, features = ["png", "jpeg
 # GUI dependencies (optional, enabled by default "gui" feature)
 tao = { version = "0.37.0", optional = true }
 muda = { version = "0.19", optional = true }
-# `common-controls-v6`: renders the "Open Folder"/"Open File" prompt
-# (`open_picker.rs`, Windows/Linux only — macOS gets a single combined
-# NSOpenPanel and never shows this prompt) with its actual button labels via
-# `TaskDialogIndirect` instead of a generic OK/Cancel `MessageBoxW`.
-rfd = { version = "0.17", optional = true, features = ["common-controls-v6"] }
+# Do NOT add the `common-controls-v6` feature: it wires the Windows/Linux
+# folder-or-file prompt (`open_picker.rs`) to `TaskDialogIndirect`, which is
+# exported only by the manifest-activated v6 `comctl32.dll` — a Rust binary
+# embeds no such manifest, so the statically linked import resolves against
+# the wrong `comctl32.dll` and Windows refuses to start the process at all
+# (`STATUS_ENTRYPOINT_NOT_FOUND`), for every invocation, not just the ones
+# that show the dialog. See `open_picker.rs`'s module doc comment.
+rfd = { version = "0.17", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 muda = { version = "0.19", features = ["gtk", "libxdo"], optional = true }
