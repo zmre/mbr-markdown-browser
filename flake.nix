@@ -787,11 +787,41 @@
                   cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
                   cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-                  # QuickLook extension (make writable for codesigning)
+                  # QuickLook extension
                   cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
-                  chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+
+                  # Everything above was copied out of the Nix store, which is
+                  # read-only (dirs 0555, files 0444). codesign does not write a
+                  # signature into the file it signs so much as replace it, and it
+                  # has to create Contents/_CodeSignature/CodeResources inside the
+                  # bundle - so a read-only *directory* anywhere in the tree makes
+                  # it emit a seal it cannot then write, and the bundle verifies as
+                  # "code has no resources but signature indicates they must be
+                  # present". That app is not merely unsigned: PlugInKit treats an
+                  # invalid signature the same as a missing one and silently
+                  # refuses to register MBRPreview.appex, so QuickLook never
+                  # appears and nothing anywhere reports an error.
+                  #
+                  # Blanket, not per-file: the previous form chmod'd only the two
+                  # items it happened to think of (the main binary and the appex),
+                  # which left Frameworks/, Resources/ and the bundle root behind.
+                  # scripts/make-macos-dmg.sh already does exactly this - it is the
+                  # hardened version of this same sequence - and the two must not
+                  # drift.
+                  chmod -R u+w $out/Applications/MBR.app
+
+                  # Strip build-machine metadata (com.apple.provenance et al) that
+                  # rides along on the copies above. Stale xattrs perturb the
+                  # bundle seal; this must happen BEFORE signing, since anything
+                  # that touches the bundle afterwards invalidates it.
+                  /usr/bin/xattr -cr $out/Applications/MBR.app
 
                   # Sign components from innermost to outermost:
+                  # `--deep` is deliberately NOT used. It would re-sign the nested
+                  # appex with the *outer* invocation's entitlements - i.e. none -
+                  # discarding the sandbox grants below, and Apple deprecated it
+                  # for signing in macOS 13 for that reason. --deep is still fine
+                  # for verification, which is where make-macos-dmg.sh uses it.
                   # 1. Sign the bundled framework library
                   /usr/bin/codesign --force --sign - \
                     $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
@@ -801,6 +831,34 @@
                     $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
                   # 3. Sign the app bundle (also signs Contents/MacOS/mbr)
                   /usr/bin/codesign --force --sign - $out/Applications/MBR.app
+
+                  # Prove the seal is actually valid rather than trusting that
+                  # codesign exited 0. The failure this guards against exited 0 for
+                  # months: every `codesign --sign` above succeeded while producing
+                  # a bundle that `--verify` rejects, because the resource seal
+                  # could not be written. An unverifiable bundle means no QuickLook
+                  # and a Gatekeeper prompt, both of them silent, so fail the build
+                  # here instead. --deep is correct for verification (it is only
+                  # deprecated for signing) and is what checks the nested appex.
+                  /usr/bin/codesign --verify --deep --strict \
+                    $out/Applications/MBR.app
+
+                  # The entitlements are the other half that fails silently: an
+                  # appex signed without com.apple.security.app-sandbox is simply
+                  # never loaded by PlugInKit, with no error anywhere. Assert the
+                  # two load-bearing keys survived into the embedded signature.
+                  /usr/bin/codesign -d --entitlements - --xml \
+                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex \
+                    > $TMPDIR/appex-entitlements.plist
+                  for key in com.apple.security.app-sandbox \
+                             com.apple.security.files.user-selected.read-only; do
+                    if ! /usr/bin/grep -q "$key" $TMPDIR/appex-entitlements.plist; then
+                      echo "error: $key missing from the signed MBRPreview.appex" >&2
+                      echo "       QuickLook would silently never load. See" >&2
+                      echo "       quicklook/MBRPreview/MBRPreview.entitlements." >&2
+                      exit 1
+                    fi
+                  done
 
                   # CLI entry point: a thin wrapper that execs the binary INSIDE the
                   # bundle. Because the wrapper execs a path within MBR.app, after the
