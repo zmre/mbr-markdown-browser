@@ -16,15 +16,27 @@
 	  without it the extension cannot read the very file it was asked to
 	  preview.
 
-	Both were present when this file was added (8be4ef8) and were dropped by
-	430a3d2 ("Quicklook improvements"), whose diff rewrote the file's
-	indentation from spaces to tabs and lost three keys along the way; the
-	commit message mentions no entitlement change, so the removal was
-	collateral rather than intended. The third dropped key,
-	com.apple.security.network.client, is deliberately NOT restored: the
-	preview renderer never makes a network call (see the "QuickLook has no
-	network" invariant in src/quicklook.rs, which is why the highlight
-	grammar is inlined), so granting it would widen the sandbox for nothing.
+	com.apple.security.network.client
+	  The preview is a WKWebView showing the document's rendered HTML, and a
+	  markdown file may reference things that live off the machine: an
+	  ![](https://...) image, a YouTube or other oembed iframe, a remote
+	  stylesheet. Outbound connections from a sandboxed process are refused
+	  without this, so those would silently render as broken images and empty
+	  frames.
+
+	  Note this is NOT in tension with the "QuickLook has no network"
+	  invariant in src/quicklook.rs. That one is narrower and still holds: it
+	  says *mbr's own* assets must be inlined rather than fetched (which is
+	  why the highlight.js grammar is embedded instead of pulled from a CDN),
+	  so a preview always renders completely with no network at all. This
+	  entitlement is about the *document's* content, which mbr does not
+	  control and cannot inline.
+
+	All three were present when this file was added (8be4ef8) and were dropped
+	by 430a3d2 ("Quicklook improvements"), whose diff rewrote the file's
+	indentation from spaces to tabs and lost them along the way; the commit
+	message mentions no entitlement change, so the removal was collateral
+	rather than intended.
 
 	Under Xcode these keys are easy to lose without noticing, because Xcode
 	injects its own (app-sandbox, get-task-allow, ...) into a Debug build's
@@ -61,6 +73,8 @@
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
 	<true/>
 	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
 	<array>
