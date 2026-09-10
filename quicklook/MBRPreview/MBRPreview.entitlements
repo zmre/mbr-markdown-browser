@@ -44,7 +44,8 @@
 	is written here and nothing else, so this file is the only thing standing
 	between the shipped extension and a sandbox it cannot read files in.
 
-	--- on the breadth of the temporary exception ---
+	On the breadth of the temporary exception
+	========================================
 
 	QuickLook hands the extension a sandbox extension for the user-selected
 	document only. Everything else a preview needs - sibling images, videos and
