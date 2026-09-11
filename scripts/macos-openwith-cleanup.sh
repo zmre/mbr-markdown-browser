@@ -32,8 +32,18 @@ BUNDLE_ID=$(defaults read "$APP_PATH/Contents/Info" CFBundleIdentifier)
 echo "Canonical app: $APP_PATH"
 echo "Bundle id: $BUNDLE_ID"
 
+# lsregister -dump separates records with a long run of dashes. Matching on
+# a bare "--" instead looks right but is grep's context separator, not
+# lsregister's: against the real dump it never matches, every record is
+# discarded at EOF, and the script cheerfully reports "No stale entries found"
+# no matter how many are there.
 mapfile -t stale_paths < <(
   "$LSREGISTER" -dump 2>/dev/null | awk -v id="$BUNDLE_ID" -v canonical="$APP_PATH" '
+    function flush() {
+      if (ident == id && path ~ /\.app$/ && path != canonical) print path
+      path = ""; ident = ""
+    }
+    /^-{10,}$/ { flush(); next }
     /^path:/ {
       path = $0
       sub(/^path:[ \t]+/, "", path)
@@ -42,11 +52,9 @@ mapfile -t stale_paths < <(
     /^identifier:/ {
       ident = $0
       sub(/^identifier:[ \t]+/, "", ident)
+      sub(/[ \t]+$/, "", ident)
     }
-    /^--[ \t]*$/ {
-      if (ident == id && path ~ /\.app$/ && path != canonical) print path
-      path = ""; ident = ""
-    }
+    END { flush() }
   '
 )
 
