@@ -83,12 +83,25 @@ The QuickLook extension is bundled with the macOS app.
 If the extension doesn't appear:
 
 ```bash
-# List installed QuickLook generators
-qlmanage -m plugins | grep mbr
+# List registered QuickLook preview extensions
+pluginkit -mv -p com.apple.quicklook.preview | grep mbr
 
 # Reload QuickLook
 qlmanage -r
+qlmanage -r cache
 ```
+
+Do **not** use `qlmanage -m plugins` to check for mbr. That command lists only
+the legacy `.qlgenerator` bundles under `/System/Library/QuickLook`; it shows no
+modern app extension at all, so it prints nothing for mbr — or for Apparency,
+Fantastical or any other working `.appex` — whether or not the extension is
+installed and working. `pluginkit` is the only tool that sees app extensions.
+
+The extension registers with the system when **the containing app is launched**
+from a real install location. Launching `MBR.app` out of `/nix/store`, a build
+output directory, or a disk image does not register it: macOS only tracks
+extensions for apps under `/Applications` (or `~/Applications`). Move the app
+first, then launch it once.
 
 ### Verify Installation
 
@@ -173,10 +186,14 @@ In QuickLook:
 
 If markdown files show as plain text:
 
-1. **Verify installation**:
+1. **Verify registration** (`+` means elected for use):
    ```bash
-   qlmanage -m plugins | grep -i mbr
+   pluginkit -mv -p com.apple.quicklook.preview | grep -i mbr
    ```
+
+   Nothing listed? Launch `MBR.app` once from `/Applications`. See
+   [Manual Registration](#manual-registration) — and note that
+   `qlmanage -m plugins` cannot answer this question.
 
 2. **Reset QuickLook**:
    ```bash
@@ -184,12 +201,31 @@ If markdown files show as plain text:
    qlmanage -r cache
    ```
 
-3. **Check for conflicts**:
+3. **Check the extension is not being rejected**:
    ```bash
-   qlmanage -m plugins | grep -i markdown
+   log show --last 5m --info --debug | grep "mis-configured plugin"
    ```
 
-   Other markdown QuickLook extensions may take precedence.
+   `plug-ins must be sandboxed` means the extension was signed without the
+   `com.apple.security.app-sandbox` entitlement. PlugInKit refuses to load it
+   and reports nothing to the user. Confirm the shipped bundle kept its
+   entitlements:
+   ```bash
+   codesign -d --entitlements - /Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+   ```
+
+4. **Check for a crash**:
+   ```bash
+   ls ~/Library/Logs/DiagnosticReports | grep MBRPreview
+   ```
+
+   If the extension crashes, QuickLook silently falls back to the system
+   plain-text preview — the symptom is identical to not being installed.
+
+5. **Check for conflicts**: other extensions claiming `public.plain-text`
+   (which markdown conforms to) may take precedence. List all of them with
+   `pluginkit -mv -p com.apple.quicklook.preview`, and disable one with
+   `pluginkit -e ignore -i <identifier>` (restore with `-e default`).
 
 ### Text Files Preview With the System Renderer
 
@@ -227,15 +263,20 @@ If macOS disables the extension:
 
 To uninstall the QuickLook extension:
 
-```bash
-# Find the extension location
-qlmanage -m plugins | grep mbr
+The extension lives inside `MBR.app` and is not separately installable, so
+there is no standalone plugin file to delete — removing the app removes the
+extension. To keep the app but stop it previewing, either turn it off in
+**System Settings → General → Login Items & Extensions → Quick Look**, or:
 
-# Remove the extension (path from above command)
-sudo rm -rf /path/to/mbr.qlgenerator
+```bash
+# Find where it is registered
+pluginkit -mv -p com.apple.quicklook.preview | grep mbr
+
+# Stop macOS using it (reversible with -e default)
+pluginkit -e ignore -i com.zmre.mbr.MBRPreview
 
 # Reload QuickLook
-qlmanage -r
+qlmanage -r && qlmanage -r cache
 ```
 
 Or simply delete `MBR.app` from Applications.

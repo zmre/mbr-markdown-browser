@@ -1,7 +1,51 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-	Why this grant is as broad as it is, and what actually constrains it.
+	Why each of these three keys is here, and what actually constrains the
+	broad one.
+
+	com.apple.security.app-sandbox
+	  An App Extension must be sandboxed or PlugInKit will not load it. This
+	  is also what makes the temporary exception below mean anything at all:
+	  a `temporary-exception` entitlement is a *relaxation of the sandbox*
+	  and is silently inert in a process that is not sandboxed.
+
+	com.apple.security.files.user-selected.read-only
+	  QuickLook hands the extension a sandbox extension ("consumable token")
+	  for the previewed document. Consuming it requires this entitlement, so
+	  without it the extension cannot read the very file it was asked to
+	  preview.
+
+	com.apple.security.network.client
+	  The preview is a WKWebView showing the document's rendered HTML, and a
+	  markdown file may reference things that live off the machine: an
+	  ![](https://...) image, a YouTube or other oembed iframe, a remote
+	  stylesheet. Outbound connections from a sandboxed process are refused
+	  without this, so those would silently render as broken images and empty
+	  frames.
+
+	  Note this is NOT in tension with the "QuickLook has no network"
+	  invariant in src/quicklook.rs. That one is narrower and still holds: it
+	  says *mbr's own* assets must be inlined rather than fetched (which is
+	  why the highlight.js grammar is embedded instead of pulled from a CDN),
+	  so a preview always renders completely with no network at all. This
+	  entitlement is about the *document's* content, which mbr does not
+	  control and cannot inline.
+
+	All three were present when this file was added (8be4ef8) and were dropped
+	by 430a3d2 ("Quicklook improvements"), whose diff rewrote the file's
+	indentation from spaces to tabs and lost them along the way; the commit
+	message mentions no entitlement change, so the removal was collateral
+	rather than intended.
+
+	Under Xcode these keys are easy to lose without noticing, because Xcode
+	injects its own (app-sandbox, get-task-allow, ...) into a Debug build's
+	signature regardless of this file. The Nix build signs with exactly what
+	is written here and nothing else, so this file is the only thing standing
+	between the shipped extension and a sandbox it cannot read files in.
+
+	On the breadth of the temporary exception
+	========================================
 
 	QuickLook hands the extension a sandbox extension for the user-selected
 	document only. Everything else a preview needs - sibling images, videos and
@@ -27,6 +71,12 @@
 -->
 <plist version="1.0">
 <dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
 	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
 	<array>
 		<string>/</string>

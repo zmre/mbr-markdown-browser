@@ -49,8 +49,8 @@ struct ContentView: View {
             Spacer()
 
             Link(
-                "Learn more at github.com/zmre/mbr",
-                destination: URL(string: "https://github.com/zmre/mbr")!
+                "Learn more at github.com/zmre/mbr-markdown-browser",
+                destination: URL(string: "https://github.com/zmre/mbr-markdown-browser/")!
             )
             .font(.caption)
         }

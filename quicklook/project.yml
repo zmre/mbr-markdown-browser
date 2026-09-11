@@ -1,8 +1,19 @@
 name: MBRQuickLook
 options:
   bundleIdPrefix: com.zmre.mbr
+  # Must match what libmbr.a is built for. The Rust staticlib this project
+  # links against is compiled against the nixpkgs apple-sdk and carries
+  # LC_BUILD_VERSION minos 14.0, and flake.nix's swiftTarget is likewise
+  # {arm64,x86_64}-apple-macos14.0. Linking at 12.0 made ld emit
+  #   "Object file (.../libmbr.a[N]) was built for newer 'macOS' version
+  #    (14.0) than being linked (12.0)"
+  # once per object file in the archive - ~1300 warnings that buried anything
+  # real in the build log. Nothing in the project supported 12.0: the
+  # extension's own Info.plist has already declared LSMinimumSystemVersion
+  # 14.6 (a stricter runtime floor than this build-time target, which is the
+  # safe direction).
   deploymentTarget:
-    macOS: "12.0"
+    macOS: "14.0"
   xcodeVersion: "16.0"
 
 settings:
@@ -24,7 +35,7 @@ targets:
   MBRQuickLookHost:
     type: application
     platform: macOS
-    deploymentTarget: "12.0"
+    deploymentTarget: "14.0"
     sources:
       - path: Host
         createIntermediateGroups: true
@@ -46,7 +57,7 @@ targets:
   MBRPreview:
     type: app-extension
     platform: macOS
-    deploymentTarget: "12.0"
+    deploymentTarget: "14.0"
     sources:
       - path: MBRPreview
         createIntermediateGroups: true
@@ -80,7 +91,7 @@ targets:
   MBRPreviewTests:
     type: bundle.unit-test
     platform: macOS
-    deploymentTarget: "12.0"
+    deploymentTarget: "14.0"
     sources:
       - path: MBRPreviewTests
         createIntermediateGroups: true

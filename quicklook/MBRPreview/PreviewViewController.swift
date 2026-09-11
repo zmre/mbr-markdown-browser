@@ -251,6 +251,23 @@ class PreviewViewController: NSViewController, QLPreviewingController, WKNavigat
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         os_log(.info, log: logger, "preparePreviewOfFile called for: %{public}@", url.path)
 
+        // Force the view hierarchy to exist before anything below touches
+        // `webView`, which `loadView()` creates and which is declared as an
+        // implicitly-unwrapped optional.
+        //
+        // QuickLook does NOT guarantee the view is loaded first. On macOS 26 it
+        // calls this method before ever accessing `self.view`, so `loadView()`
+        // has not run and `webView` is still nil - and the `loadHTMLString`
+        // call at the end of this method then traps on the implicit unwrap.
+        // The process dies with EXC_BREAKPOINT/SIGTRAP before rendering
+        // anything, QuickLook silently falls back to the system plain-text
+        // preview, and the only trace is a crash report: the extension never
+        // logs, because `loadView()` (which logs at .error) never ran either.
+        //
+        // `loadViewIfNeeded()` is idempotent, so this is a no-op on any OS
+        // version that does load the view first.
+        self.loadViewIfNeeded()
+
         // Store the completion handler - we'll call it when WebView finishes loading
         self.completionHandler = handler
 

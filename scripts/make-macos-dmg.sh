@@ -113,7 +113,28 @@ fi
 
 if [ -d "$APP/Contents/PlugIns/MBRPreview.appex" ]; then
     if [ -f "$ENTITLEMENTS" ]; then
-        sign "$APP/Contents/PlugIns/MBRPreview.appex" --entitlements "$ENTITLEMENTS"
+        # The sandbox grant in the entitlements file is a *restricted*
+        # entitlement, and AMFI will not grant one to ad-hoc signed code on the
+        # strength of its signature alone - so an ad-hoc build additionally
+        # needs get-task-allow, Apple's "development build" marker, or
+        # PlugInKit never loads the extension. A real Developer ID signature
+        # needs no such marker, and MUST NOT carry it: it lets any process
+        # attach a debugger, and the notary service rejects it outright.
+        #
+        # Same split as the `mbr` package's postFixup in flake.nix, and derived
+        # from the same file for the same reason - two hand-maintained copies
+        # of the grants would drift.
+        if [ "$REAL_SIGN" -eq 1 ]; then
+            sign "$APP/Contents/PlugIns/MBRPreview.appex" --entitlements "$ENTITLEMENTS"
+        else
+            cp "$ENTITLEMENTS" "$WORK/appex-adhoc.entitlements"
+            # Dots escaped: plutil reads this as a key *path*, so the
+            # unescaped name means four nested dictionaries and fails.
+            plutil -insert 'com\.apple\.security\.get-task-allow' -bool true \
+                "$WORK/appex-adhoc.entitlements"
+            sign "$APP/Contents/PlugIns/MBRPreview.appex" \
+                --entitlements "$WORK/appex-adhoc.entitlements"
+        fi
     else
         sign "$APP/Contents/PlugIns/MBRPreview.appex"
     fi

@@ -787,20 +787,11 @@
                   cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
                   cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-                  # QuickLook extension (make writable for codesigning)
+                  # QuickLook extension
                   cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
-                  chmod -R u+w $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
 
-                  # Sign components from innermost to outermost:
-                  # 1. Sign the bundled framework library
-                  /usr/bin/codesign --force --sign - \
-                    $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
-                  # 2. Sign the QuickLook extension with its entitlements
-                  /usr/bin/codesign --force --sign - \
-                    --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
-                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
-                  # 3. Sign the app bundle (also signs Contents/MacOS/mbr)
-                  /usr/bin/codesign --force --sign - $out/Applications/MBR.app
+                  # NOTE: signing does NOT happen here. It is the last thing the
+                  # derivation does, in postFixup below - see the comment there.
 
                   # CLI entry point: a thin wrapper that execs the binary INSIDE the
                   # bundle. Because the wrapper execs a path within MBR.app, after the
@@ -813,6 +804,120 @@
                   mkdir -p $out/bin
                   makeBinaryWrapper $out/Applications/MBR.app/Contents/MacOS/mbr $out/bin/mbr \
                     --set PDFIUM_DYNAMIC_LIB_PATH "${pkgs.pdfium-binaries}/lib"
+                '';
+
+                # Signing runs in postFixup, NOT installPhase, and the ordering is
+                # the whole point: stdenv's fixupPhase runs `strip` over $out/
+                # Applications, and stripping a Mach-O rewrites it, which discards
+                # the code signature AND the entitlements embedded in it. Signed in
+                # installPhase, the bundle reached the store reverted to the
+                # linker's automatic ad-hoc signature - "linker-signed", "Sealed
+                # Resources=none", no entitlements at all - so MBRPreview.appex had
+                # no com.apple.security.app-sandbox and PlugInKit silently declined
+                # to register it. Nothing reported an error at any point: codesign
+                # exited 0, the build succeeded, and QuickLook just showed the
+                # markdown source unrendered.
+                #
+                # postFixup is the last hook in fixupPhase, so nothing modifies the
+                # bundle after this. $out is still writable here; Nix only seals the
+                # store path once every phase has finished.
+                postFixup = ''
+                  # The bundle's contents were copied out of the Nix store, which is
+                  # read-only (dirs 0555, files 0444), and `cp -R` preserves those
+                  # modes on the copied subtrees. codesign has to create
+                  # Contents/_CodeSignature/CodeResources inside the bundle, so a
+                  # read-only directory anywhere in the tree makes it emit a seal it
+                  # cannot write, and the result verifies as "code has no resources
+                  # but signature indicates they must be present" - which PlugInKit
+                  # treats exactly like a missing signature.
+                  #
+                  # Blanket, not per-file: the previous form chmod'd only the two
+                  # items it happened to think of (the main binary and the appex),
+                  # leaving Frameworks/, Resources/ and the bundle root behind.
+                  # scripts/make-macos-dmg.sh does the same thing - it is the
+                  # hardened version of this sequence - and the two must not drift.
+                  chmod -R u+w $out/Applications/MBR.app
+
+                  # Strip build-machine metadata (com.apple.provenance et al) that
+                  # rides along on the copies. Stale xattrs perturb the bundle seal.
+                  /usr/bin/xattr -cr $out/Applications/MBR.app
+
+                  # Sign innermost-out. `--deep` is deliberately NOT used: it would
+                  # re-sign the nested appex with the outer invocation's
+                  # entitlements - i.e. none - discarding the sandbox grants, and
+                  # Apple deprecated it for signing in macOS 13 for that reason.
+                  # --deep is still correct for verification, below.
+                  /usr/bin/codesign --force --sign - \
+                    $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
+
+                  # This build signs ad-hoc: the Nix build sandbox cannot reach
+                  # the keychain, so there is no Developer ID identity here and
+                  # `--sign -` is the only option. AMFI will not grant a
+                  # *restricted* entitlement to ad-hoc code on the strength of
+                  # the signature alone, and the sandbox grant in
+                  # MBRPreview.entitlements (temporary-exception.files
+                  # .absolute-path.read-only) is exactly that. The escape hatch
+                  # Apple provides is get-task-allow, the "this is a development
+                  # build" marker - it is what Xcode injects into every Debug
+                  # build, and why an Xcode-built copy of this same extension
+                  # loads while an ad-hoc one signed from this file alone may
+                  # not.
+                  #
+                  # It is added HERE rather than to the entitlements file
+                  # because it must never reach a release: get-task-allow lets
+                  # any process attach a debugger to the extension, and the
+                  # notary service rejects a submission carrying it outright.
+                  # scripts/make-macos-dmg.sh, which signs with a real Developer
+                  # ID and notarizes, deliberately uses the file unmodified.
+                  #
+                  # Derived from the canonical file rather than duplicated, so a
+                  # change to the grants cannot silently apply to only one of
+                  # the two builds. plutil rewrites the plist, which also drops
+                  # the comments - harmless here, and it guarantees AMFI gets
+                  # well-formed XML.
+                  cp ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                    $TMPDIR/appex-adhoc.entitlements
+                  chmod u+w $TMPDIR/appex-adhoc.entitlements
+                  # The dots must be escaped: plutil reads -insert's argument as
+                  # a key *path*, so the unescaped name is parsed as four
+                  # nested dictionaries and fails with "Key path not found".
+                  /usr/bin/plutil -insert 'com\.apple\.security\.get-task-allow' \
+                    -bool true $TMPDIR/appex-adhoc.entitlements
+
+                  /usr/bin/codesign --force --sign - \
+                    --entitlements $TMPDIR/appex-adhoc.entitlements \
+                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+                  # Signs Contents/MacOS/mbr along with the bundle.
+                  /usr/bin/codesign --force --sign - $out/Applications/MBR.app
+
+                  # Everything above can fail while exiting 0, and every way it
+                  # fails is invisible until someone presses space on a .md file
+                  # and gets plain text. So assert the two things that actually
+                  # have to be true of the artifact.
+                  /usr/bin/codesign --verify --deep --strict \
+                    $out/Applications/MBR.app
+
+                  # An appex signed without com.apple.security.app-sandbox is never
+                  # loaded by PlugInKit, and one without files.user-selected.read-only
+                  # cannot read the document it was handed. Note this also catches a
+                  # malformed entitlements plist: codesign warns "Failed to parse
+                  # entitlements" and then signs with NONE, still exiting 0. (AMFI's
+                  # XML parser is much stricter than plutil -lint - a literal "--"
+                  # inside an XML comment is enough, since that is illegal in XML.)
+                  /usr/bin/codesign -d --entitlements - --xml \
+                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex \
+                    > $TMPDIR/appex-entitlements.plist
+                  for key in com.apple.security.app-sandbox \
+                             com.apple.security.files.user-selected.read-only \
+                             com.apple.security.network.client \
+                             com.apple.security.get-task-allow; do
+                    if ! /usr/bin/grep -q "$key" $TMPDIR/appex-entitlements.plist; then
+                      echo "error: $key missing from the signed MBRPreview.appex" >&2
+                      echo "       QuickLook would silently never load it. See" >&2
+                      echo "       quicklook/MBRPreview/MBRPreview.entitlements." >&2
+                      exit 1
+                    fi
+                  done
                 '';
 
                 meta = with pkgs.lib; {
