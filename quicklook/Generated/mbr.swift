@@ -455,7 +455,11 @@ fileprivate struct FfiConverterString: FfiConverter {
             return String()
         }
         let bytes = UnsafeBufferPointer<UInt8>(start: value.data!, count: Int(value.len))
-        return String(bytes: bytes, encoding: String.Encoding.utf8)!
+        // Use Swift's native UTF-8 decoder; `String(bytes:encoding:.utf8)` goes
+        // through Foundation's NSString and silently strips a leading U+FEFF BOM.
+        // Invalid UTF-8 substitutes U+FFFD instead of trapping (unreachable
+        // given Rust's `String` invariant).
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     public static func lower(_ value: String) -> RustBuffer {
@@ -471,7 +475,8 @@ fileprivate struct FfiConverterString: FfiConverter {
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> String {
         let len: Int32 = try readInt(&buf)
-        return String(bytes: try readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!
+        // See `lift` above for why we avoid Foundation's NSString-backed decoder here.
+        return String(decoding: try readBytes(&buf, count: Int(len)), as: UTF8.self)
     }
 
     public static func write(_ value: String, into buf: inout [UInt8]) {
@@ -482,17 +487,123 @@ fileprivate struct FfiConverterString: FfiConverter {
 }
 
 
-public struct QuickLookConfig: Equatable, Hashable {
-    public var includeSyntaxHighlighting: Bool
-    public var includeMermaid: Bool
-    public var baseUrl: String?
+public struct PreviewAttachment: Equatable, Hashable {
+    public var id: String
+    public var path: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(includeSyntaxHighlighting: Bool, includeMermaid: Bool, baseUrl: String?) {
+    public init(id: String, path: String) {
+        self.id = id
+        self.path = path
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PreviewAttachment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePreviewAttachment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PreviewAttachment {
+        return
+            try PreviewAttachment(
+                id: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PreviewAttachment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreviewAttachment_lift(_ buf: RustBuffer) throws -> PreviewAttachment {
+    return try FfiConverterTypePreviewAttachment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreviewAttachment_lower(_ value: PreviewAttachment) -> RustBuffer {
+    return FfiConverterTypePreviewAttachment.lower(value)
+}
+
+
+public struct PreviewDocument: Equatable, Hashable {
+    public var html: String
+    public var attachments: [PreviewAttachment]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(html: String, attachments: [PreviewAttachment]) {
+        self.html = html
+        self.attachments = attachments
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PreviewDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePreviewDocument: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PreviewDocument {
+        return
+            try PreviewDocument(
+                html: FfiConverterString.read(from: &buf), 
+                attachments: FfiConverterSequenceTypePreviewAttachment.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PreviewDocument, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.html, into: &buf)
+        FfiConverterSequenceTypePreviewAttachment.write(value.attachments, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreviewDocument_lift(_ buf: RustBuffer) throws -> PreviewDocument {
+    return try FfiConverterTypePreviewDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreviewDocument_lower(_ value: PreviewDocument) -> RustBuffer {
+    return FfiConverterTypePreviewDocument.lower(value)
+}
+
+
+public struct QuickLookConfig: Equatable, Hashable {
+    public var includeSyntaxHighlighting: Bool
+    public var includeMermaid: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(includeSyntaxHighlighting: Bool, includeMermaid: Bool) {
         self.includeSyntaxHighlighting = includeSyntaxHighlighting
         self.includeMermaid = includeMermaid
-        self.baseUrl = baseUrl
     }
 
     
@@ -512,15 +623,13 @@ public struct FfiConverterTypeQuickLookConfig: FfiConverterRustBuffer {
         return
             try QuickLookConfig(
                 includeSyntaxHighlighting: FfiConverterBool.read(from: &buf), 
-                includeMermaid: FfiConverterBool.read(from: &buf), 
-                baseUrl: FfiConverterOptionString.read(from: &buf)
+                includeMermaid: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: QuickLookConfig, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.includeSyntaxHighlighting, into: &buf)
         FfiConverterBool.write(value.includeMermaid, into: &buf)
-        FfiConverterOptionString.write(value.baseUrl, into: &buf)
     }
 }
 
@@ -672,6 +781,31 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         }
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePreviewAttachment: FfiConverterRustBuffer {
+    typealias SwiftType = [PreviewAttachment]
+
+    public static func write(_ value: [PreviewAttachment], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePreviewAttachment.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PreviewAttachment] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PreviewAttachment]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePreviewAttachment.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func findConfigRoot(filePath: String) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_mbr_fn_func_find_config_root(
@@ -679,16 +813,16 @@ public func findConfigRoot(filePath: String) -> String  {
     )
 })
 }
-public func renderPreview(filePath: String, configRoot: String?)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
+public func renderPreview(filePath: String, configRoot: String?)throws  -> PreviewDocument  {
+    return try  FfiConverterTypePreviewDocument_lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
     uniffi_mbr_fn_func_render_preview(
         FfiConverterString.lower(filePath),
         FfiConverterOptionString.lower(configRoot),$0
     )
 })
 }
-public func renderPreviewWithConfig(filePath: String, configRoot: String?, config: QuickLookConfig)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
+public func renderPreviewWithConfig(filePath: String, configRoot: String?, config: QuickLookConfig)throws  -> PreviewDocument  {
+    return try  FfiConverterTypePreviewDocument_lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
     uniffi_mbr_fn_func_render_preview_with_config(
         FfiConverterString.lower(filePath),
         FfiConverterOptionString.lower(configRoot),
@@ -715,10 +849,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mbr_checksum_func_find_config_root() != 14695) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mbr_checksum_func_render_preview() != 35244) {
+    if (uniffi_mbr_checksum_func_render_preview() != 10926) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mbr_checksum_func_render_preview_with_config() != 54306) {
+    if (uniffi_mbr_checksum_func_render_preview_with_config() != 25596) {
         return InitializationResult.apiChecksumMismatch
     }
 

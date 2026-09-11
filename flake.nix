@@ -691,7 +691,7 @@
                 -framework Cocoa \
                 -framework QuickLookUI \
                 -framework Quartz \
-                -framework WebKit \
+                -framework UniformTypeIdentifiers \
                 -framework ExtensionKit \
                 -module-name MBRPreview \
                 -Xlinker -e -Xlinker _NSExtensionMain \
@@ -699,7 +699,7 @@
                 -I quicklook/Generated \
                 -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
                 quicklook/Generated/mbr.swift \
-                quicklook/MBRPreview/PreviewViewController.swift
+                quicklook/MBRPreview/PreviewProvider.swift
 
               # Copy Info.plist to complete the .appex bundle structure.
               #

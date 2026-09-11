@@ -11,41 +11,59 @@ The QuickLook extension consists of:
 3. **Host app** (`Host/`) - Required container app for the extension
 4. **UniFFI bindings** (`Generated/`) - Auto-generated Swift/C bindings
 
-The extension uses a custom URL scheme (`mbrfile://`) to serve local assets (images, etc.) through a `WKURLSchemeHandler` in the WebView.
+### Data-based, not view-based
 
-### Security invariant: mbrfile:// is confined to the previewed repository
+`Info.plist` sets `QLIsDataBasedPreview` to `true` and the principal class is a
+`QLPreviewProvider` subclass (`MBRPreview/PreviewProvider.swift`) implementing
+`providePreview(for:)`. macOS asks for a *generation-based* preview; a view-based
+reply is refused outright with
+
+```
+Error Domain=QuickLookPreviewErrors Code=1
+"View based preview response received when expecting a generation based preview"
+```
+
+and QuickLook then falls back to the system plain-text previewer — which looks
+exactly like the extension not being installed. (This is what issue #302 was.)
+
+So there is no `WKWebView` in the extension and nothing for it to host: the
+provider hands QuickLook one HTML document and a dictionary of attachments.
+
+**Set `reply.attachments` before returning the reply, not inside the
+`dataCreationBlock`.** `QLPreviewReply.h` says the block may update them, but on
+macOS 26 attachments set there never arrive: the `cid:` URLs resolve to nothing
+and every image in the preview is blank, with no error anywhere.
+
+### Security invariant: a preview can only read files it was handed
 
 Previewed markdown is untrusted and may contain raw HTML, so a `<script>` inside a
-`.md` can request any `mbrfile://` URL it wants — not only the ones mbr generated.
-Two independent checks keep that from becoming an arbitrary file read, and **both
-must stay in place**:
+`.md` runs (JavaScript *is* enabled in a data-based HTML preview — that is what
+makes highlight.js and mermaid work). It cannot, however, reach the filesystem:
 
-1. **Swift — `MBRFileSchemeHandler` (`MBRPreview/PreviewViewController.swift`).**
-   The real boundary. It serves a file only when the requested path, fully resolved
-   with `realpath(3)`, lies inside `allowedRoot` — the previewed document's
-   repository root, set by `preparePreviewOfFile` before any HTML is loaded. Until
-   that root is set, every request is refused, so the setup path fails closed.
-2. **Rust — `resolve_asset_path` (`src/quicklook.rs`).** Defence in depth. It mints
-   an `mbrfile://` URL only for a file that exists and canonically lives inside the
-   repo root; anything else keeps its original root-relative URL and simply fails to
-   load.
+- Local assets are `QLPreviewReply` attachments, addressed as `cid:<id>`. `cid:`
+  resolves against that dictionary and nothing else, so there is no path for a
+  script to name a file that is not already in it.
+- The dictionary is built by `collect_preview_attachments` (`src/quicklook.rs`),
+  which attaches a file only when `Path::canonicalize` puts it inside the
+  previewed repository root **and** it is a regular file. `..`, extra leading
+  slashes and symlinks pointing out of the repo all resolve away before the
+  comparison, so none of them get in.
 
-Both sides canonicalize (`realpath(3)` / `Path::canonicalize`) and compare the
-*resolved* path, never the requested string, so `..`, extra leading slashes and
-symlinks pointing out of the repo are all rejected the same way.
-
-This matters because `MBRPreview/MBRPreview.entitlements` grants read access to `/`
-— see the comment in that file for why it is that broad and what would have to
-change to narrow it.
+This is strictly stronger than the `mbrfile://` `WKURLSchemeHandler` it replaced,
+which *was* reachable from page script and had to refuse bad paths one request at
+a time. It also matters less that `MBRPreview/MBRPreview.entitlements` grants read
+access to `/` — see the comment in that file for why it is that broad — because
+nothing in the preview can ask for a path any more.
 
 To sanity-check by hand, preview a `.md` containing:
 
 ```html
-<script>fetch('mbrfile:///etc/passwd').then(r=>r.text()).then(t=>document.body.textContent=t)</script>
+<img src="/../../etc/passwd">
+<img src="/images/real-image.png">
 ```
 
-The fetch must reject, and the log must show
-`MBRFileSchemeHandler refused request: path is outside the previewed repository`.
+Only the second must render. The first keeps its authored URL (`/../../etc/passwd`)
+in the HTML, because no attachment was minted for it, and therefore loads nothing.
 
 
 ## Useful Tips
@@ -202,8 +220,14 @@ The extension handles these UTIs (defined in `MBRPreview/Info.plist`):
 
 - `net.daringfireball.markdown`
 - `public.markdown`
-- `com.unknown.md`
-- `dyn.ah62d4rv4ge81e5pe` (dynamic UTI fallback)
+- `dyn.ah62d4rv4ge81e5pe` (the dynamic UTI for `.rmd`)
+- `public.plain-text` (covers `.txt`, `.log`, `.csv` and ~90 source extensions
+  via `public.source-code`; those render through the plain-text path in
+  `src/quicklook.rs`, not the markdown parser)
+
+Entries that resolve to no declared type on the machine are skipped, but each one
+costs an `Invalid content type identifier ... specified in extension` error from
+QuickLook on every preview — so do not add speculative identifiers.
 
 ### Rust Unit Tests
 
@@ -217,30 +241,38 @@ cargo test --lib --features ffi test_render_preview_with_static_folder_image
 
 ## Debugging
 
-### Debug Output Files
+### Is the extension even being invoked?
 
-The Swift extension writes debug files to `/tmp/` when it runs:
-
-- `/tmp/mbr_ql_start.txt` - Written at extension start
-- `/tmp/mbr_ql_path.txt` - File path being previewed
-- `/tmp/mbr_ql_root.txt` - Detected config root
-- `/tmp/mbr_ql_html.txt` - Generated HTML (first 5000 chars)
-- `/tmp/mbr_ql_error.txt` - Any errors
-
-Check if the extension is being invoked:
+The extension logs to the `com.zmre.mbr.MBRPreview` subsystem at `.info`, which
+is **not persisted by default** — without this, a perfectly working extension
+looks silent. Stream it live while triggering a preview:
 
 ```bash
-# Clear old files
-rm -f /tmp/mbr_ql_*
+# In one shell (note: /usr/bin/log — `log` is a zsh builtin)
+/usr/bin/log stream --style compact --level info \
+  --predicate 'subsystem == "com.zmre.mbr.MBRPreview"'
 
-# Trigger QuickLook
+# In another
 qlmanage -p /path/to/file.md
-
-# Check for debug files
-ls -la /tmp/mbr_ql_*
 ```
 
-If no files are created, the extension is not being invoked at all.
+A working preview logs three lines: `providePreview called for:`, `configRoot =`,
+and `rendered N bytes of HTML with M attachment(s)`. No lines at all means
+QuickLook never routed to the extension — see *Extension Not Being Invoked* below.
+
+To persist the logs instead of streaming them (survives across runs, needs sudo):
+
+```bash
+sudo log config --subsystem com.zmre.mbr.MBRPreview --mode "level:debug,persist:debug"
+sudo log config --subsystem com.zmre.mbr.MBRPreview --reset   # undo
+```
+
+**Test without `-c`.** `qlmanage -p -c net.daringfireball.markdown file.md` forces
+the content type and takes a different routing path than Finder's spacebar. Plain
+`qlmanage -p file.md` routes the way Finder does, which is what you want to test.
+When QuickLook declines the extension, the `com.apple.quicklook` subsystem shows
+`got displayBundleID com.apple.qldisplay.Text` (the system plain-text previewer);
+when it accepts, it shows `com.apple.qldisplay.Web2`.
 
 ### Crash Logs
 
@@ -263,7 +295,7 @@ cat ~/Library/Logs/DiagnosticReports/MBRPreview-*.ips | jq .
 Key things to look for in crash logs:
 
 - **Exception type**: `EXC_BREAKPOINT` often indicates Swift assertion failure
-- **Stack trace**: Look for `makeRustCall`, `renderPreview`, `PreviewViewController`
+- **Stack trace**: Look for `makeRustCall`, `renderPreview`, `PreviewProvider`
 - **UniFFI errors**: Crashes in `makeRustCall` often mean stale bindings
 
 ### Common Crash: Stale UniFFI Bindings
@@ -356,16 +388,35 @@ Causes and solutions:
    mdls -name kMDItemContentType /path/to/file.md
    ```
 
-5. **Competing extension** - Another extension might handle markdown:
+5. **Competing extension** - Another extension might handle markdown. Note that
+   `qlmanage -m plugins` **cannot see app extensions** — it lists only legacy
+   `.qlgenerator` bundles and prints nothing for mbr whether or not things work.
+   Use:
    ```bash
-   qlmanage -m plugins | grep -i markdown
+   pluginkit -mv -p com.apple.quicklook.preview
+   pluginkit -e ignore -i <other.extension.id>   # to rule one out
    ```
+
+6. **Stale Xcode build registered** - An Xcode Run registers a competing copy
+   from DerivedData with a `!` (debugger) election, which macOS prioritises over
+   the installed `+` one. Clear it:
+   ```bash
+   pluginkit -e default -i com.zmre.mbr.quicklook-host.MBRPreview
+   ```
+
+7. **App not launched from a real install location** - The extension only
+   registers when the containing app is launched from a real install location.
+   Running `MBR.app` out of `/nix/store` or a build output directory registers
+   nothing.
 
 ### Extension Crashes on Launch
 
 Symptoms:
-- Debug files not created
+- No log lines from the extension's subsystem (see above)
 - Crash logs in `~/Library/Logs/DiagnosticReports/`
+
+A crash looks exactly like "not installed": QuickLook swallows it and falls back
+to the system previewer.
 
 Common causes:
 
@@ -377,13 +428,23 @@ Common causes:
 
 Symptoms:
 - Markdown renders but images show as broken
-- `mbrfile://` URLs not resolving
 
 Check:
 
-1. **Config root detection** - Check `/tmp/mbr_ql_root.txt`
-2. **Static folder** - Verify images exist in `static/` folder
-3. **URL scheme handler** - Check for errors in Swift console
+1. **Attachments were made** - the extension's log line says how many:
+   `rendered N bytes of HTML with M attachment(s)`. `M = 0` with images on the
+   page means `collect_preview_attachments` resolved none of them.
+2. **Config root detection** - the `configRoot =` log line; images resolve
+   relative to it.
+3. **Static folder** - verify images exist in the repo or its `static/` folder.
+4. **Relative image URLs are not attached.** Only root-relative URLs
+   (`![x](/images/y.png)`) become attachments. An image authored relative to the
+   note (`![x](y.png)`) is rendered as a relative URL, which a data-based preview
+   has no way to resolve, so it will not display. This has always been true of
+   QuickLook previews; it is not new.
+5. **Size caps** - an asset over 16 MiB, or one that would push the page's total
+   past 64 MiB, is deliberately not attached (`MAX_ATTACHMENT_BYTES` /
+   `MAX_TOTAL_ATTACHMENT_BYTES` in `src/quicklook.rs`).
 
 ### "Can't get generator" Error
 

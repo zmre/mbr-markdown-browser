@@ -29,6 +29,13 @@ result-*
 *.njsproj
 *.sln
 *.sw?
+# A global core.excludesFile with the usual vim-swapfile pattern `*.sw*` also
+# matches `*.swift`. New Swift sources then never get added, and because a nix
+# flake only sees git-tracked files, `nix build .#mbr-quicklook` fails with
+# "error opening input file ... (No such file or directory)" for a file that is
+# plainly on disk. A repo .gitignore outranks core.excludesFile, so this undoes
+# it here. (Ordinary .swp/.swo swapfiles are still caught by `*.sw?` above.)
+!*.swift
 .playwright-mcp
 
 # macOS app template build artifacts (keep Info.plist and Resources/)

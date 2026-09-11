@@ -335,7 +335,7 @@ quicklook/
 │   ├── AppDelegate.swift
 │   └── Info.plist
 ├── MBRPreview/                       # QuickLook extension target
-│   ├── PreviewViewController.swift   # Main extension controller
+│   ├── PreviewProvider.swift         # QLPreviewProvider (data-based preview)
 │   ├── Info.plist                    # Supported UTIs, extension config
 │   └── MBRPreview.entitlements       # Sandbox entitlements
 └── Generated/                        # UniFFI-generated Swift bindings
@@ -345,9 +345,24 @@ quicklook/
 
 ### How It Works
 
-1. **UniFFI Bindings**: The Rust `render_preview()` function (in `src/quicklook.rs`) is exposed to Swift via UniFFI
+1. **UniFFI Bindings**: The Rust `render_preview()` function (in `src/quicklook.rs`) is exposed to Swift via UniFFI. It returns a `PreviewDocument`: the HTML plus the local files that HTML references.
 2. **Static Library**: Rust code is compiled as `libmbr.a` without GUI dependencies (`--no-default-features`)
-3. **Swift Extension**: `PreviewViewController.swift` calls the Rust function and displays HTML in a WebView
+3. **Swift Extension**: `PreviewProvider.swift` calls the Rust function and returns a `QLPreviewReply` carrying the HTML and its attachments
+
+The preview is **data-based**, not view-based: `QLIsDataBasedPreview` is `true` and
+the principal class subclasses `QLPreviewProvider`. macOS asks for a
+generation-based preview and rejects a view-based reply with
+`"View based preview response received when expecting a generation based preview"`,
+which looks from the outside exactly like the extension not being installed.
+
+There is therefore no `WKWebView` in the extension. Local assets (sibling images,
+video, `.mbr/theme.css`) travel as `QLPreviewReply.attachments` and the HTML
+addresses them as `cid:<id>`.
+
+> **Set `reply.attachments` before returning the reply**, not inside the
+> `dataCreationBlock`. The header documentation says the block may update them,
+> but on macOS 26 attachments added there never reach QuickLook: the `cid:` URLs
+> resolve to nothing and every image in the preview is silently blank.
 
 ### Feature Flags
 

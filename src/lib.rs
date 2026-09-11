@@ -111,7 +111,8 @@ pub use pulldown_cmark::{
 };
 #[cfg(feature = "ffi")]
 pub use quicklook::{
-    QuickLookConfig, QuickLookError, find_config_root, render_preview, render_preview_with_config,
+    PreviewAttachment, PreviewDocument, QuickLookConfig, QuickLookError, find_config_root,
+    render_preview, render_preview_with_config,
 };
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
 pub use sorting::sort_files;

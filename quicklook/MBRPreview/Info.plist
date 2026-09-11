@@ -44,8 +44,23 @@
 	<dict>
 		<key>NSExtensionAttributes</key>
 		<dict>
+			<!--
+			  Data-based ("generation based"), not view-based. macOS 26 asks
+			  for a generation-based preview and rejects a view-based reply
+			  outright:
+
+			    Error Domain=QuickLookPreviewErrors Code=1
+			    "View based preview response received when expecting a
+			     generation based preview"
+
+			  - the render succeeded, the WKWebView finished loading, and the
+			  answer was thrown away, leaving the system plain-text previewer
+			  on screen. true here is what makes NSExtensionPrincipalClass
+			  below a QLPreviewProvider rather than an NSViewController; the
+			  two must agree.
+			-->
 			<key>QLIsDataBasedPreview</key>
-			<false/>
+			<true/>
 			<key>QLSupportedContentTypes</key>
 			<array>
 				<!--
@@ -66,15 +81,18 @@
 				-->
 				<string>public.markdown</string>
 				<!--
-				  Xcode-era cruft. "com.unknown.md" is the placeholder Xcode
-				  writes for an extension it cannot map to a real UTI; it
-				  never matches anything. "dyn.ah62d4rv4ge81e5pe" decodes to
-				  the dynamic UTI for the ".rmd" extension (R Markdown) - NOT
-				  ".md", whose dynamic UTI is dyn.age8043a. Both are harmless
-				  (an unmatchable identifier is simply skipped) and the .rmd
-				  one is mildly useful, so they stay.
+				  "dyn.ah62d4rv4ge81e5pe" decodes to the dynamic UTI for the
+				  ".rmd" extension (R Markdown) - NOT ".md", whose dynamic UTI
+				  is dyn.age8043a. It stays because it is mildly useful on a
+				  machine where nothing declares an R Markdown type.
+
+				  Its stablemate "com.unknown.md" - the placeholder Xcode
+				  writes for an extension it cannot map to a real UTI - is
+				  gone. It matched nothing by construction, and every entry
+				  here that resolves to no declared type costs an
+				  "Invalid content type identifier ... specified in extension"
+				  error from QuickLook on every single preview.
 				-->
-				<string>com.unknown.md</string>
 				<string>dyn.ah62d4rv4ge81e5pe</string>
 				<!--
 				  Plain text, including source code: public.source-code
@@ -94,8 +112,14 @@
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.quicklook.preview</string>
+		<!--
+		  Must match the @objc(...) name in PreviewProvider.swift. The Swift
+		  module is MBRPreview, so without that explicit ObjC name the class
+		  would register as "MBRPreview.PreviewProvider" and this lookup would
+		  fail at preview time with no build-time warning.
+		-->
 		<key>NSExtensionPrincipalClass</key>
-		<string>PreviewViewController</string>
+		<string>PreviewProvider</string>
 	</dict>
 </dict>
 </plist>
