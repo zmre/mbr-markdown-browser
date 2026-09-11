@@ -129,7 +129,8 @@ The extension:
 2. Searches upward for `.mbr/` configuration folder
 3. Parses markdown with full extension support
 4. Renders HTML with inlined CSS/JS (self-contained)
-5. Returns the preview to Finder
+5. Attaches the local files the page references (images, video, PDFs)
+6. Returns the preview to Finder
 
 ## Configuration
 
@@ -168,6 +169,20 @@ The QuickLook preview is simplified compared to the full mbr experience:
 | Search | No | Yes |
 | Live reload | No | Yes |
 | Link following | Limited | Yes |
+
+### Images and Other Local Assets
+
+A QuickLook preview is a single self-contained document, so any local file it
+shows has to travel with it. Two consequences:
+
+- **Reference assets from the repository root.** `![diagram](/images/x.png)`
+  works; so does anything the `static_folder` overlay resolves. An image
+  authored relative to the note (`![diagram](x.png)`) does not display in a
+  preview — it renders fine everywhere else in mbr.
+- **Large assets are skipped.** A single file over 16 MB, or one that would push
+  a page's assets past 64 MB in total, is left out rather than read into the
+  preview. Assets are attached in document order, so what is at the top of the
+  page is what fits. Open the file in mbr to see the rest.
 
 ### Link Behavior
 

@@ -2,14 +2,14 @@
 // This defines the FFI boundary between Rust and Swift
 
 namespace mbr {
-    // Render a markdown file to self-contained HTML for QuickLook preview
-    // Returns complete HTML string suitable for display in WKWebView
+    // Render a file to a self-contained QuickLook preview: one HTML document
+    // plus the local files it references, ready to become a QLPreviewReply.
     [Throws=QuickLookError]
-    string render_preview(string file_path, string? config_root);
+    PreviewDocument render_preview(string file_path, string? config_root);
 
     // Render with custom configuration options
     [Throws=QuickLookError]
-    string render_preview_with_config(string file_path, string? config_root, QuickLookConfig config);
+    PreviewDocument render_preview_with_config(string file_path, string? config_root, QuickLookConfig config);
 
     // Find the repository/config root directory by searching upward for markers
     // (.mbr, .git, .zk, .obsidian, book.toml, mkdocs.yml, docusaurus.config.js)
@@ -32,5 +32,18 @@ interface QuickLookError {
 dictionary QuickLookConfig {
     boolean include_syntax_highlighting;
     boolean include_mermaid;
-    string? base_url;
+};
+
+// One local file the preview HTML references, as `cid:{id}`.
+// `path` is absolute, canonical, and already proven to be a regular file
+// inside the previewed repository - see collect_preview_attachments.
+dictionary PreviewAttachment {
+    string id;
+    string path;
+};
+
+// A rendered preview: the HTML document and every local file it needs.
+dictionary PreviewDocument {
+    string html;
+    sequence<PreviewAttachment> attachments;
 };
