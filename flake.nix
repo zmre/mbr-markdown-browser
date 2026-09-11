@@ -849,8 +849,43 @@
                   # --deep is still correct for verification, below.
                   /usr/bin/codesign --force --sign - \
                     $out/Applications/MBR.app/Contents/Frameworks/libpdfium.dylib
+
+                  # This build signs ad-hoc: the Nix build sandbox cannot reach
+                  # the keychain, so there is no Developer ID identity here and
+                  # `--sign -` is the only option. AMFI will not grant a
+                  # *restricted* entitlement to ad-hoc code on the strength of
+                  # the signature alone, and the sandbox grant in
+                  # MBRPreview.entitlements (temporary-exception.files
+                  # .absolute-path.read-only) is exactly that. The escape hatch
+                  # Apple provides is get-task-allow, the "this is a development
+                  # build" marker - it is what Xcode injects into every Debug
+                  # build, and why an Xcode-built copy of this same extension
+                  # loads while an ad-hoc one signed from this file alone may
+                  # not.
+                  #
+                  # It is added HERE rather than to the entitlements file
+                  # because it must never reach a release: get-task-allow lets
+                  # any process attach a debugger to the extension, and the
+                  # notary service rejects a submission carrying it outright.
+                  # scripts/make-macos-dmg.sh, which signs with a real Developer
+                  # ID and notarizes, deliberately uses the file unmodified.
+                  #
+                  # Derived from the canonical file rather than duplicated, so a
+                  # change to the grants cannot silently apply to only one of
+                  # the two builds. plutil rewrites the plist, which also drops
+                  # the comments - harmless here, and it guarantees AMFI gets
+                  # well-formed XML.
+                  cp ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                    $TMPDIR/appex-adhoc.entitlements
+                  chmod u+w $TMPDIR/appex-adhoc.entitlements
+                  # The dots must be escaped: plutil reads -insert's argument as
+                  # a key *path*, so the unescaped name is parsed as four
+                  # nested dictionaries and fails with "Key path not found".
+                  /usr/bin/plutil -insert 'com\.apple\.security\.get-task-allow' \
+                    -bool true $TMPDIR/appex-adhoc.entitlements
+
                   /usr/bin/codesign --force --sign - \
-                    --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                    --entitlements $TMPDIR/appex-adhoc.entitlements \
                     $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
                   # Signs Contents/MacOS/mbr along with the bundle.
                   /usr/bin/codesign --force --sign - $out/Applications/MBR.app
@@ -874,7 +909,8 @@
                     > $TMPDIR/appex-entitlements.plist
                   for key in com.apple.security.app-sandbox \
                              com.apple.security.files.user-selected.read-only \
-                             com.apple.security.network.client; do
+                             com.apple.security.network.client \
+                             com.apple.security.get-task-allow; do
                     if ! /usr/bin/grep -q "$key" $TMPDIR/appex-entitlements.plist; then
                       echo "error: $key missing from the signed MBRPreview.appex" >&2
                       echo "       QuickLook would silently never load it. See" >&2
