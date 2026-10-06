@@ -1859,7 +1859,7 @@ main dl > dd:focus-within ~ dt ~ dd {
   --mbr-chat-c4: #e65100;
   --mbr-chat-c5: #00838f;
   --mbr-chat-c6: #ad1457;
-  --mbr-chat-c7: #5d4037;
+  --mbr-chat-c7: #827717;
 }
 
 @media only screen and (prefers-color-scheme: dark) {
@@ -1871,7 +1871,7 @@ main dl > dd:focus-within ~ dt ~ dd {
     --mbr-chat-c4: #ffa726;
     --mbr-chat-c5: #4dd0e1;
     --mbr-chat-c6: #f06292;
-    --mbr-chat-c7: #bcaaa4;
+    --mbr-chat-c7: #d4e157;
   }
 }
 
@@ -1883,7 +1883,7 @@ main dl > dd:focus-within ~ dt ~ dd {
   --mbr-chat-c4: #ffa726;
   --mbr-chat-c5: #4dd0e1;
   --mbr-chat-c6: #f06292;
-  --mbr-chat-c7: #bcaaa4;
+  --mbr-chat-c7: #d4e157;
 }
 
 .mbr-chat {
@@ -1961,7 +1961,9 @@ main dl > dd:focus-within ~ dt ~ dd {
 .mbr-chat-delim {
   align-self: stretch;
   margin-block: 0.4rem;
-  border-top: 1px dashed var(--pico-muted-border-color);
+  /* The muted *border* colour all but vanishes on dark themes. */
+  border-top: 1px dashed var(--pico-muted-color);
+  opacity: 0.5;
 }
 
 .mbr-chat-comment {
@@ -1974,6 +1976,13 @@ main dl > dd:focus-within ~ dt ~ dd {
 
 .mbr-chat-md {
   align-self: stretch;
+}
+
+/* Pico gives every `p`/`ol`/`ul` an explicit `color: var(--pico-color)`, so
+ * without this a comment's paragraph ignores the muted colour set above. The
+ * meta line needs no such rule: it is a bare `div`, never markdown. */
+.mbr-chat-comment > * {
+  color: inherit;
 }
 
 @media (max-width: 576px) {
