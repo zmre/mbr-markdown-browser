@@ -2,6 +2,57 @@
 
 ## What's Next
 
+* [ ] Contacts
+  * Our `type: people` stuff so far is oriented to genealogy, but I'm also interested in building contacts.  Contacts would have email addresses, phone numbers, mailing addresses, possibly social media urls or home page urls, company, title, department, etc.
+  * In my contacts, some are companies and not people, which have the same other things but where the company name is the headline instead of first/last. Not sure if these should be a different type or not.
+  * We might have the same relationships (like children and spouses), but we might also have org chart relationships (reports_to, manages)
+  * We should improve search so we can filter by type (eg, people) and by things like company
+    * The dropdown that lets you select All, Titles & Tags, Content should get a line and allow selection of note types, too (awkward because this list contains different types of filters, but maybe useful).  We can do `type:person` and that filters properly, so if we select one of those, we should put that string in the search as a hint.
+    * There seems to be a bug where "Current folder only" shows no results for `type:person` and I'm wondering if it is confused about a note becoming a subdir.  Additionally, I want to be able to select a folder so there should be a picker button next to "current folder only" that lets me pick any folder, then the label would show which folder it is constrained to.
+  * When browsing a family tree and just being on an index page, subfolders and maybe also page titles aren't sorted alphabetically. Do they have a sort at all?
+  * Today on a people page, we put a little card off to the side showing an image, born date, whatever. I want to change this to make a proper and nice contact card.  It will always have an image, but a default one when no image exists.  So we'll have a nice looking contact card at the top, full width, and then below it any notes, then below that the relationships.
+  * Going forward, I imagine meeting notes linking out to the contact cards of people in the meeting, so I want to consider possibly showing backlinks too though I'm not yet sure if it is worth bringing that out of the info panel.  Perhaps a summary showing number of back links or something that opens the info panel if clicked.
+  * Not in mbr, but in a separate app, I'd like to be able to sync contacts with outside apps (Apple Contacts and maybe Google Contacts). This means we will need some degree of compatibility and we should research how they export and what they do.  For example, it means that phone numbers will need to be modeled something like: `phones: { home: "xxxxx", work: "yyyyy" }` so that each phone number has a label.
+  * Today our relatiohship graphs on `people` notes are labeled "Family tree" (which we should rename to "Relationships") and focus entirely on family with assumptions about parent/child/spouse relationships.  I want an org chart graph showing relationships and grouping by departments when available and I think we should use the same graph we do at the top of the info overlay except just linking to any relationship, period, without any structure.  So in the charts drop down, we have Org Chart, All People, All.  All People shows the graph links to any other relationship.  All intermingles people and notes (inbound and outbound), putting non-relationship nodes in a different color.  Ask questions if there are performance trade-offs.  Pages must load nearly instantaneously.
+  * We have a concept of "aliases" but other apps expressly have a concept of maiden name.  I want to be able to optionally name an alias, which means supporting everywhere both simple strings and objects.  Or a mix.  So we could have:
+```yaml
+aliases:
+  - Mare
+  - label: maiden_name
+    name: Mary Smith
+```
+  * Update relationships docs
+* [ ] Flashcards
+  * New `type: flashcard` option
+  * Needs a new docs page under Markdown Extensions
+  * In that docs page, I want to explain that I had hoped to be compatible with established flashcard markdown apps and looked at https://neuracache.com/markdown-flashcards and https://github.com/kanad13/markdown-flashcards and https://github.com/bttger/markdown-flashcards and https://mochi.cards/docs/getting-started/create-a-card/ but I didn't want to have a note per flashcard or html comments or special one-off syntax so none of those seemed a good model to me.  A core requirement is that notes with flashcards should be nicely readable as text, should render nicely in most places by default, and any additional behaviors should just be enhanced styling without mucking up the text.
+  * With a definition list there can be multiple answers, but we will just show all of them as a single answer.
+  * So we're going to build off of the existing Definition lists.  They support markdown inside them.  We can sprinkle notes all around and then drop a definition list anywhere in a doc.  We can group and organize within a note to our heart's content.
+    * Much like with slides, we'll have a component that only activates when we detect the flashcard type and then we'll just put a button up in the top with a play icon in it and "Review flashcards" as the text.  Upon pressing it, we'll flip into flashcard mode.  Each definition list "question" is the front of the card and that is popped up so that the whole thing fits and is maximized on the screen.  Clicking the card flips it (animation?) to show the answer.
+    * At the top, there will be a bar with some options.  One option will be to flip front/back so the answer becomes the question and vice versa.  The next will be a dropdown for the mode which will be "In order", "Random", or, if edit mode is on, FSRS Spaced Repetition.  Default to random if edit mode is off and FSRS if it is on.
+    * Now there are two possibilities: if edit mode is off or we're in Random or In Order modes, then on the answer side we get a button at the bottom that says "next" to go to the next card.  If edit mode is on and FSRS is too, we give four buttons: Again, Hard, Good, Easy, so the user can indicate how they did on that card, which feeds the algorithm.
+    * Now with FSRS, we need to record outcomes, which means adding data inline to each question.  But as noted above, we want this to be as natural and readable as possible, while being machine parseable.
+      * We will handle everything to do with the flashcards, display, ordering, etc., in the frontend. We should lazy load where possible so we don't add a lot of k-weight to pages that don't have flashcards. When someone presses play, we load the rest of the machinery.
+      * Look up spaced repetition algorithms, see how AlgoApp (formerly Anki) does it, too.  Ask me questions.  We'll need to parse all the definition lists on the page including their review histories if they exist.
+      * We should also display the review history info, but maybe require a click to see the details.
+      * To this end, we'll add on to the answers for a given question a "Review History" that has bullets under it showing date, time, and result.  We'll use the following format:
+
+```markdown
+This is a question?
+: This is the answer.
+: ___Review History___
+  * 2026-10-06 13:45 - Fail
+  * 2026-10-06 13:55 - Good
+  * 2026-10-06 14:35 - Hard
+  * 2026-10-06 15:35 - Easy
+```
+
+* [ ] Chat
+  * This is a silly little feature for us to document in markdown extensions.  I want basic compatibility with the [Obsidian Chat View Plugin](https://github.com/adifyr/obsidian-chat-view). The idea is that when there is a codeblock of type "chat", it gets displayed as chat bubbles.  It's basically regular markdown inside and parsing of the markdown inside a codeblock is the one thing that might be problematic, because this is pretty non-standard and we don't have, nor want, client-side markdown parsing (I think... do we have it somewhere?).  Essentially there are these `{{Name|markdown text|metadata info}}` blocks where carriage returns are allowed inside them.  Each block is parsed into a bubble with a name in a color at top, a metadata line at bottom (optional) in gray, and the rendered markdown in-between.  Regular markdown can be in-between the bubbles (the `{{...}}` blocks).
+  * We don't need to support the WEBVTT, zendesk, intercom, or chat-old formats.
+  * I don't have a strong use-case for this so if it isn't lightweight and straightforward, we may end up skipping it altogether.
+* [ ] Check all anchor links in doc and verify they work properly
+  * Markdown extensions page has a "click-to-expand FAQ" anchor link that isn't working. Fix that and find any other issues.
 * [ ] Reveal.js has a new major version, 6.x, we need to update to it
   * API stays the same
   * The HTML and CSS are *not* wildly changed: v6 removes zero CSS classes (adds two), and `.reveal > .slides > section` plus every `Reveal.initialize()` option are unchanged. The real work is our three `reveal.theme.*.css`, which are patched forks (Source Sans Pro `@import` stripped, globals removed so they inherit from Pico; `blank` has no upstream counterpart at all) and would need re-deriving against v6 — where themes now inline their fonts as base64, taking `black.css` from 7 KB to 575 KB, so the strip is worth keeping.
@@ -113,3 +164,5 @@
     * Templates
     * Themes
     * Added custom themes
+
+
