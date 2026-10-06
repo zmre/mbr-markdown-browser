@@ -113,13 +113,18 @@ export function wasSelfWrite(relativePath: string): boolean {
  * ours; withdrawing it would have to identify *which* registration to withdraw,
  * and getting that wrong drops a successful sibling write's suppression, which
  * is the expensive mistake of the two.
+ *
+ * Exported for every other in-place line write (`flashcard-review.ts`): there
+ * is one suppression window per page, and a second registry would be invisible
+ * to `<mbr-live-reload>`, which consults only {@link wasSelfWrite}.
  */
-function noteSelfWrite(path: string): void {
+export function noteSelfWrite(path: string): void {
   const now = Date.now()
-  for (const [key, at] of selfWrites) {
-    if (now - at >= SELF_WRITE_TTL_MS) selfWrites.delete(key)
+  const key = normalizePath(path)
+  for (const [written, at] of selfWrites) {
+    if (now - at >= SELF_WRITE_TTL_MS) selfWrites.delete(written)
   }
-  selfWrites.set(path, now)
+  selfWrites.set(key, now)
 }
 
 /** Test hook: forget every cached source line and pending suppression. */
@@ -190,7 +195,7 @@ async function sourceLines(path: string): Promise<SourceRead> {
  * Points at the editor because that is where the field is. `edit-token.ts`
  * remembers the refusal so the field is actually visible when they get there.
  */
-const TOKEN_MESSAGE = 'Editing needs a token — open the editor (e) and enter it first.'
+export const TOKEN_MESSAGE = 'Editing needs a token — open the editor (e) and enter it first.'
 
 /** Human-readable reason for a failed write, by status. */
 function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other'; message: string } {
@@ -355,6 +360,16 @@ export function applyCheckboxStatus(input: HTMLInputElement, status: TaskStatus)
  */
 export function readSourceLines(path: string): Promise<SourceRead> {
   return sourceLines(path)
+}
+
+/**
+ * Drop `path`'s cached lines, so the next read fetches the file again.
+ *
+ * For writers outside this module that learn the copy is wrong — a `409` from
+ * `POST /.mbr/flashcard-review` — and have no authoritative text to patch in.
+ */
+export function forgetSourceLines(path: string): void {
+  lineCache.delete(normalizePath(path))
 }
 
 /** Repo-relative source path of the page being viewed, if it is a markdown page. */

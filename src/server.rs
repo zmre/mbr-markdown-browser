@@ -7511,6 +7511,14 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "application/javascript",
     ),
     (
+        // Flashcard review overlay (+ ts-fsrs), lazy-loaded by <mbr-flashcards>
+        // when a deck is opened. Ships in static builds: In order / Random
+        // review needs no server, only spaced repetition does.
+        "/components/mbr-flashcards.min.js",
+        include_bytes!("../templates/components-js/mbr-flashcards.min.js"),
+        "application/javascript",
+    ),
+    (
         "/hljs.dark.css",
         include_bytes!("../templates/hljs.dark.11.11.2.css"),
         "text/css",

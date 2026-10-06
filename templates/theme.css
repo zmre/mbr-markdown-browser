@@ -1668,6 +1668,35 @@ main dl > dd:focus-within ~ dt ~ dd {
   }
 }
 
+/* Flashcard pages (`type: flashcard`): the disclosure above stays -- a question
+ * with its answer hidden is what a flashcard is -- and each card's review
+ * history is collapsed into a one-line `<details>` by `<mbr-flashcards>`
+ * (`flashcards/dom.ts`). Opening that `<summary>` moves focus into the history
+ * `<dd>`, which `dd:focus-within ~ dd` keeps open but which would close the
+ * answers *before* it; this keeps the earlier answers of the same card open
+ * too (the `:not()` stops at the previous card, as with the marker rule). */
+body.flashcard main dl > dd:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within)) {
+  visibility: visible;
+  height: auto;
+  padding-block: 0 var(--mbr-dl-item-spacing);
+}
+
+main dl > dd.mbr-fc-history summary {
+  font-size: 0.85em;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+  margin: 0;
+}
+
+main dl > dd.mbr-fc-history details {
+  margin: 0;
+}
+
+main dl > dd.mbr-fc-history ul {
+  font-size: 0.85em;
+  margin-block: 0.4em 0;
+}
+
 /* ==================== Contact card ====================
  *
  * The page header of `type: person` / `type: organization` notes

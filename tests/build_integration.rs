@@ -2013,7 +2013,11 @@ async fn test_build_writes_graph_chunks() {
 
     let output = build_site(&repo).await;
 
-    for chunk in ["mbr-graph.min.js", "mbr-genealogy.min.js"] {
+    for chunk in [
+        "mbr-graph.min.js",
+        "mbr-genealogy.min.js",
+        "mbr-flashcards.min.js",
+    ] {
         let path = output.join(".mbr").join("components").join(chunk);
         assert!(path.exists(), "Expected chunk at {}", path.display());
         let size = fs::metadata(&path).expect("chunk metadata").len();

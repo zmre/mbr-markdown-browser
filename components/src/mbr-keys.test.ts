@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { LitElement } from 'lit'
-import { isInputTarget, isMacPlatform, isModalOpen } from './mbr-keys.js'
+import { isInputTarget, isMacPlatform, isModalOpen, isPlayKey } from './mbr-keys.js'
 import type { MbrKeysElement } from './mbr-keys.js'
 import { isAnyOverlayOpen, findOverlay, OVERLAY_TAGS } from './overlay.js'
 import type { MbrOverlay, OverlayTag } from './overlay.js'
@@ -15,8 +15,10 @@ import './mbr-fuzzy-nav.js'
 import './mbr-find-bar.js'
 import './mbr-tasks.js'
 import './mbr-review.js'
+import './mbr-flashcards.js'
 import { setTasksChunkImporter } from './mbr-tasks.js'
 import { setReviewChunkImporter } from './mbr-review.js'
+import { setFlashcardsChunkImporter } from './mbr-flashcards.js'
 
 /**
  * Tests for the shared keyboard-guard helpers. `isInputTarget` must see the
@@ -45,6 +47,36 @@ function isInputTargetAtDocument(origin: Element): boolean | null {
 
 afterEach(() => {
   document.body.innerHTML = ''
+})
+
+describe('isPlayKey', () => {
+  const press = (init: KeyboardEventInit, target: EventTarget = document.body): boolean => {
+    let result = false
+    const listener = (e: KeyboardEvent) => {
+      result = isPlayKey(e)
+    }
+    document.addEventListener('keydown', listener)
+    target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, composed: true, ...init }))
+    document.removeEventListener('keydown', listener)
+    return result
+  }
+
+  it('accepts a bare p or P', () => {
+    expect(press({ key: 'p' })).toBe(true)
+    expect(press({ key: 'P', shiftKey: true })).toBe(true)
+  })
+
+  it('leaves Cmd/Ctrl/Alt+P alone (print, and friends)', () => {
+    expect(press({ key: 'p', metaKey: true })).toBe(false)
+    expect(press({ key: 'p', ctrlKey: true })).toBe(false)
+    expect(press({ key: 'p', altKey: true })).toBe(false)
+  })
+
+  it('ignores typing and other keys', () => {
+    const input = document.body.appendChild(document.createElement('input'))
+    expect(press({ key: 'p' }, input)).toBe(false)
+    expect(press({ key: 'o' })).toBe(false)
+  })
 })
 
 describe('isInputTarget', () => {
@@ -101,6 +133,15 @@ const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay &
   { tag: 'mbr-find-bar', create: () => document.createElement('mbr-find-bar') },
   { tag: 'mbr-tasks', create: () => document.createElement('mbr-tasks') },
   { tag: 'mbr-review', create: () => document.createElement('mbr-review') },
+  {
+    tag: 'mbr-flashcards',
+    // Opens only on a `type: flashcard` page that has a deck to review.
+    create: () => {
+      document.body.classList.add('flashcard')
+      document.body.insertAdjacentHTML('beforeend', '<main id="wrapper"><dl><dt>Q</dt><dd>A</dd></dl></main>')
+      return document.createElement('mbr-flashcards')
+    },
+  },
 ]
 
 describe('isModalOpen', () => {
@@ -115,6 +156,8 @@ describe('isModalOpen', () => {
     setTasksChunkImporter(() => Promise.resolve({}))
     // <mbr-review> lazy-imports its panel chunk the same way.
     setReviewChunkImporter(() => Promise.resolve({}))
+    // <mbr-flashcards> likewise, for its deck chunk.
+    setFlashcardsChunkImporter(() => Promise.resolve({}))
     // <mbr-fuzzy-nav>.open() kicks off a links.json fetch; keep it well-formed
     // so the modal can render without the shared cache seeing garbage.
     vi.stubGlobal(

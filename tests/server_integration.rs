@@ -3162,9 +3162,9 @@ async fn test_components_js_bundle_served() {
 
 #[tokio::test]
 async fn test_graph_chunks_served() {
-    // The lazy-loaded mini-graph, genealogy, task-panel, review and
-    // search-extras chunks are compiled into the binary (DEFAULT_FILES) and must be served alongside the
-    // main bundle.
+    // The lazy-loaded mini-graph, genealogy, task-panel, review, search-extras
+    // and flashcard chunks are compiled into the binary (DEFAULT_FILES) and must
+    // be served alongside the main bundle.
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
@@ -3175,6 +3175,7 @@ async fn test_graph_chunks_served() {
         "/.mbr/components/mbr-tasks.min.js",
         "/.mbr/components/mbr-review.min.js",
         "/.mbr/components/mbr-search-extras.min.js",
+        "/.mbr/components/mbr-flashcards.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -3231,7 +3232,7 @@ async fn test_components_js_bundle_no_missing_imports() {
         );
     }
 
-    // The mini-graph, genealogy, task-panel and review chunks are lazy-loaded
+    // The mini-graph, genealogy, task-panel, review and flashcard chunks are lazy-loaded
     // through runtime-computed URLs (asset base + "components/<chunk>.min.js"),
     // so they never appear as literal import() targets — which is also why the
     // absolute-import assertion above needs no exemption for them. If the
@@ -3243,6 +3244,7 @@ async fn test_components_js_bundle_no_missing_imports() {
         "mbr-tasks.min.js",
         "mbr-review.min.js",
         "mbr-search-extras.min.js",
+        "mbr-flashcards.min.js",
     ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");

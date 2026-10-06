@@ -76,6 +76,23 @@ export function isModalOpen(): boolean {
 }
 
 /**
+ * True for the `p` / `P` that starts a page's "play" mode — `<mbr-slides>` on
+ * a `style: slides` page, `<mbr-flashcards>` on a `type: flashcard` page — with
+ * the guards both share: never while typing or while an overlay owns the
+ * keyboard, and never with a modifier, so `Cmd+P` / `Ctrl+P` still prints.
+ */
+export function isPlayKey(e: KeyboardEvent): boolean {
+  return (
+    (e.key === 'p' || e.key === 'P') &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    !isInputTarget(e) &&
+    !isModalOpen()
+  );
+}
+
+/**
  * Open `<mbr-fuzzy-nav>` on a tab, if the element is present and upgraded.
  * Its `open()` takes a tab argument, so it is driven through its element type
  * rather than the narrower MbrOverlay contract.
@@ -186,6 +203,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'e', description: 'Open editor (when editing enabled)' },
       { keys: 'r', description: 'Add a review note (anchored to the selection)' },
       { keys: 'R', description: 'Open review notes (server/GUI only)' },
+      { keys: 'p', description: 'Play slides / review flashcards (on those pages)' },
       { keys: 'Esc', description: 'Close panel' },
     ],
   },
@@ -254,6 +272,17 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'd', description: 'Delete the focused note (confirms)' },
       { keys: 'c', description: 'Copy the review as markdown' },
       { keys: 'Esc', description: 'Close' },
+    ],
+  },
+  {
+    title: 'Flashcards (when open)',
+    shortcuts: [
+      { keys: 'Space / → / n', description: 'Flip, then next card' },
+      { keys: 'Enter', description: 'Flip the card' },
+      { keys: '← / →', description: 'Previous / next card (In order, Random)' },
+      { keys: 'Home / End', description: 'First / last card' },
+      { keys: '1 / 2 / 3 / 4', description: 'Rate Again / Hard / Good / Easy (FSRS)' },
+      { keys: 'Esc', description: 'Leave the deck' },
     ],
   },
   {

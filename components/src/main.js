@@ -32,3 +32,5 @@ export * from './mbr-hljs.ts';
 export * from './mbr-mermaid.ts';
 export * from './mbr-katex.ts';
 export * from './mbr-slides.ts';
+// Trigger + reading-view history summaries; the deck lives in mbr-flashcards.min.js.
+export * from './mbr-flashcards.ts';
