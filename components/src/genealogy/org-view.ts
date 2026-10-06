@@ -7,10 +7,10 @@
 import { html, render, svg, nothing, type TemplateResult } from 'lit'
 import { SvgViewportController } from '../graph/viewport-controller.js'
 import { nodeTitle } from '../graph/relationship-graph.js'
-import { computeInitialViewBox } from './timeline-layout.js'
 import {
-  ORG_CARD_H,
+  ORG_TITLE_PX,
   buildOrgTree,
+  computeOrgInitialView,
   computeOrgLayout,
   hasWorkHierarchy,
   type OrgCard,
@@ -22,10 +22,6 @@ import {
   type GenealogyChartInstance,
   type GenealogyContext,
 } from './chart-registry.js'
-
-/** Same readability thresholds as the timeline (52px card, 13px title). */
-const MIN_READABLE_CARD_PX = 34
-const TARGET_READABLE_CARD_PX = 46
 
 const TITLE_CHARS = 22
 const SUBTITLE_CHARS = 28
@@ -190,20 +186,23 @@ function mountOrgChart(container: HTMLElement, ctx: GenealogyContext): Genealogy
 
   const svgEl = canvas.querySelector('svg')
   if (svgEl instanceof SVGSVGElement) {
+    // Readable first, complete second: fit to width down to a 12px title,
+    // centered on the focus; wider charts pan. `setHomeView` (rather than the
+    // `initialView` option) because a small chart's view is LARGER than the
+    // content, which must widen the zoom-out floor rather than clamp to it.
     const rect = canvas.getBoundingClientRect()
     const focus = layout.cards.find((c) => c.isFocus)
-    const initialView = computeInitialViewBox({
-      contentWidth: layout.width,
-      contentHeight: layout.height,
-      canvasWidth: rect.width,
-      canvasHeight: rect.height,
-      cardH: ORG_CARD_H,
-      focusX: focus?.x ?? layout.width / 2,
-      focusY: focus?.y ?? layout.height / 2,
-      minReadablePx: MIN_READABLE_CARD_PX,
-      targetPx: TARGET_READABLE_CARD_PX,
-    })
-    controller = new SvgViewportController(canvas, svgEl, { initialView })
+    controller = new SvgViewportController(canvas, svgEl)
+    controller.setHomeView(
+      computeOrgInitialView({
+        contentWidth: layout.width,
+        contentHeight: layout.height,
+        canvasWidth: rect.width,
+        canvasHeight: rect.height,
+        focusX: focus?.x ?? layout.width / 2,
+        focusY: focus?.y ?? layout.height / 2,
+      })
+    )
   }
 
   return {
@@ -331,7 +330,7 @@ const ORG_CSS = `
 }
 
 .org-title {
-  font-size: 13px;
+  font-size: ${ORG_TITLE_PX}px;
   font-weight: 600;
   fill: var(--pico-color, #1f2937);
 }

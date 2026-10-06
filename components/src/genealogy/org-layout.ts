@@ -629,3 +629,56 @@ export function computeOrgLayout(tree: OrgTree): OrgLayout {
     height: rootSize.h + 2 * ORG_MARGIN,
   }
 }
+
+// ============================================================================
+// Initial view
+// ============================================================================
+
+/** Card title size in user units (`.org-title` in org-view.ts). */
+export const ORG_TITLE_PX = 13
+/** Smallest on-screen title size the chart opens at. */
+export const ORG_MIN_TITLE_PX = 12
+/** Largest initial scale: a three-card chart should not open at 2×. */
+export const ORG_MAX_INITIAL_SCALE = 1.25
+
+export interface OrgViewParams {
+  contentWidth: number
+  contentHeight: number
+  /** On-screen canvas size (CSS px). */
+  canvasWidth: number
+  canvasHeight: number
+  /** Focus card center in content coordinates. */
+  focusX: number
+  focusY: number
+}
+
+/**
+ * The org chart's opening viewBox: fit the whole chart, but never so small
+ * that a card title renders below `ORG_MIN_TITLE_PX` (org charts are wide and
+ * shallow, so plain fit-all made 9px text) and never above
+ * `ORG_MAX_INITIAL_SCALE`. Fitting height as well as width matters for a
+ * person's chart, which is a tall chain: width alone opened it so large that
+ * the managers above the focus were cut off.
+ * Where the chart is wider (or taller) than that view, the view is centered on
+ * the focus card and clamped to the content, and the user pans for the rest;
+ * where it is smaller, the content is centered. Uses the canvas aspect, so the
+ * achieved scale is exact. Returns the fit-all box when the canvas has no size
+ * (not yet laid out).
+ */
+export function computeOrgInitialView(p: OrgViewParams): { x: number; y: number; w: number; h: number } {
+  const fitAll = { x: 0, y: 0, w: p.contentWidth, h: p.contentHeight }
+  if (!(p.contentWidth > 0 && p.contentHeight > 0 && p.canvasWidth > 0 && p.canvasHeight > 0)) return fitAll
+  const minScale = ORG_MIN_TITLE_PX / ORG_TITLE_PX
+  const fitScale = Math.min(p.canvasWidth / p.contentWidth, p.canvasHeight / p.contentHeight)
+  const scale = Math.min(ORG_MAX_INITIAL_SCALE, Math.max(minScale, fitScale))
+  const w = p.canvasWidth / scale
+  const h = p.canvasHeight / scale
+  const place = (focus: number, size: number, content: number) =>
+    size >= content ? (content - size) / 2 : Math.min(Math.max(focus - size / 2, 0), content - size)
+  return {
+    x: place(p.focusX, w, p.contentWidth),
+    y: place(p.focusY, h, p.contentHeight),
+    w,
+    h,
+  }
+}

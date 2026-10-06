@@ -122,8 +122,10 @@ describe('mbr-mini-graph inline mode and class hooks', () => {
     expect(root.querySelectorAll('text.node-label').length).toBe(4)
     expect(root.querySelector('[aria-label="Zoom in"]')).not.toBeNull()
     expect(root.querySelector('.depth-value')?.textContent).toBe('2')
-    // The large coordinate space, as in the expanded modal.
-    expect(root.querySelector('svg.graph-svg')?.getAttribute('viewBox')).toBe('0 0 800 600')
+    // Fitted to the layout (not the raw 800×600 space), at the canvas aspect —
+    // happy-dom reports a zero rect, so the 800×600 aspect is the fallback.
+    const [, , w, h] = root.querySelector('svg.graph-svg')!.getAttribute('viewBox')!.split(' ').map(Number)
+    expect(h / w).toBeCloseTo(0.75, 5)
   })
 
   it('steps depth inline and refetches deeper levels', async () => {
@@ -132,6 +134,70 @@ describe('mbr-mini-graph inline mode and class hooks', () => {
     await settle(element)
     expect(circle(element, '/d/')).toBeNull()
     expect(circle(element, '/b/')).not.toBeNull()
+  })
+
+  /** A hub with many long-titled spokes: the case that produced "Dan Mos|Hana Ito". */
+  async function createCrowdedInline() {
+    const spokes = Array.from({ length: 18 }, (_, i) => `/p${i}/`)
+    const map: Record<string, PageLinks> = { '/hub/': outLinks(...spokes) }
+    for (const s of spokes) map[s] = outLinks()
+    const element = document.createElement('mbr-mini-graph')
+    element.inline = true
+    element.focusPath = '/hub/'
+    element.depth = 1
+    element.fetchLinks = async (path: string) => map[path] ?? null
+    element.isKnownNote = (p) => p in map
+    element.getMeta = (p) => ({ title: p === '/hub/' ? 'Hub' : `Person Number ${p.slice(2, -1)} Long` })
+    element.resolveHref = (p) => p
+    document.body.appendChild(element)
+    created.push(element)
+    await settle(element)
+    return element
+  }
+
+  it('fits the initial view to the laid-out graph, labels included', async () => {
+    const element = await createCrowdedInline()
+    const svg = shadow(element).querySelector('svg.graph-svg')!
+    const view = svg.getAttribute('viewBox')!.split(' ').map(Number)
+    expect(view).not.toEqual([0, 0, 800, 600])
+    const [vx, vy, vw, vh] = view
+    for (const c of shadow(element).querySelectorAll('circle.graph-node')) {
+      const cx = Number(c.getAttribute('cx'))
+      const cy = Number(c.getAttribute('cy'))
+      expect(cx).toBeGreaterThan(vx)
+      expect(cx).toBeLessThan(vx + vw)
+      expect(cy).toBeGreaterThan(vy)
+      expect(cy).toBeLessThan(vy + vh)
+    }
+    // The view hugs the content rather than the fixed 800×600 box: the
+    // content spans most of it (no 30%-of-the-canvas island).
+    const xs = [...shadow(element).querySelectorAll('circle.graph-node')].map((c) => Number(c.getAttribute('cx')))
+    expect((Math.max(...xs) - Math.min(...xs)) / vw).toBeGreaterThan(0.5)
+  })
+
+  it('keeps labels from overlapping one another', async () => {
+    const element = await createCrowdedInline()
+    const boxes = [...shadow(element).querySelectorAll<SVGTextElement>('text.node-label')].map((t) => {
+      const x = Number(t.getAttribute('x'))
+      const y = Number(t.getAttribute('y'))
+      const half = ((t.textContent ?? '').length * 11 * 0.58) / 2
+      return { x0: x - half, x1: x + half, y0: y - 9, y1: y + 2 }
+    })
+    let overlaps = 0
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i]
+        const b = boxes[j]
+        if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) overlaps++
+      }
+    }
+    expect(overlaps).toBe(0)
+  })
+
+  it('leaves the sidebar mini view and its forces alone', async () => {
+    const { element } = await createGraph()
+    const view = shadow(element).querySelector('svg.graph-svg')!.getAttribute('viewBox')
+    expect(view).toBe('0 0 400 200')
   })
 
   it('applies nodeClass and linkClass', async () => {

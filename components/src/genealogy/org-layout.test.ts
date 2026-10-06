@@ -3,7 +3,11 @@ import { buildRegistry } from '../graph/relationship-graph.js'
 import { CONTACT_TYPES, LEGACY_CONTACT_TYPES, buildSiteNotes, companyNotes } from '../graph/test-fixtures.js'
 import {
   ORG_CARD_W,
+  ORG_MAX_INITIAL_SCALE,
+  ORG_MIN_TITLE_PX,
+  ORG_TITLE_PX,
   buildOrgTree,
+  computeOrgInitialView,
   computeOrgLayout,
   hasWorkHierarchy,
   type OrgCard,
@@ -254,5 +258,56 @@ describe('computeOrgLayout', () => {
     )
     const layout = computeOrgLayout(buildOrgTree('/a/', notes, registry)!)
     expect(layout.links.filter((l) => l.kind === 'secondary')).toHaveLength(1)
+  })
+})
+
+describe('computeOrgInitialView', () => {
+  const canvas = { canvasWidth: 1000, canvasHeight: 600 }
+  const scaleOf = (view: { w: number }) => canvas.canvasWidth / view.w
+
+  it('fits a chart to the canvas when titles stay readable', () => {
+    const view = computeOrgInitialView({ contentWidth: 1050, contentHeight: 300, ...canvas, focusX: 100, focusY: 50 })
+    expect(scaleOf(view)).toBeCloseTo(1000 / 1050, 6)
+    expect(view.x).toBe(0)
+    // Shallower than the view: centered vertically.
+    expect(view.y + view.h / 2).toBeCloseTo(150, 6)
+  })
+
+  it('clamps a wide chart to a 12px title and centers on the focus', () => {
+    const view = computeOrgInitialView({ contentWidth: 3000, contentHeight: 400, ...canvas, focusX: 1800, focusY: 200 })
+    expect(scaleOf(view) * ORG_TITLE_PX).toBeCloseTo(ORG_MIN_TITLE_PX, 6)
+    expect(view.x + view.w / 2).toBeCloseTo(1800, 6)
+  })
+
+  it('clamps the focus window to the content edges', () => {
+    const view = computeOrgInitialView({ contentWidth: 3000, contentHeight: 400, ...canvas, focusX: 40, focusY: 200 })
+    expect(view.x).toBe(0)
+    const right = computeOrgInitialView({ contentWidth: 3000, contentHeight: 400, ...canvas, focusX: 2990, focusY: 200 })
+    expect(right.x + right.w).toBeCloseTo(3000, 6)
+  })
+
+  it('does not blow a small chart up past the maximum scale, and centers it', () => {
+    const view = computeOrgInitialView({ contentWidth: 250, contentHeight: 150, ...canvas, focusX: 125, focusY: 75 })
+    expect(scaleOf(view)).toBeCloseTo(ORG_MAX_INITIAL_SCALE, 6)
+    expect(view.x + view.w / 2).toBeCloseTo(125, 6)
+    expect(view.y + view.h / 2).toBeCloseTo(75, 6)
+  })
+
+  it('fits height too, so a person’s management chain is not cut off', () => {
+    const view = computeOrgInitialView({ contentWidth: 700, contentHeight: 620, ...canvas, focusX: 350, focusY: 300 })
+    expect(scaleOf(view)).toBeCloseTo(600 / 620, 6)
+    expect(view.y).toBeLessThanOrEqual(0)
+    expect(view.y + view.h).toBeGreaterThanOrEqual(620)
+  })
+
+  it('pans vertically to the focus on a tall chart', () => {
+    const view = computeOrgInitialView({ contentWidth: 900, contentHeight: 3000, ...canvas, focusX: 450, focusY: 2000 })
+    expect(view.y + view.h / 2).toBeCloseTo(2000, 6)
+  })
+
+  it('falls back to fit-all before the canvas has a size', () => {
+    expect(
+      computeOrgInitialView({ contentWidth: 500, contentHeight: 300, canvasWidth: 0, canvasHeight: 0, focusX: 0, focusY: 0 })
+    ).toEqual({ x: 0, y: 0, w: 500, h: 300 })
   })
 })
