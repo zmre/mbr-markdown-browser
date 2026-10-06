@@ -316,6 +316,51 @@ pub struct RelationType {
     /// label if unset. Set explicitly for irregular plurals (e.g. "Children").
     #[serde(default)]
     pub label_plural: Option<String>,
+
+    /// Which way the edge points in a hierarchy, read from the declaring
+    /// note's side: `up` means the **object** ranks above the subject (my
+    /// parent, my manager, my employer). `None` = not hierarchical.
+    ///
+    /// Charts orient edges by this rather than by guessing from names, so a
+    /// custom pair such as `mentor`/`mentee` draws the right way up. The two
+    /// halves of an inverse pair must point opposite ways; the registry fills
+    /// in a missing half and repairs a contradictory one (with a warning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy: Option<Hierarchy>,
+
+    /// Free-form grouping the charts use to pick which edges they draw:
+    /// `family` (family chart, timeline) and `work` (org chart). Inherited by
+    /// the reciprocal half of an inverse pair when that half leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+/// Direction of a hierarchical relation type. See [`RelationType::hierarchy`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Hierarchy {
+    /// The object ranks above the subject (`parent`, `reports_to`).
+    Up,
+    /// The object ranks below the subject (`child`, `manages`).
+    Down,
+}
+
+impl Hierarchy {
+    /// The direction the other half of an inverse pair points.
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
+
+    /// The config/JSON spelling (`"up"` / `"down"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
 }
 
 impl RelationType {
@@ -344,42 +389,136 @@ fn title_case_word(s: &str) -> String {
     }
 }
 
-/// Returns the default relation types: genealogy defaults.
+/// Returns the default relation types: family and work.
 ///
-/// - `parent` ↔ `child` (inverse pair)
-/// - `spouse` (symmetric)
-/// - `sibling` (symmetric)
+/// | name         | inverse      | symmetric | hierarchy | category |
+/// |--------------|--------------|-----------|-----------|----------|
+/// | `parent`     | `child`      |           | up        | family   |
+/// | `child`      | `parent`     |           | down      | family   |
+/// | `spouse`     |              | yes       |           | family   |
+/// | `sibling`    |              | yes       |           | family   |
+/// | `reports_to` | `manages`    |           | up        | work     |
+/// | `manages`    | `reports_to` |           | down      | work     |
+/// | `assistant`  | `assists`    |           | down      | work     |
+/// | `assists`    | `assistant`  |           | up        | work     |
+/// | `employer`   | `employee`   |           | up        | work     |
+/// | `employee`   | `employer`   |           | down      | work     |
+/// | `colleague`  |              | yes       |           | work     |
+///
+/// A repository that sets `relationship_types` replaces this list wholesale.
 pub fn default_relationship_types() -> Vec<RelationType> {
-    vec![
-        RelationType {
-            name: "parent".to_string(),
-            symmetric: false,
-            inverse: Some("child".to_string()),
-            label: Some("Parent".to_string()),
-            label_plural: Some("Parents".to_string()),
-        },
-        RelationType {
-            name: "child".to_string(),
-            symmetric: false,
-            inverse: Some("parent".to_string()),
-            label: Some("Child".to_string()),
-            label_plural: Some("Children".to_string()),
-        },
-        RelationType {
-            name: "spouse".to_string(),
-            symmetric: true,
-            inverse: None,
-            label: Some("Spouse".to_string()),
-            label_plural: Some("Spouses".to_string()),
-        },
-        RelationType {
-            name: "sibling".to_string(),
-            symmetric: true,
-            inverse: None,
-            label: Some("Sibling".to_string()),
-            label_plural: Some("Siblings".to_string()),
-        },
-    ]
+    use Hierarchy::{Down, Up};
+    // (name, inverse, symmetric, hierarchy, category, label, label_plural)
+    type Row = (
+        &'static str,
+        Option<&'static str>,
+        bool,
+        Option<Hierarchy>,
+        &'static str,
+        &'static str,
+        &'static str,
+    );
+    const FAMILY: &str = "family";
+    const WORK: &str = "work";
+    let table: [Row; 11] = [
+        (
+            "parent",
+            Some("child"),
+            false,
+            Some(Up),
+            FAMILY,
+            "Parent",
+            "Parents",
+        ),
+        (
+            "child",
+            Some("parent"),
+            false,
+            Some(Down),
+            FAMILY,
+            "Child",
+            "Children",
+        ),
+        ("spouse", None, true, None, FAMILY, "Spouse", "Spouses"),
+        ("sibling", None, true, None, FAMILY, "Sibling", "Siblings"),
+        (
+            "reports_to",
+            Some("manages"),
+            false,
+            Some(Up),
+            WORK,
+            "Reports to",
+            "Reports to",
+        ),
+        (
+            "manages",
+            Some("reports_to"),
+            false,
+            Some(Down),
+            WORK,
+            "Manages",
+            "Manages",
+        ),
+        (
+            "assistant",
+            Some("assists"),
+            false,
+            Some(Down),
+            WORK,
+            "Assistant",
+            "Assistants",
+        ),
+        (
+            "assists",
+            Some("assistant"),
+            false,
+            Some(Up),
+            WORK,
+            "Assists",
+            "Assists",
+        ),
+        (
+            "employer",
+            Some("employee"),
+            false,
+            Some(Up),
+            WORK,
+            "Employer",
+            "Employers",
+        ),
+        (
+            "employee",
+            Some("employer"),
+            false,
+            Some(Down),
+            WORK,
+            "Employee",
+            "Employees",
+        ),
+        (
+            "colleague",
+            None,
+            true,
+            None,
+            WORK,
+            "Colleague",
+            "Colleagues",
+        ),
+    ];
+    table
+        .into_iter()
+        .map(
+            |(name, inverse, symmetric, hierarchy, category, label, label_plural)| RelationType {
+                name: name.to_string(),
+                symmetric,
+                inverse: inverse.map(str::to_string),
+                label: Some(label.to_string()),
+                label_plural: Some(label_plural.to_string()),
+                hierarchy,
+                category: Some(category.to_string()),
+            },
+        )
+        .collect()
 }
 
 impl Default for SortField {
@@ -1422,16 +1561,27 @@ mod tests {
     fn test_config_default_has_relationship_types() {
         let config = Config::default();
         assert!(config.relationship_tracking);
-        assert_eq!(config.relationship_types.len(), 4);
         let names: Vec<&str> = config
             .relationship_types
             .iter()
             .map(|t| t.name.as_str())
             .collect();
-        assert!(names.contains(&"parent"));
-        assert!(names.contains(&"child"));
-        assert!(names.contains(&"spouse"));
-        assert!(names.contains(&"sibling"));
+        assert_eq!(
+            names,
+            [
+                "parent",
+                "child",
+                "spouse",
+                "sibling",
+                "reports_to",
+                "manages",
+                "assistant",
+                "assists",
+                "employer",
+                "employee",
+                "colleague",
+            ]
+        );
     }
 
     #[test]
@@ -1451,6 +1601,42 @@ mod tests {
         assert!(spouse.inverse.is_none());
     }
 
+    /// Every default inverse pair must name each other and point opposite ways
+    /// in the hierarchy, and share a category — the charts rely on all three.
+    #[test]
+    fn test_default_relationship_types_pairs_are_coherent() {
+        let types = default_relationship_types();
+        let by_name = |n: &str| types.iter().find(|t| t.name == n).unwrap();
+        for t in &types {
+            assert!(t.category.is_some(), "{} has no category", t.name);
+            if t.symmetric {
+                assert!(t.hierarchy.is_none(), "{} is symmetric", t.name);
+                continue;
+            }
+            let inverse = by_name(t.inverse.as_deref().expect("inverse"));
+            assert_eq!(inverse.inverse.as_deref(), Some(t.name.as_str()));
+            assert_eq!(inverse.hierarchy, t.hierarchy.map(Hierarchy::flipped));
+            assert_eq!(inverse.category, t.category);
+        }
+        assert_eq!(by_name("reports_to").hierarchy, Some(Hierarchy::Up));
+        assert_eq!(by_name("assistant").hierarchy, Some(Hierarchy::Down));
+        assert_eq!(by_name("employer").category.as_deref(), Some("work"));
+        assert_eq!(by_name("parent").category.as_deref(), Some("family"));
+        assert_eq!(by_name("reports_to").plural_label(), "Reports to");
+    }
+
+    #[test]
+    fn test_relation_type_hierarchy_and_category_deserialize() {
+        let json =
+            r#"{"name": "mentor", "inverse": "mentee", "hierarchy": "up", "category": "work"}"#;
+        let rel: RelationType = serde_json::from_str(json).unwrap();
+        assert_eq!(rel.hierarchy, Some(Hierarchy::Up));
+        assert_eq!(rel.category.as_deref(), Some("work"));
+
+        let bad = r#"{"name": "mentor", "hierarchy": "sideways"}"#;
+        assert!(serde_json::from_str::<RelationType>(bad).is_err());
+    }
+
     #[test]
     fn test_relation_type_label_derivation() {
         let rel = RelationType {
@@ -1459,6 +1645,8 @@ mod tests {
             inverse: None,
             label: None,
             label_plural: None,
+            hierarchy: None,
+            category: None,
         };
         // Auto-derived from name.
         assert_eq!(rel.singular_label(), "Cousin");

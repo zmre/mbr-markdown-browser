@@ -472,7 +472,7 @@ See the [Tags feature documentation](tags/) for complete details.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking |
-| `relationship_types` | array | genealogy defaults | Relation types with symmetric / inverse semantics and labels |
+| `relationship_types` | array | family + work defaults | Relation types with symmetric / inverse semantics, hierarchy, category and labels |
 
 **Relation type configuration:**
 
@@ -481,19 +481,43 @@ Each relation type can specify:
 - `symmetric`: `true` when the reverse reads the same (spouse, sibling)
 - `inverse`: The inverse relation-type name, if it's one half of an inverse pair (parent ↔ child). Mutually exclusive with `symmetric`, and must name a *different* type — see below.
 - `label` / `label_plural`: Display labels (auto-derived from `name` when unset; set `label_plural` explicitly for irregular plurals such as "Children")
+- `hierarchy`: `"up"` or `"down"`, read from the declaring note's side. `up` means the
+  note you point **to** ranks above you (your parent, manager, employer); `down` is the
+  reverse. Omit for non-hierarchical types. The charts use it to draw edges the right
+  way up instead of guessing from names.
+- `category`: A free-form group name. The charts look for `family` (family chart,
+  timeline tree) and `work` (org chart).
 
-The default `relationship_types` provide genealogy semantics:
+The two halves of an inverse pair must point opposite ways and share a category, so
+you only need to set `hierarchy`/`category` on one half: the other inherits the
+flipped direction and the same category. If both halves claim the same direction,
+mbr keeps the one declared first, flips the other and logs a warning — startup never
+fails over it. A `hierarchy` on a symmetric type is ignored with a warning.
+
+The default `relationship_types` cover family and work:
 
 ```toml
 # .mbr/config.toml (these are the built-in defaults)
 relationship_types = [
-    { name = "parent", inverse = "child", label = "Parent", label_plural = "Parents" },
-    { name = "child", inverse = "parent", label = "Child", label_plural = "Children" },
-    { name = "spouse", symmetric = true, label = "Spouse", label_plural = "Spouses" },
-    { name = "sibling", symmetric = true, label = "Sibling", label_plural = "Siblings" },
+    { name = "parent", inverse = "child", hierarchy = "up", category = "family", label = "Parent", label_plural = "Parents" },
+    { name = "child", inverse = "parent", hierarchy = "down", category = "family", label = "Child", label_plural = "Children" },
+    { name = "spouse", symmetric = true, category = "family", label = "Spouse", label_plural = "Spouses" },
+    { name = "sibling", symmetric = true, category = "family", label = "Sibling", label_plural = "Siblings" },
+    { name = "reports_to", inverse = "manages", hierarchy = "up", category = "work", label = "Reports to", label_plural = "Reports to" },
+    { name = "manages", inverse = "reports_to", hierarchy = "down", category = "work", label = "Manages", label_plural = "Manages" },
+    { name = "assistant", inverse = "assists", hierarchy = "down", category = "work", label = "Assistant", label_plural = "Assistants" },
+    { name = "assists", inverse = "assistant", hierarchy = "up", category = "work", label = "Assists", label_plural = "Assists" },
+    { name = "employer", inverse = "employee", hierarchy = "up", category = "work", label = "Employer", label_plural = "Employers" },
+    { name = "employee", inverse = "employer", hierarchy = "down", category = "work", label = "Employee", label_plural = "Employees" },
+    { name = "colleague", symmetric = true, category = "work", label = "Colleague", label_plural = "Colleagues" },
 ]
 relationship_tracking = true
 ```
+
+Setting `relationship_types` **replaces** this list wholesale, so a repository that
+adds its own types must copy the defaults it still wants (the `employer` type in
+particular powers the implicit edge from a person's `company: "[[…]]"` — see
+[Contacts](../markdown/contacts/#company-links)).
 
 Relation types not listed here are still tracked, but as directed edges with no
 automatic reverse relabelling. See the
