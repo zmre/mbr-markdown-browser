@@ -279,13 +279,106 @@ how to add your own types.
 
 ## Charts
 
-<!-- Part B fills this section. -->
-Charts for contacts are described here.
+Notes with `type: person` or `type: organization` get a **Relationships** panel
+below the note, as long as the note has at least one resolved relationship to
+another note — of any kind: family, work, or a type you defined yourself. A
+note with no relationships renders nothing, so a contact without edges never
+shows an empty box.
+
+A selector in the panel's top-left corner switches between five charts:
+
+| Chart | Draws | Built from |
+|-------|-------|------------|
+| **Family chart** | Parents, spouses and children, two generations each way, with portraits | `family` relationships |
+| **Timeline tree** | The same lineage on a year axis | `family` relationships and birth dates |
+| **Org chart** | Reporting lines, top-down | `work` relationships with a hierarchy (`reports_to`/`manages`, `assistant`/`assists`, `employer`/`employee`) |
+| **All people** | Every relationship around the note, as a force-directed graph | All relationships, any type |
+| **All** | All people, plus the note's ordinary links in and out | All relationships + this note's `links.json` |
+
+Charts that have nothing to draw for the current note are listed but
+disabled. The chart that opens first is the one you last chose, when it fits
+the note; otherwise **Family chart** if the note has family relationships,
+else **Org chart** if it has work ones, else **All people**. Opening a company
+page therefore lands on its org chart even if you last looked at a family tree,
+and doing so does not change your saved choice.
+
+### Org chart
+
+- **On an organization's page** the organization is the root and its employees
+  hang beneath it, arranged by who reports to whom. Someone whose manager does
+  not list the employer is still placed under that manager.
+- **On a person's page** you see their management chain up to the top (with the
+  employer organization above it), their peers — others with the same
+  manager — and their own reports two levels down.
+- People are grouped into labelled boxes by their `department`; a team made
+  only of individual contributors is stacked into a compact column.
+- Assistants hang off the person they assist with a dotted line. Someone with
+  two managers is drawn under one and joined to the other with a dashed line
+  (on each manager's own page, under that manager); their card shows a small
+  `+1`, and hovering it names the other manager.
+- Charts are capped at 80 people. Whatever does not fit becomes a **+N more**
+  card; clicking it opens the page of the person those reports belong to, where
+  they are drawn in full.
+- Click a card to go to that note. Drag to pan, scroll or pinch to zoom; `⤢`
+  resets the view.
+
+### All people and All
+
+These reuse the sidebar's link graph, drawn in place at full size with labels,
+pan/zoom and a **depth** stepper (starting at `graph_depth`, default 2).
+Organizations are colored differently from people, with a legend.
+
+**All** adds the current note's ordinary links — notes it links to and notes
+linking to it — in a muted color with dashed edges. Only the current note's
+links are added (they do not expand further), and they are fetched only when
+you pick this chart. If link tracking is off, the chart says so and shows
+relationships only.
+
+### Which relationships count as family or work
+
+Every relationship type has an optional `category` (`family`, `work`, or your
+own) and, for pairs like parent/child, a `hierarchy` (`up` or `down`) saying
+which side ranks higher. The family charts draw only `family` types; the org
+chart only hierarchical `work` types; the graphs draw everything. See
+[Relationships](relationships.md) for the built-in types and how to configure
+your own.
+
+If your `relationship_types` predate `category` and `hierarchy`, the charts
+fall back sensibly: the built-in work types (`reports_to`, `manages`,
+`assistant`, `assists`, `employer`, `employee`, `colleague`) are treated as
+work and everything else as family, and pairs are oriented the way they always
+were. Add `hierarchy` to a custom pair such as `manager`/`report` to make it
+draw the right way up.
 
 ## Searching contacts
 
-<!-- Part B fills this section. -->
-How to search contacts is described here.
+Search (`/` or `Ctrl+K`/`Cmd+K`) matches any frontmatter field with
+`field:value`, which covers most contact lookups:
+
+| Query | Finds |
+|-------|-------|
+| `type:person` | Every person note |
+| `company:acme` | People whose `company` contains "acme" — including `company: "[[Acme Corp]]"` |
+| `department:design` | Everyone in a department |
+| `job_title:engineer` | Everyone whose title contains "engineer" |
+| `type:person jane` | People matching "jane" |
+
+Matching is case-insensitive and by substring. Put a value containing spaces in
+double quotes: `type:"Meeting Notes"`.
+
+In server and GUI mode the search panel adds two shortcuts:
+
+- **Note types** — the scope menu (All / Titles & Tags / Content) lists every
+  `type` used in your notes, with counts, below a separator. Choosing one
+  writes the matching `type:` filter into the search box, replacing any
+  previous one, and the menu goes back to showing the scope.
+- **Folder picker** — the folder button next to **Current folder only** opens
+  a filterable list of every folder that holds notes. Pick one (arrow keys and
+  `Enter`, or click) to search only there; the option then reads
+  **Only in: /people/**. Unchecking it searches everywhere again.
+
+On a person's page, **Current folder only** searches the folder the note is in
+(`/people/` for `/people/jane/`), not the note itself.
 
 ## Data problems
 

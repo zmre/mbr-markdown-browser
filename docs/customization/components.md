@@ -15,7 +15,7 @@ mbr uses [Lit](https://lit.dev/) web components for interactive features. You ca
 | `mbr-search` | Search interface | `<mbr-search>` |
 | `mbr-nav` | Next/prev buttons | `<mbr-nav>` |
 | `mbr-info` | Info panel: metadata, links, relationships, and a mini link graph of the current note's neighbourhood | `<mbr-info>` |
-| `mbr-genealogy` | Genealogy charts (family chart / timeline tree) on `type: person` pages | `<mbr-genealogy>` |
+| `mbr-genealogy` | Relationship charts (family chart, timeline tree, org chart, All people, All) on `type: person` and `type: organization` pages | `<mbr-genealogy>` |
 | `mbr-live-reload` | Development hot reload | `<mbr-live-reload>` |
 | `mbr-video-extras` | Video player enhancements | `<mbr-video-extras>` |
 
@@ -50,8 +50,8 @@ At the moment, we're bundling all the always-on components together in `mbr-comp
 | Chunk | Contents | Loaded when |
 |-------|----------|-------------|
 | `mbr-editor.min.js` | In-browser markdown editor | Editing opens (server/GUI, opt-in) |
-| `mbr-graph.min.js` | Mini link graph (d3-force) | Info panel first opens |
-| `mbr-genealogy.min.js` | Genealogy charts (family-chart + timeline tree) | A person-page chart scrolls near the viewport |
+| `mbr-graph.min.js` | Mini link graph (d3-force), also the All people / All charts | Info panel first opens, or one of those charts is chosen |
+| `mbr-genealogy.min.js` | Relationship charts (family-chart, timeline tree, org chart; the All people / All graphs reuse `mbr-graph.min.js`) | A person/organization chart scrolls near the viewport |
 
 Start with the source components and make your own `mbr-components.min.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
 

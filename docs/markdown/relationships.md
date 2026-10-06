@@ -346,8 +346,8 @@ mbr ships two complementary visualizations. Both are lazy-loaded (they cost
 nothing until used) and both work identically in server, GUI, and static-build
 modes:
 
-- **Genealogy charts** — interactive family charts rendered inline on
-  `type: person` pages.
+- **Relationship charts** — interactive family, timeline, org and graph charts
+  rendered inline on `type: person` and `type: organization` pages.
 - **Link graph in the sidebar** — a force-directed mini graph of the current
   note's neighbourhood (content links *and* typed relationships), shown at the
   top of the info panel on every note.
@@ -359,19 +359,23 @@ modes:
 > option and the new elements. Mermaid diagrams in ordinary code blocks are
 > unaffected.
 
-### Genealogy charts on person pages
+### Relationship charts on person and organization pages
 
-Notes with `type: person` render an interactive family chart — the
-`<mbr-genealogy>` web component, emitted by `_display_enhancements.html` (below
-the note body) for person and organization
-pages only. It draws from the resolved relationships in `site.json` and
-renders **nothing** when the person has no resolved relationships, so a person
+Notes with `type: person` or `type: organization` render a **Relationships**
+panel — the `<mbr-genealogy>` web component (the name predates the other
+charts), emitted by `_display_enhancements.html` below the note body. It draws
+from the resolved relationships in `site.json` and renders **nothing** when the
+note has no resolved relationship to another note, so a
 note without edges never produces an empty box.
 
-A selector in the top-left corner of the chart switches between two views; the
-choice persists in localStorage (`mbr_genealogy_chart`):
+A selector in the top-left corner switches between five charts — **Family
+chart**, **Timeline tree**, **Org chart**, **All people** and **All**; the
+choice persists in localStorage (`mbr_genealogy_chart`) and is used whenever it
+fits the note. The family charts draw only relationship types whose `category`
+is `family`. The org chart and the two graphs are described in
+[Contacts → Charts](contacts.md#charts); the two family views are:
 
-**Family chart** (default) — built on the
+**Family chart** — built on the
 [family-chart](https://github.com/donatso/family-chart) library (ISC license):
 
 - SVG person cards with **portraits** from the `image` frontmatter field.
@@ -384,16 +388,20 @@ choice persists in localStorage (`mbr_genealogy_chart`):
 **Timeline tree** — a custom time-aware layout:
 
 - Ancestors above, descendants below the current person (two generations each).
-- A **year axis** on the left positions each person by birth year. People
-  without a `born` date fall back to their generation's median year, then to
+- A **year axis** on the left positions each person by birth year
+  (`dates.birthday`, or the older `born`; a month-day date like `--03-19` has
+  no year and is ignored). People without a birth year fall back to their
+  generation's median year, then to
   estimated 28-year generations; if no one has dates the axis is hidden.
 - Lines are colored by parent — **blue father-lines**, **pink mother-lines**
   (gray when `gender` is unknown) — and couples are joined by **marriage bars**.
 - Pan, zoom, and click-to-navigate as above.
 
-The chart JS is a lazy chunk (`/.mbr/components/mbr-genealogy.min.js`, ~204 kB
-min / ~61 kB gz). Person pages prefetch it, but it loads and renders only when
-the chart scrolls near the viewport, so it never blocks page render.
+The chart JS is a lazy chunk (`/.mbr/components/mbr-genealogy.min.js`, ~227 kB
+min / ~67 kB gz). Person pages prefetch it, but it loads and renders only when
+the chart scrolls near the viewport, so it never blocks page render. The two
+graph charts reuse the sidebar's `mbr-graph.min.js` chunk, loaded only when one
+of them is chosen.
 
 **Roadmap:** the chart selector is designed for additional chart types — a
 bubble map of birth places, hierarchical edge bundling across all notes, and an
@@ -401,9 +409,10 @@ ancestors/descendants sunburst are planned.
 
 ### When the charts appear
 
-The inline chart appears only on `type: person` notes that have at least one
-resolved relationship. Notes with other `type` values (`type: character`,
-`type: service`, …) get no inline chart — their typed relationships appear in
+The inline charts appear only on `type: person` and `type: organization` notes
+that have at least one resolved relationship. Notes with other `type` values
+(`type: character`, `type: service`, …) get no inline chart — their typed
+relationships appear in
 the **sidebar link graph** (below) and in the info panel's textual
 **Relationships** section instead.
 
@@ -412,7 +421,7 @@ To gate the chart differently or place it elsewhere, override
 
 ```html
 <!-- .mbr/_display_enhancements.html -->
-{% if type and type == "person" %}<mbr-genealogy></mbr-genealogy>{% endif %}
+{% if type and (type == "person" or type == "organization") %}<mbr-genealogy></mbr-genealogy>{% endif %}
 ```
 
 ### Link graph in the sidebar
