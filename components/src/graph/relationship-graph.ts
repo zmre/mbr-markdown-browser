@@ -621,9 +621,13 @@ export function familyGraph(graph: RelationshipGraph, registry: Registry): Relat
   }
 }
 
-/** True when the graph has at least one edge a family chart would draw. */
+/**
+ * True when a family chart would draw something for the focus: a family edge
+ * connected to it. Not merely "anywhere in the graph" — a colleague's parent
+ * two hops away is no reason to open a family tree.
+ */
 export function hasFamilyEdges(graph: RelationshipGraph, registry: Registry): boolean {
-  return graph.edges.some((e) => isFamilyEdge(e, registry))
+  return familyGraph(graph, registry).edges.length > 0
 }
 
 /**

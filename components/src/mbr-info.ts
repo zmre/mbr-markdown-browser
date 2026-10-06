@@ -20,7 +20,7 @@ import {
   type SiteRelationship,
 } from './graph/relationship-graph.js';
 import { fetchPageLinks } from './graph/links-cache.js';
-import { getMbrAssetBase } from './dynamic-loader.js';
+import { loadGraphChunk } from './graph-chunk.js';
 import { safeHref } from './safe-href.js';
 import { isCardKey } from './contact-meta.js';
 
@@ -67,37 +67,9 @@ interface NoteMeta {
   description?: string;
 }
 
-/**
- * Import the lazy mini-graph chunk (`mbr-graph.min.js`), which registers the
- * `<mbr-mini-graph>` element. The URL is computed against the asset base so it
- * works in server mode AND in static builds deployed at arbitrary depths.
- * Overridable seam so tests can stub the dynamic import.
- */
-let importGraphChunk: () => Promise<unknown> = () => {
-  const url = new URL(getMbrAssetBase() + 'components/mbr-graph.min.js', document.baseURI).href;
-  return import(/* @vite-ignore */ url);
-};
-
-/** Test hook: replace the chunk importer (module-level seam). */
-export function setGraphChunkImporter(importer: () => Promise<unknown>): void {
-  importGraphChunk = importer;
-  graphChunkPromise = null;
-}
-
-/** Shared once-per-page promise for the chunk load; `true` when usable. */
-let graphChunkPromise: Promise<boolean> | null = null;
-
-function loadGraphChunk(): Promise<boolean> {
-  if (!graphChunkPromise) {
-    graphChunkPromise = importGraphChunk()
-      .then(() => true)
-      .catch((err) => {
-        console.warn('Failed to load the graph chunk:', err);
-        return false; // No graph this page load; sections still render.
-      });
-  }
-  return graphChunkPromise;
-}
+// The lazy mini-graph chunk loader is shared with the person/organization
+// charts (graph-chunk.ts); re-exported so existing tests keep their seam.
+export { setGraphChunkImporter } from './graph-chunk.js';
 
 /**
  * Info panel component - displays document metadata, table of contents, and links.

@@ -18,7 +18,7 @@ import {
   type TimelineLayout,
   type TimelineNode,
 } from './timeline-layout.js'
-import { familyGraph, formatLifespan } from '../graph/relationship-graph.js'
+import { familyGraph, formatLifespan, hasFamilyEdges } from '../graph/relationship-graph.js'
 import {
   injectStylesOnce,
   type GenealogyChart,
@@ -202,6 +202,7 @@ function mountTimeline(container: HTMLElement, ctx: GenealogyContext): Genealogy
 export const timelineChartType: GenealogyChart = {
   id: 'timeline',
   label: 'Timeline tree',
+  isApplicable: (ctx) => hasFamilyEdges(ctx.graph, ctx.registry),
   mount: mountTimeline,
 }
 
@@ -302,36 +303,5 @@ const TIMELINE_CSS = `
 .tl-lifespan {
   font-size: 10px;
   fill: var(--pico-muted-color, #666);
-}
-
-.rel-graph-controls {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  z-index: 2;
-}
-
-.rel-graph-controls button {
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-  border: 1px solid var(--pico-muted-border-color, #ccc);
-  border-radius: 4px;
-  background: var(--pico-background-color, #fff);
-  color: var(--pico-color, #333);
-  opacity: 0.85;
-}
-
-.rel-graph-controls button:hover {
-  opacity: 1;
 }
 `

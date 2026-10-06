@@ -1,24 +1,30 @@
 /**
- * `<mbr-genealogy>` — lightweight trigger for the person-page genealogy charts.
+ * `<mbr-genealogy>` — lightweight trigger for the "Relationships" charts on
+ * person and organization pages. (The element and chunk keep their historical
+ * genealogy names; renaming them would break users' template overrides.)
  *
- * Lives in the main bundle and stays tiny: it guards on `type: person`
- * frontmatter, builds the relationship graph from site.json, renders a
- * fixed-height placeholder (no layout shift) and, once the placeholder nears
- * the viewport (IntersectionObserver, 400px margin), dynamically imports the
- * heavy `mbr-genealogy.min.js` chunk (family-chart + timeline tree) and hands
- * it the graph via `mountGenealogy()`. Pages without a person focus or without
- * any resolved relationship edges render nothing at all.
+ * Lives in the main bundle and stays tiny: it guards on `type: person` or
+ * `type: organization` frontmatter, builds the relationship graph from
+ * site.json, renders a fixed-height placeholder (no layout shift) and, once the
+ * placeholder nears the viewport (IntersectionObserver, 400px margin),
+ * dynamically imports the heavy `mbr-genealogy.min.js` chunk (family chart,
+ * timeline, org chart, graphs) and hands it the graph plus services via
+ * `mountGenealogy()`. Which chart opens is the chunk's decision. A note with no
+ * resolved relationship to another note renders nothing at all.
  */
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { waitForDom, getMbrAssetBase } from './dynamic-loader.ts'
 import { safeHref } from './safe-href.js'
-import { subscribeSiteNav, getCanonicalPath, resolveUrl } from './shared.ts'
+import { subscribeSiteNav, getCanonicalPath, getGraphDepth, resolveUrl } from './shared.ts'
+import { loadGraphChunk } from './graph-chunk.ts'
+import { fetchPageLinks } from './graph/links-cache.ts'
 import {
   DEFAULT_DEPTH,
   DEFAULT_MAX_NODES,
   buildRegistry,
   buildRelationshipGraph,
+  canonicalizeNotePath,
   nodeTitle,
   notesByPathFromSite,
   type GraphEdge,
@@ -46,6 +52,27 @@ const MAX_LISTED_DROPPED_EDGES = 5
  * ancestors must be gated on this.
  */
 const PARENT_CHILD_REL_TYPE = 'child'
+
+/** Note types that get the relationship charts. */
+const CHART_NOTE_TYPES = new Set(['person', 'organization'])
+
+/** True when the page's frontmatter `type` is one that gets the charts. */
+export function isChartNoteType(type: unknown): boolean {
+  return typeof type === 'string' && CHART_NOTE_TYPES.has(type.trim().toLowerCase())
+}
+
+/**
+ * True when `focus` has at least one resolved relationship to another known
+ * note — of ANY type or category. This, not the graph's edge count, is the
+ * gate: the family graph drops siblings and a work-only note has no family
+ * edges, yet both still have something to chart (the org chart, All people).
+ */
+export function hasChartableRelationships(focus: string, notesByPath: Map<string, SiteNote>): boolean {
+  const note = notesByPath.get(canonicalizeNotePath(focus))
+  return (note?.relationships ?? []).some(
+    (rel) => rel.resolved && !!rel.neighbor && rel.neighbor !== note?.url_path && notesByPath.has(rel.neighbor)
+  )
+}
 
 /** Shape of the lazily-loaded genealogy chunk (type-only; erased at build). */
 type GenealogyModule = {
@@ -101,8 +128,8 @@ export class MbrGenealogyElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback()
     void waitForDom().then(() => {
-      // Only person pages get a genealogy chart.
-      if (window.frontmatter?.['type'] !== 'person') return
+      // Only person and organization pages get the relationship charts.
+      if (!isChartNoteType(window.frontmatter?.['type'])) return
       this._unsubscribeSiteNav = subscribeSiteNav((state) => {
         if (state.data && state.data !== this._siteData) {
           this._siteData = state.data
@@ -132,8 +159,11 @@ export class MbrGenealogyElement extends LitElement {
   }
 
   private _hasChart(): boolean {
-    return !this._failed && this._graph !== null && this._graph.edges.length > 0
+    return !this._failed && this._graph !== null && this._chartable
   }
+
+  /** See `hasChartableRelationships`; recomputed with the graph. */
+  private _chartable = false
 
   private _rebuildGraph(): void {
     const data = this._siteData
@@ -148,6 +178,7 @@ export class MbrGenealogyElement extends LitElement {
       this.depth,
       this.maxNodes
     )
+    this._chartable = hasChartableRelationships(this._graph.focus, this._notesByPath)
     // A depth/max-nodes change after mount: remount the chart with the new graph.
     if (this._controller) {
       this._controller.destroy()
@@ -191,7 +222,7 @@ export class MbrGenealogyElement extends LitElement {
         this._module = await moduleLoader(url)
         await this._mountChart()
       } catch (err) {
-        console.warn('[mbr-genealogy] Failed to load the genealogy chart chunk:', err)
+        console.warn('[mbr-genealogy] Failed to load the relationship chart chunk:', err)
         this._failed = true
       }
     })()
@@ -200,7 +231,7 @@ export class MbrGenealogyElement extends LitElement {
 
   private async _mountChart(): Promise<void> {
     const graph = this._graph
-    if (!this._module || !graph || graph.edges.length === 0 || this._controller) return
+    if (!this._module || !graph || !this._chartable || this._controller) return
     // Make sure the mount container from the current template is in the DOM.
     await this.updateComplete
     const container = this.shadowRoot?.querySelector<HTMLElement>('.gen-mount')
@@ -212,6 +243,9 @@ export class MbrGenealogyElement extends LitElement {
       focusPath: graph.focus,
       resolveUrl,
       navigate: (path: string) => window.location.assign(resolveUrl(path)),
+      graphDepth: getGraphDepth(),
+      loadGraphChunk,
+      fetchPageLinks,
     })
     this._mounted = true
   }
@@ -283,7 +317,7 @@ export class MbrGenealogyElement extends LitElement {
       <div class="gen-notice">
         <p>
           ${one ? 'One' : pairs.length} contradictory ${kind} link${one ? '' : 's'}
-          ${one ? 'was' : 'were'} ignored so this tree could be drawn: ${contradiction}. Fix the
+          ${one ? 'was' : 'were'} ignored so the chart could be drawn: ${contradiction}. Fix the
           relationships in one note of each pair.
         </p>
         <ul>
@@ -303,15 +337,15 @@ export class MbrGenealogyElement extends LitElement {
     if (!this._hasChart()) return nothing
     const dropped = this._graph?.droppedEdges ?? []
     return html`
-      <figure class="gen-figure" role="group" aria-label="Family charts">
-        <figcaption>Family tree</figcaption>
+      <figure class="gen-figure" role="group" aria-label="Relationship charts">
+        <figcaption>Relationships</figcaption>
         ${dropped.length > 0 ? this._renderDroppedNotice(dropped) : nothing}
         <div class="gen-canvas">
           <div class="gen-mount"></div>
           ${this._mounted
             ? nothing
             : html`
-                <div class="gen-loading" role="status" aria-label="Loading family chart">
+                <div class="gen-loading" role="status" aria-label="Loading relationship chart">
                   <span class="gen-spinner" aria-hidden="true"></span>
                 </div>
               `}

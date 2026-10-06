@@ -20,7 +20,7 @@
 import { createChart, handlers } from 'family-chart'
 import type { Data, Datum, TreeDatum } from 'family-chart'
 import familyChartCss from 'family-chart/styles/family-chart.css?inline'
-import { familyGraph, formatLifespan } from '../graph/relationship-graph.js'
+import { familyGraph, formatLifespan, hasFamilyEdges } from '../graph/relationship-graph.js'
 import { DRAG_THRESHOLD_PX } from '../graph/viewport.js'
 import { findParentChildCycle, toFamilyChartData } from './family-chart-data.js'
 import { computeInitialViewBox } from './timeline-layout.js'
@@ -312,6 +312,7 @@ function buildCycleErrorCard(cycle: string[]): HTMLElement {
 export const familyChartType: GenealogyChart = {
   id: 'family-chart',
   label: 'Family chart',
+  isApplicable: (ctx) => hasFamilyEdges(ctx.graph, ctx.registry),
   mount: mountFamilyChart,
 }
 

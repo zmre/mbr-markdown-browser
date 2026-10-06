@@ -93,6 +93,62 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('mbr-mini-graph inline mode and class hooks', () => {
+  async function createInline(extra: (el: MbrMiniGraphElement) => void = () => {}) {
+    const map = chainMap()
+    const element = document.createElement('mbr-mini-graph')
+    element.setAttribute('static-layout', '')
+    element.inline = true
+    element.focusPath = '/a/'
+    element.depth = 2
+    element.fetchLinks = async (path: string) => map[path] ?? null
+    element.isKnownNote = (p) => p in map
+    element.getMeta = (p) => ({ title: `Title ${p}` })
+    element.resolveHref = (p) => p
+    extra(element)
+    document.body.appendChild(element)
+    created.push(element)
+    await settle(element)
+    return element
+  }
+
+  it('renders in place with labels, zoom buttons and the depth stepper — no modal', async () => {
+    const element = await createInline()
+    const root = shadow(element)
+    expect(element.hasAttribute('inline')).toBe(true)
+    expect(root.querySelector('.inline-canvas')).not.toBeNull()
+    expect(root.querySelector('.mini-canvas')).toBeNull()
+    expect(root.querySelector('dialog')).toBeNull()
+    expect(root.querySelectorAll('text.node-label').length).toBe(4)
+    expect(root.querySelector('[aria-label="Zoom in"]')).not.toBeNull()
+    expect(root.querySelector('.depth-value')?.textContent).toBe('2')
+    // The large coordinate space, as in the expanded modal.
+    expect(root.querySelector('svg.graph-svg')?.getAttribute('viewBox')).toBe('0 0 800 600')
+  })
+
+  it('steps depth inline and refetches deeper levels', async () => {
+    const element = await createInline()
+    shadow(element).querySelector<HTMLButtonElement>('[aria-label="Decrease depth"]')!.click()
+    await settle(element)
+    expect(circle(element, '/d/')).toBeNull()
+    expect(circle(element, '/b/')).not.toBeNull()
+  })
+
+  it('applies nodeClass and linkClass', async () => {
+    const element = await createInline((el) => {
+      el.nodeClass = (id) => (id === '/c/' ? 'node-plain' : id === '/b/' ? 'node-org' : undefined)
+      el.linkClass = (source, target) => (source === '/a/' && target === '/c/' ? 'link-plain' : undefined)
+    })
+    expect(circle(element, '/c/')?.classList.contains('node-plain')).toBe(true)
+    expect(circle(element, '/b/')?.classList.contains('node-org')).toBe(true)
+    expect(circle(element, '/a/')?.classList.contains('deg-0')).toBe(true)
+    const plain = shadow(element).querySelector('line[data-source="/a/"][data-target="/c/"]')
+    expect(plain?.classList.contains('link-plain')).toBe(true)
+    const normal = shadow(element).querySelector('line[data-source="/a/"][data-target="/b/"]')
+    expect(normal?.classList.contains('link-plain')).toBe(false)
+  })
+})
+
 describe('mbr-mini-graph rendering', () => {
   it('renders circles with BFS degree classes', async () => {
     const { element } = await createGraph()
