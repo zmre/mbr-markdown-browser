@@ -9003,3 +9003,181 @@ async fn test_chat_block_renders_bubbles_with_transformed_links() {
         "chat styles ship in theme.css"
     );
 }
+
+// ============================================================================
+// Flashcard review (`POST /.mbr/flashcard-review`)
+// ============================================================================
+
+/// A two-card deck: the first card has no history yet, the second has one.
+const DECK_SOURCE: &str = concat!(
+    "---\n",
+    "type: flashcard\n",
+    "---\n",
+    "\n",
+    "Capital of France?\n",
+    ": Paris.\n",
+    "\n",
+    "Capital of Italy?\n",
+    ": Rome.\n",
+    ": ___Review History___\n",
+    "  * 2026-10-01 08:00 - Good\n",
+);
+
+fn review_body(line: u32, expected: &str, rating: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": "deck.md", "line": line, "expected": expected, "rating": rating,
+    })
+}
+
+/// Every `data-mbr-line` on a `<dt>` in `html`, in document order.
+fn dt_lines(html: &str) -> Vec<u32> {
+    html.match_indices("<dt data-mbr-line=\"")
+        .map(|(at, prefix)| {
+            let rest = &html[at + prefix.len()..];
+            rest[..rest.find('"').expect("closing quote")]
+                .parse()
+                .expect("numeric line")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_flashcard_review_disabled_returns_403() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(5, "Capital of France?", "good"),
+    )
+    .await;
+    assert_eq!(resp.status(), 403);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+/// The whole loop the overlay runs: read the term's line from the rendered
+/// `<dt>`, send it back with the file's text for that line, and get a history
+/// entry written under exactly that card.
+#[tokio::test]
+async fn test_flashcard_review_round_trip_from_rendered_dt_lines() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/deck/").await;
+    assert!(
+        html.contains("class=\"flashcard"),
+        "type: flashcard body class"
+    );
+    let lines = dt_lines(&html);
+    assert_eq!(lines, vec![5, 8], "the terms' file lines: {html}");
+
+    // First review of the first card creates its history definition.
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(lines[0], "Capital of France?", "again"),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON");
+    let entry = json["entry"].as_str().expect("entry").to_string();
+    assert!(entry.ends_with(" - Again"), "{entry}");
+    assert_eq!(entry.len(), "2026-10-06 13:45 - Again".len(), "{entry}");
+    assert_eq!(json["inserted_at"], 7);
+    assert_eq!(json["line"], 8);
+    assert_eq!(
+        json["inserted"],
+        serde_json::json!([": ___Review History___", format!("  * {entry}")])
+    );
+    let after_first = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        after_first,
+        DECK_SOURCE.replace(
+            ": Paris.\n",
+            &format!(": Paris.\n: ___Review History___\n  * {entry}\n")
+        )
+    );
+
+    // The second card moved down two lines; the re-rendered page says so, and
+    // a review addressed there lands in its existing history.
+    let html = server.get_text("/deck/").await;
+    assert_eq!(dt_lines(&html), vec![5, 10]);
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(10, "Capital of Italy?", "easy"),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON");
+    let second = json["entry"].as_str().expect("entry").to_string();
+    assert_eq!(
+        json["inserted"],
+        serde_json::json!([format!("  * {second}")])
+    );
+    assert_eq!(json["line"], 14);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{after_first}  * {second}\n")
+    );
+}
+
+#[tokio::test]
+async fn test_flashcard_review_stale_or_wrong_line_returns_409() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for body in [
+        // The term was edited since the page loaded.
+        review_body(5, "Capital of Spain?", "good"),
+        // The line matches but is a definition, not a term.
+        review_body(6, ": Paris.", "good"),
+        // The file is shorter than the client thinks.
+        review_body(99, "Capital of France?", "good"),
+    ] {
+        let resp = edit_post(&server, "/.mbr/flashcard-review", body.clone()).await;
+        assert_eq!(resp.status(), 409, "{body}");
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+#[tokio::test]
+async fn test_flashcard_review_rejects_bad_ratings_and_paths() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // `fail` is read as a synonym for Again, but never accepted as input.
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(5, "Capital of France?", "fail"),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+
+    for path in ["../escape.md", "/etc/passwd", "missing.md"] {
+        let resp = edit_post(
+            &server,
+            "/.mbr/flashcard-review",
+            serde_json::json!({
+                "path": path, "line": 1, "expected": "x", "rating": "good",
+            }),
+        )
+        .await;
+        assert!(
+            resp.status() == 404 || resp.status() == 400,
+            "{path}: {}",
+            resp.status()
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}

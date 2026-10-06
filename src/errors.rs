@@ -339,6 +339,23 @@ pub enum TaskPatchError {
     NotATask { line: u32 },
 }
 
+/// Why [`crate::flashcards::append_review`] refused to record a review.
+///
+/// All three mean the client's picture of the file is stale — the line moved,
+/// changed, or no longer opens a top-level definition-list term — so the
+/// handler answers every one of them with `409 Conflict`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum FlashcardPatchError {
+    #[error("The file has no line {line}")]
+    LineOutOfRange { line: u32 },
+
+    #[error("Line {line} is not what the client last saw; the file changed on disk")]
+    Mismatch { line: u32 },
+
+    #[error("Line {line} does not start a top-level definition-list term")]
+    NotATerm { line: u32 },
+}
+
 /// Errors related to video metadata extraction.
 #[cfg(feature = "media-metadata")]
 #[derive(Debug, Error)]

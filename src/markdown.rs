@@ -48,7 +48,7 @@ pub(crate) fn markdown_options() -> Options {
 const BOM: char = '\u{feff}';
 
 /// Returns `input` without a leading [`BOM`].
-fn strip_bom(input: &str) -> &str {
+pub(crate) fn strip_bom(input: &str) -> &str {
     input.strip_prefix(BOM).unwrap_or(input)
 }
 
@@ -470,7 +470,7 @@ fn transform_rule_attrs(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, HashMap<usiz
 /// checkbox, so prose-only pages — the overwhelming majority — never pay for
 /// the scan. Lookups binary-search rather than counting newlines per marker,
 /// which keeps a document of a thousand tasks from becoming quadratic.
-struct LineIndex {
+pub(crate) struct LineIndex {
     /// Byte offset of every `\n`, ascending.
     newlines: Vec<usize>,
 }
@@ -484,7 +484,7 @@ const ASSUMED_LINE_BYTES: usize = 32;
 const MAX_RESERVED_LINES: usize = 1 << 16;
 
 impl LineIndex {
-    fn build(source: &str) -> Self {
+    pub(crate) fn build(source: &str) -> Self {
         // `match_indices` over a `char` pattern takes the standard library's
         // vectorised byte search, which measured ~5x faster than the obvious
         // `bytes().enumerate().filter(..)` loop (32.5us against 6.4us on a
@@ -497,7 +497,7 @@ impl LineIndex {
     }
 
     /// The 1-based line containing byte `offset`.
-    fn line_of(&self, offset: usize) -> u32 {
+    pub(crate) fn line_of(&self, offset: usize) -> u32 {
         // `partition_point` counts the newlines strictly before `offset`, which
         // is the number of complete lines preceding it.
         let preceding = self.newlines.partition_point(|&newline| newline < offset);

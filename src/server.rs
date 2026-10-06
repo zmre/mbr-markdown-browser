@@ -1358,6 +1358,42 @@ pub struct TaskToggleResponse {
     pub text: String,
 }
 
+/// JSON body for `POST /.mbr/flashcard-review`.
+///
+/// Addressed exactly like [`TaskToggleRequest`]: `line`/`expected` name the
+/// card's **term** line, which the page carries as the `<dt>`'s
+/// `data-mbr-line`.
+#[derive(serde::Deserialize)]
+pub struct FlashcardReviewRequest {
+    /// Repo-relative **filesystem** path of the note (with extension).
+    pub path: String,
+    /// 1-based source line of the definition-list term.
+    pub line: u32,
+    /// The exact current text of that line; the terminator is ignored.
+    pub expected: String,
+    /// `again`, `hard`, `good` or `easy`.
+    pub rating: crate::flashcards::Rating,
+}
+
+/// Response for a successful `POST /.mbr/flashcard-review`.
+///
+/// Everything a client holding the file's lines needs to stay in step without
+/// re-reading it: the entry (for its in-memory history) and where the lines
+/// went (to splice them in and shift every later line number by
+/// `inserted.len()`).
+#[derive(serde::Serialize)]
+pub struct FlashcardReviewResponse {
+    /// The entry as written, e.g. `2026-10-06 13:45 - Good`.
+    pub entry: String,
+    /// 1-based line of the new bullet.
+    pub line: u32,
+    /// 1-based line of the first inserted line.
+    pub inserted_at: u32,
+    /// The inserted lines, without terminators (one, or two when the term's
+    /// `___Review History___` definition was created).
+    pub inserted: Vec<String>,
+}
+
 /// JSON body for `POST /.mbr/create/{*path}`.
 #[derive(serde::Deserialize)]
 pub struct CreateRequest {
@@ -2283,6 +2319,12 @@ impl Server {
             // rest of the write endpoints). Singular `/task`, next to the plural
             // `/tasks` query above.
             .route("/.mbr/task", post(Self::task_toggle_handler))
+            // Flashcard review: appends one history entry under a term (gated
+            // by edit_enabled + auth, like `/task`).
+            .route(
+                "/.mbr/flashcard-review",
+                post(Self::flashcard_review_handler),
+            )
             // File-management endpoints (gated by edit_enabled + auth): create a
             // new file, move/rename with repo-wide link rewrite, create a folder.
             .route(
@@ -3225,17 +3267,9 @@ impl Server {
             Err(err) => return err.into_response(),
         };
 
-        let source = match tokio::fs::read(&md_path).await {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => text,
-                Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "File is not valid UTF-8").into_response();
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to read markdown before task toggle: {e}");
-                return (StatusCode::NOT_FOUND, "File not found").into_response();
-            }
+        let source = match Self::read_markdown_source(&md_path, "task toggle").await {
+            Ok(source) => source,
+            Err(err) => return err.into_response(),
         };
 
         // Local wall clock, matching the naive/local dates `tasks.rs` parses.
@@ -3261,20 +3295,116 @@ impl Server {
             return e.into_response();
         }
 
-        // Live-reload for connected clients, then the task index, which the
-        // watcher would also refresh — but only after its debounce, and the
-        // panel that sent this expects its own next query to see the change.
-        Self::broadcast_change(&config, &md_path, crate::watcher::ChangeEventType::Modified);
-        config.task_index.invalidate_file(
-            &md_path,
-            &crate::watcher::ChangeEventType::Modified,
-            &config.repo,
-            &config.base_dir,
-        );
+        Self::announce_in_place_edit(&config, &md_path);
 
         Json(TaskToggleResponse {
             line: req.line,
             text: patched.text,
+        })
+        .into_response()
+    }
+
+    /// Reads a markdown file a line-level write is about to patch.
+    ///
+    /// Shared by `POST /.mbr/task` and `POST /.mbr/flashcard-review`; `action`
+    /// only names the caller in the log line.
+    async fn read_markdown_source(
+        md_path: &Path,
+        action: &str,
+    ) -> Result<String, (StatusCode, &'static str)> {
+        match tokio::fs::read(md_path).await {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "File is not valid UTF-8")),
+            Err(e) => {
+                tracing::error!("Failed to read markdown before {action}: {e}");
+                Err((StatusCode::NOT_FOUND, "File not found"))
+            }
+        }
+    }
+
+    /// After a line-level write: live-reload for connected clients, then the
+    /// task index, which the watcher would also refresh — but only after its
+    /// debounce, and the client that sent the write expects its own next query
+    /// to see the change. (A flashcard review inserts lines, which moves every
+    /// task below it, so it needs the invalidation as much as a toggle does.)
+    fn announce_in_place_edit(config: &ServerState, md_path: &Path) {
+        Self::broadcast_change(config, md_path, crate::watcher::ChangeEventType::Modified);
+        config.task_index.invalidate_file(
+            md_path,
+            &crate::watcher::ChangeEventType::Modified,
+            &config.repo,
+            &config.base_dir,
+        );
+    }
+
+    /// POST /.mbr/flashcard-review — appends one review to a flashcard's
+    /// history.
+    ///
+    /// ```json
+    /// { "path": "notes/french.md", "line": 12,
+    ///   "expected": "What is the capital of France?", "rating": "good" }
+    /// ```
+    ///
+    /// ```json
+    /// { "entry": "2026-10-06 13:45 - Good", "line": 15,
+    ///   "inserted_at": 14, "inserted": [": ___Review History___", "  * 2026-10-06 13:45 - Good"] }
+    /// ```
+    ///
+    /// Same gate, same `expected` guard and same atomic write as
+    /// [`Self::task_toggle_handler`]; the source surgery is
+    /// [`crate::flashcards::append_review`]. The server stamps the time
+    /// itself, from the same local wall clock as `@done(...)`, so a client
+    /// with a wrong clock cannot back-date a review.
+    ///
+    /// | Status | Cause |
+    /// |--------|-------|
+    /// | `403` / `401` | [`Self::check_edit_access`] |
+    /// | `404` | The path is not an editable markdown file |
+    /// | `400` | Path outside the root, or an unreadable/not-UTF-8 file |
+    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale |
+    /// | `422` | Malformed body, including an unknown rating |
+    /// | `500` | The write failed |
+    pub async fn flashcard_review_handler(
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<FlashcardReviewRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
+        let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
+            Ok(source) => source,
+            Err(err) => return err.into_response(),
+        };
+
+        let now = chrono::Local::now().naive_local();
+        let patch = match crate::flashcards::append_review(
+            &source,
+            req.line,
+            &req.expected,
+            req.rating,
+            now,
+        ) {
+            Ok(patch) => patch,
+            Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+        };
+
+        if let Err(e) = Self::atomic_write_file(&md_path, patch.source.as_bytes()) {
+            tracing::error!("Failed to write flashcard review: {e:?}");
+            return e.into_response();
+        }
+        Self::announce_in_place_edit(&config, &md_path);
+
+        Json(FlashcardReviewResponse {
+            line: patch.entry_line(),
+            entry: patch.entry,
+            inserted_at: patch.inserted_at,
+            inserted: patch.inserted,
         })
         .into_response()
     }
