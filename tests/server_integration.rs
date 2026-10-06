@@ -426,6 +426,44 @@ async fn test_directory_listing() {
     assert_html_contains(&html, "two");
 }
 
+/// Subfolder names in the order a listing page renders them.
+fn listed_subdirs(html: &str) -> Vec<String> {
+    html.split("<h2>Folders</h2>")
+        .nth(1)
+        .and_then(|s| s.split("</section>").next())
+        .unwrap_or_default()
+        .split("<strong>")
+        .skip(1)
+        .filter_map(|s| s.split("</strong>").next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Section pages list subfolders in the sidebar's order — the index note's
+/// title, else the folder name, case-insensitively — not in byte order (which
+/// put every capitalized folder first) or whatever a hash set yielded.
+#[tokio::test]
+async fn test_directory_listing_sorts_subfolders_like_the_sidebar() {
+    let repo = TestRepo::new();
+    for (path, body) in [
+        ("lib/zoo/index.md", "---\ntitle: Aardvarks\n---\n"),
+        ("lib/zoo/y.md", "# y"),
+        ("lib/beta/x.md", "# x"),
+        ("lib/Alpha/x.md", "# x"),
+        ("lib/Gamma/x.md", "# x"),
+        ("lib/delta/x.md", "# x"),
+    ] {
+        repo.create_markdown(path, body);
+    }
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let first = listed_subdirs(&server.get_text("/lib/").await);
+    assert_eq!(first, ["zoo", "Alpha", "beta", "delta", "Gamma"]);
+    // Memoized and deterministic.
+    assert_eq!(listed_subdirs(&server.get_text("/lib/").await), first);
+}
+
 #[tokio::test]
 async fn test_static_file_serving() {
     let repo = TestRepo::new();

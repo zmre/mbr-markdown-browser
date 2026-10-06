@@ -6458,8 +6458,6 @@ impl Server {
         relative_path: &Path,
         config: &ServerState,
     ) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), MbrError> {
-        use serde_json::json;
-
         let root_path = root_path.to_path_buf();
         let dir_path = dir_path.to_path_buf();
         let relative_path = relative_path.to_path_buf();
@@ -6501,8 +6499,11 @@ impl Server {
             // Sort files using configurable sort order
             sort_files(&mut files, &sort);
 
-            // Extract subdirectories
-            let subdirs: Vec<serde_json::Value> = temp_repo
+            // Extract subdirectories. This scan is non-recursive, so a
+            // subfolder's index note is not in `temp_repo`; its frontmatter
+            // (for the sort title) is read straight from disk — one 8 KB read
+            // per subfolder, on the pre-scan path only.
+            let mut subdirs: Vec<serde_json::Value> = temp_repo
                 .queued_folders
                 .pin()
                 .iter()
@@ -6518,15 +6519,21 @@ impl Server {
                         if !url_path.ends_with('/') {
                             url_path.push('/');
                         }
-                        Some(json!({
-                            "name": name,
-                            "url_path": url_path,
-                        }))
+                        let index_fm = Some(abs_path.join(&index_file))
+                            .filter(|p| p.is_file())
+                            .and_then(|p| markdown::extract_metadata_from_file(p).ok())
+                            .map(|m| m.metadata);
+                        Some(crate::sorting::folder_entry(
+                            &name,
+                            url_path,
+                            index_fm.as_ref(),
+                        ))
                     } else {
                         None
                     }
                 })
                 .collect();
+            crate::sorting::sort_folders(&mut subdirs, &sort);
 
             Ok::<_, crate::errors::RepoError>((files, subdirs))
         })
@@ -7013,8 +7020,10 @@ fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std:
     }
 }
 
-/// Builds the deduplicated, name-sorted list of immediate subdirectories of
-/// `dir` from the repo-relative paths of every indexed file.
+/// Builds the deduplicated list of immediate subdirectories of `dir` from the
+/// repo-relative paths of every indexed file, in sidebar order (see
+/// [`crate::sorting::sort_folders`]; `folder_frontmatter` supplies each
+/// folder's index-note title, keyed by folder URL).
 ///
 /// Derived from the file index rather than from a disk walk so it can be
 /// memoized and refreshed by the same invalidation that refreshes the file
@@ -7024,20 +7033,35 @@ fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std:
 fn compute_subdir_entries<'a>(
     file_paths: impl Iterator<Item = &'a Path>,
     dir: &Path,
+    folder_frontmatter: &std::collections::HashMap<String, crate::markdown::SimpleMetadata>,
+    sort: &[SortField],
 ) -> Vec<serde_json::Value> {
-    file_paths
+    let mut entries = file_paths
         .filter_map(|path| immediate_subdir_name(path, dir))
         .map(|name| name.to_string_lossy().into_owned())
         .collect::<std::collections::BTreeSet<String>>()
         .into_iter()
         .map(|name| {
             let url_path = format!("/{}/", crate::url_path::path_to_url(&dir.join(&name)));
-            serde_json::json!({
-                "name": name,
-                "url_path": url_path,
-            })
+            let index_fm = folder_frontmatter.get(&url_path);
+            crate::sorting::folder_entry(&name, url_path, index_fm)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    crate::sorting::sort_folders(&mut entries, sort);
+    entries
+}
+
+/// The index-note frontmatter of `dir`'s immediate subfolders, keyed by
+/// folder URL, for [`compute_subdir_entries`].
+fn subfolder_index_frontmatter<'a>(
+    files: impl Iterator<Item = &'a MarkdownInfo>,
+    dir: &Path,
+    index_file: &str,
+) -> std::collections::HashMap<String, crate::markdown::SimpleMetadata> {
+    crate::sorting::folder_index_frontmatter(
+        files.filter(|info| info.raw_path.parent().and_then(Path::parent) == Some(dir)),
+        index_file,
+    )
 }
 
 /// Returns the sorted markdown-file list for `dir`, memoized per directory.
@@ -7084,6 +7108,11 @@ fn cached_dir_subdirs(
     }
     let markdown_guard = config.repo.markdown_files.pin();
     let other_guard = config.repo.other_files.pin();
+    let folder_frontmatter = subfolder_index_frontmatter(
+        markdown_guard.iter().map(|(_, info)| info),
+        dir,
+        &config.index_file,
+    );
     let computed = Arc::new(compute_subdir_entries(
         markdown_guard
             .iter()
@@ -7094,6 +7123,8 @@ fn cached_dir_subdirs(
                     .filter_map(|(abs_path, _)| abs_path.strip_prefix(root_path).ok()),
             ),
         dir,
+        &folder_frontmatter,
+        &config.sort,
     ));
     if config.repo.is_scan_complete() {
         config
@@ -8400,7 +8431,12 @@ mod tests {
             Path::new("docs/readme.md"),
             Path::new("elsewhere/d.md"),
         ];
-        let got = compute_subdir_entries(paths.into_iter(), Path::new("docs"));
+        let got = compute_subdir_entries(
+            paths.into_iter(),
+            Path::new("docs"),
+            &Default::default(),
+            &[],
+        );
         assert_eq!(got.len(), 2);
         assert_eq!(got[0]["name"], "alpha");
         assert_eq!(got[0]["url_path"], "/docs/alpha/");
@@ -8583,6 +8619,8 @@ mod tests {
                             .filter_map(|(abs, _)| abs.strip_prefix(&root).ok()),
                     ),
                 dir,
+                &Default::default(),
+                &[],
             );
             let got_subdirs: std::collections::BTreeSet<String> = got_subdir_entries
                 .iter()
@@ -8626,6 +8664,8 @@ mod tests {
                         .filter_map(|(abs, _)| abs.strip_prefix(&root).ok()),
                 ),
             Path::new(""),
+            &Default::default(),
+            &[],
         );
         let names: Vec<&str> = entries
             .iter()

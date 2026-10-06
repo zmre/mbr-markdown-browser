@@ -132,6 +132,76 @@ pub fn sort_files(files: &mut [Value], sort_config: &[SortField]) {
     apply_permutation(files, &mut indices);
 }
 
+/// Builds one subfolder entry for a section/home page listing.
+///
+/// `index_frontmatter` is the folder's own index note (`docs/index.md` for
+/// `docs/`), when it has one. Its `title` becomes the entry's `title` and its
+/// frontmatter rides along for custom sort fields — the same two things the
+/// sidebar's `buildFolderTree` attaches to a folder node, which is what lets
+/// [`sort_folders`] order a listing exactly as `sortFolders()` orders the
+/// sidebar. `title` is always present (the folder name when there is no index
+/// title), mirroring `getFolderFieldValue`'s `folder.title ?? folder.name`.
+///
+/// Contact details are filtered out of the attached frontmatter like they are
+/// out of `site.json`: a listing has no use for an index note's phone number.
+pub fn folder_entry(
+    name: &str,
+    url_path: String,
+    index_frontmatter: Option<&crate::markdown::SimpleMetadata>,
+) -> Value {
+    let title = index_frontmatter
+        .and_then(|fm| fm.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or(name);
+    let mut entry = serde_json::json!({
+        "name": name,
+        "url_path": url_path,
+        "title": title,
+    });
+    if let (Some(fm), Some(obj)) = (index_frontmatter, entry.as_object_mut()) {
+        let public: serde_json::Map<String, Value> = fm
+            .iter()
+            .filter(|(k, _)| crate::contact::is_public_frontmatter_key(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        obj.insert("frontmatter".to_string(), Value::Object(public));
+    }
+    entry
+}
+
+/// Sorts subfolder entries (from [`folder_entry`]) the way the sidebar's
+/// `sortFolders()` does, so a section page and the sidebar list folders in the
+/// same order.
+///
+/// Entries are first put in byte order of `name` so ties under the configured
+/// sort resolve the same way on every run — the callers' inputs come from a
+/// concurrent map or a `HashSet`, whose order changes per process.
+pub fn sort_folders(entries: &mut [Value], sort_config: &[SortField]) {
+    fn name(v: &Value) -> &str {
+        v.get("name").and_then(Value::as_str).unwrap_or("")
+    }
+    entries.sort_by(|a, b| name(a).cmp(name(b)));
+    sort_files(entries, sort_config);
+}
+
+/// Frontmatter of every folder's index note, keyed by the folder's URL
+/// (`/docs/`) — the lookup [`folder_entry`] needs, built in one pass.
+pub fn folder_index_frontmatter<'a>(
+    files: impl IntoIterator<Item = &'a crate::repo::MarkdownInfo>,
+    index_file: &str,
+) -> std::collections::HashMap<String, crate::markdown::SimpleMetadata> {
+    files
+        .into_iter()
+        .filter(|info| {
+            info.raw_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f == index_file)
+        })
+        .filter_map(|info| Some((info.url_path.clone(), info.frontmatter.clone()?)))
+        .collect()
+}
+
 /// Applies a permutation to a slice in-place using cycle-chase algorithm.
 ///
 /// After this function, `data[i]` will contain the element that was originally
@@ -270,6 +340,74 @@ mod tests {
             "modified": 2000,
             "frontmatter": frontmatter
         })
+    }
+
+    fn folder_names(entries: &[Value]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect()
+    }
+
+    /// Mirrors `sortFolders()` in components/src/sorting.ts: index-note title
+    /// else folder name, case-insensitive, deterministic on ties.
+    #[test]
+    fn test_sort_folders_matches_sidebar_order() {
+        let titled: crate::markdown::SimpleMetadata =
+            [("title".to_string(), json!("Aardvark Studies"))].into();
+        let mut entries = vec![
+            folder_entry("zoo", "/zoo/".into(), Some(&titled)),
+            folder_entry("beta", "/beta/".into(), None),
+            folder_entry("Alpha", "/Alpha/".into(), None),
+            folder_entry("alpha", "/alpha/".into(), None),
+            folder_entry("Gamma", "/Gamma/".into(), None),
+        ];
+        sort_folders(&mut entries, &crate::config::default_sort_config());
+        // "zoo" sorts as its index title; Alpha/alpha tie case-insensitively
+        // and fall back to byte order.
+        assert_eq!(
+            folder_names(&entries),
+            ["zoo", "Alpha", "alpha", "beta", "Gamma"]
+        );
+        assert_eq!(entries[0]["title"], "Aardvark Studies");
+        assert_eq!(entries[1]["title"], "Alpha");
+    }
+
+    #[test]
+    fn test_sort_folders_is_input_order_independent() {
+        let make = |names: &[&str]| {
+            let mut v: Vec<Value> = names
+                .iter()
+                .map(|n| folder_entry(n, format!("/{n}/"), None))
+                .collect();
+            sort_folders(&mut v, &crate::config::default_sort_config());
+            folder_names(&v)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(make(&["b", "B", "a", "A"]), make(&["A", "a", "B", "b"]));
+    }
+
+    #[test]
+    fn test_folder_entry_custom_field_and_private_details() {
+        let fm: crate::markdown::SimpleMetadata = [
+            ("order".to_string(), json!(2)),
+            ("phones.work".to_string(), json!("555")),
+        ]
+        .into();
+        let entry = folder_entry("x", "/x/".into(), Some(&fm));
+        assert_eq!(entry["frontmatter"]["order"], 2);
+        assert!(entry["frontmatter"].get("phones.work").is_none());
+
+        let mut entries = vec![folder_entry("a", "/a/".into(), None), entry];
+        let by_order = [SortField {
+            field: "order".into(),
+            order: "asc".into(),
+            compare: "numeric".into(),
+        }];
+        sort_folders(&mut entries, &by_order);
+        assert_eq!(folder_names(&entries), ["x", "a"], "missing sorts last");
     }
 
     #[test]

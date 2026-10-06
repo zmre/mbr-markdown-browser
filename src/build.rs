@@ -1327,6 +1327,12 @@ impl Builder {
         let dir_index = Arc::new(build_dir_children_index(
             self.repo.markdown_files.pin().iter().map(|(_, info)| info),
         ));
+        // Each folder's index-note frontmatter, keyed by folder URL, so a
+        // section page can order its subfolders the way the sidebar does.
+        let folder_frontmatter = crate::sorting::folder_index_frontmatter(
+            self.repo.markdown_files.pin().iter().map(|(_, info)| info),
+            &self.config.index_file,
+        );
 
         // Clone Tera once before entering the rayon pool to avoid per-file lock contention
         let tera_snapshot = self.templates.tera_clone();
@@ -1354,7 +1360,12 @@ impl Builder {
                 if error.is_set() {
                     return;
                 }
-                match self.render_directory_page_sync(dir, &dir_index, &tera_snapshot) {
+                match self.render_directory_page_sync(
+                    dir,
+                    &dir_index,
+                    &folder_frontmatter,
+                    &tera_snapshot,
+                ) {
                     Ok(()) => {
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         if done.is_multiple_of(100) || done == count {
@@ -1381,6 +1392,7 @@ impl Builder {
         &self,
         relative_dir: &Path,
         dir_index: &DirChildrenIndex,
+        folder_frontmatter: &HashMap<String, crate::markdown::SimpleMetadata>,
         tera: &tera::Tera,
     ) -> Result<(), BuildError> {
         let is_root = relative_dir.as_os_str().is_empty();
@@ -1459,8 +1471,10 @@ impl Builder {
 
         context.insert("files".to_string(), serde_json::Value::Array(files));
 
-        // Convert subdirs to JSON array with name and relative url_path
-        let subdirs_json: Vec<serde_json::Value> = dir_subdirs
+        // Subfolder entries with relative url_path, in sidebar order. The
+        // index is a `HashSet`, so without the sort this order changed on every
+        // build.
+        let mut subdirs_json: Vec<serde_json::Value> = dir_subdirs
             .iter()
             .map(|name| {
                 let abs_url_path = if is_root {
@@ -1468,12 +1482,14 @@ impl Builder {
                 } else {
                     format!("{}{}/", dir_prefix, name)
                 };
-                serde_json::json!({
-                    "name": name,
-                    "url_path": make_relative_url(&abs_url_path, depth)
-                })
+                crate::sorting::folder_entry(
+                    name,
+                    make_relative_url(&abs_url_path, depth),
+                    folder_frontmatter.get(&abs_url_path),
+                )
             })
             .collect();
+        crate::sorting::sort_folders(&mut subdirs_json, &self.config.sort);
         context.insert(
             "subdirs".to_string(),
             serde_json::Value::Array(subdirs_json),

@@ -118,6 +118,36 @@ async fn test_build_embeds_bare_giphy_url_without_network() {
     );
 }
 
+/// Section pages list subfolders in the sidebar's order (index title else
+/// name, case-insensitive). They used to come straight out of a `HashSet`, so
+/// the order changed from one build of an unchanged repo to the next.
+#[tokio::test]
+async fn test_build_section_pages_sort_subfolders_like_the_sidebar() {
+    let repo = TestRepo::new();
+    for (path, body) in [
+        ("lib/zoo/index.md", "---\ntitle: Aardvarks\n---\n"),
+        ("lib/zoo/y.md", "# y"),
+        ("lib/beta/x.md", "# x"),
+        ("lib/Alpha/x.md", "# x"),
+        ("lib/Gamma/x.md", "# x"),
+        ("lib/delta/x.md", "# x"),
+    ] {
+        repo.create_markdown(path, body);
+    }
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("lib").join("index.html")).unwrap();
+    let listed: Vec<&str> = html
+        .split("<h2>Folders</h2>")
+        .nth(1)
+        .and_then(|s| s.split("</section>").next())
+        .unwrap_or_default()
+        .split("<strong>")
+        .skip(1)
+        .filter_map(|s| s.split("</strong>").next())
+        .collect();
+    assert_eq!(listed, ["zoo", "Alpha", "beta", "delta", "Gamma"]);
+}
+
 #[tokio::test]
 async fn test_build_creates_section_pages() {
     let repo = TestRepo::new();
