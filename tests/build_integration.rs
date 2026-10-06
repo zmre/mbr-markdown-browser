@@ -1827,26 +1827,29 @@ async fn test_build_site_json_has_relationships() {
 async fn test_build_person_infobox_and_aliases() {
     let (_guard, output) = build_genealogy().await;
 
-    // Mary's page renders the optional person infobox (portrait / birthplace /
-    // aliases). The infobox lives inside `data-pagefind-body` so its text is
-    // also indexed for static search.
+    // Mary's page renders the contact card (portrait / birthplace / aliases).
+    // The card lives inside `data-pagefind-body` so its text is also indexed
+    // for static search.
     let mary_html = fs::read_to_string(output.join("people").join("mary").join("index.html"))
         .expect("mary index.html");
-    // The portrait <img> element (distinct from the `.mbr-person-portrait` CSS
-    // rule in the scoped style block) proves the image field rendered.
+    // The root-relative portrait is relativized for the static page's depth,
+    // like every other link on it (`/` is entity-escaped by Tera).
     assert!(
-        mary_html.contains(r#"<img class="mbr-person-portrait""#),
-        "Mary's page should render the portrait img element"
+        mary_html.contains(
+            r#"<img class="mbr-contact-card-avatar" src="..&#x2F;..&#x2F;people&#x2F;mary.jpg""#
+        ),
+        "Mary's page should render the portrait img element: {mary_html}"
     );
     assert!(
         mary_html.contains("Cheyenne, WY"),
         "Mary's page should show her birthplace"
     );
-    // "Also known as ..." text is emitted only by the infobox alias line.
     assert!(
-        mary_html.contains("Also known as Mary Doe"),
+        mary_html.contains("<span>aka Mary Doe</span>"),
         "Mary's page should list her alias (maiden/married name)"
     );
+    // Static builds leave the backlink count to the browser.
+    assert!(mary_html.contains("<mbr-contact-backlinks></mbr-contact-backlinks>"));
 
     // Mary's site.json frontmatter carries the `aliases` array verbatim.
     let site: serde_json::Value =
@@ -1914,6 +1917,50 @@ async fn test_build_site_json_omits_contact_details() {
 
     let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
     assert!(html.contains("jane@abc.example"));
+}
+
+/// A relative `image` is written relative to the note's folder, but the page
+/// is served one level deeper (`/people/jane/`); the card must rewrite it the
+/// way body images are, or the portrait 404s. Also: a wikilinked company links
+/// to the organization note with a page-relative URL.
+#[tokio::test]
+async fn test_build_contact_card_relative_image_and_company_link() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: person\ntitle: Jane\nimage: images/jane.jpg\ncompany: \"[[Acme Corp]]\"\n---\nHi.\n",
+    );
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\nCo.\n",
+    );
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
+    assert!(
+        html.contains(r#"src="..&#x2F;images&#x2F;jane.jpg""#),
+        "portrait must resolve from /people/jane/: {html}"
+    );
+    assert!(
+        html.contains(r#"<a href="..&#x2F;..&#x2F;orgs&#x2F;acme&#x2F;">Acme Corp</a>"#),
+        "company link: {html}"
+    );
+
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr").join("site.json")).unwrap())
+            .unwrap();
+    let files = site["markdown_files"].as_array().unwrap();
+    let jane = files
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .unwrap();
+    let employer = jane["relationships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["predicate"] == "employer")
+        .expect("implied employer edge in site.json");
+    assert_eq!(employer["neighbor"], "/orgs/acme/");
+    assert_eq!(employer["derived"], true);
 }
 
 #[tokio::test]

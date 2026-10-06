@@ -380,10 +380,20 @@ async fn main() -> Result<(), MbrError> {
         let templates =
             templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
                 .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
+        // A contact note still gets its card; with no repository there is no
+        // relationship index to link `company` through, and no backlinks.
+        let mut extra_context = std::collections::HashMap::new();
+        mbr::page_context::insert_contact(
+            &mut extra_context,
+            render_result.contact,
+            &[],
+            None,
+            &mbr::page_context::UrlMode::Absolute,
+        );
         let html_output = templates.render_markdown(
             &render_result.html,
             render_result.frontmatter,
-            std::collections::HashMap::new(),
+            extra_context,
         )?;
         println!("{}", html_output);
     } else if args.server {

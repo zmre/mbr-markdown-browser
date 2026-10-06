@@ -1165,6 +1165,7 @@ impl Builder {
         let outbound_links = render_result.outbound_links;
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
+        let contact = render_result.contact;
         let readability_counts = crate::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -1218,7 +1219,7 @@ impl Builder {
 
         // Build the extra context (navigation, TOC, readability, chrome) via
         // the shared builder; static builds relativize URLs to the page depth.
-        let extra_context = page_context::markdown_extra_context(
+        let mut extra_context = page_context::markdown_extra_context(
             &page_context::MarkdownPageParams {
                 breadcrumb_path: std::path::Path::new(&info.url_path),
                 headings: &headings,
@@ -1249,6 +1250,23 @@ impl Builder {
             },
             &page_context::UrlMode::RelativeToDepth(depth),
         );
+        // The backlink count is left to the browser (from this page's own
+        // links.json), since the inbound side is only inverted after every
+        // page has rendered.
+        if contact.is_some() {
+            let relationships = if self.config.relationship_tracking {
+                self.repo.relationship_index.get(&info.url_path)
+            } else {
+                Vec::new()
+            };
+            page_context::insert_contact(
+                &mut extra_context,
+                contact,
+                &relationships,
+                None,
+                &page_context::UrlMode::RelativeToDepth(depth),
+            );
+        }
 
         // Render through template (lock-free — uses pre-cloned Tera)
         let html_output =

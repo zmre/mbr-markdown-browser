@@ -6296,6 +6296,7 @@ impl Server {
         let outbound_links = render_result.outbound_links;
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
+        let contact = render_result.contact;
         let readability_counts = crate::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -6386,7 +6387,7 @@ impl Server {
 
         // Build the extra context (navigation, TOC, readability, chrome) via
         // the shared builder; server mode uses absolute URLs.
-        let extra_context = page_context::markdown_extra_context(
+        let mut extra_context = page_context::markdown_extra_context(
             &page_context::MarkdownPageParams {
                 breadcrumb_path: &url_path_buf,
                 headings: &headings,
@@ -6412,6 +6413,24 @@ impl Server {
             },
             &page_context::UrlMode::Absolute,
         );
+        if contact.is_some() {
+            let relationships = if config.relationship_tracking {
+                config.repo.relationship_index.get(&current_url)
+            } else {
+                Vec::new()
+            };
+            // A hash hit once the inbound index is built; until then (and with
+            // link tracking off) the card falls back to the lazy chip.
+            let backlinks = (config.link_tracking && config.inbound_index.is_ready())
+                .then(|| config.inbound_index.source_count(&current_url));
+            page_context::insert_contact(
+                &mut extra_context,
+                contact,
+                &relationships,
+                backlinks,
+                &page_context::UrlMode::Absolute,
+            );
+        }
 
         let full_html_output = config
             .templates

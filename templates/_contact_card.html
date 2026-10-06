@@ -1,0 +1,43 @@
+{# Contact card: the page header of a `type: person` / `type: organization` note.
+
+   Driven by `contact`, which the renderer builds from the RAW frontmatter
+   (`src/contact.rs`) — the flat frontmatter variables have already lost the
+   list forms of `phones`, `emails`, labeled `aliases` and friends. Undefined on
+   every other page, so this partial renders nothing there.
+
+   Every `href` comes from `contact.*.href`, which Rust only ever sets to a
+   mailto:/tel:/http(s) URL; nothing here builds a link from raw frontmatter.
+   Values are autoescaped like the rest of the template.
+
+   Headline: the card's <h1> stands in for the generated one (`index.html`
+   suppresses its own for contacts), and is omitted when the markdown body
+   starts with its own H1 so a page never shows two. A legacy `.mbr/index.html`
+   that still includes `_person_infobox.html` keeps rendering its own <h1>;
+   that partial sets `mbr_contact_card_no_headline` before including this one.
+
+   Avoid <dl> here: theme.css turns `main dl` into a click-to-reveal FAQ. #}
+{% if contact %}
+{# `default` only fills *undefined* values and `display_name` is null when
+   absent, hence the explicit chain. #}
+{% if contact.display_name %}{% set mbr_card_name = contact.display_name %}{% elif title %}{% set mbr_card_name = title %}{% else %}{% set mbr_card_name = "" %}{% endif %}
+<header class="mbr-contact-card" data-kind="{{ contact.kind }}"{% if contact.gender %} data-gender="{{ contact.gender | lower }}"{% endif %}>
+  <div class="mbr-contact-card-identity">
+    {% if contact.image %}<img class="mbr-contact-card-avatar" src="{{ contact.image }}" alt="{{ mbr_card_name }}" loading="lazy" />{% else %}<span class="mbr-contact-card-avatar mbr-contact-card-avatar-default" aria-hidden="true">{% if contact.kind == "organization" %}<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v16"/><path d="M15 10h4a1 1 0 0 1 1 1v10"/><path d="M2.5 21h19"/><path d="M8 8h3M8 12h3M8 16h3M17.5 14v.01M17.5 17.5v.01"/></svg>{% else %}<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>{% endif %}</span>{% endif %}
+    <div class="mbr-contact-card-heading">
+      {% if mbr_card_name and not has_h1 and not mbr_contact_card_no_headline %}<h1 class="mbr-contact-card-name">{{ mbr_card_name }}</h1>{% endif %}
+      {% if contact.job_title or contact.department or contact.company %}<p class="mbr-contact-card-role">{% if contact.job_title %}<span>{{ contact.job_title }}</span>{% endif %}{% if contact.department %}<span>{{ contact.department }}</span>{% endif %}{% if contact.company %}<span>{% if contact.company.url %}<a href="{{ contact.company.url }}">{{ contact.company.name }}</a>{% else %}{{ contact.company.name }}{% endif %}</span>{% endif %}</p>{% endif %}
+      {% if contact.alias_phrases %}<p class="mbr-contact-card-aliases">{% for phrase in contact.alias_phrases %}<span>{{ phrase }}</span>{% endfor %}</p>{% endif %}
+      {% if contact_backlinks is defined %}{% if contact_backlinks > 0 %}<mbr-contact-backlinks count="{{ contact_backlinks }}"><button type="button" class="mbr-contact-card-chip">Linked from {{ contact_backlinks }} note{% if contact_backlinks != 1 %}s{% endif %}</button></mbr-contact-backlinks>{% endif %}{% else %}<mbr-contact-backlinks></mbr-contact-backlinks>{% endif %}
+    </div>
+  </div>
+  {% if contact.phones or contact.emails or contact.urls or contact.social or contact.im or contact.addresses or contact.dates or contact.places %}
+  <div class="mbr-contact-card-sections">
+    {% if contact.phones %}<section class="mbr-contact-card-section" aria-label="Phone"><p class="mbr-contact-card-section-title">Phone</p><ul>{% for item in contact.phones %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
+    {% if contact.emails %}<section class="mbr-contact-card-section" aria-label="Email"><p class="mbr-contact-card-section-title">Email</p><ul>{% for item in contact.emails %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
+    {% if contact.urls or contact.social or contact.im %}<section class="mbr-contact-card-section" aria-label="Web"><p class="mbr-contact-card-section-title">Web</p><ul>{% for item in contact.urls %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}" rel="noopener noreferrer">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}{% for item in contact.social %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}" rel="noopener noreferrer">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}{% for item in contact.im %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}" rel="noopener noreferrer">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
+    {% if contact.addresses %}<section class="mbr-contact-card-section" aria-label="Address"><p class="mbr-contact-card-section-title">Address</p><ul>{% for item in contact.addresses %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}<address>{% for line in item.lines %}{{ line }}{% if not loop.last %}<br />{% endif %}{% endfor %}</address></li>{% endfor %}</ul></section>{% endif %}
+    {% if contact.dates or contact.places %}<section class="mbr-contact-card-section" aria-label="Dates"><p class="mbr-contact-card-section-title">Dates</p><ul>{% for item in contact.dates %}<li><span class="mbr-contact-card-label">{{ item.label_display }}</span>{% if item.datetime %}<time datetime="{{ item.datetime }}">{{ item.display }}</time>{% else %}<span>{{ item.display }}</span>{% endif %}{% if item.place %}<span class="mbr-contact-card-place">{{ item.place }}</span>{% endif %}</li>{% endfor %}{% for item in contact.places %}<li><span class="mbr-contact-card-label">{{ item.label_display }}</span><span class="mbr-contact-card-place">{{ item.value }}</span></li>{% endfor %}</ul></section>{% endif %}
+  </div>
+  {% endif %}
+</header>
+{% endif %}

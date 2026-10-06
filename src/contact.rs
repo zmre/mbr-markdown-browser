@@ -161,6 +161,16 @@ impl PartialDate {
         }
     }
 
+    /// The HTML `<time datetime>` spelling: like [`Self::iso`], except that a
+    /// yearless date is `MM-DD` (HTML's "yearless date string"), not vCard's
+    /// `--MM-DD`.
+    pub fn html_datetime(&self) -> String {
+        match *self {
+            Self::MonthDay { month, day } => format!("{month:02}-{day:02}"),
+            other => other.iso(),
+        }
+    }
+
     /// Canonical machine form: ISO 8601 for dated forms, `--MM-DD` (vCard) for
     /// a yearless one. This is what `site.json` carries.
     pub fn iso(&self) -> String {
@@ -300,6 +310,11 @@ pub struct LabeledDate {
     pub value: String,
     /// `PartialDate::display` when parseable, else `raw`.
     pub display: String,
+    /// A valid HTML `<time datetime>` value (`PartialDate::html_datetime`), or
+    /// `None` for unparseable text.
+    pub datetime: Option<String>,
+    /// `born_place` on the birthday, `died_place` on the death date.
+    pub place: Option<String>,
     #[serde(skip)]
     pub date: Option<PartialDate>,
 }
@@ -339,6 +354,9 @@ pub struct Contact {
     /// Well-known labels first (birthday, death, anniversary), then authored order.
     pub dates: Vec<LabeledDate>,
     pub born_place: Option<String>,
+    /// Places whose date is unknown (`born_place` with no birthday), shown as
+    /// their own lines in the Dates section.
+    pub places: Vec<Labeled>,
     pub died_place: Option<String>,
     pub problems: Vec<ContactProblem>,
 }
@@ -422,7 +440,9 @@ impl Contact {
             .into_iter()
             .filter_map(|(label, value)| parse_address(label, &value, &mut problems))
             .collect();
-        let dates = parse_dates(fm, Some(&mut problems));
+        let mut dates = parse_dates(fm, Some(&mut problems));
+        let (born_place, died_place) = (text("born_place"), text("died_place"));
+        let places = attach_places(&mut dates, born_place.as_ref(), died_place.as_ref());
 
         Self {
             kind,
@@ -442,8 +462,9 @@ impl Contact {
             im,
             addresses,
             dates,
-            born_place: text("born_place"),
-            died_place: text("died_place"),
+            born_place,
+            died_place,
+            places,
             problems,
         }
     }
@@ -806,10 +827,45 @@ fn labeled_date(label: String, raw: String) -> LabeledDate {
         label_display: humanize_label(&label),
         value: date.map(|d| d.iso()).unwrap_or_else(|| raw.clone()),
         display: date.map(|d| d.display()).unwrap_or_else(|| raw.clone()),
+        datetime: date.map(|d| d.html_datetime()),
+        place: None,
         label,
         raw,
         date,
     }
+}
+
+/// Hangs `born_place`/`died_place` on the birthday/death dates. A place with
+/// no matching date is returned as a standalone entry ("Born: Boulder, CO").
+fn attach_places(
+    dates: &mut [LabeledDate],
+    born_place: Option<&String>,
+    died_place: Option<&String>,
+) -> Vec<Labeled> {
+    [
+        ("birthday", born_place, "Born"),
+        ("death", died_place, "Died"),
+    ]
+    .into_iter()
+    .filter_map(|(label, place, shown)| {
+        let place = place?;
+        match dates
+            .iter_mut()
+            .find(|d| d.label.eq_ignore_ascii_case(label))
+        {
+            Some(date) => {
+                date.place = Some(place.clone());
+                None
+            }
+            None => Some(Labeled {
+                label: Some(shown.to_lowercase()),
+                label_display: Some(shown.to_string()),
+                value: place.clone(),
+                href: None,
+            }),
+        }
+    })
+    .collect()
 }
 
 /// Display form of a free-text label: `home_fax` → "Home fax", well-known
@@ -857,11 +913,7 @@ fn href_for(kind: HrefKind, value: &str) -> Option<String> {
             && !v.contains(char::is_whitespace)
             && !v.contains([':', '/', '?', '#', '<', '>', '"']))
         .then(|| format!("mailto:{v}")),
-        HrefKind::Phone => {
-            let digits: String = v.chars().filter(char::is_ascii_digit).collect();
-            let plus = if v.starts_with('+') { "+" } else { "" };
-            (digits.len() >= 3).then(|| format!("tel:{plus}{digits}"))
-        }
+        HrefKind::Phone => tel_href(v),
         HrefKind::Web => {
             let lower = v.to_ascii_lowercase();
             if v.contains(char::is_whitespace) {
@@ -875,6 +927,58 @@ fn href_for(kind: HrefKind, value: &str) -> Option<String> {
             }
         }
     }
+}
+
+/// A `tel:` URI for a phone number as people write one, or `None` when the
+/// value is not a number.
+///
+/// Spaces, dots, parentheses and dashes are layout and are dropped; a leading
+/// `+`, the digits, and the dial-string pause/wait characters `,` `;` `p` `w`
+/// are kept. A trailing extension written `ext. 12`, `extension 12` or `x12`
+/// becomes the RFC 3966 `;ext=12` parameter rather than being glued onto the
+/// number. Any other letter means this is not a dialable number ("ask for
+/// Pam"), so no link is made — the card still shows the text as authored.
+fn tel_href(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    let (number, extension) = split_extension(&lower);
+    let mut out = String::with_capacity(number.len());
+    let mut digits = 0usize;
+    for (i, c) in number.chars().enumerate() {
+        match c {
+            '+' if i == 0 => out.push('+'),
+            '0'..='9' => {
+                digits += 1;
+                out.push(c);
+            }
+            ',' | ';' | 'p' | 'w' if digits > 0 => out.push(c),
+            ' ' | '.' | '(' | ')' | '-' | '\u{a0}' => {}
+            _ => return None,
+        }
+    }
+    let ext = match extension {
+        Some(ext) if !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_digit()) => {
+            format!(";ext={ext}")
+        }
+        Some(_) => return None,
+        None => String::new(),
+    };
+    (digits >= 3).then(|| format!("tel:{out}{ext}"))
+}
+
+/// Splits `"303 555 0100 ext. 12"` into the number and `"12"`. Recognises
+/// `extension`, `ext`, `ext.` and `x`, each optionally followed by spaces.
+fn split_extension(lower: &str) -> (&str, Option<String>) {
+    ["extension", "ext.", "ext", "x"]
+        .iter()
+        .find_map(|marker| {
+            let at = lower.rfind(marker)?;
+            let rest: String = lower[at + marker.len()..]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            Some((lower[..at].trim_end(), Some(rest)))
+        })
+        .unwrap_or((lower, None))
 }
 
 /// The frontmatter simplifier's contact hook. Called once per note on the
@@ -1229,6 +1333,48 @@ mod tests {
         );
         assert!(c.emails.iter().all(|e| e.href.is_none()));
         assert_eq!(c.phones[0].href, None);
+    }
+
+    #[test]
+    fn tel_hrefs_strip_layout_and_keep_dial_characters() {
+        let cases = [
+            ("+1 (303) 555-0100 ext. 12", Some("tel:+13035550100;ext=12")),
+            ("+1 303 555 0100", Some("tel:+13035550100")),
+            ("303.555.0100", Some("tel:3035550100")),
+            ("303-555-0100,,42", Some("tel:3035550100,,42")),
+            ("555 0100;123", Some("tel:5550100;123")),
+            ("555 0100p12", Some("tel:5550100p12")),
+            ("555 0100 W 9", Some("tel:5550100w9")),
+            ("555 0100 x7", Some("tel:5550100;ext=7")),
+            ("555 0100 Extension 7", Some("tel:5550100;ext=7")),
+            ("Ask for Pam 555 0100", None),
+            ("call me", None),
+            ("12", None),
+            ("555 0100 ext. twelve", None),
+            ("javascript:alert(1)", None),
+        ];
+        for (input, want) in cases {
+            assert_eq!(tel_href(input).as_deref(), want, "{input:?}");
+        }
+        // The display text is never rewritten.
+        let c = contact("type: person\nphones:\n  work: \"+1 (303) 555-0100 ext. 12\"\n");
+        assert_eq!(c.phones[0].value, "+1 (303) 555-0100 ext. 12");
+        assert_eq!(c.phones[0].href.as_deref(), Some("tel:+13035550100;ext=12"));
+    }
+
+    #[test]
+    fn social_handles_stay_text_and_urls_link() {
+        let c = contact(
+            "type: person\nsocial:\n  twitter: \"@jdoe\"\n  mastodon: https://example.social/@jd\nurls:\n  homepage: \"javascript:alert(document.cookie)\"\nemails:\n  work: jane@abc.example\n",
+        );
+        assert_eq!(c.social[0].value, "@jdoe");
+        assert_eq!(c.social[0].href, None, "no guessed URL templates");
+        assert_eq!(
+            c.social[1].href.as_deref(),
+            Some("https://example.social/@jd")
+        );
+        assert_eq!(c.urls[0].href, None);
+        assert_eq!(c.emails[0].href.as_deref(), Some("mailto:jane@abc.example"));
     }
 
     // ----- addresses -----

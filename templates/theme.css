@@ -1668,6 +1668,176 @@ main dl > dd:focus-within ~ dt ~ dd {
   }
 }
 
+/* ==================== Contact card ====================
+ *
+ * The page header of `type: person` / `type: organization` notes
+ * (`_contact_card.html`). Pico variables only, so it follows every theme and
+ * both color schemes; no fixed widths, so it reflows down to a phone.
+ *
+ * Section titles are <p>, not <h2>: `<mbr-heading-enhancer>` gives every
+ * `main` heading a permalink, and "Phone" is not a place anyone links to. */
+
+.mbr-contact-card {
+  --mbr-contact-avatar-size: 5.5rem;
+  margin: 0 0 var(--pico-block-spacing-vertical, 1.5rem);
+  padding: var(--pico-spacing, 1rem) calc(var(--pico-spacing, 1rem) * 1.25);
+  border: 1px solid var(--pico-muted-border-color, #e0e0e0);
+  border-radius: var(--pico-border-radius, 0.5rem);
+  background: var(--pico-card-background-color, transparent);
+  box-shadow: var(--pico-card-box-shadow, none);
+}
+
+.mbr-contact-card-identity {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--pico-spacing, 1rem) * 1.25);
+}
+
+.mbr-contact-card-avatar {
+  flex: none;
+  width: var(--mbr-contact-avatar-size);
+  height: var(--mbr-contact-avatar-size);
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--pico-secondary-background, #eee);
+}
+
+.mbr-contact-card[data-kind="organization"] .mbr-contact-card-avatar {
+  border-radius: var(--pico-border-radius, 0.5rem);
+}
+
+.mbr-contact-card-avatar-default {
+  display: inline-flex;
+  padding: calc(var(--mbr-contact-avatar-size) * 0.18);
+  color: var(--pico-secondary-inverse, #fff);
+  background: var(--pico-secondary, #6c757d);
+}
+
+/* The genealogy tint the old infobox carried, kept subtle and theme-relative. */
+.mbr-contact-card[data-gender="female"] .mbr-contact-card-avatar-default {
+  background: color-mix(in srgb, var(--pico-secondary, #6c757d) 45%, #c2477a);
+}
+
+.mbr-contact-card[data-gender="male"] .mbr-contact-card-avatar-default {
+  background: color-mix(in srgb, var(--pico-secondary, #6c757d) 45%, #2f6fb5);
+}
+
+.mbr-contact-card-heading {
+  min-width: 0;
+}
+
+.mbr-contact-card-heading > * {
+  margin: 0;
+}
+
+.mbr-contact-card-heading > * + * {
+  margin-top: 0.25rem;
+}
+
+.mbr-contact-card-name {
+  overflow-wrap: anywhere;
+}
+
+.mbr-contact-card-role span + span::before,
+.mbr-contact-card-aliases span + span::before {
+  content: " · ";
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-aliases {
+  font-style: italic;
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-chip {
+  display: inline-block;
+  width: auto;
+  margin: 0.25rem 0 0;
+  padding: 0.15rem 0.7rem;
+  font-size: 0.85rem;
+  border-radius: 999px;
+  --pico-background-color: transparent;
+  --pico-color: var(--pico-primary, inherit);
+  --pico-border-color: var(--pico-primary-border, currentColor);
+}
+
+.mbr-contact-card-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--pico-spacing, 1rem) calc(var(--pico-spacing, 1rem) * 1.5);
+  margin-top: var(--pico-spacing, 1rem);
+  padding-top: var(--pico-spacing, 1rem);
+  border-top: 1px solid var(--pico-muted-border-color, #e0e0e0);
+}
+
+/* Pico gives every <section> a block margin; the grid gap already spaces these. */
+.mbr-contact-card-section {
+  margin: 0;
+}
+
+.mbr-contact-card-section-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-section ul {
+  margin: 0;
+  padding: 0;
+}
+
+.mbr-contact-card-section li {
+  list-style: none;
+  margin: 0 0 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.mbr-contact-card-section address {
+  margin: 0;
+  font-style: normal;
+}
+
+.mbr-contact-card-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-place::before {
+  content: " — ";
+  color: var(--pico-muted-color, #666);
+}
+
+/* A place listed on its own (no date known) needs no separator. */
+.mbr-contact-card-label + .mbr-contact-card-place::before {
+  content: none;
+}
+
+@media (max-width: 576px) {
+  .mbr-contact-card {
+    --mbr-contact-avatar-size: 4rem;
+  }
+
+  .mbr-contact-card-identity {
+    align-items: flex-start;
+  }
+}
+
+@media print {
+  .mbr-contact-card {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+
+  /* An interactive "open the info panel" control means nothing on paper. */
+  mbr-contact-backlinks {
+    display: none;
+  }
+}
+
 /* ==================== Print Styles ==================== */
 
 @media print {

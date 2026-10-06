@@ -19,6 +19,8 @@ export * from './mbr-heading-enhancer.ts';
 export * from './nav-title.ts';
 export * from './mbr-footnote-preview.ts';
 export * from './mbr-genealogy.ts';
+// Contact card "Linked from N notes" chip (light DOM, no Lit).
+export * from './mbr-contact-backlinks.ts';
 // Trigger only — the two-pane panel lives in the lazy mbr-tasks.min.js chunk.
 export * from './mbr-tasks.ts';
 // Trigger, markers and popover; the panel and form live in mbr-review.min.js.

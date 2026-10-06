@@ -230,6 +230,14 @@ export class MbrInfoElement extends LitElement {
     }
   }
 
+  /**
+   * Opens the panel. Public so in-page controls (the contact card's
+   * "Linked from N notes" chip) can reach it without synthesizing Ctrl+G.
+   */
+  open(): void {
+    this._open();
+  }
+
   private _open() {
     this._isOpen = true;
     // Load links data when panel opens (if not already loaded)

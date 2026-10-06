@@ -888,6 +888,68 @@ async fn test_site_json_omits_contact_details() {
     assert!(html.contains("jane@abc.example"), "email missing from page");
 }
 
+/// The contact card renders server-side with safe links, links a wikilinked
+/// company through the implied `employer` edge, and — once the inbound index
+/// is built — states the backlink count without any client work.
+#[tokio::test]
+async fn test_contact_card_on_person_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Jane Doe\n",
+            "company: \"[[Acme Corp]]\"\n",
+            "job_title: VP Marketing\n",
+            "phones:\n  - mobile: \"+1 (303) 555-0100 ext. 12\"\n",
+            "emails:\n  work: jane@abc.example\n",
+            "urls:\n  bad: \"javascript:alert(1)\"\n",
+            "---\n",
+            "Notes about Jane.\n",
+        ),
+    );
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\nA company.\n",
+    );
+    repo.create_markdown("notes/a.md", "Met [Jane](../people/jane.md).\n");
+    repo.create_markdown("notes/b.md", "Again [[Jane Doe]].\n");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // The inbound index is built in the background after the scan; until then
+    // the card carries the lazy placeholder instead of a count.
+    let mut html = String::new();
+    for _ in 0..100 {
+        html = server.get_text("/people/jane/").await;
+        if html.contains("<mbr-contact-backlinks count=") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        html.contains(r#"<mbr-contact-backlinks count="2">"#),
+        "backlink chip: {html}"
+    );
+    assert!(html.contains("Linked from 2 notes"));
+    assert!(html.contains(r#"<h1 class="mbr-contact-card-name">Jane Doe</h1>"#));
+    assert_eq!(html.matches("<h1").count(), 1);
+    assert!(html.contains(r#"href="tel:+13035550100;ext=12""#));
+    assert!(html.contains(r#"href="mailto:jane@abc.example""#));
+    assert!(!html.contains(r#"href="javascript"#));
+    assert!(
+        html.contains(r#"<a href="&#x2F;orgs&#x2F;acme&#x2F;">Acme Corp</a>"#),
+        "company should link to the organization note: {html}"
+    );
+
+    // The organization gets the card (and the relationships element) too.
+    let org = server.get_text("/orgs/acme/").await;
+    assert!(org.contains(r#"data-kind="organization""#));
+    assert!(org.contains("<mbr-genealogy></mbr-genealogy>"));
+}
+
 /// Serving a hidden directory by name (`mbr -s .scratch`) must index it.
 ///
 /// Root discovery deliberately walks *upward* to the enclosing repository, so
