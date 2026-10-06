@@ -140,7 +140,7 @@ make clearing fail on the non-secure origins where the clipboard API is absent.
 
 The button is hidden entirely when there is nothing to clear, and when the store
 was written by a newer version of mbr than the one you are running (see
-[Persistence](#persistence-and-its-limits)).
+[Where notes live](#where-notes-live)).
 
 ### Keyboard
 

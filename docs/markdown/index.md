@@ -20,7 +20,7 @@ These are pulldown-cmark's built-in extensions:
 | [Task lists](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_tasklist.html) | `- [ ]` / `- [x]` | Checkboxes in lists |
 | [Smart punctuation](https://pulldown-cmark.github.io/pulldown-cmark/third_party/smart_punct.html) | `"quotes"`, `--` | Curly quotes, em-dashes |
 | [Heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html) | `# Title {#id}` or `# Title {.myclass}` | Custom anchor IDs or classes |
-| Definition lists | `Term` on one line, `: Definition` on the next | Rendered as a [click-to-expand FAQ](#definition-lists-faq-style) |
+| Definition lists | `Term` on one line, `: Definition` on the next | Rendered as a [click-to-expand FAQ](#definition-lists--faq-style) |
 | Autolinks | `<https://...>` | Clickable URLs |
 | [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$` | LaTeX via KaTeX |
 | [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
@@ -519,7 +519,7 @@ full list and for the browser-version caveat on `<details>`.
 
 Colors, spacing, the marker and the animation are all driven by `--mbr-dl-*`
 custom properties — see
-[Definition Lists in CSS Theming](../customization/themes/#definition-lists-faq).
+[Definition Lists in CSS Theming](../customization/themes/#definition-lists--faq).
 
 ## Heading Anchors
 

@@ -539,7 +539,7 @@ mbr treats the first form as the second and warns once, naming the type
 coercion both halves of such a pair would be indistinguishable, and every edge
 using it would look like a two-note `parent`/`child`-style cycle — dropping half
 of each relationship in the genealogy chart and reporting a
-[`relationship_cycle`](#per-page-error-indicator-server--gui-only) against notes
+[`relationship_cycle`](#per-page-error-indicator--server---gui-only) against notes
 whose data was fine. Declare `symmetric = true` explicitly to silence the
 warning.
 

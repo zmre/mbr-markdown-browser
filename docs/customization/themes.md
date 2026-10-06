@@ -207,7 +207,7 @@ mbr adds custom CSS variables for its unique features:
 
 ### Definition Lists (FAQ)
 
-Definition lists render as a [click-to-expand FAQ](../markdown/#definition-lists-faq-style).
+Definition lists render as a [click-to-expand FAQ](../markdown/#definition-lists--faq-style).
 These are the defaults — every color resolves through a Pico variable, so light
 and dark mode and all the color themes follow automatically. Override the
 variables rather than the rules and you keep that for free:
