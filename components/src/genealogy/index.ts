@@ -9,11 +9,28 @@
  * note, else the first applicable of family → org → all people (see
  * `chooseChartId`); only an explicit selection is persisted.
  *
+ * The relationship graph is built HERE, not by the trigger: the trigger only
+ * decides whether there is anything to chart (a cheap scan of the focus note),
+ * so neither the graph builder nor the contradictory-link notice costs the main
+ * bundle anything, and no graph is built for a chart that never scrolls into
+ * view.
+ *
  * IMPORTANT: nothing in this chunk may import stateful main-bundle modules
  * (shared.ts, graph/links-cache.ts, …) — those hold top-level fetches/caches
  * that would re-run inside the chunk. Everything stateful arrives through the
- * `GenealogyContext` object.
+ * `GenealogyMountInput` object.
  */
+import {
+  DEFAULT_DEPTH,
+  DEFAULT_MAX_NODES,
+  buildRegistry,
+  buildRelationshipGraph,
+  nodeTitle,
+  type PageLinks,
+  type RelationTypeConfig,
+  type SiteNote,
+} from '../graph/relationship-graph.js'
+import { renderDroppedNotice } from './dropped-notice.js'
 import {
   CHART_TYPES,
   injectStylesOnce,
@@ -34,16 +51,71 @@ export interface GenealogyController {
   destroy(): void
   /** Switch charts programmatically (same path as the selector). */
   setChartType(id: string): void
+  /** The context the charts were given (graph, registry, services). */
+  readonly context: GenealogyContext
 }
 
-export function mountGenealogy(container: HTMLElement, ctx: GenealogyContext): GenealogyController {
+/** What the main-bundle trigger hands the chunk. */
+export interface GenealogyMountInput {
+  /** `url_path` → site.json note for every known note. */
+  notesByPath: Map<string, SiteNote>
+  /** site.json's `relationship_types`, as served. */
+  relationshipTypes: RelationTypeConfig[]
+  /** Canonical url_path of the focused note. */
+  focusPath: string
+  /** Relationship hops for the family graph (default `DEFAULT_DEPTH`). */
+  depth?: number
+  /** Node cap for the family graph (default `DEFAULT_MAX_NODES`). */
+  maxNodes?: number
+  resolveUrl: (path: string) => string
+  navigate: (path: string) => void
+  graphDepth: number
+  loadGraphChunk: () => Promise<boolean>
+  fetchPageLinks: (path: string) => Promise<PageLinks | null>
+}
+
+/** Build the registry and the focus graph: everything the charts read. */
+export function buildGenealogyContext(input: GenealogyMountInput): GenealogyContext {
+  const registry = buildRegistry(input.relationshipTypes)
+  const graph = buildRelationshipGraph(
+    input.focusPath,
+    input.notesByPath,
+    registry,
+    input.depth ?? DEFAULT_DEPTH,
+    input.maxNodes ?? DEFAULT_MAX_NODES
+  )
+  return {
+    graph,
+    notesByPath: input.notesByPath,
+    registry,
+    focusPath: graph.focus,
+    resolveUrl: input.resolveUrl,
+    navigate: input.navigate,
+    graphDepth: input.graphDepth,
+    loadGraphChunk: input.loadGraphChunk,
+    fetchPageLinks: input.fetchPageLinks,
+  }
+}
+
+export function mountGenealogy(container: HTMLElement, input: GenealogyMountInput): GenealogyController {
   injectStylesOnce(container.getRootNode(), 'mbr-genealogy-base', BASE_CSS)
+  const ctx = buildGenealogyContext(input)
 
   const root = document.createElement('div')
   root.className = 'mbr-genealogy-root'
+  const titleOf = (path: string) => {
+    const note = ctx.notesByPath.get(path)
+    return note ? nodeTitle(note.frontmatter ?? {}, path) : path
+  }
+  const notice = renderDroppedNotice(ctx.graph.droppedEdges, titleOf, ctx.resolveUrl)
+  if (notice) root.appendChild(notice)
+  // The selector overlays the chart, not the notice, so both share a wrapper.
+  const chartWrap = document.createElement('div')
+  chartWrap.className = 'gen-chart-wrap'
   const chartArea = document.createElement('div')
   chartArea.className = 'gen-chart-area'
-  root.appendChild(chartArea)
+  chartWrap.appendChild(chartArea)
+  root.appendChild(chartWrap)
   container.appendChild(root)
 
   let activeId = chooseChartId(readStoredChartChoice(), ctx)
@@ -67,11 +139,12 @@ export function mountGenealogy(container: HTMLElement, ctx: GenealogyContext): G
   }
 
   const selector = createSelector(activeId, setChartType, ctx)
-  root.appendChild(selector)
+  chartWrap.appendChild(selector)
   mountActive()
 
   return {
     setChartType,
+    context: ctx,
     destroy() {
       instance?.destroy()
       instance = null
@@ -89,6 +162,8 @@ const BASE_CSS = `
 .mbr-genealogy-root {
   position: relative;
   height: 100%;
+  display: flex;
+  flex-direction: column;
   --mbr-gen-male: #1565c0;
   --mbr-gen-female: #c2185b;
   --mbr-gen-male-fill: #d7e3f8;
@@ -120,8 +195,40 @@ const BASE_CSS = `
   }
 }
 
+.gen-chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
 .gen-chart-area {
   height: 100%;
+}
+
+/* Contradictory-link notice. Small and muted so it informs without competing
+   with the chart; it sits inside the fixed-height canvas, so the chart shrinks
+   instead of the page shifting, and it scrolls rather than crowd the chart out. */
+.gen-notice {
+  flex: none;
+  max-height: 40%;
+  overflow-y: auto;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--pico-muted-color, #666);
+}
+
+.gen-notice p {
+  margin: 0;
+}
+
+.gen-notice ul {
+  margin: 0.35rem 0;
+  padding-left: 1.25rem;
+}
+
+.gen-notice li {
+  margin: 0.1rem 0;
 }
 
 .gen-chart-select {

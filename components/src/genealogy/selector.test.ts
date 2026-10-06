@@ -17,9 +17,12 @@ import {
   resolveChartId,
   storeChartId,
 } from './selector.js'
-import { mountGenealogy } from './index.js'
+import { mountGenealogy, type GenealogyMountInput } from './index.js'
 
-function makeContext(): GenealogyContext {
+/** A chart context that can also be handed to `mountGenealogy` as its input. */
+type TestContext = GenealogyContext & GenealogyMountInput
+
+function makeContext(): TestContext {
   const notesByPath = genealogyNotes()
   const registry = buildRegistry(GENEALOGY_TYPES)
   const graph = buildRelationshipGraph('/people/john/', notesByPath, registry)
@@ -33,6 +36,7 @@ function makeContext(): GenealogyContext {
     graphDepth: 2,
     loadGraphChunk: () => Promise.resolve(false),
     fetchPageLinks: () => Promise.resolve(null),
+    relationshipTypes: GENEALOGY_TYPES,
   }
 }
 
@@ -126,7 +130,11 @@ describe('UNIT mountGenealogy', () => {
     expect(mountSpies.get('timeline')).not.toHaveBeenCalled()
     const [mountContainer, mountCtx] = mountSpies.get('family-chart')!.mock.calls[0]
     expect(mountContainer).toBeInstanceOf(HTMLElement)
-    expect(mountCtx).toBe(ctx)
+    // The chunk builds the graph and registry itself from the input.
+    expect(mountCtx).toBe(controller.context)
+    expect(mountCtx.focusPath).toBe('/people/john/')
+    expect(mountCtx.graph.edges).toEqual(ctx.graph.edges)
+    expect(mountCtx.registry.isSymmetric('spouse')).toBe(true)
     const select = container.querySelector<HTMLSelectElement>('select.gen-chart-select')
     expect(select).not.toBeNull()
     expect(select!.value).toBe(DEFAULT_CHART_ID)
@@ -177,7 +185,7 @@ describe('UNIT mountGenealogy', () => {
 // Default chart choice (B3)
 // ---------------------------------------------------------------------------
 
-function companyContext(focus: string, types = CONTACT_TYPES): GenealogyContext {
+function companyContext(focus: string, types = CONTACT_TYPES): TestContext {
   const notesByPath = companyNotes(types)
   const registry = buildRegistry(types)
   const graph = buildRelationshipGraph(focus, notesByPath, registry)
@@ -191,6 +199,7 @@ function companyContext(focus: string, types = CONTACT_TYPES): GenealogyContext 
     graphDepth: 2,
     loadGraphChunk: () => Promise.resolve(false),
     fetchPageLinks: () => Promise.resolve(null),
+    relationshipTypes: types,
   }
 }
 

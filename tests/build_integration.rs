@@ -2081,6 +2081,27 @@ async fn test_build_omits_the_review_chunk_and_the_review_trigger() {
 }
 
 #[tokio::test]
+async fn test_build_omits_the_search_extras_chunk() {
+    // The folder picker and note-type list serve search controls that render
+    // only in server/GUI mode (static search is Pagefind, with no facets or
+    // folders), so the chunk would be an unreachable payload in a static site.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\nBody.\n");
+
+    let output = build_site(&repo).await;
+
+    let chunk = output
+        .join(".mbr")
+        .join("components")
+        .join("mbr-search-extras.min.js");
+    assert!(
+        !chunk.exists(),
+        "the search-extras chunk must not be written to a static build: {}",
+        chunk.display()
+    );
+}
+
+#[tokio::test]
 async fn test_build_body_wikilink_resolves_globally() {
     let repo = TestRepo::new();
     // Target file in one folder; referencing page in a *different* folder.

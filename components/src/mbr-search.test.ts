@@ -1,13 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-search.js'
 import type { MbrSearchElement, SearchRequestBody } from './mbr-search.js'
-import {
-  foldersFromUrlPaths,
-  noteTypesFromSite,
-  searchFolderFor,
-  typeFacetToken,
-  withTypeFacet,
-} from './mbr-search.js'
+import { searchFolderFor, setSearchExtrasImporter } from './mbr-search.js'
+
+// The lazy chunk, imported directly (happy-dom cannot import a runtime URL).
+setSearchExtrasImporter(() => import('./search-extras/index.js'))
 
 /**
  * Private surface of MbrSearchElement that these tests drive.
@@ -28,7 +25,7 @@ interface SearchHandle {
   _folders: string[]
   _noteTypes: Array<{ type: string; count: number }>
   _folderOverride: string | null
-  _isFolderPickerOpen: boolean
+  _extras: unknown
   _openSearch(): void
   _closeSearch(): void
   _performPagefindSearch(): Promise<void>
@@ -610,56 +607,6 @@ describe('searchFolderFor', () => {
   })
 })
 
-describe('foldersFromUrlPaths', () => {
-  it('lists proper ancestors only, never a note page itself', () => {
-    expect(foldersFromUrlPaths(['/people/john/', '/people/staff/amy/', '/README/'])).toEqual([
-      '/people/',
-      '/people/staff/',
-    ])
-  })
-
-  it('sorts case-insensitively and de-duplicates', () => {
-    expect(foldersFromUrlPaths(['/b/x/', '/A/y/', '/a/z/', '/b/w/'])).toEqual(['/A/', '/a/', '/b/'])
-  })
-})
-
-describe('noteTypesFromSite', () => {
-  it('counts distinct types case-insensitively under the first spelling', () => {
-    const files = [
-      { frontmatter: { type: 'person' } },
-      { frontmatter: { type: 'Person' } },
-      { frontmatter: { type: ' organization ' } },
-      { frontmatter: { type: 42 } },
-      { frontmatter: {} },
-      {},
-    ]
-    expect(noteTypesFromSite(files)).toEqual([
-      { type: 'organization', count: 1 },
-      { type: 'person', count: 2 },
-    ])
-  })
-
-  it('tolerates a missing file list', () => {
-    expect(noteTypesFromSite(undefined)).toEqual([])
-  })
-})
-
-describe('type facet tokens', () => {
-  it('quotes values containing whitespace', () => {
-    expect(typeFacetToken('person')).toBe('type:person')
-    expect(typeFacetToken('Meeting Notes')).toBe('type:"Meeting Notes"')
-    expect(typeFacetToken('say "hi" there')).toBe('type:"say hi there"')
-  })
-
-  it('appends the token, replacing any existing type facet', () => {
-    expect(withTypeFacet('', 'person')).toBe('type:person')
-    expect(withTypeFacet('jane', 'person')).toBe('jane type:person')
-    expect(withTypeFacet('jane type:org tags:x', 'person')).toBe('jane tags:x type:person')
-    expect(withTypeFacet('type:"Meeting Notes" plan', 'person')).toBe('plan type:person')
-    expect(withTypeFacet('plan TYPE:x', 'Meeting Notes')).toBe('plan type:"Meeting Notes"')
-  })
-})
-
 describe('MbrSearchElement note types and folder picker', () => {
   let el: MbrSearchElement
 
@@ -668,6 +615,8 @@ describe('MbrSearchElement note types and folder picker', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
     setConfig(true)
     el = await mount()
+    // The chunk import resolves on the modal open above; give it a moment.
+    await vi.waitFor(() => expect(customElements.get('mbr-folder-picker')).toBeDefined())
     await flush()
     const h = handle(el)
     h._noteTypes = [
@@ -675,6 +624,8 @@ describe('MbrSearchElement note types and folder picker', () => {
       { type: 'person', count: 12 },
     ]
     h._folders = ['/notes/', '/people/', '/people/staff/']
+    // Normally set when site.json arrives; the stub site.json is empty.
+    h._extras = await import('./search-extras/index.js')
     await el.updateComplete
   })
 
@@ -733,10 +684,16 @@ describe('MbrSearchElement note types and folder picker', () => {
     expect(lastBody().q).toBe('type:"Meeting Notes"')
   })
 
+  function picker(): HTMLElementTagNameMap['mbr-folder-picker'] {
+    const node = el.shadowRoot!.querySelector('mbr-folder-picker')
+    expect(node, 'the chunk element is rendered next to the checkbox').not.toBeNull()
+    return node!
+  }
+
   async function openPicker(): Promise<HTMLInputElement> {
-    el.shadowRoot!.querySelector<HTMLButtonElement>('.folder-picker-button')!.click()
-    await el.updateComplete
-    const filter = el.shadowRoot!.querySelector<HTMLInputElement>('.folder-filter')
+    picker().shadowRoot!.querySelector<HTMLButtonElement>('button')!.click()
+    await picker().updateComplete
+    const filter = picker().shadowRoot!.querySelector<HTMLInputElement>('input')
     expect(filter).not.toBeNull()
     return filter!
   }
@@ -750,17 +707,17 @@ describe('MbrSearchElement note types and folder picker', () => {
     const filter = await openPicker()
     filter.value = 'peo'
     filter.dispatchEvent(new Event('input'))
-    await el.updateComplete
-    const rows = el.shadowRoot!.querySelectorAll('.folder-option')
-    expect([...rows].map((r) => r.textContent)).toEqual(['/people/', '/people/staff/'])
+    await picker().updateComplete
+    const rows = picker().shadowRoot!.querySelectorAll('.option')
+    expect([...rows].map((r) => r.textContent?.trim())).toEqual(['/people/', '/people/staff/'])
 
     key(filter, 'ArrowDown')
-    await el.updateComplete
+    await picker().updateComplete
     key(filter, 'Enter')
     await flush()
     await el.updateComplete
 
-    expect(handle(el)._isFolderPickerOpen).toBe(false)
+    expect(picker().isOpen).toBe(false)
     expect(lastBody()).toMatchObject({ folder_scope: 'current', folder: '/people/staff/' })
     const label = el.shadowRoot!.querySelector('.folder-name')
     expect(label?.textContent).toBe('/people/staff/')
@@ -772,7 +729,7 @@ describe('MbrSearchElement note types and folder picker', () => {
   it('unchecking the scope clears a picked folder', async () => {
     typeQuery(el, 'needle')
     await openPicker()
-    el.shadowRoot!.querySelectorAll<HTMLElement>('.folder-option')[0].click()
+    picker().shadowRoot!.querySelectorAll<HTMLElement>('.option')[0].click()
     await flush()
     expect(lastBody().folder).toBe('/notes/')
 
@@ -786,15 +743,15 @@ describe('MbrSearchElement note types and folder picker', () => {
   it('Escape in the filter closes only the picker', async () => {
     const filter = await openPicker()
     key(filter, 'Escape')
-    await el.updateComplete
-    expect(handle(el)._isFolderPickerOpen).toBe(false)
+    await picker().updateComplete
+    expect(picker().isOpen).toBe(false)
     expect(handle(el)._isOpen).toBe(true)
   })
 
   it('a click elsewhere in the modal closes the picker', async () => {
     await openPicker()
     el.shadowRoot!.querySelector<HTMLElement>('.results-container')!.click()
-    await el.updateComplete
-    expect(handle(el)._isFolderPickerOpen).toBe(false)
+    await picker().updateComplete
+    expect(picker().isOpen).toBe(false)
   })
 })

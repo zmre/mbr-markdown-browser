@@ -7302,6 +7302,14 @@ pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
 /// be an unreachable payload in every generated page.
 pub const REVIEW_CHUNK_ROUTE: &str = "/components/mbr-review.min.js";
 
+/// [`DEFAULT_FILES`] route of the lazy search-panel extras chunk (folder picker,
+/// note-type list).
+///
+/// Skipped by `build.rs` like [`TASKS_CHUNK_ROUTE`]: the controls it serves —
+/// the scope select and the folder scope — render only in server/GUI mode,
+/// because static search is Pagefind, which has neither facets nor folders.
+pub const SEARCH_EXTRAS_CHUNK_ROUTE: &str = "/components/mbr-search-extras.min.js";
+
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/favicon.png",
@@ -7342,8 +7350,8 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "application/javascript",
     ),
     (
-        // Genealogy chart chunk (family-chart + timeline tree), lazy-loaded by
-        // <mbr-genealogy> on `type: person` pages only.
+        // Relationship-charts chunk (family-chart, timeline tree, org chart),
+        // lazy-loaded by <mbr-genealogy> on person/organization pages only.
         "/components/mbr-genealogy.min.js",
         include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
         "application/javascript",
@@ -7362,6 +7370,14 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         // from static builds — see `REVIEW_CHUNK_ROUTE` in build.rs.
         REVIEW_CHUNK_ROUTE,
         include_bytes!("../templates/components-js/mbr-review.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Search-panel folder picker and note-type list, lazy-loaded by
+        // <mbr-search> the first time the modal opens. Deliberately excluded
+        // from static builds — see `SEARCH_EXTRAS_CHUNK_ROUTE` in build.rs.
+        SEARCH_EXTRAS_CHUNK_ROUTE,
+        include_bytes!("../templates/components-js/mbr-search-extras.min.js"),
         "application/javascript",
     ),
     (

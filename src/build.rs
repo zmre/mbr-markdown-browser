@@ -2121,6 +2121,13 @@ impl Builder {
                 continue;
             }
 
+            // Skip the search-extras chunk: it serves the scope select and
+            // folder scope, which render only in server/GUI mode. Static
+            // search is Pagefind, with no facets or folders to pick.
+            if *route == crate::server::SEARCH_EXTRAS_CHUNK_ROUTE {
+                continue;
+            }
+
             // Strip leading / from route to get filename
             let filename = route.trim_start_matches('/');
             let output_path = mbr_output.join(filename);

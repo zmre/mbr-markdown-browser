@@ -3024,8 +3024,8 @@ async fn test_components_js_bundle_served() {
 
 #[tokio::test]
 async fn test_graph_chunks_served() {
-    // The lazy-loaded mini-graph, genealogy, task-panel and review chunks are
-    // compiled into the binary (DEFAULT_FILES) and must be served alongside the
+    // The lazy-loaded mini-graph, genealogy, task-panel, review and
+    // search-extras chunks are compiled into the binary (DEFAULT_FILES) and must be served alongside the
     // main bundle.
     let repo = TestRepo::new();
 
@@ -3036,6 +3036,7 @@ async fn test_graph_chunks_served() {
         "/.mbr/components/mbr-genealogy.min.js",
         "/.mbr/components/mbr-tasks.min.js",
         "/.mbr/components/mbr-review.min.js",
+        "/.mbr/components/mbr-search-extras.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -3103,6 +3104,7 @@ async fn test_components_js_bundle_no_missing_imports() {
         "mbr-genealogy.min.js",
         "mbr-tasks.min.js",
         "mbr-review.min.js",
+        "mbr-search-extras.min.js",
     ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");
