@@ -3815,13 +3815,7 @@ impl Server {
                 .unwrap_or_else(|| stem.to_string())
         };
         let aliases: Vec<String> = frontmatter
-            .and_then(|fm| fm.get("aliases"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
+            .map(crate::contact::alias_names_in)
             .unwrap_or_default();
 
         let old_title = title_for(old_stem);
@@ -5234,8 +5228,9 @@ impl Server {
     async fn try_serve_errors_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
         use crate::page_errors::{
             PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
-            detect_unresolved_wikilinks, frontmatter_parse_errors, relationship_cycle_errors,
-            validate_internal_links, validate_media_references, validate_rendered_links,
+            contact_problem_errors, detect_unresolved_wikilinks, frontmatter_parse_errors,
+            relationship_cycle_errors, validate_internal_links, validate_media_references,
+            validate_rendered_links,
         };
 
         // Only handle exact `errors.json` tails. This keeps the endpoint
@@ -5284,11 +5279,18 @@ impl Server {
         // rendered HTML for media / wikilink scans (the `LinkCache` only holds
         // outbound links), so unlike `try_serve_links_json` we cannot short-
         // circuit through the cache when the HTML is missing.
-        let (outbound_links, html_for_scan, frontmatter_error, ambiguous_wikilinks): (
+        let (
+            outbound_links,
+            html_for_scan,
+            frontmatter_error,
+            ambiguous_wikilinks,
+            contact_problems,
+        ): (
             Vec<crate::link_index::OutboundLink>,
             String,
             Option<String>,
             Vec<crate::wikilink_index::AmbiguousWikilink>,
+            Vec<crate::contact::ContactProblem>,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
                 let is_index_file = md_path
@@ -5349,6 +5351,10 @@ impl Server {
                             render_result.html,
                             render_result.frontmatter_error,
                             render_result.ambiguous_wikilinks,
+                            render_result
+                                .contact
+                                .map(|c| c.problems)
+                                .unwrap_or_default(),
                         )
                     }
                     Err(e) => {
@@ -5367,11 +5373,11 @@ impl Server {
                     &config.repo.tag_index,
                     &config.tag_sources,
                 );
-                (outbound, String::new(), None, Vec::new())
+                (outbound, String::new(), None, Vec::new(), Vec::new())
             }
             ResolvedPath::TagSourceIndex { source } => {
                 let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
-                (outbound, String::new(), None, Vec::new())
+                (outbound, String::new(), None, Vec::new(), Vec::new())
             }
             _ => {
                 tracing::debug!("errors.json: page not found: {}", page_url_path);
@@ -5381,6 +5387,7 @@ impl Server {
 
         let mut errors = Vec::new();
         errors.extend(frontmatter_parse_errors(&frontmatter_error));
+        errors.extend(contact_problem_errors(&contact_problems));
         if html_for_scan.is_empty() {
             // Tag pages and tag indexes have no authored body; their outbound
             // links are synthesized absolute URLs, so that list is the only
@@ -8331,6 +8338,25 @@ mod tests {
         let files = [mk_markdown_info("docs/a.md", "/docs/a/", "Alpha")];
         let got = compute_sibling_files(files.iter(), Path::new("empty"), &title_sort());
         assert!(got.is_empty());
+    }
+
+    /// A move must not rewrite `[[Mare]]` when `Mare` is still one of the
+    /// note's names — including when it is a *labeled* alias, which the
+    /// simplified frontmatter now carries as a plain name.
+    #[test]
+    fn test_wikilink_delta_names_keeps_labeled_aliases() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("mare.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: Mary Doe\naliases:\n  - nickname: Mare\n---\n",
+        )
+        .unwrap();
+        let fm = crate::markdown::extract_metadata_from_file(&path)
+            .unwrap()
+            .metadata;
+        let delta = Server::wikilink_delta_names(Some(&fm), "mare", "mary");
+        assert!(delta.is_empty(), "{delta:?}");
     }
 
     // ===== directory listings served from the in-memory index =====

@@ -228,6 +228,13 @@ pub struct MarkdownRenderResult {
     /// spotted. Always empty when the render had no wikilink index (CLI /
     /// QuickLook paths).
     pub ambiguous_wikilinks: Vec<crate::wikilink_index::AmbiguousWikilink>,
+    /// The contact card model, for `type: person` / `type: organization` notes.
+    ///
+    /// Parsed here, from the raw YAML, because the simplified `frontmatter`
+    /// above has already lost list-of-map fields such as `phones`. Its `image`
+    /// is rewritten with the same link transform the body's images get, so a
+    /// relative portrait resolves from the page's trailing-slash URL.
+    pub contact: Option<crate::contact::Contact>,
 }
 
 struct EventState {
@@ -1965,6 +1972,17 @@ fn finalize_render(
         frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
+    let contact = state
+        .metadata_parsed
+        .as_ref()
+        .and_then(crate::contact::Contact::from_yaml)
+        .map(|mut contact| {
+            contact.image = contact
+                .image
+                .map(|src| transform_link(&src, &state.link_transform_config));
+            contact
+        });
+
     Ok(MarkdownRenderResult {
         frontmatter,
         frontmatter_error: state.frontmatter_error,
@@ -1976,6 +1994,7 @@ fn finalize_render(
         sentence_count: state.sentence_count,
         syllable_count: state.syllable_count,
         ambiguous_wikilinks: state.ambiguous_wikilinks,
+        contact,
     })
 }
 
@@ -2336,9 +2355,19 @@ async fn prefetch_oembed_urls(
     results
 }
 
+/// The simplified frontmatter every page feature and `site.json` reads.
+///
+/// The one entry point for all three parse paths (page render, metadata scan,
+/// [`parse`]), so the contact normalisation applied here — flat `aliases`,
+/// `dates.<label>` strings — holds everywhere. See
+/// [`crate::contact::normalize_simplified`].
 fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
     match y.as_ref().and_then(|yaml| yaml.as_hash()) {
-        Some(hash) => yaml_hash_to_metadata(hash),
+        Some(hash) => {
+            let mut hm = yaml_hash_to_metadata(hash);
+            crate::contact::normalize_simplified(&mut hm, hash);
+            hm
+        }
         None => SimpleMetadata::new(),
     }
 }
@@ -3110,6 +3139,51 @@ mod tests {
         let result = render_result(content).await;
         assert!(result.frontmatter_error.is_none());
         assert!(result.frontmatter.contains_key("style"));
+    }
+
+    /// Every parse path goes through the contact hook: mixed `aliases` come out
+    /// as a flat list of names, and a person's dates — legacy `born` included —
+    /// as `dates.<label>` strings (the `site.json` contract).
+    #[tokio::test]
+    async fn simplified_frontmatter_normalizes_aliases_and_contact_dates() {
+        let content = concat!(
+            "---\n",
+            "type: person\n",
+            "title: Mary Doe\n",
+            "born: 1898\n",
+            "aliases:\n",
+            "  - Mare\n",
+            "  - maiden_name: Mary Smith\n",
+            "dates:\n",
+            "  anniversary: 06-10\n",
+            "phones:\n",
+            "  - mobile: \"555 0100\"\n",
+            "---\n",
+            "Body\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mary.md");
+        std::fs::write(&path, content).unwrap();
+
+        let scanned = extract_metadata_from_file(&path).unwrap().metadata;
+        let rendered = render_result(content).await;
+        let parsed = parse(&path).unwrap().frontmatter;
+        for fm in [&scanned, &rendered.frontmatter, &parsed] {
+            assert_eq!(fm["aliases"], serde_json::json!(["Mare", "Mary Smith"]));
+            assert_eq!(fm["dates.birthday"], serde_json::json!("1898"));
+            assert_eq!(fm["dates.anniversary"], serde_json::json!("--06-10"));
+            assert_eq!(fm["born"], serde_json::json!(1898), "legacy key kept");
+        }
+
+        let contact = rendered.contact.expect("person → contact");
+        assert_eq!(contact.phones[0].href.as_deref(), Some("tel:5550100"));
+        assert_eq!(contact.alias_phrases, ["aka Mare", "née Mary Smith"]);
+    }
+
+    #[tokio::test]
+    async fn contact_is_none_for_other_notes() {
+        let result = render_result("---\ntype: event\n---\nBody\n").await;
+        assert!(result.contact.is_none());
     }
 
     /// Frontmatter with two `to:` keys in one `relationships:` entry — the exact

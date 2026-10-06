@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::contact::humanize_date;
 use crate::errors::TemplateError;
 use crate::markdown::SimpleMetadata;
 use itertools::Itertools;
@@ -461,27 +462,13 @@ impl Templates {
     }
 }
 
-/// Full English month names, indexed by `month - 1`.
-const MONTH_NAMES: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// Tera `humandate` filter: humanize a date string, passing through any other
-/// value unchanged.
+/// Tera `humandate` filter: humanize a date, passing through anything else.
 ///
-/// Strings are run through [`humanize_date`]; non-string values (numbers, bools,
-/// null, arrays, objects) are returned as-is so the filter never errors.
+/// Strings go through [`humanize_date`], which understands every partial form
+/// the contact schema allows (`YYYY-MM-DD`, `YYYY-MM`, `YYYY`, `MM-DD`,
+/// `--MM-DD`) and returns unparseable text unchanged. Non-string values
+/// (numbers, bools, null, arrays, objects) are returned as-is so the filter
+/// never errors — a YAML `born: 1898` arrives as a number and reads fine.
 fn humandate_filter(
     value: &serde_json::Value,
     _args: &HashMap<String, serde_json::Value>,
@@ -490,70 +477,6 @@ fn humandate_filter(
         serde_json::Value::String(s) => Ok(serde_json::Value::String(humanize_date(s))),
         other => Ok(other.clone()),
     }
-}
-
-/// Returns `true` when `s` is a non-empty run of ASCII digits.
-fn is_all_ascii_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Parse an exactly-4-digit year component (e.g. `"1855"`).
-fn parse_year4(s: &str) -> Option<u32> {
-    if s.len() == 4 && is_all_ascii_digits(s) {
-        s.parse().ok()
-    } else {
-        None
-    }
-}
-
-/// Parse an exactly-2-digit month in `1..=12`.
-fn parse_month2(s: &str) -> Option<u32> {
-    if s.len() == 2 && is_all_ascii_digits(s) {
-        let m: u32 = s.parse().ok()?;
-        (1..=12).contains(&m).then_some(m)
-    } else {
-        None
-    }
-}
-
-/// Parse an exactly-2-digit day in `1..=31`.
-fn parse_day2(s: &str) -> Option<u32> {
-    if s.len() == 2 && is_all_ascii_digits(s) {
-        let d: u32 = s.parse().ok()?;
-        (1..=31).contains(&d).then_some(d)
-    } else {
-        None
-    }
-}
-
-/// Humanize an ISO-ish date string into a reader-friendly form.
-///
-/// - `YYYY-MM-DD` (valid month 1-12, day 1-31) → `"Month D, YYYY"` with the
-///   day's leading zero stripped (e.g. `"1855-10-30"` → `"October 30, 1855"`).
-/// - `YYYY-MM` (valid month) → `"Month YYYY"` (e.g. `"1855-10"` → `"October 1855"`).
-/// - `YYYY` → unchanged.
-/// - Anything else — partial, prefixed ("circa 1855"), already-formatted, or
-///   out-of-range (e.g. `"2020-13-40"`) — is returned UNCHANGED.
-fn humanize_date(input: &str) -> String {
-    let parts: Vec<&str> = input.split('-').collect();
-    match parts.as_slice() {
-        [y, m, d] => {
-            if let (Some(year), Some(month), Some(day)) =
-                (parse_year4(y), parse_month2(m), parse_day2(d))
-            {
-                return format!("{} {}, {}", MONTH_NAMES[(month - 1) as usize], day, year);
-            }
-        }
-        [y, m] => {
-            if let (Some(year), Some(month)) = (parse_year4(y), parse_month2(m)) {
-                return format!("{} {}", MONTH_NAMES[(month - 1) as usize], year);
-            }
-        }
-        // Everything else — a bare `YYYY`, partials, prose, already-formatted,
-        // or out-of-range dates — is returned unchanged by the fallthrough.
-        _ => {}
-    }
-    input.to_string()
 }
 
 /// Builds the `<body>` class list from the `type` and `style` frontmatter keys.

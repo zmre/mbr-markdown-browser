@@ -41,6 +41,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod constants;
+pub mod contact;
 pub mod edit_auth;
 pub mod embedded_hljs;
 pub mod embedded_katex;

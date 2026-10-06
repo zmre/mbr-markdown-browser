@@ -4758,6 +4758,41 @@ async fn test_errors_json_multiple_problem_types_on_one_page() {
 }
 
 #[tokio::test]
+async fn test_errors_json_reports_unreadable_contact_fields() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "jane.md",
+        "---\ntype: person\ntitle: Jane\nphones:\n  - {a: 1, b: 2}\n  - mobile: '555 0100'\naliases:\n  - [nested]\n---\nBody\n",
+    );
+    // The same shapes on a non-contact note are not contact problems.
+    repo.create_markdown(
+        "plain.md",
+        "---\ntitle: Plain\nphones:\n  - {a: 1, b: 2}\n---\nBody\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let json: serde_json::Value = server.get("/jane/errors.json").await.json().await.unwrap();
+    let fields: Vec<&str> = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "contact_data_problem")
+        .filter_map(|e| e["field"].as_str())
+        .collect();
+    assert_eq!(fields, ["aliases", "phones"], "{json}");
+
+    let plain: serde_json::Value = server.get("/plain/errors.json").await.json().await.unwrap();
+    assert!(
+        !plain["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "contact_data_problem"),
+        "{plain}"
+    );
+}
+
+#[tokio::test]
 async fn test_errors_json_reports_frontmatter_parse_error() {
     let repo = TestRepo::new();
     // Invalid YAML frontmatter: `*` list markers with TAB indentation. This is

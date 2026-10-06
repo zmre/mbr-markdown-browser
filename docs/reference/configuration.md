@@ -789,6 +789,7 @@ The endpoint detects these issue types:
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
 | `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
+| `contact_data_problem` | On a `type: person` / `type: organization` note, an entry in a contact field (`aliases`, `phones`, `dates`, …) had a shape mbr cannot read (e.g. a map with two keys where one `label: value` pair belongs). The entry was skipped; the rest of the card renders. Carries `field` and `message`. See [Contacts](../markdown/contacts/). |
 | `unplayable_media` | A video that exists and serves correctly but whose track layout matches a combination implicated in browser decode failures. Advisory only — see [Unplayable Media Detection](#unplayable-media-detection) below. Requires the `media-metadata` feature. |
 | `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
 | `ambiguous_relationship_endpoint` | A relationship endpoint named a title/alias shared by several notes; mbr resolved it to one of them. Reported on the note that declared the endpoint. |

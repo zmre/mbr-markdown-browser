@@ -857,15 +857,7 @@ fn wikilink_names_for_target(path: &Path) -> Vec<String> {
         .get("title")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let aliases = metadata
-        .get("aliases")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<String>>()
-        })
-        .unwrap_or_default();
+    let aliases = crate::contact::alias_names_in(&metadata);
 
     let mut seen: HashSet<String> = HashSet::new();
     std::iter::once(stem)
@@ -1773,6 +1765,36 @@ mod tests {
         // Two matches on one page dedupe to a single inbound link.
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].from, "/notes/family/");
+    }
+
+    /// A labeled alias (`maiden_name: …`) is a name like any other: grep-based
+    /// backlinks must find `[[Mary Smith]]` exactly as the renderer resolves it.
+    #[test]
+    fn find_inbound_links_matches_labeled_alias_wikilink() {
+        let temp_dir = TempDir::new().unwrap();
+        let people = temp_dir.path().join("people");
+        let notes = temp_dir.path().join("notes");
+        fs::create_dir_all(&people).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+
+        fs::write(
+            people.join("mary.md"),
+            "---\ntitle: Mary Doe\naliases:\n  - Mare\n  - maiden_name: Mary Smith\n---\n\nHi.\n",
+        )
+        .unwrap();
+        fs::write(notes.join("a.md"), "Met [[Mary Smith]] today.").unwrap();
+        fs::write(notes.join("b.md"), "And [[Mare]] too.").unwrap();
+
+        let links = find_inbound_links(
+            "/people/mary/",
+            temp_dir.path(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+        let froms: Vec<&str> = links.iter().map(|l| l.from.as_str()).collect();
+        assert_eq!(froms, ["/notes/a/", "/notes/b/"]);
     }
 
     #[test]

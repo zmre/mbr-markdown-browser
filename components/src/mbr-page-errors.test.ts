@@ -76,6 +76,17 @@ describe('UNIT summarizePageErrors', () => {
     expect(summary).toBe('Detected 1 broken link and 1 ambiguous wikilink.');
   });
 
+  it('names unreadable contact fields', () => {
+    const contact = {
+      type: 'contact_data_problem' as const,
+      field: 'phones',
+      message: 'entry 2 is not a value; ignored',
+    };
+    expect(summarizePageErrors([contact, contact, frontmatterError])).toBe(
+      'Detected 1 frontmatter parse error and 2 unreadable contact fields.'
+    );
+  });
+
   it('returns an empty string when there is nothing to report', () => {
     expect(summarizePageErrors([])).toBe('');
   });

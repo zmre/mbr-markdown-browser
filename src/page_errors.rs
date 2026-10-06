@@ -86,6 +86,15 @@ pub enum PageError {
         /// The other notes sharing that name.
         candidates: Vec<String>,
     },
+    /// A contact field (`aliases`, `phones`, `dates`, …) on a `type: person` /
+    /// `type: organization` note had an entry mbr could not read, so the card
+    /// skipped it. See `contact::ContactProblem`.
+    ContactDataProblem {
+        /// The frontmatter key at fault.
+        field: String,
+        /// What was wrong and what was done about it.
+        message: String,
+    },
     /// A `[[Wikilink]]` in the body named a title/stem shared by several notes;
     /// mbr silently resolved it to one of them.
     AmbiguousWikilink {
@@ -606,6 +615,19 @@ pub fn ambiguous_relationship_endpoint_errors(endpoints: &[AmbiguousEndpoint]) -
             raw: endpoint.raw.clone(),
             resolved_to: endpoint.resolved_to.clone(),
             candidates: endpoint.candidates.clone(),
+        })
+        .collect()
+}
+
+/// Wraps the unreadable contact-field entries found while parsing a contact
+/// note (from [`crate::markdown::MarkdownRenderResult::contact`]) into the
+/// page-error list.
+pub fn contact_problem_errors(problems: &[crate::contact::ContactProblem]) -> Vec<PageError> {
+    problems
+        .iter()
+        .map(|p| PageError::ContactDataProblem {
+            field: p.field.clone(),
+            message: p.message.clone(),
         })
         .collect()
 }
