@@ -1838,6 +1838,158 @@ main dl > dd:focus-within ~ dt ~ dd {
   }
 }
 
+/* ==================== Chat Blocks (```chat) ==================== */
+
+/*
+ * Speech bubbles for ```chat code blocks (src/chat.rs), rendered server-side
+ * so they work in static builds and QuickLook without any JavaScript.
+ *
+ * Each speaker gets one of eight colour slots (`.mbr-chat-c0` … `c7`) from a
+ * stable hash of their name. The slot sets `--mbr-chat-color`; the name label
+ * uses it directly and the bubble is a light wash of it over the page
+ * background, so every Pico theme, light or dark, gets readable bubbles from
+ * the one palette below. Override `--mbr-chat-c0` … `--mbr-chat-c7` to recolour.
+ */
+
+:root {
+  --mbr-chat-c0: #c62828;
+  --mbr-chat-c1: #1565c0;
+  --mbr-chat-c2: #2e7d32;
+  --mbr-chat-c3: #6a1b9a;
+  --mbr-chat-c4: #e65100;
+  --mbr-chat-c5: #00838f;
+  --mbr-chat-c6: #ad1457;
+  --mbr-chat-c7: #5d4037;
+}
+
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --mbr-chat-c0: #ef5350;
+    --mbr-chat-c1: #64b5f6;
+    --mbr-chat-c2: #66bb6a;
+    --mbr-chat-c3: #ba68c8;
+    --mbr-chat-c4: #ffa726;
+    --mbr-chat-c5: #4dd0e1;
+    --mbr-chat-c6: #f06292;
+    --mbr-chat-c7: #bcaaa4;
+  }
+}
+
+[data-theme="dark"] {
+  --mbr-chat-c0: #ef5350;
+  --mbr-chat-c1: #64b5f6;
+  --mbr-chat-c2: #66bb6a;
+  --mbr-chat-c3: #ba68c8;
+  --mbr-chat-c4: #ffa726;
+  --mbr-chat-c5: #4dd0e1;
+  --mbr-chat-c6: #f06292;
+  --mbr-chat-c7: #bcaaa4;
+}
+
+.mbr-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-block: 0 var(--pico-typography-spacing-vertical, 1.5rem);
+}
+
+.mbr-chat-msg {
+  --mbr-chat-color: var(--mbr-chat-c0);
+  align-self: flex-start;
+  max-width: 75%;
+  padding: 0.45rem 0.8rem;
+  border-radius: 1rem 1rem 1rem 0.25rem;
+  border: 1px solid var(--pico-muted-border-color);
+  /* Fallback first: color-mix() is the wash, where supported. */
+  background: var(--pico-card-sectioning-background-color);
+  background: color-mix(in srgb, var(--mbr-chat-color) 10%, var(--pico-background-color));
+  border-color: color-mix(in srgb, var(--mbr-chat-color) 30%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.mbr-chat-c0 { --mbr-chat-color: var(--mbr-chat-c0); }
+.mbr-chat-c1 { --mbr-chat-color: var(--mbr-chat-c1); }
+.mbr-chat-c2 { --mbr-chat-color: var(--mbr-chat-c2); }
+.mbr-chat-c3 { --mbr-chat-color: var(--mbr-chat-c3); }
+.mbr-chat-c4 { --mbr-chat-color: var(--mbr-chat-c4); }
+.mbr-chat-c5 { --mbr-chat-color: var(--mbr-chat-c5); }
+.mbr-chat-c6 { --mbr-chat-color: var(--mbr-chat-c6); }
+.mbr-chat-c7 { --mbr-chat-color: var(--mbr-chat-c7); }
+
+.mbr-chat-right {
+  align-self: flex-end;
+  border-radius: 1rem 1rem 0.25rem 1rem;
+}
+
+.mbr-chat-center {
+  align-self: center;
+  border-radius: 1rem;
+  text-align: center;
+}
+
+/* Same speaker again: pull the bubble up under the previous one. */
+.mbr-chat-cont {
+  margin-top: -0.35rem;
+}
+
+.mbr-chat-name {
+  margin-bottom: 0.15rem;
+  color: var(--mbr-chat-color);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.mbr-chat-meta {
+  margin-top: 0.2rem;
+  color: var(--pico-muted-color);
+  font-size: 0.75em;
+  text-align: right;
+}
+
+.mbr-chat-body > :first-child,
+.mbr-chat-comment > :first-child,
+.mbr-chat-md > :first-child {
+  margin-top: 0;
+}
+
+.mbr-chat-body > :last-child,
+.mbr-chat-comment > :last-child,
+.mbr-chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+.mbr-chat-delim {
+  align-self: stretch;
+  margin-block: 0.4rem;
+  border-top: 1px dashed var(--pico-muted-border-color);
+}
+
+.mbr-chat-comment {
+  align-self: center;
+  max-width: 85%;
+  color: var(--pico-muted-color);
+  font-size: 0.85em;
+  text-align: center;
+}
+
+.mbr-chat-md {
+  align-self: stretch;
+}
+
+@media (max-width: 576px) {
+  .mbr-chat-msg {
+    max-width: 90%;
+  }
+}
+
+@media print {
+  .mbr-chat-msg {
+    break-inside: avoid;
+    background: none;
+    border-color: #999;
+  }
+}
+
 /* ==================== Print Styles ==================== */
 
 @media print {

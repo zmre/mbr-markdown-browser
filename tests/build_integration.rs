@@ -3168,3 +3168,24 @@ async fn build_emits_no_data_mbr_line_even_when_config_enables_review() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_build_renders_chat_blocks() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes/other.md", "# Other\n");
+    repo.create_markdown(
+        "notes/chat.md",
+        "# Chat\n\n```chat\n{{Alice|See [the other note](other.md)|9:00}}\n...\n# later\n```\n",
+    );
+
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("notes/chat/index.html")).unwrap();
+
+    assert!(html.contains("<div class=\"mbr-chat\""), "{html}");
+    assert!(html.contains("<div class=\"mbr-chat-delim\""), "{html}");
+    assert!(html.contains("<div class=\"mbr-chat-comment\">"), "{html}");
+    assert!(
+        html.contains("<a href=\"../other/\">the other note</a>"),
+        "relative link in a bubble is transformed: {html}"
+    );
+}

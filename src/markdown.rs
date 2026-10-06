@@ -10,8 +10,8 @@ use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use crate::wikilink_index::WikilinkIndex;
 use pulldown_cmark::{
-    BlockQuoteKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind, Options,
-    Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
+    BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind,
+    Options, Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -1053,6 +1053,7 @@ fn collect_events_and_headings<'a>(
     let mut line_index: Option<LineIndex> = None;
     let mut at_item_start = false;
     let mut pending_task: Option<PendingTask> = None;
+    let mut chat_block: Option<PendingChat> = None;
 
     for (event, range) in parser {
         // Computed once here rather than at each push site, and only when
@@ -1149,6 +1150,37 @@ fn collect_events_and_headings<'a>(
                     close_task(&mut events, task);
                 }
             }
+        }
+
+        // --- ```chat blocks (see `push_chat_block`) ---
+        // Placed after the task handling so a fence inside a task item has
+        // already closed the task's span, exactly as any code block does.
+        if let Some(chat) = chat_block.as_mut() {
+            match event {
+                Event::Text(text) => chat.source.push_str(&text),
+                Event::End(TagEnd::CodeBlock) => {
+                    if let Some(chat) = chat_block.take() {
+                        push_chat_block(&mut events, text_lines, block_lines, &chat);
+                    }
+                }
+                // A code block holds nothing but text; nothing else can arrive.
+                _ => {}
+            }
+            continue;
+        }
+        if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = &event
+            && crate::chat::is_chat_info(info)
+        {
+            let fence_line = (text_lines.enabled || block_lines.enabled).then(|| {
+                line_index
+                    .get_or_insert_with(|| LineIndex::build(markdown_input))
+                    .line_of(range.start)
+            });
+            chat_block = Some(PendingChat {
+                source: String::new(),
+                fence_line,
+            });
+            continue;
         }
 
         match &event {
@@ -1345,6 +1377,177 @@ fn collect_events_and_headings<'a>(
     }
 
     (events, headings, section_attrs)
+}
+
+/// A ```` ```chat ```` fence whose text is still being collected.
+struct PendingChat {
+    source: String,
+    /// The fence's 1-based source line; `None` when neither line table is
+    /// recording, so a page nobody anchors never builds a [`LineIndex`].
+    fence_line: Option<u32>,
+}
+
+/// Replaces a ```` ```chat ```` code block with bubble markup whose bodies are
+/// **real markdown events**, spliced into the page's own stream.
+///
+/// # Why here and not in `html.rs`
+///
+/// A writer-side sub-render would be simpler, but it would see bodies after
+/// [`process_all_events`] has run, so a relative link inside a bubble would
+/// miss the trailing-slash link transform, `[[wikilinks]]` would not resolve,
+/// images would not become media embeds, and backlinks / `errors.json` would
+/// not see the links at all. Splicing events here sends bodies through every
+/// later pass for free. Pass 1 is also the only place source lines exist.
+///
+/// # Invariants this must keep
+///
+/// * Every push goes through [`push_event`], with the body's real source line
+///   (fence line + 1 + the body's line within the block), so [`TextLines`] and
+///   [`BlockLines`] stay strictly ascending and point where a reader expects.
+///   Content lines map 1:1 to source lines even inside a list item or
+///   blockquote: the parser strips the container prefix but never a newline.
+/// * Body events bypass pass 1's own arms. Body headings therefore get no
+///   generated id and stay out of the page TOC (a bubble is not a section of
+///   the document); `[ ]` stays a plain disabled checkbox (the task index skips
+///   code fences, so wiring it would advertise a task nothing can find).
+/// * `Event::Rule` becomes a literal `<hr />`: `html.rs` turns a top-level
+///   rule into a `</section><section>` split — which would close the section
+///   from inside the bubble's `<div>` — and both sides count rules to number
+///   `--- {attrs}` sections, so a body rule would shift every later section's
+///   attributes by one.
+/// * Metadata blocks are disabled for bodies, so a body starting with `---`
+///   is a rule rather than a second frontmatter block.
+///
+/// Wikilinks: plain `[[Note]]` and `[[Tags:x]]` both arrive as
+/// `LinkType::WikiLink` from pulldown-cmark itself and are resolved in
+/// `process_event`, so no pre-pass is needed. The `transform_wikilinks`
+/// pre-pass skips fences (and so these bodies); what it adds over the native
+/// path is only `[[Source:value|label]]` label handling.
+fn push_chat_block<'a>(
+    events: &mut Vec<Event<'a>>,
+    text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
+    chat: &PendingChat,
+) {
+    use crate::chat::{self, ChatItem};
+
+    // The fence's content starts on the line after the fence.
+    let content_line = chat.fence_line.map(|line| line.saturating_add(1));
+    // Only the review feature reads `data-mbr-line`; it would otherwise be noise.
+    let review_line = chat.fence_line.filter(|_| block_lines.enabled);
+    let source_index = content_line.map(|_| LineIndex::build(&chat.source));
+    // 1-based source line of byte `offset` in the block's text.
+    let line_at = |offset: usize| -> Option<u32> {
+        let base = content_line?;
+        let within = source_index.as_ref()?.line_of(offset);
+        Some(base.saturating_add(within - 1))
+    };
+    let html = |events: &mut Vec<Event<'a>>,
+                text_lines: &mut TextLines,
+                block_lines: &mut BlockLines,
+                html: String| {
+        push_event(
+            events,
+            text_lines,
+            block_lines,
+            Event::Html(CowStr::from(html)),
+            None,
+        );
+    };
+
+    html(
+        events,
+        text_lines,
+        block_lines,
+        chat::open_html(review_line),
+    );
+    for item in chat::parse(&chat.source) {
+        let text_is_comment = matches!(item, ChatItem::Comment { .. });
+        match item {
+            ChatItem::Message(message) => {
+                html(
+                    events,
+                    text_lines,
+                    block_lines,
+                    chat::message_open_html(&message),
+                );
+                push_chat_markdown(
+                    events,
+                    text_lines,
+                    block_lines,
+                    &message.body,
+                    line_at(message.body_offset),
+                );
+                html(
+                    events,
+                    text_lines,
+                    block_lines,
+                    chat::message_close_html(&message),
+                );
+            }
+            ChatItem::Delimiter => html(
+                events,
+                text_lines,
+                block_lines,
+                chat::DELIMITER_HTML.to_string(),
+            ),
+            ChatItem::Comment { text, offset } | ChatItem::Markdown { text, offset } => {
+                let open = if text_is_comment {
+                    chat::COMMENT_OPEN_HTML
+                } else {
+                    chat::MARKDOWN_OPEN_HTML
+                };
+                html(events, text_lines, block_lines, open.to_string());
+                push_chat_markdown(events, text_lines, block_lines, &text, line_at(offset));
+                html(
+                    events,
+                    text_lines,
+                    block_lines,
+                    chat::CLOSE_HTML.to_string(),
+                );
+            }
+        }
+    }
+    html(
+        events,
+        text_lines,
+        block_lines,
+        chat::CLOSE_HTML.to_string(),
+    );
+}
+
+/// Parses one chat body (or the markdown between bubbles) and pushes its events.
+///
+/// `first_line` is the source line of `text`'s first byte, `None` when no line
+/// table is recording.
+fn push_chat_markdown<'a>(
+    events: &mut Vec<Event<'a>>,
+    text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
+    text: &str,
+    first_line: Option<u32>,
+) {
+    let options = markdown_options()
+        - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
+    let index = first_line.map(|_| LineIndex::build(text));
+    let parser = TextMergeWithOffset::new(MDParser::new_ext(text, options).into_offset_iter());
+    for (event, range) in parser {
+        let wants_line = (text_lines.enabled && matches!(event, Event::Text(_)))
+            || (block_lines.enabled && is_review_block_start(&event));
+        let line = match (first_line, &index) {
+            (Some(base), Some(index)) if wants_line => {
+                Some(base.saturating_add(index.line_of(range.start) - 1))
+            }
+            _ => None,
+        };
+        let event = match event {
+            Event::Rule => Event::Html(CowStr::Borrowed("<hr />\n")),
+            // The body is a temporary; the page's events outlive it.
+            other => other.into_static(),
+        };
+        push_event(events, text_lines, block_lines, event, line);
+    }
 }
 
 /// A task item whose checkbox has been emitted and whose text span is still open.
@@ -6372,6 +6575,169 @@ mod tests {
                 "line {line} outside 1..={line_count}: {html}"
             );
         }
+    }
+
+    // --- ```chat blocks ---
+
+    /// The part of `html` from the chat block to the `## After` heading.
+    fn chat_part(html: &str) -> &str {
+        let start = html
+            .find("<div class=\"mbr-chat\"")
+            .unwrap_or_else(|| panic!("no chat block in: {html}"));
+        let end = html
+            .find("After</h2>")
+            .and_then(|at| html[..at].rfind("<h2"))
+            .unwrap_or(html.len());
+        &html[start..end]
+    }
+
+    const CHAT_PAGE: &str = concat!(
+        "# Page\n",                                              // 1
+        "\n",                                                    // 2
+        "```chat\n",                                             // 3
+        "> Bob\n",                                               // 4
+        "Between [bubbles](other.md).\n",                        // 5
+        "{{Alice|See [rel](other.md) and [[Other]]|5:42 PM}}\n", // 6
+        "{{Bob|first\n",                                         // 7
+        "\n",                                                    // 8
+        "## Body heading\n",                                     // 9
+        "\n",                                                    // 10
+        "---\n",                                                 // 11
+        "\n",                                                    // 12
+        "TODO: later\n",                                         // 13
+        "|}}\n",                                                 // 14
+        "...\n",                                                 // 15
+        "# A note with [a link](other.md)\n",                    // 16
+        "```\n",                                                 // 17
+        "\n",                                                    // 18
+        "## After\n",                                            // 19
+    );
+
+    #[tokio::test]
+    async fn chat_block_renders_bubbles_with_page_link_transform() {
+        let result = render_with_wikilinks(CHAT_PAGE, "/sub/page/", None, None).await;
+        let chat = chat_part(&result.html);
+
+        assert!(chat.contains("role=\"log\""), "{chat}");
+        assert!(
+            chat.contains("mbr-chat-msg mbr-chat-left mbr-chat-c"),
+            "Alice is on the left: {chat}"
+        );
+        assert!(
+            chat.contains("mbr-chat-msg mbr-chat-right mbr-chat-c"),
+            "Bob is on the right: {chat}"
+        );
+        assert!(chat.contains("<div class=\"mbr-chat-name\">Alice</div>"));
+        assert!(chat.contains("<div class=\"mbr-chat-meta\">5:42 PM</div>"));
+        assert!(chat.contains("mbr-chat-delim"));
+        assert!(chat.contains("<div class=\"mbr-chat-comment\">"));
+        assert!(chat.contains("<div class=\"mbr-chat-md\">"));
+        // Every relative link — in a body, in a comment and between bubbles —
+        // gets the same trailing-slash transform as the rest of the page.
+        assert_eq!(
+            chat.matches("href=\"../other/\"").count(),
+            3,
+            "three relative links transformed: {chat}"
+        );
+        // A wikilink in a body resolves exactly as one outside the block does.
+        let outside = render_with_wikilinks("[[Other]]", "/sub/page/", None, None)
+            .await
+            .html;
+        let href_at = outside.find("href=\"").expect("a link") + "href=\"".len();
+        let href = &outside[href_at..href_at + outside[href_at..].find('"').expect("closed")];
+        assert!(
+            chat.contains(&format!("href=\"{href}\">Other</a>")),
+            "expected {href}: {chat}"
+        );
+        // Not a code block any more.
+        assert!(!chat.contains("<pre"), "{chat}");
+        assert!(!chat.contains("{{"), "{chat}");
+    }
+
+    #[tokio::test]
+    async fn chat_body_headings_stay_out_of_the_toc_and_rules_do_not_split_sections() {
+        let result = render_with_wikilinks(CHAT_PAGE, "/sub/page/", None, None).await;
+        let ids: Vec<&str> = result.headings.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["page", "after"], "body heading excluded from TOC");
+
+        let chat = chat_part(&result.html);
+        assert!(chat.contains("<h2>Body heading</h2>"), "{chat}");
+        assert!(chat.contains("<hr />"), "{chat}");
+        assert!(
+            !chat.contains("<section") && !chat.contains("</section>"),
+            "a body rule must not split sections inside the bubble: {chat}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_body_rule_does_not_shift_section_attrs() {
+        let md = "```chat\n{{A|x\n\n---\n\ny|}}\n```\n\n--- {#after .tail}\n\nTail\n";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains("<section id=\"after\" class=\"tail\">"),
+            "the attrs of the first real rule land on its section: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_bodies_carry_their_real_source_lines() {
+        let html = render_review(CHAT_PAGE, true).await;
+        let chat = chat_part(&html);
+        assert_eq!(block_line_of_tag(chat, "<div class=\"mbr-chat\""), Some(3));
+        assert_eq!(block_line_of(chat, "Between "), Some(5));
+        assert_eq!(block_line_of(chat, "See "), Some(6));
+        assert_eq!(block_line_of_tag(chat, "<h2"), Some(9));
+        assert_eq!(block_line_of(chat, "A note with"), Some(16));
+        assert!(
+            chat.contains("id=\"mbr-marker-13\""),
+            "the TODO in the body anchors to its own line: {chat}"
+        );
+        // And nothing after the block is thrown off.
+        assert_eq!(block_line_of(&html, ">After<"), Some(19));
+    }
+
+    #[tokio::test]
+    async fn chat_block_inside_a_list_item_keeps_lines() {
+        let md = concat!(
+            "- item\n",       // 1
+            "  ```chat\n",    // 2
+            "  {{A|one|}}\n", // 3
+            "  {{B|two|}}\n", // 4
+            "  ```\n",        // 5
+        );
+        let html = render_review(md, false).await;
+        assert_eq!(block_line_of(&html, "two"), Some(4), "{html}");
+    }
+
+    #[tokio::test]
+    async fn chat_block_links_are_outbound_links() {
+        let result = render_with_wikilinks(CHAT_PAGE, "/sub/page/", None, None).await;
+        assert!(
+            result
+                .outbound_links
+                .iter()
+                .any(|link| link.to.contains("other")),
+            "{:?}",
+            result.outbound_links
+        );
+    }
+
+    #[tokio::test]
+    async fn non_chat_fences_are_untouched() {
+        for info in ["chat-old", "rust", ""] {
+            let md = format!("```{info}\n{{{{A|b|c}}}}\n```\n");
+            let html = render_markdown(&md).await;
+            assert!(!html.contains("mbr-chat"), "{info}: {html}");
+            assert!(html.contains("{{A|b|c}}"), "{info}: {html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_header_and_subtext_are_escaped() {
+        let html = render_markdown("```chat\n{{<img src=x onerror=alert(1)>|hi|<b>}}\n```\n").await;
+        assert!(!html.contains("<img src=x"), "{html}");
+        assert!(html.contains("&lt;img src=x"), "{html}");
+        assert!(html.contains("&lt;b&gt;"), "{html}");
     }
 }
 

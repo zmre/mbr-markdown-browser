@@ -8971,3 +8971,35 @@ async fn test_head_config_includes_review_enabled() {
         assert_html_contains(&server.get_text(path).await, "reviewEnabled: false");
     }
 }
+
+/// A ```chat block renders as bubbles, and the links in its bodies get the same
+/// trailing-slash transform as links anywhere else on the page — they are
+/// spliced into the page's event stream, not rendered on the side.
+#[tokio::test]
+async fn test_chat_block_renders_bubbles_with_transformed_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes/other.md", "# Other\n");
+    repo.create_markdown(
+        "notes/chat.md",
+        "# Chat\n\n```chat\n> Bob\n{{Alice|See [the other note](other.md)|9:00}}\n{{Bob|And [[other]] too|}}\n```\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/notes/chat/").await;
+
+    assert_html_contains(&html, "<div class=\"mbr-chat\"");
+    assert_html_contains(&html, "<div class=\"mbr-chat-name\">Alice</div>");
+    assert_html_contains(&html, "mbr-chat-msg mbr-chat-right");
+    assert_html_contains(&html, "<a href=\"../other/\">the other note</a>");
+    assert_html_contains(&html, "<a href=\"../other/\">other</a>");
+    assert!(
+        !html.contains("{{Alice"),
+        "the fence must not survive: {html}"
+    );
+
+    let css = server.get_text("/.mbr/theme.css").await;
+    assert!(
+        css.contains(".mbr-chat-msg"),
+        "chat styles ship in theme.css"
+    );
+}

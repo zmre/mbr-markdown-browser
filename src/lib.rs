@@ -38,6 +38,7 @@ pub mod audio;
 pub mod browser;
 pub mod build;
 pub mod cache;
+pub mod chat;
 pub mod cli;
 pub mod config;
 pub mod constants;
