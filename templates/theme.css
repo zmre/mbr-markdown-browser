@@ -1523,6 +1523,16 @@ main dl > dt {
     var(--mbr-dl-transition-easing);
 }
 
+/* The negative `text-indent` above is inherited, and it applies to the first
+ * line of every *block container* -- which includes inline-blocks. Pico draws
+ * `code` / `kbd` as `inline-block`, so a question like "set a page's `<body>`
+ * classes?" pulled its code span's text a marker-width to the left, over the
+ * word before it. Resetting it on every descendant is safe: an inline element
+ * ignores `text-indent`, so only the inline-blocks notice. */
+main dl > dt * {
+  text-indent: 0;
+}
+
 main dl > dt:hover {
   color: var(--mbr-dl-question-hover-color);
 }
