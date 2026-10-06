@@ -2017,6 +2017,7 @@ async fn test_build_writes_graph_chunks() {
         "mbr-graph.min.js",
         "mbr-genealogy.min.js",
         "mbr-flashcards.min.js",
+        "mbr-flashcards-reading.min.js",
     ] {
         let path = output.join(".mbr").join("components").join(chunk);
         assert!(path.exists(), "Expected chunk at {}", path.display());

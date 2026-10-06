@@ -1,7 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { recordReview } from './flashcard-review.js'
-import { readSourceLines, resetTaskToggleState, wasSelfWrite } from './task-toggle.js'
-import { clearEditToken, isEditTokenRequired } from './edit-token.js'
+import { makeReviewRecorder } from './review-writer.js'
+// The real main-bundle instances, injected exactly as `<mbr-flashcards>` does:
+// these tests are what pin that the writer drives *their* cache and window.
+import {
+  TOKEN_MESSAGE,
+  forgetSourceLines,
+  noteSelfWrite,
+  readSourceLines,
+  resetTaskToggleState,
+  wasSelfWrite,
+} from '../task-toggle.js'
+import {
+  clearEditToken,
+  editAuthHeaders,
+  isEditTokenRequired,
+  noteEditTokenRequired,
+} from '../edit-token.js'
+
+const recordReview = makeReviewRecorder({
+  path: 'deck.md',
+  read: readSourceLines,
+  forget: forgetSourceLines,
+  selfWrite: noteSelfWrite,
+  headers: editAuthHeaders,
+  tokenRequired: noteEditTokenRequired,
+  tokenMessage: TOKEN_MESSAGE,
+})
 
 const SOURCE = 'Q?\n: A.\n\nNext?\n: B.\n'
 
@@ -26,17 +50,15 @@ beforeEach(() => {
   resetTaskToggleState()
   clearEditToken()
   window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
-  window.frontmatter = { markdown_source: 'deck.md' }
   fetchMock = vi.fn()
   globalThis.fetch = fetchMock as unknown as typeof fetch
 })
 
 afterEach(() => {
   window.__MBR_CONFIG__ = undefined
-  window.frontmatter = undefined
 })
 
-describe('recordReview', () => {
+describe('makeReviewRecorder', () => {
   it('sends the term line as `expected`, and splices the insert into the cache', async () => {
     route({
       ok: true,
@@ -100,12 +122,5 @@ describe('recordReview', () => {
     const outcome = await recordReview({ line: 99, rating: 'easy' })
     expect(outcome).toMatchObject({ ok: false, kind: 'conflict' })
     expect(fetchMock.mock.calls.some((c) => c[0] === '/.mbr/flashcard-review')).toBe(false)
-  })
-
-  it('refuses on a page with no source path', async () => {
-    window.frontmatter = undefined
-    const outcome = await recordReview({ line: 1, rating: 'good' })
-    expect(outcome.ok).toBe(false)
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

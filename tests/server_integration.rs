@@ -3176,6 +3176,7 @@ async fn test_graph_chunks_served() {
         "/.mbr/components/mbr-review.min.js",
         "/.mbr/components/mbr-search-extras.min.js",
         "/.mbr/components/mbr-flashcards.min.js",
+        "/.mbr/components/mbr-flashcards-reading.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -3245,6 +3246,7 @@ async fn test_components_js_bundle_no_missing_imports() {
         "mbr-review.min.js",
         "mbr-search-extras.min.js",
         "mbr-flashcards.min.js",
+        "mbr-flashcards-reading.min.js",
     ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");

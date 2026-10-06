@@ -7519,6 +7519,14 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "application/javascript",
     ),
     (
+        // Flashcard reading view (collapsed review-history summaries), imported
+        // by <mbr-flashcards> at idle on `type: flashcard` pages only. Separate
+        // from the deck so reading a note never fetches ts-fsrs.
+        "/components/mbr-flashcards-reading.min.js",
+        include_bytes!("../templates/components-js/mbr-flashcards-reading.min.js"),
+        "application/javascript",
+    ),
+    (
         "/hljs.dark.css",
         include_bytes!("../templates/hljs.dark.11.11.2.css"),
         "text/css",

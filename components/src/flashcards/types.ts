@@ -34,5 +34,32 @@ export type ReviewOutcome =
     }
   | { readonly ok: false; readonly kind: 'conflict' | 'auth' | 'other'; readonly message: string }
 
-/** The writer the trigger injects into the deck as `.recordReview`. */
+/** The writer the deck uses (built by `review-writer.ts::makeReviewRecorder`). */
 export type ReviewRecorder = (target: ReviewTarget) => Promise<ReviewOutcome>
+
+/** A file's source lines as `task-toggle.ts` reads them (mirrors its `SourceRead`). */
+export type SourceLines = { ok: true; lines: string[] } | { ok: false; status: number }
+
+/**
+ * The main-bundle state the writer needs, injected by the `<mbr-flashcards>`
+ * trigger. Each member is a `task-toggle.ts` / `edit-token.ts` export: the
+ * chunk must use *those* instances — one source-line cache, one self-write
+ * window, one in-memory token — so it receives them rather than importing a
+ * second copy.
+ */
+export interface ReviewServices {
+  /** Repo-relative source path of the page (`currentDocumentPath()`). */
+  readonly path: string
+  /** `readSourceLines` */
+  readonly read: (path: string) => Promise<SourceLines>
+  /** `forgetSourceLines` */
+  readonly forget: (path: string) => void
+  /** `noteSelfWrite` */
+  readonly selfWrite: (path: string) => void
+  /** `editAuthHeaders` */
+  readonly headers: (extra?: Record<string, string>) => Record<string, string>
+  /** `noteEditTokenRequired` */
+  readonly tokenRequired: () => void
+  /** What to say when a token is missing (`task-toggle.ts::TOKEN_MESSAGE`). */
+  readonly tokenMessage: string
+}

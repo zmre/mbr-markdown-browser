@@ -203,7 +203,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'e', description: 'Open editor (when editing enabled)' },
       { keys: 'r', description: 'Add a review note (anchored to the selection)' },
       { keys: 'R', description: 'Open review notes (server/GUI only)' },
-      { keys: 'p', description: 'Play slides / review flashcards (on those pages)' },
+      { keys: 'p', description: 'Play slides / flashcards' },
       { keys: 'Esc', description: 'Close panel' },
     ],
   },
@@ -272,17 +272,6 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'd', description: 'Delete the focused note (confirms)' },
       { keys: 'c', description: 'Copy the review as markdown' },
       { keys: 'Esc', description: 'Close' },
-    ],
-  },
-  {
-    title: 'Flashcards (when open)',
-    shortcuts: [
-      { keys: 'Space / → / n', description: 'Flip, then next card' },
-      { keys: 'Enter', description: 'Flip the card' },
-      { keys: '← / →', description: 'Previous / next card (In order, Random)' },
-      { keys: 'Home / End', description: 'First / last card' },
-      { keys: '1 / 2 / 3 / 4', description: 'Rate Again / Hard / Good / Easy (FSRS)' },
-      { keys: 'Esc', description: 'Leave the deck' },
     ],
   },
   {

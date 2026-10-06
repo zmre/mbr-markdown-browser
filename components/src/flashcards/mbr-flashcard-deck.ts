@@ -114,8 +114,6 @@ export class MbrFlashcardDeckElement extends LitElement {
   @property({ attribute: false }) root: ParentNode = document
   /** The review writer; `null` disables spaced repetition. */
   @property({ attribute: false }) recordReview: ReviewRecorder | null = null
-  /** True when the server can record reviews (edit mode, a source path). */
-  @property({ attribute: false }) srsAvailable = false
 
   @state() private _cards: DeckCard[] = []
   @state() private _mode: DeckMode = 'random'
@@ -204,10 +202,12 @@ export class MbrFlashcardDeckElement extends LitElement {
   // Session
   // ========================================
 
-  /** Spaced repetition is usable only when every card can be addressed. */
+  /**
+   * Spaced repetition needs a writer (the trigger supplies one only with
+   * editing on and a source path) and every card addressable by its line.
+   */
   private get _srsUsable(): boolean {
     return (
-      this.srsAvailable &&
       this.recordReview !== null &&
       this._cards.length > 0 &&
       this._cards.every((card) => Number(card.parts.term.dataset.mbrLine) > 0)

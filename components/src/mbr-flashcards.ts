@@ -1,31 +1,45 @@
 /**
  * `<mbr-flashcards>` — the flashcard trigger (main bundle).
  *
- * On a `type: flashcard` page (`<body class="flashcard">`) with at least one
- * top-level definition list, this renders a "Review flashcards" button in the
- * nav (where `<mbr-slides>` puts "Play Slides") and claims `p`, the same key
- * and guards as slides (`isPlayKey`). Opening it lazy-loads
- * `mbr-flashcards.min.js` and appends a `<mbr-flashcard-deck>` overlay to
- * `<body>`.
+ * On a `type: flashcard` page (`<body class="flashcard">`) that has a
+ * definition list, this renders a "Review flashcards" button in the nav (where
+ * `<mbr-slides>` puts "Play Slides", and styled by that element's own sheet)
+ * and claims `p`, with the same guards as slides (`isPlayKey`).
  *
- * It also does the one thing every flashcard page needs without the chunk:
- * collapse each card's `___Review History___` into a one-line summary
- * (`flashcards/dom.ts::decorateHistory`). That runs in static builds too.
+ * **Deliberately tiny: it ships on every page, and almost no page is a deck.**
+ * Everything else is in two lazy chunks, fetched only on flashcard pages:
  *
- * Kept small on purpose — the overlay, FSRS (`ts-fsrs`) and the fitting logic
- * are all in the chunk. What lives here is what the chunk may not hold: the
- * writer (`recordReview`, which shares `task-toggle.ts`'s caches) and the
- * decision whether spaced repetition is available at all.
+ * - `mbr-flashcards-reading.min.js`, imported at idle, collapses each card's
+ *   `___Review History___` into a one-line summary. Separate from the deck so
+ *   that *reading* a flashcard note never fetches FSRS and the overlay.
+ * - `mbr-flashcards.min.js`, imported when the deck is opened: the overlay,
+ *   `ts-fsrs`, and the review writer.
+ *
+ * The writer must use this bundle's `task-toggle.ts` / `edit-token.ts` state
+ * (one source cache, one self-write window, one token), so the trigger hands
+ * those functions to the chunk's `makeReviewRecorder` rather than letting the
+ * chunk import a second copy. No writer (no editing, or no source path) means
+ * the deck offers no spaced repetition.
+ *
+ * "Has a deck" is checked loosely here (any `dl > dt` in the page); the chunk
+ * applies the exact rule — top-level lists only — and says "No cards" when a
+ * page's only lists are nested.
  */
-import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
+import { LitElement, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { getMbrAssetBase, waitForDom } from './dynamic-loader.js'
+import { getMbrAssetBase, scheduleIdleTask, waitForDom } from './dynamic-loader.js'
 import { isEditEnabled } from './shared.js'
 import { isPlayKey } from './mbr-keys.js'
-import { currentDocumentPath } from './task-toggle.js'
-import { recordReview } from './flashcard-review.js'
-import { decorateAllHistories, hasDeck } from './flashcards/dom.js'
-import type { ReviewRecorder } from './flashcards/types.js'
+import { MbrSlidesElement } from './mbr-slides.js'
+import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
+import {
+  TOKEN_MESSAGE,
+  currentDocumentPath,
+  forgetSourceLines,
+  noteSelfWrite,
+  readSourceLines,
+} from './task-toggle.js'
+import type { ReviewRecorder, ReviewServices } from './flashcards/types.js'
 import type { MbrOverlay } from './overlay.js'
 
 declare global {
@@ -34,78 +48,86 @@ declare global {
   }
 }
 
-/** Body class `type: flashcard` produces (`templates.rs::body_class_list`). */
-const FLASHCARD_CLASS = 'flashcard'
-
-/** Event the deck dispatches to be closed (`flashcards/mbr-flashcard-deck.ts`). */
-const DECK_CLOSE_EVENT = 'mbr-flashcards-close'
+/** What the chunks export that the trigger uses (`flashcards/index.ts`, `reading.ts`). */
+interface ChunkModule {
+  makeReviewRecorder?: (services: ReviewServices) => ReviewRecorder
+  decorateAllHistories?: (root: ParentNode) => void
+}
 
 /** The properties the trigger sets on the chunk's deck element. */
 interface DeckElement extends HTMLElement {
   root: ParentNode
   recordReview: ReviewRecorder | null
-  srsAvailable: boolean
 }
 
-/** The page's rendered markdown — where the deck's lists live. */
+/** The page's rendered markdown (`main#wrapper`) — where the deck's lists live. */
 function deckRoot(): ParentNode {
-  return document.querySelector('main#wrapper') ?? document.querySelector('main') ?? document.body
+  return document.querySelector('main') ?? document.body
 }
 
-/** True on a flashcard page that has something to review. */
+/** True on a `type: flashcard` page with a definition list to review. */
 function isDeckPage(): boolean {
-  return document.body.classList.contains(FLASHCARD_CLASS) && hasDeck(deckRoot())
+  return document.body.classList.contains('flashcard') && !!deckRoot().querySelector('dl > dt')
 }
 
 /**
- * Import the lazy deck chunk. Same seam as `mbr-review.ts`: a runtime URL that
+ * Import a chunk by file name. Same seam as `mbr-review.ts`: a runtime URL that
  * resolves from any page depth, `@vite-ignore` so vite leaves it alone, and an
- * overridable binding so tests can stub what happy-dom cannot import.
+ * overridable binding — one for both chunks — so tests can stub what happy-dom
+ * cannot import.
  */
-let importFlashcardsChunk: () => Promise<unknown> = () => {
-  const url = new URL(getMbrAssetBase() + 'components/mbr-flashcards.min.js', document.baseURI).href
-  return import(/* @vite-ignore */ url)
+let importChunk = (file: string): Promise<ChunkModule> =>
+  import(/* @vite-ignore */ new URL(getMbrAssetBase() + 'components/' + file, document.baseURI).href)
+
+/** Shared once-per-page load of the deck chunk; `null` when it failed. */
+let deckChunk: Promise<ChunkModule | null> | null = null
+
+/** Test hook: replace the chunk importer; `file` names the chunk wanted. */
+export function setFlashcardsChunkImporter(importer: (file: string) => Promise<unknown>): void {
+  importChunk = importer as typeof importChunk
+  deckChunk = null
 }
 
-/** Test hook: replace the chunk importer (module-level seam). */
-export function setFlashcardsChunkImporter(importer: () => Promise<unknown>): void {
-  importFlashcardsChunk = importer
-  flashcardsChunkPromise = null
+function chunkFailed(err: unknown): null {
+  console.warn('mbr-flashcards:', err)
+  return null
 }
 
-/** Shared once-per-page promise for the chunk load; `true` when usable. */
-let flashcardsChunkPromise: Promise<boolean> | null = null
-
-function loadFlashcardsChunk(): Promise<boolean> {
-  if (!flashcardsChunkPromise) {
-    flashcardsChunkPromise = importFlashcardsChunk()
-      .then(() => true)
-      .catch((err) => {
-        console.warn('Failed to load the flashcards chunk:', err)
-        return false // No deck this page load; the trigger stays inert.
-      })
-  }
-  return flashcardsChunkPromise
+/** The writer's main-bundle state, or `null` when reviews cannot be written. */
+function reviewServices(): ReviewServices | null {
+  const path = currentDocumentPath()
+  return isEditEnabled() && path
+    ? {
+        path,
+        read: readSourceLines,
+        forget: forgetSourceLines,
+        selfWrite: noteSelfWrite,
+        headers: editAuthHeaders,
+        tokenRequired: noteEditTokenRequired,
+        tokenMessage: TOKEN_MESSAGE,
+      }
+    : null
 }
 
 @customElement('mbr-flashcards')
 export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
   @state() private _isDeck = false
-  @state() private _isOpen = false
-  @state() private _loading = false
-
+  // Not reactive: render() never reads it.
+  private _isOpen = false
   private _deck: DeckElement | null = null
 
   override connectedCallback(): void {
     super.connectedCallback()
     document.addEventListener('keydown', this._handleKeydown)
-    waitForDom()
-      .then(() => {
-        if (!this.isConnected || !document.body.classList.contains(FLASHCARD_CLASS)) return
-        decorateAllHistories(deckRoot())
-        this._isDeck = isDeckPage()
+    void waitForDom().then(() => {
+      if (!this.isConnected || !isDeckPage()) return
+      this._isDeck = true
+      scheduleIdleTask(() => {
+        importChunk('mbr-flashcards-reading.min.js')
+          .then((m) => m.decorateAllHistories?.(deckRoot()))
+          .catch(chunkFailed)
       })
-      .catch((err) => console.error('[mbr-flashcards] Error:', err))
+    })
   }
 
   override disconnectedCallback(): void {
@@ -113,10 +135,6 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     document.removeEventListener('keydown', this._handleKeydown)
     this.close()
   }
-
-  // ========================================
-  // MbrOverlay
-  // ========================================
 
   /** True while the deck is showing, or its chunk is loading. */
   public get isOpen(): boolean {
@@ -135,8 +153,7 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
 
   private _handleKeydown = (e: KeyboardEvent): void => {
     // A page that is both slides and flashcards keeps `p` for the slides.
-    if (document.body.classList.contains('slides')) return
-    if (isPlayKey(e) && !this._isOpen && isDeckPage()) {
+    if (!document.body.classList.contains('slides') && isPlayKey(e) && !this._isOpen && isDeckPage()) {
       e.preventDefault()
       void this._open()
     }
@@ -148,52 +165,34 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     // `isModalOpen()` swallow every bare-letter shortcut on the page.
     if (this._isOpen || !isDeckPage()) return
     this._isOpen = true
-    this._loading = true
-    let ready = false
-    try {
-      ready = await loadFlashcardsChunk()
-    } finally {
-      this._loading = false
-    }
+    // On failure: no deck this page load; the trigger stays inert.
+    deckChunk ??= importChunk('mbr-flashcards.min.js').catch(chunkFailed)
+    const chunk = await deckChunk
     // Closed (Esc) while loading, or the chunk failed: show nothing.
-    if (!this._isOpen || !ready) {
+    if (!this._isOpen || !chunk) {
       this._isOpen = false
       return
     }
 
+    const services = reviewServices()
     const deck = document.createElement('mbr-flashcard-deck') as DeckElement
     deck.root = deckRoot()
-    deck.recordReview = recordReview
-    deck.srsAvailable = isEditEnabled() && currentDocumentPath() !== null
-    deck.addEventListener(DECK_CLOSE_EVENT, () => this.close())
+    // No writer means no spaced repetition: In order / Random only.
+    deck.recordReview = services && chunk.makeReviewRecorder ? chunk.makeReviewRecorder(services) : null
+    deck.addEventListener('mbr-flashcards-close', () => this.close())
     this._deck = deck
     document.body.append(deck)
   }
 
   override render(): TemplateResult | typeof nothing {
-    if (!this._isDeck) return nothing
-    // A dimmed button stands in for a spinner: the chunk is small and local,
-    // so the loading state is rarely visible at all.
-    return html`<button
-      @click=${() => this.open()}
-      ?disabled=${this._loading}
-      aria-busy=${this._loading ? 'true' : 'false'}
-      aria-label="Review flashcards (P)"
-      title="Review the flashcards on this page (P)"
-    ><i></i><span>Review flashcards</span></button>`
+    // No loading state: the chunk is small and local, and a second press while
+    // it loads is already a no-op (`_open` checks `_isOpen`). One line on
+    // purpose: template whitespace is not minified.
+    // prettier-ignore
+    return this._isDeck ? html`<button class="play-slides-btn" @click=${() => this.open()} title="Review flashcards (P)"><span class="play-icon"></span>Review flashcards</button>` : nothing
   }
 
-  // Same metrics as <mbr-slides>' button, so the nav reads the same. Written
-  // compactly: Lit `css` text is not minified, and this ships on every page.
-  static override styles = css`
-    :host { display: contents }
-    button { display: flex; align-items: center; gap: .4rem; padding: .35rem .7rem; border: none;
-      border-radius: 4px; cursor: pointer; font-size: .85rem; font-weight: 500; white-space: nowrap;
-      background: var(--pico-primary-background, #1095c1); color: var(--pico-primary-inverse, #fff);
-      transition: background .15s ease, transform .1s ease }
-    button:hover { background: var(--pico-primary-hover-background, #0d7a9c); transform: translateY(-1px) }
-    button:disabled { opacity: .7; cursor: wait }
-    i { border-left: 8px solid currentColor; border-block: 5px solid transparent }
-    @media (max-width: 576px) { span { display: none } }
-  `
+  // <mbr-slides>' own sheet, not a copy: the two buttons share the nav slot
+  // and should look identical, and a second sheet would ship on every page.
+  static override styles = MbrSlidesElement.styles
 }

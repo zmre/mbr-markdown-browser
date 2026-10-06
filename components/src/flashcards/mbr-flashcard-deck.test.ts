@@ -7,12 +7,12 @@ import type { ReviewOutcome, ReviewRecorder, ReviewTarget } from './types.js'
 
 let deck: MbrFlashcardDeckElement
 
-async function mount(options: { srs?: boolean; recorder?: ReviewRecorder } = {}) {
+// A recorder is what turns spaced repetition on, exactly as the trigger decides.
+async function mount(options: { recorder?: ReviewRecorder } = {}) {
   const root = installDeckPage()
   deck = document.createElement('mbr-flashcard-deck')
   deck.root = root
   deck.recordReview = options.recorder ?? null
-  deck.srsAvailable = options.srs ?? false
   document.body.append(deck)
   await deck.updateComplete
   return root
@@ -164,14 +164,14 @@ describe('spaced repetition', () => {
   })
 
   it('is the default when available, and orders due cards before new ones', async () => {
-    await mount({ srs: true, recorder })
+    await mount({ recorder })
     expect(deck.querySelector('select')!.querySelector('option[value="srs"]')!.hasAttribute('selected')).toBe(true)
     // Cards 1 and 3 have old histories (due); card 2 is new.
     expect(counter()).toBe('Due 2 · New 1')
   })
 
   it('shows numbered rating buttons with intervals; Space on the back does not skip', async () => {
-    await mount({ srs: true, recorder })
+    await mount({ recorder })
     await key(' ')
     const buttons = Array.from(deck.querySelectorAll('.mbr-fc-ratings button'))
     expect(buttons.map((b) => b.querySelector('span')!.textContent)).toEqual([
@@ -190,7 +190,7 @@ describe('spaced repetition', () => {
   })
 
   it('a rating key records the review, updates the page and advances', async () => {
-    const root = await mount({ srs: true, recorder })
+    const root = await mount({ recorder })
     // Walk to the new card (always last in the queue) — rate the first two.
     reply = { ok: true, entry: '2026-10-20 10:00 - Easy', line: 10, insertedAt: 10, insertedCount: 1 }
     await key(' ')
@@ -205,7 +205,7 @@ describe('spaced repetition', () => {
   })
 
   it('brings a lapsed card back later in the same session (learn-ahead)', async () => {
-    await mount({ srs: true, recorder })
+    await mount({ recorder })
     reply = { ok: true, entry: '2027-06-01 12:00 - Again', line: 10, insertedAt: 10, insertedCount: 1 }
     expect(counter()).toBe('Due 2 · New 1')
     await key(' ')
@@ -218,7 +218,7 @@ describe('spaced repetition', () => {
 
   it('stops writing after a conflict and says so', async () => {
     reply = { ok: false, kind: 'conflict', message: 'This note changed on disk — reload to continue reviewing.' }
-    await mount({ srs: true, recorder })
+    await mount({ recorder })
     await key(' ')
     await key('3')
     await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
@@ -232,7 +232,7 @@ describe('spaced repetition', () => {
 
   it('keeps the card on any other failure so the rating can be retried', async () => {
     reply = { ok: false, kind: 'auth', message: 'Editing needs a token' }
-    await mount({ srs: true, recorder })
+    await mount({ recorder })
     await key(' ')
     await key('1')
     await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
@@ -249,7 +249,6 @@ describe('spaced repetition', () => {
     deck = document.createElement('mbr-flashcard-deck')
     deck.root = root
     deck.recordReview = recorder
-    deck.srsAvailable = true
     document.body.append(deck)
     await deck.updateComplete
     expect(deck.querySelector('.mbr-fc-screen h3')!.textContent).toBe('Nothing due')
@@ -263,7 +262,6 @@ describe('spaced repetition', () => {
     deck = document.createElement('mbr-flashcard-deck')
     deck.root = root
     deck.recordReview = recorder
-    deck.srsAvailable = true
     document.body.append(deck)
     await deck.updateComplete
     expect(deck.querySelector('option[value="srs"]')).toBeNull()

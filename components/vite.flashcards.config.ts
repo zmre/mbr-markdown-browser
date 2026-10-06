@@ -5,13 +5,14 @@ import { resolve } from 'node:path'
 //
 // The main bundle (vite.config.ts) uses `inlineDynamicImports`, which would pull
 // the overlay and ts-fsrs into every page load. Instead `<mbr-flashcards>` — a
-// nav button, the `p` key and the reading view's history summaries, all small —
-// loads this chunk the first time a deck is opened.
+// nav button and the `p` key, nothing more — loads this chunk the first time a
+// deck is opened. (The reading view's history summaries are a third, much
+// smaller chunk: `vite.flashcards-reading.config.ts`.)
 //
 // The chunk must not import stateful main-bundle modules: `shared.ts`,
-// `task-toggle.ts` / `flashcard-review.ts` (the source-line cache and the
-// self-write window) or `edit-token.ts`. The writer is injected as the deck's
-// `recordReview` property by the trigger.
+// `task-toggle.ts` (the source-line cache and the self-write window) or
+// `edit-token.ts`. The review writer lives here, but builds itself from those
+// modules' functions, which the trigger passes to `makeReviewRecorder`.
 //
 // Unlike the task and review chunks this one IS written into static builds:
 // "In order" and "Random" review need nothing from the server. Spaced

@@ -114,7 +114,8 @@ export function wasSelfWrite(relativePath: string): boolean {
  * and getting that wrong drops a successful sibling write's suppression, which
  * is the expensive mistake of the two.
  *
- * Exported for every other in-place line write (`flashcard-review.ts`): there
+ * Exported for every other in-place line write (`flashcards/review-writer.ts`,
+ * which receives it from `<mbr-flashcards>` as a service): there
  * is one suppression window per page, and a second registry would be invisible
  * to `<mbr-live-reload>`, which consults only {@link wasSelfWrite}.
  */
