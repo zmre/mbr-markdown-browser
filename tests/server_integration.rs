@@ -785,6 +785,71 @@ async fn test_site_json_endpoint() {
     assert!(content_type.to_str().unwrap().contains("application/json"));
 }
 
+/// A person's frontmatter, written the way the contacts docs show it.
+const CONTACT_NOTE: &str = concat!(
+    "---\n",
+    "type: person\n",
+    "title: Jane Doe\n",
+    "company: Acme\n",
+    "born: 1927-03-19\n",
+    "aliases:\n",
+    "  - Mare\n",
+    "  - maiden_name: Mary Smith\n",
+    "emails:\n",
+    "  work: jane@abc.example\n",
+    "phones:\n",
+    "  - mobile: \"+1 303 555 0100\"\n",
+    "urls:\n",
+    "  homepage: https://jane.example\n",
+    "social:\n",
+    "  linkedin: https://linkedin.example/in/jdoe\n",
+    "im:\n",
+    "  signal: \"+1 303 555 0100\"\n",
+    "addresses:\n",
+    "  home:\n",
+    "    city: Paris\n",
+    "---\n",
+    "Notes about Jane.\n",
+);
+
+/// Contact details stay on the page and out of `site.json` (contract 0.2);
+/// dates and aliases are normalized for the charts.
+#[tokio::test]
+async fn test_site_json_omits_contact_details() {
+    let repo = TestRepo::new();
+    repo.create_markdown("people/jane.md", CONTACT_NOTE);
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let body = server.get_text("/.mbr/site.json").await;
+    let site: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let jane = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .expect("jane in site.json");
+    let fm = jane["frontmatter"].as_object().unwrap();
+
+    for key in fm.keys() {
+        let root = key.split('.').next().unwrap();
+        assert!(
+            !["emails", "phones", "urls", "social", "im", "addresses"].contains(&root),
+            "{key} leaked into site.json"
+        );
+    }
+    for secret in ["jane@abc.example", "555 0100", "jane.example", "Paris"] {
+        assert!(!body.contains(secret), "{secret} leaked into site.json");
+    }
+    assert_eq!(fm["dates.birthday"], "1927-03-19");
+    assert_eq!(fm["aliases"], serde_json::json!(["Mare", "Mary Smith"]));
+    assert_eq!(fm["company"], "Acme");
+
+    // The page itself still carries them.
+    let html = server.get_text("/people/jane/").await;
+    assert!(html.contains("jane@abc.example"), "email missing from page");
+}
+
 /// Serving a hidden directory by name (`mbr -s .scratch`) must index it.
 ///
 /// Root discovery deliberately walks *upward* to the enclosing repository, so

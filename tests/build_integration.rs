@@ -1836,6 +1836,56 @@ async fn test_build_person_infobox_and_aliases() {
     );
 }
 
+/// The static `site.json` is published with the site, so contact details must
+/// never reach it — while the page that owns them still shows them.
+#[tokio::test]
+async fn test_build_site_json_omits_contact_details() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Jane Doe\n",
+            "died: 2010-08-05\n",
+            "emails:\n",
+            "  work: jane@abc.example\n",
+            "phones:\n",
+            "  - mobile: \"+1 303 555 0100\"\n",
+            "addresses: \"1 Main St\"\n",
+            "---\n",
+            "Notes.\n",
+        ),
+    );
+    let output = build_site(&repo).await;
+
+    let site_text = fs::read_to_string(output.join(".mbr").join("site.json")).unwrap();
+    for secret in [
+        "jane@abc.example",
+        "555 0100",
+        "1 Main St",
+        "\"emails",
+        "\"phones",
+    ] {
+        assert!(
+            !site_text.contains(secret),
+            "{secret} leaked into site.json"
+        );
+    }
+    let site: serde_json::Value = serde_json::from_str(&site_text).unwrap();
+    let jane = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .expect("jane");
+    assert_eq!(jane["frontmatter"]["dates.death"], "2010-08-05");
+    assert_eq!(jane["frontmatter"]["died"], "2010-08-05", "legacy key kept");
+
+    let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
+    assert!(html.contains("jane@abc.example"));
+}
+
 #[tokio::test]
 async fn test_build_person_page_has_genealogy_element() {
     let (_guard, output) = build_genealogy().await;

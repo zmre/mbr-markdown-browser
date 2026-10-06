@@ -213,6 +213,12 @@ pub struct MarkdownInfo {
     pub url_path: String,
     pub created: u64,
     pub modified: u64,
+    /// The simplified frontmatter, complete in memory (search matches on all
+    /// of it) but serialized **without** contact details — `emails`, `phones`,
+    /// `urls`, `social`, `im`, `addresses` and their dot-key variants. This
+    /// struct is what both server and static `site.json` serialize, so the one
+    /// attribute covers both; see [`crate::contact::is_public_frontmatter_key`].
+    #[serde(serialize_with = "crate::contact::serialize_public_frontmatter")]
     pub frontmatter: Option<crate::markdown::SimpleMetadata>,
     /// Typed relationships declared in frontmatter (unresolved endpoints).
     /// Skipped in serialization — resolved relationships are exposed via the
