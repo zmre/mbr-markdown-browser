@@ -26,6 +26,7 @@ description: The fast, complete markdown browser and static site generator
 | [Task Browser](markdown/tasks/) | Find, filter and complete tasks (server/GUI) |
 | [Relationships & Genealogy](markdown/relationships/) | Typed relationships between notes |
 | [Contacts](markdown/contacts/) | People and organizations: contact card, labeled fields, org relationships |
+| [Chat Transcripts](markdown/chat/) | Conversations as speech bubbles |
 | [CLI Reference](reference/cli/) | Command line options |
 | [Configuration Reference](reference/configuration/) | Config file, environment variables, and feature settings |
 | [Architecture](reference/architecture/) | Technical overview |

@@ -241,6 +241,19 @@ exactly as you wrote them. See the
 panel, and
 [`tasks_stamp_done`](../reference/configuration/#task-settings) for the stamp.
 
+## Chat Transcripts
+
+A ```` ```chat ```` code block renders a conversation as speech bubbles, in the
+format of the Obsidian Chat View plugin:
+
+```chat
+> Bob
+{{Alice|Lunch at noon?|11:02}}
+{{Bob|Sounds good|11:03}}
+```
+
+See [Chat Transcripts](chat/) for the full syntax.
+
 ## Pull Quotes
 
 Use double `>>` for emphasized quotations:
@@ -605,6 +618,7 @@ URLs in angle brackets become clickable:
 - [Contacts](contacts/) - People and organizations with a contact card, labeled phones/emails/addresses and partial dates
 - [Page Styles and Types](styles/) - Restyle a whole page with `style` and `type` frontmatter
 - [Presentation Slides](slides/) - Create slide presentations from markdown
+- [Chat Transcripts](chat/) - Conversations as speech bubbles with a `chat` code block
 - [Slides Example](test-slides/) - A live example presentation
 
 
