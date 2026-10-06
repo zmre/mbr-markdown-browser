@@ -45,13 +45,16 @@ Components load site metadata from `/.mbr/site.json` and render interactive UI.
 
 ## Overriding Components
 
-At the moment, we're bundling all the always-on components together in `mbr-components.min.js` -- this is efficient from a loading / speed perspective and makes current development easier. Three heavier features live in their own lazy chunks that are only fetched on demand:
+At the moment, we're bundling all the always-on components together in `mbr-components.min.js` -- this is efficient from a loading / speed perspective and makes current development easier. Heavier or rarely used features live in their own lazy chunks that are only fetched on demand:
 
 | Chunk | Contents | Loaded when |
 |-------|----------|-------------|
 | `mbr-editor.min.js` | In-browser markdown editor | Editing opens (server/GUI, opt-in) |
 | `mbr-graph.min.js` | Mini link graph (d3-force), also the All people / All charts | Info panel first opens, or one of those charts is chosen |
 | `mbr-genealogy.min.js` | Relationship charts (family-chart, timeline tree, org chart; the All people / All graphs reuse `mbr-graph.min.js`) | A person/organization chart scrolls near the viewport |
+| `mbr-tasks.min.js` | Task browser panel (server/GUI only; not written to static builds) | The task browser first opens |
+| `mbr-review.min.js` | Review-notes panel and note form (server/GUI only; not written to static builds) | A note is first written or the list opened |
+| `mbr-search-extras.min.js` | Search panel folder picker and note-type list (server/GUI only; not written to static builds) | The search modal first opens |
 
 Start with the source components and make your own `mbr-components.min.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
 

@@ -397,8 +397,8 @@ is `family`. The org chart and the two graphs are described in
   (gray when `gender` is unknown) — and couples are joined by **marriage bars**.
 - Pan, zoom, and click-to-navigate as above.
 
-The chart JS is a lazy chunk (`/.mbr/components/mbr-genealogy.min.js`, ~227 kB
-min / ~67 kB gz). Person pages prefetch it, but it loads and renders only when
+The chart JS is a lazy chunk (`/.mbr/components/mbr-genealogy.min.js`, ~239 kB
+min / ~71 kB gz). Person pages prefetch it, but it loads and renders only when
 the chart scrolls near the viewport, so it never blocks page render. The two
 graph charts reuse the sidebar's `mbr-graph.min.js` chunk, loaded only when one
 of them is chosen.
