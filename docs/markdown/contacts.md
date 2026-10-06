@@ -386,7 +386,7 @@ An entry mbr cannot read — a map with two keys where one `label: value` pair
 belongs, a list nested inside a list, a date without a label — is skipped, and
 the rest of the card still renders. In server/GUI mode it is listed in the
 page-problems panel as an *unreadable contact field*, naming the field. See
-[Configuration → Per-page error indicator](../reference/configuration/#per-page-error-indicator-server--gui-only).
+[Configuration → Per-page error indicator](../reference/configuration/#per-page-error-indicator--server---gui-only).
 
 ## Compatibility with address books
 
