@@ -681,6 +681,7 @@ review_enabled = false
 | `<blockquote>` | a block quote |
 | `<pre>` | a fenced or indented code block |
 | `<table>` | a table |
+| `<dt>` / `<dd>` | a definition list term / definition (also how a [flashcard](../markdown/flashcards.md) review addresses its card) |
 
 On a heading the attribute is written **before** any `{#id .class}` the author
 supplied, because an HTML parser keeps the first of a pair of duplicate
@@ -699,9 +700,9 @@ displace the real source line.
   already desynchronised text bytes from source bytes by the time the HTML is
   written.
 
-**Known gap:** in a *tight* definition list the `<dd>`/`<dt>` prose is not
-wrapped in a `<p>`, so those lines have no ancestor carrying `data-mbr-line`.
-A selection there anchors to the nearest enclosing block instead.
+`<dt>` and `<dd>` carry it themselves because a *tight* definition list's
+prose is not wrapped in a `<p>`, so without them those lines would have no
+ancestor carrying `data-mbr-line`.
 
 ### Incomplete-Marker Highlighting
 

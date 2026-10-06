@@ -657,7 +657,7 @@ impl From<bool> for ReviewLines {
 
 /// The **single** definition of which blocks carry a `data-mbr-line` attribute.
 ///
-/// `src/html.rs` renders the attribute; its six `start_tag` arms name this
+/// `src/html.rs` renders the attribute; its eight `start_tag` arms name this
 /// function in their comments so the two cannot drift apart.
 ///
 /// # What is deliberately excluded
@@ -673,13 +673,13 @@ impl From<bool> for ReviewLines {
 ///   bytes from source bytes by the time the writer sees them (see
 ///   [`TextLines`]' "Why the run's *start* is enough").
 ///
-/// # Known gap
+/// # Definition lists
 ///
-/// A **tight** definition list's `<dd>`/`<dt>` prose is not wrapped in a `<p>`,
-/// so such a line has no ancestor carrying `data-mbr-line` at all. Closing that
-/// is two more match arms here and in `html.rs`
-/// (`DefinitionListTitle`/`DefinitionListDefinition`); it is documented rather
-/// than fixed because nothing needs it yet.
+/// `<dt>` and `<dd>` are in the set because a **tight** definition list's prose
+/// is not wrapped in a `<p>`, so without them such a line has no ancestor
+/// carrying `data-mbr-line` at all. The `<dt>`'s line is also how a flashcard
+/// review addresses its card (`POST /.mbr/flashcard-review`, `flashcards.rs`):
+/// the term's own source line is the `line`/`expected` pair the write checks.
 fn is_review_block_start(event: &Event<'_>) -> bool {
     matches!(
         event,
@@ -690,6 +690,8 @@ fn is_review_block_start(event: &Event<'_>) -> bool {
                 | Tag::BlockQuote(_)
                 | Tag::CodeBlock(_)
                 | Tag::Table(_)
+                | Tag::DefinitionListTitle
+                | Tag::DefinitionListDefinition
         )
     )
 }
@@ -848,7 +850,7 @@ fn push_event<'a>(
     if matches!(event, Event::Text(_)) {
         text_lines.record(events.len(), line);
     // `enabled` first, so the off path is one predictable branch rather than
-    // the six-variant `matches!` behind it.
+    // the eight-variant `matches!` behind it.
     } else if block_lines.enabled && is_review_block_start(&event) {
         block_lines.record(events.len(), line);
     }
@@ -6256,6 +6258,48 @@ mod tests {
             recorded.len(),
             7,
             "no record for Tag::List or Tag::TableCell: {recorded:?}"
+        );
+    }
+
+    /// Every `data-mbr-line` value on an opening `tag` (e.g. `"<dt"`), in
+    /// document order.
+    fn block_lines_on(html: &str, tag: &str) -> Vec<u32> {
+        html.match_indices(tag)
+            .filter_map(|(at, _)| block_line_of_tag(&html[at..], tag))
+            .collect()
+    }
+
+    /// `<dt>`/`<dd>` carry their own source line — the flashcard writer
+    /// addresses a card by its term's line, and the frontend reads it from the
+    /// `<dt>`. Covers frontmatter (lines are file lines, not body lines), tight
+    /// and loose lists, multiple answers, and an image in an earlier term: the
+    /// writer's second event loop (`raw_text`, draining alt text) must not
+    /// desynchronise the index for the terms after it.
+    #[tokio::test]
+    async fn block_lines_on_definition_terms_and_definitions() {
+        let md = concat!(
+            "---\n",                      // 1
+            "type: flashcard\n",          // 2
+            "---\n",                      // 3
+            "\n",                         // 4
+            "![a *styled* alt](x.png)\n", // 5  term with an image
+            ": first answer\n",           // 6
+            ": second answer\n",          // 7
+            "\n",                         // 8
+            "Loose term\n",               // 9
+            "\n",                         // 10
+            ": loose answer\n",           // 11
+            "\n",                         // 12
+            "Last term\n",                // 13
+            ": last answer\n",            // 14
+        );
+        let html = render_review(md, false).await;
+        assert_eq!(block_lines_on(&html, "<dt"), vec![5, 9, 13], "{html}");
+        assert_eq!(block_lines_on(&html, "<dd"), vec![6, 7, 11, 14], "{html}");
+        // The FAQ disclosure's `tabindex` survives alongside the attribute.
+        assert!(
+            html.contains(r#"<dt data-mbr-line="9" tabindex="0">"#),
+            "{html}"
         );
     }
 
