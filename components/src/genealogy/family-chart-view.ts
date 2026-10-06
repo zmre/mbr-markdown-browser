@@ -20,7 +20,7 @@
 import { createChart, handlers } from 'family-chart'
 import type { Data, Datum, TreeDatum } from 'family-chart'
 import familyChartCss from 'family-chart/styles/family-chart.css?inline'
-import { formatLifespan } from '../graph/relationship-graph.js'
+import { familyGraph, formatLifespan } from '../graph/relationship-graph.js'
 import { DRAG_THRESHOLD_PX } from '../graph/viewport.js'
 import { findParentChildCycle, toFamilyChartData } from './family-chart-data.js'
 import { computeInitialViewBox } from './timeline-layout.js'
@@ -84,7 +84,8 @@ function mountFamilyChart(container: HTMLElement, ctx: GenealogyContext): Geneal
   cont.className = 'f3 f3-cont mbr-f3'
   container.appendChild(cont)
 
-  const { data, mainId } = toFamilyChartData(ctx.graph)
+  // Family edges only: managers and employers are not parents.
+  const { data, mainId } = toFamilyChartData(familyGraph(ctx.graph, ctx.registry))
 
   // HARD PRECONDITION for createChart(): the parent/child rels must be acyclic.
   // `calculateTree()` walks them with `d3.hierarchy()`, which has no cycle

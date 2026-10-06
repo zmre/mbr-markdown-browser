@@ -32,6 +32,13 @@ export interface SiteNote {
   relationships?: SiteRelationship[]
 }
 
+/**
+ * Which way a hierarchical relation type points. A declaration on note S
+ * `{type: T, to: O}` reads "O is S's T"; `up` means O ranks ABOVE S (parent,
+ * manager, employer, the person S assists), `down` the reverse.
+ */
+export type RelationHierarchy = 'up' | 'down'
+
 /** A relation-type descriptor from `site.json`'s `relationship_types`. */
 export interface RelationTypeConfig {
   name: string
@@ -39,6 +46,10 @@ export interface RelationTypeConfig {
   inverse: string | null
   label: string
   label_plural: string
+  /** Absent on non-hierarchical types and on registries older than the field. */
+  hierarchy?: RelationHierarchy | null
+  /** Free-form grouping; the charts use `family` and `work`. */
+  category?: string | null
 }
 
 // ============================================================================
@@ -90,6 +101,8 @@ export interface GraphEdge {
   kind: EdgeKind
   relType: string
   label: string
+  /** The relation type's category (see `Registry.categoryOf`), if any. */
+  category?: string
 }
 
 export interface GraphNode {
@@ -102,6 +115,12 @@ export interface GraphNode {
   image?: string
   /** Birth place from frontmatter `born_place`, if any. */
   bornPlace?: string
+  /** Frontmatter `type` (`person`, `organization`, …), lowercased. */
+  type?: string
+  /** Frontmatter `job_title`, if any. */
+  jobTitle?: string
+  /** Frontmatter `department`, if any. */
+  department?: string
   isFocus: boolean
 }
 
@@ -126,6 +145,50 @@ export interface Registry {
   get(name: string): RelationTypeConfig | undefined
   isSymmetric(name: string): boolean
   inverseOf(name: string): string | null
+  /**
+   * The type's hierarchy, or its inverse's flipped when only the inverse
+   * declares one. `undefined` = not declared (callers fall back to the legacy
+   * lexicographic orientation).
+   */
+  hierarchyOf(name: string): RelationHierarchy | undefined
+  /** The type's category; see {@link BUILTIN_RELATION_CATEGORIES} for the fallback. */
+  categoryOf(name: string): string | undefined
+  /** True when at least one type declares a category (the modern registry). */
+  readonly hasCategories: boolean
+}
+
+/**
+ * Categories of the built-in relation types, consulted ONLY when the registry
+ * declares no categories at all — a site.json written before `category`
+ * existed, or a repository's own `relationship_types` that predates it. Without
+ * this, such a repository's org chart would be empty and its family chart would
+ * draw managers as parents. A custom type absent here stays uncategorised,
+ * which keeps the legacy "every hierarchy is a family tree" behaviour for it.
+ */
+export const BUILTIN_RELATION_CATEGORIES: Readonly<Record<string, string>> = {
+  parent: 'family',
+  child: 'family',
+  spouse: 'family',
+  sibling: 'family',
+  reports_to: 'work',
+  manages: 'work',
+  assistant: 'work',
+  assists: 'work',
+  employer: 'work',
+  employee: 'work',
+  colleague: 'work',
+}
+
+function asHierarchy(value: unknown): RelationHierarchy | undefined {
+  return value === 'up' || value === 'down' ? value : undefined
+}
+
+function flipHierarchy(h: RelationHierarchy | undefined): RelationHierarchy | undefined {
+  return h === 'up' ? 'down' : h === 'down' ? 'up' : undefined
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
 }
 
 /** Build a case-insensitive registry from `relationship_types`. */
@@ -134,10 +197,24 @@ export function buildRegistry(types: RelationTypeConfig[]): Registry {
   for (const t of types) {
     if (t && typeof t.name === 'string') byName.set(t.name.toLowerCase(), t)
   }
+  const hasCategories = [...byName.values()].some((t) => nonEmpty(t.category) !== undefined)
+  const get = (n: string) => byName.get(n.toLowerCase())
   return {
-    get: (n) => byName.get(n.toLowerCase()),
-    isSymmetric: (n) => byName.get(n.toLowerCase())?.symmetric === true,
-    inverseOf: (n) => byName.get(n.toLowerCase())?.inverse ?? null,
+    get,
+    isSymmetric: (n) => get(n)?.symmetric === true,
+    inverseOf: (n) => get(n)?.inverse ?? null,
+    hierarchyOf: (n) => {
+      const type = get(n)
+      const own = asHierarchy(type?.hierarchy)
+      if (own || !type?.inverse) return own
+      return flipHierarchy(asHierarchy(get(type.inverse)?.hierarchy))
+    },
+    categoryOf: (n) => {
+      if (!hasCategories) return BUILTIN_RELATION_CATEGORIES[n.toLowerCase()]
+      const type = get(n)
+      return nonEmpty(type?.category) ?? (type?.inverse ? nonEmpty(get(type.inverse)?.category) : undefined)
+    },
+    hasCategories,
   }
 }
 
@@ -149,11 +226,47 @@ export function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s
 }
 
-/** Extract the first 4-digit year from a date-ish value, if any. */
+/** A month-day date with no year: `03-19` or the vCard-style `--03-19`. */
+const MONTH_DAY = /^\s*(?:--)?\d{1,2}-\d{1,2}\s*$/
+
+/**
+ * Extract the year from a date-ish value: `1927-03-19`, `1927-03`, `1927`, or
+ * free text like `c. 1898`. A month-day date (`03-19`, `--03-19`) has no year
+ * and yields `undefined` rather than a misread.
+ */
 export function yearOf(value: unknown): string | undefined {
   if (value == null) return undefined
-  const match = String(value).match(/\d{4}/)
+  const text = String(value)
+  if (MONTH_DAY.test(text)) return undefined
+  const match = text.match(/\d{4}/)
   return match ? match[0] : undefined
+}
+
+/**
+ * A date from frontmatter by contract label. site.json flattens `dates:` into
+ * dot keys (`dates.birthday`); a page's own `window.frontmatter` may still be
+ * nested, so both shapes are read.
+ */
+function datesEntry(fm: Record<string, unknown>, label: string): unknown {
+  const flat = fm[`dates.${label}`]
+  if (flat != null && flat !== '') return flat
+  const nested = fm['dates']
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    return (nested as Record<string, unknown>)[label]
+  }
+  return undefined
+}
+
+/**
+ * Birth and death years. `dates.birthday`/`dates.death` win; the deprecated
+ * `born`/`died` are the fallback — the server normalises them into `dates.*`,
+ * but an older or cached site.json may not have.
+ */
+export function lifeYears(fm: Record<string, unknown>): { born?: string; died?: string } {
+  return {
+    born: yearOf(datesEntry(fm, 'birthday')) ?? yearOf(fm['born']),
+    died: yearOf(datesEntry(fm, 'death')) ?? yearOf(fm['died']),
+  }
 }
 
 /**
@@ -221,24 +334,51 @@ export function classifyRelationship(
   if (symmetric) {
     const [a, b] = [selfPath, neighbor].sort()
     const label = rel.label ?? registry.get(predicate)?.label ?? capitalize(predicate)
+    const category = registry.categoryOf(predicate)
     return {
-      edge: { from: a, to: b, kind: 'symmetric', relType: predicate, label },
+      edge: { from: a, to: b, kind: 'symmetric', relType: predicate, label, ...(category ? { category } : {}) },
       key: `sym|${predicate}|${a}|${b}`,
     }
   }
 
   if (inverse) {
-    // Inverse pair (e.g. parent/child): canonicalize onto the lexicographically
-    // smaller type name so both viewpoints collapse to one edge. `predicate`
-    // names the neighbour's role relative to `self`, so the neighbour is the
-    // role holder and `self` is the anchor.
     const inv = inverse.toLowerCase()
-    const forward = predicate < inv ? predicate : inv
-    const roleHolder = predicate === forward ? neighbor : selfPath
-    const anchor = predicate === forward ? selfPath : neighbor
+    const hierarchy = registry.hierarchyOf(predicate)
+    // `from` is always the SUPERIOR (parent, manager, employer) and `to` the
+    // subordinate, so top-down layouts put superiors above. Both viewpoints of
+    // one relationship must canonicalize onto the same name and endpoints so
+    // they collapse to one edge.
+    let canonical: string
+    let superior: string
+    let subordinate: string
+    if (hierarchy) {
+      // The registry says which way the pair points. `predicate` is the
+      // neighbour's role relative to `self`: `up` ⇒ the neighbour ranks above.
+      // The canonical name is the `down` half (child, manages, employee, …).
+      canonical = hierarchy === 'down' ? predicate : inv
+      superior = hierarchy === 'up' ? neighbor : selfPath
+      subordinate = hierarchy === 'up' ? selfPath : neighbor
+    } else {
+      // Legacy fallback for registries without `hierarchy`: canonicalize onto
+      // the lexicographically smaller name and treat its role holder as the
+      // subordinate. Right for parent/child by luck of the alphabet; a custom
+      // `manager`/`report` pair came out upside down, which is why `hierarchy`
+      // exists.
+      canonical = predicate < inv ? predicate : inv
+      superior = predicate === canonical ? selfPath : neighbor
+      subordinate = predicate === canonical ? neighbor : selfPath
+    }
+    const category = registry.categoryOf(canonical)
     return {
-      edge: { from: anchor, to: roleHolder, kind: 'hierarchical', relType: forward, label: rel.label ?? '' },
-      key: `hier|${forward}|${anchor}|${roleHolder}`,
+      edge: {
+        from: superior,
+        to: subordinate,
+        kind: 'hierarchical',
+        relType: canonical,
+        label: rel.label ?? '',
+        ...(category ? { category } : {}),
+      },
+      key: `hier|${canonical}|${superior}|${subordinate}`,
     }
   }
 
@@ -247,8 +387,9 @@ export function classifyRelationship(
   const object = rel.direction === 'outgoing' ? neighbor : selfPath
   const relType = rel.rel_type.toLowerCase()
   const label = rel.label ?? registry.get(rel.rel_type)?.label ?? rel.predicate
+  const category = registry.categoryOf(relType)
   return {
-    edge: { from: subject, to: object, kind: 'directed', relType, label },
+    edge: { from: subject, to: object, kind: 'directed', relType, label, ...(category ? { category } : {}) },
     key: `dir|${relType}|${subject}|${object}`,
   }
 }
@@ -406,6 +547,85 @@ export function breakHierarchicalCycles(
   return { edges: edges.filter((edge) => !dropped.has(edge)), droppedEdges }
 }
 
+/** A graph node from a note's (simplified) frontmatter. */
+export function graphNodeFor(path: string, fm: Record<string, unknown>, isFocus: boolean): GraphNode {
+  const { born, died } = lifeYears(fm)
+  const type = stringOf(fm['type'])?.toLowerCase()
+  const jobTitle = stringOf(fm['job_title'])
+  const department = stringOf(fm['department'])
+  return {
+    urlPath: path,
+    title: nodeTitle(fm, path),
+    born,
+    died,
+    gender: normalizeGender(fm['gender']),
+    image: stringOf(fm['image']),
+    bornPlace: stringOf(fm['born_place']),
+    ...(type ? { type } : {}),
+    ...(jobTitle ? { jobTitle } : {}),
+    ...(department ? { department } : {}),
+    isFocus,
+  }
+}
+
+/**
+ * True when an edge belongs on a FAMILY chart (family chart, timeline tree).
+ *
+ * Contract: only `category === 'family'` edges count. Legacy fallback when the
+ * registry declares no categories at all: every edge whose type is not a
+ * built-in work type (`BUILTIN_RELATION_CATEGORIES`) — what those charts drew
+ * before categories existed, minus managers drawn as parents.
+ */
+export function isFamilyEdge(edge: GraphEdge, registry: Registry): boolean {
+  if (edge.category) return edge.category === 'family'
+  return !registry.hasCategories
+}
+
+/** True when an edge is part of a work hierarchy (org chart material). */
+export function isWorkHierarchyEdge(edge: GraphEdge): boolean {
+  return edge.kind === 'hierarchical' && edge.category === 'work'
+}
+
+/**
+ * The family-only view of a graph: family edges, and the nodes still connected
+ * to the focus through them. Pruning matters — a colleague reached through a
+ * work edge would otherwise float as an unconnected card on a family chart.
+ * `droppedEdges` is narrowed the same way so cycle notices stay on topic.
+ */
+export function familyGraph(graph: RelationshipGraph, registry: Registry): RelationshipGraph {
+  const edges = graph.edges.filter((e) => isFamilyEdge(e, registry))
+  const adjacency = new Map<string, string[]>()
+  const link = (a: string, b: string) => {
+    const list = adjacency.get(a)
+    if (list) list.push(b)
+    else adjacency.set(a, [b])
+  }
+  for (const e of edges) {
+    link(e.from, e.to)
+    link(e.to, e.from)
+  }
+  const reached = new Set<string>([graph.focus])
+  const queue = [graph.focus]
+  for (let i = 0; i < queue.length; i++) {
+    for (const next of adjacency.get(queue[i]) ?? []) {
+      if (reached.has(next)) continue
+      reached.add(next)
+      queue.push(next)
+    }
+  }
+  return {
+    focus: graph.focus,
+    nodes: graph.nodes.filter((n) => reached.has(n.urlPath)),
+    edges: edges.filter((e) => reached.has(e.from) && reached.has(e.to)),
+    droppedEdges: (graph.droppedEdges ?? []).filter((e) => isFamilyEdge(e, registry)),
+  }
+}
+
+/** True when the graph has at least one edge a family chart would draw. */
+export function hasFamilyEdges(graph: RelationshipGraph, registry: Registry): boolean {
+  return graph.edges.some((e) => isFamilyEdge(e, registry))
+}
+
 /**
  * Build a de-duplicated relationship graph around `focusPath`.
  *
@@ -461,19 +681,9 @@ export function buildRelationshipGraph(
   }
 
   // Phase 2: build node objects.
-  const nodes: GraphNode[] = [...included].map((path) => {
-    const fm = notesByPath.get(path)?.frontmatter ?? {}
-    return {
-      urlPath: path,
-      title: nodeTitle(fm, path),
-      born: yearOf(fm['born']),
-      died: yearOf(fm['died']),
-      gender: normalizeGender(fm['gender']),
-      image: stringOf(fm['image']),
-      bornPlace: stringOf(fm['born_place']),
-      isFocus: path === focus,
-    }
-  })
+  const nodes: GraphNode[] = [...included].map((path) =>
+    graphNodeFor(path, notesByPath.get(path)?.frontmatter ?? {}, path === focus)
+  )
 
   // Phase 3: collect every edge among included nodes, de-duplicated.
   const edges = new Map<string, GraphEdge>()

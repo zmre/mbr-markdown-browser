@@ -18,7 +18,7 @@ import {
   type TimelineLayout,
   type TimelineNode,
 } from './timeline-layout.js'
-import { formatLifespan } from '../graph/relationship-graph.js'
+import { familyGraph, formatLifespan } from '../graph/relationship-graph.js'
 import {
   injectStylesOnce,
   type GenealogyChart,
@@ -142,7 +142,8 @@ function mountTimeline(container: HTMLElement, ctx: GenealogyContext): Genealogy
   container.appendChild(canvas)
 
   let controller: SvgViewportController | null = null
-  const layout = computeTimelineLayout(ctx.graph)
+  // Family edges only: managers and employers are not parents.
+  const layout = computeTimelineLayout(familyGraph(ctx.graph, ctx.registry))
   const onActivate = (node: TimelineNode) => {
     // A pan that started on a card must not navigate; consuming the drag flag
     // clears it so the next genuine click works again.
