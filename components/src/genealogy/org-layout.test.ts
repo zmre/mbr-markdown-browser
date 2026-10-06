@@ -104,6 +104,24 @@ describe('buildOrgTree', () => {
     expect(tree.root.children[0]).toMatchObject({ id: '/c/', also: ['/b/'] })
   })
 
+  it('shows a dual report under the second manager too, on that manager’s page', () => {
+    const notes = buildSiteNotes(
+      [
+        { path: '/a/', fm: { title: 'A' } },
+        { path: '/b/', fm: { title: 'B' } },
+        { path: '/c/', fm: { title: 'C' } },
+      ],
+      [
+        ['/c/', 'reports_to', '/a/'],
+        ['/c/', 'reports_to', '/b/'],
+      ]
+    )
+    const tree = buildOrgTree('/b/', notes, registry)!
+    expect(outline(tree.root)).toEqual(['/b/ *', '  /c/'])
+    // `also` names the manager NOT drawn as the parent here.
+    expect(tree.root.children[0].also).toEqual(['/a/'])
+  })
+
   it('terminates on a reporting cycle and places each note once', () => {
     const notes = buildSiteNotes(
       [

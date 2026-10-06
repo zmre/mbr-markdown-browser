@@ -11,7 +11,8 @@
  *   beneath it, structured by reporting lines where known.
  * - Person focus: the management chain up to the top (plus the employer
  *   organization above it, if any), the focus's peers (same manager), and the
- *   focus's reports two levels down.
+ *   focus's reports two levels down — all direct reports, including people
+ *   whose first-listed manager is someone else.
  *
  * Every person has ONE tree parent — their first non-organization superior in
  * authored order, else their first organization. Other superiors are kept as
@@ -285,7 +286,9 @@ export function buildOrgTree(
       }
       const shown = kids.slice(0, Math.max(0, budget))
       for (const kid of shown) {
-        const child = place(kid, parentOf(kid))
+        // The edge actually drawn, so `also` lists the OTHER superiors.
+        const edge = index.superiors(kid).find((s) => s.path === node.id) ?? parentOf(kid)
+        const child = place(kid, edge)
         node.children.push(child)
         queue.push({ node: child, depthLeft: depthLeft - 1 })
       }
@@ -374,8 +377,11 @@ export function buildOrgTree(
     }
   }
 
+  // Reports: EVERY direct report, not just those whose first-listed manager
+  // is this person — on Eve's page, someone reporting to Eve and Carol is
+  // Eve's report too. The placed set still draws each note once.
   const focusNode = nodes.get(focus)!
-  expand([{ node: focusNode, depthLeft: reportsDepth }], (p) => index.childrenOf(p, parentOf), parentOf)
+  expand([{ node: focusNode, depthLeft: reportsDepth }], (p) => index.inferiors(p), parentOf)
   return { root: nodes.get(chain[0])!, hidden }
 }
 
