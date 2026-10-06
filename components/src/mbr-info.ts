@@ -22,6 +22,7 @@ import {
 import { fetchPageLinks } from './graph/links-cache.js';
 import { getMbrAssetBase } from './dynamic-loader.js';
 import { safeHref } from './safe-href.js';
+import { isCardKey } from './contact-meta.js';
 
 interface Heading {
   level: number;
@@ -270,8 +271,9 @@ export class MbrInfoElement extends LitElement {
   }
 
   private _getOrderedKeys(): string[] {
+    const type = this._frontmatter['type'];
     const allKeys = Object.keys(this._frontmatter)
-      .filter(k => !MbrInfoElement.skipKeys.has(k));
+      .filter(k => !MbrInfoElement.skipKeys.has(k) && !isCardKey(type, k));
 
     return [
       ...MbrInfoElement.preferredOrder.filter(k => allKeys.includes(k)),

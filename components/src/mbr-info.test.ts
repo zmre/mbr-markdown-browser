@@ -127,6 +127,45 @@ describe('MbrInfoElement relationships', () => {
   })
 })
 
+describe('MbrInfoElement metadata on contact pages', () => {
+  afterEach(() => {
+    document.querySelectorAll('mbr-info').forEach((el) => el.remove())
+  })
+
+  async function metadataText(frontmatter: Record<string, unknown>): Promise<string> {
+    window.frontmatter = frontmatter
+    const el = document.createElement('mbr-info') as any
+    document.body.appendChild(el)
+    el._isOpen = true
+    el.requestUpdate()
+    await el.updateComplete
+    return el.shadowRoot.querySelector('.metadata-table')?.textContent ?? ''
+  }
+
+  const fields = {
+    title: 'Jane Doe',
+    'emails.work': 'jane@abc.example',
+    'dates.anniversary': '--06-10',
+    job_title: 'VP',
+    gender: 'female',
+  }
+
+  it('leaves card fields to the contact card', async () => {
+    const text = await metadataText({ type: 'person', ...fields })
+    expect(text).toContain('Jane Doe')
+    expect(text).toContain('female')
+    expect(text).not.toContain('jane@abc.example')
+    expect(text).not.toContain('--06-10')
+    expect(text).not.toContain('VP')
+  })
+
+  it('shows everything on other note types', async () => {
+    const text = await metadataText({ type: 'event', ...fields })
+    expect(text).toContain('jane@abc.example')
+    expect(text).toContain('--06-10')
+  })
+})
+
 describe('MbrInfoElement graph section', () => {
   let element: HTMLElement
 

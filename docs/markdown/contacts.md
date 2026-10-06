@@ -224,6 +224,10 @@ loads. It is hidden when nothing links here.
 
 The page reads top to bottom: card, your notes, then the relationship charts.
 
+On contact pages the info panel's Metadata table leaves out what the card
+already shows (name parts, company, department, job title, phones, emails, web,
+IM, addresses and `dates`), so nothing is listed twice.
+
 ### Customizing
 
 The card is the `_contact_card.html` partial; override it in `.mbr/` like any
