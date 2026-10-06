@@ -20,7 +20,7 @@ These are pulldown-cmark's built-in extensions:
 | [Task lists](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_tasklist.html) | `- [ ]` / `- [x]` | Checkboxes in lists |
 | [Smart punctuation](https://pulldown-cmark.github.io/pulldown-cmark/third_party/smart_punct.html) | `"quotes"`, `--` | Curly quotes, em-dashes |
 | [Heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html) | `# Title {#id}` or `# Title {.myclass}` | Custom anchor IDs or classes |
-| Definition lists | `Term` on one line, `: Definition` on the next | Rendered as a [click-to-expand FAQ](#definition-lists--faq-style) |
+| Definition lists | `Term` on one line, `: Definition` on the next | Rendered as a [click-to-expand FAQ](#definition-lists--faq-style); a [flashcard deck](flashcards/) on a `type: flashcard` page |
 | Autolinks | `<https://...>` | Clickable URLs |
 | [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$` | LaTeX via KaTeX |
 | [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
@@ -619,6 +619,7 @@ URLs in angle brackets become clickable:
 - [Page Styles and Types](styles/) - Restyle a whole page with `style` and `type` frontmatter
 - [Presentation Slides](slides/) - Create slide presentations from markdown
 - [Chat Transcripts](chat/) - Conversations as speech bubbles with a `chat` code block
+- [Flashcards](flashcards/) - Turn definition lists into a flashcard deck, with spaced repetition
 - [Slides Example](test-slides/) - A live example presentation
 
 

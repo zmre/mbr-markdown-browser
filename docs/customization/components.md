@@ -55,6 +55,7 @@ At the moment, we're bundling all the always-on components together in `mbr-comp
 | `mbr-tasks.min.js` | Task browser panel (server/GUI only; not written to static builds) | The task browser first opens |
 | `mbr-review.min.js` | Review-notes panel and note form (server/GUI only; not written to static builds) | A note is first written or the list opened |
 | `mbr-search-extras.min.js` | Search panel folder picker and note-type list (server/GUI only; not written to static builds) | The search modal first opens |
+| `mbr-flashcards.min.js` | Flashcard review overlay (+ ts-fsrs) | A flashcard deck is first opened |
 
 Start with the source components and make your own `mbr-components.min.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
 
