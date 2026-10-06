@@ -44,30 +44,32 @@ frontmatter unchanged and is exposed to templates and `site.json`.
 
 ## Person fields
 
-A `type: person` note may carry optional, self-descriptive attributes. All are
-ordinary frontmatter — they flow through to templates and `site.json` unchanged —
-but mbr gives a few of them first-class treatment:
+A `type: person` (or `type: organization`) note is a **contact**: mbr renders a
+full-width contact card at the top of the page from its frontmatter. The full
+field list — names, company, phones, emails, addresses, labeled dates — is in
+[Contacts](contacts/); the ones that matter most for genealogy are:
 
 | Field | Type | Purpose |
 |--------|------|---------|
-| `born` | date/string | Birth date; shown on its own line in the person infobox with a 📅 icon, humanized when it's an ISO date (e.g. `1855-10-30` → *October 30, 1855*). Other formats display as written. |
-| `died` | date/string | Death date; shown on its own line beneath `born`, humanized the same way. |
-| `born_place` | string | Birthplace; displayed on the person's page beneath the dates. |
-| `image` | path or URL | Portrait; displayed on the person's page. |
-| `gender` | string | Styles the genealogy charts (e.g. `male`, `female`) — card tinting and parent-line colors; any value is accepted. |
-| `aliases` | array of strings | Alternate and maiden names (see below). |
+| `dates` | map of label → date | `birthday`, `death`, `anniversary`, or any label of your own. Partial dates are fine: `1927-03-19`, `1927-03`, `1927`, or a yearless `03-19`. Shown humanized on the card (*March 19, 1927*, *March 19*). |
+| `born` / `died` | date/string | **Deprecated but supported** spellings of `dates.birthday` / `dates.death` (the `dates` entry wins if both are present). |
+| `born_place` / `died_place` | string | Shown next to the birthday / death date. |
+| `image` | path or URL | Portrait on the card (relative paths resolve from the note's folder). |
+| `gender` | string | Styles the genealogy charts and tints the card's default avatar (e.g. `male`, `female`); any value is accepted. |
+| `aliases` | list | Alternate and maiden names, optionally labeled (see below). |
 
 ```yaml
 ---
 type: person
 title: Mary Doe
-born: 1927-03-19
-died: 2010-08-05
+dates:
+  birthday: 1927-03-19
+  death: 2010-08-05
 born_place: "Boulder, CO"
 gender: female
 image: /people/mary.jpg
 aliases:
-  - Mary Smith          # maiden name
+  - maiden_name: Mary Smith
   - "Mrs. John Doe"
 relationships:
   - type: spouse
@@ -75,10 +77,17 @@ relationships:
 ---
 ```
 
+In `site.json` every person and organization carries its dates as
+`dates.<label>` strings, with legacy `born`/`died` folded into
+`dates.birthday`/`dates.death`, so charts and custom components read one shape.
+
 ### Aliases
 
 `aliases` lists alternate names for a person — most usefully **maiden names** and
-married names. They do two things:
+married names. Entries may be bare names or one-key `label: name` maps, mixed
+freely; the label only affects how the contact card phrases it
+(`maiden_name: Mary Smith` reads *née Mary Smith*). A single name may be written
+as a plain string (`aliases: Bob`). Every name, labeled or not, does two things:
 
 - **Endpoint resolution.** A relationship endpoint that names an alias — written
   as a `[[Wikilink]]` or a path — resolves to this note, exactly like its
@@ -185,22 +194,62 @@ child"), then:
 Reciprocal declarations are de-duplicated: if John *also* declares
 `type: parent, to: [[George Doe]]`, both sides collapse to the same single edge.
 
-The built-in genealogy defaults are:
+The built-in defaults cover family and work:
 
-```toml
-relationship_types = [
-    { name = "parent", inverse = "child", label = "Parent", label_plural = "Parents" },
-    { name = "child", inverse = "parent", label = "Child", label_plural = "Children" },
-    { name = "spouse", symmetric = true, label = "Spouse", label_plural = "Spouses" },
-    { name = "sibling", symmetric = true, label = "Sibling", label_plural = "Siblings" },
-]
-```
+| name | inverse | symmetric | hierarchy | category |
+|------|---------|-----------|-----------|----------|
+| `parent` | `child` | | up | family |
+| `child` | `parent` | | down | family |
+| `spouse` | | yes | | family |
+| `sibling` | | yes | | family |
+| `reports_to` | `manages` | | up | work |
+| `manages` | `reports_to` | | down | work |
+| `assistant` | `assists` | | down | work |
+| `assists` | `assistant` | | up | work |
+| `employer` | `employee` | | up | work |
+| `employee` | `employer` | | down | work |
+| `colleague` | | yes | | work |
 
-Add your own domain types (e.g. `{ name = "manager", inverse = "report" }`) in
-`.mbr/config.toml`.
+Two fields describe how a type *draws*:
+
+- **`hierarchy`** (`up` / `down`) is read from the declaring note's side: `up`
+  means the note you point **to** ranks above you — `type: reports_to, to:
+  "[[Sam Lee]]"` makes Sam your manager. The charts orient edges by it, so a
+  custom pair like `mentor`/`mentee` draws the right way up.
+- **`category`** groups types for the charts: the family chart and timeline use
+  `family` edges, the org chart uses `work` edges.
+
+Set them on one half of an inverse pair and the other half inherits the flipped
+direction and the same category. If both halves claim the same direction, mbr
+keeps the one declared first, flips the other and logs a warning.
+
+A person's `company: "[[Acme Corp]]"` also creates an `employer` edge to that
+note (shown on both ends as derived) — see
+[Contacts → Company links](contacts/#company-links).
 
 > **Note:** setting `relationship_types` replaces the defaults wholesale — the
-> genealogy types above are *not* merged in. Copy the ones you still want.
+> types above are *not* merged in. To add your own, copy the defaults you still
+> want and append:
+>
+> ```toml
+> relationship_types = [
+>     { name = "parent", inverse = "child", hierarchy = "up", category = "family", label_plural = "Parents" },
+>     { name = "child", inverse = "parent", hierarchy = "down", category = "family", label_plural = "Children" },
+>     { name = "spouse", symmetric = true, category = "family" },
+>     { name = "sibling", symmetric = true, category = "family" },
+>     { name = "reports_to", inverse = "manages", hierarchy = "up", category = "work", label = "Reports to", label_plural = "Reports to" },
+>     { name = "assistant", inverse = "assists", hierarchy = "down", category = "work" },
+>     { name = "employer", inverse = "employee", hierarchy = "up", category = "work" },
+>     { name = "colleague", symmetric = true, category = "work" },
+>     # your own:
+>     { name = "mentor", inverse = "mentee", hierarchy = "up", category = "work" },
+> ]
+> ```
+>
+> (Inverse halves such as `manages` are auto-registered from their partner, as
+> described next; spell them out only to change their labels.) The full list
+> with labels is in the
+> [Configuration Reference](../reference/configuration/#relationship-settings).
 
 ### Declaring one half of an inverse pair
 
@@ -313,8 +362,9 @@ modes:
 ### Genealogy charts on person pages
 
 Notes with `type: person` render an interactive family chart — the
-`<mbr-genealogy>` web component, emitted by `_display_enhancements.html` for
-person pages only. It draws from the resolved relationships in `site.json` and
+`<mbr-genealogy>` web component, emitted by `_display_enhancements.html` (below
+the note body) for person and organization
+pages only. It draws from the resolved relationships in `site.json` and
 renders **nothing** when the person has no resolved relationships, so a person
 note without edges never produces an empty box.
 
@@ -502,7 +552,7 @@ as a whole is gated on link tracking.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking |
-| `relationship_types` | array | genealogy defaults | Relation types and their semantics/labels |
+| `relationship_types` | array | family + work defaults | Relation types and their semantics, hierarchy, category and labels |
 | `graph_depth` | number | `2` | Default neighbourhood depth (`1`–`5`) for the sidebar link graph (env `MBR_GRAPH_DEPTH`) |
 
 CLI: `--no-relationship-tracking` disables the feature for a single run. See the

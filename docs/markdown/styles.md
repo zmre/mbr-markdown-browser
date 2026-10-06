@@ -88,8 +88,9 @@ A few details worth knowing:
 - **Templates see `type` as you wrote it.** Only the body class is slugified, so
   a template condition like `{% if type == "person" %}` still matches.
 
-`type` is more than a class name. It also drives features such as the person
-infobox and the genealogy charts. See
+`type` is more than a class name. It also drives features such as the contact
+card on `person` / `organization` notes (see [Contacts](contacts/)) and the
+genealogy charts. See
 [The `type` field](relationships/#the-type-field) for the rest of what it does.
 
 ## Which One Should I Use?

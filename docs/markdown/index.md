@@ -602,6 +602,7 @@ URLs in angle brackets become clickable:
 - [Media Embedding](media/) - Videos, audio, PDFs, and more
 - [Task Browser](tasks/) - Find, filter and complete tasks across the repository
 - [Relationships & Genealogy](relationships/) - Typed frontmatter relationships and family trees
+- [Contacts](contacts/) - People and organizations with a contact card, labeled phones/emails/addresses and partial dates
 - [Page Styles and Types](styles/) - Restyle a whole page with `style` and `type` frontmatter
 - [Presentation Slides](slides/) - Create slide presentations from markdown
 - [Slides Example](test-slides/) - A live example presentation
