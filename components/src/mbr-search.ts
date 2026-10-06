@@ -1,7 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state, query } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab } from './shared.js'
+import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab, safeDecodePath, siteNav } from './shared.js'
 import type { MbrOverlay } from './overlay.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
 
@@ -124,24 +124,137 @@ function getMbrConfig(): MbrConfig {
   };
 }
 
+/** The folder holding `path`: everything up to and including its last `/` but one. */
+function parentFolder(path: string): string {
+  const trimmed = path.endsWith('/') ? path.slice(0, -1) : path;
+  const lastSlash = trimmed.lastIndexOf('/');
+  return lastSlash > 0 ? trimmed.substring(0, lastSlash + 1) : '/';
+}
+
 /**
- * Get the current folder context from the URL path.
- * - Section pages (ending with /) search from current path
- * - Markdown pages (not ending with / after navigation) search from parent
+ * The folder "Current folder only" scopes a search to, as a DECODED url-path
+ * prefix ending in `/` — the form the server's folder filter compares against
+ * `url_path` (src/search.rs `matches_folder_filter`, a plain `starts_with`).
+ *
+ * The URL alone cannot tell a note from a folder: every markdown page is served
+ * at a trailing-slash URL, so `/people/john/` is John's *note*, and treating it
+ * as a folder scoped the search to John and nothing else. `markdownSource` (the
+ * page's repo-relative source path, set on every rendered markdown page) is
+ * what disambiguates:
+ *
+ * - no `markdownSource` (section, home, tag pages) → the URL is the folder;
+ * - an index note (`people/index.md` served at `/people/`) → its URL is its
+ *   own folder, recognised by the source's directory equalling the URL;
+ * - any other note → the parent of its URL.
+ *
+ * The pathname is percent-decoded first (`url_path` is stored decoded, so
+ * `/My%20Notes/` would match nothing); a malformed escape keeps the raw text.
  */
+export function searchFolderFor(pathname: string, markdownSource?: string | null): string {
+  const decoded = safeDecodePath(pathname) || '/';
+  if (!markdownSource) {
+    return decoded.endsWith('/') ? decoded : parentFolder(decoded);
+  }
+  const page = decoded.endsWith('/') ? decoded : `${decoded}/`;
+  const sourceDir = markdownSource.split('/').slice(0, -1).filter(Boolean).join('/');
+  const sourceFolder = sourceDir ? `/${sourceDir}/` : '/';
+  return page === sourceFolder ? page : parentFolder(page);
+}
+
+/** Case-insensitive, locale-independent ordering for folder and type lists. */
+function compareFolded(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Every folder that holds at least one note, derived from site.json `url_path`s
+ * (no endpoint needed). A note's own URL is not a folder — `/people/john/` is
+ * John's page — so only *proper* ancestors count; a note that also has notes
+ * beneath it contributes its URL through those children. The root is omitted:
+ * scoping to `/` is the same as searching everywhere.
+ */
+export function foldersFromUrlPaths(paths: readonly string[]): string[] {
+  const folders = new Set<string>();
+  for (const path of paths) {
+    if (typeof path !== 'string') continue;
+    const segments = path.split('/').filter(Boolean);
+    let prefix = '/';
+    for (const segment of segments.slice(0, -1)) {
+      prefix += `${segment}/`;
+      folders.add(prefix);
+    }
+  }
+  return [...folders].sort(compareFolded);
+}
+
+/** One distinct frontmatter `type`, with how many notes carry it. */
+export interface NoteTypeCount {
+  type: string;
+  count: number;
+}
+
+/**
+ * Distinct frontmatter `type` values across site.json, case-insensitively
+ * merged (the server's facet match is case-insensitive, so `Person` and
+ * `person` select the same notes) under the first spelling seen.
+ */
+export function noteTypesFromSite(
+  files: ReadonlyArray<{ frontmatter?: Record<string, unknown> | null }> | null | undefined
+): NoteTypeCount[] {
+  const byKey = new Map<string, NoteTypeCount>();
+  for (const file of files ?? []) {
+    const raw = file?.frontmatter?.['type'];
+    if (typeof raw !== 'string') continue;
+    const type = raw.trim();
+    if (!type) continue;
+    const key = type.toLowerCase();
+    const entry = byKey.get(key);
+    if (entry) entry.count += 1;
+    else byKey.set(key, { type, count: 1 });
+  }
+  return [...byKey.values()].sort((a, b) => compareFolded(a.type, b.type));
+}
+
+/**
+ * The `type:` facet token for a note type. A value with whitespace is quoted —
+ * `parse_query` (src/search.rs `query_tokens`) keeps `key:"two words"` whole.
+ * A literal `"` cannot be expressed inside that quoting, so it is dropped; the
+ * facet is a substring match, so the remaining text still selects the type.
+ */
+export function typeFacetToken(type: string): string {
+  const value = type.replace(/"/g, '').trim();
+  return /\s/.test(value) ? `type:"${value}"` : `type:${value}`;
+}
+
+/** Matches an existing `type:` facet token, quoted or bare. */
+const TYPE_TOKEN = /(^|\s)type:("[^"]*"?|\S*)/gi;
+
+/**
+ * `query` with any existing `type:` facet replaced by the one for `type`, so
+ * choosing a second type swaps rather than stacking two facets (which would
+ * have to both match and select nothing).
+ */
+export function withTypeFacet(query: string, type: string): string {
+  const rest = query.replace(TYPE_TOKEN, ' ').replace(/\s+/g, ' ').trim();
+  const token = typeFacetToken(type);
+  return rest ? `${rest} ${token}` : token;
+}
+
+/**
+ * Value prefix of the note-type `<option>`s in the scope select. Scope values
+ * (`all`/`metadata`/`content`) never contain a colon, so the two cannot clash.
+ */
+const TYPE_OPTION_PREFIX = 'type:';
+
+/** Most folders the picker lists at once; the filter narrows the rest. */
+const MAX_LISTED_FOLDERS = 200;
+
+/** The current page's search folder (see {@link searchFolderFor}). */
 function getCurrentFolder(): string {
-  const path = window.location.pathname;
-  // If path ends with /, it's a section page - search from current folder
-  if (path.endsWith('/')) {
-    return path;
-  }
-  // Otherwise it's a markdown file rendered at a trailing-slash URL,
-  // so search from parent directory
-  const lastSlash = path.lastIndexOf('/');
-  if (lastSlash > 0) {
-    return path.substring(0, lastSlash + 1);
-  }
-  return '/';
+  const source = window.frontmatter?.['markdown_source'];
+  return searchFolderFor(window.location.pathname, typeof source === 'string' ? source : null);
 }
 
 /**
@@ -181,6 +294,33 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   @state()
   private _filetypeFilter: FiletypeFilter = 'markdown';
+
+  /**
+   * A folder chosen in the folder picker, overriding the current page's folder
+   * while `_folderScope` is `current`. `null` means "the folder I am in".
+   */
+  @state()
+  private _folderOverride: string | null = null;
+
+  @state()
+  private _isFolderPickerOpen = false;
+
+  @state()
+  private _folderFilter = '';
+
+  /** Highlighted row in the folder picker (index into the filtered list). */
+  @state()
+  private _folderPickerIndex = 0;
+
+  /** Folders and note types derived from site.json, loaded on first open. */
+  @state()
+  private _folders: string[] = [];
+
+  @state()
+  private _noteTypes: NoteTypeCount[] = [];
+
+  /** site.json payload `_folders`/`_noteTypes` were derived from. */
+  private _facetSource: unknown = null;
 
   @state()
   private _error: string | null = null;
@@ -328,6 +468,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       if (this._isMediaBrowserOpen) {
         e.preventDefault();
         this._closeMediaBrowser();
+      } else if (this._isFolderPickerOpen) {
+        e.preventDefault();
+        this._closeFolderPicker();
       } else if (this._isOpen) {
         e.preventDefault();
         this._closeSearch();
@@ -337,13 +480,36 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _openSearch() {
     this._isOpen = true;
+    if (getMbrConfig().serverMode) this._loadSiteFacets();
     this.updateComplete.then(() => {
       this._input?.focus();
     });
   }
 
+  /**
+   * Derive the folder list and note types from site.json. Runs when the modal
+   * opens — never at page load — and only once per site.json payload; both are
+   * O(files), which is fine on a user action but not on the critical path.
+   */
+  private _loadSiteFacets(): void {
+    siteNav
+      .then((data: { markdown_files?: Array<{ url_path?: string; frontmatter?: Record<string, unknown> }> }) => {
+        if (!data || data === this._facetSource) return;
+        this._facetSource = data;
+        const files = Array.isArray(data.markdown_files) ? data.markdown_files : [];
+        this._folders = foldersFromUrlPaths(
+          files.map((f) => f?.url_path).filter((p): p is string => typeof p === 'string')
+        );
+        this._noteTypes = noteTypesFromSite(files);
+      })
+      .catch(() => {
+        // site.json failed: no type options and an empty picker, search still works.
+      });
+  }
+
   private _closeSearch() {
     this._isOpen = false;
+    this._isFolderPickerOpen = false;
     this._query = '';
     this._results = [];
     this._selectedIndex = -1;
@@ -485,18 +651,134 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _handleScopeChange(e: Event) {
     const target = e.target as HTMLSelectElement;
+    if (target.value.startsWith(TYPE_OPTION_PREFIX)) {
+      this._applyNoteType(target.value.slice(TYPE_OPTION_PREFIX.length));
+      // The type is now visible as a `type:` token in the query; the select
+      // goes back to showing the scope, which is what it controls.
+      target.value = this._scope;
+      return;
+    }
     this._scope = target.value as SearchScope;
     if (this._query.length >= 2) {
       this._performSearch();
     }
   }
 
+  /**
+   * Restrict the search to one note type by writing a `type:` facet into the
+   * query. Content-only scope never consults facets on a facet-only query (the
+   * server runs content search only when there are free-text terms), so it is
+   * widened to All; the other scopes already apply facets.
+   */
+  private _applyNoteType(type: string): void {
+    this._query = withTypeFacet(this._query, type);
+    if (this._scope === 'content') this._scope = 'all';
+    this._selectedIndex = -1;
+    this.updateComplete.then(() => this._input?.focus());
+    if (this._query.length >= 2) this._performSearch();
+  }
+
   private _handleFolderScopeChange(e: Event) {
     const target = e.target as HTMLInputElement;
     this._folderScope = target.checked ? 'current' : 'everywhere';
+    // Unchecking clears a picked folder: the next check means "here" again.
+    if (!target.checked) this._folderOverride = null;
     if (this._query.length >= 2) {
       this._performSearch();
     }
+  }
+
+  /** Clicks inside the modal never reach the backdrop; outside the picker they close it. */
+  private _handleModalClick = (e: Event): void => {
+    e.stopPropagation();
+    if (!this._isFolderPickerOpen) return;
+    const inPicker = e
+      .composedPath()
+      .some((node) => node instanceof Element && node.classList.contains('folder-scope'));
+    if (!inPicker) this._closeFolderPicker(false);
+  };
+
+  /** Folders matching the picker's filter, capped for rendering. */
+  private _filteredFolders(): string[] {
+    const needle = this._folderFilter.trim().toLowerCase();
+    const matches = needle
+      ? this._folders.filter((f) => f.toLowerCase().includes(needle))
+      : this._folders;
+    return matches.slice(0, MAX_LISTED_FOLDERS);
+  }
+
+  private _toggleFolderPicker(): void {
+    if (this._isFolderPickerOpen) {
+      this._closeFolderPicker();
+      return;
+    }
+    this._loadSiteFacets();
+    this._isFolderPickerOpen = true;
+    this._folderFilter = '';
+    this._folderPickerIndex = 0;
+    this.updateComplete.then(() => {
+      this.shadowRoot?.querySelector<HTMLInputElement>('.folder-filter')?.focus();
+    });
+  }
+
+  private _closeFolderPicker(refocus = true): void {
+    if (!this._isFolderPickerOpen) return;
+    this._isFolderPickerOpen = false;
+    if (refocus) {
+      this.updateComplete.then(() => {
+        this.shadowRoot?.querySelector<HTMLButtonElement>('.folder-picker-button')?.focus();
+      });
+    }
+  }
+
+  private _chooseFolder(folder: string): void {
+    this._folderOverride = folder;
+    this._folderScope = 'current';
+    this._closeFolderPicker(false);
+    this.updateComplete.then(() => this._input?.focus());
+    if (this._query.length >= 2) this._performSearch();
+  }
+
+  private _handleFolderFilterInput(e: Event): void {
+    this._folderFilter = (e.target as HTMLInputElement).value;
+    this._folderPickerIndex = 0;
+  }
+
+  private _handleFolderFilterKeydown(e: KeyboardEvent): void {
+    const folders = this._filteredFolders();
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        this._folderPickerIndex = Math.min(this._folderPickerIndex + 1, folders.length - 1);
+        this._scrollFolderOptionIntoView();
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        this._folderPickerIndex = Math.max(this._folderPickerIndex - 1, 0);
+        this._scrollFolderOptionIntoView();
+        break;
+      case 'Enter': {
+        e.preventDefault();
+        const folder = folders[this._folderPickerIndex];
+        if (folder) this._chooseFolder(folder);
+        break;
+      }
+      case 'Escape':
+        // Close only the picker: the search modal's own Escape handlers (this
+        // element's document listener) must not see this keypress.
+        e.preventDefault();
+        e.stopPropagation();
+        this._closeFolderPicker();
+        break;
+    }
+  }
+
+  private _scrollFolderOptionIntoView(): void {
+    this.updateComplete.then(() => {
+      this.shadowRoot
+        ?.querySelector('.folder-option[aria-selected="true"]')
+        ?.scrollIntoView?.({ block: 'nearest' });
+    });
   }
 
   private _handleFiletypeChange(e: Event) {
@@ -548,7 +830,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
       // Add folder path when searching current folder
       if (this._folderScope === 'current') {
-        searchBody.folder = getCurrentFolder();
+        searchBody.folder = this._folderOverride ?? getCurrentFolder();
       }
 
       // Add filetype filter
@@ -709,7 +991,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
     return html`
       <div class="modal-backdrop" @click=${this._closeSearch}>
-        <div class="modal" @click=${(e: Event) => e.stopPropagation()}>
+        <div class="modal" @click=${this._handleModalClick}>
           <div class="search-header">
             <div class="search-input-wrapper">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon">
@@ -733,20 +1015,44 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 <option value="all" ?selected=${this._scope === 'all'}>All</option>
                 <option value="metadata" ?selected=${this._scope === 'metadata'}>Titles & Tags</option>
                 <option value="content" ?selected=${this._scope === 'content'}>Content</option>
+                ${this._noteTypes.length > 0 ? html`
+                  <option disabled>── Note types ──</option>
+                  ${this._noteTypes.map((t) => html`
+                    <option value=${TYPE_OPTION_PREFIX + t.type}>${t.type} (${t.count})</option>
+                  `)}
+                ` : nothing}
               </select>
             ` : nothing}
           </div>
 
           ${showScopeSelector ? html`
             <div class="search-options">
-              <label class="option-toggle">
-                <input
-                  type="checkbox"
-                  ?checked=${this._folderScope === 'current'}
-                  @change=${this._handleFolderScopeChange}
-                />
-                <span>Current folder only</span>
-              </label>
+              <span class="folder-scope">
+                <label class="option-toggle">
+                  <input
+                    type="checkbox"
+                    .checked=${this._folderScope === 'current'}
+                    @change=${this._handleFolderScopeChange}
+                  />
+                  ${this._folderOverride && this._folderScope === 'current'
+                    ? html`<span>Only in: <span class="folder-name" title=${this._folderOverride}>${this._folderOverride}</span></span>`
+                    : html`<span>Current folder only</span>`}
+                </label>
+                <button
+                  type="button"
+                  class="folder-picker-button"
+                  title="Choose a folder to search in"
+                  aria-label="Choose a folder to search in"
+                  aria-haspopup="listbox"
+                  aria-expanded=${this._isFolderPickerOpen ? 'true' : 'false'}
+                  @click=${this._toggleFolderPicker}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                  </svg>
+                </button>
+                ${this._renderFolderPicker()}
+              </span>
               <label class="option-toggle">
                 <input
                   type="checkbox"
@@ -805,6 +1111,51 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
             </span>
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  /**
+   * The folder picker: a filter field over a listbox of every note folder.
+   * Focus stays in the filter field and the highlighted row is announced via
+   * `aria-activedescendant`, the same arrow/Enter model as the results list.
+   */
+  private _renderFolderPicker(): TemplateResult | typeof nothing {
+    if (!this._isFolderPickerOpen) return nothing;
+    const folders = this._filteredFolders();
+    const active = Math.min(this._folderPickerIndex, folders.length - 1);
+    return html`
+      <div class="folder-picker" @click=${(e: Event) => e.stopPropagation()}>
+        <input
+          class="folder-filter"
+          type="text"
+          placeholder="Filter folders…"
+          aria-label="Filter folders"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="folder-listbox"
+          aria-activedescendant=${active >= 0 ? `folder-option-${active}` : ''}
+          autocomplete="off"
+          spellcheck="false"
+          .value=${this._folderFilter}
+          @input=${this._handleFolderFilterInput}
+          @keydown=${this._handleFolderFilterKeydown}
+        />
+        <ul id="folder-listbox" class="folder-list" role="listbox" aria-label="Folders">
+          ${folders.length === 0
+            ? html`<li class="folder-empty" role="presentation">No folders match</li>`
+            : folders.map((folder, i) => html`
+                <li
+                  id=${`folder-option-${i}`}
+                  class="folder-option"
+                  role="option"
+                  aria-selected=${i === active ? 'true' : 'false'}
+                  title=${folder}
+                  @mousedown=${(e: Event) => e.preventDefault()}
+                  @click=${() => this._chooseFolder(folder)}
+                >${folder}</li>
+              `)}
+        </ul>
       </div>
     `;
   }
@@ -1005,6 +1356,117 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
     .option-toggle:hover {
       color: var(--pico-color, #333);
+    }
+
+    /* "Current folder only" + the folder-picker button and its popover */
+    .folder-scope {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+
+    .folder-name {
+      display: inline-block;
+      max-width: 16rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+      font-family: var(--pico-font-family-monospace, monospace);
+      color: var(--pico-color, #333);
+    }
+
+    .folder-picker-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.5rem;
+      height: 1.5rem;
+      margin: 0;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--pico-muted-color, #666);
+      cursor: pointer;
+    }
+
+    .folder-picker-button:hover,
+    .folder-picker-button[aria-expanded="true"] {
+      color: var(--pico-color, #333);
+      border-color: var(--pico-muted-border-color, #ccc);
+    }
+
+    .folder-picker-button:focus-visible {
+      outline: 2px solid var(--pico-primary, #0172ad);
+      outline-offset: 1px;
+    }
+
+    .folder-picker {
+      position: absolute;
+      top: calc(100% + 0.35rem);
+      left: 0;
+      z-index: 5;
+      width: min(22rem, 80vw);
+      padding: 0.4rem;
+      border: 1px solid var(--pico-muted-border-color, #ddd);
+      border-radius: 8px;
+      background: var(--pico-background-color, #fff);
+      box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.3);
+    }
+
+    .folder-filter {
+      width: 100%;
+      box-sizing: border-box;
+      margin: 0 0 0.35rem;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.8rem;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      border-radius: 4px;
+      background: var(--pico-background-color, #fff);
+      color: var(--pico-color, #333);
+    }
+
+    .folder-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 14rem;
+      overflow-y: auto;
+    }
+
+    .folder-option,
+    .folder-empty {
+      margin: 0;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-family: var(--pico-font-family-monospace, monospace);
+      font-size: 0.78rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      list-style: none;
+    }
+
+    .folder-option {
+      cursor: pointer;
+      color: var(--pico-color, #333);
+    }
+
+    .folder-option:hover {
+      background: var(--pico-secondary-background, rgba(0, 0, 0, 0.05));
+      background: color-mix(in srgb, var(--pico-primary, #0172ad) 8%, transparent);
+    }
+
+    .folder-option[aria-selected="true"] {
+      background: color-mix(in srgb, var(--pico-primary, #0172ad) 18%, transparent);
+    }
+
+    .folder-empty {
+      color: var(--pico-muted-color, #888);
+      font-family: inherit;
     }
 
     /* Results container */
