@@ -1903,6 +1903,63 @@ async fn test_search_arbitrary_frontmatter_field() {
     );
 }
 
+/// Result url_paths of a search, for membership assertions.
+async fn search_paths(server: &TestServer, body: &str) -> Vec<String> {
+    let response = server.post_json("/.mbr/search", body).await;
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["url_path"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Contacts: `company:acme` must find a person whose `company` is a wikilink,
+/// through the generic facet path — no contact-specific search code.
+#[tokio::test]
+async fn test_search_company_facet_matches_wikilink_company() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: person\ntitle: Jane Doe\ncompany: \"[[Acme Corp]]\"\n---\nNotes.",
+    );
+    repo.create_markdown(
+        "people/sam.md",
+        "---\ntype: person\ntitle: Sam Lee\ncompany: Globex\n---\nNotes.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let paths = search_paths(&server, r#"{"q": "company:acme"}"#).await;
+    assert_eq!(paths, vec!["/people/jane/".to_string()]);
+}
+
+/// The search panel's note-type selector writes `type:"Meeting Notes"` for a
+/// type containing spaces; the quoted value must reach the facet whole.
+#[tokio::test]
+async fn test_search_quoted_type_facet() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "standup.md",
+        "---\ntype: Meeting Notes\ntitle: Standup\n---\nBody.",
+    );
+    repo.create_markdown("memo.md", "---\ntype: Meeting\ntitle: Memo\n---\nBody.");
+    repo.create_markdown("other.md", "---\ntype: Notes\ntitle: Other\n---\nBody.");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let paths = search_paths(
+        &server,
+        r#"{"q": "type:\"Meeting Notes\"", "scope": "metadata"}"#,
+    )
+    .await;
+    assert_eq!(paths, vec!["/standup/".to_string()]);
+}
+
 #[tokio::test]
 async fn test_search_mixed_terms_and_facets() {
     let repo = TestRepo::new();

@@ -84,7 +84,7 @@ pub fn parse_query(q: &str) -> ParsedQuery {
     let mut terms = Vec::new();
     let mut facets = Vec::new();
 
-    for token in q.split_whitespace() {
+    for token in query_tokens(q) {
         // Check if this looks like a facet (contains : but not ://)
         if let Some(colon_pos) = token.find(':') {
             // Skip if it's a URL (contains ://)
@@ -101,6 +101,13 @@ pub fn parse_query(q: &str) -> ParsedQuery {
 
             let (key, value) = token.split_at(colon_pos);
             let value = &value[1..]; // Skip the colon
+            // `key:"two words"` — drop the quotes `query_tokens` kept. A value
+            // whose closing quote has not been typed yet loses just the opening
+            // one, so the search narrows while the user is still typing.
+            let value = value
+                .strip_prefix('"')
+                .map(|v| v.strip_suffix('"').unwrap_or(v))
+                .unwrap_or(value);
 
             // Only add if both key and value are non-empty
             if !key.is_empty() && !value.is_empty() {
@@ -114,6 +121,37 @@ pub fn parse_query(q: &str) -> ParsedQuery {
     }
 
     ParsedQuery { terms, facets }
+}
+
+/// Split a query on whitespace, except inside a quoted facet value.
+///
+/// `type:"Meeting Notes"` is one token, so a facet can name a frontmatter value
+/// that contains spaces — the search panel's note-type selector writes exactly
+/// this form. Quoting is recognised only directly after `key:` (a non-empty key
+/// with no `:` or `"` of its own) and only when the closing quote exists;
+/// anything else splits on whitespace as it always did, so a stray `"` in a
+/// plain term cannot swallow the rest of the query.
+fn query_tokens(q: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut rest = q.trim_start();
+    while !rest.is_empty() {
+        let next_space = |s: &str| s.find(char::is_whitespace).unwrap_or(s.len());
+        let mut end = next_space(rest);
+        if let Some(open) = rest[..end].find(":\"") {
+            let key = &rest[..open];
+            let value_start = open + 2;
+            if !key.is_empty()
+                && !key.contains([':', '"'])
+                && let Some(close) = rest[value_start..].find('"')
+            {
+                let after = value_start + close + 1;
+                end = after + next_space(&rest[after..]);
+            }
+        }
+        tokens.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    tokens
 }
 
 /// Check if a frontmatter field value contains the facet value (case-insensitive).
@@ -1220,6 +1258,86 @@ mod tests {
         let parsed = parse_query("key:");
         assert_eq!(parsed.terms, vec!["key:"]);
         assert!(parsed.facets.is_empty());
+    }
+
+    #[test]
+    fn test_parse_query_quoted_facet_value_keeps_spaces() {
+        let parsed = parse_query(r#"standup type:"Meeting Notes" author:al"#);
+        assert_eq!(parsed.terms, vec!["standup"]);
+        assert_eq!(
+            parsed.facets,
+            vec![
+                ("type".to_string(), "Meeting Notes".to_string()),
+                ("author".to_string(), "al".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_query_quoted_single_word_facet() {
+        let parsed = parse_query(r#"type:"person""#);
+        assert_eq!(
+            parsed.facets,
+            vec![("type".to_string(), "person".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_query_unclosed_quote_splits_on_whitespace() {
+        // Mid-typing: the closing quote is not there yet.
+        let parsed = parse_query(r#"type:"Meeting No"#);
+        assert_eq!(
+            parsed.facets,
+            vec![("type".to_string(), "Meeting".to_string())]
+        );
+        assert_eq!(parsed.terms, vec!["No"]);
+    }
+
+    #[test]
+    fn test_parse_query_stray_quote_in_term_does_not_group() {
+        let parsed = parse_query(r#""hello world" type:x"#);
+        assert_eq!(parsed.terms, vec![r#""hello"#, r#"world""#]);
+        assert_eq!(parsed.facets, vec![("type".to_string(), "x".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_query_empty_quoted_value_is_a_term() {
+        let parsed = parse_query(r#"type:"""#);
+        assert!(parsed.facets.is_empty());
+        assert_eq!(parsed.terms, vec![r#"type:"""#]);
+    }
+
+    #[test]
+    fn test_facet_matches_wikilink_company() {
+        let mut fm = crate::markdown::SimpleMetadata::new();
+        fm.insert(
+            "company".to_string(),
+            serde_json::Value::String("[[Acme Corp]]".to_string()),
+        );
+        assert!(facet_matches(Some(&fm), "company", "acme"));
+        assert!(!facet_matches(Some(&fm), "company", "globex"));
+    }
+
+    proptest::proptest! {
+        /// Arbitrary input never panics, and every token's text survives into
+        /// either a term or a facet (nothing is silently dropped).
+        #[test]
+        fn prop_parse_query_never_panics(q in "\\PC{0,64}") {
+            let parsed = parse_query(&q);
+            let tokens = query_tokens(&q);
+            proptest::prop_assert_eq!(tokens.len(), parsed.terms.len() + parsed.facets.len());
+        }
+
+        /// A quoted facet value round-trips whole, whatever spaces it holds.
+        #[test]
+        fn prop_quoted_facet_round_trips(
+            key in "[a-z_]{1,10}",
+            value in "[A-Za-z0-9][A-Za-z0-9 ]{0,20}[A-Za-z0-9]",
+        ) {
+            let parsed = parse_query(&format!("lead {key}:\"{value}\" tail"));
+            proptest::prop_assert_eq!(parsed.facets, vec![(key, value)]);
+            proptest::prop_assert_eq!(parsed.terms, vec!["lead".to_string(), "tail".to_string()]);
+        }
     }
 
     #[test]
