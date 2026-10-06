@@ -950,6 +950,144 @@ async fn test_contact_card_on_person_page() {
     assert!(org.contains("<mbr-genealogy></mbr-genealogy>"));
 }
 
+/// The `site.json` contract the relationship charts read (contacts spec 0.2 /
+/// 0.3), checked against the server's real output rather than the frontend's
+/// fixtures. The charts never re-resolve wikilinks or guess orientation by
+/// name, so each of these is load-bearing:
+///
+/// - every built-in type carries `category`, and `hierarchy` exactly when it
+///   is hierarchical (absent, not `null`, on symmetric types) — the org chart
+///   draws `work` + hierarchy edges, the family chart only `family` ones;
+/// - a `company: "[[X]]"` wikilink *alone* — no `relationships:` entry — puts a
+///   derived `employer` edge on the person and `employee` on the organization,
+///   which is the only thing that places that person in the org chart on both
+///   pages;
+/// - legacy `born`/`died` arrive as `dates.birthday`/`dates.death` strings, and
+///   labeled aliases as plain names.
+#[tokio::test]
+async fn test_site_json_contract_for_relationship_charts() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\nA company.\n",
+    );
+    repo.create_markdown(
+        "people/bob.md",
+        "---\ntype: person\ntitle: Bob Stone\n---\nManager.\n",
+    );
+    repo.create_markdown(
+        "people/zoe.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Zoe Park\n",
+            "company: \"[[Acme Corp]]\"\n",
+            "relationships:\n",
+            "  - type: reports_to\n",
+            "    to: \"[[Bob Stone]]\"\n",
+            "---\n",
+            "Employed only through the company field.\n",
+        ),
+    );
+    repo.create_markdown(
+        "people/olga.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Olga Stone\n",
+            "born: \"1912-05-04\"\n",
+            "died: \"1990\"\n",
+            "aliases:\n",
+            "  - Ollie\n",
+            "  - maiden_name: Olga Brandt\n",
+            "---\n",
+            "Legacy genealogy fields.\n",
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let site = get_json(&server, "/.mbr/site.json").await;
+
+    // (name, hierarchy, category) for all eleven built-in types.
+    let expected = [
+        ("parent", Some("up"), "family"),
+        ("child", Some("down"), "family"),
+        ("spouse", None, "family"),
+        ("sibling", None, "family"),
+        ("reports_to", Some("up"), "work"),
+        ("manages", Some("down"), "work"),
+        ("assistant", Some("down"), "work"),
+        ("assists", Some("up"), "work"),
+        ("employer", Some("up"), "work"),
+        ("employee", Some("down"), "work"),
+        ("colleague", None, "work"),
+    ];
+    let types = site["relationship_types"]
+        .as_array()
+        .expect("relationship_types array");
+    assert_eq!(
+        types.len(),
+        expected.len(),
+        "built-in type count: {types:?}"
+    );
+    for (name, hierarchy, category) in expected {
+        let t = types
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from relationship_types"));
+        assert_eq!(t["category"], category, "{name} category");
+        match hierarchy {
+            Some(h) => assert_eq!(t["hierarchy"], h, "{name} hierarchy"),
+            None => assert!(
+                t.get("hierarchy").is_none(),
+                "{name} must omit hierarchy, got {t}"
+            ),
+        }
+    }
+
+    let files = site["markdown_files"].as_array().expect("markdown_files");
+    let note = |url: &str| {
+        files
+            .iter()
+            .find(|f| f["url_path"] == url)
+            .unwrap_or_else(|| panic!("{url} missing from site.json"))
+    };
+    let has_edge = |url: &str, predicate: &str, neighbor: &str, derived: bool| {
+        note(url)["relationships"].as_array().is_some_and(|rels| {
+            rels.iter().any(|r| {
+                r["predicate"] == predicate
+                    && r["neighbor"] == neighbor
+                    && r["resolved"] == true
+                    && r["derived"] == derived
+            })
+        })
+    };
+
+    assert!(
+        has_edge("/people/zoe/", "employer", "/orgs/acme/", true),
+        "company wikilink should imply a derived employer edge: {}",
+        note("/people/zoe/")
+    );
+    assert!(
+        has_edge("/orgs/acme/", "employee", "/people/zoe/", true),
+        "organization should list the company-derived employee: {}",
+        note("/orgs/acme/")
+    );
+    assert!(has_edge(
+        "/people/zoe/",
+        "reports_to",
+        "/people/bob/",
+        false
+    ));
+    assert!(has_edge("/people/bob/", "manages", "/people/zoe/", true));
+
+    let olga = &note("/people/olga/")["frontmatter"];
+    assert_eq!(olga["dates.birthday"], "1912-05-04");
+    assert_eq!(olga["dates.death"], "1990");
+    assert_eq!(olga["aliases"], serde_json::json!(["Ollie", "Olga Brandt"]));
+}
+
 /// Serving a hidden directory by name (`mbr -s .scratch`) must index it.
 ///
 /// Root discovery deliberately walks *upward* to the enclosing repository, so
