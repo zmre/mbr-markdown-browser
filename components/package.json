@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "bench": "vitest bench"
+    "bench": "vitest bench --reporter=verbose"
   },
   "dependencies": {
     "@milkdown/crepe": "^7.22.2",
@@ -21,12 +21,12 @@
   },
   "devDependencies": {
     "@types/d3-force": "^3.0.10",
-    "@vitest/browser": "^4.1.11",
+    "@vitest/browser": "^5.0.3",
     "happy-dom": "^20.14.5",
     "terser": "^5.51.2",
     "typescript": "~7.0.2",
     "vite": "^8.3.3",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.3"
   },
   "overrides": {
     "ws": "^8.20.1",

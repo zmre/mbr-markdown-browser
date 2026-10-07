@@ -4,8 +4,14 @@
  * Measures sortFiles and buildFolderTree performance at various dataset sizes.
  */
 
-import { bench, describe } from 'vitest'
-import { sortFiles, buildFolderTree, type MarkdownFile, type SortField } from './sorting'
+import { describe, test } from 'vitest'
+import * as sorting from './sorting'
+import type { MarkdownFile, SortField } from './sorting'
+
+// Bound once to locals: every access to an imported binding goes through the
+// module runner's getter, which is measurable at these call rates and makes
+// vitest flag the results as unreliable.
+const { sortFiles, buildFolderTree } = sorting
 
 function generateFiles(count: number): MarkdownFile[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -33,24 +39,30 @@ describe('sortFiles', () => {
   ]
 
   for (const size of [100, 500, 2000]) {
-    const files = generateFiles(size)
+    test(`${size} items`, async ({ bench }) => {
+      const files = generateFiles(size)
 
-    bench(`single field sort (${size} items)`, () => {
-      sortFiles(files, singleFieldConfig)
-    })
-
-    bench(`multi field sort (${size} items)`, () => {
-      sortFiles(files, multiFieldConfig)
+      await bench.compare(
+        bench(`single field sort (${size} items)`, () => {
+          sortFiles(files, singleFieldConfig)
+        }),
+        bench(`multi field sort (${size} items)`, () => {
+          sortFiles(files, multiFieldConfig)
+        }),
+      )
     })
   }
 })
 
 describe('buildFolderTree', () => {
-  for (const size of [100, 500, 2000]) {
-    const files = generateFiles(size)
-
-    bench(`build tree (${size} items)`, () => {
-      buildFolderTree(files)
-    })
-  }
+  test('by dataset size', async ({ bench }) => {
+    await bench.compare(
+      ...[100, 500, 2000].map((size) => {
+        const files = generateFiles(size)
+        return bench(`build tree (${size} items)`, () => {
+          buildFolderTree(files)
+        })
+      }),
+    )
+  })
 })

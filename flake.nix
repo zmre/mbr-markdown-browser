@@ -624,7 +624,7 @@
             inherit version;
             src = ./components;
             #npmDepsHash = pkgs.lib.fakeHash;
-            npmDepsHash = "sha256-FHd/UtqE6ExDBeXIDN9uT0eype77eJvY5nMOGuulav0=";
+            npmDepsHash = "sha256-IZJNhI3JxAsuK6guyjkk+8Ja4bk15ylPPk6e8EXmf0U=";
             buildPhase = ''
               npm run build
             '';

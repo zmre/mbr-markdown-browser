@@ -12,8 +12,13 @@
  * happy-dom rather than the binary search it is meant to cover.
  */
 
-import { bench, describe } from 'vitest'
-import { buildTextIndex, compileQuery, findMatchOffsets } from './find-in-page'
+import { describe, test } from 'vitest'
+import * as findInPage from './find-in-page'
+
+// Bound once to locals: every access to an imported binding goes through the
+// module runner's getter, which is measurable at these call rates and makes
+// vitest flag the results as unreliable.
+const { buildTextIndex, compileQuery, findMatchOffsets } = findInPage
 
 const WORDS = [
   'markdown', 'browser', 'render', 'template', 'section', 'anchor', 'wikilink',
@@ -57,31 +62,37 @@ function generateDocument(chars: number): HTMLElement {
 const SIZES = [10_000, 100_000, 1_000_000]
 
 describe('buildTextIndex', () => {
-  for (const size of SIZES) {
-    const root = generateDocument(size)
-    bench(`index a ${size.toLocaleString('en-US')} char document`, () => {
-      buildTextIndex(root)
-    })
-  }
+  test('by document size', async ({ bench }) => {
+    await bench.compare(
+      ...SIZES.map((size) => {
+        const root = generateDocument(size)
+        return bench(`index a ${size.toLocaleString('en-US')} char document`, () => {
+          buildTextIndex(root)
+        })
+      }),
+    )
+  })
 })
 
 describe('findMatchOffsets', () => {
   for (const size of SIZES) {
-    const index = buildTextIndex(generateDocument(size))
+    test(`${size.toLocaleString('en-US')} chars`, async ({ bench }) => {
+      const index = buildTextIndex(generateDocument(size))
 
-    // Rare single word: the common case, a handful of hits.
-    bench(`scan ${size.toLocaleString('en-US')} chars, rare term`, () => {
-      findMatchOffsets(index, compileQuery('genealogy', false)!, 10_000)
-    })
-
-    // Two words with a flexible separator, which is the expensive pattern.
-    bench(`scan ${size.toLocaleString('en-US')} chars, two-word phrase`, () => {
-      findMatchOffsets(index, compileQuery('markdown browser', false)!, 10_000)
-    })
-
-    // Pathological: a single letter matching a large fraction of the document.
-    bench(`scan ${size.toLocaleString('en-US')} chars, one letter`, () => {
-      findMatchOffsets(index, compileQuery('e', false)!, 10_000)
+      await bench.compare(
+        // Rare single word: the common case, a handful of hits.
+        bench(`scan ${size.toLocaleString('en-US')} chars, rare term`, () => {
+          findMatchOffsets(index, compileQuery('genealogy', false)!, 10_000)
+        }),
+        // Two words with a flexible separator, which is the expensive pattern.
+        bench(`scan ${size.toLocaleString('en-US')} chars, two-word phrase`, () => {
+          findMatchOffsets(index, compileQuery('markdown browser', false)!, 10_000)
+        }),
+        // Pathological: a single letter matching a large fraction of the document.
+        bench(`scan ${size.toLocaleString('en-US')} chars, one letter`, () => {
+          findMatchOffsets(index, compileQuery('e', false)!, 10_000)
+        }),
+      )
     })
   }
 })
