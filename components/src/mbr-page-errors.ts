@@ -39,6 +39,13 @@ interface FrontmatterParseError {
   message: string;
 }
 
+/** An unreadable entry in a contact field; the card skipped it. */
+interface ContactDataProblem {
+  type: 'contact_data_problem';
+  field: string;
+  message: string;
+}
+
 /**
  * A parent/child (or other inverse-pair) loop in the typed relationships. The
  * genealogy chart cannot lay out a cyclic hierarchy, so one of the closing
@@ -86,6 +93,7 @@ type ServerPageError =
   | BrokenMediaReferenceError
   | UnresolvedWikilinkError
   | FrontmatterParseError
+  | ContactDataProblem
   | UnplayableMediaError
   | RelationshipCycleError
   | AmbiguousNameError;
@@ -121,6 +129,7 @@ const ERROR_LABELS: ReadonlyArray<
     'frontmatter parse error',
     'frontmatter parse errors',
   ],
+  ['contact_data_problem', 'unreadable contact field', 'unreadable contact fields'],
   ['unplayable_media', 'unplayable media file', 'unplayable media files'],
   [
     'runtime_media_error',
@@ -385,6 +394,27 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
+  private _renderContactGroup(): TemplateResult | typeof nothing {
+    const items = this._errors.filter(
+      (e): e is ContactDataProblem => e.type === 'contact_data_problem'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Unreadable contact fields (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`<li>
+              <code class="target">${e.field}</code>
+              <span class="text"> — ${e.message}</span>
+            </li>`
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
   private _renderRelationshipCycleGroup(): TemplateResult | typeof nothing {
     const items = this._errors.filter(
       (e): e is RelationshipCycleError => e.type === 'relationship_cycle'
@@ -573,6 +603,7 @@ export class MbrPageErrorsElement extends LitElement {
           ${this._renderRuntimeMediaGroup()}
           ${this._renderWikilinkGroup()}
           ${this._renderFrontmatterGroup()}
+          ${this._renderContactGroup()}
           ${this._renderRelationshipCycleGroup()}
           ${this._renderAmbiguousEndpointGroup()}
           ${this._renderAmbiguousWikilinkGroup()}

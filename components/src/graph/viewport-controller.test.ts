@@ -83,3 +83,25 @@ describe('UNIT SvgViewportController', () => {
     expect(vbOf(svg).w).toBeCloseTo(1000 / 8, 5)
   })
 })
+
+describe('SvgViewportController.setHomeView', () => {
+  it('shows the new home and reset() returns to it', () => {
+    const { svg, controller } = setup()
+    const home: ViewBox = { x: 100, y: 20, w: 300, h: 60 }
+    controller.setHomeView(home)
+    expect(vbOf(svg)).toEqual(home)
+    controller.zoomIn()
+    expect(vbOf(svg).w).toBeLessThan(300)
+    controller.reset()
+    expect(vbOf(svg)).toEqual(home)
+  })
+
+  it('widens the zoom-out floor when the home is wider than the base', () => {
+    const { svg, controller } = setup()
+    const home: ViewBox = { x: -500, y: 0, w: 2000, h: 400 }
+    controller.setHomeView(home)
+    expect(vbOf(svg)).toEqual(home)
+    controller.zoomOut()
+    expect(vbOf(svg).w).toBe(2000)
+  })
+})

@@ -978,12 +978,18 @@ body > header nav > ul.mbr-title-group > li.mbr-nav-title > strong {
  * The tooltip is Pico's, added by `components/src/nav-title.ts` only while the
  * text is actually clipped -- so the focus ring below appears only on a title
  * that has something hidden to reveal.
+ * But exclude the mbr-nav-title from tooltip dotted underline
  */
 body > header nav > ul.mbr-title-group > li.mbr-nav-title[data-tooltip] {
   cursor: help;
+  border-bottom: none;
 }
 
-body > header nav > ul.mbr-title-group > li.mbr-nav-title[data-tooltip]::before {
+body
+  > header
+  nav
+  > ul.mbr-title-group
+  > li.mbr-nav-title[data-tooltip]::before {
   /*
    * Long titles are the whole reason this exists, so let the bubble wrap rather
    * than run off the edge of a narrow window.
@@ -1258,7 +1264,9 @@ a.mbr-link-enhanced[data-tooltip]::after {
  * Absolutely positioned so it cannot push the icon off centre -- as a flex
  * sibling it would share the box and shift the icon left.
  */
-.mbr-review-marker[data-mbr-review-count]:not([data-mbr-review-count="1"])::after {
+.mbr-review-marker[data-mbr-review-count]:not(
+    [data-mbr-review-count="1"]
+  )::after {
   content: attr(data-mbr-review-count);
   position: absolute;
   top: -0.35em;
@@ -1523,6 +1531,16 @@ main dl > dt {
     var(--mbr-dl-transition-easing);
 }
 
+/* The negative `text-indent` above is inherited, and it applies to the first
+ * line of every *block container* -- which includes inline-blocks. Pico draws
+ * `code` / `kbd` as `inline-block`, so a question like "set a page's `<body>`
+ * classes?" pulled its code span's text a marker-width to the left, over the
+ * word before it. Resetting it on every descendant is safe: an inline element
+ * ignores `text-indent`, so only the inline-blocks notice. */
+main dl > dt * {
+  text-indent: 0;
+}
+
 main dl > dt:hover {
   color: var(--mbr-dl-question-hover-color);
 }
@@ -1665,6 +1683,389 @@ main dl > dd:focus-within ~ dt ~ dd {
   main dl > dt::before,
   main dl > dd {
     transition: none;
+  }
+}
+
+/* Flashcard pages (`type: flashcard`): the disclosure above stays -- a question
+ * with its answer hidden is what a flashcard is -- and each card's review
+ * history is collapsed into a one-line `<details>` by `<mbr-flashcards>`
+ * (`flashcards/dom.ts`). Opening that `<summary>` moves focus into the history
+ * `<dd>`, which `dd:focus-within ~ dd` keeps open but which would close the
+ * answers *before* it; this keeps the earlier answers of the same card open
+ * too (the `:not()` stops at the previous card, as with the marker rule). */
+body.flashcard
+  main
+  dl
+  > dd:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within)) {
+  visibility: visible;
+  height: auto;
+  padding-block: 0 var(--mbr-dl-item-spacing);
+}
+
+main dl > dd.mbr-fc-history summary {
+  font-size: 0.85em;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+  margin: 0;
+}
+
+main dl > dd.mbr-fc-history details {
+  margin: 0;
+}
+
+main dl > dd.mbr-fc-history ul {
+  font-size: 0.85em;
+  margin-block: 0.4em 0;
+}
+
+/* ==================== Contact card ====================
+ *
+ * The page header of `type: person` / `type: organization` notes
+ * (`_contact_card.html`). Pico variables only, so it follows every theme and
+ * both color schemes; no fixed widths, so it reflows down to a phone.
+ *
+ * Section titles are <p>, not <h2>: `<mbr-heading-enhancer>` gives every
+ * `main` heading a permalink, and "Phone" is not a place anyone links to. */
+
+.mbr-contact-card {
+  --mbr-contact-avatar-size: 5.5rem;
+  margin: 0 0 var(--pico-block-spacing-vertical, 1.5rem);
+  padding: var(--pico-spacing, 1rem) calc(var(--pico-spacing, 1rem) * 1.25);
+  border: 1px solid var(--pico-muted-border-color, #e0e0e0);
+  border-radius: var(--pico-border-radius, 0.5rem);
+  background: var(--pico-card-background-color, transparent);
+  box-shadow: var(--pico-card-box-shadow, none);
+}
+
+.mbr-contact-card-identity {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--pico-spacing, 1rem) * 1.25);
+}
+
+.mbr-contact-card-avatar {
+  flex: none;
+  width: var(--mbr-contact-avatar-size);
+  height: var(--mbr-contact-avatar-size);
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--pico-secondary-background, #eee);
+}
+
+.mbr-contact-card[data-kind="organization"] .mbr-contact-card-avatar {
+  border-radius: var(--pico-border-radius, 0.5rem);
+}
+
+.mbr-contact-card-avatar-default {
+  display: inline-flex;
+  padding: calc(var(--mbr-contact-avatar-size) * 0.18);
+  color: var(--pico-secondary-inverse, #fff);
+  background: var(--pico-secondary, #6c757d);
+}
+
+/* The genealogy tint the old infobox carried, kept subtle and theme-relative. */
+.mbr-contact-card[data-gender="female"] .mbr-contact-card-avatar-default {
+  background: color-mix(in srgb, var(--pico-secondary, #6c757d) 45%, #c2477a);
+}
+
+.mbr-contact-card[data-gender="male"] .mbr-contact-card-avatar-default {
+  background: color-mix(in srgb, var(--pico-secondary, #6c757d) 45%, #2f6fb5);
+}
+
+.mbr-contact-card-heading {
+  min-width: 0;
+}
+
+.mbr-contact-card-heading > * {
+  margin: 0;
+}
+
+.mbr-contact-card-heading > * + * {
+  margin-top: 0.25rem;
+}
+
+.mbr-contact-card-name {
+  overflow-wrap: anywhere;
+}
+
+.mbr-contact-card-role span + span::before,
+.mbr-contact-card-aliases span + span::before {
+  content: " · ";
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-aliases {
+  font-style: italic;
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-chip {
+  display: inline-block;
+  width: auto;
+  margin: 0.25rem 0 0;
+  padding: 0.15rem 0.7rem;
+  font-size: 0.85rem;
+  border-radius: 999px;
+  --pico-background-color: transparent;
+  --pico-color: var(--pico-primary, inherit);
+  --pico-border-color: var(--pico-primary-border, currentColor);
+}
+
+.mbr-contact-card-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--pico-spacing, 1rem) calc(var(--pico-spacing, 1rem) * 1.5);
+  margin-top: var(--pico-spacing, 1rem);
+  padding-top: var(--pico-spacing, 1rem);
+  border-top: 1px solid var(--pico-muted-border-color, #e0e0e0);
+}
+
+/* Pico gives every <section> a block margin; the grid gap already spaces these. */
+.mbr-contact-card-section {
+  margin: 0;
+}
+
+.mbr-contact-card-section-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-section ul {
+  margin: 0;
+  padding: 0;
+}
+
+.mbr-contact-card-section li {
+  list-style: none;
+  margin: 0 0 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.mbr-contact-card-section address {
+  margin: 0;
+  font-style: normal;
+}
+
+.mbr-contact-card-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--pico-muted-color, #666);
+}
+
+.mbr-contact-card-place::before {
+  content: " — ";
+  color: var(--pico-muted-color, #666);
+}
+
+/* A place listed on its own (no date known) needs no separator. */
+.mbr-contact-card-label + .mbr-contact-card-place::before {
+  content: none;
+}
+
+@media (max-width: 576px) {
+  .mbr-contact-card {
+    --mbr-contact-avatar-size: 4rem;
+  }
+
+  .mbr-contact-card-identity {
+    align-items: flex-start;
+  }
+}
+
+@media print {
+  .mbr-contact-card {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+
+  /* An interactive "open the info panel" control means nothing on paper. */
+  mbr-contact-backlinks {
+    display: none;
+  }
+}
+
+/* ==================== Chat Blocks (```chat) ==================== */
+
+/*
+ * Speech bubbles for ```chat code blocks (src/chat.rs), rendered server-side
+ * so they work in static builds and QuickLook without any JavaScript.
+ *
+ * Each speaker gets one of eight colour slots (`.mbr-chat-c0` … `c7`) from a
+ * stable hash of their name. The slot sets `--mbr-chat-color`; the name label
+ * uses it directly and the bubble is a light wash of it over the page
+ * background, so every Pico theme, light or dark, gets readable bubbles from
+ * the one palette below. Override `--mbr-chat-c0` … `--mbr-chat-c7` to recolour.
+ */
+
+:root {
+  --mbr-chat-c0: #c62828;
+  --mbr-chat-c1: #1565c0;
+  --mbr-chat-c2: #2e7d32;
+  --mbr-chat-c3: #6a1b9a;
+  --mbr-chat-c4: #e65100;
+  --mbr-chat-c5: #00838f;
+  --mbr-chat-c6: #ad1457;
+  --mbr-chat-c7: #827717;
+}
+
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --mbr-chat-c0: #ef5350;
+    --mbr-chat-c1: #64b5f6;
+    --mbr-chat-c2: #66bb6a;
+    --mbr-chat-c3: #ba68c8;
+    --mbr-chat-c4: #ffa726;
+    --mbr-chat-c5: #4dd0e1;
+    --mbr-chat-c6: #f06292;
+    --mbr-chat-c7: #d4e157;
+  }
+}
+
+[data-theme="dark"] {
+  --mbr-chat-c0: #ef5350;
+  --mbr-chat-c1: #64b5f6;
+  --mbr-chat-c2: #66bb6a;
+  --mbr-chat-c3: #ba68c8;
+  --mbr-chat-c4: #ffa726;
+  --mbr-chat-c5: #4dd0e1;
+  --mbr-chat-c6: #f06292;
+  --mbr-chat-c7: #d4e157;
+}
+
+.mbr-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-block: 0 var(--pico-typography-spacing-vertical, 1.5rem);
+}
+
+.mbr-chat-msg {
+  --mbr-chat-color: var(--mbr-chat-c0);
+  align-self: flex-start;
+  max-width: 75%;
+  padding: 0.45rem 0.8rem;
+  border-radius: 1rem 1rem 1rem 0.25rem;
+  border: 1px solid var(--pico-muted-border-color);
+  /* Fallback first: color-mix() is the wash, where supported. */
+  background: var(--pico-card-sectioning-background-color);
+  background: color-mix(
+    in srgb,
+    var(--mbr-chat-color) 10%,
+    var(--pico-background-color)
+  );
+  border-color: color-mix(in srgb, var(--mbr-chat-color) 30%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.mbr-chat-c0 {
+  --mbr-chat-color: var(--mbr-chat-c0);
+}
+.mbr-chat-c1 {
+  --mbr-chat-color: var(--mbr-chat-c1);
+}
+.mbr-chat-c2 {
+  --mbr-chat-color: var(--mbr-chat-c2);
+}
+.mbr-chat-c3 {
+  --mbr-chat-color: var(--mbr-chat-c3);
+}
+.mbr-chat-c4 {
+  --mbr-chat-color: var(--mbr-chat-c4);
+}
+.mbr-chat-c5 {
+  --mbr-chat-color: var(--mbr-chat-c5);
+}
+.mbr-chat-c6 {
+  --mbr-chat-color: var(--mbr-chat-c6);
+}
+.mbr-chat-c7 {
+  --mbr-chat-color: var(--mbr-chat-c7);
+}
+
+.mbr-chat-right {
+  align-self: flex-end;
+  border-radius: 1rem 1rem 0.25rem 1rem;
+}
+
+.mbr-chat-center {
+  align-self: center;
+  border-radius: 1rem;
+  text-align: center;
+}
+
+/* Same speaker again: pull the bubble up under the previous one. */
+.mbr-chat-cont {
+  margin-top: -0.35rem;
+}
+
+.mbr-chat-name {
+  margin-bottom: 0.15rem;
+  color: var(--mbr-chat-color);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.mbr-chat-meta {
+  margin-top: 0.2rem;
+  color: var(--pico-muted-color);
+  font-size: 0.75em;
+  text-align: right;
+}
+
+.mbr-chat-body > :first-child,
+.mbr-chat-comment > :first-child,
+.mbr-chat-md > :first-child {
+  margin-top: 0;
+}
+
+.mbr-chat-body > :last-child,
+.mbr-chat-comment > :last-child,
+.mbr-chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+.mbr-chat-delim {
+  align-self: stretch;
+  margin-block: 0.4rem;
+  /* The muted *border* colour all but vanishes on dark themes. */
+  border-top: 1px dashed var(--pico-muted-color);
+  opacity: 0.5;
+}
+
+.mbr-chat-comment {
+  align-self: center;
+  max-width: 85%;
+  color: var(--pico-muted-color);
+  font-size: 0.85em;
+  text-align: center;
+}
+
+.mbr-chat-md {
+  align-self: stretch;
+}
+
+/* Pico gives every `p`/`ol`/`ul` an explicit `color: var(--pico-color)`, so
+ * without this a comment's paragraph ignores the muted colour set above. The
+ * meta line needs no such rule: it is a bare `div`, never markdown. */
+.mbr-chat-comment > * {
+  color: inherit;
+}
+
+@media (max-width: 576px) {
+  .mbr-chat-msg {
+    max-width: 90%;
+  }
+}
+
+@media print {
+  .mbr-chat-msg {
+    break-inside: avoid;
+    background: none;
+    border-color: #999;
   }
 }
 

@@ -40,7 +40,7 @@ use papaya::HashMap as ConcurrentHashMap;
 use serde::{Deserialize, Serialize};
 use yaml_rust2::Yaml;
 
-use crate::config::RelationType;
+use crate::config::{Hierarchy, RelationType};
 use crate::link_index::resolve_relative_url;
 
 /// Reserved edge keys that are not treated as free-form attributes.
@@ -78,6 +78,16 @@ pub struct RawRelationship {
     /// Free-form edge attributes (everything except the reserved keys),
     /// preserved verbatim as JSON. Order-stable via `BTreeMap`.
     pub attributes: BTreeMap<String, serde_json::Value>,
+    /// True when the edge was *implied* by another frontmatter field rather
+    /// than written in `relationships:` — today only a person's
+    /// `company: "[[Acme]]"`, which implies `employer → Acme`.
+    ///
+    /// An implicit edge does not make its note a declarer, so it surfaces as
+    /// `derived: true` on **both** ends, and it is dropped when its type is not
+    /// in the registry (a repository whose `relationship_types` has no
+    /// `employer` asked for no such edge). An explicit declaration of the same
+    /// edge wins and makes it a normal, declared one.
+    pub implicit: bool,
 }
 
 /// A relationship after endpoint resolution and viewpoint framing, ready for
@@ -244,7 +254,7 @@ impl RelationTypeRegistry {
             .map(|t| (t.name.to_lowercase(), t.clone()))
             .collect();
         Self {
-            by_name: derive_reciprocal_types(configured, &types),
+            by_name: reconcile_pair_metadata(derive_reciprocal_types(configured, &types), &types),
         }
     }
 
@@ -308,13 +318,24 @@ impl RelationTypeRegistry {
             .by_name
             .values()
             .map(|t| {
-                serde_json::json!({
+                let mut entry = serde_json::json!({
                     "name": t.name,
                     "symmetric": t.symmetric,
                     "inverse": t.inverse,
                     "label": t.singular_label(),
                     "label_plural": t.plural_label(),
-                })
+                });
+                // Omitted rather than `null` when unset: the frontend's
+                // fallbacks key on the field being absent (contract 0.3/0.4).
+                if let Some(obj) = entry.as_object_mut() {
+                    if let Some(h) = t.hierarchy {
+                        obj.insert("hierarchy".into(), h.as_str().into());
+                    }
+                    if let Some(c) = &t.category {
+                        obj.insert("category".into(), c.clone().into());
+                    }
+                }
+                entry
             })
             .collect();
         serde_json::Value::Array(arr)
@@ -390,7 +411,97 @@ fn reciprocal_type(t: &RelationType) -> Option<RelationType> {
         inverse: Some(t.name.trim().to_string()),
         label: None,
         label_plural: None,
+        hierarchy: t.hierarchy.map(Hierarchy::flipped),
+        category: t.category.clone(),
     })
+}
+
+/// Makes the hierarchy/category metadata of every inverse pair coherent.
+///
+/// The two halves of a pair describe one edge from opposite ends, so their
+/// `hierarchy` must point opposite ways and their `category` must agree. This
+/// never fails startup (matching the rest of the registry validation): a half
+/// that leaves a field unset inherits it from its partner, and a contradiction
+/// (`parent` and `child` both `up`) is repaired in favour of the type declared
+/// **first** in the config, with a warning naming both. A symmetric type has no
+/// direction, so a `hierarchy` on one is dropped with a warning.
+///
+/// Only pairs whose halves name each other are touched; a pair that disagrees
+/// about its inverse was already reported by [`derive_reciprocal_types`].
+fn reconcile_pair_metadata(
+    mut by_name: BTreeMap<String, RelationType>,
+    types: &[RelationType],
+) -> BTreeMap<String, RelationType> {
+    for t in types {
+        let key = t.name.to_lowercase();
+        let Some(current) = by_name.get(&key).cloned() else {
+            continue;
+        };
+        if current.symmetric {
+            if current.hierarchy.is_some() {
+                tracing::warn!(
+                    "relation type `{}` is symmetric, so it cannot have a `hierarchy`; ignoring it",
+                    current.name
+                );
+                if let Some(slot) = by_name.get_mut(&key) {
+                    slot.hierarchy = None;
+                }
+            }
+            continue;
+        }
+        let Some(partner_key) = current
+            .inverse
+            .as_deref()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .map(str::to_lowercase)
+        else {
+            continue;
+        };
+        let Some(partner) = by_name.get(&partner_key).cloned() else {
+            continue;
+        };
+        let names_back = partner
+            .inverse
+            .as_deref()
+            .is_some_and(|i| normalize_name(i) == normalize_name(&current.name));
+        if !names_back || partner.symmetric {
+            continue;
+        }
+
+        let (own_hierarchy, partner_hierarchy) = match (current.hierarchy, partner.hierarchy) {
+            (Some(h), Some(p)) if h == p => {
+                tracing::warn!(
+                    "relation types `{}` and `{}` are inverses but both declare \
+                     `hierarchy = \"{}\"`; one end of an edge must rank above the \
+                     other, so `{}` is being treated as `{}`",
+                    current.name,
+                    partner.name,
+                    h.as_str(),
+                    partner.name,
+                    h.flipped().as_str(),
+                );
+                (Some(h), Some(h.flipped()))
+            }
+            (Some(h), None) => (Some(h), Some(h.flipped())),
+            (None, Some(p)) => (Some(p.flipped()), Some(p)),
+            other => other,
+        };
+        let category = current
+            .category
+            .clone()
+            .or_else(|| partner.category.clone());
+
+        if let Some(slot) = by_name.get_mut(&key) {
+            slot.hierarchy = own_hierarchy;
+            slot.category = slot.category.clone().or_else(|| category.clone());
+        }
+        if let Some(slot) = by_name.get_mut(&partner_key) {
+            slot.hierarchy = partner_hierarchy;
+            slot.category = slot.category.clone().or(category);
+        }
+    }
+    by_name
 }
 
 /// Completes half-declared inverse pairs by auto-registering the reciprocal of
@@ -646,10 +757,51 @@ impl RelationshipIndex {
 /// non-string array elements, so relationships must be read straight from the
 /// `yaml_rust2::Yaml` value. Malformed or empty entries are tolerated (skipped
 /// with a warning); the endpoint strings are kept unresolved.
+///
+/// Also yields the implicit `employer` edge a person's `company: "[[X]]"`
+/// stands for (see [`company_employer_relationship`]), so every consumer of the
+/// declared relationships sees it without a second pass over the YAML.
 pub fn parse_relationships(yaml: &Yaml) -> Vec<RawRelationship> {
     let Some(hash) = yaml.as_hash() else {
         return Vec::new();
     };
+    let mut out = parse_declared_relationships(hash);
+    out.extend(company_employer_relationship(hash));
+    out
+}
+
+/// The relation type a person's `company` wikilink implies.
+pub const COMPANY_RELATION_TYPE: &str = "employer";
+
+/// The implicit `employer → X` edge for a `type: person` note whose `company`
+/// is a wikilink.
+///
+/// Wikilink-only on purpose: plain text such as `company: Acme` stays plain
+/// text even when a note happens to be titled "Acme". Auto-resolving free text
+/// would mint edges the author never asked for — and a one-word company name is
+/// exactly the kind of string that collides with an unrelated note.
+fn company_employer_relationship(hash: &yaml_rust2::yaml::Hash) -> Option<RawRelationship> {
+    let field = |name: &str| {
+        hash.get(&Yaml::String(name.to_string()))
+            .and_then(Yaml::as_str)
+    };
+    if field("type").map(str::trim) != Some("person") {
+        return None;
+    }
+    let company = field("company")?.trim();
+    strip_wikilink(company).filter(|inner| !inner.trim().is_empty())?;
+    Some(RawRelationship {
+        implicit: true,
+        rel_type: COMPANY_RELATION_TYPE.to_string(),
+        to: Some(company.to_string()),
+        from: None,
+        label: None,
+        attributes: BTreeMap::new(),
+    })
+}
+
+/// Parses the explicit `relationships:` array. See [`parse_relationships`].
+fn parse_declared_relationships(hash: &yaml_rust2::yaml::Hash) -> Vec<RawRelationship> {
     let rel_key = Yaml::String("relationships".to_string());
     let items = match hash.get(&rel_key) {
         Some(Yaml::Array(items)) => items,
@@ -703,14 +855,15 @@ pub fn parse_relationships(yaml: &Yaml) -> Vec<RawRelationship> {
             from,
             label,
             attributes,
+            implicit: false,
         });
     }
     out
 }
 
 /// Converts a `yaml_rust2::Yaml` value to a `serde_json::Value`, preserving
-/// structure (used for free-form edge attributes).
-fn yaml_to_json(y: &Yaml) -> serde_json::Value {
+/// structure (used for free-form edge attributes and the contact model).
+pub(crate) fn yaml_to_json(y: &Yaml) -> serde_json::Value {
     use serde_json::Value;
     match y {
         Yaml::String(s) => Value::String(s.clone()),
@@ -1035,6 +1188,11 @@ pub fn build_relationships(
             if rel_type.is_empty() {
                 continue;
             }
+            // An implied edge exists only if the repository knows its type —
+            // see `RawRelationship::implicit`.
+            if rel.implicit && registry.get(rel_type).is_none() {
+                continue;
+            }
             if rel.from.is_none() && rel.to.is_none() {
                 tracing::warn!(
                     "relationship on {} has neither `to` nor `from`; skipping",
@@ -1092,7 +1250,9 @@ pub fn build_relationships(
                 attributes: rel.attributes.clone(),
                 declarers: HashSet::new(),
             });
-            edge.declarers.insert(note.url.clone());
+            if !rel.implicit {
+                edge.declarers.insert(note.url.clone());
+            }
             // Merge attributes (first declaration wins on key conflict).
             for (k, v) in &rel.attributes {
                 edge.attributes
@@ -1589,6 +1749,8 @@ mod tests {
             inverse: Some(inverse.to_string()),
             label: None,
             label_plural: None,
+            hierarchy: None,
+            category: None,
         }
     }
 
@@ -1600,6 +1762,8 @@ mod tests {
             inverse: None,
             label: None,
             label_plural: None,
+            hierarchy: None,
+            category: None,
         }
     }
 
@@ -1614,6 +1778,7 @@ mod tests {
 
     fn rel_to(rel_type: &str, to: &str) -> RawRelationship {
         RawRelationship {
+            implicit: false,
             rel_type: rel_type.to_string(),
             to: Some(to.to_string()),
             from: None,
@@ -1744,6 +1909,179 @@ mod tests {
         assert_eq!(reg.predicate_subject("parent"), "parent");
     }
 
+    // ----- hierarchy / category -----
+
+    fn typed(name: &str, inverse: &str, hierarchy: Option<Hierarchy>) -> RelationType {
+        RelationType {
+            hierarchy,
+            category: Some("work".to_string()),
+            ..inverse_type(name, inverse)
+        }
+    }
+
+    #[test]
+    fn registry_derived_reciprocal_flips_hierarchy_and_keeps_category() {
+        let reg =
+            RelationTypeRegistry::from_types(&[typed("mentor", "mentee", Some(Hierarchy::Up))]);
+        let mentee = reg.get("mentee").expect("auto-registered");
+        assert_eq!(mentee.hierarchy, Some(Hierarchy::Down));
+        assert_eq!(mentee.category.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn registry_fills_in_a_missing_half_of_a_configured_pair() {
+        let reg = RelationTypeRegistry::from_types(&[
+            inverse_type("mentee", "mentor"),
+            typed("mentor", "mentee", Some(Hierarchy::Up)),
+        ]);
+        assert_eq!(reg.get("mentee").unwrap().hierarchy, Some(Hierarchy::Down));
+        assert_eq!(reg.get("mentee").unwrap().category.as_deref(), Some("work"));
+        assert_eq!(reg.get("mentor").unwrap().hierarchy, Some(Hierarchy::Up));
+    }
+
+    #[test]
+    fn registry_repairs_contradictory_hierarchy_in_favour_of_first_declared() {
+        // Both halves claim `up`: impossible. The first declared keeps its
+        // value and the partner is flipped, without failing startup.
+        let reg = RelationTypeRegistry::from_types(&[
+            typed("boss", "report", Some(Hierarchy::Up)),
+            typed("report", "boss", Some(Hierarchy::Up)),
+        ]);
+        assert_eq!(reg.get("boss").unwrap().hierarchy, Some(Hierarchy::Up));
+        assert_eq!(reg.get("report").unwrap().hierarchy, Some(Hierarchy::Down));
+
+        let reversed = RelationTypeRegistry::from_types(&[
+            typed("report", "boss", Some(Hierarchy::Up)),
+            typed("boss", "report", Some(Hierarchy::Up)),
+        ]);
+        assert_eq!(
+            reversed.get("report").unwrap().hierarchy,
+            Some(Hierarchy::Up)
+        );
+        assert_eq!(
+            reversed.get("boss").unwrap().hierarchy,
+            Some(Hierarchy::Down)
+        );
+    }
+
+    #[test]
+    fn registry_drops_hierarchy_on_symmetric_type() {
+        let reg = RelationTypeRegistry::from_types(&[RelationType {
+            hierarchy: Some(Hierarchy::Up),
+            ..symmetric_type("peer")
+        }]);
+        assert_eq!(reg.get("peer").unwrap().hierarchy, None);
+    }
+
+    #[test]
+    fn registry_json_carries_hierarchy_and_category_only_when_set() {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let json = reg.to_json();
+        let arr = json.as_array().unwrap();
+        let find = |n: &str| arr.iter().find(|t| t["name"] == n).unwrap().clone();
+        assert_eq!(find("reports_to")["hierarchy"], "up");
+        assert_eq!(find("manages")["hierarchy"], "down");
+        assert_eq!(find("manages")["category"], "work");
+        assert_eq!(find("child")["category"], "family");
+        let colleague = find("colleague");
+        assert!(colleague.get("hierarchy").is_none(), "{colleague}");
+        assert_eq!(colleague["symmetric"], true);
+
+        let bare = RelationTypeRegistry::from_types(&[symmetric_type("friend")]).to_json();
+        let friend = &bare.as_array().unwrap()[0];
+        assert!(friend.get("hierarchy").is_none());
+        assert!(friend.get("category").is_none());
+    }
+
+    // ----- company → employer -----
+
+    fn person_with_company(url: &str, title: &str, company: &str) -> NoteRelInput {
+        let yaml = parse_yaml(&format!("type: person\ncompany: \"{company}\"\n"));
+        note(url, title, title, parse_relationships(&yaml))
+    }
+
+    #[test]
+    fn company_wikilink_implies_employer_edge_on_both_ends() {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let notes = vec![
+            person_with_company("/people/jane/", "Jane Doe", "[[Acme Corp]]"),
+            note("/orgs/acme/", "Acme Corp", "acme", vec![]),
+        ];
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+
+        let jane = &map["/people/jane/"];
+        assert_eq!(jane.len(), 1);
+        assert_eq!(jane[0].predicate, "employer");
+        assert_eq!(jane[0].neighbor, "/orgs/acme/");
+        assert!(jane[0].resolved);
+        assert!(jane[0].derived, "implied by `company`, not declared");
+
+        let acme = &map["/orgs/acme/"];
+        assert_eq!(acme[0].predicate, "employee");
+        assert_eq!(acme[0].neighbor, "/people/jane/");
+        assert!(acme[0].derived);
+    }
+
+    #[test]
+    fn company_edge_is_declared_once_the_author_writes_it_out() {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let mut jane = person_with_company("/people/jane/", "Jane Doe", "[[Acme Corp]]");
+        jane.relationships.push(rel_to("employer", "[[Acme Corp]]"));
+        let notes = vec![jane, note("/orgs/acme/", "Acme Corp", "acme", vec![])];
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        let jane = &map["/people/jane/"];
+        assert_eq!(
+            jane.len(),
+            1,
+            "explicit and implied edge collapse: {jane:?}"
+        );
+        assert!(!jane[0].derived);
+    }
+
+    #[test]
+    fn company_edge_needs_employer_in_the_registry() {
+        let reg = RelationTypeRegistry::from_types(&[symmetric_type("spouse")]);
+        let notes = vec![
+            person_with_company("/people/jane/", "Jane Doe", "[[Acme Corp]]"),
+            note("/orgs/acme/", "Acme Corp", "acme", vec![]),
+        ];
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        assert!(map.is_empty(), "{map:?}");
+    }
+
+    #[test]
+    fn unresolved_company_wikilink_is_reported_like_any_unresolved_endpoint() {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let notes = vec![person_with_company(
+            "/people/jane/",
+            "Jane Doe",
+            "[[Nowhere Inc]]",
+        )];
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        let jane = &map["/people/jane/"];
+        assert_eq!(jane.len(), 1);
+        assert!(!jane[0].resolved);
+        assert_eq!(jane[0].neighbor, "");
+        assert_eq!(jane[0].neighbor_title, "Nowhere Inc");
+    }
+
+    #[test]
+    fn company_plain_text_or_non_person_implies_nothing() {
+        let plain = parse_yaml("type: person\ncompany: Acme Corp\n");
+        assert!(parse_relationships(&plain).is_empty());
+        let org = parse_yaml("type: organization\ncompany: \"[[Parent Co]]\"\n");
+        assert!(parse_relationships(&org).is_empty());
+        let empty = parse_yaml("type: person\ncompany: \"[[ ]]\"\n");
+        assert!(parse_relationships(&empty).is_empty());
+
+        let linked = parse_yaml("type: person\ncompany: \"[[Acme Corp|Acme]]\"\n");
+        let rels = parse_relationships(&linked);
+        assert_eq!(rels.len(), 1);
+        assert!(rels[0].implicit);
+        assert_eq!(rels[0].rel_type, COMPANY_RELATION_TYPE);
+        assert_eq!(rels[0].to.as_deref(), Some("[[Acme Corp|Acme]]"));
+    }
+
     #[test]
     fn registry_auto_registers_missing_inverse_half() {
         // Regression: only the `employer` half of the pair is configured, so
@@ -1795,6 +2133,8 @@ mod tests {
                 inverse: Some("partnered-with".to_string()),
                 label: None,
                 label_plural: None,
+                hierarchy: None,
+                category: None,
             },
             inverse_type("boss", "   "),
         ]);
@@ -1891,9 +2231,15 @@ mod tests {
 
     #[test]
     fn registry_defaults_are_unchanged_by_derivation() {
-        // The genealogy defaults declare both halves, so nothing is derived.
-        let reg = RelationTypeRegistry::from_types(&genealogy_types());
-        assert_eq!(reg.to_json().as_array().unwrap().len(), 4);
+        // The defaults declare both halves of every pair with coherent
+        // hierarchy/category, so neither derivation nor reconciliation may
+        // touch a single field.
+        let defaults = genealogy_types();
+        let reg = RelationTypeRegistry::from_types(&defaults);
+        assert_eq!(reg.to_json().as_array().unwrap().len(), defaults.len());
+        for t in &defaults {
+            assert_eq!(reg.get(&t.name), Some(t), "{} changed", t.name);
+        }
     }
 
     #[test]
@@ -1901,7 +2247,7 @@ mod tests {
         let reg = RelationTypeRegistry::from_types(&genealogy_types());
         let json = reg.to_json();
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 4);
+        assert_eq!(arr.len(), 11);
         let child = arr.iter().find(|t| t["name"] == "child").unwrap();
         assert_eq!(child["label_plural"], "Children");
         assert_eq!(child["inverse"], "parent");
@@ -1917,6 +2263,7 @@ mod tests {
                 "John Doe",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[mary doe]]".into()),
                     from: None,
@@ -1945,6 +2292,7 @@ mod tests {
                 "Alpha",
                 "alpha",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[beta-stem]]".into()),
                     from: None,
@@ -1966,6 +2314,7 @@ mod tests {
             "Alpha",
             "alpha",
             vec![RawRelationship {
+                implicit: false,
                 rel_type: "spouse".into(),
                 to: Some("[[Ghost]]".into()),
                 from: None,
@@ -1992,6 +2341,7 @@ mod tests {
                 "Zeb",
                 "zeb",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[Sam]]".into()),
                     from: None,
@@ -2015,6 +2365,7 @@ mod tests {
                 "John",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("mary.md".into()),
                     from: None,
@@ -2043,6 +2394,7 @@ mod tests {
                 "Zeb",
                 "zeb",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[Mary Doe]]".into()),
                     from: None,
@@ -2069,6 +2421,7 @@ mod tests {
                 "Zeb",
                 "zeb",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[Sam]]".into()),
                     from: None,
@@ -2095,6 +2448,7 @@ mod tests {
                 "Zeb",
                 "zeb",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[mary doe]]".into()),
                     from: None,
@@ -2120,6 +2474,7 @@ mod tests {
                 "John",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "child".into(),
                     to: Some("[[Alice]]".into()),
                     from: None,
@@ -2151,6 +2506,7 @@ mod tests {
                 "John",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[Mary]]".into()),
                     from: None,
@@ -2175,6 +2531,7 @@ mod tests {
                 "John",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "child".into(),
                     to: Some("[[Alice]]".into()),
                     from: None,
@@ -2187,6 +2544,7 @@ mod tests {
                 "Alice",
                 "alice",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "parent".into(),
                     to: Some("[[John]]".into()),
                     from: None,
@@ -2284,6 +2642,7 @@ mod tests {
                 "C",
                 "c",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     from: Some("[[A]]".into()),
                     to: Some("[[B]]".into()),
@@ -2309,6 +2668,7 @@ mod tests {
                 "John",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "mentor".into(),
                     to: Some("[[Alice]]".into()),
                     from: None,
@@ -2336,6 +2696,7 @@ mod tests {
             "John",
             "john",
             vec![RawRelationship {
+                implicit: false,
                 rel_type: "spouse".into(),
                 to: None,
                 from: None,
@@ -2815,6 +3176,7 @@ mod tests {
                 "John",
                 "john",
                 vec![RawRelationship {
+                    implicit: false,
                     rel_type: "spouse".into(),
                     to: Some("[[Mary]]".into()),
                     from: None,
@@ -2877,7 +3239,7 @@ mod proptests {
                     continue;
                 }
                 let rel_type = if e.symmetric { "spouse" } else { "parent" };
-                per_note[e.declarer].push(RawRelationship {
+                per_note[e.declarer].push(RawRelationship { implicit: false,
                     rel_type: rel_type.to_string(),
                     to: Some(format!("[[P{}]]", e.target)),
                     from: None,

@@ -793,7 +793,7 @@ pub fn patch_task_line(
 /// A trailing newline terminates the last line rather than starting an empty
 /// one, so `"a\n"` has exactly one line — which is what every editor, and
 /// [`str::lines`], also says.
-fn line_span(source: &str, line_number: u32) -> Option<std::ops::Range<usize>> {
+pub(crate) fn line_span(source: &str, line_number: u32) -> Option<std::ops::Range<usize>> {
     let target = usize::try_from(line_number).ok()?.checked_sub(1)?;
     let mut start = 0;
     for (index, line) in source.split_inclusive('\n').enumerate() {
@@ -810,7 +810,7 @@ fn line_span(source: &str, line_number: u32) -> Option<std::ops::Range<usize>> {
 ///
 /// The terminator is carried through verbatim rather than normalized: a CRLF
 /// file that mbr patches one line of must stay a CRLF file.
-fn split_line_terminator(line: &str) -> (&str, &str) {
+pub(crate) fn split_line_terminator(line: &str) -> (&str, &str) {
     let content = line.trim_end_matches(['\r', '\n']);
     (content, &line[content.len()..])
 }

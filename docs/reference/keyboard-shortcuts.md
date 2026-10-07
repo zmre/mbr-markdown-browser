@@ -37,6 +37,7 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `e` | Open the editor for the current file (when [editing](../modes/editing/) is enabled) |
 | `r` | Add a [review note](../modes/review/), anchored to the selection (server and GUI modes only) |
 | `R` | Open the review panel (server and GUI modes only) |
+| `p` | Play the slides (on a `style: slides` page) or review the [flashcards](../markdown/flashcards/) (on a `type: flashcard` page) |
 | `Esc` | Close current panel |
 
 ## Quick Navigation (Fuzzy Nav)
@@ -119,6 +120,23 @@ focus is in a text field, `e`, `d` and `c` are ordinary characters.
 its own confirmation and has deliberately **no shortcut**: every key above
 affects a single note, and a whole-review delete should not be one keystroke away
 from a typo.
+
+## Flashcards (when open)
+
+`p` on a `type: flashcard` page opens its deck. The navigation keys mirror the
+ones slides use. See [Flashcards](../markdown/flashcards/) for the full guide.
+
+| Key | Action |
+|-----|--------|
+| `Space` / `→` / `PageDown` / `n` | Advance: flip a card showing its front; on the back, next card (In order / Random) |
+| `Enter` / click | Flip the card either way |
+| `←` / `PageUp` | Previous card (In order / Random) |
+| `Home` / `End` | First / last card (In order / Random) |
+| `1` / `2` / `3` / `4` | Rate Again / Hard / Good / Easy and move on (spaced repetition, on the back) |
+| `Esc` | Leave the deck |
+
+In spaced-repetition mode `Space` and `→` never leave the back of a card — only a
+rating does — so a stray key cannot skip a card you were meant to grade.
 
 ## Task Checkboxes (in a page)
 

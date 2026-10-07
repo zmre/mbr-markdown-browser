@@ -29,7 +29,9 @@ Partials are prefixed with underscore and included by other templates:
 | `_info_panel.html` | Document info sidebar |
 | `_footer.html` | Page footer |
 | `_scripts.html` | Base JavaScript includes |
-| `_display_enhancements.html` | Display-enhancement loaders (mermaid, hljs; `<mbr-genealogy>` on person pages) |
+| `_display_enhancements.html` | Display-enhancement loaders (mermaid, hljs; `<mbr-genealogy>` on person and organization pages) |
+| `_contact_card.html` | Contact card at the top of `type: person` / `type: organization` pages, from the `contact` variable — see [Contacts](../markdown/contacts/#customizing) |
+| `_person_infobox.html` | Compatibility shim: renders the contact card without its headline, for custom `index.html` files written before the card existed |
 
 ## Template Variables
 

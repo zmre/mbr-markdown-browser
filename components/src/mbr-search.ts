@@ -1,7 +1,8 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state, query } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab } from './shared.js'
+import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab, safeDecodePath, siteNav } from './shared.js'
+import { getMbrAssetBase } from './dynamic-loader.js'
 import type { MbrOverlay } from './overlay.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
 
@@ -124,24 +125,83 @@ function getMbrConfig(): MbrConfig {
   };
 }
 
+/** The folder holding `path`: everything up to and including its last `/` but one. */
+function parentFolder(path: string): string {
+  const trimmed = path.endsWith('/') ? path.slice(0, -1) : path;
+  const lastSlash = trimmed.lastIndexOf('/');
+  return lastSlash > 0 ? trimmed.substring(0, lastSlash + 1) : '/';
+}
+
 /**
- * Get the current folder context from the URL path.
- * - Section pages (ending with /) search from current path
- * - Markdown pages (not ending with / after navigation) search from parent
+ * The folder "Current folder only" scopes a search to, as a DECODED url-path
+ * prefix ending in `/` — the form the server's folder filter compares against
+ * `url_path` (src/search.rs `matches_folder_filter`, a plain `starts_with`).
+ *
+ * The URL alone cannot tell a note from a folder: every markdown page is served
+ * at a trailing-slash URL, so `/people/john/` is John's *note*, and treating it
+ * as a folder scoped the search to John and nothing else. `markdownSource` (the
+ * page's repo-relative source path, set on every rendered markdown page) is
+ * what disambiguates:
+ *
+ * - no `markdownSource` (section, home, tag pages) → the URL is the folder;
+ * - an index note (`people/index.md` served at `/people/`) → its URL is its
+ *   own folder, recognised by the source's directory equalling the URL;
+ * - any other note → the parent of its URL.
+ *
+ * The pathname is percent-decoded first (`url_path` is stored decoded, so
+ * `/My%20Notes/` would match nothing); a malformed escape keeps the raw text.
  */
+export function searchFolderFor(pathname: string, markdownSource?: string | null): string {
+  const decoded = safeDecodePath(pathname) || '/';
+  if (!markdownSource) {
+    return decoded.endsWith('/') ? decoded : parentFolder(decoded);
+  }
+  const page = decoded.endsWith('/') ? decoded : `${decoded}/`;
+  const sourceDir = markdownSource.split('/').slice(0, -1).filter(Boolean).join('/');
+  const sourceFolder = sourceDir ? `/${sourceDir}/` : '/';
+  return page === sourceFolder ? page : parentFolder(page);
+}
+
+/**
+ * Value prefix of the note-type `<option>`s in the scope select. Scope values
+ * (`all`/`metadata`/`content`) never contain a colon, so the two cannot clash.
+ */
+const TYPE_OPTION_PREFIX = 'type:';
+
+/**
+ * The lazy `mbr-search-extras.min.js` chunk: the folder picker element plus the
+ * type-list and facet helpers. Kept out of the main bundle (which every page
+ * pays for) because nothing in it is needed before the search modal opens.
+ */
+export type SearchExtrasModule = typeof import('./search-extras/index.js');
+
+const defaultSearchExtrasImporter = (): Promise<SearchExtrasModule> =>
+  import(
+    /* @vite-ignore */ new URL(getMbrAssetBase() + 'components/mbr-search-extras.min.js', document.baseURI).href
+  ) as Promise<SearchExtrasModule>;
+
+let importSearchExtras = defaultSearchExtrasImporter;
+let searchExtrasPromise: Promise<SearchExtrasModule | null> | null = null;
+
+/** Test seam: replace the chunk importer (`null` restores the default). */
+export function setSearchExtrasImporter(importer: (() => Promise<SearchExtrasModule>) | null): void {
+  importSearchExtras = importer ?? defaultSearchExtrasImporter;
+  searchExtrasPromise = null;
+}
+
+/** Load the chunk once per page; resolves `null` (search still works) on failure. */
+function loadSearchExtras(): Promise<SearchExtrasModule | null> {
+  searchExtrasPromise ??= importSearchExtras().catch((err) => {
+    console.warn('Failed to load the search extras chunk:', err);
+    return null;
+  });
+  return searchExtrasPromise;
+}
+
+/** The current page's search folder (see {@link searchFolderFor}). */
 function getCurrentFolder(): string {
-  const path = window.location.pathname;
-  // If path ends with /, it's a section page - search from current folder
-  if (path.endsWith('/')) {
-    return path;
-  }
-  // Otherwise it's a markdown file rendered at a trailing-slash URL,
-  // so search from parent directory
-  const lastSlash = path.lastIndexOf('/');
-  if (lastSlash > 0) {
-    return path.substring(0, lastSlash + 1);
-  }
-  return '/';
+  const source = window.frontmatter?.['markdown_source'];
+  return searchFolderFor(window.location.pathname, typeof source === 'string' ? source : null);
 }
 
 /**
@@ -181,6 +241,26 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   @state()
   private _filetypeFilter: FiletypeFilter = 'markdown';
+
+  /**
+   * A folder chosen in the folder picker, overriding the current page's folder
+   * while `_folderScope` is `current`. `null` means "the folder I am in".
+   */
+  @state()
+  private _folderOverride: string | null = null;
+
+  /** Folders and note types derived (chunk-side) from site.json on first open. */
+  @state()
+  private _folders: string[] = [];
+
+  @state()
+  private _noteTypes: Array<{ type: string; count: number }> = [];
+
+  /** Loaded `mbr-search-extras` chunk, once the modal has opened. */
+  private _extras: SearchExtrasModule | null = null;
+
+  /** site.json payload `_folders`/`_noteTypes` were derived from. */
+  private _facetSource: unknown = null;
 
   @state()
   private _error: string | null = null;
@@ -328,6 +408,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       if (this._isMediaBrowserOpen) {
         e.preventDefault();
         this._closeMediaBrowser();
+      } else if (this._picker()?.isOpen) {
+        e.preventDefault();
+        this._picker()?.close();
       } else if (this._isOpen) {
         e.preventDefault();
         this._closeSearch();
@@ -337,9 +420,32 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _openSearch() {
     this._isOpen = true;
+    if (getMbrConfig().serverMode) this._loadSiteFacets();
     this.updateComplete.then(() => {
       this._input?.focus();
     });
+  }
+
+  /**
+   * Derive the folder list and note types from site.json. Runs when the modal
+   * opens — never at page load — and only once per site.json payload; both are
+   * O(files), which is fine on a user action but not on the critical path.
+   */
+  private _loadSiteFacets(): void {
+    void Promise.all([loadSearchExtras(), siteNav.catch(() => null)]).then(([extras, data]) => {
+      if (!extras || !data || data === this._facetSource) return;
+      this._extras = extras;
+      this._facetSource = data;
+      const { folders, types } = extras.deriveSearchFacets(data);
+      this._folders = folders;
+      this._noteTypes = types;
+    });
+  }
+
+  /** The chunk's folder picker, once defined and rendered. */
+  private _picker(): HTMLElementTagNameMap['mbr-folder-picker'] | null {
+    const el = this.shadowRoot?.querySelector('mbr-folder-picker');
+    return el && typeof el.close === 'function' ? el : null;
   }
 
   private _closeSearch() {
@@ -485,19 +591,57 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _handleScopeChange(e: Event) {
     const target = e.target as HTMLSelectElement;
+    if (target.value.startsWith(TYPE_OPTION_PREFIX)) {
+      this._applyNoteType(target.value.slice(TYPE_OPTION_PREFIX.length));
+      // The type is now visible as a `type:` token in the query; the select
+      // goes back to showing the scope, which is what it controls.
+      target.value = this._scope;
+      return;
+    }
     this._scope = target.value as SearchScope;
     if (this._query.length >= 2) {
       this._performSearch();
     }
   }
 
+  /**
+   * Restrict the search to one note type by writing a `type:` facet into the
+   * query. Content-only scope never consults facets on a facet-only query (the
+   * server runs content search only when there are free-text terms), so it is
+   * widened to All; the other scopes already apply facets.
+   */
+  private _applyNoteType(type: string): void {
+    if (!this._extras) return;
+    this._query = this._extras.withTypeFacet(this._query, type);
+    if (this._scope === 'content') this._scope = 'all';
+    this._selectedIndex = -1;
+    this.updateComplete.then(() => this._input?.focus());
+    if (this._query.length >= 2) this._performSearch();
+  }
+
   private _handleFolderScopeChange(e: Event) {
     const target = e.target as HTMLInputElement;
     this._folderScope = target.checked ? 'current' : 'everywhere';
+    // Unchecking clears a picked folder: the next check means "here" again.
+    if (!target.checked) this._folderOverride = null;
     if (this._query.length >= 2) {
       this._performSearch();
     }
   }
+
+  /** Clicks inside the modal never reach the backdrop; outside the picker they close it. */
+  private _handleModalClick = (e: Event): void => {
+    e.stopPropagation();
+    const picker = this._picker();
+    if (picker?.isOpen && !e.composedPath().includes(picker)) picker.close(false);
+  };
+
+  private _handleFolderPick = (e: CustomEvent<{ folder: string }>): void => {
+    this._folderOverride = e.detail.folder;
+    this._folderScope = 'current';
+    this.updateComplete.then(() => this._input?.focus());
+    if (this._query.length >= 2) this._performSearch();
+  };
 
   private _handleFiletypeChange(e: Event) {
     const target = e.target as HTMLInputElement;
@@ -548,7 +692,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
       // Add folder path when searching current folder
       if (this._folderScope === 'current') {
-        searchBody.folder = getCurrentFolder();
+        searchBody.folder = this._folderOverride ?? getCurrentFolder();
       }
 
       // Add filetype filter
@@ -709,7 +853,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
     return html`
       <div class="modal-backdrop" @click=${this._closeSearch}>
-        <div class="modal" @click=${(e: Event) => e.stopPropagation()}>
+        <div class="modal" @click=${this._handleModalClick}>
           <div class="search-header">
             <div class="search-input-wrapper">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon">
@@ -733,20 +877,31 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 <option value="all" ?selected=${this._scope === 'all'}>All</option>
                 <option value="metadata" ?selected=${this._scope === 'metadata'}>Titles & Tags</option>
                 <option value="content" ?selected=${this._scope === 'content'}>Content</option>
+                ${this._noteTypes.length > 0 ? html`
+                  <option disabled>── Note types ──</option>
+                  ${this._noteTypes.map((t) => html`
+                    <option value=${TYPE_OPTION_PREFIX + t.type}>${t.type} (${t.count})</option>
+                  `)}
+                ` : nothing}
               </select>
             ` : nothing}
           </div>
 
           ${showScopeSelector ? html`
             <div class="search-options">
-              <label class="option-toggle">
-                <input
-                  type="checkbox"
-                  ?checked=${this._folderScope === 'current'}
-                  @change=${this._handleFolderScopeChange}
-                />
-                <span>Current folder only</span>
-              </label>
+              <span class="folder-scope">
+                <label class="option-toggle">
+                  <input
+                    type="checkbox"
+                    .checked=${this._folderScope === 'current'}
+                    @change=${this._handleFolderScopeChange}
+                  />
+                  ${this._folderOverride && this._folderScope === 'current'
+                    ? html`<span>Only in: <span class="folder-name" title=${this._folderOverride}>${this._folderOverride}</span></span>`
+                    : html`<span>Current folder only</span>`}
+                </label>
+                <mbr-folder-picker .folders=${this._folders} @mbr-folder-pick=${this._handleFolderPick}></mbr-folder-picker>
+              </span>
               <label class="option-toggle">
                 <input
                   type="checkbox"
@@ -1004,6 +1159,25 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     }
 
     .option-toggle:hover {
+      color: var(--pico-color, #333);
+    }
+
+    /* "Current folder only" / "Only in: …" + the lazily defined picker */
+    .folder-scope {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+
+    .folder-name {
+      display: inline-block;
+      max-width: 16rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+      font-family: var(--pico-font-family-monospace, monospace);
       color: var(--pico-color, #333);
     }
 

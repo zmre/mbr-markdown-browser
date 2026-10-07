@@ -10,8 +10,8 @@ use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use crate::wikilink_index::WikilinkIndex;
 use pulldown_cmark::{
-    BlockQuoteKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind, Options,
-    Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
+    BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind,
+    Options, Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -48,7 +48,7 @@ pub(crate) fn markdown_options() -> Options {
 const BOM: char = '\u{feff}';
 
 /// Returns `input` without a leading [`BOM`].
-fn strip_bom(input: &str) -> &str {
+pub(crate) fn strip_bom(input: &str) -> &str {
     input.strip_prefix(BOM).unwrap_or(input)
 }
 
@@ -228,6 +228,13 @@ pub struct MarkdownRenderResult {
     /// spotted. Always empty when the render had no wikilink index (CLI /
     /// QuickLook paths).
     pub ambiguous_wikilinks: Vec<crate::wikilink_index::AmbiguousWikilink>,
+    /// The contact card model, for `type: person` / `type: organization` notes.
+    ///
+    /// Parsed here, from the raw YAML, because the simplified `frontmatter`
+    /// above has already lost list-of-map fields such as `phones`. Its `image`
+    /// is rewritten with the same link transform the body's images get, so a
+    /// relative portrait resolves from the page's trailing-slash URL.
+    pub contact: Option<crate::contact::Contact>,
 }
 
 struct EventState {
@@ -463,7 +470,7 @@ fn transform_rule_attrs(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, HashMap<usiz
 /// checkbox, so prose-only pages — the overwhelming majority — never pay for
 /// the scan. Lookups binary-search rather than counting newlines per marker,
 /// which keeps a document of a thousand tasks from becoming quadratic.
-struct LineIndex {
+pub(crate) struct LineIndex {
     /// Byte offset of every `\n`, ascending.
     newlines: Vec<usize>,
 }
@@ -477,7 +484,7 @@ const ASSUMED_LINE_BYTES: usize = 32;
 const MAX_RESERVED_LINES: usize = 1 << 16;
 
 impl LineIndex {
-    fn build(source: &str) -> Self {
+    pub(crate) fn build(source: &str) -> Self {
         // `match_indices` over a `char` pattern takes the standard library's
         // vectorised byte search, which measured ~5x faster than the obvious
         // `bytes().enumerate().filter(..)` loop (32.5us against 6.4us on a
@@ -490,7 +497,7 @@ impl LineIndex {
     }
 
     /// The 1-based line containing byte `offset`.
-    fn line_of(&self, offset: usize) -> u32 {
+    pub(crate) fn line_of(&self, offset: usize) -> u32 {
         // `partition_point` counts the newlines strictly before `offset`, which
         // is the number of complete lines preceding it.
         let preceding = self.newlines.partition_point(|&newline| newline < offset);
@@ -636,21 +643,42 @@ impl TextLineCursor<'_> {
 /// three positional booleans under `#[allow(clippy::too_many_arguments)]`, and a
 /// fourth would be swappable with any of them without the compiler noticing.
 /// Same reasoning, and the same shape, as [`TaskMarkup`].
+///
+/// Three states because two features read the attribute. Review notes read it
+/// off every block in [`is_review_block_start`]; flashcard reviews
+/// (`POST /.mbr/flashcard-review`) address a card by its **term's** line alone,
+/// and they answer to `edit_enabled`, not `review_enabled`. Folding both into
+/// one boolean meant `--no-review` silently took spaced repetition away from a
+/// server that had editing on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewLines {
+    /// Every block in [`is_review_block_start`].
     Emit,
+    /// `<dt>` only ([`is_definition_term_start`]): review notes are off, but a
+    /// flashcard review still needs to name its card. Every other element is
+    /// exactly what [`ReviewLines::Omit`] renders, so `--no-review` keeps its
+    /// meaning everywhere else.
+    TermsOnly,
+    /// Nothing; byte-identical to a render from before the attribute existed.
     Omit,
 }
 
-impl From<bool> for ReviewLines {
-    fn from(enabled: bool) -> Self {
-        if enabled { Self::Emit } else { Self::Omit }
+impl ReviewLines {
+    /// The mode for a live page render, from the two switches that read the
+    /// attribute. `review_enabled` wins because it is a superset: its blocks
+    /// already include every `<dt>`.
+    pub fn for_server(review_enabled: bool, edit_enabled: bool) -> Self {
+        match (review_enabled, edit_enabled) {
+            (true, _) => Self::Emit,
+            (false, true) => Self::TermsOnly,
+            (false, false) => Self::Omit,
+        }
     }
 }
 
 /// The **single** definition of which blocks carry a `data-mbr-line` attribute.
 ///
-/// `src/html.rs` renders the attribute; its six `start_tag` arms name this
+/// `src/html.rs` renders the attribute; its eight `start_tag` arms name this
 /// function in their comments so the two cannot drift apart.
 ///
 /// # What is deliberately excluded
@@ -666,13 +694,13 @@ impl From<bool> for ReviewLines {
 ///   bytes from source bytes by the time the writer sees them (see
 ///   [`TextLines`]' "Why the run's *start* is enough").
 ///
-/// # Known gap
+/// # Definition lists
 ///
-/// A **tight** definition list's `<dd>`/`<dt>` prose is not wrapped in a `<p>`,
-/// so such a line has no ancestor carrying `data-mbr-line` at all. Closing that
-/// is two more match arms here and in `html.rs`
-/// (`DefinitionListTitle`/`DefinitionListDefinition`); it is documented rather
-/// than fixed because nothing needs it yet.
+/// `<dt>` and `<dd>` are in the set because a **tight** definition list's prose
+/// is not wrapped in a `<p>`, so without them such a line has no ancestor
+/// carrying `data-mbr-line` at all. The `<dt>`'s line is also how a flashcard
+/// review addresses its card (`POST /.mbr/flashcard-review`, `flashcards.rs`):
+/// the term's own source line is the `line`/`expected` pair the write checks.
 fn is_review_block_start(event: &Event<'_>) -> bool {
     matches!(
         event,
@@ -683,8 +711,16 @@ fn is_review_block_start(event: &Event<'_>) -> bool {
                 | Tag::BlockQuote(_)
                 | Tag::CodeBlock(_)
                 | Tag::Table(_)
+                | Tag::DefinitionListTitle
+                | Tag::DefinitionListDefinition
         )
     )
+}
+
+/// The subset of [`is_review_block_start`] that [`ReviewLines::TermsOnly`]
+/// records: a definition-list term, the line a flashcard review addresses.
+fn is_definition_term_start(event: &Event<'_>) -> bool {
+    matches!(event, Event::Start(Tag::DefinitionListTitle))
 }
 
 /// Source lines for the block-level elements of a document, carried from pass 1
@@ -708,9 +744,17 @@ fn is_review_block_start(event: &Event<'_>) -> bool {
 /// # Why a separate table from [`TextLines`]
 ///
 /// The two answer to independent switches — `TextLines` to `mark_incomplete`,
-/// this to `review_enabled` — so neither flag can serve both, and a single
-/// monotone [`TextLineCursor`] cannot serve two consumers walking different
-/// vectors.
+/// this to [`ReviewLines`] (`review_enabled`, and `edit_enabled` for flashcard
+/// terms) — so neither flag can serve both, and a single monotone
+/// [`TextLineCursor`] cannot serve two consumers walking different vectors.
+///
+/// # Scope is decided here, not in the writer
+///
+/// `html.rs` numbers exactly the events this table names, so a
+/// [`ReviewLines::TermsOnly`] table — which only ever *records* `<dt>` starts —
+/// needs nothing from the writer, and pass 3's remap carries it unchanged
+/// because it re-keys whatever records exist rather than re-deciding which
+/// blocks deserve one.
 struct BlockLines {
     /// Ascending by `at`, strictly.
     entries: Vec<crate::html::BlockLine>,
@@ -718,24 +762,59 @@ struct BlockLines {
     /// `record` calls then compile down to a single branch. Builds, the CLI,
     /// QuickLook and the repository-wide backlink scan are all disabled.
     enabled: bool,
+    /// Record `<dt>` starts only ([`ReviewLines::TermsOnly`]).
+    terms_only: bool,
 }
 
 impl BlockLines {
-    /// A table that will be filled in — for a render that wants `data-mbr-line`.
-    fn recording() -> Self {
+    /// The table a render in `mode` fills in.
+    fn for_mode(mode: ReviewLines) -> Self {
         Self {
             entries: Vec::new(),
-            enabled: true,
+            enabled: mode != ReviewLines::Omit,
+            terms_only: mode == ReviewLines::TermsOnly,
         }
+    }
+
+    /// A table that will be filled in — for a render that wants `data-mbr-line`.
+    #[cfg(test)]
+    fn recording() -> Self {
+        Self::for_mode(ReviewLines::Emit)
     }
 
     /// A table that stays empty. An empty table is also how `html.rs` knows the
     /// feature is off, so a disabled render costs one branch and emits nothing.
     fn disabled() -> Self {
+        Self::for_mode(ReviewLines::Omit)
+    }
+
+    /// A fresh, empty table in the same mode — what pass 3 rebuilds into.
+    fn empty_like(&self) -> Self {
         Self {
             entries: Vec::new(),
-            enabled: false,
+            enabled: self.enabled,
+            terms_only: self.terms_only,
         }
+    }
+
+    /// Whether `event` is a block start this table records a line for.
+    ///
+    /// `enabled` first, so the off path is one predictable branch rather than
+    /// the eight-variant `matches!` behind it.
+    fn wants(&self, event: &Event<'_>) -> bool {
+        self.enabled
+            && if self.terms_only {
+                is_definition_term_start(event)
+            } else {
+                is_review_block_start(event)
+            }
+    }
+
+    /// Whether every recorded block kind is in scope — i.e. review notes are
+    /// on. Lines emitted *outside* this table (the chat container's) key off it,
+    /// so a terms-only render numbers nothing but `<dt>`.
+    fn numbers_every_block(&self) -> bool {
+        self.enabled && !self.terms_only
     }
 
     /// Notes that the event about to occupy slot `at` is a block start on
@@ -840,9 +919,7 @@ fn push_event<'a>(
 ) {
     if matches!(event, Event::Text(_)) {
         text_lines.record(events.len(), line);
-    // `enabled` first, so the off path is one predictable branch rather than
-    // the six-variant `matches!` behind it.
-    } else if block_lines.enabled && is_review_block_start(&event) {
+    } else if block_lines.wants(&event) {
         block_lines.record(events.len(), line);
     }
     events.push(event);
@@ -1046,6 +1123,7 @@ fn collect_events_and_headings<'a>(
     let mut line_index: Option<LineIndex> = None;
     let mut at_item_start = false;
     let mut pending_task: Option<PendingTask> = None;
+    let mut chat_block: Option<PendingChat> = None;
 
     for (event, range) in parser {
         // Computed once here rather than at each push site, and only when
@@ -1055,7 +1133,7 @@ fn collect_events_and_headings<'a>(
         // and once built it is reused, so the two features together cost no more
         // than one.
         let source_line = if (text_lines.enabled && matches!(event, Event::Text(_)))
-            || (block_lines.enabled && is_review_block_start(&event))
+            || block_lines.wants(&event)
         {
             let index = line_index.get_or_insert_with(|| LineIndex::build(markdown_input));
             Some(index.line_of(range.start))
@@ -1142,6 +1220,37 @@ fn collect_events_and_headings<'a>(
                     close_task(&mut events, task);
                 }
             }
+        }
+
+        // --- ```chat blocks (see `push_chat_block`) ---
+        // Placed after the task handling so a fence inside a task item has
+        // already closed the task's span, exactly as any code block does.
+        if let Some(chat) = chat_block.as_mut() {
+            match event {
+                Event::Text(text) => chat.source.push_str(&text),
+                Event::End(TagEnd::CodeBlock) => {
+                    if let Some(chat) = chat_block.take() {
+                        push_chat_block(&mut events, text_lines, block_lines, &chat);
+                    }
+                }
+                // A code block holds nothing but text; nothing else can arrive.
+                _ => {}
+            }
+            continue;
+        }
+        if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = &event
+            && crate::chat::is_chat_info(info)
+        {
+            let fence_line = (text_lines.enabled || block_lines.enabled).then(|| {
+                line_index
+                    .get_or_insert_with(|| LineIndex::build(markdown_input))
+                    .line_of(range.start)
+            });
+            chat_block = Some(PendingChat {
+                source: String::new(),
+                fence_line,
+            });
+            continue;
         }
 
         match &event {
@@ -1340,6 +1449,180 @@ fn collect_events_and_headings<'a>(
     (events, headings, section_attrs)
 }
 
+/// A ```` ```chat ```` fence whose text is still being collected.
+struct PendingChat {
+    source: String,
+    /// The fence's 1-based source line; `None` when neither line table is
+    /// recording, so a page nobody anchors never builds a [`LineIndex`].
+    fence_line: Option<u32>,
+}
+
+/// Replaces a ```` ```chat ```` code block with bubble markup whose bodies are
+/// **real markdown events**, spliced into the page's own stream.
+///
+/// # Why here and not in `html.rs`
+///
+/// A writer-side sub-render would be simpler, but it would see bodies after
+/// [`process_all_events`] has run, so a relative link inside a bubble would
+/// miss the trailing-slash link transform, `[[wikilinks]]` would not resolve,
+/// images would not become media embeds, and backlinks / `errors.json` would
+/// not see the links at all. Splicing events here sends bodies through every
+/// later pass for free. Pass 1 is also the only place source lines exist.
+///
+/// # Invariants this must keep
+///
+/// * Every push goes through [`push_event`], with the body's real source line
+///   (fence line + 1 + the body's line within the block), so [`TextLines`] and
+///   [`BlockLines`] stay strictly ascending and point where a reader expects.
+///   Content lines map 1:1 to source lines even inside a list item or
+///   blockquote: the parser strips the container prefix but never a newline.
+/// * Body events bypass pass 1's own arms. Body headings therefore get no
+///   generated id and stay out of the page TOC (a bubble is not a section of
+///   the document); `[ ]` stays a plain disabled checkbox (the task index skips
+///   code fences, so wiring it would advertise a task nothing can find).
+/// * `Event::Rule` becomes a literal `<hr />`: `html.rs` turns a top-level
+///   rule into a `</section><section>` split — which would close the section
+///   from inside the bubble's `<div>` — and both sides count rules to number
+///   `--- {attrs}` sections, so a body rule would shift every later section's
+///   attributes by one.
+/// * Metadata blocks are disabled for bodies, so a body starting with `---`
+///   is a rule rather than a second frontmatter block.
+///
+/// Wikilinks: plain `[[Note]]` and `[[Tags:x]]` both arrive as
+/// `LinkType::WikiLink` from pulldown-cmark itself and are resolved in
+/// `process_event`, so no pre-pass is needed. The `transform_wikilinks`
+/// pre-pass skips fences (and so these bodies); what it adds over the native
+/// path is only `[[Source:value|label]]` label handling.
+fn push_chat_block<'a>(
+    events: &mut Vec<Event<'a>>,
+    text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
+    chat: &PendingChat,
+) {
+    use crate::chat::{self, ChatItem};
+
+    // The fence's content starts on the line after the fence.
+    let content_line = chat.fence_line.map(|line| line.saturating_add(1));
+    // Only the review feature reads the container's `data-mbr-line`; it would
+    // otherwise be noise — and under `TermsOnly` it would number a non-term.
+    let review_line = chat
+        .fence_line
+        .filter(|_| block_lines.numbers_every_block());
+    let source_index = content_line.map(|_| LineIndex::build(&chat.source));
+    // 1-based source line of byte `offset` in the block's text.
+    let line_at = |offset: usize| -> Option<u32> {
+        let base = content_line?;
+        let within = source_index.as_ref()?.line_of(offset);
+        Some(base.saturating_add(within - 1))
+    };
+    let html = |events: &mut Vec<Event<'a>>,
+                text_lines: &mut TextLines,
+                block_lines: &mut BlockLines,
+                html: String| {
+        push_event(
+            events,
+            text_lines,
+            block_lines,
+            Event::Html(CowStr::from(html)),
+            None,
+        );
+    };
+
+    html(
+        events,
+        text_lines,
+        block_lines,
+        chat::open_html(review_line),
+    );
+    for item in chat::parse(&chat.source) {
+        let text_is_comment = matches!(item, ChatItem::Comment { .. });
+        match item {
+            ChatItem::Message(message) => {
+                html(
+                    events,
+                    text_lines,
+                    block_lines,
+                    chat::message_open_html(&message),
+                );
+                push_chat_markdown(
+                    events,
+                    text_lines,
+                    block_lines,
+                    &message.body,
+                    line_at(message.body_offset),
+                );
+                html(
+                    events,
+                    text_lines,
+                    block_lines,
+                    chat::message_close_html(&message),
+                );
+            }
+            ChatItem::Delimiter => html(
+                events,
+                text_lines,
+                block_lines,
+                chat::DELIMITER_HTML.to_string(),
+            ),
+            ChatItem::Comment { text, offset } | ChatItem::Markdown { text, offset } => {
+                let open = if text_is_comment {
+                    chat::COMMENT_OPEN_HTML
+                } else {
+                    chat::MARKDOWN_OPEN_HTML
+                };
+                html(events, text_lines, block_lines, open.to_string());
+                push_chat_markdown(events, text_lines, block_lines, &text, line_at(offset));
+                html(
+                    events,
+                    text_lines,
+                    block_lines,
+                    chat::CLOSE_HTML.to_string(),
+                );
+            }
+        }
+    }
+    html(
+        events,
+        text_lines,
+        block_lines,
+        chat::CLOSE_HTML.to_string(),
+    );
+}
+
+/// Parses one chat body (or the markdown between bubbles) and pushes its events.
+///
+/// `first_line` is the source line of `text`'s first byte, `None` when no line
+/// table is recording.
+fn push_chat_markdown<'a>(
+    events: &mut Vec<Event<'a>>,
+    text_lines: &mut TextLines,
+    block_lines: &mut BlockLines,
+    text: &str,
+    first_line: Option<u32>,
+) {
+    let options = markdown_options()
+        - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
+    let index = first_line.map(|_| LineIndex::build(text));
+    let parser = TextMergeWithOffset::new(MDParser::new_ext(text, options).into_offset_iter());
+    for (event, range) in parser {
+        let wants_line =
+            (text_lines.enabled && matches!(event, Event::Text(_))) || block_lines.wants(&event);
+        let line = match (first_line, &index) {
+            (Some(base), Some(index)) if wants_line => {
+                Some(base.saturating_add(index.line_of(range.start) - 1))
+            }
+            _ => None,
+        };
+        let event = match event {
+            Event::Rule => Event::Html(CowStr::Borrowed("<hr />\n")),
+            // The body is a temporary; the page's events outlive it.
+            other => other.into_static(),
+        };
+        push_event(events, text_lines, block_lines, event, line);
+    }
+}
+
 /// A task item whose checkbox has been emitted and whose text span is still open.
 struct PendingTask {
     /// Positions in the output of the text runs making up the display text.
@@ -1480,10 +1763,7 @@ pub async fn render_with_cache(
     };
     // Independent of the marker rule: `review_enabled` and `mark_incomplete` are
     // separate switches, which is why these are two tables.
-    let mut block_lines = match review {
-        ReviewLines::Emit => BlockLines::recording(),
-        ReviewLines::Omit => BlockLines::disabled(),
-    };
+    let mut block_lines = BlockLines::for_mode(review);
     let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
         &markdown_input,
         TaskMarkup::Render,
@@ -1782,11 +2062,7 @@ fn mark_incomplete_blocks<'a>(
     // `# Index alignment`. `block_cursor` reads the incoming pass-1 keying,
     // `remapped` collects the output keying.
     let mut block_cursor = block_lines.cursor();
-    let mut remapped = if block_lines.enabled {
-        BlockLines::recording()
-    } else {
-        BlockLines::disabled()
-    };
+    let mut remapped = block_lines.empty_like();
     // Depths rather than booleans: `![a ![b](c) d](e)` nests, and a `<pre>`
     // never should but costs nothing to survive.
     let mut code_depth: usize = 0;
@@ -1965,6 +2241,17 @@ fn finalize_render(
         frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
+    let contact = state
+        .metadata_parsed
+        .as_ref()
+        .and_then(crate::contact::Contact::from_yaml)
+        .map(|mut contact| {
+            contact.image = contact
+                .image
+                .map(|src| transform_link(&src, &state.link_transform_config));
+            contact
+        });
+
     Ok(MarkdownRenderResult {
         frontmatter,
         frontmatter_error: state.frontmatter_error,
@@ -1976,6 +2263,7 @@ fn finalize_render(
         sentence_count: state.sentence_count,
         syllable_count: state.syllable_count,
         ambiguous_wikilinks: state.ambiguous_wikilinks,
+        contact,
     })
 }
 
@@ -2033,10 +2321,7 @@ pub fn render_sync(
         TextLines::disabled()
     };
     // Independent of the marker rule, exactly as in `render_with_cache`.
-    let mut block_lines = match review {
-        ReviewLines::Emit => BlockLines::recording(),
-        ReviewLines::Omit => BlockLines::disabled(),
-    };
+    let mut block_lines = BlockLines::for_mode(review);
     let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
         &markdown_input,
         TaskMarkup::Render,
@@ -2336,9 +2621,19 @@ async fn prefetch_oembed_urls(
     results
 }
 
+/// The simplified frontmatter every page feature and `site.json` reads.
+///
+/// The one entry point for all three parse paths (page render, metadata scan,
+/// [`parse`]), so the contact normalisation applied here — flat `aliases`,
+/// `dates.<label>` strings — holds everywhere. See
+/// [`crate::contact::normalize_simplified`].
 fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
     match y.as_ref().and_then(|yaml| yaml.as_hash()) {
-        Some(hash) => yaml_hash_to_metadata(hash),
+        Some(hash) => {
+            let mut hm = yaml_hash_to_metadata(hash);
+            crate::contact::normalize_simplified(&mut hm, hash);
+            hm
+        }
         None => SimpleMetadata::new(),
     }
 }
@@ -3110,6 +3405,51 @@ mod tests {
         let result = render_result(content).await;
         assert!(result.frontmatter_error.is_none());
         assert!(result.frontmatter.contains_key("style"));
+    }
+
+    /// Every parse path goes through the contact hook: mixed `aliases` come out
+    /// as a flat list of names, and a person's dates — legacy `born` included —
+    /// as `dates.<label>` strings (the `site.json` contract).
+    #[tokio::test]
+    async fn simplified_frontmatter_normalizes_aliases_and_contact_dates() {
+        let content = concat!(
+            "---\n",
+            "type: person\n",
+            "title: Mary Doe\n",
+            "born: 1898\n",
+            "aliases:\n",
+            "  - Mare\n",
+            "  - maiden_name: Mary Smith\n",
+            "dates:\n",
+            "  anniversary: 06-10\n",
+            "phones:\n",
+            "  - mobile: \"555 0100\"\n",
+            "---\n",
+            "Body\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mary.md");
+        std::fs::write(&path, content).unwrap();
+
+        let scanned = extract_metadata_from_file(&path).unwrap().metadata;
+        let rendered = render_result(content).await;
+        let parsed = parse(&path).unwrap().frontmatter;
+        for fm in [&scanned, &rendered.frontmatter, &parsed] {
+            assert_eq!(fm["aliases"], serde_json::json!(["Mare", "Mary Smith"]));
+            assert_eq!(fm["dates.birthday"], serde_json::json!("1898"));
+            assert_eq!(fm["dates.anniversary"], serde_json::json!("--06-10"));
+            assert_eq!(fm["born"], serde_json::json!(1898), "legacy key kept");
+        }
+
+        let contact = rendered.contact.expect("person → contact");
+        assert_eq!(contact.phones[0].href.as_deref(), Some("tel:5550100"));
+        assert_eq!(contact.alias_phrases, ["aka Mare", "née Mary Smith"]);
+    }
+
+    #[tokio::test]
+    async fn contact_is_none_for_other_notes() {
+        let result = render_result("---\ntype: event\n---\nBody\n").await;
+        assert!(result.contact.is_none());
     }
 
     /// Frontmatter with two `to:` keys in one `relationships:` entry — the exact
@@ -5860,6 +6200,11 @@ mod tests {
     /// Renders `md` through the async entry point with `data-mbr-line` on, and
     /// optionally with incomplete-marker highlighting.
     async fn render_review(md: &str, mark_incomplete: bool) -> String {
+        render_review_with(md, mark_incomplete, ReviewLines::Emit).await
+    }
+
+    /// [`render_review`] with an explicit [`ReviewLines`] mode.
+    async fn render_review_with(md: &str, mark_incomplete: bool, review: ReviewLines) -> String {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(md.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
@@ -5880,7 +6225,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
-            ReviewLines::Emit,
+            review,
             mark_incomplete,
             &markers,
             None,
@@ -5979,6 +6324,90 @@ mod tests {
             recorded.len(),
             7,
             "no record for Tag::List or Tag::TableCell: {recorded:?}"
+        );
+    }
+
+    /// Every `data-mbr-line` value on an opening `tag` (e.g. `"<dt"`), in
+    /// document order.
+    fn block_lines_on(html: &str, tag: &str) -> Vec<u32> {
+        html.match_indices(tag)
+            .filter_map(|(at, _)| block_line_of_tag(&html[at..], tag))
+            .collect()
+    }
+
+    /// `<dt>`/`<dd>` carry their own source line — the flashcard writer
+    /// addresses a card by its term's line, and the frontend reads it from the
+    /// `<dt>`. Covers frontmatter (lines are file lines, not body lines), tight
+    /// and loose lists, multiple answers, and an image in an earlier term: the
+    /// writer's second event loop (`raw_text`, draining alt text) must not
+    /// desynchronise the index for the terms after it.
+    #[tokio::test]
+    async fn block_lines_on_definition_terms_and_definitions() {
+        let md = concat!(
+            "---\n",                      // 1
+            "type: flashcard\n",          // 2
+            "---\n",                      // 3
+            "\n",                         // 4
+            "![a *styled* alt](x.png)\n", // 5  term with an image
+            ": first answer\n",           // 6
+            ": second answer\n",          // 7
+            "\n",                         // 8
+            "Loose term\n",               // 9
+            "\n",                         // 10
+            ": loose answer\n",           // 11
+            "\n",                         // 12
+            "Last term\n",                // 13
+            ": last answer\n",            // 14
+        );
+        let html = render_review(md, false).await;
+        assert_eq!(block_lines_on(&html, "<dt"), vec![5, 9, 13], "{html}");
+        assert_eq!(block_lines_on(&html, "<dd"), vec![6, 7, 11, 14], "{html}");
+        // The FAQ disclosure's `tabindex` survives alongside the attribute.
+        assert!(
+            html.contains(r#"<dt data-mbr-line="9" tabindex="0">"#),
+            "{html}"
+        );
+    }
+
+    /// A definition list inside a ```` ```chat ```` body is spliced into the
+    /// page stream by `push_chat_markdown`, which consults the same
+    /// `is_review_block_start`, so its `<dt>`/`<dd>` carry their real source
+    /// lines too, and the table stays strictly ascending across the boundary
+    /// between page events and chat-body events. (The deck still ignores such
+    /// a list: `flashcards/dom.ts` treats `.mbr-chat` as nesting, matching the
+    /// writer, which sees a code fence there and refuses the line.)
+    #[tokio::test]
+    async fn block_lines_on_definition_lists_inside_chat_bodies() {
+        let md = concat!(
+            "Before term\n",       // 1
+            ": before answer\n",   // 2
+            "\n",                  // 3
+            "```chat\n",           // 4
+            "{{Alice|Chat term\n", // 5
+            ": chat answer\n",     // 6
+            "|}}\n",               // 7
+            "Between term\n",      // 8
+            ": between answer\n",  // 9
+            "```\n",               // 10
+            "\n",                  // 11
+            "After term\n",        // 12
+            ": after answer\n",    // 13
+        );
+        let html = render_review(md, false).await;
+        assert!(html.contains("<div class=\"mbr-chat\""), "{html}");
+        assert_eq!(block_lines_on(&html, "<dt"), vec![1, 5, 8, 12], "{html}");
+        assert_eq!(block_lines_on(&html, "<dd"), vec![2, 6, 9, 13], "{html}");
+
+        let emitted = emitted_block_lines(&html);
+        assert!(
+            emitted.windows(2).all(|pair| pair[0] <= pair[1]),
+            "data-mbr-line values follow document order: {emitted:?}"
+        );
+
+        let recorded = recorded_block_lines(md);
+        assert!(
+            recorded.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "BlockLines records must be strictly ascending by event index: {recorded:?}"
         );
     }
 
@@ -6121,6 +6550,74 @@ mod tests {
             "one attribute per block, at its true line: {html}"
         );
         assert_eq!(block_line_of(&html, "Delta is plain."), Some(7), "{html}");
+    }
+
+    /// `--no-review` with editing on: the flashcard writer still needs every
+    /// term's line, and nothing else may be numbered. The fixture has every
+    /// other recorded block kind, a ```` ```chat ```` block (whose container
+    /// carries a line of its own under [`ReviewLines::Emit`]) and markers in a
+    /// definition and an item, so pass 3's remap runs over a terms-only table.
+    #[tokio::test]
+    async fn terms_only_numbers_definition_terms_and_nothing_else() {
+        let md = concat!(
+            "# Heading\n\n",         // 1
+            "A paragraph.\n\n",      // 3
+            "- TODO an item\n\n",    // 5
+            "> a quote\n\n",         // 7
+            "First term\n",          // 9
+            ": TODO first answer\n", // 10
+            "\n",                    // 11
+            "Loose term\n\n",        // 12
+            ": loose answer\n\n",    // 14
+            "```chat\n",             // 16
+            "{{Alice|Chat term\n",   // 17
+            ": chat answer\n",       // 18
+            "|}}\n",                 // 19
+            "```\n\n",               // 20
+            "```\ncode\n```\n",      // 22
+        );
+        for mark_incomplete in [false, true] {
+            let html = render_review_with(md, mark_incomplete, ReviewLines::TermsOnly).await;
+            assert_eq!(block_lines_on(&html, "<dt"), vec![9, 12, 17], "{html}");
+            assert_eq!(
+                emitted_block_lines(&html),
+                vec![9, 12, 17],
+                "terms only, mark_incomplete={mark_incomplete}: {html}"
+            );
+            if mark_incomplete {
+                assert!(html.contains(INCOMPLETE_SPAN_PREFIX), "{html}");
+            }
+        }
+    }
+
+    /// A terms-only render of a page with no definition list is the
+    /// feature-off render, byte for byte; with one, it differs only by the
+    /// terms' attributes.
+    #[tokio::test]
+    async fn terms_only_differs_from_omit_only_on_terms() {
+        let plain = "# H\n\nA TODO paragraph.\n\n- item\n";
+        assert_eq!(
+            render_review_with(plain, true, ReviewLines::TermsOnly).await,
+            render_review_with(plain, true, ReviewLines::Omit).await,
+        );
+
+        let deck = "Term\n: answer\n\nOther\n: TODO other answer\n";
+        let terms = render_review_with(deck, true, ReviewLines::TermsOnly).await;
+        let omit = render_review_with(deck, true, ReviewLines::Omit).await;
+        assert_eq!(
+            terms
+                .replace(" data-mbr-line=\"1\"", "")
+                .replace(" data-mbr-line=\"4\"", ""),
+            omit,
+        );
+    }
+
+    #[test]
+    fn review_lines_for_server_modes() {
+        assert_eq!(ReviewLines::for_server(true, false), ReviewLines::Emit);
+        assert_eq!(ReviewLines::for_server(true, true), ReviewLines::Emit);
+        assert_eq!(ReviewLines::for_server(false, true), ReviewLines::TermsOnly);
+        assert_eq!(ReviewLines::for_server(false, false), ReviewLines::Omit);
     }
 
     /// With the feature off the writer must produce exactly the bytes it
@@ -6298,6 +6795,169 @@ mod tests {
                 "line {line} outside 1..={line_count}: {html}"
             );
         }
+    }
+
+    // --- ```chat blocks ---
+
+    /// The part of `html` from the chat block to the `## After` heading.
+    fn chat_part(html: &str) -> &str {
+        let start = html
+            .find("<div class=\"mbr-chat\"")
+            .unwrap_or_else(|| panic!("no chat block in: {html}"));
+        let end = html
+            .find("After</h2>")
+            .and_then(|at| html[..at].rfind("<h2"))
+            .unwrap_or(html.len());
+        &html[start..end]
+    }
+
+    const CHAT_PAGE: &str = concat!(
+        "# Page\n",                                              // 1
+        "\n",                                                    // 2
+        "```chat\n",                                             // 3
+        "> Bob\n",                                               // 4
+        "Between [bubbles](other.md).\n",                        // 5
+        "{{Alice|See [rel](other.md) and [[Other]]|5:42 PM}}\n", // 6
+        "{{Bob|first\n",                                         // 7
+        "\n",                                                    // 8
+        "## Body heading\n",                                     // 9
+        "\n",                                                    // 10
+        "---\n",                                                 // 11
+        "\n",                                                    // 12
+        "TODO: later\n",                                         // 13
+        "|}}\n",                                                 // 14
+        "...\n",                                                 // 15
+        "# A note with [a link](other.md)\n",                    // 16
+        "```\n",                                                 // 17
+        "\n",                                                    // 18
+        "## After\n",                                            // 19
+    );
+
+    #[tokio::test]
+    async fn chat_block_renders_bubbles_with_page_link_transform() {
+        let result = render_with_wikilinks(CHAT_PAGE, "/sub/page/", None, None).await;
+        let chat = chat_part(&result.html);
+
+        assert!(chat.contains("role=\"log\""), "{chat}");
+        assert!(
+            chat.contains("mbr-chat-msg mbr-chat-left mbr-chat-c"),
+            "Alice is on the left: {chat}"
+        );
+        assert!(
+            chat.contains("mbr-chat-msg mbr-chat-right mbr-chat-c"),
+            "Bob is on the right: {chat}"
+        );
+        assert!(chat.contains("<div class=\"mbr-chat-name\">Alice</div>"));
+        assert!(chat.contains("<div class=\"mbr-chat-meta\">5:42 PM</div>"));
+        assert!(chat.contains("mbr-chat-delim"));
+        assert!(chat.contains("<div class=\"mbr-chat-comment\">"));
+        assert!(chat.contains("<div class=\"mbr-chat-md\">"));
+        // Every relative link — in a body, in a comment and between bubbles —
+        // gets the same trailing-slash transform as the rest of the page.
+        assert_eq!(
+            chat.matches("href=\"../other/\"").count(),
+            3,
+            "three relative links transformed: {chat}"
+        );
+        // A wikilink in a body resolves exactly as one outside the block does.
+        let outside = render_with_wikilinks("[[Other]]", "/sub/page/", None, None)
+            .await
+            .html;
+        let href_at = outside.find("href=\"").expect("a link") + "href=\"".len();
+        let href = &outside[href_at..href_at + outside[href_at..].find('"').expect("closed")];
+        assert!(
+            chat.contains(&format!("href=\"{href}\">Other</a>")),
+            "expected {href}: {chat}"
+        );
+        // Not a code block any more.
+        assert!(!chat.contains("<pre"), "{chat}");
+        assert!(!chat.contains("{{"), "{chat}");
+    }
+
+    #[tokio::test]
+    async fn chat_body_headings_stay_out_of_the_toc_and_rules_do_not_split_sections() {
+        let result = render_with_wikilinks(CHAT_PAGE, "/sub/page/", None, None).await;
+        let ids: Vec<&str> = result.headings.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["page", "after"], "body heading excluded from TOC");
+
+        let chat = chat_part(&result.html);
+        assert!(chat.contains("<h2>Body heading</h2>"), "{chat}");
+        assert!(chat.contains("<hr />"), "{chat}");
+        assert!(
+            !chat.contains("<section") && !chat.contains("</section>"),
+            "a body rule must not split sections inside the bubble: {chat}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_body_rule_does_not_shift_section_attrs() {
+        let md = "```chat\n{{A|x\n\n---\n\ny|}}\n```\n\n--- {#after .tail}\n\nTail\n";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains("<section id=\"after\" class=\"tail\">"),
+            "the attrs of the first real rule land on its section: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_bodies_carry_their_real_source_lines() {
+        let html = render_review(CHAT_PAGE, true).await;
+        let chat = chat_part(&html);
+        assert_eq!(block_line_of_tag(chat, "<div class=\"mbr-chat\""), Some(3));
+        assert_eq!(block_line_of(chat, "Between "), Some(5));
+        assert_eq!(block_line_of(chat, "See "), Some(6));
+        assert_eq!(block_line_of_tag(chat, "<h2"), Some(9));
+        assert_eq!(block_line_of(chat, "A note with"), Some(16));
+        assert!(
+            chat.contains("id=\"mbr-marker-13\""),
+            "the TODO in the body anchors to its own line: {chat}"
+        );
+        // And nothing after the block is thrown off.
+        assert_eq!(block_line_of(&html, ">After<"), Some(19));
+    }
+
+    #[tokio::test]
+    async fn chat_block_inside_a_list_item_keeps_lines() {
+        let md = concat!(
+            "- item\n",       // 1
+            "  ```chat\n",    // 2
+            "  {{A|one|}}\n", // 3
+            "  {{B|two|}}\n", // 4
+            "  ```\n",        // 5
+        );
+        let html = render_review(md, false).await;
+        assert_eq!(block_line_of(&html, "two"), Some(4), "{html}");
+    }
+
+    #[tokio::test]
+    async fn chat_block_links_are_outbound_links() {
+        let result = render_with_wikilinks(CHAT_PAGE, "/sub/page/", None, None).await;
+        assert!(
+            result
+                .outbound_links
+                .iter()
+                .any(|link| link.to.contains("other")),
+            "{:?}",
+            result.outbound_links
+        );
+    }
+
+    #[tokio::test]
+    async fn non_chat_fences_are_untouched() {
+        for info in ["chat-old", "rust", ""] {
+            let md = format!("```{info}\n{{{{A|b|c}}}}\n```\n");
+            let html = render_markdown(&md).await;
+            assert!(!html.contains("mbr-chat"), "{info}: {html}");
+            assert!(html.contains("{{A|b|c}}"), "{info}: {html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_header_and_subtext_are_escaped() {
+        let html = render_markdown("```chat\n{{<img src=x onerror=alert(1)>|hi|<b>}}\n```\n").await;
+        assert!(!html.contains("<img src=x"), "{html}");
+        assert!(html.contains("&lt;img src=x"), "{html}");
+        assert!(html.contains("&lt;b&gt;"), "{html}");
     }
 }
 

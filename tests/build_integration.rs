@@ -118,6 +118,36 @@ async fn test_build_embeds_bare_giphy_url_without_network() {
     );
 }
 
+/// Section pages list subfolders in the sidebar's order (index title else
+/// name, case-insensitive). They used to come straight out of a `HashSet`, so
+/// the order changed from one build of an unchanged repo to the next.
+#[tokio::test]
+async fn test_build_section_pages_sort_subfolders_like_the_sidebar() {
+    let repo = TestRepo::new();
+    for (path, body) in [
+        ("lib/zoo/index.md", "---\ntitle: Aardvarks\n---\n"),
+        ("lib/zoo/y.md", "# y"),
+        ("lib/beta/x.md", "# x"),
+        ("lib/Alpha/x.md", "# x"),
+        ("lib/Gamma/x.md", "# x"),
+        ("lib/delta/x.md", "# x"),
+    ] {
+        repo.create_markdown(path, body);
+    }
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("lib").join("index.html")).unwrap();
+    let listed: Vec<&str> = html
+        .split("<h2>Folders</h2>")
+        .nth(1)
+        .and_then(|s| s.split("</section>").next())
+        .unwrap_or_default()
+        .split("<strong>")
+        .skip(1)
+        .filter_map(|s| s.split("</strong>").next())
+        .collect();
+    assert_eq!(listed, ["zoo", "Alpha", "beta", "delta", "Gamma"]);
+}
+
 #[tokio::test]
 async fn test_build_creates_section_pages() {
     let repo = TestRepo::new();
@@ -1797,26 +1827,29 @@ async fn test_build_site_json_has_relationships() {
 async fn test_build_person_infobox_and_aliases() {
     let (_guard, output) = build_genealogy().await;
 
-    // Mary's page renders the optional person infobox (portrait / birthplace /
-    // aliases). The infobox lives inside `data-pagefind-body` so its text is
-    // also indexed for static search.
+    // Mary's page renders the contact card (portrait / birthplace / aliases).
+    // The card lives inside `data-pagefind-body` so its text is also indexed
+    // for static search.
     let mary_html = fs::read_to_string(output.join("people").join("mary").join("index.html"))
         .expect("mary index.html");
-    // The portrait <img> element (distinct from the `.mbr-person-portrait` CSS
-    // rule in the scoped style block) proves the image field rendered.
+    // The root-relative portrait is relativized for the static page's depth,
+    // like every other link on it (`/` is entity-escaped by Tera).
     assert!(
-        mary_html.contains(r#"<img class="mbr-person-portrait""#),
-        "Mary's page should render the portrait img element"
+        mary_html.contains(
+            r#"<img class="mbr-contact-card-avatar" src="..&#x2F;..&#x2F;people&#x2F;mary.jpg""#
+        ),
+        "Mary's page should render the portrait img element: {mary_html}"
     );
     assert!(
         mary_html.contains("Cheyenne, WY"),
         "Mary's page should show her birthplace"
     );
-    // "Also known as ..." text is emitted only by the infobox alias line.
     assert!(
-        mary_html.contains("Also known as Mary Doe"),
+        mary_html.contains("<span>aka Mary Doe</span>"),
         "Mary's page should list her alias (maiden/married name)"
     );
+    // Static builds leave the backlink count to the browser.
+    assert!(mary_html.contains("<mbr-contact-backlinks></mbr-contact-backlinks>"));
 
     // Mary's site.json frontmatter carries the `aliases` array verbatim.
     let site: serde_json::Value =
@@ -1834,6 +1867,100 @@ async fn test_build_person_infobox_and_aliases() {
         aliases.iter().any(|a| a == "Mary Doe"),
         "Mary's frontmatter aliases should include 'Mary Doe'"
     );
+}
+
+/// The static `site.json` is published with the site, so contact details must
+/// never reach it — while the page that owns them still shows them.
+#[tokio::test]
+async fn test_build_site_json_omits_contact_details() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Jane Doe\n",
+            "died: 2010-08-05\n",
+            "emails:\n",
+            "  work: jane@abc.example\n",
+            "phones:\n",
+            "  - mobile: \"+1 303 555 0100\"\n",
+            "addresses: \"1 Main St\"\n",
+            "---\n",
+            "Notes.\n",
+        ),
+    );
+    let output = build_site(&repo).await;
+
+    let site_text = fs::read_to_string(output.join(".mbr").join("site.json")).unwrap();
+    for secret in [
+        "jane@abc.example",
+        "555 0100",
+        "1 Main St",
+        "\"emails",
+        "\"phones",
+    ] {
+        assert!(
+            !site_text.contains(secret),
+            "{secret} leaked into site.json"
+        );
+    }
+    let site: serde_json::Value = serde_json::from_str(&site_text).unwrap();
+    let jane = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .expect("jane");
+    assert_eq!(jane["frontmatter"]["dates.death"], "2010-08-05");
+    assert_eq!(jane["frontmatter"]["died"], "2010-08-05", "legacy key kept");
+
+    let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
+    assert!(html.contains("jane@abc.example"));
+}
+
+/// A relative `image` is written relative to the note's folder, but the page
+/// is served one level deeper (`/people/jane/`); the card must rewrite it the
+/// way body images are, or the portrait 404s. Also: a wikilinked company links
+/// to the organization note with a page-relative URL.
+#[tokio::test]
+async fn test_build_contact_card_relative_image_and_company_link() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: person\ntitle: Jane\nimage: images/jane.jpg\ncompany: \"[[Acme Corp]]\"\n---\nHi.\n",
+    );
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\nCo.\n",
+    );
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
+    assert!(
+        html.contains(r#"src="..&#x2F;images&#x2F;jane.jpg""#),
+        "portrait must resolve from /people/jane/: {html}"
+    );
+    assert!(
+        html.contains(r#"<a href="..&#x2F;..&#x2F;orgs&#x2F;acme&#x2F;">Acme Corp</a>"#),
+        "company link: {html}"
+    );
+
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr").join("site.json")).unwrap())
+            .unwrap();
+    let files = site["markdown_files"].as_array().unwrap();
+    let jane = files
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .unwrap();
+    let employer = jane["relationships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["predicate"] == "employer")
+        .expect("implied employer edge in site.json");
+    assert_eq!(employer["neighbor"], "/orgs/acme/");
+    assert_eq!(employer["derived"], true);
 }
 
 #[tokio::test]
@@ -1886,7 +2013,12 @@ async fn test_build_writes_graph_chunks() {
 
     let output = build_site(&repo).await;
 
-    for chunk in ["mbr-graph.min.js", "mbr-genealogy.min.js"] {
+    for chunk in [
+        "mbr-graph.min.js",
+        "mbr-genealogy.min.js",
+        "mbr-flashcards.min.js",
+        "mbr-flashcards-reading.min.js",
+    ] {
         let path = output.join(".mbr").join("components").join(chunk);
         assert!(path.exists(), "Expected chunk at {}", path.display());
         let size = fs::metadata(&path).expect("chunk metadata").len();
@@ -1950,6 +2082,27 @@ async fn test_build_omits_the_review_chunk_and_the_review_trigger() {
     assert!(
         !html.contains("<mbr-review"),
         "a built page must not carry the review trigger: {html}"
+    );
+}
+
+#[tokio::test]
+async fn test_build_omits_the_search_extras_chunk() {
+    // The folder picker and note-type list serve search controls that render
+    // only in server/GUI mode (static search is Pagefind, with no facets or
+    // folders), so the chunk would be an unreachable payload in a static site.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\nBody.\n");
+
+    let output = build_site(&repo).await;
+
+    let chunk = output
+        .join(".mbr")
+        .join("components")
+        .join("mbr-search-extras.min.js");
+    assert!(
+        !chunk.exists(),
+        "the search-extras chunk must not be written to a static build: {}",
+        chunk.display()
     );
 }
 
@@ -3019,4 +3172,25 @@ async fn build_emits_no_data_mbr_line_even_when_config_enables_review() {
             page.display()
         );
     }
+}
+
+#[tokio::test]
+async fn test_build_renders_chat_blocks() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes/other.md", "# Other\n");
+    repo.create_markdown(
+        "notes/chat.md",
+        "# Chat\n\n```chat\n{{Alice|See [the other note](other.md)|9:00}}\n...\n# later\n```\n",
+    );
+
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("notes/chat/index.html")).unwrap();
+
+    assert!(html.contains("<div class=\"mbr-chat\""), "{html}");
+    assert!(html.contains("<div class=\"mbr-chat-delim\""), "{html}");
+    assert!(html.contains("<div class=\"mbr-chat-comment\">"), "{html}");
+    assert!(
+        html.contains("<a href=\"../other/\">the other note</a>"),
+        "relative link in a bubble is transformed: {html}"
+    );
 }

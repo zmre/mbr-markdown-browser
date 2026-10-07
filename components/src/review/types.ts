@@ -118,7 +118,7 @@ export type NoteDraft = Pick<ReviewNote, 'file' | 'type' | 'body'> &
  * What a selection resolved to, before it becomes a note.
  *
  * Produced by `anchor.ts`. Every field may be absent: a selection in a block
- * with no `data-mbr-line` carrier (a tight definition list, a static build, a
+ * with no `data-mbr-line` carrier (a static build, a
  * stale custom template) degrades to a file-level note rather than failing.
  */
 export interface NoteAnchor {

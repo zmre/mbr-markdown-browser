@@ -3,7 +3,7 @@
         <ul>
           {% if sidebar_style == "single" %}<li><mbr-sidebar-trigger></mbr-sidebar-trigger></li>{% endif %}
           {% if sidebar_style != "single" %}<li><mbr-browse></mbr-browse></li>{% endif %}
-          <li><mbr-slides></mbr-slides></li>
+          <li><mbr-slides></mbr-slides><mbr-flashcards></mbr-flashcards></li>
         </ul>
         <ul class="mbr-title-group">
           <li class="mbr-nav-title"><strong>{% if title %}{{ title }}{% elif current_dir_name %}{{ current_dir_name }}{% endif %}</strong></li>

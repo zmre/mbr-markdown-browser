@@ -140,6 +140,32 @@ scroll position, keeps the task browser's overlay and filters intact, and (on a
 token-protected server) keeps the in-memory token alive so the next click still
 authenticates. An edit made anywhere else still reloads the page as usual.
 
+### Flashcard reviews
+
+With editing on, the [flashcard](../markdown/flashcards.md) review overlay
+offers a spaced-repetition mode, and each Again / Hard / Good / Easy answer is
+appended to the card's `___Review History___` in the note itself:
+
+| Endpoint | Body | Purpose |
+|----------|------|---------|
+| `POST /.mbr/flashcard-review` | `{ "path": "notes/french.md", "line": 12, "expected": "What is the capital of France?", "rating": "good", "at": "2026-10-06 13:45" }` | Append one `YYYY-MM-DD HH:MM - Rating` entry under the term on `line`. |
+
+It is gated and authenticated exactly like `POST /.mbr/task`, and `expected`
+plays the same role: it is the card's **term** line, which must still match the
+file, or the request is rejected with `409` (as it is when the line is no longer
+a top-level definition-list term). `at` is the reviewer's local wall-clock
+time, and it is what the entry records: the deck replays history in the
+browser's time zone, so the server's own clock would be wrong whenever the two
+zones differ. It is required, must be exactly `YYYY-MM-DD HH:MM`, and must lie
+within 26 hours of the server's UTC clock — any real time zone passes, a wrong
+date does not — otherwise the request is rejected with `422` and nothing is
+written. On success it returns
+`{ "entry": "2026-10-06 13:45 - Good", "line": 15, "inserted_at": 14, "inserted": […] }`:
+the entry, the line of its bullet, and the inserted lines — two when the term's
+history definition had to be created, one otherwise. Line terminators and the
+presence or absence of a trailing newline are preserved, and like a task toggle
+the write does not live-reload the page.
+
 ## Generating a token
 
 For remote editing you need a shared token. Generate one:

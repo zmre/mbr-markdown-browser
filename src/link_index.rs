@@ -590,6 +590,17 @@ impl InboundIndex {
         }
     }
 
+    /// How many distinct pages link to `target_url` — a hash hit and a length,
+    /// no clone. Only meaningful once [`Self::is_ready`]; a miss before then is
+    /// "unknown", not zero.
+    pub fn source_count(&self, target_url: &str) -> usize {
+        self.inbound
+            .pin()
+            .get(target_url)
+            .map(|bucket| bucket.lock().expect("inbound bucket poisoned").len())
+            .unwrap_or(0)
+    }
+
     /// Drop everything, including readiness (a full rescan rebuilds it).
     pub fn clear(&self) {
         self.inbound.pin().clear();
@@ -633,6 +644,18 @@ mod tests {
         assert_eq!(b[0].text, "see B");
         assert_eq!(index.get("/c/").len(), 1);
         assert!(index.get("/nowhere/").is_empty());
+    }
+
+    #[test]
+    fn inbound_index_source_count_counts_distinct_pages() {
+        let index = InboundIndex::new();
+        index.set_page_links("/a/", &[link_to("/b/", "one")]);
+        index.set_page_links("/c/", &[link_to("/b/", "two")]);
+        assert_eq!(index.source_count("/b/"), 2);
+        assert_eq!(index.source_count("/b/"), index.get("/b/").len());
+        assert_eq!(index.source_count("/nowhere/"), 0);
+        index.set_page_links("/a/", &[]);
+        assert_eq!(index.source_count("/b/"), 1);
     }
 
     #[test]

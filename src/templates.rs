@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::contact::humanize_date;
 use crate::errors::TemplateError;
 use crate::markdown::SimpleMetadata;
 use itertools::Itertools;
@@ -461,27 +462,13 @@ impl Templates {
     }
 }
 
-/// Full English month names, indexed by `month - 1`.
-const MONTH_NAMES: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// Tera `humandate` filter: humanize a date string, passing through any other
-/// value unchanged.
+/// Tera `humandate` filter: humanize a date, passing through anything else.
 ///
-/// Strings are run through [`humanize_date`]; non-string values (numbers, bools,
-/// null, arrays, objects) are returned as-is so the filter never errors.
+/// Strings go through [`humanize_date`], which understands every partial form
+/// the contact schema allows (`YYYY-MM-DD`, `YYYY-MM`, `YYYY`, `MM-DD`,
+/// `--MM-DD`) and returns unparseable text unchanged. Non-string values
+/// (numbers, bools, null, arrays, objects) are returned as-is so the filter
+/// never errors — a YAML `born: 1898` arrives as a number and reads fine.
 fn humandate_filter(
     value: &serde_json::Value,
     _args: &HashMap<String, serde_json::Value>,
@@ -490,70 +477,6 @@ fn humandate_filter(
         serde_json::Value::String(s) => Ok(serde_json::Value::String(humanize_date(s))),
         other => Ok(other.clone()),
     }
-}
-
-/// Returns `true` when `s` is a non-empty run of ASCII digits.
-fn is_all_ascii_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Parse an exactly-4-digit year component (e.g. `"1855"`).
-fn parse_year4(s: &str) -> Option<u32> {
-    if s.len() == 4 && is_all_ascii_digits(s) {
-        s.parse().ok()
-    } else {
-        None
-    }
-}
-
-/// Parse an exactly-2-digit month in `1..=12`.
-fn parse_month2(s: &str) -> Option<u32> {
-    if s.len() == 2 && is_all_ascii_digits(s) {
-        let m: u32 = s.parse().ok()?;
-        (1..=12).contains(&m).then_some(m)
-    } else {
-        None
-    }
-}
-
-/// Parse an exactly-2-digit day in `1..=31`.
-fn parse_day2(s: &str) -> Option<u32> {
-    if s.len() == 2 && is_all_ascii_digits(s) {
-        let d: u32 = s.parse().ok()?;
-        (1..=31).contains(&d).then_some(d)
-    } else {
-        None
-    }
-}
-
-/// Humanize an ISO-ish date string into a reader-friendly form.
-///
-/// - `YYYY-MM-DD` (valid month 1-12, day 1-31) → `"Month D, YYYY"` with the
-///   day's leading zero stripped (e.g. `"1855-10-30"` → `"October 30, 1855"`).
-/// - `YYYY-MM` (valid month) → `"Month YYYY"` (e.g. `"1855-10"` → `"October 1855"`).
-/// - `YYYY` → unchanged.
-/// - Anything else — partial, prefixed ("circa 1855"), already-formatted, or
-///   out-of-range (e.g. `"2020-13-40"`) — is returned UNCHANGED.
-fn humanize_date(input: &str) -> String {
-    let parts: Vec<&str> = input.split('-').collect();
-    match parts.as_slice() {
-        [y, m, d] => {
-            if let (Some(year), Some(month), Some(day)) =
-                (parse_year4(y), parse_month2(m), parse_day2(d))
-            {
-                return format!("{} {}, {}", MONTH_NAMES[(month - 1) as usize], day, year);
-            }
-        }
-        [y, m] => {
-            if let (Some(year), Some(month)) = (parse_year4(y), parse_month2(m)) {
-                return format!("{} {}", MONTH_NAMES[(month - 1) as usize], year);
-            }
-        }
-        // Everything else — a bare `YYYY`, partials, prose, already-formatted,
-        // or out-of-range dates — is returned unchanged by the fallthrough.
-        _ => {}
-    }
-    input.to_string()
 }
 
 /// Builds the `<body>` class list from the `type` and `style` frontmatter keys.
@@ -646,6 +569,11 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         "_display_enhancements.html",
         include_str!("../templates/_display_enhancements.html"),
     ),
+    (
+        "_contact_card.html",
+        include_str!("../templates/_contact_card.html"),
+    ),
+    // Compat shim for customized `index.html` files written before the card.
     (
         "_person_infobox.html",
         include_str!("../templates/_person_infobox.html"),
@@ -1335,10 +1263,6 @@ mod tests {
         );
 
         assert!(
-            html.contains("mbr-person-infobox"),
-            "person infobox should render for `type: person`, got:\n{html}"
-        );
-        assert!(
             html.contains("<mbr-genealogy></mbr-genealogy>"),
             "genealogy element should render for `type: person`, got:\n{html}"
         );
@@ -1349,5 +1273,184 @@ mod tests {
             json!("person"),
             "frontmatter payload should carry the authored type"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Contact card
+    // ------------------------------------------------------------------
+
+    /// Renders a page the way the server does for a contact note: simplified
+    /// frontmatter plus the `contact` context built from the raw YAML.
+    fn render_contact(yaml: &str, extra: &[(&str, serde_json::Value)]) -> String {
+        render_contact_with(None, yaml, extra)
+    }
+
+    fn render_contact_with(
+        user_index: Option<&str>,
+        yaml: &str,
+        extra: &[(&str, serde_json::Value)],
+    ) -> String {
+        let doc = yaml_rust2::YamlLoader::load_from_str(yaml)
+            .unwrap()
+            .remove(0);
+        let mut frontmatter = SimpleMetadata::new();
+        for key in ["type", "title"] {
+            if let Some(v) = doc[key].as_str() {
+                frontmatter.insert(key.to_string(), json!(v));
+            }
+        }
+        let mut context: HashMap<String, serde_json::Value> = HashMap::from([
+            ("sidebar_style".to_string(), json!("auto")),
+            ("has_h1".to_string(), json!(false)),
+        ]);
+        context.extend(extra.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        let backlinks = context
+            .remove("contact_backlinks")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        crate::page_context::insert_contact(
+            &mut context,
+            crate::contact::Contact::from_yaml(&doc),
+            &[],
+            backlinks,
+            &crate::page_context::UrlMode::Absolute,
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        if let Some(index) = user_index {
+            std::fs::create_dir_all(tmp.path().join(".mbr")).unwrap();
+            std::fs::write(tmp.path().join(".mbr/index.html"), index).unwrap();
+        }
+        Templates::new(tmp.path(), None)
+            .unwrap()
+            .render_markdown("<p>body</p>", frontmatter, context)
+            .expect("page should render")
+    }
+
+    const JANE: &str = concat!(
+        "type: person\n",
+        "title: Jane Doe\n",
+        "job_title: VP Marketing\n",
+        "department: Marketing\n",
+        "company: Acme\n",
+        "gender: Female\n",
+        "aliases: [Mare, {maiden_name: Mary Smith}]\n",
+        "phones:\n  - mobile: \"+1 (303) 555-0100 ext. 12\"\n",
+        "emails: {work: jane@abc.example}\n",
+        "urls:\n  homepage: https://jane.example\n  evil: \"javascript:alert(1)\"\n",
+        "social: {twitter: \"@jdoe\"}\n",
+        "addresses: {home: {street: 52 Rue Bonsergent, city: Paris, country: France}}\n",
+        "born: 1927-03-19\n",
+        "born_place: Boulder, CO\n",
+        "dates: {anniversary: 06-10}\n",
+    );
+
+    #[test]
+    fn test_contact_card_is_the_page_header() {
+        let html = render_contact(JANE, &[]);
+        assert!(html.contains(
+            r#"<header class="mbr-contact-card" data-kind="person" data-gender="female">"#
+        ));
+        assert_eq!(html.matches("<h1").count(), 1, "one headline:\n{html}");
+        assert!(html.contains(r#"<h1 class="mbr-contact-card-name">Jane Doe</h1>"#));
+        assert!(html.contains("<span>VP Marketing</span><span>Marketing</span><span>Acme</span>"));
+        assert!(html.contains("<span>aka Mare</span><span>née Mary Smith</span>"));
+        // The default avatar, since there is no image.
+        assert!(html.contains("mbr-contact-card-avatar-default"));
+        // Card first, then the notes.
+        assert!(html.find("mbr-contact-card").unwrap() < html.find("<p>body</p>").unwrap());
+    }
+
+    #[test]
+    fn test_contact_card_links_are_allowlisted() {
+        let html = render_contact(JANE, &[]);
+        assert!(
+            html.contains(r#"<a href="tel:+13035550100;ext=12">+1 (303) 555-0100 ext. 12</a>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<a href="mailto:jane@abc.example">jane@abc.example</a>"#));
+        // Tera autoescapes `/` in attribute values; the browser decodes it.
+        assert!(
+            html.contains(r#"rel="noopener noreferrer">https:&#x2F;&#x2F;jane.example</a>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains(r#"href="javascript"#),
+            "javascript: must never be a link"
+        );
+        assert!(html.contains("<span>javascript:alert(1)</span>"));
+        assert!(html.contains("<span>@jdoe</span>"), "a handle stays text");
+    }
+
+    #[test]
+    fn test_contact_card_address_and_dates() {
+        let html = render_contact(JANE, &[]);
+        assert!(html.contains("<address>52 Rue Bonsergent<br />Paris<br />France</address>"));
+        assert!(html.contains(r#"<time datetime="1927-03-19">March 19, 1927</time><span class="mbr-contact-card-place">Boulder, CO</span>"#), "{html}");
+        assert!(html.contains(r#"<time datetime="06-10">June 10</time>"#));
+    }
+
+    #[test]
+    fn test_contact_card_yields_headline_to_an_authored_h1() {
+        let html = render_contact(JANE, &[("has_h1", json!(true))]);
+        assert!(!html.contains("mbr-contact-card-name"), "{html}");
+        assert!(html.contains("mbr-contact-card"));
+    }
+
+    #[test]
+    fn test_contact_card_backlink_chip_states() {
+        let known = render_contact(JANE, &[("contact_backlinks", json!(3))]);
+        assert!(known.contains(r#"<mbr-contact-backlinks count="3"><button type="button" class="mbr-contact-card-chip">Linked from 3 notes</button></mbr-contact-backlinks>"#));
+        let one = render_contact(JANE, &[("contact_backlinks", json!(1))]);
+        assert!(one.contains("Linked from 1 note</button>"));
+        let none = render_contact(JANE, &[("contact_backlinks", json!(0))]);
+        assert!(!none.contains("mbr-contact-backlinks"));
+        let unknown = render_contact(JANE, &[]);
+        assert!(unknown.contains("<mbr-contact-backlinks></mbr-contact-backlinks>"));
+    }
+
+    #[test]
+    fn test_contact_card_escapes_frontmatter() {
+        let html = render_contact(
+            "type: person\ntitle: \"<script>x()</script>\"\njob_title: \"<b>boss</b>\"\n",
+            &[],
+        );
+        assert!(!html.contains("<script>x()"));
+        assert!(!html.contains("<b>boss</b>"));
+    }
+
+    #[test]
+    fn test_contact_card_organization_and_name_parts() {
+        let org = render_contact("type: organization\ncompany: Acme Corp\n", &[]);
+        assert!(org.contains(r#"data-kind="organization""#));
+        assert!(org.contains(r#"<h1 class="mbr-contact-card-name">Acme Corp</h1>"#));
+        assert!(org.contains("<mbr-genealogy></mbr-genealogy>"));
+
+        let parts = render_contact("type: person\nfirst_name: Ada\nlast_name: Lovelace\n", &[]);
+        assert!(parts.contains(r#"<h1 class="mbr-contact-card-name">Ada Lovelace</h1>"#));
+    }
+
+    #[test]
+    fn test_non_contact_pages_get_no_card() {
+        let html = render_contact("type: event\ntitle: Party\n", &[]);
+        assert!(!html.contains("mbr-contact-card"));
+        assert!(html.contains("<h1>Party</h1>"));
+    }
+
+    /// A customized `index.html` written against the old infobox keeps its
+    /// own generated `<h1>` and gets the card — once, without a second name.
+    #[test]
+    fn test_legacy_index_including_person_infobox_gets_the_card_once() {
+        let legacy = concat!(
+            "<html><body><main>",
+            "{% if title and not has_h1 %}<h1>{{ title }}</h1>{% endif %}",
+            "{% include \"_person_infobox.html\" %}{{ markdown | safe }}",
+            "</main></body></html>",
+        );
+        let html = render_contact_with(Some(legacy), JANE, &[]);
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Jane Doe</h1>"));
+        assert!(html.contains("mbr-contact-card"));
+        assert!(html.contains("tel:+13035550100"));
     }
 }

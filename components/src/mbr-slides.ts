@@ -18,7 +18,7 @@
 import { LitElement, html, css, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
-import { isInputTarget, isModalOpen } from './mbr-keys.js'
+import { isPlayKey } from './mbr-keys.js'
 
 interface RevealPlugin {
   id: string
@@ -195,19 +195,11 @@ export class MbrSlidesElement extends LitElement {
   }
 
   private _handleKeyPress(e: KeyboardEvent) {
-    // Don't trigger if user is typing in an input (isInputTarget uses
-    // composedPath so inputs inside shadow DOMs are detected) or while a
-    // modal such as search is open.
-    if (isInputTarget(e) || isModalOpen()) {
-      return
-    }
-
-    // Press 'p' to start presentation
-    if (e.key === 'p' || e.key === 'P') {
-      if (!this._isPlaying && !this._isLoading) {
-        e.preventDefault()
-        this._startPresentation()
-      }
+    // Press 'p' to start presentation. `isPlayKey` carries the shared guards
+    // (typing, open overlays, modifiers) — the same key starts flashcards.
+    if (isPlayKey(e) && !this._isPlaying && !this._isLoading) {
+      e.preventDefault()
+      this._startPresentation()
     }
   }
 

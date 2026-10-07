@@ -1358,6 +1358,46 @@ pub struct TaskToggleResponse {
     pub text: String,
 }
 
+/// JSON body for `POST /.mbr/flashcard-review`.
+///
+/// Addressed exactly like [`TaskToggleRequest`]: `line`/`expected` name the
+/// card's **term** line, which the page carries as the `<dt>`'s
+/// `data-mbr-line`.
+#[derive(serde::Deserialize)]
+pub struct FlashcardReviewRequest {
+    /// Repo-relative **filesystem** path of the note (with extension).
+    pub path: String,
+    /// 1-based source line of the definition-list term.
+    pub line: u32,
+    /// The exact current text of that line; the terminator is ignored.
+    pub expected: String,
+    /// `again`, `hard`, `good` or `easy`.
+    pub rating: crate::flashcards::Rating,
+    /// The reviewer's local wall-clock time, `YYYY-MM-DD HH:MM` — written as
+    /// the entry's timestamp after [`crate::flashcards::parse_review_time`]
+    /// checks it. Required.
+    pub at: String,
+}
+
+/// Response for a successful `POST /.mbr/flashcard-review`.
+///
+/// Everything a client holding the file's lines needs to stay in step without
+/// re-reading it: the entry (for its in-memory history) and where the lines
+/// went (to splice them in and shift every later line number by
+/// `inserted.len()`).
+#[derive(serde::Serialize)]
+pub struct FlashcardReviewResponse {
+    /// The entry as written, e.g. `2026-10-06 13:45 - Good`.
+    pub entry: String,
+    /// 1-based line of the new bullet.
+    pub line: u32,
+    /// 1-based line of the first inserted line.
+    pub inserted_at: u32,
+    /// The inserted lines, without terminators (one, or two when the term's
+    /// `___Review History___` definition was created).
+    pub inserted: Vec<String>,
+}
+
 /// JSON body for `POST /.mbr/create/{*path}`.
 #[derive(serde::Deserialize)]
 pub struct CreateRequest {
@@ -2283,6 +2323,12 @@ impl Server {
             // rest of the write endpoints). Singular `/task`, next to the plural
             // `/tasks` query above.
             .route("/.mbr/task", post(Self::task_toggle_handler))
+            // Flashcard review: appends one history entry under a term (gated
+            // by edit_enabled + auth, like `/task`).
+            .route(
+                "/.mbr/flashcard-review",
+                post(Self::flashcard_review_handler),
+            )
             // File-management endpoints (gated by edit_enabled + auth): create a
             // new file, move/rename with repo-wide link rewrite, create a folder.
             .route(
@@ -3225,17 +3271,9 @@ impl Server {
             Err(err) => return err.into_response(),
         };
 
-        let source = match tokio::fs::read(&md_path).await {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => text,
-                Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "File is not valid UTF-8").into_response();
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to read markdown before task toggle: {e}");
-                return (StatusCode::NOT_FOUND, "File not found").into_response();
-            }
+        let source = match Self::read_markdown_source(&md_path, "task toggle").await {
+            Ok(source) => source,
+            Err(err) => return err.into_response(),
         };
 
         // Local wall clock, matching the naive/local dates `tasks.rs` parses.
@@ -3261,20 +3299,127 @@ impl Server {
             return e.into_response();
         }
 
-        // Live-reload for connected clients, then the task index, which the
-        // watcher would also refresh — but only after its debounce, and the
-        // panel that sent this expects its own next query to see the change.
-        Self::broadcast_change(&config, &md_path, crate::watcher::ChangeEventType::Modified);
-        config.task_index.invalidate_file(
-            &md_path,
-            &crate::watcher::ChangeEventType::Modified,
-            &config.repo,
-            &config.base_dir,
-        );
+        Self::announce_in_place_edit(&config, &md_path);
 
         Json(TaskToggleResponse {
             line: req.line,
             text: patched.text,
+        })
+        .into_response()
+    }
+
+    /// Reads a markdown file a line-level write is about to patch.
+    ///
+    /// Shared by `POST /.mbr/task` and `POST /.mbr/flashcard-review`; `action`
+    /// only names the caller in the log line.
+    async fn read_markdown_source(
+        md_path: &Path,
+        action: &str,
+    ) -> Result<String, (StatusCode, &'static str)> {
+        match tokio::fs::read(md_path).await {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "File is not valid UTF-8")),
+            Err(e) => {
+                tracing::error!("Failed to read markdown before {action}: {e}");
+                Err((StatusCode::NOT_FOUND, "File not found"))
+            }
+        }
+    }
+
+    /// After a line-level write: live-reload for connected clients, then the
+    /// task index, which the watcher would also refresh — but only after its
+    /// debounce, and the client that sent the write expects its own next query
+    /// to see the change. (A flashcard review inserts lines, which moves every
+    /// task below it, so it needs the invalidation as much as a toggle does.)
+    fn announce_in_place_edit(config: &ServerState, md_path: &Path) {
+        Self::broadcast_change(config, md_path, crate::watcher::ChangeEventType::Modified);
+        config.task_index.invalidate_file(
+            md_path,
+            &crate::watcher::ChangeEventType::Modified,
+            &config.repo,
+            &config.base_dir,
+        );
+    }
+
+    /// POST /.mbr/flashcard-review — appends one review to a flashcard's
+    /// history.
+    ///
+    /// ```json
+    /// { "path": "notes/french.md", "line": 12,
+    ///   "expected": "What is the capital of France?", "rating": "good",
+    ///   "at": "2026-10-06 13:45" }
+    /// ```
+    ///
+    /// ```json
+    /// { "entry": "2026-10-06 13:45 - Good", "line": 15,
+    ///   "inserted_at": 14, "inserted": [": ___Review History___", "  * 2026-10-06 13:45 - Good"] }
+    /// ```
+    ///
+    /// Same gate, same `expected` guard and same atomic write as
+    /// [`Self::task_toggle_handler`]; the source surgery is
+    /// [`crate::flashcards::append_review`].
+    ///
+    /// The entry is stamped with the **reviewer's** wall clock (`at`), not the
+    /// server's: the format carries no offset and the deck replays entries as
+    /// browser-local time, so a server in another time zone would put every
+    /// review hours away from where FSRS's 1m/10m steps expect it. `at` is
+    /// held to the exact entry format and to within
+    /// [`crate::flashcards::REVIEW_TIME_WINDOW_HOURS`] of the server's UTC
+    /// clock — any real time zone passes, garbage and far past/future do not.
+    ///
+    /// | Status | Cause |
+    /// |--------|-------|
+    /// | `403` / `401` | [`Self::check_edit_access`] |
+    /// | `404` | The path is not an editable markdown file |
+    /// | `400` | Path outside the root, or an unreadable/not-UTF-8 file |
+    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale |
+    /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
+    /// | `500` | The write failed |
+    pub async fn flashcard_review_handler(
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        Json(req): Json<FlashcardReviewRequest>,
+    ) -> Response {
+        if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
+            return err.into_response();
+        }
+        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
+        let reviewed_at =
+            match crate::flashcards::parse_review_time(&req.at, chrono::Utc::now().naive_utc()) {
+                Ok(time) => time,
+                Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+            };
+        let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
+            Ok(source) => source,
+            Err(err) => return err.into_response(),
+        };
+
+        let patch = match crate::flashcards::append_review(
+            &source,
+            req.line,
+            &req.expected,
+            req.rating,
+            reviewed_at,
+        ) {
+            Ok(patch) => patch,
+            Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+        };
+
+        if let Err(e) = Self::atomic_write_file(&md_path, patch.source.as_bytes()) {
+            tracing::error!("Failed to write flashcard review: {e:?}");
+            return e.into_response();
+        }
+        Self::announce_in_place_edit(&config, &md_path);
+
+        Json(FlashcardReviewResponse {
+            line: patch.entry_line(),
+            entry: patch.entry,
+            inserted_at: patch.inserted_at,
+            inserted: patch.inserted,
         })
         .into_response()
     }
@@ -3815,13 +3960,7 @@ impl Server {
                 .unwrap_or_else(|| stem.to_string())
         };
         let aliases: Vec<String> = frontmatter
-            .and_then(|fm| fm.get("aliases"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
+            .map(crate::contact::alias_names_in)
             .unwrap_or_default();
 
         let old_title = title_for(old_stem);
@@ -5234,8 +5373,9 @@ impl Server {
     async fn try_serve_errors_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
         use crate::page_errors::{
             PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
-            detect_unresolved_wikilinks, frontmatter_parse_errors, relationship_cycle_errors,
-            validate_internal_links, validate_media_references, validate_rendered_links,
+            contact_problem_errors, detect_unresolved_wikilinks, frontmatter_parse_errors,
+            relationship_cycle_errors, validate_internal_links, validate_media_references,
+            validate_rendered_links,
         };
 
         // Only handle exact `errors.json` tails. This keeps the endpoint
@@ -5284,11 +5424,18 @@ impl Server {
         // rendered HTML for media / wikilink scans (the `LinkCache` only holds
         // outbound links), so unlike `try_serve_links_json` we cannot short-
         // circuit through the cache when the HTML is missing.
-        let (outbound_links, html_for_scan, frontmatter_error, ambiguous_wikilinks): (
+        let (
+            outbound_links,
+            html_for_scan,
+            frontmatter_error,
+            ambiguous_wikilinks,
+            contact_problems,
+        ): (
             Vec<crate::link_index::OutboundLink>,
             String,
             Option<String>,
             Vec<crate::wikilink_index::AmbiguousWikilink>,
+            Vec<crate::contact::ContactProblem>,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
                 let is_index_file = md_path
@@ -5349,6 +5496,10 @@ impl Server {
                             render_result.html,
                             render_result.frontmatter_error,
                             render_result.ambiguous_wikilinks,
+                            render_result
+                                .contact
+                                .map(|c| c.problems)
+                                .unwrap_or_default(),
                         )
                     }
                     Err(e) => {
@@ -5367,11 +5518,11 @@ impl Server {
                     &config.repo.tag_index,
                     &config.tag_sources,
                 );
-                (outbound, String::new(), None, Vec::new())
+                (outbound, String::new(), None, Vec::new(), Vec::new())
             }
             ResolvedPath::TagSourceIndex { source } => {
                 let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
-                (outbound, String::new(), None, Vec::new())
+                (outbound, String::new(), None, Vec::new(), Vec::new())
             }
             _ => {
                 tracing::debug!("errors.json: page not found: {}", page_url_path);
@@ -5381,6 +5532,7 @@ impl Server {
 
         let mut errors = Vec::new();
         errors.extend(frontmatter_parse_errors(&frontmatter_error));
+        errors.extend(contact_problem_errors(&contact_problems));
         if html_for_scan.is_empty() {
             // Tag pages and tag indexes have no authored body; their outbound
             // links are synthesized absolute URLs, so that list is the only
@@ -6276,7 +6428,8 @@ impl Server {
             transcode_enabled,
             valid_tag_sources,
             // The one place the feature is ever on: the real page render.
-            markdown::ReviewLines::from(config.review_enabled),
+            // Editing alone still numbers `<dt>`s, for flashcard reviews.
+            markdown::ReviewLines::for_server(config.review_enabled, config.edit_enabled),
             config.mark_incomplete,
             &config.incomplete_markers,
             Some(config.repo.wikilink_index.clone()),
@@ -6289,6 +6442,7 @@ impl Server {
         let outbound_links = render_result.outbound_links;
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
+        let contact = render_result.contact;
         let readability_counts = crate::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -6379,7 +6533,7 @@ impl Server {
 
         // Build the extra context (navigation, TOC, readability, chrome) via
         // the shared builder; server mode uses absolute URLs.
-        let extra_context = page_context::markdown_extra_context(
+        let mut extra_context = page_context::markdown_extra_context(
             &page_context::MarkdownPageParams {
                 breadcrumb_path: &url_path_buf,
                 headings: &headings,
@@ -6405,6 +6559,24 @@ impl Server {
             },
             &page_context::UrlMode::Absolute,
         );
+        if contact.is_some() {
+            let relationships = if config.relationship_tracking {
+                config.repo.relationship_index.get(&current_url)
+            } else {
+                Vec::new()
+            };
+            // A hash hit once the inbound index is built; until then (and with
+            // link tracking off) the card falls back to the lazy chip.
+            let backlinks = (config.link_tracking && config.inbound_index.is_ready())
+                .then(|| config.inbound_index.source_count(&current_url));
+            page_context::insert_contact(
+                &mut extra_context,
+                contact,
+                &relationships,
+                backlinks,
+                &page_context::UrlMode::Absolute,
+            );
+        }
 
         let full_html_output = config
             .templates
@@ -6451,8 +6623,6 @@ impl Server {
         relative_path: &Path,
         config: &ServerState,
     ) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), MbrError> {
-        use serde_json::json;
-
         let root_path = root_path.to_path_buf();
         let dir_path = dir_path.to_path_buf();
         let relative_path = relative_path.to_path_buf();
@@ -6494,8 +6664,11 @@ impl Server {
             // Sort files using configurable sort order
             sort_files(&mut files, &sort);
 
-            // Extract subdirectories
-            let subdirs: Vec<serde_json::Value> = temp_repo
+            // Extract subdirectories. This scan is non-recursive, so a
+            // subfolder's index note is not in `temp_repo`; its frontmatter
+            // (for the sort title) is read straight from disk — one 8 KB read
+            // per subfolder, on the pre-scan path only.
+            let mut subdirs: Vec<serde_json::Value> = temp_repo
                 .queued_folders
                 .pin()
                 .iter()
@@ -6511,15 +6684,21 @@ impl Server {
                         if !url_path.ends_with('/') {
                             url_path.push('/');
                         }
-                        Some(json!({
-                            "name": name,
-                            "url_path": url_path,
-                        }))
+                        let index_fm = Some(abs_path.join(&index_file))
+                            .filter(|p| p.is_file())
+                            .and_then(|p| markdown::extract_metadata_from_file(p).ok())
+                            .map(|m| m.metadata);
+                        Some(crate::sorting::folder_entry(
+                            &name,
+                            url_path,
+                            index_fm.as_ref(),
+                        ))
                     } else {
                         None
                     }
                 })
                 .collect();
+            crate::sorting::sort_folders(&mut subdirs, &sort);
 
             Ok::<_, crate::errors::RepoError>((files, subdirs))
         })
@@ -7006,8 +7185,10 @@ fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std:
     }
 }
 
-/// Builds the deduplicated, name-sorted list of immediate subdirectories of
-/// `dir` from the repo-relative paths of every indexed file.
+/// Builds the deduplicated list of immediate subdirectories of `dir` from the
+/// repo-relative paths of every indexed file, in sidebar order (see
+/// [`crate::sorting::sort_folders`]; `folder_frontmatter` supplies each
+/// folder's index-note title, keyed by folder URL).
 ///
 /// Derived from the file index rather than from a disk walk so it can be
 /// memoized and refreshed by the same invalidation that refreshes the file
@@ -7017,20 +7198,35 @@ fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std:
 fn compute_subdir_entries<'a>(
     file_paths: impl Iterator<Item = &'a Path>,
     dir: &Path,
+    folder_frontmatter: &std::collections::HashMap<String, crate::markdown::SimpleMetadata>,
+    sort: &[SortField],
 ) -> Vec<serde_json::Value> {
-    file_paths
+    let mut entries = file_paths
         .filter_map(|path| immediate_subdir_name(path, dir))
         .map(|name| name.to_string_lossy().into_owned())
         .collect::<std::collections::BTreeSet<String>>()
         .into_iter()
         .map(|name| {
             let url_path = format!("/{}/", crate::url_path::path_to_url(&dir.join(&name)));
-            serde_json::json!({
-                "name": name,
-                "url_path": url_path,
-            })
+            let index_fm = folder_frontmatter.get(&url_path);
+            crate::sorting::folder_entry(&name, url_path, index_fm)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    crate::sorting::sort_folders(&mut entries, sort);
+    entries
+}
+
+/// The index-note frontmatter of `dir`'s immediate subfolders, keyed by
+/// folder URL, for [`compute_subdir_entries`].
+fn subfolder_index_frontmatter<'a>(
+    files: impl Iterator<Item = &'a MarkdownInfo>,
+    dir: &Path,
+    index_file: &str,
+) -> std::collections::HashMap<String, crate::markdown::SimpleMetadata> {
+    crate::sorting::folder_index_frontmatter(
+        files.filter(|info| info.raw_path.parent().and_then(Path::parent) == Some(dir)),
+        index_file,
+    )
 }
 
 /// Returns the sorted markdown-file list for `dir`, memoized per directory.
@@ -7077,6 +7273,11 @@ fn cached_dir_subdirs(
     }
     let markdown_guard = config.repo.markdown_files.pin();
     let other_guard = config.repo.other_files.pin();
+    let folder_frontmatter = subfolder_index_frontmatter(
+        markdown_guard.iter().map(|(_, info)| info),
+        dir,
+        &config.index_file,
+    );
     let computed = Arc::new(compute_subdir_entries(
         markdown_guard
             .iter()
@@ -7087,6 +7288,8 @@ fn cached_dir_subdirs(
                     .filter_map(|(abs_path, _)| abs_path.strip_prefix(root_path).ok()),
             ),
         dir,
+        &folder_frontmatter,
+        &config.sort,
     ));
     if config.repo.is_scan_complete() {
         config
@@ -7245,6 +7448,14 @@ pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
 /// be an unreachable payload in every generated page.
 pub const REVIEW_CHUNK_ROUTE: &str = "/components/mbr-review.min.js";
 
+/// [`DEFAULT_FILES`] route of the lazy search-panel extras chunk (folder picker,
+/// note-type list).
+///
+/// Skipped by `build.rs` like [`TASKS_CHUNK_ROUTE`]: the controls it serves —
+/// the scope select and the folder scope — render only in server/GUI mode,
+/// because static search is Pagefind, which has neither facets nor folders.
+pub const SEARCH_EXTRAS_CHUNK_ROUTE: &str = "/components/mbr-search-extras.min.js";
+
 pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     (
         "/favicon.png",
@@ -7285,8 +7496,8 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         "application/javascript",
     ),
     (
-        // Genealogy chart chunk (family-chart + timeline tree), lazy-loaded by
-        // <mbr-genealogy> on `type: person` pages only.
+        // Relationship-charts chunk (family-chart, timeline tree, org chart),
+        // lazy-loaded by <mbr-genealogy> on person/organization pages only.
         "/components/mbr-genealogy.min.js",
         include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
         "application/javascript",
@@ -7305,6 +7516,30 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         // from static builds — see `REVIEW_CHUNK_ROUTE` in build.rs.
         REVIEW_CHUNK_ROUTE,
         include_bytes!("../templates/components-js/mbr-review.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Search-panel folder picker and note-type list, lazy-loaded by
+        // <mbr-search> the first time the modal opens. Deliberately excluded
+        // from static builds — see `SEARCH_EXTRAS_CHUNK_ROUTE` in build.rs.
+        SEARCH_EXTRAS_CHUNK_ROUTE,
+        include_bytes!("../templates/components-js/mbr-search-extras.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Flashcard review overlay (+ ts-fsrs), lazy-loaded by <mbr-flashcards>
+        // when a deck is opened. Ships in static builds: In order / Random
+        // review needs no server, only spaced repetition does.
+        "/components/mbr-flashcards.min.js",
+        include_bytes!("../templates/components-js/mbr-flashcards.min.js"),
+        "application/javascript",
+    ),
+    (
+        // Flashcard reading view (collapsed review-history summaries), imported
+        // by <mbr-flashcards> at idle on `type: flashcard` pages only. Separate
+        // from the deck so reading a note never fetches ts-fsrs.
+        "/components/mbr-flashcards-reading.min.js",
+        include_bytes!("../templates/components-js/mbr-flashcards-reading.min.js"),
         "application/javascript",
     ),
     (
@@ -8333,6 +8568,25 @@ mod tests {
         assert!(got.is_empty());
     }
 
+    /// A move must not rewrite `[[Mare]]` when `Mare` is still one of the
+    /// note's names — including when it is a *labeled* alias, which the
+    /// simplified frontmatter now carries as a plain name.
+    #[test]
+    fn test_wikilink_delta_names_keeps_labeled_aliases() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("mare.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: Mary Doe\naliases:\n  - nickname: Mare\n---\n",
+        )
+        .unwrap();
+        let fm = crate::markdown::extract_metadata_from_file(&path)
+            .unwrap()
+            .metadata;
+        let delta = Server::wikilink_delta_names(Some(&fm), "mare", "mary");
+        assert!(delta.is_empty(), "{delta:?}");
+    }
+
     // ===== directory listings served from the in-memory index =====
 
     /// Only a file that lives *below* a subdirectory of `dir` contributes a
@@ -8374,7 +8628,12 @@ mod tests {
             Path::new("docs/readme.md"),
             Path::new("elsewhere/d.md"),
         ];
-        let got = compute_subdir_entries(paths.into_iter(), Path::new("docs"));
+        let got = compute_subdir_entries(
+            paths.into_iter(),
+            Path::new("docs"),
+            &Default::default(),
+            &[],
+        );
         assert_eq!(got.len(), 2);
         assert_eq!(got[0]["name"], "alpha");
         assert_eq!(got[0]["url_path"], "/docs/alpha/");
@@ -8557,6 +8816,8 @@ mod tests {
                             .filter_map(|(abs, _)| abs.strip_prefix(&root).ok()),
                     ),
                 dir,
+                &Default::default(),
+                &[],
             );
             let got_subdirs: std::collections::BTreeSet<String> = got_subdir_entries
                 .iter()
@@ -8600,6 +8861,8 @@ mod tests {
                         .filter_map(|(abs, _)| abs.strip_prefix(&root).ok()),
                 ),
             Path::new(""),
+            &Default::default(),
+            &[],
         );
         let names: Vec<&str> = entries
             .iter()

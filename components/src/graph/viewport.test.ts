@@ -9,6 +9,7 @@ import {
   zoomViewBoxAtPoint,
   panViewBox,
   clientPointToSvg,
+  fitViewBox,
   type ViewBox,
 } from './viewport.js'
 
@@ -122,5 +123,34 @@ describe('clientPointToSvg', () => {
   it('accounts for a non-zero viewBox origin', () => {
     const shifted: ViewBox = { x: 10, y: 5, w: 100, h: 80 }
     expect(clientPointToSvg(0, 0, rect, shifted)).toEqual({ x: 10, y: 5 })
+  })
+})
+
+describe('fitViewBox', () => {
+  it('pads the union of the extents and centers it', () => {
+    const vb = fitViewBox([{ x0: 0, y0: 0, x1: 100, y1: 50 }, { x0: 200, y0: 10, x1: 300, y1: 100 }], 0.5, 10)!
+    expect(vb).toEqual({ x: -10, y: -30, w: 320, h: 160 })
+  })
+
+  it('widens to the canvas aspect when the content is tall', () => {
+    const vb = fitViewBox([{ x0: 0, y0: 0, x1: 10, y1: 100 }], 0.5, 0)!
+    expect(vb.h).toBe(100)
+    expect(vb.w).toBe(200)
+    expect(vb.x + vb.w / 2).toBe(5)
+  })
+
+  it('widens only the bottom margin when asked', () => {
+    const vb = fitViewBox([{ x0: 0, y0: 0, x1: 100, y1: 100 }], 1, 10, 0, 30)!
+    expect(vb.y).toBe(-10)
+    expect(vb.h).toBe(140)
+  })
+
+  it('honours a minimum width', () => {
+    expect(fitViewBox([{ x0: 0, y0: 0, x1: 10, y1: 10 }], 1, 0, 400)!.w).toBe(400)
+  })
+
+  it('returns null for nothing to fit or a bad aspect', () => {
+    expect(fitViewBox([], 1, 0)).toBeNull()
+    expect(fitViewBox([{ x0: 0, y0: 0, x1: 1, y1: 1 }], 0, 0)).toBeNull()
   })
 })

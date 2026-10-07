@@ -30,8 +30,9 @@ import {
 import { DEFAULT_MAX_NODES } from './relationship-graph.js'
 import { filterToDepth, type MiniGraph, type MiniGraphNode } from './build.js'
 import { expandNeighborhood, type FetchPageLinks } from './bfs.js'
-import { DRAG_THRESHOLD_PX, clientPointToSvg, parseViewBox } from './viewport.js'
+import { DRAG_THRESHOLD_PX, clientPointToSvg, fitViewBox, parseViewBox, type Extent } from './viewport.js'
 import { SvgViewportController } from './viewport-controller.js'
+import { separateLabels } from './label-separation.js'
 import { positionAnchored } from '../anchored-popover.js'
 
 declare global {
@@ -70,6 +71,30 @@ const EXPANDED_H = 600
  */
 const MINI_FORCES = { linkDistance: 30, charge: -40, collidePad: 2 }
 const EXPANDED_FORCES = { linkDistance: 70, charge: -200, collidePad: 16 }
+/**
+ * Inline (in-page chart) tuning. Labels are always on here, so collision is
+ * per node from its LABEL width (`_inlineCollideRadius`), not a fixed pad, and
+ * the gentle centering pull is enough because the view is fitted to the result
+ * rather than the result squeezed into a fixed box.
+ */
+const INLINE_FORCES = { linkDistance: 60, charge: -260, collidePad: 6 }
+
+/** Label font size (px, user units) in the large views; see `.node-label`. */
+const LABEL_FONT_PX = 11
+/** Rough average glyph advance for the label font, as a fraction of its size. */
+const LABEL_CHAR_EM = 0.58
+/** Label baseline offset below the node, matching `_applyPositions`. */
+const LABEL_OFFSET = 11
+/** Collision radius cap: one very long title must not push everything away. */
+const MAX_LABEL_COLLIDE_RADIUS = 72
+/** Margin around the fitted inline view, and its minimum width (user units). */
+const INLINE_FIT_PAD = 24
+const INLINE_FIT_MIN_W = 420
+/**
+ * Bottom margin of the fitted inline view: the depth stepper (right) and the
+ * caller's legend (left) overlay the canvas's bottom edge.
+ */
+const INLINE_FIT_PAD_BOTTOM = 64
 
 /** Depth stepper bounds (mirror the Rust `graph_depth` config range). */
 const DEPTH_MIN = 1
@@ -125,6 +150,27 @@ export class MbrMiniGraphElement extends LitElement {
    */
   @property({ type: Boolean, attribute: 'static-layout' })
   staticLayout = false
+
+  /**
+   * Render in place at the host's full size — labels, pan/zoom, zoom buttons
+   * and the depth stepper — instead of the sidebar's mini canvas plus modal.
+   * Used by the person/organization page charts ("All people", "All"); the
+   * host must be given a height.
+   */
+  @property({ type: Boolean, reflect: true })
+  inline = false
+
+  /**
+   * Extra class(es) for a node's circle, e.g. `node-org` / `node-plain`
+   * (styled below). Lets a caller color nodes by kind without this chunk
+   * knowing what the kinds mean.
+   */
+  @property({ attribute: false })
+  nodeClass?: (id: string) => string | undefined
+
+  /** Extra class(es) for a link, e.g. `link-plain` (dashed). */
+  @property({ attribute: false })
+  linkClass?: (source: string, target: string) => string | undefined
 
   // Injected services (set as properties by the trigger in the main bundle).
   @property({ attribute: false })
@@ -260,8 +306,13 @@ export class MbrMiniGraphElement extends LitElement {
   // Displayed graph + simulation sync
   // =====================================================================
 
+  /** Expanded modal or inline: the large canvas with labels and a stepper. */
+  private _isLarge(): boolean {
+    return this._expanded || this.inline
+  }
+
   private _activeDepth(): number {
-    return this._expanded ? this._stepperDepth : clampDepth(this.depth)
+    return this._isLarge() ? this._stepperDepth : clampDepth(this.depth)
   }
 
   private _displayedGraph(): MiniGraph | null {
@@ -270,8 +321,72 @@ export class MbrMiniGraphElement extends LitElement {
   }
 
   private _bounds(): { w: number; h: number } {
-    return this._expanded ? { w: EXPANDED_W, h: EXPANDED_H } : { w: MINI_W, h: MINI_H }
+    return this._isLarge() ? { w: EXPANDED_W, h: EXPANDED_H } : { w: MINI_W, h: MINI_H }
   }
+
+  /** Estimated rendered width of a node's label (user units). */
+  private _labelWidth(id: string): number {
+    return this._titleFor(id).length * LABEL_FONT_PX * LABEL_CHAR_EM
+  }
+
+  /**
+   * Inline collision radius: half the label width, so two labels side by side
+   * cannot overlap ("Dan Mos|Hana Ito"), capped so one long title does not
+   * dominate. A circle over-reserves vertically, which costs only space — and
+   * the inline view is fitted to whatever space the layout takes.
+   */
+  private _inlineCollideRadius(node: SimNode): number {
+    const half = Math.min(MAX_LABEL_COLLIDE_RADIUS, this._labelWidth(node.id) / 2 + 2)
+    return Math.max(nodeRadius(node) + INLINE_FORCES.collidePad, half)
+  }
+
+  /** Each node's box including its label, for fitting the inline view. */
+  private _inlineExtents(): Extent[] {
+    const extents: Extent[] = []
+    for (const node of this._simNodes) {
+      if (node.x == null || node.y == null) continue
+      const r = nodeRadius(node)
+      const half = Math.max(r, this._labelWidth(node.id) / 2)
+      extents.push({ x0: node.x - half, y0: node.y - r, x1: node.x + half, y1: node.y + r + LABEL_OFFSET + 4 })
+    }
+    return extents
+  }
+
+  /**
+   * Fit the inline view to the laid-out graph (nodes + labels) with padding, at
+   * the canvas's own aspect ratio, and make it the ⤢ home. Runs after every
+   * synchronous layout, so stepping depth re-fits too.
+   */
+  private _fitInline(): void {
+    const canvas = this.shadowRoot?.querySelector<HTMLElement>('.inline-canvas')
+    if (!canvas || !this._modalViewport) return
+    const rect = canvas.getBoundingClientRect()
+    const aspect = rect.width > 0 && rect.height > 0 ? rect.height / rect.width : EXPANDED_H / EXPANDED_W
+    const view = fitViewBox(this._inlineExtents(), aspect, INLINE_FIT_PAD, INLINE_FIT_MIN_W, INLINE_FIT_PAD_BOTTOM)
+    if (view) this._modalViewport.setHomeView(view)
+  }
+
+  /**
+   * Guarantee no two inline labels overlap: the circular collision force gets
+   * most of the way, `separateLabels` moves whatever still overlaps.
+   */
+  private _separateInlineLabels(): void {
+    const points = this._simNodes.map((node) => ({
+      x: node.x ?? 0,
+      y: node.y ?? 0,
+      w: this._labelWidth(node.id),
+      h: LABEL_FONT_PX + 2,
+      dy: nodeRadius(node) + LABEL_OFFSET - LABEL_FONT_PX / 2 + 1,
+    }))
+    separateLabels(points)
+    for (const [i, node] of this._simNodes.entries()) {
+      node.x = points[i].x
+      node.y = points[i].y
+    }
+  }
+
+  /** Set by `_syncSimulation` when the inline layout changed and needs a fit. */
+  private _needsFit = false
 
   private _isStatic(): boolean {
     if (this.staticLayout) return true
@@ -324,7 +439,7 @@ export class MbrMiniGraphElement extends LitElement {
   private _syncSimulation(displayed: MiniGraph): void {
     const { w, h } = this._bounds()
     const signature = [
-      this._expanded ? 'x' : 'm',
+      this._isLarge() ? 'x' : 'm',
       displayed.nodes.map((n) => n.id).join(','),
       displayed.links.map((l) => `${l.source}|${l.target}`).join(','),
     ].join('#')
@@ -349,30 +464,46 @@ export class MbrMiniGraphElement extends LitElement {
     // charge / collision forces to the active view: the expanded canvas needs
     // more spread so nodes fill the larger space and their labels stop
     // overlapping, instead of staying clumped like the mini view.
-    const forces = this._expanded ? EXPANDED_FORCES : MINI_FORCES
+    const forces = this.inline ? INLINE_FORCES : this._isLarge() ? EXPANDED_FORCES : MINI_FORCES
     this._linkForce?.distance(forces.linkDistance)
     sim.force('charge', forceManyBody<SimNode>().strength(forces.charge))
-    sim.force('collide', forceCollide<SimNode>((d) => nodeRadius(d) + forces.collidePad))
+    sim.force(
+      'collide',
+      forceCollide<SimNode>((d) =>
+        this.inline ? this._inlineCollideRadius(d) : nodeRadius(d) + forces.collidePad
+      ).iterations(this.inline ? 2 : 1)
+    )
     sim.force('center', forceCenter<SimNode>(w / 2, h / 2))
-    sim.force('x', forceX<SimNode>(w / 2).strength(0.04))
-    sim.force('y', forceY<SimNode>(h / 2).strength(0.04))
+    // Inline charts sit in a wide canvas (~16:9): pull harder vertically than
+    // horizontally so the settled layout is wide too, and the fitted view
+    // fills the canvas instead of leaving bands on both sides.
+    sim.force('x', forceX<SimNode>(w / 2).strength(this.inline ? 0.02 : 0.04))
+    sim.force('y', forceY<SimNode>(h / 2).strength(this.inline ? 0.09 : 0.04))
 
     sim.nodes(nodes)
     // Fresh link copies each sync: d3 mutates source/target into node refs.
     this._linkForce?.links(displayed.links.map((l) => ({ source: l.source, target: l.target })))
 
-    if (this._isStatic()) {
+    if (this._isStatic() || this.inline) {
+      // Inline lays out synchronously too, so the first paint is the settled
+      // graph and the view can be fitted to it; a drag still reheats the live
+      // simulation (`_onDocPointerMove`), so the physics stay interactive.
       sim.stop()
       sim.alpha(1)
       sim.tick(STATIC_TICKS)
+      if (this.inline) this._separateInlineLabels()
       this._clampPositions()
       this._applyPositions()
+      this._needsFit = this.inline
     } else {
       sim.alpha(0.5).restart()
     }
   }
 
   private _clampPositions(): void {
+    // Inline: the view is fitted to the layout, so there is no box to keep
+    // nodes in — clamping would only pile them up along its edges.
+    if (this.inline) return
     const { w, h } = this._bounds()
     for (const node of this._simNodes) {
       const r = nodeRadius(node)
@@ -436,6 +567,19 @@ export class MbrMiniGraphElement extends LitElement {
     if (displayed && displayed.nodes.length >= 2) {
       this._syncSimulation(displayed)
       this._applyPositions()
+    }
+    // Inline: wire pan/zoom once the canvas exists (it persists across renders),
+    // then fit the view to the layout just computed.
+    if (this.inline && !this._modalViewport) {
+      const canvas = this.shadowRoot?.querySelector<HTMLElement>('.inline-canvas')
+      const svgEl = canvas?.querySelector('svg')
+      if (canvas && svgEl instanceof SVGSVGElement) {
+        this._modalViewport = new SvgViewportController(canvas, svgEl)
+      }
+    }
+    if (this.inline && this._needsFit && this._modalViewport) {
+      this._needsFit = false
+      this._fitInline()
     }
     // Wire the expanded canvas's pan/zoom controller when the modal appears.
     if (changed.has('_expanded')) {
@@ -648,7 +792,7 @@ export class MbrMiniGraphElement extends LitElement {
   private _renderNodes(graph: MiniGraph, withLabels: boolean): TemplateResult[] {
     const parts: TemplateResult[] = graph.links.map(
       (link) => svg`<line
-        class="graph-link"
+        class="graph-link ${this.linkClass?.(link.source, link.target) ?? ''}"
         data-source=${link.source}
         data-target=${link.target}
       ></line>`
@@ -656,7 +800,7 @@ export class MbrMiniGraphElement extends LitElement {
     for (const node of graph.nodes) {
       parts.push(
         svg`<circle
-          class="graph-node deg-${Math.min(node.degree, 5)}"
+          class="graph-node deg-${Math.min(node.degree, 5)} ${this.nodeClass?.(node.id) ?? ''}"
           data-id=${node.id}
           r=${nodeRadius(node)}
           role="link"
@@ -744,25 +888,7 @@ export class MbrMiniGraphElement extends LitElement {
         <div class="graph-modal-body">
           <div class="graph-modal-header">
             <h2>Link graph</h2>
-            <div class="depth-stepper rel-graph-controls" role="group" aria-label="Graph depth">
-              <button
-                type="button"
-                aria-label="Decrease depth"
-                ?disabled=${this._stepperDepth <= DEPTH_MIN}
-                @click=${() => this._stepDepth(-1)}
-              >
-                −
-              </button>
-              <span class="depth-value" aria-live="polite">${this._stepperDepth}</span>
-              <button
-                type="button"
-                aria-label="Increase depth"
-                ?disabled=${this._stepperDepth >= DEPTH_MAX}
-                @click=${() => this._stepDepth(1)}
-              >
-                +
-              </button>
-            </div>
+            ${this._renderStepper()}
             <button
               type="button"
               class="graph-modal-close"
@@ -788,9 +914,58 @@ export class MbrMiniGraphElement extends LitElement {
     `
   }
 
+  /** The depth stepper (expanded modal header and inline canvas). */
+  private _renderStepper(): TemplateResult {
+    return html`<div class="depth-stepper rel-graph-controls" role="group" aria-label="Graph depth">
+      <button
+        type="button"
+        aria-label="Decrease depth"
+        ?disabled=${this._stepperDepth <= DEPTH_MIN}
+        @click=${() => this._stepDepth(-1)}
+      >
+        −
+      </button>
+      <span class="depth-value" aria-live="polite">${this._stepperDepth}</span>
+      <button
+        type="button"
+        aria-label="Increase depth"
+        ?disabled=${this._stepperDepth >= DEPTH_MAX}
+        @click=${() => this._stepDepth(1)}
+      >
+        +
+      </button>
+    </div>`
+  }
+
+  private _renderInline(graph: MiniGraph): TemplateResult {
+    return html`
+      <div class="inline-canvas" aria-label="Relationship graph">
+        <svg
+          class="graph-svg"
+          viewBox="0 0 ${EXPANDED_W} ${EXPANDED_H}"
+          preserveAspectRatio="xMidYMid meet"
+        >
+          ${this._renderNodes(graph, true)}
+        </svg>
+        <div class="zoom-controls rel-graph-controls">
+          <button type="button" aria-label="Zoom in" title="Zoom in" @click=${() => this._modalViewport?.zoomIn()}>+</button>
+          <button type="button" aria-label="Zoom out" title="Zoom out" @click=${() => this._modalViewport?.zoomOut()}>−</button>
+          <button type="button" aria-label="Reset view" title="Reset view" @click=${() => this._modalViewport?.reset()}>⤢</button>
+        </div>
+        <div class="inline-depth rel-graph-controls">
+          <span class="inline-depth-label">Depth</span>
+          ${this._renderStepper()}
+        </div>
+        ${this._renderTruncationBadge(graph)}
+      </div>
+      ${this._renderHoverCard()}
+    `
+  }
+
   override render() {
     const graph = this._displayedGraph()
     if (!graph || graph.nodes.length < 2) return nothing
+    if (this.inline) return this._renderInline(graph)
     // Hover card lives INSIDE the dialog when expanded so it shares the top
     // layer (a card in the normal layer would render behind the modal); in the
     // mini view it sits alongside the canvas.
@@ -867,6 +1042,90 @@ export class MbrMiniGraphElement extends LitElement {
     .graph-node.deg-5 {
       fill: #d1e6f0;
       fill: color-mix(in oklab, var(--pico-primary, #0172ad) 18%, var(--pico-background-color, #fff));
+    }
+
+    /* Caller-assigned kinds (see nodeClass/linkClass). Declared after the
+       degree ramp so they win at equal specificity. The colors are custom
+       properties so the page around the graph can draw a matching legend. */
+    .graph-node.node-org {
+      fill: var(--mbr-graph-node-org, #c2410c);
+    }
+    .graph-node.node-plain {
+      fill: var(--mbr-graph-node-plain, #b8bec8);
+    }
+    .graph-link.link-plain {
+      stroke-dasharray: 3 3;
+    }
+
+    :host([inline]) {
+      height: 100%;
+    }
+
+    .inline-canvas {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+    }
+
+    :host([inline]) .graph-link {
+      stroke: color-mix(in srgb, var(--pico-muted-color, #6b7280) 45%, transparent);
+      stroke-width: 1.25;
+    }
+
+    :host([inline]) .node-label {
+      font-size: 11px;
+      paint-order: stroke;
+      stroke: var(--pico-background-color, #fff);
+      stroke-width: 3px;
+      stroke-linejoin: round;
+    }
+
+    .zoom-controls {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .zoom-controls button {
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      line-height: 1;
+      cursor: pointer;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      border-radius: 4px;
+      background: var(--pico-background-color, #fff);
+      color: var(--pico-color, #333);
+      opacity: 0.85;
+    }
+
+    .zoom-controls button:hover {
+      opacity: 1;
+    }
+
+    .inline-depth {
+      position: absolute;
+      right: 0.5rem;
+      bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.2rem 0.4rem;
+      border: 1px solid var(--pico-muted-border-color, #e0e0e0);
+      border-radius: 6px;
+      background: var(--pico-background-color, #fff);
+      font-size: 0.8rem;
+      color: var(--pico-muted-color, #666);
     }
 
     .node-label {

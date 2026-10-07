@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-search.js'
 import type { MbrSearchElement, SearchRequestBody } from './mbr-search.js'
+import { searchFolderFor, setSearchExtrasImporter } from './mbr-search.js'
+
+// The lazy chunk, imported directly (happy-dom cannot import a runtime URL).
+setSearchExtrasImporter(() => import('./search-extras/index.js'))
 
 /**
  * Private surface of MbrSearchElement that these tests drive.
@@ -17,6 +21,11 @@ interface SearchHandle {
   _isOpen: boolean
   _error: string | null
   _pagefind: unknown
+  _scope: string
+  _folders: string[]
+  _noteTypes: Array<{ type: string; count: number }>
+  _folderOverride: string | null
+  _extras: unknown
   _openSearch(): void
   _closeSearch(): void
   _performPagefindSearch(): Promise<void>
@@ -156,6 +165,7 @@ describe('MbrSearchElement', () => {
     el?.remove()
     globalThis.fetch = originalFetch
     delete window.__MBR_CONFIG__
+    delete window.frontmatter
     vi.restoreAllMocks()
   })
 
@@ -229,7 +239,8 @@ describe('MbrSearchElement', () => {
       })
     })
 
-    it('sends folder_scope=current plus the current folder', async () => {
+    it('sends folder_scope=current plus the folder of a section page', async () => {
+      // No `markdown_source`: a directory listing, whose URL IS the folder.
       window.history.pushState({}, '', '/docs/guide/')
       await toggleOption(el, 0, true)
 
@@ -240,6 +251,22 @@ describe('MbrSearchElement', () => {
         folder_scope: 'current',
         folder: '/docs/guide/',
       })
+    })
+
+    it('scopes a note page to the folder holding the note, not the note itself', async () => {
+      // Regression: `/docs/guide/` is guide.md's URL, so scoping to it searched
+      // that one note and nothing else.
+      window.frontmatter = { markdown_source: 'docs/guide.md' }
+      window.history.pushState({}, '', '/docs/guide/')
+      await toggleOption(el, 0, true)
+      expect(lastBody().folder).toBe('/docs/')
+    })
+
+    it('sends the decoded folder for a percent-encoded note URL', async () => {
+      window.frontmatter = { markdown_source: 'My Notes/Café plan.md' }
+      window.history.pushState({}, '', '/My%20Notes/Caf%C3%A9%20plan/')
+      await toggleOption(el, 0, true)
+      expect(lastBody().folder).toBe('/My Notes/')
     })
 
     it('derives the folder from the parent when the path has no trailing slash', async () => {
@@ -546,5 +573,185 @@ describe('MbrSearchElement', () => {
       await fresh
       expect(h._results.map((r) => r.url_path)).toEqual(['/fresh/'])
     })
+  })
+})
+
+describe('searchFolderFor', () => {
+  it('treats a page without a markdown source as a folder', () => {
+    expect(searchFolderFor('/people/')).toBe('/people/')
+    expect(searchFolderFor('/')).toBe('/')
+  })
+
+  it('uses the parent folder of a note', () => {
+    expect(searchFolderFor('/people/john/', 'people/john.md')).toBe('/people/')
+    expect(searchFolderFor('/people/john', 'people/john.md')).toBe('/people/')
+  })
+
+  it('uses the root for a top-level note', () => {
+    expect(searchFolderFor('/README/', 'README.md')).toBe('/')
+  })
+
+  it('keeps an index note on its own folder', () => {
+    expect(searchFolderFor('/people/', 'people/index.md')).toBe('/people/')
+    expect(searchFolderFor('/', 'index.md')).toBe('/')
+  })
+
+  it('percent-decodes spaces and unicode', () => {
+    expect(searchFolderFor('/My%20Notes/Caf%C3%A9/', 'My Notes/Café.md')).toBe('/My Notes/')
+    expect(searchFolderFor('/%C3%9Cber%20uns/', 'Über uns/index.md')).toBe('/Über uns/')
+    expect(searchFolderFor('/Caf%C3%A9%20Folder/')).toBe('/Café Folder/')
+  })
+
+  it('keeps the raw path when an escape is malformed', () => {
+    expect(searchFolderFor('/100%/')).toBe('/100%/')
+  })
+})
+
+describe('MbrSearchElement note types and folder picker', () => {
+  let el: MbrSearchElement
+
+  beforeEach(async () => {
+    fetchMock = vi.fn().mockResolvedValue(okResponse())
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    setConfig(true)
+    el = await mount()
+    // The chunk import resolves on the modal open above; give it a moment.
+    await vi.waitFor(() => expect(customElements.get('mbr-folder-picker')).toBeDefined())
+    await flush()
+    const h = handle(el)
+    h._noteTypes = [
+      { type: 'Meeting Notes', count: 3 },
+      { type: 'person', count: 12 },
+    ]
+    h._folders = ['/notes/', '/people/', '/people/staff/']
+    // Normally set when site.json arrives; the stub site.json is empty.
+    h._extras = await import('./search-extras/index.js')
+    await el.updateComplete
+  })
+
+  afterEach(() => {
+    el?.remove()
+    globalThis.fetch = originalFetch
+    delete window.__MBR_CONFIG__
+    vi.restoreAllMocks()
+  })
+
+  function scopeSelect(): HTMLSelectElement {
+    return el.shadowRoot!.querySelector<HTMLSelectElement>('.scope-select')!
+  }
+
+  it('lists note types after a disabled separator', () => {
+    const options = [...scopeSelect().options]
+    expect(options.map((o) => o.textContent?.trim())).toEqual([
+      'All',
+      'Titles & Tags',
+      'Content',
+      '── Note types ──',
+      'Meeting Notes (3)',
+      'person (12)',
+    ])
+    expect(options[3].disabled).toBe(true)
+  })
+
+  it('choosing a type writes a facet token and keeps showing the scope', async () => {
+    typeQuery(el, 'jane')
+    const select = scopeSelect()
+    select.value = 'content'
+    select.dispatchEvent(new Event('change'))
+    await flush()
+
+    select.value = 'type:person'
+    select.dispatchEvent(new Event('change'))
+    await flush()
+    await el.updateComplete
+
+    expect(handle(el)._query).toBe('jane type:person')
+    expect(input(el).value).toBe('jane type:person')
+    // Content scope never applies a facet to a facet-only query → widened.
+    expect(handle(el)._scope).toBe('all')
+    expect(scopeSelect().value).toBe('all')
+    expect(lastBody()).toMatchObject({ q: 'jane type:person', scope: 'all' })
+  })
+
+  it('quotes a type with spaces and replaces a previous type', async () => {
+    const select = scopeSelect()
+    select.value = 'type:person'
+    select.dispatchEvent(new Event('change'))
+    await flush()
+    select.value = 'type:Meeting Notes'
+    select.dispatchEvent(new Event('change'))
+    await flush()
+    expect(lastBody().q).toBe('type:"Meeting Notes"')
+  })
+
+  function picker(): HTMLElementTagNameMap['mbr-folder-picker'] {
+    const node = el.shadowRoot!.querySelector('mbr-folder-picker')
+    expect(node, 'the chunk element is rendered next to the checkbox').not.toBeNull()
+    return node!
+  }
+
+  async function openPicker(): Promise<HTMLInputElement> {
+    picker().shadowRoot!.querySelector<HTMLButtonElement>('button')!.click()
+    await picker().updateComplete
+    const filter = picker().shadowRoot!.querySelector<HTMLInputElement>('input')
+    expect(filter).not.toBeNull()
+    return filter!
+  }
+
+  function key(target: HTMLElement, k: string) {
+    target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, composed: true }))
+  }
+
+  it('filters folders and chooses one with the keyboard', async () => {
+    typeQuery(el, 'needle')
+    const filter = await openPicker()
+    filter.value = 'peo'
+    filter.dispatchEvent(new Event('input'))
+    await picker().updateComplete
+    const rows = picker().shadowRoot!.querySelectorAll('.option')
+    expect([...rows].map((r) => r.textContent?.trim())).toEqual(['/people/', '/people/staff/'])
+
+    key(filter, 'ArrowDown')
+    await picker().updateComplete
+    key(filter, 'Enter')
+    await flush()
+    await el.updateComplete
+
+    expect(picker().isOpen).toBe(false)
+    expect(lastBody()).toMatchObject({ folder_scope: 'current', folder: '/people/staff/' })
+    const label = el.shadowRoot!.querySelector('.folder-name')
+    expect(label?.textContent).toBe('/people/staff/')
+    expect(label?.getAttribute('title')).toBe('/people/staff/')
+    const box = el.shadowRoot!.querySelector<HTMLInputElement>('.search-options input[type="checkbox"]')!
+    expect(box.checked).toBe(true)
+  })
+
+  it('unchecking the scope clears a picked folder', async () => {
+    typeQuery(el, 'needle')
+    await openPicker()
+    picker().shadowRoot!.querySelectorAll<HTMLElement>('.option')[0].click()
+    await flush()
+    expect(lastBody().folder).toBe('/notes/')
+
+    await toggleOption(el, 0, false)
+    expect(handle(el)._folderOverride).toBeNull()
+    expect('folder' in lastBody()).toBe(false)
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.folder-name')).toBeNull()
+  })
+
+  it('Escape in the filter closes only the picker', async () => {
+    const filter = await openPicker()
+    key(filter, 'Escape')
+    await picker().updateComplete
+    expect(picker().isOpen).toBe(false)
+    expect(handle(el)._isOpen).toBe(true)
+  })
+
+  it('a click elsewhere in the modal closes the picker', async () => {
+    await openPicker()
+    el.shadowRoot!.querySelector<HTMLElement>('.results-container')!.click()
+    await picker().updateComplete
+    expect(picker().isOpen).toBe(false)
   })
 })

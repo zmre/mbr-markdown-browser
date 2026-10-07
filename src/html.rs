@@ -129,9 +129,11 @@ pub struct HtmlConfig {
     /// both leave it empty, so the writer's output is byte-for-byte what it was
     /// before `data-mbr-line` existed.
     ///
-    /// When non-empty, the writer emits ` data-mbr-line="N"` on the six block
+    /// When non-empty, the writer emits ` data-mbr-line="N"` on the eight block
     /// tags listed in `markdown::is_review_block_start` — the single definition
-    /// of that set, which the arms here must not drift from.
+    /// of that set, which the arms here must not drift from — but only on the
+    /// events the table actually names. A `ReviewLines::TermsOnly` table names
+    /// only `<dt>` starts, so every other arm writes nothing.
     pub block_lines: Vec<BlockLine>,
 }
 
@@ -548,7 +550,7 @@ where
     ///
     /// [`Self::event_index`] is post-incremented by [`Self::next_event`], so the
     /// event in hand sits at `event_index - 1`. That off-by-one is hidden here
-    /// rather than repeated at each of the six call sites.
+    /// rather than repeated at each of the eight call sites.
     fn write_block_line(&mut self) -> Result<(), W::Error> {
         let index = match self.event_index.checked_sub(1) {
             Some(index) => index,
@@ -750,7 +752,7 @@ where
         }
         match tag {
             Tag::HtmlBlock => Ok(()),
-            // MBR EXTENSION: `data-mbr-line`. One of the six tags in
+            // MBR EXTENSION: `data-mbr-line`. One of the eight tags in
             // `markdown::is_review_block_start`; keep the two sets in step.
             Tag::Paragraph => {
                 if self.emit_block_lines {
@@ -964,18 +966,24 @@ where
                 // `<dt>` cannot receive unless it is made focusable. The
                 // `tabindex` is therefore load-bearing, not decoration: drop it
                 // and every answer becomes permanently unreachable.
-                if self.end_newline {
-                    self.write("<dt tabindex=\"0\">")
-                } else {
-                    self.write("\n<dt tabindex=\"0\">")
+                //
+                // `data-mbr-line`: one of the tags in
+                // `markdown::is_review_block_start`. Flashcard reviews address
+                // a card by its term's source line, and a tight term has no
+                // `<p>` that could carry the line instead.
+                self.write(if self.end_newline { "<dt" } else { "\n<dt" })?;
+                if self.emit_block_lines {
+                    self.write_block_line()?;
                 }
+                self.write(" tabindex=\"0\">")
             }
+            // MBR EXTENSION: `data-mbr-line`, for the same reason as `<dt>`.
             Tag::DefinitionListDefinition => {
-                if self.end_newline {
-                    self.write("<dd>")
-                } else {
-                    self.write("\n<dd>")
+                self.write(if self.end_newline { "<dd" } else { "\n<dd" })?;
+                if self.emit_block_lines {
+                    self.write_block_line()?;
                 }
+                self.write(">")
             }
             Tag::Subscript => self.write("<sub>"),
             Tag::Superscript => self.write("<sup>"),
@@ -2154,6 +2162,9 @@ mod tests {
                 id: CowStr::from(id.to_string()),
             },
             Tag::HtmlBlock => Tag::HtmlBlock,
+            Tag::DefinitionList => Tag::DefinitionList,
+            Tag::DefinitionListTitle => Tag::DefinitionListTitle,
+            Tag::DefinitionListDefinition => Tag::DefinitionListDefinition,
             other => panic!("unhandled tag in test helper: {other:?}"),
         }
     }
@@ -2266,6 +2277,52 @@ mod tests {
             html.contains(r#"<p data-mbr-line="5">Third one.</p>"#),
             "and so must the one after that: {html}"
         );
+    }
+
+    /// `<dt>`/`<dd>` take the attribute too, ahead of the `tabindex` the FAQ
+    /// disclosure depends on — and with the table empty they are byte-for-byte
+    /// what they were before.
+    #[test]
+    fn block_line_attribute_on_definition_list_tags() {
+        let markdown = "Term\n: answer\n";
+        let html = render_markdown_with_block_lines(markdown, |e| {
+            matches!(
+                e,
+                Start(Tag::DefinitionListTitle | Tag::DefinitionListDefinition)
+            )
+        });
+        assert!(
+            html.contains(r#"<dt data-mbr-line="2" tabindex="0">Term</dt>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<dd data-mbr-line="5">answer</dd>"#),
+            "{html}"
+        );
+
+        let plain = render_markdown_with_block_lines(markdown, |_| false);
+        assert!(
+            plain.contains("<dt tabindex=\"0\">Term</dt>\n<dd>answer</dd>"),
+            "{plain}"
+        );
+    }
+
+    /// The writer numbers exactly the events the table names, which is what
+    /// lets `ReviewLines::TermsOnly` (`--no-review` with editing on) be decided
+    /// entirely in `markdown.rs`: a table holding only `<dt>` starts leaves
+    /// every other element — the paragraph, the item, the `<dd>` — bare, even
+    /// though `emit_block_lines` is on for the whole document.
+    #[test]
+    fn block_lines_holding_only_terms_number_only_terms() {
+        let markdown = "Para\n\n- item\n\nTerm\n: answer\n";
+        let html = render_markdown_with_block_lines(markdown, |e| {
+            matches!(e, Start(Tag::DefinitionListTitle))
+        });
+        assert!(html.contains("<p>Para</p>"), "{html}");
+        assert!(html.contains("<li>item</li>"), "{html}");
+        assert!(html.contains("<dd>answer</dd>"), "{html}");
+        assert_eq!(html.matches("data-mbr-line=\"").count(), 1, "{html}");
+        assert!(html.contains("<dt data-mbr-line="), "{html}");
     }
 
     #[test]

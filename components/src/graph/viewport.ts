@@ -79,6 +79,52 @@ export function zoomViewBoxAtPoint(
   return { x: point.x - relX * newW, y: point.y - relY * newH, w: newW, h: newH }
 }
 
+/** An axis-aligned box in SVG-user units (a node plus its label, say). */
+export interface Extent {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+/**
+ * The viewBox that fits every extent with `pad` user units of margin, widened
+ * on one axis to the canvas `aspect` (height / width) so `preserveAspectRatio`
+ * never letterboxes it into a smaller picture than computed. `minW` keeps a
+ * two-node graph from being blown up to fill the whole canvas; `padBottom`
+ * (default `pad`) widens the bottom margin alone. Returns `null`
+ * when there is nothing to fit.
+ */
+export function fitViewBox(
+  extents: readonly Extent[],
+  aspect: number,
+  pad: number,
+  minW = 0,
+  padBottom = pad
+): ViewBox | null {
+  if (extents.length === 0 || !(aspect > 0)) return null
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  for (const e of extents) {
+    x0 = Math.min(x0, e.x0)
+    y0 = Math.min(y0, e.y0)
+    x1 = Math.max(x1, e.x1)
+    y1 = Math.max(y1, e.y1)
+  }
+  if (![x0, y0, x1, y1].every(Number.isFinite)) return null
+  // `padBottom` reserves room for controls overlaid along the bottom edge.
+  y1 += padBottom - pad
+  let w = Math.max(x1 - x0 + 2 * pad, minW)
+  let h = y1 - y0 + 2 * pad
+  if (h / w > aspect) w = h / aspect
+  else h = w * aspect
+  const cx = (x0 + x1) / 2
+  const cy = (y0 + y1) / 2
+  return { x: cx - w / 2, y: cy - h / 2, w, h }
+}
+
 /** Translate a viewBox by a delta expressed in SVG-user units. */
 export function panViewBox(vb: ViewBox, dxUser: number, dyUser: number): ViewBox {
   return { x: vb.x - dxUser, y: vb.y - dyUser, w: vb.w, h: vb.h }

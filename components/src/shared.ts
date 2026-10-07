@@ -196,7 +196,7 @@ export function getTagSources(): TagSourceConfig[] {
  * Percent-decode a URL path, falling back to the raw string on a malformed
  * escape sequence (e.g. a lone `%`) so a bad URL never throws.
  */
-function safeDecodePath(p: string): string {
+export function safeDecodePath(p: string): string {
   try {
     return decodeURIComponent(p);
   } catch {

@@ -106,6 +106,20 @@ export class SvgViewportController {
   }
 
   /**
+   * Make `view` the new home and show it — for content whose extent is only
+   * known after construction (a force layout that has just settled). A home
+   * wider than the base widens the base too, since the base is the zoom-out
+   * floor and the home must stay reachable.
+   */
+  setHomeView(view: ViewBox): void {
+    if (!(view.w > 0 && view.h > 0)) return
+    if (!this._baseViewBox || view.w > this._baseViewBox.w) this._baseViewBox = { ...view }
+    this._homeViewBox = { ...view }
+    this._viewBox = { ...view }
+    this._applyViewBox()
+  }
+
+  /**
    * Returns whether the last gesture was a drag (pan past the travel
    * threshold) and clears the flag, so a click handler can suppress navigation
    * exactly once after a pan that started on a clickable node.

@@ -355,6 +355,9 @@ const hier = (from: string, to: string, relType = 'child'): GraphEdge => ({
   label: '',
 })
 
+/** A built graph's parent/child edge: the registry (even a legacy one) categorises it. */
+const famHier = (from: string, to: string): GraphEdge => ({ ...hier(from, to), category: 'family' })
+
 const directed = (from: string, to: string): GraphEdge => ({
   from,
   to,
@@ -478,8 +481,8 @@ describe('buildRelationshipGraph acyclic-hierarchy invariant', () => {
     expect(hierarchyIsAcyclic(graph.edges)).toBe(true)
     expect(graph.edges.filter((e) => e.kind === 'hierarchical')).toHaveLength(1)
     // The focus is the first DFS root, so the edge out of the focus survives.
-    expect(graph.droppedEdges).toEqual([hier('/p/b/', '/p/a/')])
-    expect(graph.edges).toEqual([hier('/p/a/', '/p/b/')])
+    expect(graph.droppedEdges).toEqual([famHier('/p/b/', '/p/a/')])
+    expect(graph.edges).toEqual([famHier('/p/a/', '/p/b/')])
   })
 
   it('breaks a 3-cycle of mutually-declared parents', () => {
@@ -492,7 +495,7 @@ describe('buildRelationshipGraph acyclic-hierarchy invariant', () => {
     expect(graph.nodes).toHaveLength(3)
     expect(hierarchyIsAcyclic(graph.edges)).toBe(true)
     expect(graph.edges.filter((e) => e.kind === 'hierarchical')).toHaveLength(2)
-    expect(graph.droppedEdges).toEqual([hier('/p/b/', '/p/a/')])
+    expect(graph.droppedEdges).toEqual([famHier('/p/b/', '/p/a/')])
   })
 
   it('drops the same edges on every build, whatever the note order', () => {
@@ -555,7 +558,7 @@ describe('buildRelationshipGraph acyclic-hierarchy invariant', () => {
       ],
     ])
     const graph = buildRelationshipGraph('/p/parent/', notes, registry, 2)
-    expect(graph.edges).toEqual([hier('/p/parent/', '/p/child/')])
+    expect(graph.edges).toEqual([famHier('/p/parent/', '/p/child/')])
     expect(graph.droppedEdges).toEqual([])
   })
 

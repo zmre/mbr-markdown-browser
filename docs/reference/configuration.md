@@ -472,7 +472,7 @@ See the [Tags feature documentation](tags/) for complete details.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `relationship_tracking` | bool | `true` | Enable typed relationship tracking |
-| `relationship_types` | array | genealogy defaults | Relation types with symmetric / inverse semantics and labels |
+| `relationship_types` | array | family + work defaults | Relation types with symmetric / inverse semantics, hierarchy, category and labels |
 
 **Relation type configuration:**
 
@@ -481,19 +481,43 @@ Each relation type can specify:
 - `symmetric`: `true` when the reverse reads the same (spouse, sibling)
 - `inverse`: The inverse relation-type name, if it's one half of an inverse pair (parent ↔ child). Mutually exclusive with `symmetric`, and must name a *different* type — see below.
 - `label` / `label_plural`: Display labels (auto-derived from `name` when unset; set `label_plural` explicitly for irregular plurals such as "Children")
+- `hierarchy`: `"up"` or `"down"`, read from the declaring note's side. `up` means the
+  note you point **to** ranks above you (your parent, manager, employer); `down` is the
+  reverse. Omit for non-hierarchical types. The charts use it to draw edges the right
+  way up instead of guessing from names.
+- `category`: A free-form group name. The charts look for `family` (family chart,
+  timeline tree) and `work` (org chart).
 
-The default `relationship_types` provide genealogy semantics:
+The two halves of an inverse pair must point opposite ways and share a category, so
+you only need to set `hierarchy`/`category` on one half: the other inherits the
+flipped direction and the same category. If both halves claim the same direction,
+mbr keeps the one declared first, flips the other and logs a warning — startup never
+fails over it. A `hierarchy` on a symmetric type is ignored with a warning.
+
+The default `relationship_types` cover family and work:
 
 ```toml
 # .mbr/config.toml (these are the built-in defaults)
 relationship_types = [
-    { name = "parent", inverse = "child", label = "Parent", label_plural = "Parents" },
-    { name = "child", inverse = "parent", label = "Child", label_plural = "Children" },
-    { name = "spouse", symmetric = true, label = "Spouse", label_plural = "Spouses" },
-    { name = "sibling", symmetric = true, label = "Sibling", label_plural = "Siblings" },
+    { name = "parent", inverse = "child", hierarchy = "up", category = "family", label = "Parent", label_plural = "Parents" },
+    { name = "child", inverse = "parent", hierarchy = "down", category = "family", label = "Child", label_plural = "Children" },
+    { name = "spouse", symmetric = true, category = "family", label = "Spouse", label_plural = "Spouses" },
+    { name = "sibling", symmetric = true, category = "family", label = "Sibling", label_plural = "Siblings" },
+    { name = "reports_to", inverse = "manages", hierarchy = "up", category = "work", label = "Reports to", label_plural = "Reports to" },
+    { name = "manages", inverse = "reports_to", hierarchy = "down", category = "work", label = "Manages", label_plural = "Manages" },
+    { name = "assistant", inverse = "assists", hierarchy = "down", category = "work", label = "Assistant", label_plural = "Assistants" },
+    { name = "assists", inverse = "assistant", hierarchy = "up", category = "work", label = "Assists", label_plural = "Assists" },
+    { name = "employer", inverse = "employee", hierarchy = "up", category = "work", label = "Employer", label_plural = "Employers" },
+    { name = "employee", inverse = "employer", hierarchy = "down", category = "work", label = "Employee", label_plural = "Employees" },
+    { name = "colleague", symmetric = true, category = "work", label = "Colleague", label_plural = "Colleagues" },
 ]
 relationship_tracking = true
 ```
+
+Setting `relationship_types` **replaces** this list wholesale, so a repository that
+adds its own types must copy the defaults it still wants (the `employer` type in
+particular powers the implicit edge from a person's `company: "[[…]]"` — see
+[Contacts](../markdown/contacts/#company-links)).
 
 Relation types not listed here are still tracked, but as directed edges with no
 automatic reverse relabelling. See the
@@ -515,7 +539,7 @@ mbr treats the first form as the second and warns once, naming the type
 coercion both halves of such a pair would be indistinguishable, and every edge
 using it would look like a two-note `parent`/`child`-style cycle — dropping half
 of each relationship in the genealogy chart and reporting a
-[`relationship_cycle`](#per-page-error-indicator-server--gui-only) against notes
+[`relationship_cycle`](#per-page-error-indicator--server---gui-only) against notes
 whose data was fine. Declare `symmetric = true` explicitly to silence the
 warning.
 
@@ -641,6 +665,13 @@ something can be asked about. `review_enabled` therefore has no effect on
 |--------|------|---------|-------------|
 | `review_enabled` | bool | `true` | Emit `data-mbr-line` on block elements. Disable with `--no-review` or `MBR_REVIEW_ENABLED=false`. |
 
+**One exception survives `--no-review`.** With [editing](../modes/editing.md)
+on, definition-list terms (`<dt>`) keep their `data-mbr-line`, because that line
+is how a [flashcard](../markdown/flashcards.md) review addresses its card —
+without it the spaced-repetition mode would quietly disappear. No other element
+is numbered, so the flag keeps its meaning everywhere else; with both review
+and editing off, nothing is.
+
 Example:
 ```toml
 # .mbr/config.toml
@@ -657,6 +688,7 @@ review_enabled = false
 | `<blockquote>` | a block quote |
 | `<pre>` | a fenced or indented code block |
 | `<table>` | a table |
+| `<dt>` / `<dd>` | a definition list term / definition (also how a [flashcard](../markdown/flashcards.md) review addresses its card) |
 
 On a heading the attribute is written **before** any `{#id .class}` the author
 supplied, because an HTML parser keeps the first of a pair of duplicate
@@ -675,9 +707,9 @@ displace the real source line.
   already desynchronised text bytes from source bytes by the time the HTML is
   written.
 
-**Known gap:** in a *tight* definition list the `<dd>`/`<dt>` prose is not
-wrapped in a `<p>`, so those lines have no ancestor carrying `data-mbr-line`.
-A selection there anchors to the nearest enclosing block instead.
+`<dt>` and `<dd>` carry it themselves because a *tight* definition list's
+prose is not wrapped in a `<p>`, so without them those lines would have no
+ancestor carrying `data-mbr-line`.
 
 ### Incomplete-Marker Highlighting
 
@@ -765,6 +797,7 @@ The endpoint detects these issue types:
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
 | `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
+| `contact_data_problem` | On a `type: person` / `type: organization` note, an entry in a contact field (`aliases`, `phones`, `dates`, …) had a shape mbr cannot read (e.g. a map with two keys where one `label: value` pair belongs). The entry was skipped; the rest of the card renders. Carries `field` and `message`. See [Contacts](../markdown/contacts/). |
 | `unplayable_media` | A video that exists and serves correctly but whose track layout matches a combination implicated in browser decode failures. Advisory only — see [Unplayable Media Detection](#unplayable-media-detection) below. Requires the `media-metadata` feature. |
 | `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
 | `ambiguous_relationship_endpoint` | A relationship endpoint named a title/alias shared by several notes; mbr resolved it to one of them. Reported on the note that declared the endpoint. |

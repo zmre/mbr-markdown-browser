@@ -281,6 +281,42 @@ pub fn insert_error_keys(
     }
 }
 
+/// Adds the contact card's context for a `type: person` / `type: organization`
+/// page: `contact` (the [`crate::contact::Contact`] model) and, when the
+/// backlink count is known without any extra work, `contact_backlinks`.
+///
+/// Inserts nothing for other notes, so every other page renders byte-for-byte
+/// as before. `relationships` are the page's own resolved relationships, used
+/// only to link a wikilinked `company` (see
+/// [`crate::contact::Contact::resolve_company`]); the company URL is made
+/// relative in static builds like every other link on the page.
+///
+/// `backlinks` is `None` whenever counting would cost anything — before the
+/// server's inbound index is ready, in static builds — and the card then emits
+/// a placeholder that the browser fills from `links.json` on idle.
+pub fn insert_contact(
+    ctx: &mut HashMap<String, Value>,
+    contact: Option<crate::contact::Contact>,
+    relationships: &[crate::relationships::ResolvedRelationship],
+    backlinks: Option<usize>,
+    url_mode: &UrlMode,
+) {
+    let Some(mut contact) = contact else {
+        return;
+    };
+    contact.resolve_company(relationships);
+    if let (UrlMode::RelativeToDepth(depth), Some(company)) = (url_mode, contact.company.as_mut()) {
+        company.url = company
+            .url
+            .take()
+            .map(|url| make_relative_url(&url, *depth));
+    }
+    ctx.insert("contact".to_string(), json!(contact));
+    if let Some(count) = backlinks {
+        ctx.insert("contact_backlinks".to_string(), json!(count));
+    }
+}
+
 /// Page-specific inputs for the shared markdown-page context builder.
 ///
 /// Sibling computation stays with the caller (server memoizes via a cache,

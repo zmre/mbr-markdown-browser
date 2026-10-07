@@ -38,8 +38,15 @@ Press **/** or click the search icon to open search:
 
 - Search across all markdown files
 - Filter by metadata, content, or both
-- Scope to current folder or everywhere
+- Filter on any frontmatter field with `field:value` (`tags:rust`,
+  `company:acme`); quote values with spaces: `type:"Meeting Notes"`
+- Pick a note type from the scope menu — every `type` in your notes is listed
+  with a count, and choosing one writes the `type:` filter for you
+- Scope to the current folder (on a note, the folder the note is in), to any
+  folder via the folder button next to **Current folder only**, or everywhere
 - Results show snippets with highlighted matches
+
+See [Searching contacts](../markdown/contacts/#searching-contacts) for examples.
 
 ### Directory Browsing
 

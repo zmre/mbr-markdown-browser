@@ -426,6 +426,44 @@ async fn test_directory_listing() {
     assert_html_contains(&html, "two");
 }
 
+/// Subfolder names in the order a listing page renders them.
+fn listed_subdirs(html: &str) -> Vec<String> {
+    html.split("<h2>Folders</h2>")
+        .nth(1)
+        .and_then(|s| s.split("</section>").next())
+        .unwrap_or_default()
+        .split("<strong>")
+        .skip(1)
+        .filter_map(|s| s.split("</strong>").next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Section pages list subfolders in the sidebar's order — the index note's
+/// title, else the folder name, case-insensitively — not in byte order (which
+/// put every capitalized folder first) or whatever a hash set yielded.
+#[tokio::test]
+async fn test_directory_listing_sorts_subfolders_like_the_sidebar() {
+    let repo = TestRepo::new();
+    for (path, body) in [
+        ("lib/zoo/index.md", "---\ntitle: Aardvarks\n---\n"),
+        ("lib/zoo/y.md", "# y"),
+        ("lib/beta/x.md", "# x"),
+        ("lib/Alpha/x.md", "# x"),
+        ("lib/Gamma/x.md", "# x"),
+        ("lib/delta/x.md", "# x"),
+    ] {
+        repo.create_markdown(path, body);
+    }
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let first = listed_subdirs(&server.get_text("/lib/").await);
+    assert_eq!(first, ["zoo", "Alpha", "beta", "delta", "Gamma"]);
+    // Memoized and deterministic.
+    assert_eq!(listed_subdirs(&server.get_text("/lib/").await), first);
+}
+
 #[tokio::test]
 async fn test_static_file_serving() {
     let repo = TestRepo::new();
@@ -783,6 +821,321 @@ async fn test_site_json_endpoint() {
     assert_eq!(response.status(), 200);
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("application/json"));
+}
+
+/// A person's frontmatter, written the way the contacts docs show it.
+const CONTACT_NOTE: &str = concat!(
+    "---\n",
+    "type: person\n",
+    "title: Jane Doe\n",
+    "company: Acme\n",
+    "born: 1927-03-19\n",
+    "aliases:\n",
+    "  - Mare\n",
+    "  - maiden_name: Mary Smith\n",
+    "emails:\n",
+    "  work: jane@abc.example\n",
+    "phones:\n",
+    "  - mobile: \"+1 303 555 0100\"\n",
+    "urls:\n",
+    "  homepage: https://jane.example\n",
+    "social:\n",
+    "  linkedin: https://linkedin.example/in/jdoe\n",
+    "im:\n",
+    "  signal: \"+1 303 555 0100\"\n",
+    "addresses:\n",
+    "  home:\n",
+    "    city: Paris\n",
+    "---\n",
+    "Notes about Jane.\n",
+);
+
+/// A date label is matched case-insensitively everywhere, so `site.json` must
+/// publish it under the lowercase key the charts read: an authored `Birthday`
+/// both beats the legacy `born` and *is* the chart's birth year.
+#[tokio::test]
+async fn test_site_json_date_keys_are_lowercase() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/ada.md",
+        "---\ntype: person\nborn: 1950\ndates:\n  Birthday: 1960-01-02\n  Wedding Day: 1985-06-01\n---\n",
+    );
+    repo.create_markdown(
+        "people/bea.md",
+        "---\ntype: person\ndates:\n  - DEATH: 2001\n---\n",
+    );
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let site: serde_json::Value =
+        serde_json::from_str(&server.get_text("/.mbr/site.json").await).unwrap();
+    let fm = |url: &str| {
+        site["markdown_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["url_path"] == url)
+            .unwrap_or_else(|| panic!("{url} in site.json"))["frontmatter"]
+            .clone()
+    };
+    let ada = fm("/people/ada/");
+    assert_eq!(ada["dates.birthday"], "1960-01-02", "{ada}");
+    assert_eq!(ada["dates.wedding day"], "1985-06-01", "{ada}");
+    let bea = fm("/people/bea/");
+    assert_eq!(bea["dates.death"], "2001", "{bea}");
+    for person in [&ada, &bea] {
+        let dates: Vec<&String> = person
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("dates."))
+            .collect();
+        assert!(
+            dates.iter().all(|k| **k == k.to_lowercase()),
+            "one canonical lowercase key per date: {dates:?}"
+        );
+    }
+
+    // The card agrees: one birthday, the authored one.
+    let html = server.get_text("/people/ada/").await;
+    assert!(html.contains("1960"), "{html}");
+}
+
+/// Contact details stay on the page and out of `site.json` (contract 0.2);
+/// dates and aliases are normalized for the charts.
+#[tokio::test]
+async fn test_site_json_omits_contact_details() {
+    let repo = TestRepo::new();
+    repo.create_markdown("people/jane.md", CONTACT_NOTE);
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let body = server.get_text("/.mbr/site.json").await;
+    let site: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let jane = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .expect("jane in site.json");
+    let fm = jane["frontmatter"].as_object().unwrap();
+
+    for key in fm.keys() {
+        let root = key.split('.').next().unwrap();
+        assert!(
+            !["emails", "phones", "urls", "social", "im", "addresses"].contains(&root),
+            "{key} leaked into site.json"
+        );
+    }
+    for secret in ["jane@abc.example", "555 0100", "jane.example", "Paris"] {
+        assert!(!body.contains(secret), "{secret} leaked into site.json");
+    }
+    assert_eq!(fm["dates.birthday"], "1927-03-19");
+    assert_eq!(fm["aliases"], serde_json::json!(["Mare", "Mary Smith"]));
+    assert_eq!(fm["company"], "Acme");
+
+    // The page itself still carries them.
+    let html = server.get_text("/people/jane/").await;
+    assert!(html.contains("jane@abc.example"), "email missing from page");
+}
+
+/// The contact card renders server-side with safe links, links a wikilinked
+/// company through the implied `employer` edge, and — once the inbound index
+/// is built — states the backlink count without any client work.
+#[tokio::test]
+async fn test_contact_card_on_person_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Jane Doe\n",
+            "company: \"[[Acme Corp]]\"\n",
+            "job_title: VP Marketing\n",
+            "phones:\n  - mobile: \"+1 (303) 555-0100 ext. 12\"\n",
+            "emails:\n  work: jane@abc.example\n",
+            "urls:\n  bad: \"javascript:alert(1)\"\n",
+            "---\n",
+            "Notes about Jane.\n",
+        ),
+    );
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\nA company.\n",
+    );
+    repo.create_markdown("notes/a.md", "Met [Jane](../people/jane.md).\n");
+    repo.create_markdown("notes/b.md", "Again [[Jane Doe]].\n");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // The inbound index is built in the background after the scan; until then
+    // the card carries the lazy placeholder instead of a count.
+    let mut html = String::new();
+    for _ in 0..100 {
+        html = server.get_text("/people/jane/").await;
+        if html.contains("<mbr-contact-backlinks count=") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        html.contains(r#"<mbr-contact-backlinks count="2">"#),
+        "backlink chip: {html}"
+    );
+    assert!(html.contains("Linked from 2 notes"));
+    assert!(html.contains(r#"<h1 class="mbr-contact-card-name">Jane Doe</h1>"#));
+    assert_eq!(html.matches("<h1").count(), 1);
+    assert!(html.contains(r#"href="tel:+13035550100;ext=12""#));
+    assert!(html.contains(r#"href="mailto:jane@abc.example""#));
+    assert!(!html.contains(r#"href="javascript"#));
+    assert!(
+        html.contains(r#"<a href="&#x2F;orgs&#x2F;acme&#x2F;">Acme Corp</a>"#),
+        "company should link to the organization note: {html}"
+    );
+
+    // The organization gets the card (and the relationships element) too.
+    let org = server.get_text("/orgs/acme/").await;
+    assert!(org.contains(r#"data-kind="organization""#));
+    assert!(org.contains("<mbr-genealogy></mbr-genealogy>"));
+}
+
+/// The `site.json` contract the relationship charts read (contacts spec 0.2 /
+/// 0.3), checked against the server's real output rather than the frontend's
+/// fixtures. The charts never re-resolve wikilinks or guess orientation by
+/// name, so each of these is load-bearing:
+///
+/// - every built-in type carries `category`, and `hierarchy` exactly when it
+///   is hierarchical (absent, not `null`, on symmetric types) — the org chart
+///   draws `work` + hierarchy edges, the family chart only `family` ones;
+/// - a `company: "[[X]]"` wikilink *alone* — no `relationships:` entry — puts a
+///   derived `employer` edge on the person and `employee` on the organization,
+///   which is the only thing that places that person in the org chart on both
+///   pages;
+/// - legacy `born`/`died` arrive as `dates.birthday`/`dates.death` strings, and
+///   labeled aliases as plain names.
+#[tokio::test]
+async fn test_site_json_contract_for_relationship_charts() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\nA company.\n",
+    );
+    repo.create_markdown(
+        "people/bob.md",
+        "---\ntype: person\ntitle: Bob Stone\n---\nManager.\n",
+    );
+    repo.create_markdown(
+        "people/zoe.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Zoe Park\n",
+            "company: \"[[Acme Corp]]\"\n",
+            "relationships:\n",
+            "  - type: reports_to\n",
+            "    to: \"[[Bob Stone]]\"\n",
+            "---\n",
+            "Employed only through the company field.\n",
+        ),
+    );
+    repo.create_markdown(
+        "people/olga.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Olga Stone\n",
+            "born: \"1912-05-04\"\n",
+            "died: \"1990\"\n",
+            "aliases:\n",
+            "  - Ollie\n",
+            "  - maiden_name: Olga Brandt\n",
+            "---\n",
+            "Legacy genealogy fields.\n",
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let site = get_json(&server, "/.mbr/site.json").await;
+
+    // (name, hierarchy, category) for all eleven built-in types.
+    let expected = [
+        ("parent", Some("up"), "family"),
+        ("child", Some("down"), "family"),
+        ("spouse", None, "family"),
+        ("sibling", None, "family"),
+        ("reports_to", Some("up"), "work"),
+        ("manages", Some("down"), "work"),
+        ("assistant", Some("down"), "work"),
+        ("assists", Some("up"), "work"),
+        ("employer", Some("up"), "work"),
+        ("employee", Some("down"), "work"),
+        ("colleague", None, "work"),
+    ];
+    let types = site["relationship_types"]
+        .as_array()
+        .expect("relationship_types array");
+    assert_eq!(
+        types.len(),
+        expected.len(),
+        "built-in type count: {types:?}"
+    );
+    for (name, hierarchy, category) in expected {
+        let t = types
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from relationship_types"));
+        assert_eq!(t["category"], category, "{name} category");
+        match hierarchy {
+            Some(h) => assert_eq!(t["hierarchy"], h, "{name} hierarchy"),
+            None => assert!(
+                t.get("hierarchy").is_none(),
+                "{name} must omit hierarchy, got {t}"
+            ),
+        }
+    }
+
+    let files = site["markdown_files"].as_array().expect("markdown_files");
+    let note = |url: &str| {
+        files
+            .iter()
+            .find(|f| f["url_path"] == url)
+            .unwrap_or_else(|| panic!("{url} missing from site.json"))
+    };
+    let has_edge = |url: &str, predicate: &str, neighbor: &str, derived: bool| {
+        note(url)["relationships"].as_array().is_some_and(|rels| {
+            rels.iter().any(|r| {
+                r["predicate"] == predicate
+                    && r["neighbor"] == neighbor
+                    && r["resolved"] == true
+                    && r["derived"] == derived
+            })
+        })
+    };
+
+    assert!(
+        has_edge("/people/zoe/", "employer", "/orgs/acme/", true),
+        "company wikilink should imply a derived employer edge: {}",
+        note("/people/zoe/")
+    );
+    assert!(
+        has_edge("/orgs/acme/", "employee", "/people/zoe/", true),
+        "organization should list the company-derived employee: {}",
+        note("/orgs/acme/")
+    );
+    assert!(has_edge(
+        "/people/zoe/",
+        "reports_to",
+        "/people/bob/",
+        false
+    ));
+    assert!(has_edge("/people/bob/", "manages", "/people/zoe/", true));
+
+    let olga = &note("/people/olga/")["frontmatter"];
+    assert_eq!(olga["dates.birthday"], "1912-05-04");
+    assert_eq!(olga["dates.death"], "1990");
+    assert_eq!(olga["aliases"], serde_json::json!(["Ollie", "Olga Brandt"]));
 }
 
 /// Serving a hidden directory by name (`mbr -s .scratch`) must index it.
@@ -1736,6 +2089,63 @@ async fn test_search_arbitrary_frontmatter_field() {
         body["total_matches"].as_i64().unwrap() >= 1,
         "Should find file by custom frontmatter field 'author'"
     );
+}
+
+/// Result url_paths of a search, for membership assertions.
+async fn search_paths(server: &TestServer, body: &str) -> Vec<String> {
+    let response = server.post_json("/.mbr/search", body).await;
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["url_path"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Contacts: `company:acme` must find a person whose `company` is a wikilink,
+/// through the generic facet path — no contact-specific search code.
+#[tokio::test]
+async fn test_search_company_facet_matches_wikilink_company() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: person\ntitle: Jane Doe\ncompany: \"[[Acme Corp]]\"\n---\nNotes.",
+    );
+    repo.create_markdown(
+        "people/sam.md",
+        "---\ntype: person\ntitle: Sam Lee\ncompany: Globex\n---\nNotes.",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let paths = search_paths(&server, r#"{"q": "company:acme"}"#).await;
+    assert_eq!(paths, vec!["/people/jane/".to_string()]);
+}
+
+/// The search panel's note-type selector writes `type:"Meeting Notes"` for a
+/// type containing spaces; the quoted value must reach the facet whole.
+#[tokio::test]
+async fn test_search_quoted_type_facet() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "standup.md",
+        "---\ntype: Meeting Notes\ntitle: Standup\n---\nBody.",
+    );
+    repo.create_markdown("memo.md", "---\ntype: Meeting\ntitle: Memo\n---\nBody.");
+    repo.create_markdown("other.md", "---\ntype: Notes\ntitle: Other\n---\nBody.");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let paths = search_paths(
+        &server,
+        r#"{"q": "type:\"Meeting Notes\"", "scope": "metadata"}"#,
+    )
+    .await;
+    assert_eq!(paths, vec!["/standup/".to_string()]);
 }
 
 #[tokio::test]
@@ -2802,9 +3212,9 @@ async fn test_components_js_bundle_served() {
 
 #[tokio::test]
 async fn test_graph_chunks_served() {
-    // The lazy-loaded mini-graph, genealogy, task-panel and review chunks are
-    // compiled into the binary (DEFAULT_FILES) and must be served alongside the
-    // main bundle.
+    // The lazy-loaded mini-graph, genealogy, task-panel, review, search-extras
+    // and flashcard chunks are compiled into the binary (DEFAULT_FILES) and must
+    // be served alongside the main bundle.
     let repo = TestRepo::new();
 
     let server = TestServer::start(&repo).await;
@@ -2814,6 +3224,9 @@ async fn test_graph_chunks_served() {
         "/.mbr/components/mbr-genealogy.min.js",
         "/.mbr/components/mbr-tasks.min.js",
         "/.mbr/components/mbr-review.min.js",
+        "/.mbr/components/mbr-search-extras.min.js",
+        "/.mbr/components/mbr-flashcards.min.js",
+        "/.mbr/components/mbr-flashcards-reading.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -2870,7 +3283,7 @@ async fn test_components_js_bundle_no_missing_imports() {
         );
     }
 
-    // The mini-graph, genealogy, task-panel and review chunks are lazy-loaded
+    // The mini-graph, genealogy, task-panel, review and flashcard chunks are lazy-loaded
     // through runtime-computed URLs (asset base + "components/<chunk>.min.js"),
     // so they never appear as literal import() targets — which is also why the
     // absolute-import assertion above needs no exemption for them. If the
@@ -2881,6 +3294,9 @@ async fn test_components_js_bundle_no_missing_imports() {
         "mbr-genealogy.min.js",
         "mbr-tasks.min.js",
         "mbr-review.min.js",
+        "mbr-search-extras.min.js",
+        "mbr-flashcards.min.js",
+        "mbr-flashcards-reading.min.js",
     ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");
@@ -4755,6 +5171,41 @@ async fn test_errors_json_multiple_problem_types_on_one_page() {
     assert!(errors.iter().any(|e| e["type"] == "broken_internal_link"));
     assert!(errors.iter().any(|e| e["type"] == "broken_media_reference"));
     assert!(errors.iter().any(|e| e["type"] == "unresolved_wikilink"));
+}
+
+#[tokio::test]
+async fn test_errors_json_reports_unreadable_contact_fields() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "jane.md",
+        "---\ntype: person\ntitle: Jane\nphones:\n  - {a: 1, b: 2}\n  - mobile: '555 0100'\naliases:\n  - [nested]\n---\nBody\n",
+    );
+    // The same shapes on a non-contact note are not contact problems.
+    repo.create_markdown(
+        "plain.md",
+        "---\ntitle: Plain\nphones:\n  - {a: 1, b: 2}\n---\nBody\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let json: serde_json::Value = server.get("/jane/errors.json").await.json().await.unwrap();
+    let fields: Vec<&str> = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "contact_data_problem")
+        .filter_map(|e| e["field"].as_str())
+        .collect();
+    assert_eq!(fields, ["aliases", "phones"], "{json}");
+
+    let plain: serde_json::Value = server.get("/plain/errors.json").await.json().await.unwrap();
+    assert!(
+        !plain["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "contact_data_problem"),
+        "{plain}"
+    );
 }
 
 #[tokio::test]
@@ -8573,4 +9024,315 @@ async fn test_head_config_includes_review_enabled() {
     for path in ["/readme/", "/"] {
         assert_html_contains(&server.get_text(path).await, "reviewEnabled: false");
     }
+}
+
+/// A ```chat block renders as bubbles, and the links in its bodies get the same
+/// trailing-slash transform as links anywhere else on the page — they are
+/// spliced into the page's event stream, not rendered on the side.
+#[tokio::test]
+async fn test_chat_block_renders_bubbles_with_transformed_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes/other.md", "# Other\n");
+    repo.create_markdown(
+        "notes/chat.md",
+        "# Chat\n\n```chat\n> Bob\n{{Alice|See [the other note](other.md)|9:00}}\n{{Bob|And [[other]] too|}}\n```\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/notes/chat/").await;
+
+    assert_html_contains(&html, "<div class=\"mbr-chat\"");
+    assert_html_contains(&html, "<div class=\"mbr-chat-name\">Alice</div>");
+    assert_html_contains(&html, "mbr-chat-msg mbr-chat-right");
+    assert_html_contains(&html, "<a href=\"../other/\">the other note</a>");
+    assert_html_contains(&html, "<a href=\"../other/\">other</a>");
+    assert!(
+        !html.contains("{{Alice"),
+        "the fence must not survive: {html}"
+    );
+
+    let css = server.get_text("/.mbr/theme.css").await;
+    assert!(
+        css.contains(".mbr-chat-msg"),
+        "chat styles ship in theme.css"
+    );
+}
+
+// ============================================================================
+// Flashcard review (`POST /.mbr/flashcard-review`)
+// ============================================================================
+
+/// A two-card deck: the first card has no history yet, the second has one.
+const DECK_SOURCE: &str = concat!(
+    "---\n",
+    "type: flashcard\n",
+    "---\n",
+    "\n",
+    "Capital of France?\n",
+    ": Paris.\n",
+    "\n",
+    "Capital of Italy?\n",
+    ": Rome.\n",
+    ": ___Review History___\n",
+    "  * 2026-10-01 08:00 - Good\n",
+);
+
+fn review_body(line: u32, expected: &str, rating: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": "deck.md", "line": line, "expected": expected, "rating": rating,
+        "at": reviewer_clock(0),
+    })
+}
+
+/// The wall-clock time, as the deck sends it, of a reviewer `offset_hours`
+/// east of UTC.
+fn reviewer_clock(offset_hours: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::hours(offset_hours))
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+/// Every `data-mbr-line` on a `<dt>` in `html`, in document order.
+fn dt_lines(html: &str) -> Vec<u32> {
+    html.match_indices("<dt data-mbr-line=\"")
+        .map(|(at, prefix)| {
+            let rest = &html[at + prefix.len()..];
+            rest[..rest.find('"').expect("closing quote")]
+                .parse()
+                .expect("numeric line")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_flashcard_review_disabled_returns_403() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(5, "Capital of France?", "good"),
+    )
+    .await;
+    assert_eq!(resp.status(), 403);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+/// The whole loop the overlay runs: read the term's line from the rendered
+/// `<dt>`, send it back with the file's text for that line, and get a history
+/// entry written under exactly that card.
+#[tokio::test]
+async fn test_flashcard_review_round_trip_from_rendered_dt_lines() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/deck/").await;
+    assert!(
+        html.contains("class=\"flashcard"),
+        "type: flashcard body class"
+    );
+    let lines = dt_lines(&html);
+    assert_eq!(lines, vec![5, 8], "the terms' file lines: {html}");
+
+    // First review of the first card creates its history definition. The
+    // entry is stamped with the *reviewer's* clock — here UTC+13, which is
+    // nobody's server time zone in CI — not the server's.
+    let reviewer_at = reviewer_clock(13);
+    let mut body = review_body(lines[0], "Capital of France?", "again");
+    body["at"] = serde_json::json!(reviewer_at);
+    let resp = edit_post(&server, "/.mbr/flashcard-review", body).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON");
+    let entry = json["entry"].as_str().expect("entry").to_string();
+    assert_eq!(entry, format!("{reviewer_at} - Again"));
+    assert_eq!(json["inserted_at"], 7);
+    assert_eq!(json["line"], 8);
+    assert_eq!(
+        json["inserted"],
+        serde_json::json!([": ___Review History___", format!("  * {entry}")])
+    );
+    let after_first = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        after_first,
+        DECK_SOURCE.replace(
+            ": Paris.\n",
+            &format!(": Paris.\n: ___Review History___\n  * {entry}\n")
+        )
+    );
+
+    // The second card moved down two lines; the re-rendered page says so, and
+    // a review addressed there lands in its existing history.
+    let html = server.get_text("/deck/").await;
+    assert_eq!(dt_lines(&html), vec![5, 10]);
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(10, "Capital of Italy?", "easy"),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON");
+    let second = json["entry"].as_str().expect("entry").to_string();
+    assert_eq!(
+        json["inserted"],
+        serde_json::json!([format!("  * {second}")])
+    );
+    assert_eq!(json["line"], 14);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{after_first}  * {second}\n")
+    );
+}
+
+/// `--no-review` turns off the review-notes anchors, not flashcard writes: with
+/// editing on, a term still carries the line `POST /.mbr/flashcard-review`
+/// addresses it by. Nothing else does — the flag keeps its meaning for every
+/// other element.
+#[tokio::test]
+async fn test_flashcard_dt_lines_survive_no_review_when_editing() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "deck.md",
+        &format!("{DECK_SOURCE}\nA paragraph.\n\n- an item\n"),
+    );
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.review_enabled = false;
+        c.edit_enabled = true;
+    })
+    .await;
+    let html = server.get_text("/deck/").await;
+
+    assert_eq!(dt_lines(&html), vec![5, 8], "{html}");
+    assert_html_contains(&html, "<p>A paragraph.</p>");
+    assert_html_contains(&html, "<li>an item</li>");
+    assert_html_contains(&html, "<dd>Paris.</dd>");
+    assert_eq!(
+        html.matches("data-mbr-line=\"").count(),
+        2,
+        "only the two terms are numbered: {html}"
+    );
+}
+
+/// With both off there is no writer to address, so no element is numbered.
+#[tokio::test]
+async fn test_no_review_and_no_edit_number_nothing() {
+    let repo = TestRepo::new();
+    repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.review_enabled = false;
+    })
+    .await;
+    let html = server.get_text("/deck/").await;
+    assert!(!html.contains("data-mbr-line=\""), "{html}");
+    assert_html_contains(&html, "<dt tabindex=\"0\">Capital of France?</dt>");
+}
+
+/// The entry is the reviewer's own wall-clock time, so the server checks it
+/// rather than trusting it: the exact entry format, and no further from the
+/// server's UTC clock than a real time zone can put it. Anything else is 422 and
+/// nothing is written.
+#[tokio::test]
+async fn test_flashcard_review_validates_the_reviewers_clock() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let missing = serde_json::json!({
+        "path": "deck.md", "line": 5, "expected": "Capital of France?", "rating": "good",
+    });
+    let mut bodies = vec![missing];
+    for at in [
+        serde_json::json!(reviewer_clock(30)),
+        serde_json::json!(reviewer_clock(-30)),
+        serde_json::json!("2026-10-06T13:45"),
+        serde_json::json!("2026-10-06 13:45:00"),
+        serde_json::json!("yesterday"),
+        serde_json::json!(1_759_000_000),
+        serde_json::Value::Null,
+    ] {
+        let mut body = review_body(5, "Capital of France?", "good");
+        body["at"] = at;
+        bodies.push(body);
+    }
+    for body in bodies {
+        let resp = edit_post(&server, "/.mbr/flashcard-review", body.clone()).await;
+        assert_eq!(resp.status(), 422, "{body}");
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+
+    // Both ends of the real range of offsets are accepted.
+    for offset in [-12, 14] {
+        let resp = edit_post(
+            &server,
+            "/.mbr/flashcard-review",
+            serde_json::json!({
+                "path": "deck.md", "line": 5, "expected": "Capital of France?",
+                "rating": "good", "at": reviewer_clock(offset),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "UTC{offset:+}");
+    }
+}
+
+#[tokio::test]
+async fn test_flashcard_review_stale_or_wrong_line_returns_409() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for body in [
+        // The term was edited since the page loaded.
+        review_body(5, "Capital of Spain?", "good"),
+        // The line matches but is a definition, not a term.
+        review_body(6, ": Paris.", "good"),
+        // The file is shorter than the client thinks.
+        review_body(99, "Capital of France?", "good"),
+    ] {
+        let resp = edit_post(&server, "/.mbr/flashcard-review", body.clone()).await;
+        assert_eq!(resp.status(), 409, "{body}");
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+#[tokio::test]
+async fn test_flashcard_review_rejects_bad_ratings_and_paths() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    // `fail` is read as a synonym for Again, but never accepted as input.
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(5, "Capital of France?", "fail"),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+
+    for path in ["../escape.md", "/etc/passwd", "missing.md"] {
+        let resp = edit_post(
+            &server,
+            "/.mbr/flashcard-review",
+            serde_json::json!({
+                "path": path, "line": 1, "expected": "x", "rating": "good",
+                "at": reviewer_clock(0),
+            }),
+        )
+        .await;
+        assert!(
+            resp.status() == 404 || resp.status() == 400,
+            "{path}: {}",
+            resp.status()
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
 }

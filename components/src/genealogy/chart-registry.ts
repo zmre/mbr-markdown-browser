@@ -1,5 +1,6 @@
 /**
- * Chart registry for the person-page genealogy chunk.
+ * Chart registry for the person/organization relationship charts chunk
+ * (historically "genealogy"; the element and chunk keep that name).
  *
  * Each chart is a small `GenealogyChart` descriptor with a `mount()` factory;
  * `mountGenealogy()` (index.ts) renders a selector over `CHART_TYPES` and
@@ -16,9 +17,11 @@
  * time (long after module evaluation), and `CHART_TYPES` is built after the
  * view modules finish evaluating.
  */
-import type { RelationshipGraph, Registry, SiteNote } from '../graph/relationship-graph.js'
+import type { PageLinks, RelationshipGraph, Registry, SiteNote } from '../graph/relationship-graph.js'
 import { familyChartType } from './family-chart-view.js'
 import { timelineChartType } from './timeline-view.js'
+import { orgChartType } from './org-view.js'
+import { allChartType, allPeopleChartType } from './graph-views.js'
 
 /** Everything a chart needs, passed down from the `<mbr-genealogy>` trigger. */
 export interface GenealogyContext {
@@ -34,6 +37,16 @@ export interface GenealogyContext {
   resolveUrl: (path: string) => string
   /** Navigate to a note by url_path (same tab). */
   navigate: (path: string) => void
+  /** `graph_depth` config (window.__MBR_CONFIG__.graphDepth): force-graph BFS depth. */
+  graphDepth: number
+  /**
+   * Load the `mbr-graph.min.js` chunk that defines `<mbr-mini-graph>`; resolves
+   * `false` on failure. Injected (main bundle, single-flight) so this chunk
+   * never bundles a second copy of the element or of d3-force.
+   */
+  loadGraphChunk: () => Promise<boolean>
+  /** The caching `links.json` fetcher (`null` when link tracking is off). */
+  fetchPageLinks: (path: string) => Promise<PageLinks | null>
 }
 
 /** A mounted chart; `destroy()` must remove all DOM and listeners it added. */
@@ -47,13 +60,31 @@ export interface GenealogyChart {
   id: string
   /** Human-readable label shown in the selector. */
   label: string
+  /**
+   * Whether this chart has anything to draw for the focus note. Inapplicable
+   * charts stay in the selector, disabled, and are never chosen by default.
+   * Must be cheap: it runs for every chart when the chunk mounts. Absent =
+   * always applicable.
+   */
+  isApplicable?(ctx: GenealogyContext): boolean
   mount(container: HTMLElement, ctx: GenealogyContext): GenealogyChartInstance
 }
 
-/** All available charts, in selector order. family-chart is the default. */
-export const CHART_TYPES: GenealogyChart[] = [familyChartType, timelineChartType]
+/** All available charts, in selector order. */
+export const CHART_TYPES: GenealogyChart[] = [
+  familyChartType,
+  timelineChartType,
+  orgChartType,
+  allPeopleChartType,
+  allChartType,
+]
 
 export const DEFAULT_CHART_ID = 'family-chart'
+
+/** True when `chart` can draw something for this context. */
+export function isChartApplicable(chart: GenealogyChart, ctx: GenealogyContext): boolean {
+  return chart.isApplicable ? chart.isApplicable(ctx) : true
+}
 
 // ============================================================================
 // Style injection (shared by the chunk's views)

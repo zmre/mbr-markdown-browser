@@ -213,6 +213,12 @@ pub struct MarkdownInfo {
     pub url_path: String,
     pub created: u64,
     pub modified: u64,
+    /// The simplified frontmatter, complete in memory (search matches on all
+    /// of it) but serialized **without** contact details — `emails`, `phones`,
+    /// `urls`, `social`, `im`, `addresses` and their dot-key variants. This
+    /// struct is what both server and static `site.json` serialize, so the one
+    /// attribute covers both; see [`crate::contact::is_public_frontmatter_key`].
+    #[serde(serialize_with = "crate::contact::serialize_public_frontmatter")]
     pub frontmatter: Option<crate::markdown::SimpleMetadata>,
     /// Typed relationships declared in frontmatter (unresolved endpoints).
     /// Skipped in serialization — resolved relationships are exposed via the
@@ -1450,18 +1456,11 @@ impl Repo {
                     .unwrap_or_default()
                     .to_string();
                 // Alternate names (e.g. maiden names) that also resolve to this
-                // note. Read from a frontmatter `aliases` array of strings;
-                // non-string elements and wrong types are ignored (empty vec).
+                // note — labeled ones included; see `contact::alias_names`.
                 let aliases = info
                     .frontmatter
                     .as_ref()
-                    .and_then(|fm| fm.get("aliases"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect::<Vec<String>>()
-                    })
+                    .map(crate::contact::alias_names_in)
                     .unwrap_or_default();
                 let is_index = info
                     .raw_path

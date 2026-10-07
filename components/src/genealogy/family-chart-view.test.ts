@@ -45,6 +45,9 @@ function cyclicContext(): GenealogyContext {
     focusPath: graph.focus,
     resolveUrl: (p) => p,
     navigate: vi.fn(),
+    graphDepth: 2,
+    loadGraphChunk: () => Promise.resolve(false),
+    fetchPageLinks: () => Promise.resolve(null),
   }
 }
 
