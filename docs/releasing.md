@@ -1,7 +1,7 @@
 # Releasing mbr
 
 Pushing a `vX.Y.Z` tag builds, signs, notarizes and publishes mbr's macOS DMG
-(and the Linux/Windows tarballs, and the crate). `.github/workflows/release.yml`
+(and the Linux/Windows tarballs, the crate, and the Homebrew cask). `.github/workflows/release.yml`
 is the whole pipeline; this document is the part that cannot live in a comment
 — the one-time Apple setup, and what to do when notarization says no.
 
@@ -185,3 +185,84 @@ entitlement reasons, that is the first thing to revisit.
 same way the release itself is — a dry run publishes nothing. It uses
 `CARGO_REGISTRY_TOKEN`, which predates this pipeline and is unrelated to the
 five Apple secrets above.
+
+## Updating the Homebrew cask
+
+The Homebrew tap is this repository: `Casks/mbr.rb` on `main` is what
+`brew update` reads. After every stable release the `update-homebrew-cask` job
+points the cask at the new DMG and pushes the change to `main` as
+`Homebrew cask: mbr X.Y.Z [skip ci]`.
+
+The job:
+
+* runs after `release`, so it is skipped on dry runs, and skips prereleases
+  (a `-` in the version)
+* takes the DMG's checksum from the release's `SHA256SUMS` and checks it
+  against a fresh download
+* runs `scripts/update-cask.sh`, then commits locally and verifies that commit
+  with `brew style`, `brew audit --cask --online`, a real
+  `brew install --cask` and `mbr --version`
+* pushes with a deploy key, rebasing and retrying if `main` moved
+* does nothing if the cask is already current, and never moves it to an older
+  version
+
+The cask always uses the DMG, never `mbr-macos-arm64.tar.gz`, because only the
+DMG's app is notarized.
+
+ci.yml's `cask-lint` job runs `brew style`/`brew audit` and smoke-tests
+`scripts/update-cask.sh` whenever either file changes.
+
+### One-time setup
+
+`main` requires pull requests, and `GITHUB_TOKEN` cannot bypass that. The job
+pushes with a deploy key instead, which a repository **ruleset** can exempt.
+Classic branch protection cannot, so it has to be replaced by a ruleset.
+
+1. Generate a key pair and add the public half as a deploy key **with write
+   access**:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "mbr homebrew cask bot" -f mbr-cask-deploy-key
+   gh repo deploy-key add mbr-cask-deploy-key.pub \
+     --repo zmre/mbr-markdown-browser --allow-write --title "Homebrew cask bot"
+   ```
+
+2. Store the private half as the `HOMEBREW_CASK_DEPLOY_KEY` Actions secret,
+   then delete both files:
+
+   ```sh
+   gh secret set HOMEBREW_CASK_DEPLOY_KEY \
+     --repo zmre/mbr-markdown-browser < mbr-cask-deploy-key
+   rm mbr-cask-deploy-key mbr-cask-deploy-key.pub
+   ```
+
+3. Add **Deploy keys** to the bypass list of the `protect main` ruleset
+   (**Settings → Rules → Rulesets**), which already requires a PR and the
+   Clippy check. Then remove the classic branch protection on `main`: it
+   requires a PR too, and classic protection has no deploy-key exemption, so
+   the push stays blocked while it exists. Nothing is lost, since `protect
+   main` and `Copilot review for default branch` together cover everything it
+   enforced (PR required, no force pushes, no deletion).
+
+   ```sh
+   gh api -X PUT repos/zmre/mbr-markdown-browser/rulesets/19498799 --input - <<'JSON'
+   {"bypass_actors": [{"actor_type": "DeployKey", "bypass_mode": "always"}]}
+   JSON
+   gh api -X DELETE repos/zmre/mbr-markdown-browser/branches/main/protection
+   ```
+
+   A deploy key bypasses every rule in that ruleset, including the required
+   status check, which is why the job verifies the cask itself before pushing.
+
+### Fixing the cask by hand
+
+If the job fails, or a release needs its cask repaired, update it on a branch
+and open a PR:
+
+```sh
+VERSION=0.7.0
+SHA=$(gh release download "v$VERSION" --repo zmre/mbr-markdown-browser \
+  -p SHA256SUMS -O - | awk '$2 == "mbr-macos-arm64.dmg" { print $1 }')
+scripts/update-cask.sh "$VERSION" "$SHA"
+git diff Casks/mbr.rb
+```

@@ -177,6 +177,9 @@ The macOS release includes `MBR.app`, a proper application bundle that:
 open -a MBR /path/to/notes
 ```
 
+Homebrew does steps 1 and 2 and also puts `mbr` on your `PATH`; see
+[Installation](../getting-started/).
+
 ### Opening a Markdown File from Finder
 
 `MBR.app` registers as a viewer for markdown files, so right-click → **Open
