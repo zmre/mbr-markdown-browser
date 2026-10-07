@@ -161,7 +161,9 @@ pub struct ReviewPatch {
     /// 1-based line number of the first inserted line.
     pub inserted_at: u32,
     /// The inserted lines, without terminators: the bullet alone, or the
-    /// history label followed by the bullet when the term had no history yet.
+    /// history label followed by the bullet when the term had no history yet —
+    /// either one followed by a blank line when the next card's term was glued
+    /// to the insert point (see [`append_review`]).
     ///
     /// Returned so a client holding the file's lines can splice them in rather
     /// than re-read the file, and shift every later line number it holds.
@@ -169,10 +171,15 @@ pub struct ReviewPatch {
 }
 
 impl ReviewPatch {
-    /// 1-based line number of the new bullet (always the last inserted line).
+    /// 1-based line number of the new bullet: the last non-blank inserted line.
     pub fn entry_line(&self) -> u32 {
-        let extra = u32::try_from(self.inserted.len().saturating_sub(1)).unwrap_or(0);
-        self.inserted_at.saturating_add(extra)
+        let index = self
+            .inserted
+            .iter()
+            .rposition(|line| !line.is_empty())
+            .unwrap_or(0);
+        self.inserted_at
+            .saturating_add(u32::try_from(index).unwrap_or(0))
     }
 }
 
@@ -200,6 +207,29 @@ impl ReviewPatch {
 /// Every other byte is untouched: inserted lines use the terminator of the
 /// line they follow (so CRLF files stay CRLF), and a file without a trailing
 /// newline still has none.
+///
+/// # A term glued to the insert point
+///
+/// A term needs no blank line before it when the definition above ends in a
+/// block that cannot be lazily continued — a closed code fence:
+///
+/// ~~~markdown
+/// Q1
+/// : A1
+///
+///   ```
+///   code
+///   ```
+/// Q2
+/// : A2
+/// ~~~
+///
+/// Here `Q2` is a card. A history bullet inserted above it would give it a
+/// paragraph to continue, and the card would silently merge into `Q1`'s
+/// history. So when the line after the insert point is non-blank, unindented
+/// and not a `:` definition, a blank line follows the entry. (The common shape,
+/// `Q2` straight after a one-line answer, needs nothing: that `Q2` was a lazy
+/// continuation of the answer before the write, never a card.)
 ///
 /// # Errors
 ///
@@ -276,6 +306,14 @@ pub fn append_review(
         }
     };
 
+    let glued = line_span(source, after_line.saturating_add(1))
+        .map(|span| split_line_terminator(&source[span]).0)
+        .is_some_and(starts_a_glued_block);
+    let inserted: Vec<String> = inserted
+        .into_iter()
+        .chain(glued.then(String::new))
+        .collect();
+
     let fallback_terminator = if term_terminator.is_empty() {
         "\n"
     } else {
@@ -288,6 +326,15 @@ pub fn append_review(
         inserted_at: after_line.saturating_add(1),
         inserted,
     })
+}
+
+/// True when `line` follows the insert point so closely that it could be read
+/// as a lazy continuation of the new entry: non-blank, unindented, and not a
+/// `:` definition (which continues the list as it should).
+fn starts_a_glued_block(line: &str) -> bool {
+    line.chars()
+        .next()
+        .is_some_and(|c| !c.is_whitespace() && c != ':')
 }
 
 /// True when inline `text` — the words inside the emphasis that opens a
@@ -1139,14 +1186,137 @@ mod tests {
         );
     }
 
+    // ---- terms with no blank line before them --------------------------------
+
+    /// The `<dt>` texts of `source` rendered exactly as a page is — the same
+    /// parser and [`markdown_options`] — so these tests do not rely on
+    /// [`scan_terms`] agreeing with itself.
+    fn rendered_terms(source: &str) -> Vec<String> {
+        let mut html = String::new();
+        pulldown_cmark::html::push_html(&mut html, Parser::new_ext(source, markdown_options()));
+        html.split("<dt>")
+            .skip(1)
+            .map(|rest| rest[..rest.find("</dt>").expect("closed dt")].to_string())
+            .collect()
+    }
+
+    /// Rates the term on `line` and checks the write kept every card — by the
+    /// renderer's parse and by [`outline`] — while adding one history entry.
+    fn assert_rating_keeps_cards(source: &str, line: u32) -> String {
+        let terms = rendered_terms(source);
+        let before = outline(source);
+        let patched = appended(source, line);
+        assert_eq!(rendered_terms(&patched), terms, "{patched}");
+        let after = outline(&patched);
+        assert_eq!(after.len(), before.len(), "{patched}");
+        for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+            assert_eq!((&b.0, &b.1), (&a.0, &a.1), "card {i}: {patched}");
+            let target = b.0 == line_containing(source, line_span(source, line).unwrap().start);
+            let grown = if target {
+                b.2.unwrap_or(0) + 1
+            } else {
+                b.2.unwrap_or(0)
+            };
+            assert_eq!(a.2.unwrap_or(0), grown, "card {i}: {patched}");
+        }
+        patched
+    }
+
+    /// `Q2` straight after an answer is not a second term at all: it is a lazy
+    /// continuation of `A1`'s paragraph, before any write, so the deck never
+    /// offered it as a card. A pulldown-cmark definition list needs a blank
+    /// line (or a non-paragraph block) before the next term.
+    #[test]
+    fn a_term_glued_to_an_answer_is_a_lazy_continuation() {
+        let source = "Q1\n: A1\nQ2\n: A2\n";
+        assert_eq!(rendered_terms(source), ["Q1"]);
+        assert_eq!(
+            append(source, 3),
+            Err(FlashcardPatchError::NotATerm { line: 3 })
+        );
+        let patched = assert_rating_keeps_cards(source, 1);
+        assert_eq!(
+            patched,
+            "Q1\n: A1\nQ2\n: A2\n: ___Review History___\n  * 2026-10-06 13:45 - Good\n"
+        );
+    }
+
+    /// The same inside an existing history: `Q2` continues the last bullet.
+    #[test]
+    fn a_term_glued_to_a_history_bullet_is_a_lazy_continuation() {
+        let source = "Q1\n: A1\n: ___Review History___\n  * 2026-10-01 08:00 - Good\nQ2\n: A2\n";
+        assert_eq!(rendered_terms(source), ["Q1"]);
+        assert_rating_keeps_cards(source, 1);
+    }
+
+    #[test]
+    fn a_term_glued_to_a_loose_answer_is_a_lazy_continuation() {
+        let source = "Q1\n\n: A1\nQ2\n\n: A2\n";
+        assert_eq!(rendered_terms(source), ["Q1"]);
+        assert_rating_keeps_cards(source, 1);
+    }
+
+    /// A definition ending in a fenced block leaves no paragraph to continue,
+    /// so here the glued `Q2` *is* a term — and a history written straight
+    /// above it would hand it a bullet to lazily continue, silently merging
+    /// the card into the previous one.
+    #[test]
+    fn a_term_glued_to_a_closed_fence_stays_a_term() {
+        let source = "Q1\n: A1\n\n  ```\n  code\n  ```\nQ2\n: A2\n";
+        assert_eq!(rendered_terms(source), ["Q1", "Q2"]);
+        let patched = assert_rating_keeps_cards(source, 1);
+        assert_eq!(
+            patched,
+            concat!(
+                "Q1\n: A1\n\n  ```\n  code\n  ```\n",
+                ": ___Review History___\n",
+                "  * 2026-10-06 13:45 - Good\n",
+                "\n",
+                "Q2\n: A2\n",
+            )
+        );
+        // The separating blank line is reported, so a client shifting its line
+        // numbers by `inserted.len()` stays right, but the entry's own line
+        // skips it.
+        let patch = append(source, 1).unwrap();
+        assert_eq!(patch.inserted.last().map(String::as_str), Some(""));
+        assert_eq!((patch.inserted_at, patch.entry_line()), (7, 8));
+        // `Q2`'s card renders exactly as it did before the write.
+        let q2_card = |source: &str| {
+            let mut html = String::new();
+            pulldown_cmark::html::push_html(&mut html, Parser::new_ext(source, markdown_options()));
+            html[html.find("<dt>Q2</dt>").expect("Q2 is a term")..].to_string()
+        };
+        assert_eq!(q2_card(&patched), q2_card(source));
+        // …and the next rating appends to the history, above the blank line.
+        let again = assert_rating_keeps_cards(&patched, 1);
+        assert!(
+            again.contains("13:45 - Good\n  * 2026-10-06 13:45 - Good\n\nQ2\n"),
+            "{again}"
+        );
+    }
+
     // ---- properties ---------------------------------------------------------
 
     /// One generated card: its term, its answers and an optional history.
     #[derive(Debug, Clone)]
     struct GenCard {
         loose: bool,
+        /// No blank line between this card's term and the previous card.
+        glued: bool,
         answers: Vec<u8>,
         history: Option<(char, Vec<u8>)>,
+    }
+
+    impl GenCard {
+        /// Whether a term glued straight after this card is a term of its
+        /// own. Only when the card's last definition ends in a closed fence
+        /// (answer kind 3, no history): anything ending in a paragraph — a
+        /// one-line answer, a list item, a history label or bullet — takes
+        /// the glued line as a lazy continuation instead.
+        fn ends_in_a_fence(&self) -> bool {
+            self.history.is_none() && self.answers.last().is_some_and(|kind| kind % 5 == 3)
+        }
     }
 
     /// Answer shapes, by index — single line, multi-line continuation, nested
@@ -1176,14 +1346,16 @@ mod tests {
     fn gen_card() -> impl Strategy<Value = GenCard> {
         (
             any::<bool>(),
+            any::<bool>(),
             prop::collection::vec(0u8..5, 1..4),
             prop::option::of((
                 prop::sample::select(vec!['*', '-']),
                 prop::collection::vec(0u8..6, 0..4),
             )),
         )
-            .prop_map(|(loose, answers, history)| GenCard {
+            .prop_map(|(loose, glued, answers, history)| GenCard {
                 loose,
+                glued,
                 answers,
                 history,
             })
@@ -1212,7 +1384,7 @@ mod tests {
                             "```\nFake?\n: fake\n```".to_string()
                         });
                     }
-                    for card in cards {
+                    for (card_index, card) in cards.iter().enumerate() {
                         term_index += 1;
                         let separator = if card.loose { "\n\n" } else { "\n" };
                         let mut definitions: Vec<String> = card
@@ -1223,10 +1395,28 @@ mod tests {
                         if let Some((marker, entries)) = &card.history {
                             definitions.push(history_text(*marker, entries));
                         }
-                        blocks.push(format!(
-                            "Term {term_index}?{separator}{}",
+                        let previous = card_index.checked_sub(1).map(|i| &cards[i]);
+                        let glued = card.glued && previous.is_some();
+                        // A glued line that the parser will read as a lazy
+                        // continuation is not a term, so it must not be named
+                        // like one: `terms` below is the generator's own
+                        // prediction, checked against the scanner.
+                        let name = if glued && !previous.is_some_and(GenCard::ends_in_a_fence) {
+                            "Glued"
+                        } else {
+                            "Term"
+                        };
+                        let card_text = format!(
+                            "{name} {term_index}?{separator}{}",
                             definitions.join(separator)
-                        ));
+                        );
+                        match blocks.last_mut() {
+                            Some(last) if glued => {
+                                last.push('\n');
+                                last.push_str(&card_text);
+                            }
+                            _ => blocks.push(card_text),
+                        }
                     }
                 }
                 let mut text = blocks.join("\n\n");

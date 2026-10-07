@@ -56,7 +56,10 @@ Which two fields set a page's body classes?
 - **Leave a blank line before the next term.** Without one, the next question
   is swallowed into the previous answer as a lazy continuation — the same
   [definition-list gotcha](./#leave-a-blank-line-between-entries) as anywhere
-  else.
+  else. (The one exception is an answer ending in a code block, which has no
+  paragraph to continue. A question right after one is a separate card, and
+  when mbr records a review above it, it adds a blank line so the question
+  stays separate.)
 - Only *top-level* definition lists are cards. A list nested inside a block
   quote or a list item is left out of the deck.
 - Tight (no blank lines) and loose (blank line between the term and its `:`
