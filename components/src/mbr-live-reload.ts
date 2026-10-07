@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { wasSelfWrite } from './task-toggle.js';
+import { isOwnWriteEcho, mayBeOwnWriteEcho, wasSelfWrite } from './task-toggle.js';
 
 interface FileChangeEvent {
   path: string;
@@ -233,16 +233,34 @@ export class MbrLiveReloadElement extends LitElement {
       return;
     }
 
-    const shouldReload = this._shouldReloadForFile(changedPath);
+    if (!this._shouldReloadForFile(changedPath)) return;
 
-    if (shouldReload) {
-      this._showReloadNotification(changedPath);
-
-      // Reload after a short delay to show notification
-      setTimeout(() => {
-        window.location.reload();
-      }, 500);
+    // The window above only covers events that arrive promptly. The watcher's
+    // echo of an atomic rename can arrive seconds — even minutes — later, and
+    // reloading for it would close a flashcard deck mid-review. For a file
+    // this page has written, ask whether the disk still holds exactly what the
+    // page holds; only a real difference reloads. Every other file decides
+    // synchronously, as before.
+    if (mayBeOwnWriteEcho(changedPath)) {
+      void isOwnWriteEcho(changedPath).then((own) => {
+        if (own) {
+          console.log('[mbr-live-reload] Skipping reload for a late echo of our own write:', changedPath);
+        } else if (this.isConnected) {
+          this._scheduleReload(changedPath);
+        }
+      });
+      return;
     }
+    this._scheduleReload(changedPath);
+  }
+
+  private _scheduleReload(changedPath: string) {
+    this._showReloadNotification(changedPath);
+
+    // Reload after a short delay to show notification
+    setTimeout(() => {
+      window.location.reload();
+    }, 500);
   }
 
   private _shouldReloadForFile(changedPath: string): boolean {

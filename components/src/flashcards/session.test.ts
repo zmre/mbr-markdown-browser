@@ -12,6 +12,7 @@ import {
   relativeTime,
   replay,
 } from './session.js'
+import { seededRng } from './test-fixtures.js'
 
 const scheduler = makeScheduler()
 const MINUTE = 60_000
@@ -76,15 +77,44 @@ describe('planSession', () => {
   const recent = replay(scheduler, parseHistory(['2026-10-18 08:00 - Good'])) // learning, due
   const future = replay(scheduler, parseHistory(['2026-10-19 08:00 - Easy'])) // not yet due
 
-  it('puts due cards first, least retrievable first, then new cards in order', () => {
-    const plan = planSession(scheduler, [null, recent, long, null, future], now)
-    expect(plan.queue).toEqual([2, 1, 0, 3])
-    expect([...plan.fresh]).toEqual([0, 3])
+  it('puts due cards first, least retrievable first, then the new cards', () => {
+    const plan = planSession(scheduler, [null, recent, long, null, future], now, seededRng(1))
+    expect(plan.queue.slice(0, 2)).toEqual([2, 1])
+    expect([...plan.queue.slice(2)].sort()).toEqual([0, 3])
+    expect([...plan.fresh].sort()).toEqual([0, 3])
     expect(plan.nextDue).toEqual(future!.due)
   })
 
+  it('shuffles new cards rather than keeping document order', () => {
+    const states = Array.from({ length: 12 }, () => null)
+    const documentOrder = states.map((_, i) => i)
+    const plans = [1, 2, 3, 4, 5].map((seed) => planSession(scheduler, states, now, seededRng(seed)).queue)
+    for (const queue of plans) expect([...queue].sort((a, b) => a - b)).toEqual(documentOrder)
+    // Not document order, and not a fixed permutation either: the first card varies.
+    expect(plans.some((queue) => queue.join() !== documentOrder.join())).toBe(true)
+    expect(new Set(plans.map((queue) => queue[0])).size).toBeGreaterThan(1)
+    // Seeded, so reproducible.
+    expect(planSession(scheduler, states, now, seededRng(3)).queue).toEqual(plans[2])
+  })
+
+  it('keeps due cards ahead of new ones, and breaks equal retrievability at random', () => {
+    // Two copies of one history: identical retrievability and due date.
+    const twin = replay(scheduler, parseHistory(['2026-01-01 08:00 - Easy']))
+    const states = [null, twin, null, twin, recent]
+    const firsts = new Set<number>()
+    for (let seed = 1; seed <= 20; seed++) {
+      const queue = planSession(scheduler, states, now, seededRng(seed)).queue
+      // Long-overdue twins are least retrievable, then `recent`, then the new cards.
+      expect([...queue.slice(0, 2)].sort()).toEqual([1, 3])
+      expect(queue[2]).toBe(4)
+      expect([...queue.slice(3)].sort()).toEqual([0, 2])
+      firsts.add(queue[0])
+    }
+    expect(firsts).toEqual(new Set([1, 3]))
+  })
+
   it('has an empty queue and a next due date when nothing is due', () => {
-    const plan = planSession(scheduler, [future], now)
+    const plan = planSession(scheduler, [future], now, seededRng(1))
     expect(plan.queue).toEqual([])
     expect(plan.nextDue).toEqual(future!.due)
   })

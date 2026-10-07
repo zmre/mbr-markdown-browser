@@ -21,6 +21,8 @@ function pressP(init: KeyboardEventInit = {}, target: EventTarget = document) {
 
 /** What the deck chunk's writer factory was handed, by the last open. */
 let services: unknown = null
+/** What the stub writer answers. */
+let writeReply: unknown = { ok: false, kind: 'other', message: 'stub' }
 
 /**
  * The one importer seam, answering per file: the real reading entry (cheap and
@@ -34,7 +36,7 @@ function stubChunks(log: string[] = []) {
     return Promise.resolve({
       makeReviewRecorder: (s: unknown) => {
         services = s
-        return () => Promise.resolve({ ok: false, kind: 'other', message: 'stub' })
+        return () => Promise.resolve(writeReply)
       },
     })
   }
@@ -42,6 +44,7 @@ function stubChunks(log: string[] = []) {
 
 beforeEach(() => {
   services = null
+  writeReply = { ok: false, kind: 'other', message: 'stub' }
   setFlashcardsChunkImporter(stubChunks())
   window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
 })
@@ -152,5 +155,48 @@ describe('<mbr-flashcards>', () => {
     await vi.waitFor(() => expect(trigger.isOpen).toBe(false))
     expect(document.querySelector('mbr-flashcard-deck')).toBeNull()
     warn.mockRestore()
+  })
+
+  it('draws the progress indicators at idle by default', async () => {
+    installDeckPage()
+    await mount()
+    await vi.waitFor(() => expect(document.querySelector('dt.mbr-fc-last-easy')).not.toBeNull())
+  })
+
+  it('skips the indicators, but not the summaries, when the option is off', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, flashcardsProgressIndicators: false }
+    installDeckPage()
+    await mount()
+    await vi.waitFor(() => expect(document.querySelectorAll('dd.mbr-fc-history summary')).toHaveLength(2))
+    expect(document.querySelector('[class*="mbr-fc-last-"]')).toBeNull()
+  })
+
+  it('hands the configured Concentric threshold to the deck', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, flashcardsConcentricThreshold: 0.85 }
+    installDeckPage()
+    await mount()
+    trigger.open()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    expect((document.querySelector('mbr-flashcard-deck') as unknown as { concentricThreshold: number }).concentricThreshold).toBe(0.85)
+  })
+
+  it('redraws the indicators after a session that wrote a review', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    writeReply = { ok: true, entry: '2026-10-20 10:00 - Good', line: 10, insertedAt: 10, insertedCount: 1 }
+    installDeckPage()
+    window.frontmatter = { markdown_source: 'deck.md' }
+    await mount()
+    await vi.waitFor(() => expect(document.querySelector('dt.mbr-fc-last-easy')).not.toBeNull())
+    trigger.open()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    const deck = document.querySelector('mbr-flashcard-deck') as unknown as {
+      recordReview: (t: unknown) => Promise<unknown>
+    }
+    // The deck appends the entry to the page itself; stand in for that here.
+    document.querySelector('dd[data-mbr-line="7"] ul')!.insertAdjacentHTML('beforeend', '<li>2026-12-20 10:00 - Again</li>')
+    await deck.recordReview({ line: 5, rating: 'again' })
+    trigger.close()
+    await vi.waitFor(() => expect(document.querySelector('dt.mbr-fc-last-again')).not.toBeNull())
+    window.frontmatter = undefined
   })
 })

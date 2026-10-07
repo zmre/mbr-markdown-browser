@@ -229,3 +229,87 @@ export function appendHistoryEntry(
   list.append(li)
   decorateHistory(dd)
 }
+
+/** One heading that has at least one card in its subtree. */
+export interface CardSection {
+  readonly heading: HTMLElement
+  readonly id: string
+  /** 1–6. */
+  readonly level: number
+  /** The heading's own text, without enhancer decoration. */
+  readonly text: string
+  /** Indices (into the `terms` given to {@link cardSections}) of every card under it. */
+  readonly cards: readonly number[]
+}
+
+/** Which headings hold which cards. */
+export interface CardSectionMap {
+  /** Headings with ≥ 1 card, in document order. */
+  readonly sections: readonly CardSection[]
+  /** Per card, the ids of every heading it sits under, outermost first. */
+  readonly cardAncestors: readonly (readonly string[])[]
+}
+
+/**
+ * Decoration other code appends to a heading, none of it the heading's text:
+ * the permalink (`mbr-heading-enhancer.ts`; its `#` is CSS-generated, but the
+ * element is still there), a review-note marker, and this module's own pie.
+ */
+const HEADING_DECORATION = '.mbr-heading-anchor, .mbr-review-marker, .mbr-fc-pie'
+
+/** A heading's text without {@link HEADING_DECORATION}, whitespace collapsed. */
+export function headingText(heading: Element): string {
+  const copy = heading.cloneNode(true) as Element
+  copy.querySelectorAll(HEADING_DECORATION).forEach((el) => el.remove())
+  return (copy.textContent ?? '').replace(/\s+/g, ' ').trim()
+}
+
+const SECTION_HEADINGS = 'h1[id], h2[id], h3[id], h4[id], h5[id], h6[id]'
+
+/**
+ * Map each card to the headings above it.
+ *
+ * One `querySelectorAll` over headings and terms together returns them in
+ * document order whatever the nesting, which matters because `---` wraps the
+ * page in `<section>`s: a card and the heading it belongs under are often not
+ * siblings. A stack of open headings (popped by any heading of the same or a
+ * higher level) gives each card its nearest heading plus that heading's
+ * ancestors. Headings inside a definition list (an answer's own markup) do not
+ * open a section. Headings without an id cannot be filtered on or linked to,
+ * and are skipped.
+ */
+export function cardSections(root: ParentNode, terms: readonly Element[]): CardSectionMap {
+  const termIndex = new Map(terms.map((term, i) => [term, i] as const))
+  const open: { heading: HTMLElement; level: number; cards: number[] }[] = []
+  const all: { heading: HTMLElement; level: number; cards: number[] }[] = []
+  const cardAncestors: string[][] = terms.map(() => [])
+
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>(`${SECTION_HEADINGS}, dt`))) {
+    if (el.tagName === 'DT') {
+      const index = termIndex.get(el)
+      if (index === undefined) continue
+      for (const entry of open) entry.cards.push(index)
+      cardAncestors[index] = open.map((entry) => entry.heading.id)
+      continue
+    }
+    if (el.closest('dl')) continue
+    const level = Number(el.tagName[1])
+    while (open.length > 0 && open[open.length - 1].level >= level) open.pop()
+    const entry = { heading: el, level, cards: [] as number[] }
+    open.push(entry)
+    all.push(entry)
+  }
+
+  return {
+    sections: all
+      .filter((entry) => entry.cards.length > 0)
+      .map((entry) => ({
+        heading: entry.heading,
+        id: entry.heading.id,
+        level: entry.level,
+        text: headingText(entry.heading),
+        cards: entry.cards,
+      })),
+    cardAncestors,
+  }
+}

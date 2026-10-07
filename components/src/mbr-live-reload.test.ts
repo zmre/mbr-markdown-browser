@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-live-reload.ts'
 import type { MbrLiveReloadElement } from './mbr-live-reload.ts'
 import { resetTaskToggleState, toggleTask } from './task-toggle.ts'
+import { setFlashcardsChunkImporter, type MbrFlashcardsElement } from './mbr-flashcards.ts'
+import { installDeckPage } from './flashcards/test-fixtures.ts'
 
 /**
  * Tests for <mbr-live-reload>, the server-mode element that watches
@@ -326,6 +328,56 @@ describe('MbrLiveReloadElement message handling', () => {
     resetTaskToggleState()
   })
 
+  it('skips a late echo of its own task write, but not a real edit after it', async () => {
+    // The watcher's echo of the atomic rename is at FSEvents' mercy: it has
+    // been measured arriving well after the self-write window closed.
+    resetTaskToggleState()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    let disk = '- [ ] a\n'
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).startsWith('/.mbr/raw/')) {
+        return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(disk) })
+      }
+      disk = '- [x] a\n'
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ line: 1, text: '- [x] a' }) })
+    }) as unknown as typeof fetch
+    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' })
+    await mount()
+    latestSocket().emitOpen()
+
+    vi.advanceTimersByTime(10_000)
+    await fileChanged('docs/guide.md')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(reload).not.toHaveBeenCalled()
+
+    disk = '- [x] a\nsomebody else\n'
+    await fileChanged('docs/guide.md')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(reload).toHaveBeenCalledTimes(1)
+    resetTaskToggleState()
+  })
+
+  it('reloads for a late event when the page has no trustworthy copy to compare', async () => {
+    // A 409 drops the cached source: with nothing to compare against, the safe
+    // answer is the old one.
+    resetTaskToggleState()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    globalThis.fetch = vi.fn().mockImplementation((url: string) =>
+      String(url).startsWith('/.mbr/raw/')
+        ? Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('- [ ] a\n') })
+        : Promise.resolve({ ok: false, status: 409 }),
+    ) as unknown as typeof fetch
+    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' })
+    await mount()
+    latestSocket().emitOpen()
+
+    vi.advanceTimersByTime(10_000)
+    await fileChanged('docs/guide.md')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(reload).toHaveBeenCalledTimes(1)
+    resetTaskToggleState()
+  })
+
   it('shows a notification before navigating away', async () => {
     const el = await mount()
     latestSocket().emitOpen()
@@ -453,6 +505,108 @@ describe('MbrLiveReloadElement message handling', () => {
 // ============================================================================
 // Reconnecting
 // ============================================================================
+
+describe('MbrLiveReloadElement and flashcard reviews', () => {
+  /**
+   * Regression: rating cards with editing on reloaded the page a moment later,
+   * dropping the reader out of the deck. Every review write registers its
+   * self-write window, but the watcher's echo of the atomic rename can arrive
+   * long after that window has closed (FSEvents coalesces and delays), and a
+   * late echo for the page's own file reloaded it.
+   *
+   * Driven end to end through the real pieces: the `<mbr-flashcards>` trigger,
+   * the real deck chunk and review writer (wired with this bundle's
+   * task-toggle state, as in production), and the real live-reload element.
+   * Only the server is fake — it keeps a `disk` the writes really change.
+   */
+  let disk: string[]
+  let trigger: MbrFlashcardsElement | null = null
+
+  /** A fake mbr server: `/.mbr/raw` serves `disk`, a review is spliced into it. */
+  function fakeServer() {
+    globalThis.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (String(url).startsWith('/.mbr/raw/')) {
+        return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(disk.join('\n')) })
+      }
+      const body = JSON.parse(String(init?.body)) as { line: number; rating: string; at: string }
+      const entry = `${body.at} - Good`
+      const insertedAt = body.line + 2
+      const inserted = [': ___Review History___', `  * ${entry}`]
+      disk.splice(insertedAt - 1, 0, ...inserted)
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ entry, line: insertedAt + 1, inserted_at: insertedAt, inserted }),
+      })
+    }) as unknown as typeof fetch
+  }
+
+  async function openDeck(): Promise<HTMLElement> {
+    trigger = document.createElement('mbr-flashcards')
+    document.body.append(trigger)
+    await vi.advanceTimersByTimeAsync(0)
+    trigger.open()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    const deck = document.querySelector('mbr-flashcard-deck') as HTMLElement & { updateComplete: Promise<boolean> }
+    await deck.updateComplete
+    return deck
+  }
+
+  async function rateCurrentCard(deck: HTMLElement & { updateComplete?: Promise<boolean> }) {
+    const press = (key: string) =>
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true }))
+    press(' ')
+    await deck.updateComplete
+    press('3')
+    await vi.advanceTimersByTimeAsync(0)
+    await deck.updateComplete
+  }
+
+  beforeEach(() => {
+    resetTaskToggleState()
+    setFlashcardsChunkImporter((file) =>
+      file === 'mbr-flashcards.min.js' ? import('./flashcards/index.ts') : import('./flashcards/reading.ts'),
+    )
+    installDeckPage()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    disk = Array.from({ length: 40 }, (_, i) => `source line ${i + 1}`)
+    fakeServer()
+  })
+
+  afterEach(() => {
+    trigger?.remove()
+    trigger = null
+    document.querySelectorAll('mbr-flashcard-deck').forEach((el) => el.remove())
+    document.body.className = ''
+    resetTaskToggleState()
+  })
+
+  it('does not reload for an echo of a Concentric rating that arrives after the window', async () => {
+    await mount()
+    latestSocket().emitOpen()
+    const deck = await openDeck()
+    expect(deck.querySelector<HTMLSelectElement>('.mbr-fc-bar select')!.value).toBe('concentric')
+
+    for (let i = 0; i < 3; i++) await rateCurrentCard(deck)
+    // Three reviews, each written to "disk" (two lines apiece).
+    expect(disk).toHaveLength(46)
+
+    // The handler's prompt broadcast: inside the window, as before.
+    await fileChanged('docs/guide.md')
+    // The watcher's echo, delivered late — the case that used to reload.
+    vi.advanceTimersByTime(5_000)
+    await fileChanged('docs/guide.md')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(reload).not.toHaveBeenCalled()
+    expect(document.querySelector('mbr-flashcard-deck')).toBe(deck)
+
+    // A genuine edit by someone else still reloads.
+    disk.push('edited elsewhere')
+    await fileChanged('docs/guide.md')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('MbrLiveReloadElement reconnection', () => {
   it('reconnects to the same endpoint after the server drops the connection', async () => {

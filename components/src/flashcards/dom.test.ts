@@ -2,16 +2,18 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   HISTORY_CLASS,
   appendHistoryEntry,
+  cardSections,
   decorateAllHistories,
   decorateHistory,
   deckCards,
   deckLists,
   hasDeck,
+  headingText,
   historyEntriesOf,
   isHistoryDefinition,
   shiftSourceLines,
 } from './dom.js'
-import { DECK_HTML, installDeckPage } from './test-fixtures.js'
+import { DECK_HTML, SECTIONED_DECK_HTML, installDeckPage } from './test-fixtures.js'
 import { DECK_CSS } from './styles.js'
 
 afterEach(() => {
@@ -169,5 +171,65 @@ describe('after a write', () => {
     appendHistoryEntry(card, '2026-10-20 10:00 - Good', 10, 10)
     expect(card.history!.querySelectorAll('li')).toHaveLength(3)
     expect(card.history!.querySelector('summary')!.textContent).toMatch(/^Reviewed 3× · last: Good/)
+  })
+})
+
+describe('cardSections', () => {
+  const map = () => {
+    const root = installDeckPage(SECTIONED_DECK_HTML)
+    return cardSections(
+      root,
+      deckCards(root).map((c) => c.term)
+    )
+  }
+
+  it('lists every heading with cards, in document order, across <section> wrappers', () => {
+    const { sections } = map()
+    expect(sections.map((s) => [s.id, s.level, s.cards])).toEqual([
+      ['deck', 1, [0, 1, 2, 3, 4]],
+      ['geo', 2, [0, 1, 2]],
+      ['rivers', 3, [2]],
+      ['math', 2, [3, 4]],
+    ])
+  })
+
+  it('gives each card its nearest heading and that heading’s ancestors', () => {
+    expect(map().cardAncestors).toEqual([
+      ['deck', 'geo'],
+      ['deck', 'geo'],
+      ['deck', 'geo', 'rivers'],
+      ['deck', 'math'],
+      ['deck', 'math'],
+    ])
+  })
+
+  it('reads heading text without enhancer decoration', () => {
+    const { sections } = map()
+    expect(sections.map((s) => s.text)).toEqual(['Deck', 'Geography', 'Rivers', 'Math'])
+    const h = document.createElement('h2')
+    h.innerHTML = 'A <code>b</code><span class="mbr-fc-pie" role="img" aria-label="x"></span>'
+    expect(headingText(h)).toBe('A b')
+  })
+
+  it('ignores headings inside an answer and headings without an id', () => {
+    const root = installDeckPage(
+      '<main id="wrapper"><h2>No id</h2><dl><dt>Q1</dt><dd><h3 id="inner">Inner</h3>A</dd><dt>Q2</dt><dd>B</dd></dl></main>'
+    )
+    const result = cardSections(
+      root,
+      deckCards(root).map((c) => c.term)
+    )
+    expect(result.sections).toEqual([])
+    expect(result.cardAncestors).toEqual([[], []])
+  })
+
+  it('ignores terms that are not cards', () => {
+    const root = installDeckPage(SECTIONED_DECK_HTML)
+    const cards = deckCards(root).slice(0, 2)
+    const result = cardSections(
+      root,
+      cards.map((c) => c.term)
+    )
+    expect(result.sections.map((s) => s.id)).toEqual(['deck', 'geo'])
   })
 })
