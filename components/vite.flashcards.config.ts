@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 
 // Separate build for the flashcard review overlay (`mbr-flashcards.min.js`).
 //
-// The main bundle (vite.config.ts) uses `inlineDynamicImports`, which would pull
+// The main bundle (vite.config.ts) uses `codeSplitting: false`, which would pull
 // the overlay and ts-fsrs into every page load. Instead `<mbr-flashcards>` — a
 // nav button and the `p` key, nothing more — loads this chunk the first time a
 // deck is opened. (The reading view's history summaries are a third, much
@@ -42,14 +42,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/flashcards/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/flashcards/index.ts'),
       fileName: 'mbr-flashcards.min',
       name: 'MBRFlashcards',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

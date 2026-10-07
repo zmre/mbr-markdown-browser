@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 // the folder picker element and the note-type / folder derivation.
 //
 // Every page pays for the main bundle (vite.config.ts uses
-// `inlineDynamicImports`), and none of this is needed before the search modal
+// `codeSplitting: false`), and none of this is needed before the search modal
 // opens, so `<mbr-search>` imports the chunk on first open instead.
 //
 // The chunk must not import stateful main-bundle modules (`shared.ts` fetches
@@ -39,14 +39,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/search-extras/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/search-extras/index.ts'),
       fileName: 'mbr-search-extras.min',
       name: 'MBRSearchExtras',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

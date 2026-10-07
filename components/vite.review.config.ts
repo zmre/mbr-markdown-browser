@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 
 // Separate build for the review-notes panel chunk (`mbr-review.min.js`).
 //
-// The main bundle (vite.config.ts) uses `inlineDynamicImports`, which would pull
+// The main bundle (vite.config.ts) uses `codeSplitting: false`, which would pull
 // the panel and the note form into every page load. Instead `<mbr-review>` — a
 // trigger, the in-document markers and the keyboard shortcuts, all small — loads
 // this chunk the first time a note is written or the list is opened.
@@ -44,14 +44,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/review/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/review/index.ts'),
       fileName: 'mbr-review.min',
       name: 'MBRReview',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },
