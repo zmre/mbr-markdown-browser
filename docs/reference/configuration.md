@@ -151,6 +151,8 @@ assert a fact about the command line that was never typed.
 | `review_enabled` | bool | `true` | Emit `data-mbr-line` source lines on block elements (server/GUI only). See [Review Settings](#review-settings). |
 | `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight TK/TODO/FIXME/XXX anywhere in a line |
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag work as incomplete |
+| `flashcards_concentric_threshold` | number | `0.7` | Share of first answers that must be Good/Easy before the flashcard deck's Concentric stack grows; must be greater than 0 and at most 1. See [Flashcard Settings](#flashcard-settings). |
+| `flashcards_progress_indicators` | bool | `true` | Show review-progress borders and heading pies on flashcard notes. See [Flashcard Settings](#flashcard-settings). |
 
 ### Navigation Settings
 
@@ -647,6 +649,58 @@ link_tracking = false
 ```
 
 When disabled, the `links.json` endpoint returns 404, no link files are generated during builds, and the info panel's link sections and mini link graph don't appear.
+
+### Flashcard Settings
+
+Two options tune [flashcard notes](../markdown/flashcards.md) (`type:
+flashcard`). Both apply in every mode, static builds included: Concentric runs
+session-only where nothing can be written, and the progress indicators read the
+review history already in the page.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `flashcards_concentric_threshold` | number | `0.7` | Growth bar for [Concentric (FSRS) mode](../markdown/flashcards.md#concentric--fsrs) |
+| `flashcards_progress_indicators` | bool | `true` | Reading-view [progress indicators](../markdown/flashcards.md#progress-in-the-page) |
+
+**Concentric threshold (`flashcards_concentric_threshold`):** at the end of each
+pass through the stack, Concentric folds in two more cards if at least this
+share of the cards rated in the pass were rated Good or Easy the first time they
+came up. The bar is applied to whole cards, so it moves in steps: with six
+cards, `0.7` needs five of six. `1.0` demands a perfect pass; a low value grows
+the stack almost every pass. Values outside `0 < t ≤ 1` (including `0`) stop
+mbr at startup with a configuration error. Exposed to the frontend as
+`window.__MBR_CONFIG__.flashcardsConcentricThreshold`; environment variable
+`MBR_FLASHCARDS_CONCENTRIC_THRESHOLD`.
+
+**Progress indicators (`flashcards_progress_indicators`):** on a flashcard note
+with any review history, each reviewed question gets a left border in its
+latest rating's colour and each heading with cards under it gets a small pie of
+its cards' latest ratings. Set to `false` to draw neither; the collapsed
+*Reviewed 4× · last: Easy, Oct 9* history lines are unaffected. Exposed as
+`window.__MBR_CONFIG__.flashcardsProgressIndicators`; environment variable
+`MBR_FLASHCARDS_PROGRESS_INDICATORS`.
+
+The four rating colours are CSS custom properties in `theme.css`, shared by the
+deck's rating buttons and these indicators, so `.mbr/user.css` can recolour
+both at once:
+
+```css
+:root {
+  --mbr-fc-again: #c62828;
+  --mbr-fc-hard: #b7791f;
+  --mbr-fc-good: var(--pico-ins-color);
+  --mbr-fc-easy: var(--pico-primary);
+  --mbr-fc-unreviewed: #9ca3af; /* the pies' grey slice */
+}
+```
+
+```toml
+# .mbr/config.toml
+flashcards_concentric_threshold = 0.8
+flashcards_progress_indicators = true
+```
+
+There are no CLI flags for either.
 
 ### Review Settings
 
@@ -1207,6 +1261,10 @@ MBR_MEDIA_CACHE_SIZE=134217728 # 128MB of video/PDF covers, chapters, captions
 
 # Navigation
 MBR_GRAPH_DEPTH=3
+
+# Flashcards
+MBR_FLASHCARDS_CONCENTRIC_THRESHOLD=0.8
+MBR_FLASHCARDS_PROGRESS_INDICATORS=false
 
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true

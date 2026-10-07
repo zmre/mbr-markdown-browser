@@ -129,6 +129,11 @@ pub enum ConfigError {
     #[error("Invalid graph_depth: {value}. Must be between 1 and 5")]
     InvalidGraphDepth { value: usize },
 
+    #[error(
+        "Invalid flashcards_concentric_threshold: {value}. Must be greater than 0 and at most 1"
+    )]
+    InvalidFlashcardsConcentricThreshold { value: f64 },
+
     #[error("Invalid build_concurrency: {value}. Must be greater than 0")]
     InvalidBuildConcurrency { value: usize },
 

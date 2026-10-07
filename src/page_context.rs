@@ -344,6 +344,14 @@ pub struct MarkdownContextOptions<'a> {
     pub sidebar_style: &'a str,
     pub sidebar_max_items: usize,
     pub graph_depth: usize,
+    /// Concentric-mode growth threshold, read by the flashcard deck as
+    /// `__MBR_CONFIG__.flashcardsConcentricThreshold`. Markdown pages only:
+    /// the deck exists only on a `type: flashcard` note, so the chrome-only
+    /// pages leave it to the template's default.
+    pub flashcards_concentric_threshold: f64,
+    /// Whether the reading view draws flashcard progress indicators
+    /// (`__MBR_CONFIG__.flashcardsProgressIndicators`). Markdown pages only.
+    pub flashcards_progress_indicators: bool,
     /// Whether the task browser is available on this page. Markdown pages do
     /// not go through [`insert_page_chrome`], so this is the sibling of
     /// [`PageChrome::tasks_enabled`] for them. Always `false` in static builds.
@@ -427,6 +435,14 @@ pub fn markdown_extra_context(
         json!(opts.sidebar_max_items),
     );
     ctx.insert("graph_depth".to_string(), json!(opts.graph_depth));
+    ctx.insert(
+        "flashcards_concentric_threshold".to_string(),
+        json!(opts.flashcards_concentric_threshold),
+    );
+    ctx.insert(
+        "flashcards_progress_indicators".to_string(),
+        json!(opts.flashcards_progress_indicators),
+    );
     ctx.insert("tasks_enabled".to_string(), json!(opts.tasks_enabled));
     ctx.insert("review_enabled".to_string(), json!(opts.review_enabled));
     ctx.insert(
@@ -767,6 +783,8 @@ mod tests {
             sidebar_style: "auto",
             sidebar_max_items: 10,
             graph_depth: 2,
+            flashcards_concentric_threshold: 0.7,
+            flashcards_progress_indicators: true,
             tasks_enabled: true,
             review_enabled: false,
             tasks_default_include: IncludeFilter::Tasks,
@@ -812,6 +830,14 @@ mod tests {
 
         assert_eq!(ctx.get("has_h1"), Some(&json!(true)));
         assert_eq!(ctx.get("tasks_enabled"), Some(&json!(true)));
+        assert_eq!(
+            ctx.get("flashcards_concentric_threshold"),
+            Some(&json!(0.7))
+        );
+        assert_eq!(
+            ctx.get("flashcards_progress_indicators"),
+            Some(&json!(true))
+        );
         assert_eq!(ctx.get("word_count"), Some(&json!(401)));
         // 401 words at 200 wpm rounds up to 3 minutes
         assert_eq!(ctx.get("reading_time_minutes"), Some(&json!(3)));

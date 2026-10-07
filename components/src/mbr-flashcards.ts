@@ -28,7 +28,7 @@
 import { LitElement, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { getMbrAssetBase, scheduleIdleTask, waitForDom } from './dynamic-loader.js'
-import { isEditEnabled } from './shared.js'
+import { getFlashcardsConcentricThreshold, isEditEnabled, isFlashcardsProgressEnabled } from './shared.js'
 import { isPlayKey } from './mbr-keys.js'
 import { MbrSlidesElement } from './mbr-slides.js'
 import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
@@ -52,12 +52,14 @@ declare global {
 interface ChunkModule {
   makeReviewRecorder?: (services: ReviewServices) => ReviewRecorder
   decorateAllHistories?: (root: ParentNode) => void
+  decorateProgress?: (root: ParentNode) => void
 }
 
 /** The properties the trigger sets on the chunk's deck element. */
 interface DeckElement extends HTMLElement {
   root: ParentNode
   recordReview: ReviewRecorder | null
+  concentricThreshold: number
 }
 
 /** The page's rendered markdown (`main#wrapper`) — where the deck's lists live. */
@@ -79,18 +81,32 @@ function isDeckPage(): boolean {
 let importChunk = (file: string): Promise<ChunkModule> =>
   import(/* @vite-ignore */ new URL(getMbrAssetBase() + 'components/' + file, document.baseURI).href)
 
-/** Shared once-per-page load of the deck chunk; `null` when it failed. */
+/** Shared once-per-page loads of the two chunks; `null` when one failed. */
 let deckChunk: Promise<ChunkModule | null> | null = null
+let readingChunk: Promise<ChunkModule | null> | null = null
 
 /** Test hook: replace the chunk importer; `file` names the chunk wanted. */
 export function setFlashcardsChunkImporter(importer: (file: string) => Promise<unknown>): void {
   importChunk = importer as typeof importChunk
-  deckChunk = null
+  deckChunk = readingChunk = null
 }
 
 function chunkFailed(err: unknown): null {
   console.warn('mbr-flashcards:', err)
   return null
+}
+
+/**
+ * Run the reading chunk over the page: the history summaries (first load only;
+ * after that the deck keeps them current) and, unless
+ * `flashcards_progress_indicators` is off, the progress indicators.
+ */
+function decorateReading(histories: boolean): void {
+  readingChunk ??= importChunk('mbr-flashcards-reading.min.js').catch(chunkFailed)
+  void readingChunk.then((m) => {
+    if (histories) m?.decorateAllHistories?.(deckRoot())
+    if (isFlashcardsProgressEnabled()) m?.decorateProgress?.(deckRoot())
+  })
 }
 
 /** The writer's main-bundle state, or `null` when reviews cannot be written. */
@@ -115,6 +131,8 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
   // Not reactive: render() never reads it.
   private _isOpen = false
   private _deck: DeckElement | null = null
+  /** Set when the open deck wrote a review: the indicators need redrawing. */
+  private _wrote = false
 
   override connectedCallback(): void {
     super.connectedCallback()
@@ -122,11 +140,7 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     void waitForDom().then(() => {
       if (!this.isConnected || !isDeckPage()) return
       this._isDeck = true
-      scheduleIdleTask(() => {
-        importChunk('mbr-flashcards-reading.min.js')
-          .then((m) => m.decorateAllHistories?.(deckRoot()))
-          .catch(chunkFailed)
-      })
+      scheduleIdleTask(() => decorateReading(true))
     })
   }
 
@@ -149,6 +163,8 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     this._isOpen = false
     this._deck?.remove()
     this._deck = null
+    if (this._wrote) decorateReading(false)
+    this._wrote = false
   }
 
   private _handleKeydown = (e: KeyboardEvent): void => {
@@ -178,7 +194,15 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     const deck = document.createElement('mbr-flashcard-deck') as DeckElement
     deck.root = deckRoot()
     // No writer means no spaced repetition: In order / Random only.
-    deck.recordReview = services && chunk.makeReviewRecorder ? chunk.makeReviewRecorder(services) : null
+    const record = services && chunk.makeReviewRecorder ? chunk.makeReviewRecorder(services) : null
+    deck.recordReview =
+      record &&
+      (async (target) => {
+        const outcome = await record(target)
+        if (outcome.ok) this._wrote = true
+        return outcome
+      })
+    deck.concentricThreshold = getFlashcardsConcentricThreshold()
     deck.addEventListener('mbr-flashcards-close', () => this.close())
     this._deck = deck
     document.body.append(deck)

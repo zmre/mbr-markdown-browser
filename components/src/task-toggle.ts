@@ -47,7 +47,7 @@ const TASK_ENDPOINT = '/.mbr/task'
 const RAW_PREFIX = '/.mbr/raw/'
 
 /**
- * How long a write keeps reloads for that file suppressed.
+ * How long a write keeps reloads for that file suppressed outright.
  *
  * One write produces **several** reload-worthy events, not one: the handler
  * broadcasts explicitly before it responds, and then the watcher sees the
@@ -57,10 +57,16 @@ const RAW_PREFIX = '/.mbr/raw/'
  * watcher's echo reload the page anyway, which is the failure this window
  * exists to prevent.
  *
- * The window is short because the only thing it costs is a genuine external
- * edit landing on the same file within it, which then waits for the next
- * navigation to show up. A second and a half is two orders of magnitude more
- * than the observed echo and still short enough to be invisible.
+ * **The window is not enough on its own.** The handler's broadcast is prompt,
+ * but the watcher's echo is whatever FSEvents decides: measured on an idle
+ * macOS `/tmp`, one echo came ~950ms after its request, and a run of later
+ * writes produced *no* echo until one coalesced event arrived more than two
+ * minutes afterwards. An echo that lands outside the window used to reload the
+ * page — closing an open flashcard deck mid-review — so a late event for a
+ * file this page wrote is settled by content instead: see
+ * {@link isOwnWriteEcho}. The window stays because it is free (no request) and
+ * because it covers the moment a write is in flight, before the cache holds
+ * the new text.
  */
 const SELF_WRITE_TTL_MS = 1500
 
@@ -77,6 +83,15 @@ const pendingReads = new Map<string, Promise<SourceRead>>()
 
 /** Repo-relative paths this page wrote recently, keyed to their timestamps. */
 const selfWrites = new Map<string, number>()
+
+/**
+ * Every repo-relative path this page has written, for the page's lifetime.
+ *
+ * The window in {@link selfWrites} covers the events a write produces
+ * *promptly*; this set is what lets {@link isOwnWriteEcho} recognise the ones
+ * that arrive late.
+ */
+const writtenPaths = new Set<string>()
 
 /** Normalizes a repo-relative path for comparison against a watcher event. */
 function normalizePath(path: string): string {
@@ -117,7 +132,8 @@ export function wasSelfWrite(relativePath: string): boolean {
  * Exported for every other in-place line write (`flashcards/review-writer.ts`,
  * which receives it from `<mbr-flashcards>` as a service): there
  * is one suppression window per page, and a second registry would be invisible
- * to `<mbr-live-reload>`, which consults only {@link wasSelfWrite}.
+ * to `<mbr-live-reload>`, which consults only {@link wasSelfWrite} and
+ * {@link isOwnWriteEcho}.
  */
 export function noteSelfWrite(path: string): void {
   const now = Date.now()
@@ -126,6 +142,49 @@ export function noteSelfWrite(path: string): void {
     if (now - at >= SELF_WRITE_TTL_MS) selfWrites.delete(written)
   }
   selfWrites.set(key, now)
+  writtenPaths.add(key)
+}
+
+/**
+ * True when a reload for `relativePath` might be an echo of this page's own
+ * writes — it wrote that file at some point — so {@link isOwnWriteEcho} is
+ * worth a request. Synchronous so that every other event decides at once.
+ */
+export function mayBeOwnWriteEcho(relativePath: string): boolean {
+  return writtenPaths.has(normalizePath(relativePath))
+}
+
+/**
+ * True when the file on disk is exactly what this page already holds and has
+ * drawn: the event is an echo of its own writes, however late it arrived.
+ *
+ * The comparison is against the source-line cache, which every write keeps in
+ * step from the server's answer (`toggleTask` patches the line, the flashcard
+ * writer splices in the inserted ones). Anything that makes the cache
+ * untrustworthy — a 409, an unreadable response — drops it, and with no cache
+ * this answers false and the page reloads as it always did. So does a failed
+ * read (a 401 on a token-protected server, the server gone): reloading is the
+ * safe default, because a page that silently stops following real external
+ * edits is the worse failure.
+ *
+ * Reads the file fresh, bypassing the cache and its single-flight, since the
+ * whole question is whether the cache is still current.
+ */
+export async function isOwnWriteEcho(relativePath: string): Promise<boolean> {
+  const key = normalizePath(relativePath)
+  if (!writtenPaths.has(key) || !lineCache.has(key)) return false
+  let disk: SourceRead
+  try {
+    disk = await fetchSourceLines(key)
+  } catch {
+    return false
+  }
+  if (!disk.ok) return false
+  // A write that started while the file was being read is still in flight, and
+  // its line is not in the cache yet: the window is the authority for it.
+  if (wasSelfWrite(key)) return true
+  const held = lineCache.get(key)
+  return held !== undefined && held.length === disk.lines.length && held.every((line, i) => line === disk.lines[i])
 }
 
 /** Test hook: forget every cached source line and pending suppression. */
@@ -133,6 +192,7 @@ export function resetTaskToggleState(): void {
   lineCache.clear()
   pendingReads.clear()
   selfWrites.clear()
+  writtenPaths.clear()
 }
 
 /** `/.mbr/raw/...` URL for a repo-relative path, each segment encoded. */

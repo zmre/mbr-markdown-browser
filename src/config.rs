@@ -116,6 +116,18 @@ fn default_graph_depth() -> usize {
     2
 }
 
+/// Default for [`Config::flashcards_concentric_threshold`]: with the default
+/// six-card stack, 70% means five of six first answers rated Good or Easy.
+const DEFAULT_FLASHCARDS_CONCENTRIC_THRESHOLD: f64 = 0.7;
+
+fn default_flashcards_concentric_threshold() -> f64 {
+    DEFAULT_FLASHCARDS_CONCENTRIC_THRESHOLD
+}
+
+fn default_flashcards_progress_indicators() -> bool {
+    true
+}
+
 /// Whether the native menu bar is shown in the window.
 ///
 /// Only Linux ever consults this. macOS puts the menu in the system-wide bar
@@ -649,6 +661,16 @@ pub struct Config {
     /// Default: 2.
     #[serde(default = "default_graph_depth")]
     pub graph_depth: usize,
+    /// Share of a pass's first answers that must be Good or Easy before the
+    /// flashcard deck's Concentric mode folds two more cards into the stack.
+    /// Range: greater than 0, at most 1. Default: 0.7.
+    #[serde(default = "default_flashcards_concentric_threshold")]
+    pub flashcards_concentric_threshold: f64,
+    /// Whether flashcard notes show review-progress indicators in the reading
+    /// view (a rating-coloured border on reviewed questions, a pie per heading).
+    /// Default: true.
+    #[serde(default = "default_flashcards_progress_indicators")]
+    pub flashcards_progress_indicators: bool,
     /// Whether the GUI window shows the native menu bar. `"auto"` (default)
     /// follows the platform convention — hidden on Linux, shown on macOS and
     /// Windows; `"always"` and `"never"` pin it.
@@ -856,6 +878,8 @@ impl Default for Config {
             sidebar_style: default_sidebar_style(),
             sidebar_max_items: default_sidebar_max_items(),
             graph_depth: default_graph_depth(),
+            flashcards_concentric_threshold: default_flashcards_concentric_threshold(),
+            flashcards_progress_indicators: default_flashcards_progress_indicators(),
             gui_menu_bar: default_gui_menu_bar(),
             title_prefix: String::new(),
             title_suffix: String::new(),
@@ -1147,6 +1171,7 @@ impl Config {
     /// - `port`: Must be 1-65535 (port 0 means "auto-assign", which isn't useful for display)
     /// - `sidebar_max_items`: Must be > 0
     /// - `graph_depth`: Must be between 1 and 5
+    /// - `flashcards_concentric_threshold`: Must be in (0, 1]
     /// - `build_concurrency`: If set, must be > 0
     /// - `static_folder`: Must stay inside `root_dir`, or land under a directory
     ///   at most [`MAX_STATIC_FOLDER_ASCENT`] levels above it (see
@@ -1174,6 +1199,16 @@ impl Config {
         if !(1..=5).contains(&self.graph_depth) {
             return Err(ConfigError::InvalidGraphDepth {
                 value: self.graph_depth,
+            });
+        }
+
+        // 0 (or less) would grow the stack after every pass whatever the
+        // answers; above 1 it could never grow. NaN fails the range check too.
+        if !(self.flashcards_concentric_threshold > 0.0
+            && self.flashcards_concentric_threshold <= 1.0)
+        {
+            return Err(ConfigError::InvalidFlashcardsConcentricThreshold {
+                value: self.flashcards_concentric_threshold,
             });
         }
 
@@ -1851,6 +1886,81 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_default_flashcards_options() {
+        let config = Config::default();
+        assert!((config.flashcards_concentric_threshold - 0.7).abs() < f64::EPSILON);
+        assert!(config.flashcards_progress_indicators);
+    }
+
+    #[test]
+    fn test_validate_flashcards_concentric_threshold_bounds() {
+        for bad in [0.0, -0.5, 1.01, f64::NAN, f64::INFINITY] {
+            let config = Config {
+                flashcards_concentric_threshold: bad,
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(ConfigError::InvalidFlashcardsConcentricThreshold { .. })
+                ),
+                "{bad} must be rejected"
+            );
+        }
+        for good in [0.01, 0.5, 1.0] {
+            let config = Config {
+                flashcards_concentric_threshold: good,
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok(), "{good} must be accepted");
+        }
+    }
+
+    #[test]
+    fn test_config_read_flashcards_options_from_toml() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "flashcards_concentric_threshold = 0.85\nflashcards_progress_indicators = false\n",
+        ));
+
+        let config = Config::read(repo.path()).expect("toml must load");
+
+        assert!((config.flashcards_concentric_threshold - 0.85).abs() < f64::EPSILON);
+        assert!(!config.flashcards_progress_indicators);
+    }
+
+    #[test]
+    fn test_config_read_flashcards_options_from_env() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("flashcards_concentric_threshold = 0.9\n"));
+        let _env = EnvVars::set(&[
+            ("MBR_FLASHCARDS_CONCENTRIC_THRESHOLD", "0.6"),
+            ("MBR_FLASHCARDS_PROGRESS_INDICATORS", "false"),
+        ]);
+
+        let config = Config::read(repo.path()).expect("env must load");
+
+        assert!((config.flashcards_concentric_threshold - 0.6).abs() < f64::EPSILON);
+        assert!(!config.flashcards_progress_indicators);
+    }
+
+    #[test]
+    fn test_config_read_rejects_out_of_range_flashcards_threshold() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("flashcards_concentric_threshold = 1.5\n"));
+
+        let err = Config::read(repo.path()).expect_err("1.5 must abort loading");
+
+        assert!(
+            matches!(
+                err,
+                crate::MbrError::Config(ConfigError::InvalidFlashcardsConcentricThreshold { .. })
+            ),
+            "got: {err:?}"
+        );
     }
 
     #[test]

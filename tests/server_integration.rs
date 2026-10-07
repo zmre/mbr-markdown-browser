@@ -42,6 +42,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         sidebar_style: "panel".to_string(),
         sidebar_max_items: 100,
         graph_depth: 2,
+        flashcards_concentric_threshold: 0.7,
+        flashcards_progress_indicators: true,
         title_prefix: String::new(),
         title_suffix: String::new(),
         mark_incomplete: true,
@@ -241,6 +243,28 @@ async fn test_head_config_includes_graph_depth() {
     .await;
     let html = server.get_text("/readme/").await;
     assert_html_contains(&html, "graphDepth: 4");
+}
+
+/// Both flashcard options reach the deck and the reading chunk only through
+/// `__MBR_CONFIG__`; the trigger reads them there and hands them on.
+#[tokio::test]
+async fn test_head_config_includes_flashcard_options() {
+    let repo = TestRepo::new();
+    repo.create_markdown("deck.md", "---\ntype: flashcard\n---\n# Deck\n\nQ\n: A\n");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/deck/").await;
+    assert_html_contains(&html, "flashcardsConcentricThreshold: 0.7,");
+    assert_html_contains(&html, "flashcardsProgressIndicators: true,");
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.flashcards_concentric_threshold = 0.85;
+        c.flashcards_progress_indicators = false;
+    })
+    .await;
+    let html = server.get_text("/deck/").await;
+    assert_html_contains(&html, "flashcardsConcentricThreshold: 0.85,");
+    assert_html_contains(&html, "flashcardsProgressIndicators: false,");
 }
 
 /// The task panel's Show default is a per-repo config option, and the only way
