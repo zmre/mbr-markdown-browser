@@ -148,9 +148,10 @@ rfd = { version = "0.17", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 muda = { version = "0.21", features = ["gtk3"], optional = true }
 # `external_open`: gio's AppInfo::launch_default_for_uri is the desktop-portal
-# aware equivalent of xdg-open without the process spawn. Already in the tree
-# via gtk/webkit2gtk at this exact version, so this adds no crate.
-gio = { version = "0.21", optional = true }
+# aware equivalent of xdg-open without the process spawn. Pinned to the gio the
+# GTK stack (gtk/webkit2gtk under tao/wry/muda) already uses, so this adds no
+# crate; a newer gio would link a second glib. Move it only with that stack.
+gio = { version = "0.18", optional = true }
 # `browser`: the menu bar is a `GtkMenuBar` inside the window on Linux, so
 # hiding it (and making the hide survive a later `show_all()`) needs `WidgetExt`.
 # Same situation as gio above — gtk 0.18.2 is already in the tree via
