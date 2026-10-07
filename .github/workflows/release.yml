@@ -920,6 +920,11 @@ jobs:
       # qualified name; style and audit come first here, so the tap is trusted
       # explicitly. Guarded so an older runner image without the command still
       # works.
+      #
+      # `brew style --cask zmre/mbr/mbr`, not `brew style zmre/mbr`: the tap is
+      # the whole repository, and the tap-wide form lints every script and
+      # workflow in it with Homebrew's rules, failing on files the cask does
+      # not depend on.
       - name: Verify the cask with Homebrew
         if: ${{ steps.update.outputs.changed == 'true' }}
         env:
@@ -931,7 +936,7 @@ jobs:
           if brew help trust > /dev/null 2>&1; then
             brew trust --tap zmre/mbr
           fi
-          brew style zmre/mbr
+          brew style --cask zmre/mbr/mbr
           brew audit --cask --online zmre/mbr/mbr
           brew install --cask zmre/mbr/mbr
 

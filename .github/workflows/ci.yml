@@ -545,6 +545,11 @@ jobs:
       # load casks from an untrusted third-party tap; guarded for older images.
       # `--online` checks the URL and sha256 against the published release, so
       # a hand edit with a wrong checksum fails here rather than for users.
+      #
+      # `brew style` is scoped to the cask with `--cask zmre/mbr/mbr`. Given the
+      # tap name instead, it lints every file in the tap, which here is the
+      # whole repository: shfmt over scripts/ and actionlint over workflows,
+      # with Homebrew's style rules rather than this project's.
       - name: brew style and audit
         if: steps.changes.outputs.changed == 'true'
         env:
@@ -556,7 +561,7 @@ jobs:
           if brew help trust > /dev/null 2>&1; then
             brew trust --tap zmre/mbr
           fi
-          brew style zmre/mbr
+          brew style --cask zmre/mbr/mbr
           brew audit --cask --online zmre/mbr/mbr
 
   # Guard against Dependabot (or manual) bumps of components/ dependencies that
