@@ -6,13 +6,20 @@
  * history into its one-line summary on the reading view, the lazy chunk to
  * replay it through FSRS.
  *
- * # Timestamps are local wall-clock time
+ * # Timestamps are the reviewer's local wall-clock time
  *
- * The server stamps entries with its local time and no offset (the same clock
- * as a task's `@done(...)`), and they are read back as **the browser's** local
- * time. Reviewing in another time zone can therefore shift an entry by a few
- * hours relative to the others — harmless at FSRS's day-scale intervals, and
- * the price of history lines a human can read at a glance.
+ * An entry carries no offset (so it reads well as plain text), and it is
+ * replayed here as **the browser's** local time. The writer therefore stamps it
+ * with that same clock: the deck sends its own local time as `at`
+ * (`review-writer.ts`, formatted by {@link formatEntryTime}) and the server only
+ * validates it and writes it verbatim. A server stamp would be wrong whenever
+ * the server runs in another time zone — every entry hours away from where the
+ * replay puts "now", which breaks FSRS's 1-minute/10-minute learning steps
+ * outright, not just at the margins.
+ *
+ * What remains is the reviewer moving: entries written in one zone and replayed
+ * in another shift together by the difference. That can move a day boundary
+ * slightly, but the history stays consistent with itself.
  */
 
 /** The four self-ratings, in button order. */

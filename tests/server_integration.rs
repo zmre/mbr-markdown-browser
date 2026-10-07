@@ -9030,7 +9030,16 @@ const DECK_SOURCE: &str = concat!(
 fn review_body(line: u32, expected: &str, rating: &str) -> serde_json::Value {
     serde_json::json!({
         "path": "deck.md", "line": line, "expected": expected, "rating": rating,
+        "at": reviewer_clock(0),
     })
+}
+
+/// The wall-clock time, as the deck sends it, of a reviewer `offset_hours`
+/// east of UTC.
+fn reviewer_clock(offset_hours: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::hours(offset_hours))
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
 }
 
 /// Every `data-mbr-line` on a `<dt>` in `html`, in document order.
@@ -9080,18 +9089,17 @@ async fn test_flashcard_review_round_trip_from_rendered_dt_lines() {
     let lines = dt_lines(&html);
     assert_eq!(lines, vec![5, 8], "the terms' file lines: {html}");
 
-    // First review of the first card creates its history definition.
-    let resp = edit_post(
-        &server,
-        "/.mbr/flashcard-review",
-        review_body(lines[0], "Capital of France?", "again"),
-    )
-    .await;
+    // First review of the first card creates its history definition. The
+    // entry is stamped with the *reviewer's* clock — here UTC+13, which is
+    // nobody's server time zone in CI — not the server's.
+    let reviewer_at = reviewer_clock(13);
+    let mut body = review_body(lines[0], "Capital of France?", "again");
+    body["at"] = serde_json::json!(reviewer_at);
+    let resp = edit_post(&server, "/.mbr/flashcard-review", body).await;
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.expect("JSON");
     let entry = json["entry"].as_str().expect("entry").to_string();
-    assert!(entry.ends_with(" - Again"), "{entry}");
-    assert_eq!(entry.len(), "2026-10-06 13:45 - Again".len(), "{entry}");
+    assert_eq!(entry, format!("{reviewer_at} - Again"));
     assert_eq!(json["inserted_at"], 7);
     assert_eq!(json["line"], 8);
     assert_eq!(
@@ -9174,6 +9182,55 @@ async fn test_no_review_and_no_edit_number_nothing() {
     assert_html_contains(&html, "<dt tabindex=\"0\">Capital of France?</dt>");
 }
 
+/// The entry is the reviewer's own wall-clock time, so the server checks it
+/// rather than trusting it: the exact entry format, and no further from the
+/// server's UTC clock than a real time zone can put it. Anything else is 422 and
+/// nothing is written.
+#[tokio::test]
+async fn test_flashcard_review_validates_the_reviewers_clock() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let missing = serde_json::json!({
+        "path": "deck.md", "line": 5, "expected": "Capital of France?", "rating": "good",
+    });
+    let mut bodies = vec![missing];
+    for at in [
+        serde_json::json!(reviewer_clock(30)),
+        serde_json::json!(reviewer_clock(-30)),
+        serde_json::json!("2026-10-06T13:45"),
+        serde_json::json!("2026-10-06 13:45:00"),
+        serde_json::json!("yesterday"),
+        serde_json::json!(1_759_000_000),
+        serde_json::Value::Null,
+    ] {
+        let mut body = review_body(5, "Capital of France?", "good");
+        body["at"] = at;
+        bodies.push(body);
+    }
+    for body in bodies {
+        let resp = edit_post(&server, "/.mbr/flashcard-review", body.clone()).await;
+        assert_eq!(resp.status(), 422, "{body}");
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+
+    // Both ends of the real range of offsets are accepted.
+    for offset in [-12, 14] {
+        let resp = edit_post(
+            &server,
+            "/.mbr/flashcard-review",
+            serde_json::json!({
+                "path": "deck.md", "line": 5, "expected": "Capital of France?",
+                "rating": "good", "at": reviewer_clock(offset),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "UTC{offset:+}");
+    }
+}
+
 #[tokio::test]
 async fn test_flashcard_review_stale_or_wrong_line_returns_409() {
     let repo = TestRepo::new();
@@ -9217,6 +9274,7 @@ async fn test_flashcard_review_rejects_bad_ratings_and_paths() {
             "/.mbr/flashcard-review",
             serde_json::json!({
                 "path": path, "line": 1, "expected": "x", "rating": "good",
+                "at": reviewer_clock(0),
             }),
         )
         .await;

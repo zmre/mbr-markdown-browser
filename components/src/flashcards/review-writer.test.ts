@@ -79,7 +79,7 @@ describe('makeReviewRecorder', () => {
       insertedAt: 3,
       insertedCount: 2,
     })
-    expect(reviewBody()).toEqual({ path: 'deck.md', line: 1, expected: 'Q?', rating: 'good' })
+    expect(reviewBody()).toMatchObject({ path: 'deck.md', line: 1, expected: 'Q?', rating: 'good' })
     const headers = (fetchMock.mock.calls.find((c) => c[0] === '/.mbr/flashcard-review')![1] as RequestInit)
       .headers as Record<string, string>
     expect(headers['X-MBR-Edit']).toBe('1')
@@ -99,6 +99,39 @@ describe('makeReviewRecorder', () => {
       'Next?',
     ])
     expect(fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('/.mbr/raw/'))).toHaveLength(1)
+  })
+
+  it("stamps the review with the reviewer's local wall-clock time", async () => {
+    // Local-time constructor: whatever zone the test runs in, the reviewer's
+    // clock reads 09:05 (seconds dropped, zero-padded), and that is what the
+    // server must write — not its own clock.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 0, 2, 9, 5, 42))
+    try {
+      route({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({ entry: '2026-01-02 09:05 - Hard', line: 4, inserted_at: 3, inserted: ['a', 'b'] }),
+      })
+      await recordReview({ line: 1, rating: 'hard' })
+      expect(reviewBody()).toEqual({
+        path: 'deck.md',
+        line: 1,
+        expected: 'Q?',
+        rating: 'hard',
+        at: '2026-01-02 09:05',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('explains a refused time as a clock problem', async () => {
+    route({ ok: false, status: 422 })
+    const outcome = await recordReview({ line: 1, rating: 'good' })
+    expect(outcome).toMatchObject({ ok: false, kind: 'other' })
+    expect(outcome.ok === false && outcome.message).toMatch(/clock/)
   })
 
   it('reports a 409 as a conflict and forgets the cached file', async () => {

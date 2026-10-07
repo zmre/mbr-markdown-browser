@@ -339,6 +339,19 @@ pub enum TaskPatchError {
     NotATask { line: u32 },
 }
 
+/// Why [`crate::flashcards::parse_review_time`] refused a reviewer's clock.
+///
+/// Both are a bad request rather than a stale file, so the handler answers
+/// `422`, the same as any other malformed body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ReviewTimeError {
+    #[error("`at` must be local wall-clock time as YYYY-MM-DD HH:MM")]
+    Malformed,
+
+    #[error("`at` is further from the server's clock than any time zone")]
+    OutOfRange,
+}
+
 /// Why [`crate::flashcards::append_review`] refused to record a review.
 ///
 /// All three mean the client's picture of the file is stale — the line moved,

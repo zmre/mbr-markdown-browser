@@ -1373,6 +1373,10 @@ pub struct FlashcardReviewRequest {
     pub expected: String,
     /// `again`, `hard`, `good` or `easy`.
     pub rating: crate::flashcards::Rating,
+    /// The reviewer's local wall-clock time, `YYYY-MM-DD HH:MM` — written as
+    /// the entry's timestamp after [`crate::flashcards::parse_review_time`]
+    /// checks it. Required.
+    pub at: String,
 }
 
 /// Response for a successful `POST /.mbr/flashcard-review`.
@@ -3342,7 +3346,8 @@ impl Server {
     ///
     /// ```json
     /// { "path": "notes/french.md", "line": 12,
-    ///   "expected": "What is the capital of France?", "rating": "good" }
+    ///   "expected": "What is the capital of France?", "rating": "good",
+    ///   "at": "2026-10-06 13:45" }
     /// ```
     ///
     /// ```json
@@ -3352,9 +3357,15 @@ impl Server {
     ///
     /// Same gate, same `expected` guard and same atomic write as
     /// [`Self::task_toggle_handler`]; the source surgery is
-    /// [`crate::flashcards::append_review`]. The server stamps the time
-    /// itself, from the same local wall clock as `@done(...)`, so a client
-    /// with a wrong clock cannot back-date a review.
+    /// [`crate::flashcards::append_review`].
+    ///
+    /// The entry is stamped with the **reviewer's** wall clock (`at`), not the
+    /// server's: the format carries no offset and the deck replays entries as
+    /// browser-local time, so a server in another time zone would put every
+    /// review hours away from where FSRS's 1m/10m steps expect it. `at` is
+    /// held to the exact entry format and to within
+    /// [`crate::flashcards::REVIEW_TIME_WINDOW_HOURS`] of the server's UTC
+    /// clock — any real time zone passes, garbage and far past/future do not.
     ///
     /// | Status | Cause |
     /// |--------|-------|
@@ -3362,7 +3373,7 @@ impl Server {
     /// | `404` | The path is not an editable markdown file |
     /// | `400` | Path outside the root, or an unreadable/not-UTF-8 file |
     /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale |
-    /// | `422` | Malformed body, including an unknown rating |
+    /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
     /// | `500` | The write failed |
     pub async fn flashcard_review_handler(
         State(config): State<ServerState>,
@@ -3377,18 +3388,22 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        let reviewed_at =
+            match crate::flashcards::parse_review_time(&req.at, chrono::Utc::now().naive_utc()) {
+                Ok(time) => time,
+                Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+            };
         let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
             Ok(source) => source,
             Err(err) => return err.into_response(),
         };
 
-        let now = chrono::Local::now().naive_local();
         let patch = match crate::flashcards::append_review(
             &source,
             req.line,
             &req.expected,
             req.rating,
-            now,
+            reviewed_at,
         ) {
             Ok(patch) => patch,
             Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),

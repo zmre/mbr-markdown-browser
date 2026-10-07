@@ -178,18 +178,20 @@ What is the capital of France?
   **History** on the back of a card shows the entries and the card's current
   due date, stability and difficulty.)
 
-The server stamps each entry itself, and writes only that line (plus the
-`___Review History___` line the first time), keeping the file's line endings.
+Each entry is stamped with your device's clock when you rate the card, and the
+server writes only that line (plus the `___Review History___` line the first
+time), keeping the file's line endings.
 If the note changed on disk since the page loaded, nothing is written and the
 deck says so; reload the page to continue. The endpoint is
 [`POST /.mbr/flashcard-review`](../modes/editing/#flashcard-reviews).
 
 > [!NOTE]
-> Times are written in the server's local time zone without an offset, and read
-> back as the browser's local time. Reviewing while travelling across time zones
-> can therefore shift an entry by a few hours relative to the others — harmless
-> at FSRS's day-scale intervals, and the price of history a human can read at a
-> glance.
+> Times are your local wall-clock time, without an offset, and are read back in
+> the browser's time zone — so it does not matter where the server runs. The
+> server refuses a time more than a day or so from its own clock, which catches
+> a badly set device clock. Reviewing while travelling across time zones writes
+> entries in whichever zone you are in, which can nudge a day boundary slightly;
+> that is the price of history a human can read at a glance.
 
 ## The demo deck
 

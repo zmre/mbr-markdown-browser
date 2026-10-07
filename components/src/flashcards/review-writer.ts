@@ -13,7 +13,11 @@
  * The page itself is brought up to date by the deck (`dom.ts`), which knows
  * which card was reviewed; this module keeps only the *source* cache in step,
  * by splicing in the lines the server inserted.
+ *
+ * The review is stamped here, with the reviewer's local wall-clock time (`at`),
+ * because that is how `history.ts` replays it; the server only validates it.
  */
+import { formatEntryTime } from './history.js'
 import type { ReviewOutcome, ReviewRecorder, ReviewServices, SourceLines } from './types.js'
 
 /** Endpoint for one review (`server.rs::flashcard_review_handler`). */
@@ -30,6 +34,14 @@ function failure(status: number, tokenMessage: string): Extract<ReviewOutcome, {
       return { ok: false, kind: 'auth', message: tokenMessage }
     case 403:
       return { ok: false, kind: 'auth', message: 'Editing is not enabled on this server.' }
+    case 422:
+      // The only 422 a well-formed request from this module can earn is `at`
+      // further from the server's clock than any time zone.
+      return {
+        ok: false,
+        kind: 'other',
+        message: "The server refused this review's time — check this device's clock.",
+      }
     case 0:
       return { ok: false, kind: 'other', message: 'The server could not be reached.' }
     default:
@@ -66,6 +78,8 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
   const fail = (status: number) => failure(status, services.tokenMessage)
 
   return async (target) => {
+    // Taken when the card is rated, before any round trip.
+    const at = formatEntryTime(new Date())
     let read: SourceLines
     try {
       read = await services.read(path)
@@ -93,7 +107,7 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
         method: 'POST',
         headers: services.headers({ 'Content-Type': 'application/json' }),
         credentials: 'same-origin',
-        body: JSON.stringify({ path, line: target.line, expected, rating: target.rating }),
+        body: JSON.stringify({ path, line: target.line, expected, rating: target.rating, at }),
       })
     } catch (err) {
       console.warn('Flashcard review request failed:', err)

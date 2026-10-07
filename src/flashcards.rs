@@ -15,7 +15,18 @@
 //! This module appends one entry to that list (creating the definition when the
 //! term has none yet). Like [`crate::tasks::patch_task_line`] it knows nothing
 //! about the filesystem or HTTP: the handler reads the file, passes the text and
-//! the clock in, and writes back [`ReviewPatch::source`].
+//! the reviewer's time in, and writes back [`ReviewPatch::source`].
+//!
+//! # Whose clock
+//!
+//! The entry has no offset (the format is the user's, and it has to read well
+//! as plain text), and the deck replays it as the *browser's* local time. So
+//! the time must be the reviewer's wall clock, not the server's: stamped by a
+//! server in another time zone, a review would land hours away from where the
+//! deck expects it and FSRS's 1-minute/10-minute learning steps would come due
+//! at the wrong moment or not at all. The client therefore sends its local time
+//! and [`parse_review_time`] checks it — the exact entry format, and within
+//! [`REVIEW_TIME_WINDOW_HOURS`] of the server's UTC clock.
 //!
 //! # Why a real parse, not a line scan
 //!
@@ -40,7 +51,7 @@ use chrono::NaiveDateTime;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 
-use crate::errors::FlashcardPatchError;
+use crate::errors::{FlashcardPatchError, ReviewTimeError};
 use crate::markdown::{LineIndex, markdown_options, strip_bom};
 use crate::tasks::{line_span, split_line_terminator};
 
@@ -54,9 +65,57 @@ pub const HISTORY_LABEL: &str = "___Review History___";
 /// The label's words, compared case-insensitively once emphasis is stripped.
 const HISTORY_TEXT: &str = "review history";
 
-/// `YYYY-MM-DD HH:MM`, local wall-clock time without an offset — the same
-/// shape (and the same clock) as a task's `@done(...)` stamp.
+/// `YYYY-MM-DD HH:MM`, the reviewer's local wall-clock time without an offset
+/// — the same shape as a task's `@done(...)` stamp.
 const ENTRY_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
+
+/// How far a reviewer's wall clock may sit from the server's UTC clock.
+///
+/// Real offsets run from UTC−12 to UTC+14, so every reviewer is within 14
+/// hours; 26 leaves room for a badly-set clock on either side while still
+/// refusing a stray epoch, a far-future date or a client that sent something
+/// other than "now".
+pub const REVIEW_TIME_WINDOW_HOURS: i64 = 26;
+
+/// Validates the reviewer's local time as sent by the deck (`at`).
+///
+/// Strictly `YYYY-MM-DD HH:MM` — ASCII digits, zero-padded, no seconds, no
+/// offset, nothing around it — because the string is written into the note
+/// verbatim and has to read back as an entry. Chrono's own parser would accept
+/// `2026-1-6 9:05` and a leading `+`, so the shape is checked byte by byte
+/// first and chrono only judges the calendar (month 13, February 29th of a
+/// common year, `24:00`, minute 60 — there is no minute-precision spelling of a
+/// leap second).
+///
+/// `now_utc` is the server's clock as a naive UTC time, a parameter so the
+/// window is testable without mocking it.
+///
+/// # Errors
+///
+/// [`ReviewTimeError::Malformed`] for anything that is not a real date and
+/// time in the entry format; [`ReviewTimeError::OutOfRange`] for one more than
+/// [`REVIEW_TIME_WINDOW_HOURS`] away from `now_utc`.
+pub fn parse_review_time(
+    at: &str,
+    now_utc: NaiveDateTime,
+) -> Result<NaiveDateTime, ReviewTimeError> {
+    const SHAPE: &[u8; 16] = b"0000-00-00 00:00";
+    let shaped = at.len() == SHAPE.len()
+        && at.bytes().zip(SHAPE).all(|(byte, &want)| match want {
+            b'0' => byte.is_ascii_digit(),
+            separator => byte == separator,
+        });
+    if !shaped {
+        return Err(ReviewTimeError::Malformed);
+    }
+    let time = NaiveDateTime::parse_from_str(at, ENTRY_TIME_FORMAT)
+        .map_err(|_| ReviewTimeError::Malformed)?;
+    let window = chrono::TimeDelta::hours(REVIEW_TIME_WINDOW_HOURS);
+    if (time - now_utc).abs() > window {
+        return Err(ReviewTimeError::OutOfRange);
+    }
+    Ok(time)
+}
 
 /// One self-rating, in Anki's four-button vocabulary.
 ///
@@ -84,8 +143,12 @@ impl Rating {
 }
 
 /// The text of one history entry: `2026-10-06 13:45 - Good`.
-pub fn format_entry(now: NaiveDateTime, rating: Rating) -> String {
-    format!("{} - {}", now.format(ENTRY_TIME_FORMAT), rating.label())
+pub fn format_entry(reviewed_at: NaiveDateTime, rating: Rating) -> String {
+    format!(
+        "{} - {}",
+        reviewed_at.format(ENTRY_TIME_FORMAT),
+        rating.label()
+    )
 }
 
 /// A markdown source with one review appended by [`append_review`].
@@ -114,6 +177,9 @@ impl ReviewPatch {
 }
 
 /// Appends one review entry to the history of the term on `term_line`.
+///
+/// `reviewed_at` is the reviewer's local wall-clock time (see [`parse_review_time`]),
+/// written as the entry's timestamp.
 ///
 /// `term_line` is 1-based — the `data-mbr-line` the renderer puts on the
 /// `<dt>`. `expected` is the line's text as the client last saw it, compared
@@ -146,11 +212,11 @@ impl ReviewPatch {
 /// use chrono::NaiveDate;
 /// use mbr::flashcards::{Rating, append_review};
 ///
-/// let now = NaiveDate::from_ymd_opt(2026, 10, 6)
+/// let reviewed_at = NaiveDate::from_ymd_opt(2026, 10, 6)
 ///     .and_then(|d| d.and_hms_opt(13, 45, 0))
 ///     .unwrap();
 /// let source = "Capital of France?\n: Paris.\n";
-/// let patch = append_review(source, 1, "Capital of France?", Rating::Good, now).unwrap();
+/// let patch = append_review(source, 1, "Capital of France?", Rating::Good, reviewed_at).unwrap();
 /// assert_eq!(
 ///     patch.source,
 ///     "Capital of France?\n: Paris.\n: ___Review History___\n  * 2026-10-06 13:45 - Good\n"
@@ -163,7 +229,7 @@ pub fn append_review(
     term_line: u32,
     expected: &str,
     rating: Rating,
-    now: NaiveDateTime,
+    reviewed_at: NaiveDateTime,
 ) -> Result<ReviewPatch, FlashcardPatchError> {
     let span = line_span(source, term_line)
         .ok_or(FlashcardPatchError::LineOutOfRange { line: term_line })?;
@@ -179,7 +245,7 @@ pub fn append_review(
         .ok_or(not_a_term)?;
 
     let lines = LineIndex::build(source);
-    let entry = format_entry(now, rating);
+    let entry = format_entry(reviewed_at, rating);
     let (after_line, inserted) = match term.definitions.iter().find(|d| d.history) {
         Some(Definition {
             last_item: Some(item),
@@ -583,6 +649,102 @@ mod tests {
             format_entry(at(23, 59), Rating::Easy),
             "2026-10-06 23:59 - Easy"
         );
+    }
+
+    // ---- the reviewer's clock ----------------------------------------------
+
+    /// The server's UTC "now" for the window tests.
+    fn utc_now() -> NaiveDateTime {
+        at(12, 0)
+    }
+
+    #[test]
+    fn review_time_accepts_any_real_time_zone() {
+        // UTC-12 (Baker Island) to UTC+14 (Kiribati), and UTC itself.
+        for at in ["2026-10-06 00:00", "2026-10-06 12:00", "2026-10-07 02:00"] {
+            assert_eq!(
+                parse_review_time(at, utc_now()).map(|t| format_entry(t, Rating::Good)),
+                Ok(format!("{at} - Good")),
+                "{at}"
+            );
+        }
+        // The window's edges are inclusive.
+        assert!(parse_review_time("2026-10-05 10:00", utc_now()).is_ok());
+        assert!(parse_review_time("2026-10-07 14:00", utc_now()).is_ok());
+    }
+
+    #[test]
+    fn review_time_refuses_times_no_time_zone_can_explain() {
+        for at in [
+            "2026-10-05 09:59", // 26h01m behind
+            "2026-10-07 14:01", // 26h01m ahead
+            "1970-01-01 00:00",
+            "9999-12-31 23:59",
+        ] {
+            assert_eq!(
+                parse_review_time(at, utc_now()),
+                Err(ReviewTimeError::OutOfRange),
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_time_is_strictly_the_entry_format() {
+        for at in [
+            "",
+            "now",
+            "2026-10-06",
+            "2026-10-06 12:00:00", // seconds are not stored
+            "2026-10-06T12:00",
+            "2026-10-06 12:00Z",
+            "2026-10-06 12:00 ",
+            " 2026-10-06 12:00",
+            "2026-10-6 12:00",
+            "2026-10-06 2:00",
+            "+2026-10-06 12:00",
+            "2026-1０-06 12:00", // a full-width digit
+            "2026-10-06 12:00 - Good",
+        ] {
+            assert_eq!(
+                parse_review_time(at, utc_now()),
+                Err(ReviewTimeError::Malformed),
+                "{at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_time_refuses_impossible_calendar_values() {
+        for at in [
+            "2026-13-01 12:00",
+            "2026-00-10 12:00",
+            "2026-02-29 12:00", // not a leap year
+            "2026-10-32 12:00",
+            "2026-10-06 24:00",
+            "2026-10-06 12:60",
+            // A leap second has no minute-precision spelling: 23:59:60 is
+            // malformed (no seconds) and 23:60 is not a minute.
+            "2016-12-31 23:60",
+            "2016-12-31 23:59:60",
+        ] {
+            assert_eq!(
+                parse_review_time(at, utc_now()),
+                Err(ReviewTimeError::Malformed),
+                "{at}"
+            );
+        }
+    }
+
+    proptest! {
+        /// Never panics, and anything it accepts round-trips through the entry
+        /// format unchanged — which is what the server writes.
+        #[test]
+        fn review_time_never_panics_and_round_trips(at in "\\PC{0,24}") {
+            if let Ok(time) = parse_review_time(&at, utc_now()) {
+                prop_assert_eq!(time.format(ENTRY_TIME_FORMAT).to_string(), at);
+            }
+        }
     }
 
     #[test]
