@@ -35,6 +35,7 @@ import {
   type Grade,
 } from 'ts-fsrs'
 import type { HistoryEntry, Rating } from './history.js'
+import { shuffle, type Rng } from './random.js'
 
 export type { Card } from 'ts-fsrs'
 
@@ -134,16 +135,21 @@ export interface SessionPlan {
  *
  * Due cards (due ≤ now) come first, least retrievable first — the card most
  * likely to have been forgotten is the one most worth seeing — with ties
- * broken by due date and then document order. New cards follow in document
- * order (Anki's "show new cards after reviews"). No daily limits: the deck is
- * one note, not a collection of thousands.
+ * broken by due date and then at random. New cards follow, shuffled (Anki's
+ * "show new cards after reviews"): in document order a
+ * note with little history would open on its first card every time, and the
+ * reader would learn the sequence rather than the cards. No daily limits: the
+ * deck is one note, not a collection of thousands.
+ *
+ * `rng` is `Math.random` in the deck and seeded in tests.
  */
 export function planSession(
   scheduler: FSRS,
   states: readonly (Card | null)[],
-  now: Date
+  now: Date,
+  rng: Rng
 ): SessionPlan {
-  const due: { index: number; retrievability: number; due: number }[] = []
+  const due: { index: number; retrievability: number; due: number; tie: number }[] = []
   const fresh: number[] = []
   let nextDue: Date | null = null
   states.forEach((card, index) => {
@@ -154,14 +160,15 @@ export function planSession(
         index,
         retrievability: scheduler.get_retrievability(card, now, false),
         due: card.due.getTime(),
+        tie: rng(),
       })
     } else if (!nextDue || card.due.getTime() < nextDue.getTime()) {
       nextDue = card.due
     }
   })
-  due.sort((a, b) => a.retrievability - b.retrievability || a.due - b.due || a.index - b.index)
+  due.sort((a, b) => a.retrievability - b.retrievability || a.due - b.due || a.tie - b.tie)
   return {
-    queue: [...due.map((d) => d.index), ...fresh],
+    queue: [...due.map((d) => d.index), ...shuffle(fresh, rng)],
     fresh: new Set(fresh),
     nextDue,
   }

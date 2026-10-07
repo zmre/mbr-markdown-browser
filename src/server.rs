@@ -1091,6 +1091,10 @@ pub struct ServerConfig {
     pub sidebar_max_items: usize,
     /// Depth (hops) of the sidebar mini graph neighborhood (1-5).
     pub graph_depth: usize,
+    /// Concentric-mode growth threshold for the flashcard deck (0 < t ≤ 1).
+    pub flashcards_concentric_threshold: f64,
+    /// Draw review-progress indicators on flashcard notes' reading view.
+    pub flashcards_progress_indicators: bool,
     pub title_prefix: String,
     pub title_suffix: String,
     /// Highlight blocks beginning with an incomplete marker (TK/TODO/FIXME/XXX).
@@ -1166,6 +1170,8 @@ impl From<&crate::config::Config> for ServerConfig {
             sidebar_style: config.sidebar_style.clone(),
             sidebar_max_items: config.sidebar_max_items,
             graph_depth: config.graph_depth,
+            flashcards_concentric_threshold: config.flashcards_concentric_threshold,
+            flashcards_progress_indicators: config.flashcards_progress_indicators,
             title_prefix: config.title_prefix.clone(),
             title_suffix: config.title_suffix.clone(),
             // Server/GUI default: on unless config overrides.
@@ -1285,6 +1291,10 @@ pub struct ServerState {
     pub sidebar_max_items: usize,
     /// Depth (hops) of the sidebar mini graph neighborhood (1-5)
     pub graph_depth: usize,
+    /// Concentric-mode growth threshold, for `__MBR_CONFIG__`.
+    pub flashcards_concentric_threshold: f64,
+    /// Whether flashcard notes draw reading-view progress indicators.
+    pub flashcards_progress_indicators: bool,
     /// Text to prepend to all page titles
     pub title_prefix: String,
     /// Text to append to all page titles
@@ -1740,6 +1750,8 @@ impl Server {
             sidebar_style,
             sidebar_max_items,
             graph_depth,
+            flashcards_concentric_threshold,
+            flashcards_progress_indicators,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -2289,6 +2301,8 @@ impl Server {
             sidebar_style,
             sidebar_max_items,
             graph_depth,
+            flashcards_concentric_threshold,
+            flashcards_progress_indicators,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -6550,6 +6564,8 @@ impl Server {
                 sidebar_style: &config.sidebar_style,
                 sidebar_max_items: config.sidebar_max_items,
                 graph_depth: config.graph_depth,
+                flashcards_concentric_threshold: config.flashcards_concentric_threshold,
+                flashcards_progress_indicators: config.flashcards_progress_indicators,
                 tasks_enabled: config.tasks_enabled,
                 review_enabled: config.review_enabled,
                 tasks_default_include: config.tasks_default_include,

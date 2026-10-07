@@ -7,6 +7,8 @@ import {
   openInNewTab,
   getCanonicalPath,
   getGraphDepth,
+  getFlashcardsConcentricThreshold,
+  isFlashcardsProgressEnabled,
   getRepoId,
   getTasksDefaultInclude,
 } from './shared.ts';
@@ -240,6 +242,45 @@ describe('media navigation loading', () => {
     expect(states[states.length - 1].data?.other_files).toHaveLength(1);
     expect(mod.getMediaNavState().data?.other_files).toHaveLength(1);
     unsub();
+  });
+});
+
+describe('flashcard config getters', () => {
+  const originalConfig = window.__MBR_CONFIG__;
+
+  afterEach(() => {
+    window.__MBR_CONFIG__ = originalConfig;
+  });
+
+  function set(extra: Record<string, unknown>): void {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, ...extra };
+  }
+
+  it('threshold defaults to 0.7 when absent or non-numeric', () => {
+    window.__MBR_CONFIG__ = undefined;
+    expect(getFlashcardsConcentricThreshold()).toBe(0.7);
+    set({ flashcardsConcentricThreshold: '0.5' });
+    expect(getFlashcardsConcentricThreshold()).toBe(0.7);
+    set({ flashcardsConcentricThreshold: NaN });
+    expect(getFlashcardsConcentricThreshold()).toBe(0.7);
+  });
+
+  it('threshold passes legal values and clamps the rest into (0, 1]', () => {
+    set({ flashcardsConcentricThreshold: 0.85 });
+    expect(getFlashcardsConcentricThreshold()).toBe(0.85);
+    set({ flashcardsConcentricThreshold: 3 });
+    expect(getFlashcardsConcentricThreshold()).toBe(1);
+    set({ flashcardsConcentricThreshold: 0 });
+    expect(getFlashcardsConcentricThreshold()).toBeGreaterThan(0);
+  });
+
+  it('progress indicators default on and turn off only on an explicit false', () => {
+    window.__MBR_CONFIG__ = undefined;
+    expect(isFlashcardsProgressEnabled()).toBe(true);
+    set({ flashcardsProgressIndicators: false });
+    expect(isFlashcardsProgressEnabled()).toBe(false);
+    set({ flashcardsProgressIndicators: true });
+    expect(isFlashcardsProgressEnabled()).toBe(true);
   });
 });
 

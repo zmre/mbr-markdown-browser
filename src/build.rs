@@ -1236,6 +1236,11 @@ impl Builder {
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
+                // Both flashcard options apply to static builds too: Concentric
+                // runs session-only there, and the indicators read the history
+                // already in the page.
+                flashcards_concentric_threshold: self.config.flashcards_concentric_threshold,
+                flashcards_progress_indicators: self.config.flashcards_progress_indicators,
                 // Static builds never carry the task browser: the task index
                 // reads live files, which a published site does not have.
                 tasks_enabled: false,

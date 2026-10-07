@@ -65,6 +65,73 @@ export const DECK_CSS = `
   border-color: var(--pico-primary-background, #0172ad);
   color: var(--pico-primary-inverse, #fff);
 }
+.mbr-fc-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.mbr-fc-size input {
+  width: 4.5rem;
+  height: auto;
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.mbr-fc-filter { position: relative; }
+.mbr-fc-filter-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+.mbr-fc-filter-btn.is-active { color: var(--pico-primary, #0172ad); border-color: currentColor; }
+.mbr-fc-filter-badge {
+  position: absolute;
+  top: -0.25rem;
+  right: -0.25rem;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--pico-primary, #0172ad);
+  border: 2px solid var(--pico-background-color, #fff);
+}
+.mbr-fc-filter-pop {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 2;
+  min-width: 14rem;
+  max-width: min(24rem, 90vw);
+  max-height: 60vh;
+  overflow: auto;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--pico-muted-border-color, #e5e7eb);
+  border-radius: var(--pico-border-radius, 0.25rem);
+  background: var(--pico-card-background-color, var(--pico-background-color, #fff));
+  box-shadow: var(--pico-card-box-shadow, 0 0.5rem 1.5rem rgba(0, 0, 0, 0.12));
+  /* A column whatever Pico does to checkbox labels (inline, fit-content). */
+  display: flex;
+  flex-direction: column;
+}
+.mbr-fc-filter-pop label {
+  display: flex;
+  width: auto;
+  white-space: nowrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0.2rem 0;
+  padding-inline-start: calc(var(--mbr-fc-depth, 0) * 1rem);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.mbr-fc-filter-pop label > span { flex: 1; }
+.mbr-fc-filter-pop small { color: var(--pico-muted-color, #6b7280); font-variant-numeric: tabular-nums; }
+.mbr-fc-filter-pop input { margin: 0; flex: none; }
+
 .mbr-fc-close {
   border: none;
   background: transparent;
@@ -240,17 +307,13 @@ export const DECK_CSS = `
   border: 1px solid currentColor;
   opacity: 0.7;
 }
-/* Again is a true red, not Pico's --pico-del-color: that is a muted salmon
- * that reads as orange beside Hard's amber. Same pair as chat's slot 0. */
-:root { --mbr-fc-again: #c62828; }
-@media only screen and (prefers-color-scheme: dark) {
-  :root:not([data-theme]) { --mbr-fc-again: #ef5350; }
-}
-[data-theme="dark"] { --mbr-fc-again: #ef5350; }
-.mbr-fc-rate-again { --mbr-fc-rating: var(--mbr-fc-again); }
-.mbr-fc-rate-hard { --mbr-fc-rating: #b7791f; }
-.mbr-fc-rate-good { --mbr-fc-rating: var(--pico-ins-color, #2e7d32); }
-.mbr-fc-rate-easy { --mbr-fc-rating: var(--pico-primary, #0172ad); }
+/* The four rating colours are defined once, in theme.css, and shared with
+ * the reading view's borders and pies. The fallbacks only matter to a repo
+ * whose own .mbr/theme.css predates them. */
+.mbr-fc-rate-again { --mbr-fc-rating: var(--mbr-fc-again, #c62828); }
+.mbr-fc-rate-hard { --mbr-fc-rating: var(--mbr-fc-hard, #b7791f); }
+.mbr-fc-rate-good { --mbr-fc-rating: var(--mbr-fc-good, var(--pico-ins-color, #2e7d32)); }
+.mbr-fc-rate-easy { --mbr-fc-rating: var(--mbr-fc-easy, var(--pico-primary, #0172ad)); }
 .mbr-fc-ratings.is-nudged { animation: mbr-fc-nudge 0.35s ease-in-out; }
 @keyframes mbr-fc-nudge {
   0%, 100% { transform: none; }
@@ -288,6 +351,36 @@ export const DECK_CSS = `
 }
 .mbr-fc-hints kbd { font-size: 0.7rem; padding: 0.05rem 0.3rem; }
 
+.mbr-fc-help-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.35);
+}
+.mbr-fc-help {
+  width: min(100%, 44rem);
+  max-height: 100%;
+  overflow: auto;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--pico-muted-border-color, #e5e7eb);
+  border-radius: var(--pico-border-radius, 0.25rem);
+  background: var(--pico-card-background-color, var(--pico-background-color, #fff));
+  box-shadow: var(--pico-card-box-shadow, 0 0.5rem 1.5rem rgba(0, 0, 0, 0.12));
+}
+.mbr-fc-help:focus { outline: none; }
+.mbr-fc-help header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+.mbr-fc-help h3 { margin: 0; flex: 1; font-size: 1.1rem; }
+.mbr-fc-help h4 { margin: 0.75rem 0 0.25rem; font-size: 0.9rem; color: var(--pico-muted-color, #6b7280); }
+.mbr-fc-help table { margin: 0; font-size: 0.85rem; table-layout: fixed; }
+.mbr-fc-help :is(th, td) { padding: 0.2rem 0.5rem; vertical-align: top; }
+/* One width for every group's key column, so the actions line up across tables. */
+.mbr-fc-help th { width: 13rem; font-weight: normal; }
+.mbr-fc-help kbd { font-size: 0.75rem; padding: 0.05rem 0.35rem; }
+
 .mbr-fc-screen {
   margin: auto;
   text-align: center;
@@ -316,6 +409,7 @@ export const DECK_CSS = `
   .mbr-fc-hints { display: none; }
   .mbr-fc-swap-label { display: none; }
   .mbr-fc-ratings { gap: 0.3rem; }
+  .mbr-fc-help th { width: 7rem; }
 }
 
 /* No 3D turn: cross-fade the faces instead. */

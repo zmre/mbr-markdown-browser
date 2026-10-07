@@ -1718,6 +1718,94 @@ main dl > dd.mbr-fc-history ul {
   margin-block: 0.4em 0;
 }
 
+/* Flashcard rating colours: one definition for the deck's rating buttons
+ * (`flashcards/styles.ts`) and the reading view's progress indicators below.
+ * Again is a true red, not Pico's --pico-del-color: that is a muted salmon
+ * that reads as orange beside Hard's amber. Same pair as chat's slot 0.
+ * Declared on `[data-theme]` too so Good/Easy, which follow Pico's own
+ * colours, resolve against the theme of the element that sets one. */
+:root,
+[data-theme] {
+  --mbr-fc-again: #c62828;
+  --mbr-fc-hard: #b7791f;
+  --mbr-fc-good: var(--pico-ins-color, #2e7d32);
+  --mbr-fc-easy: var(--pico-primary, #0172ad);
+  --mbr-fc-unreviewed: #9ca3af;
+}
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --mbr-fc-again: #ef5350;
+    --mbr-fc-unreviewed: #6b7280;
+  }
+}
+[data-theme="dark"] {
+  --mbr-fc-again: #ef5350;
+  --mbr-fc-unreviewed: #6b7280;
+}
+
+/* Reading-view progress (`flashcards/progress.ts`): a reviewed question's
+ * left border is its latest rating. Scoped to `main` so it can never reach
+ * the deck overlay (appended to <body>; its clones drop the class anyway).
+ * The extra padding keeps the disclosure marker off the border. `:where()`
+ * keeps the specificity of a bare `main dl > dt`, so the print rules further
+ * down (no marker, no indent) still win on paper. */
+main
+  dl
+  > dt:where(
+    .mbr-fc-last-again,
+    .mbr-fc-last-hard,
+    .mbr-fc-last-good,
+    .mbr-fc-last-easy
+  ) {
+  border-left: 2px solid var(--mbr-fc-last);
+  padding-inline-start: calc(
+    var(--mbr-dl-marker-size) + var(--mbr-dl-marker-gap) + 0.4em
+  );
+}
+main dl > dt.mbr-fc-last-again {
+  --mbr-fc-last: var(--mbr-fc-again);
+}
+main dl > dt.mbr-fc-last-hard {
+  --mbr-fc-last: var(--mbr-fc-hard);
+}
+main dl > dt.mbr-fc-last-good {
+  --mbr-fc-last: var(--mbr-fc-good);
+}
+main dl > dt.mbr-fc-last-easy {
+  --mbr-fc-last: var(--mbr-fc-easy);
+}
+
+/* A heading's pie of its cards' latest ratings. Textless (an aria-hidden svg
+ * inside a role="img" span), so copying the heading copies only its words. */
+main .mbr-fc-pie {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-inline-start: 0.4em;
+  vertical-align: -0.05em;
+  line-height: 0;
+}
+main .mbr-fc-pie svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+main .mbr-fc-pie-again {
+  fill: var(--mbr-fc-again);
+}
+main .mbr-fc-pie-hard {
+  fill: var(--mbr-fc-hard);
+}
+main .mbr-fc-pie-good {
+  fill: var(--mbr-fc-good);
+}
+main .mbr-fc-pie-easy {
+  fill: var(--mbr-fc-easy);
+}
+main .mbr-fc-pie-unreviewed {
+  fill: var(--mbr-fc-unreviewed);
+}
+
 /* ==================== Contact card ====================
  *
  * The page header of `type: person` / `type: organization` notes

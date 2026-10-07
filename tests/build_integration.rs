@@ -252,6 +252,20 @@ async fn test_build_head_includes_graph_depth() {
     );
 }
 
+/// The flashcard options apply to static builds too: Concentric runs
+/// session-only there and the indicators read history already in the page.
+#[tokio::test]
+async fn test_build_head_includes_flashcard_options() {
+    let repo = TestRepo::new();
+    repo.create_markdown("deck.md", "---\ntype: flashcard\n---\n# Deck\n\nQ\n: A\n");
+
+    let output = build_site(&repo).await;
+
+    let html = fs::read_to_string(output.join("deck").join("index.html")).unwrap();
+    assert!(html.contains("flashcardsConcentricThreshold: 0.7,"));
+    assert!(html.contains("flashcardsProgressIndicators: true,"));
+}
+
 /// The task browser is server/GUI only: its index is built by reading live
 /// files, which a published static site does not have. Every page kind must
 /// therefore advertise `tasksEnabled: false`, no matter what the config says.

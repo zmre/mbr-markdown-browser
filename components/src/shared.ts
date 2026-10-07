@@ -32,6 +32,8 @@ declare global {
       basePath?: string;
       tagSources?: TagSourceConfig[];
       graphDepth?: number;
+      flashcardsConcentricThreshold?: number;
+      flashcardsProgressIndicators?: boolean;
       repoId?: string;
     };
   }
@@ -52,6 +54,25 @@ export function getGraphDepth(): number {
     return GRAPH_DEPTH_DEFAULT;
   }
   return Math.max(GRAPH_DEPTH_MIN, Math.min(GRAPH_DEPTH_MAX, Math.floor(raw)));
+}
+
+/** Default Concentric growth threshold (mirrors the Rust config default). */
+const CONCENTRIC_THRESHOLD_DEFAULT = 0.7;
+
+/**
+ * The flashcard deck's Concentric growth threshold
+ * (`flashcards_concentric_threshold`): a missing or non-numeric value yields
+ * 0.7, anything else is clamped into (0, 1] as the Rust validation demands.
+ */
+export function getFlashcardsConcentricThreshold(): number {
+  const raw = window.__MBR_CONFIG__?.flashcardsConcentricThreshold;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return CONCENTRIC_THRESHOLD_DEFAULT;
+  return Math.min(1, Math.max(0.01, raw));
+}
+
+/** Whether flashcard notes draw reading-view progress indicators (default on). */
+export function isFlashcardsProgressEnabled(): boolean {
+  return window.__MBR_CONFIG__?.flashcardsProgressIndicators !== false;
 }
 
 /**
