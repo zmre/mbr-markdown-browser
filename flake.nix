@@ -352,7 +352,6 @@
           xorg.libXcursor
           xorg.libXi
           xorg.libXrandr
-          xdotool # provides libxdo needed by wry/tao
         ]);
 
       # Static x264 for H.264 software encoding fallback
