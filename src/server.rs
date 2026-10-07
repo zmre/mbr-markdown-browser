@@ -7650,12 +7650,12 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     // Reveal.js presentation framework
     (
         "/reveal.js",
-        include_bytes!("../templates/reveal.5.2.1.js"),
+        include_bytes!("../templates/reveal.6.0.2.js"),
         "application/javascript",
     ),
     (
         "/reveal.css",
-        include_bytes!("../templates/reveal.5.2.1.css"),
+        include_bytes!("../templates/reveal.6.0.2.css"),
         "text/css",
     ),
     (
@@ -7680,7 +7680,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/reveal-notes.js",
-        include_bytes!("../templates/reveal.notes.5.2.1.js"),
+        include_bytes!("../templates/reveal.notes.6.0.2.js"),
         "application/javascript",
     ),
 ];
