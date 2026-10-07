@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 
 // Separate build for the heavy Milkdown/Crepe editor chunk.
 //
-// The main bundle (vite.config.ts) uses `inlineDynamicImports`, which would
+// The main bundle (vite.config.ts) uses `codeSplitting: false`, which would
 // pull Crepe into every page load. Instead, the `<mbr-editor>` trigger loads
 // this chunk on demand at runtime. Crepe's CSS is imported as `?inline`
 // strings inside the chunk, so this build emits a single self-contained JS file
@@ -31,7 +31,7 @@ export default {
   resolve: {
     alias: {
       '@codemirror/language-data': resolve(
-        __dirname,
+        import.meta.dirname,
         'src/editor-stubs/codemirror-language-data.ts',
       ),
     },
@@ -57,14 +57,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/editor-crepe.ts'),
+      entry: resolve(import.meta.dirname, 'src/editor-crepe.ts'),
       fileName: 'mbr-editor.min',
       name: 'MBREditor',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

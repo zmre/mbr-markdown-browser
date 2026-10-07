@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 
 // Separate build for the sidebar mini force-graph chunk (`mbr-graph.min.js`).
 //
-// The main bundle (vite.config.ts) uses `inlineDynamicImports`, which would
+// The main bundle (vite.config.ts) uses `codeSplitting: false`, which would
 // pull d3-force into every page load. Instead, `<mbr-info>` loads this chunk
 // on demand the first time the info panel opens (and only when the current
 // page has a links.json). The chunk must not import stateful modules like
@@ -34,14 +34,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/graph/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/graph/index.ts'),
       fileName: 'mbr-graph.min',
       name: 'MBRGraph',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

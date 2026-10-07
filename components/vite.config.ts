@@ -36,7 +36,7 @@ export default {
           // Serve other /.mbr/* from templates (CSS, etc.)
           if (req.url?.startsWith('/.mbr/')) {
             const filePath = req.url.slice(6); // Remove '/.mbr/' prefix
-            const templatePath = resolve(__dirname, '..', 'templates', filePath);
+            const templatePath = resolve(import.meta.dirname, '..', 'templates', filePath);
             if (existsSync(templatePath)) {
               req.url = '/../templates/' + filePath;
             }
@@ -65,7 +65,7 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/main.js'),
+      entry: resolve(import.meta.dirname, 'src/main.js'),
       fileName: 'mbr-components.min',
       name: 'MBR',
       // Use 'es' format without code splitting for simpler embedding
@@ -77,7 +77,7 @@ export default {
       output: {
         // Disable code splitting - bundle everything into one file
         // This is essential since we serve the bundle as a single embedded file
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     }
   }

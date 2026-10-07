@@ -123,6 +123,10 @@ where
     /// `fetch_sub` would wrap to a near-`usize::MAX` total and leave the cache
     /// permanently "over budget", evicting on every insert; saturating keeps
     /// the drift bounded and self-correcting.
+    // `fetch_update` is deprecated as of Rust 1.99 in favour of `update` /
+    // `try_update`, which only stabilized in 1.95 — newer than this crate's
+    // `rust-version`. Switch to `update` once the MSRV reaches 1.95.
+    #[allow(deprecated)]
     fn sub_current_size(&self, bytes: usize) {
         let _ = self
             .current_size

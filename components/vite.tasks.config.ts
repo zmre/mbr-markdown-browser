@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 
 // Separate build for the task-browser panel chunk (`mbr-tasks.min.js`).
 //
-// The main bundle (vite.config.ts) uses `inlineDynamicImports`, which would
+// The main bundle (vite.config.ts) uses `codeSplitting: false`, which would
 // pull the whole two-pane panel into every page load. Instead, `<mbr-tasks>`
 // loads this chunk on demand the first time the task browser is opened. The
 // chunk must not import stateful modules like `shared.ts` (top-level site.json
@@ -39,14 +39,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/tasks/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/tasks/index.ts'),
       fileName: 'mbr-tasks.min',
       name: 'MBRTasks',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

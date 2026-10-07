@@ -33,14 +33,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/genealogy/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/genealogy/index.ts'),
       fileName: 'mbr-genealogy.min',
       name: 'MBRGenealogy',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

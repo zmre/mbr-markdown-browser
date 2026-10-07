@@ -232,14 +232,14 @@ fn build_menu_bar() -> MenuHandles {
 
     // The "command" modifier: Cmd on macOS, Ctrl elsewhere.
     //
-    // `Modifiers::SUPER` is Cmd on macOS but the *Super/Windows* key on Linux and
+    // `Modifiers::META` is Cmd on macOS but the *Super/Windows* key on Linux and
     // Windows, where it belongs to the desktop — a tiling compositor such as
     // Hyprland binds nearly the whole Super range, so a menu item accelerated
     // with it is not merely non-standard, it never fires. Every accelerator that
     // is Cmd-something on macOS has to make this choice; the ones below that
     // already spell it out inline predate this constant.
     #[cfg(target_os = "macos")]
-    let command_modifier = Modifiers::SUPER;
+    let command_modifier = Modifiers::META;
     #[cfg(not(target_os = "macos"))]
     let command_modifier = Modifiers::CONTROL;
 
@@ -247,14 +247,14 @@ fn build_menu_bar() -> MenuHandles {
         "open",
         "&Open...",
         true,
-        Some(Accelerator::new(Some(command_modifier), Code::KeyO)),
+        Some(Accelerator::new(command_modifier, Code::KeyO)),
     );
 
     let reload_item = MenuItem::with_id(
         "reload",
         "&Reload",
         true,
-        Some(Accelerator::new(Some(command_modifier), Code::KeyR)),
+        Some(Accelerator::new(command_modifier, Code::KeyR)),
     );
 
     // Print is Cmd+P on macOS but **Ctrl+Shift+P** elsewhere. Plain Ctrl+P is
@@ -269,7 +269,7 @@ fn build_menu_bar() -> MenuHandles {
         "print",
         "&Print…",
         true,
-        Some(Accelerator::new(Some(print_modifier), Code::KeyP)),
+        Some(Accelerator::new(print_modifier, Code::KeyP)),
     );
 
     #[cfg(target_os = "macos")]
@@ -305,20 +305,19 @@ fn build_menu_bar() -> MenuHandles {
     // Find uses Cmd+F / Cmd+G / Shift+Cmd+G on macOS, Ctrl+F / F3 / Shift+F3 elsewhere.
     // F3 rather than Ctrl+G off macOS: Ctrl+G is already the info panel's binding.
     #[cfg(target_os = "macos")]
-    let find_accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::KeyF);
+    let find_accelerator = Accelerator::new(Modifiers::META, Code::KeyF);
     #[cfg(not(target_os = "macos"))]
-    let find_accelerator = Accelerator::new(Some(Modifiers::CONTROL), Code::KeyF);
+    let find_accelerator = Accelerator::new(Modifiers::CONTROL, Code::KeyF);
 
     #[cfg(target_os = "macos")]
-    let find_next_accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::KeyG);
+    let find_next_accelerator = Accelerator::new(Modifiers::META, Code::KeyG);
     #[cfg(not(target_os = "macos"))]
-    let find_next_accelerator = Accelerator::new(None, Code::F3);
+    let find_next_accelerator = Accelerator::new(Modifiers::empty(), Code::F3);
 
     #[cfg(target_os = "macos")]
-    let find_prev_accelerator =
-        Accelerator::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyG);
+    let find_prev_accelerator = Accelerator::new(Modifiers::META | Modifiers::SHIFT, Code::KeyG);
     #[cfg(not(target_os = "macos"))]
-    let find_prev_accelerator = Accelerator::new(Some(Modifiers::SHIFT), Code::F3);
+    let find_prev_accelerator = Accelerator::new(Modifiers::SHIFT, Code::F3);
 
     let find_item = MenuItem::with_id("find", "&Find…", true, Some(find_accelerator));
     let find_next_item =
@@ -354,7 +353,7 @@ fn build_menu_bar() -> MenuHandles {
     // Cmd+Option+I on macOS, Ctrl+Shift+I elsewhere -- the inspector shortcut
     // every browser uses on that platform.
     #[cfg(target_os = "macos")]
-    let devtools_modifiers = Modifiers::SUPER | Modifiers::ALT;
+    let devtools_modifiers = Modifiers::META | Modifiers::ALT;
     #[cfg(not(target_os = "macos"))]
     let devtools_modifiers = Modifiers::CONTROL | Modifiers::SHIFT;
 
@@ -362,7 +361,7 @@ fn build_menu_bar() -> MenuHandles {
         "devtools",
         "Toggle Developer Tools",
         true,
-        Some(Accelerator::new(Some(devtools_modifiers), Code::KeyI)),
+        Some(Accelerator::new(devtools_modifiers, Code::KeyI)),
     );
     log_menu_result(
         "view menu items",
@@ -380,13 +379,13 @@ fn build_menu_bar() -> MenuHandles {
     // advertises the key that actually works there.
     #[cfg(target_os = "macos")]
     let (back_accelerator, forward_accelerator) = (
-        Accelerator::new(Some(Modifiers::SUPER), Code::BracketLeft),
-        Accelerator::new(Some(Modifiers::SUPER), Code::BracketRight),
+        Accelerator::new(Modifiers::META, Code::BracketLeft),
+        Accelerator::new(Modifiers::META, Code::BracketRight),
     );
     #[cfg(not(target_os = "macos"))]
     let (back_accelerator, forward_accelerator) = (
-        Accelerator::new(Some(Modifiers::ALT), Code::ArrowLeft),
-        Accelerator::new(Some(Modifiers::ALT), Code::ArrowRight),
+        Accelerator::new(Modifiers::ALT, Code::ArrowLeft),
+        Accelerator::new(Modifiers::ALT, Code::ArrowRight),
     );
 
     let back_item = MenuItem::with_id("back", "&Back", true, Some(back_accelerator));

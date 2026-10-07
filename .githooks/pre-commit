@@ -18,9 +18,11 @@ info() { echo -e "${GREEN}[pre-commit]${NC} $*"; }
 warn() { echo -e "${YELLOW}[pre-commit]${NC} $*"; }
 error() { echo -e "${RED}[pre-commit]${NC} $*" >&2; }
 
-# Check if components/package.json is staged
+# Check if components/package.json or package-lock.json is staged. The lockfile
+# alone is enough: npmDepsHash is computed from package-lock.json, so a
+# lockfile-only refresh otherwise commits a stale hash.
 package_json_staged() {
-    git diff --cached --name-only | grep -q '^components/package.json$'
+    git diff --cached --name-only | grep -qE '^components/package(-lock)?\.json$'
 }
 
 # Check if any Rust files are staged
@@ -85,7 +87,7 @@ check_npm_deps() {
         return 0
     fi
 
-    info "components/package.json is staged, checking npm deps sync..."
+    info "components/package.json or package-lock.json is staged, checking npm deps sync..."
 
     # Run the sync script
     if ! "$PROJECT_DIR/scripts/sync-npm-deps.sh" --force; then

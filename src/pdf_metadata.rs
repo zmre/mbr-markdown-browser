@@ -258,7 +258,9 @@ fn extract_cover_sync(path: &Path) -> Result<Vec<u8>, PdfMetadataError> {
         .render_with_config(&config)
         .map_err(|e| PdfMetadataError::RenderFailed(format!("Render failed: {}", e)))?;
 
-    let image = bitmap.as_image();
+    let image = bitmap
+        .as_image()
+        .map_err(|e| PdfMetadataError::RenderFailed(format!("Bitmap conversion failed: {}", e)))?;
     let mut jpg_bytes = Vec::new();
     let encoder = JpegEncoder::new_with_quality(&mut jpg_bytes, crate::constants::JPEG_QUALITY);
     image

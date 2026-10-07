@@ -36,14 +36,14 @@ export default {
       },
     },
     lib: {
-      entry: resolve(__dirname, 'src/flashcards/reading.ts'),
+      entry: resolve(import.meta.dirname, 'src/flashcards/reading.ts'),
       fileName: 'mbr-flashcards-reading.min',
       name: 'MBRFlashcardsReading',
       formats: ['es'],
     },
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

@@ -1,10 +1,6 @@
 name: "CodeQL Config"
-paths:
-  - src
-  - components
-  - templates/*.html
-  - macos
-  - quicklook
-  - scripts
+# Vendored third-party bundles (highlight.js, KaTeX, mermaid, reveal.js),
+# refreshed by scripts/update-assets.sh. Alerts in them are upstream's to fix
+# and would otherwise re-fire on every version bump.
 paths-ignore:
   - templates/*.js
