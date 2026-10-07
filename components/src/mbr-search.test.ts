@@ -26,6 +26,7 @@ interface SearchHandle {
   _noteTypes: Array<{ type: string; count: number }>
   _folderOverride: string | null
   _extras: unknown
+  _selectedIndex: number
   _openSearch(): void
   _closeSearch(): void
   _performPagefindSearch(): Promise<void>
@@ -431,6 +432,184 @@ describe('MbrSearchElement', () => {
       slow.resolve(okResponse())
       await flush()
       expect(handle(el)._results.map((r) => r.url_path)).toEqual(['/fresh/'])
+    })
+  })
+
+  // ==========================================================================
+  // Selection. `_selectedIndex` is the only thing that may mark a row as
+  // selected; these pin the three ways a second / wrong row used to light up:
+  // no reset when a new list lands, a `:hover` rule painting the row under a
+  // resting pointer, and mouse boundary events (re-dispatched by the browser
+  // when rows move under a stationary cursor) writing the selection.
+  // ==========================================================================
+  describe('result selection', () => {
+    function results(prefix: string, n: number) {
+      return Array.from({ length: n }, (_, i) => ({
+        url_path: `/${prefix}-${i}/`,
+        title: `${prefix} ${i}`,
+        description: null,
+        tags: null,
+        score: n - i,
+        snippet: null,
+        is_content_match: true,
+        filetype: 'markdown',
+      }))
+    }
+
+    function rows(): HTMLAnchorElement[] {
+      return Array.from(el.shadowRoot?.querySelectorAll<HTMLAnchorElement>('a.result') ?? [])
+    }
+
+    /** Indices of every row rendered as selected. */
+    function selectedRows(): number[] {
+      return rows().flatMap((a, i) => (a.classList.contains('selected') ? [i] : []))
+    }
+
+    async function key(k: string, ctrlKey = false) {
+      input(el).dispatchEvent(new KeyboardEvent('keydown', { key: k, ctrlKey, bubbles: true }))
+      await el.updateComplete
+    }
+
+    async function pointer(row: number, type: string, x: number, y: number) {
+      rows()[row].dispatchEvent(new MouseEvent(type, { clientX: x, clientY: y, bubbles: true }))
+      await el.updateComplete
+    }
+
+    beforeEach(async () => {
+      fetchMock.mockResolvedValue(okResponse({ results: results('a', 6), total_matches: 6 }))
+      el = await mount()
+    })
+
+    it('selects the first result when the first search of the page lands', async () => {
+      typeQuery(el, 'needle')
+      await new Promise((r) => setTimeout(r, 200)) // past the 150 ms debounce
+      await el.updateComplete
+
+      expect(rows().length).toBe(6)
+      expect(handle(el)._selectedIndex).toBe(0)
+      expect(selectedRows()).toEqual([0])
+    })
+
+    it('resets to the first row when a new list replaces one the keyboard moved in', async () => {
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+      await key('n', true)
+      await key('n', true)
+      await key('n', true)
+      expect(selectedRows()).toEqual([3])
+
+      // New query: Ctrl-N on the still-visible old list while it is in flight.
+      fetchMock.mockResolvedValue(okResponse({ results: results('b', 6), total_matches: 6 }))
+      typeQuery(el, 'needle2')
+      await key('n', true)
+      await key('n', true)
+      await selectScope(el, 'all')
+      await el.updateComplete
+
+      expect(rows()[0].getAttribute('href')).toContain('/b-0/')
+      expect(handle(el)._selectedIndex).toBe(0)
+      expect(selectedRows()).toEqual([0])
+    })
+
+    it('resets to the first row when the scope changes the list', async () => {
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+      await key('ArrowDown')
+      await key('ArrowDown')
+      expect(selectedRows()).toEqual([2])
+
+      fetchMock.mockResolvedValue(okResponse({ results: results('c', 4), total_matches: 4 }))
+      await selectScope(el, 'content')
+      await el.updateComplete
+      expect(selectedRows()).toEqual([0])
+    })
+
+    it('does not let a row under a resting pointer take the selection', async () => {
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+
+      // What the browser sends when results render under a stationary cursor.
+      await pointer(3, 'mouseover', 40, 200)
+      await pointer(3, 'mouseenter', 40, 200)
+      await pointer(3, 'mousemove', 40, 200)
+      await pointer(3, 'mousemove', 40, 200)
+      expect(selectedRows()).toEqual([0])
+
+      await key('n', true)
+      expect(selectedRows()).toEqual([1])
+    })
+
+    it('never styles a row as highlighted by :hover', () => {
+      const ctor = customElements.get('mbr-search') as unknown as {
+        styles: { cssText: string } | Array<{ cssText: string }>
+      }
+      const css = [ctor.styles].flat().map((s) => s.cssText).join('\n')
+      expect(css).toContain('.result.selected')
+      expect(css).not.toMatch(/\.result:hover/)
+    })
+
+    it('keeps keyboard and mouse on one selection', async () => {
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+
+      // A real move onto row 3 selects it, and only it.
+      await pointer(2, 'mousemove', 40, 150)
+      await pointer(3, 'mousemove', 40, 200)
+      expect(selectedRows()).toEqual([3])
+
+      // The keyboard continues from where the mouse left the selection.
+      await key('n', true)
+      expect(selectedRows()).toEqual([4])
+
+      // Ctrl-N scrolled the list, so another row is now under the unmoved
+      // pointer and the browser re-dispatches a move there: ignored.
+      await pointer(1, 'mousemove', 40, 200)
+      expect(selectedRows()).toEqual([4])
+
+      // Enter opens the row the index names.
+      const clicks = vi.spyOn(rows()[4], 'click').mockImplementation(() => {})
+      await key('Enter')
+      expect(clicks).toHaveBeenCalledTimes(1)
+    })
+
+    it('a modal reopened under a pointer that moved while closed does not select by it', async () => {
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+      await pointer(2, 'mousemove', 40, 150)
+      await pointer(3, 'mousemove', 40, 200)
+      expect(selectedRows()).toEqual([3])
+
+      handle(el)._closeSearch()
+      handle(el)._openSearch()
+      await el.updateComplete
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+
+      // First event of the new session at a new position is only a baseline.
+      await pointer(5, 'mousemove', 40, 300)
+      expect(selectedRows()).toEqual([0])
+    })
+
+    it('keeps the selection when a stale response lands after a newer list', async () => {
+      const slow = deferred<ReturnType<typeof okResponse>>()
+      fetchMock.mockReturnValueOnce(slow.promise)
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all') // slow, still pending
+
+      fetchMock.mockResolvedValue(okResponse({ results: results('fresh', 4), total_matches: 4 }))
+      typeQuery(el, 'needle2')
+      await selectScope(el, 'all')
+      await key('n', true)
+      await key('n', true)
+      expect(selectedRows()).toEqual([2])
+
+      slow.resolve(okResponse({ results: results('stale', 6), total_matches: 6 }))
+      await flush()
+      await el.updateComplete
+      expect(rows().map((a) => a.getAttribute('href'))).toEqual(
+        results('fresh', 4).map((r) => r.url_path)
+      )
+      expect(selectedRows()).toEqual([2])
     })
   })
 
