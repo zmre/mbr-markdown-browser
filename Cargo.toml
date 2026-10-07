@@ -108,7 +108,10 @@ walkdir = "2.5"
 thiserror = "2.0"
 parking_lot = "0.12"
 # Editing feature: password/token hashing for the edit endpoint
-argon2 = { version = "0.5", features = ["std"] }
+argon2 = "0.6"
+# Random bytes for `--generate-edit-token`. Already in the tree at 0.4 via
+# argon2's password-hash, so naming it adds no crate.
+getrandom = "0.4"
 sha2 = "0.11"
 rpassword = "7"
 yaml-rust2 = "0.12"

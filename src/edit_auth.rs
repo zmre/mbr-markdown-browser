@@ -10,7 +10,7 @@
 
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use sha2::{Digest, Sha256};
 
@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 ///
 /// The returned string is what belongs in `edit_token_hash`.
 pub fn hash_token(token: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default().hash_password(token.as_bytes(), &salt)?;
+    // `hash_password` draws a recommended-length random salt from the OS RNG.
+    let hash = Argon2::default().hash_password(token.as_bytes())?;
     Ok(hash.to_string())
 }
 
@@ -40,9 +40,10 @@ pub fn verify_token(hash: &str, token: &str) -> bool {
 ///
 /// Used by `--generate-edit-token` when the user does not supply a password.
 pub fn generate_token() -> String {
-    use argon2::password_hash::rand_core::RngCore;
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    // Same failure mode as the `OsRng::fill_bytes` this replaced: an OS RNG
+    // that cannot produce bytes is unrecoverable for a CLI token generator.
+    getrandom::fill(&mut bytes).expect("OS random number generator failed");
     to_hex(&bytes)
 }
 
@@ -77,6 +78,26 @@ mod tests {
     fn verify_rejects_wrong_token() {
         let hash = hash_token("s3cret").unwrap();
         assert!(!verify_token(&hash, "not-the-token"));
+    }
+
+    /// An `edit_token_hash` already sitting in someone's `.mbr/config.toml` must
+    /// keep verifying across argon2 upgrades. This one was produced by the
+    /// reference C implementation (`argon2 mbrsaltmbrsalt -id -t 2 -k 19456 -p 1
+    /// -l 32 -e`), with the same default parameters `hash_token` has always used.
+    #[test]
+    fn verify_accepts_existing_reference_hash() {
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$bWJyc2FsdG1icnNhbHQ$qZe0wJsZ+QggSV7lpWfHIqHwB1yscboSULscxsCHiCQ";
+        assert!(verify_token(hash, "correct horse battery staple"));
+        assert!(!verify_token(hash, "correct horse battery stapler"));
+    }
+
+    #[test]
+    fn hash_token_uses_default_argon2id_params() {
+        let hash = hash_token("s3cret").unwrap();
+        assert!(
+            hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "unexpected PHC prefix: {hash}"
+        );
     }
 
     #[test]
