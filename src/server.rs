@@ -6413,7 +6413,8 @@ impl Server {
             transcode_enabled,
             valid_tag_sources,
             // The one place the feature is ever on: the real page render.
-            markdown::ReviewLines::from(config.review_enabled),
+            // Editing alone still numbers `<dt>`s, for flashcard reviews.
+            markdown::ReviewLines::for_server(config.review_enabled, config.edit_enabled),
             config.mark_incomplete,
             &config.incomplete_markers,
             Some(config.repo.wikilink_index.clone()),

@@ -665,6 +665,13 @@ something can be asked about. `review_enabled` therefore has no effect on
 |--------|------|---------|-------------|
 | `review_enabled` | bool | `true` | Emit `data-mbr-line` on block elements. Disable with `--no-review` or `MBR_REVIEW_ENABLED=false`. |
 
+**One exception survives `--no-review`.** With [editing](../modes/editing.md)
+on, definition-list terms (`<dt>`) keep their `data-mbr-line`, because that line
+is how a [flashcard](../markdown/flashcards.md) review addresses its card —
+without it the spaced-repetition mode would quietly disappear. No other element
+is numbered, so the flag keeps its meaning everywhere else; with both review
+and editing off, nothing is.
+
 Example:
 ```toml
 # .mbr/config.toml

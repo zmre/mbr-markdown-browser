@@ -11,7 +11,7 @@ import {
   isHistoryDefinition,
   shiftSourceLines,
 } from './dom.js'
-import { installDeckPage } from './test-fixtures.js'
+import { DECK_HTML, installDeckPage } from './test-fixtures.js'
 import { DECK_CSS } from './styles.js'
 
 afterEach(() => {
@@ -140,6 +140,26 @@ describe('after a write', () => {
     expect(dd.querySelector('li')!.dataset.mbrLine).toBe('15')
     expect(dd.querySelector('summary')!.textContent).toMatch(/^Reviewed 1× · last: Hard/)
     expect(deckCards(root)[1].history).toBe(dd)
+  })
+
+  it('numbers nothing new on a terms-only page (--no-review with editing)', () => {
+    // Only the terms carry a line; the server numbered no answer, item or
+    // history, so neither may the page's own copy of the write.
+    const root = installDeckPage(
+      DECK_HTML.replace(/<(?!dt)(\w+) data-mbr-line="\d+"/g, '<$1')
+    )
+    expect(root.querySelectorAll('[data-mbr-line]')).toHaveLength(4)
+    const [first, second] = deckCards(root)
+    appendHistoryEntry(second, '2026-10-20 10:00 - Hard', 14, 15)
+    appendHistoryEntry(first, '2026-10-20 10:05 - Good', 10, 10)
+    expect(second.history!.hasAttribute('data-mbr-line')).toBe(false)
+    expect(root.querySelectorAll('[data-mbr-line]')).toHaveLength(4)
+    expect(Array.from(root.querySelectorAll('[data-mbr-line]'), (el) => el.tagName)).toEqual([
+      'DT',
+      'DT',
+      'DT',
+      'DT',
+    ])
   })
 
   it('appends to an existing (decorated) history', () => {

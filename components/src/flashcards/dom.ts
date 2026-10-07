@@ -193,6 +193,10 @@ export function shiftSourceLines(root: ParentNode, from: number, by: number): vo
  * later write addressed through them stays correct.
  *
  * Call {@link shiftSourceLines} first — the new elements are already numbered.
+ *
+ * Numbered only when the server numbers answers too: with review notes off and
+ * editing on (`ReviewLines::TermsOnly`) only `<dt>`s carry a line, and the
+ * page's copy of the write must not number what a re-render would not.
  */
 export function appendHistoryEntry(
   card: CardParts,
@@ -200,14 +204,15 @@ export function appendHistoryEntry(
   insertedAt: number,
   entryLine: number
 ): void {
+  const numbered = [...card.answers, card.history].some((dd) => dd?.hasAttribute('data-mbr-line'))
   const li = document.createElement('li')
   li.textContent = entry
-  li.dataset.mbrLine = String(entryLine)
+  if (numbered) li.dataset.mbrLine = String(entryLine)
 
   let dd = card.history
   if (!dd) {
     dd = document.createElement('dd')
-    dd.dataset.mbrLine = String(insertedAt)
+    if (numbered) dd.dataset.mbrLine = String(insertedAt)
     const label = document.createElement('em')
     label.append(document.createElement('strong'))
     label.firstElementChild!.textContent = 'Review History'

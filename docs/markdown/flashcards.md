@@ -142,6 +142,12 @@ the note itself — so it is offered only when the page is served with
 static site, or a server without editing, still offers In order and Random. On
 this documentation site, which is a static build, the mode is not offered.
 
+The deck finds each card in the file by its question's source line, which the
+page carries as `data-mbr-line`. That attribute also serves
+[review notes](../reference/configuration.md#review-settings), but turning those
+off with `--no-review` does not take spaced repetition with it: with editing on,
+questions keep their line and nothing else on the page gets one.
+
 ### The review history
 
 Each rating is appended to the card as one more definition:

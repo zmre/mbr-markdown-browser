@@ -643,15 +643,36 @@ impl TextLineCursor<'_> {
 /// three positional booleans under `#[allow(clippy::too_many_arguments)]`, and a
 /// fourth would be swappable with any of them without the compiler noticing.
 /// Same reasoning, and the same shape, as [`TaskMarkup`].
+///
+/// Three states because two features read the attribute. Review notes read it
+/// off every block in [`is_review_block_start`]; flashcard reviews
+/// (`POST /.mbr/flashcard-review`) address a card by its **term's** line alone,
+/// and they answer to `edit_enabled`, not `review_enabled`. Folding both into
+/// one boolean meant `--no-review` silently took spaced repetition away from a
+/// server that had editing on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewLines {
+    /// Every block in [`is_review_block_start`].
     Emit,
+    /// `<dt>` only ([`is_definition_term_start`]): review notes are off, but a
+    /// flashcard review still needs to name its card. Every other element is
+    /// exactly what [`ReviewLines::Omit`] renders, so `--no-review` keeps its
+    /// meaning everywhere else.
+    TermsOnly,
+    /// Nothing; byte-identical to a render from before the attribute existed.
     Omit,
 }
 
-impl From<bool> for ReviewLines {
-    fn from(enabled: bool) -> Self {
-        if enabled { Self::Emit } else { Self::Omit }
+impl ReviewLines {
+    /// The mode for a live page render, from the two switches that read the
+    /// attribute. `review_enabled` wins because it is a superset: its blocks
+    /// already include every `<dt>`.
+    pub fn for_server(review_enabled: bool, edit_enabled: bool) -> Self {
+        match (review_enabled, edit_enabled) {
+            (true, _) => Self::Emit,
+            (false, true) => Self::TermsOnly,
+            (false, false) => Self::Omit,
+        }
     }
 }
 
@@ -696,6 +717,12 @@ fn is_review_block_start(event: &Event<'_>) -> bool {
     )
 }
 
+/// The subset of [`is_review_block_start`] that [`ReviewLines::TermsOnly`]
+/// records: a definition-list term, the line a flashcard review addresses.
+fn is_definition_term_start(event: &Event<'_>) -> bool {
+    matches!(event, Event::Start(Tag::DefinitionListTitle))
+}
+
 /// Source lines for the block-level elements of a document, carried from pass 1
 /// ([`collect_events_and_headings`], the only place byte ranges exist) to the
 /// HTML writer, which emits them as `data-mbr-line`.
@@ -717,9 +744,17 @@ fn is_review_block_start(event: &Event<'_>) -> bool {
 /// # Why a separate table from [`TextLines`]
 ///
 /// The two answer to independent switches — `TextLines` to `mark_incomplete`,
-/// this to `review_enabled` — so neither flag can serve both, and a single
-/// monotone [`TextLineCursor`] cannot serve two consumers walking different
-/// vectors.
+/// this to [`ReviewLines`] (`review_enabled`, and `edit_enabled` for flashcard
+/// terms) — so neither flag can serve both, and a single monotone
+/// [`TextLineCursor`] cannot serve two consumers walking different vectors.
+///
+/// # Scope is decided here, not in the writer
+///
+/// `html.rs` numbers exactly the events this table names, so a
+/// [`ReviewLines::TermsOnly`] table — which only ever *records* `<dt>` starts —
+/// needs nothing from the writer, and pass 3's remap carries it unchanged
+/// because it re-keys whatever records exist rather than re-deciding which
+/// blocks deserve one.
 struct BlockLines {
     /// Ascending by `at`, strictly.
     entries: Vec<crate::html::BlockLine>,
@@ -727,24 +762,59 @@ struct BlockLines {
     /// `record` calls then compile down to a single branch. Builds, the CLI,
     /// QuickLook and the repository-wide backlink scan are all disabled.
     enabled: bool,
+    /// Record `<dt>` starts only ([`ReviewLines::TermsOnly`]).
+    terms_only: bool,
 }
 
 impl BlockLines {
-    /// A table that will be filled in — for a render that wants `data-mbr-line`.
-    fn recording() -> Self {
+    /// The table a render in `mode` fills in.
+    fn for_mode(mode: ReviewLines) -> Self {
         Self {
             entries: Vec::new(),
-            enabled: true,
+            enabled: mode != ReviewLines::Omit,
+            terms_only: mode == ReviewLines::TermsOnly,
         }
+    }
+
+    /// A table that will be filled in — for a render that wants `data-mbr-line`.
+    #[cfg(test)]
+    fn recording() -> Self {
+        Self::for_mode(ReviewLines::Emit)
     }
 
     /// A table that stays empty. An empty table is also how `html.rs` knows the
     /// feature is off, so a disabled render costs one branch and emits nothing.
     fn disabled() -> Self {
+        Self::for_mode(ReviewLines::Omit)
+    }
+
+    /// A fresh, empty table in the same mode — what pass 3 rebuilds into.
+    fn empty_like(&self) -> Self {
         Self {
             entries: Vec::new(),
-            enabled: false,
+            enabled: self.enabled,
+            terms_only: self.terms_only,
         }
+    }
+
+    /// Whether `event` is a block start this table records a line for.
+    ///
+    /// `enabled` first, so the off path is one predictable branch rather than
+    /// the eight-variant `matches!` behind it.
+    fn wants(&self, event: &Event<'_>) -> bool {
+        self.enabled
+            && if self.terms_only {
+                is_definition_term_start(event)
+            } else {
+                is_review_block_start(event)
+            }
+    }
+
+    /// Whether every recorded block kind is in scope — i.e. review notes are
+    /// on. Lines emitted *outside* this table (the chat container's) key off it,
+    /// so a terms-only render numbers nothing but `<dt>`.
+    fn numbers_every_block(&self) -> bool {
+        self.enabled && !self.terms_only
     }
 
     /// Notes that the event about to occupy slot `at` is a block start on
@@ -849,9 +919,7 @@ fn push_event<'a>(
 ) {
     if matches!(event, Event::Text(_)) {
         text_lines.record(events.len(), line);
-    // `enabled` first, so the off path is one predictable branch rather than
-    // the eight-variant `matches!` behind it.
-    } else if block_lines.enabled && is_review_block_start(&event) {
+    } else if block_lines.wants(&event) {
         block_lines.record(events.len(), line);
     }
     events.push(event);
@@ -1065,7 +1133,7 @@ fn collect_events_and_headings<'a>(
         // and once built it is reused, so the two features together cost no more
         // than one.
         let source_line = if (text_lines.enabled && matches!(event, Event::Text(_)))
-            || (block_lines.enabled && is_review_block_start(&event))
+            || block_lines.wants(&event)
         {
             let index = line_index.get_or_insert_with(|| LineIndex::build(markdown_input));
             Some(index.line_of(range.start))
@@ -1435,8 +1503,11 @@ fn push_chat_block<'a>(
 
     // The fence's content starts on the line after the fence.
     let content_line = chat.fence_line.map(|line| line.saturating_add(1));
-    // Only the review feature reads `data-mbr-line`; it would otherwise be noise.
-    let review_line = chat.fence_line.filter(|_| block_lines.enabled);
+    // Only the review feature reads the container's `data-mbr-line`; it would
+    // otherwise be noise — and under `TermsOnly` it would number a non-term.
+    let review_line = chat
+        .fence_line
+        .filter(|_| block_lines.numbers_every_block());
     let source_index = content_line.map(|_| LineIndex::build(&chat.source));
     // 1-based source line of byte `offset` in the block's text.
     let line_at = |offset: usize| -> Option<u32> {
@@ -1535,8 +1606,8 @@ fn push_chat_markdown<'a>(
     let index = first_line.map(|_| LineIndex::build(text));
     let parser = TextMergeWithOffset::new(MDParser::new_ext(text, options).into_offset_iter());
     for (event, range) in parser {
-        let wants_line = (text_lines.enabled && matches!(event, Event::Text(_)))
-            || (block_lines.enabled && is_review_block_start(&event));
+        let wants_line =
+            (text_lines.enabled && matches!(event, Event::Text(_))) || block_lines.wants(&event);
         let line = match (first_line, &index) {
             (Some(base), Some(index)) if wants_line => {
                 Some(base.saturating_add(index.line_of(range.start) - 1))
@@ -1692,10 +1763,7 @@ pub async fn render_with_cache(
     };
     // Independent of the marker rule: `review_enabled` and `mark_incomplete` are
     // separate switches, which is why these are two tables.
-    let mut block_lines = match review {
-        ReviewLines::Emit => BlockLines::recording(),
-        ReviewLines::Omit => BlockLines::disabled(),
-    };
+    let mut block_lines = BlockLines::for_mode(review);
     let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
         &markdown_input,
         TaskMarkup::Render,
@@ -1994,11 +2062,7 @@ fn mark_incomplete_blocks<'a>(
     // `# Index alignment`. `block_cursor` reads the incoming pass-1 keying,
     // `remapped` collects the output keying.
     let mut block_cursor = block_lines.cursor();
-    let mut remapped = if block_lines.enabled {
-        BlockLines::recording()
-    } else {
-        BlockLines::disabled()
-    };
+    let mut remapped = block_lines.empty_like();
     // Depths rather than booleans: `![a ![b](c) d](e)` nests, and a `<pre>`
     // never should but costs nothing to survive.
     let mut code_depth: usize = 0;
@@ -2257,10 +2321,7 @@ pub fn render_sync(
         TextLines::disabled()
     };
     // Independent of the marker rule, exactly as in `render_with_cache`.
-    let mut block_lines = match review {
-        ReviewLines::Emit => BlockLines::recording(),
-        ReviewLines::Omit => BlockLines::disabled(),
-    };
+    let mut block_lines = BlockLines::for_mode(review);
     let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
         &markdown_input,
         TaskMarkup::Render,
@@ -6139,6 +6200,11 @@ mod tests {
     /// Renders `md` through the async entry point with `data-mbr-line` on, and
     /// optionally with incomplete-marker highlighting.
     async fn render_review(md: &str, mark_incomplete: bool) -> String {
+        render_review_with(md, mark_incomplete, ReviewLines::Emit).await
+    }
+
+    /// [`render_review`] with an explicit [`ReviewLines`] mode.
+    async fn render_review_with(md: &str, mark_incomplete: bool, review: ReviewLines) -> String {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(md.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
@@ -6159,7 +6225,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
-            ReviewLines::Emit,
+            review,
             mark_incomplete,
             &markers,
             None,
@@ -6484,6 +6550,74 @@ mod tests {
             "one attribute per block, at its true line: {html}"
         );
         assert_eq!(block_line_of(&html, "Delta is plain."), Some(7), "{html}");
+    }
+
+    /// `--no-review` with editing on: the flashcard writer still needs every
+    /// term's line, and nothing else may be numbered. The fixture has every
+    /// other recorded block kind, a ```` ```chat ```` block (whose container
+    /// carries a line of its own under [`ReviewLines::Emit`]) and markers in a
+    /// definition and an item, so pass 3's remap runs over a terms-only table.
+    #[tokio::test]
+    async fn terms_only_numbers_definition_terms_and_nothing_else() {
+        let md = concat!(
+            "# Heading\n\n",         // 1
+            "A paragraph.\n\n",      // 3
+            "- TODO an item\n\n",    // 5
+            "> a quote\n\n",         // 7
+            "First term\n",          // 9
+            ": TODO first answer\n", // 10
+            "\n",                    // 11
+            "Loose term\n\n",        // 12
+            ": loose answer\n\n",    // 14
+            "```chat\n",             // 16
+            "{{Alice|Chat term\n",   // 17
+            ": chat answer\n",       // 18
+            "|}}\n",                 // 19
+            "```\n\n",               // 20
+            "```\ncode\n```\n",      // 22
+        );
+        for mark_incomplete in [false, true] {
+            let html = render_review_with(md, mark_incomplete, ReviewLines::TermsOnly).await;
+            assert_eq!(block_lines_on(&html, "<dt"), vec![9, 12, 17], "{html}");
+            assert_eq!(
+                emitted_block_lines(&html),
+                vec![9, 12, 17],
+                "terms only, mark_incomplete={mark_incomplete}: {html}"
+            );
+            if mark_incomplete {
+                assert!(html.contains(INCOMPLETE_SPAN_PREFIX), "{html}");
+            }
+        }
+    }
+
+    /// A terms-only render of a page with no definition list is the
+    /// feature-off render, byte for byte; with one, it differs only by the
+    /// terms' attributes.
+    #[tokio::test]
+    async fn terms_only_differs_from_omit_only_on_terms() {
+        let plain = "# H\n\nA TODO paragraph.\n\n- item\n";
+        assert_eq!(
+            render_review_with(plain, true, ReviewLines::TermsOnly).await,
+            render_review_with(plain, true, ReviewLines::Omit).await,
+        );
+
+        let deck = "Term\n: answer\n\nOther\n: TODO other answer\n";
+        let terms = render_review_with(deck, true, ReviewLines::TermsOnly).await;
+        let omit = render_review_with(deck, true, ReviewLines::Omit).await;
+        assert_eq!(
+            terms
+                .replace(" data-mbr-line=\"1\"", "")
+                .replace(" data-mbr-line=\"4\"", ""),
+            omit,
+        );
+    }
+
+    #[test]
+    fn review_lines_for_server_modes() {
+        assert_eq!(ReviewLines::for_server(true, false), ReviewLines::Emit);
+        assert_eq!(ReviewLines::for_server(true, true), ReviewLines::Emit);
+        assert_eq!(ReviewLines::for_server(false, true), ReviewLines::TermsOnly);
+        assert_eq!(ReviewLines::for_server(false, false), ReviewLines::Omit);
     }
 
     /// With the feature off the writer must produce exactly the bytes it

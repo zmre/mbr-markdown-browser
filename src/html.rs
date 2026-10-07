@@ -131,7 +131,9 @@ pub struct HtmlConfig {
     ///
     /// When non-empty, the writer emits ` data-mbr-line="N"` on the eight block
     /// tags listed in `markdown::is_review_block_start` — the single definition
-    /// of that set, which the arms here must not drift from.
+    /// of that set, which the arms here must not drift from — but only on the
+    /// events the table actually names. A `ReviewLines::TermsOnly` table names
+    /// only `<dt>` starts, so every other arm writes nothing.
     pub block_lines: Vec<BlockLine>,
 }
 
@@ -2303,6 +2305,24 @@ mod tests {
             plain.contains("<dt tabindex=\"0\">Term</dt>\n<dd>answer</dd>"),
             "{plain}"
         );
+    }
+
+    /// The writer numbers exactly the events the table names, which is what
+    /// lets `ReviewLines::TermsOnly` (`--no-review` with editing on) be decided
+    /// entirely in `markdown.rs`: a table holding only `<dt>` starts leaves
+    /// every other element — the paragraph, the item, the `<dd>` — bare, even
+    /// though `emit_block_lines` is on for the whole document.
+    #[test]
+    fn block_lines_holding_only_terms_number_only_terms() {
+        let markdown = "Para\n\n- item\n\nTerm\n: answer\n";
+        let html = render_markdown_with_block_lines(markdown, |e| {
+            matches!(e, Start(Tag::DefinitionListTitle))
+        });
+        assert!(html.contains("<p>Para</p>"), "{html}");
+        assert!(html.contains("<li>item</li>"), "{html}");
+        assert!(html.contains("<dd>answer</dd>"), "{html}");
+        assert_eq!(html.matches("data-mbr-line=\"").count(), 1, "{html}");
+        assert!(html.contains("<dt data-mbr-line="), "{html}");
     }
 
     #[test]

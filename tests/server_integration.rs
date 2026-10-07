@@ -9131,6 +9131,49 @@ async fn test_flashcard_review_round_trip_from_rendered_dt_lines() {
     );
 }
 
+/// `--no-review` turns off the review-notes anchors, not flashcard writes: with
+/// editing on, a term still carries the line `POST /.mbr/flashcard-review`
+/// addresses it by. Nothing else does — the flag keeps its meaning for every
+/// other element.
+#[tokio::test]
+async fn test_flashcard_dt_lines_survive_no_review_when_editing() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "deck.md",
+        &format!("{DECK_SOURCE}\nA paragraph.\n\n- an item\n"),
+    );
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.review_enabled = false;
+        c.edit_enabled = true;
+    })
+    .await;
+    let html = server.get_text("/deck/").await;
+
+    assert_eq!(dt_lines(&html), vec![5, 8], "{html}");
+    assert_html_contains(&html, "<p>A paragraph.</p>");
+    assert_html_contains(&html, "<li>an item</li>");
+    assert_html_contains(&html, "<dd>Paris.</dd>");
+    assert_eq!(
+        html.matches("data-mbr-line=\"").count(),
+        2,
+        "only the two terms are numbered: {html}"
+    );
+}
+
+/// With both off there is no writer to address, so no element is numbered.
+#[tokio::test]
+async fn test_no_review_and_no_edit_number_nothing() {
+    let repo = TestRepo::new();
+    repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.review_enabled = false;
+    })
+    .await;
+    let html = server.get_text("/deck/").await;
+    assert!(!html.contains("data-mbr-line=\""), "{html}");
+    assert_html_contains(&html, "<dt tabindex=\"0\">Capital of France?</dt>");
+}
+
 #[tokio::test]
 async fn test_flashcard_review_stale_or_wrong_line_returns_409() {
     let repo = TestRepo::new();
