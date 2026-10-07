@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@types/d3-force": "^3.0.10",
-    "@vitest/browser": "^4.1.11",
+    "@vitest/browser": "^5.0.3",
     "happy-dom": "^20.13.2",
     "terser": "^5.51.2",
     "typescript": "~7.0.2",
