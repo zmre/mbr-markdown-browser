@@ -396,13 +396,13 @@
       # Static linking avoids hardcoded Nix store paths for ffmpeg dylibs in binaries
       ffmpegMinimalStatic = pkgs.stdenv.mkDerivation {
         pname = "ffmpeg-minimal-static";
-        version = "7.1";
+        version = "7.1.5";
         src = pkgs.fetchurl {
-          url = "https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz";
-          hash = "sha256-QJc9RJcNvIPvMCsGCfLnSYK+LYWRbdLudHLTBninq+Y=";
+          url = "https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz";
+          hash = "sha256-3maFCcr541480WJHNEH9spU4xtlu0IApKzz55vxdVY8=";
         };
         unpackCmd = "tar xf $curSrc";
-        sourceRoot = "ffmpeg-7.1";
+        sourceRoot = "ffmpeg-7.1.5";
         nativeBuildInputs = with pkgs;
           [pkg-config perl yasm nasm]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [pkgs.apple-sdk];
