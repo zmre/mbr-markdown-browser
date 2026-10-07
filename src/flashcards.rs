@@ -848,6 +848,22 @@ mod tests {
         );
     }
 
+    /// A term inside a ```` ```chat ```` body renders as a real `<dt>` with a
+    /// `data-mbr-line`, but in the source it is code-fence text. The writer must
+    /// refuse it, which is why the deck treats `.mbr-chat` as nesting.
+    #[test]
+    fn terms_inside_chat_blocks_are_not_terms() {
+        let source = "```chat\n{{Alice|Chat term\n: chat answer\n|}}\n```\n\nReal?\n: yes\n";
+        assert_eq!(
+            append(source, 2),
+            Err(FlashcardPatchError::NotATerm { line: 2 })
+        );
+        assert!(
+            appended(source, 7)
+                .ends_with(": yes\n: ___Review History___\n  * 2026-10-06 13:45 - Good\n")
+        );
+    }
+
     #[test]
     fn definition_lines_and_prose_are_not_terms() {
         let source = "Prose.\n\nQ?\n: A.\n";

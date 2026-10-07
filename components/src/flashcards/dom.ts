@@ -19,9 +19,12 @@ import { isHistoryLabel, parseHistory, summarizeHistory, type HistoryEntry } fro
  * indentation prefix. Collecting the same set here keeps "a card" meaning the
  * same thing on both sides, so a review can never be addressed to a term the
  * server will refuse. `<section>` is deliberately absent: it is the renderer's
- * own wrapper (`enable_sections`), not markdown nesting.
+ * own wrapper (`enable_sections`), not markdown nesting. `.mbr-chat` is
+ * present although it is not markdown nesting either: a chat bubble's body is
+ * rendered markdown (with real `data-mbr-line`s), but in the source it is the
+ * text of a ```chat code fence, which the writer refuses.
  */
-const NESTING_SELECTOR = 'li, blockquote, dd, td, th, .footnote-definition'
+const NESTING_SELECTOR = 'li, blockquote, dd, td, th, .footnote-definition, .mbr-chat'
 
 /** Class a decorated history `<dd>` carries. */
 export const HISTORY_CLASS = 'mbr-fc-history'

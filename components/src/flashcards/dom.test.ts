@@ -28,6 +28,18 @@ describe('deck discovery', () => {
     expect(hasDeck(root)).toBe(false)
   })
 
+  it('ignores definition lists inside a chat block', () => {
+    // The body is rendered markdown, but in the source it sits inside a
+    // ```chat fence, which src/flashcards.rs refuses to write to.
+    const root = document.createElement('main')
+    root.innerHTML =
+      '<div class="mbr-chat" role="log"><div class="mbr-chat-msg"><div class="mbr-chat-body">' +
+      '<dl><dt data-mbr-line="5">x</dt><dd data-mbr-line="6">y</dd></dl></div></div>' +
+      '<div class="mbr-chat-md"><dl><dt data-mbr-line="8">z</dt><dd>w</dd></dl></div></div>'
+    expect(deckLists(root)).toHaveLength(0)
+    expect(hasDeck(root)).toBe(false)
+  })
+
   it('groups terms with their answers and history', () => {
     const cards = deckCards(installDeckPage())
     expect(cards.map((c) => c.term.textContent)).toEqual([

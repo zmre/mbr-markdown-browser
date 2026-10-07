@@ -6303,6 +6303,48 @@ mod tests {
         );
     }
 
+    /// A definition list inside a ```` ```chat ```` body is spliced into the
+    /// page stream by `push_chat_markdown`, which consults the same
+    /// `is_review_block_start`, so its `<dt>`/`<dd>` carry their real source
+    /// lines too, and the table stays strictly ascending across the boundary
+    /// between page events and chat-body events. (The deck still ignores such
+    /// a list: `flashcards/dom.ts` treats `.mbr-chat` as nesting, matching the
+    /// writer, which sees a code fence there and refuses the line.)
+    #[tokio::test]
+    async fn block_lines_on_definition_lists_inside_chat_bodies() {
+        let md = concat!(
+            "Before term\n",       // 1
+            ": before answer\n",   // 2
+            "\n",                  // 3
+            "```chat\n",           // 4
+            "{{Alice|Chat term\n", // 5
+            ": chat answer\n",     // 6
+            "|}}\n",               // 7
+            "Between term\n",      // 8
+            ": between answer\n",  // 9
+            "```\n",               // 10
+            "\n",                  // 11
+            "After term\n",        // 12
+            ": after answer\n",    // 13
+        );
+        let html = render_review(md, false).await;
+        assert!(html.contains("<div class=\"mbr-chat\""), "{html}");
+        assert_eq!(block_lines_on(&html, "<dt"), vec![1, 5, 8, 12], "{html}");
+        assert_eq!(block_lines_on(&html, "<dd"), vec![2, 6, 9, 13], "{html}");
+
+        let emitted = emitted_block_lines(&html);
+        assert!(
+            emitted.windows(2).all(|pair| pair[0] <= pair[1]),
+            "data-mbr-line values follow document order: {emitted:?}"
+        );
+
+        let recorded = recorded_block_lines(md);
+        assert!(
+            recorded.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "BlockLines records must be strictly ascending by event index: {recorded:?}"
+        );
+    }
+
     #[test]
     fn block_lines_disabled_records_nothing() {
         let md = "# H\n\nPara.\n\n- item\n\n> quote\n";
