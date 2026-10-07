@@ -240,7 +240,14 @@ export const DECK_CSS = `
   border: 1px solid currentColor;
   opacity: 0.7;
 }
-.mbr-fc-rate-again { --mbr-fc-rating: var(--pico-del-color, #c62828); }
+/* Again is a true red, not Pico's --pico-del-color: that is a muted salmon
+ * that reads as orange beside Hard's amber. Same pair as chat's slot 0. */
+:root { --mbr-fc-again: #c62828; }
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) { --mbr-fc-again: #ef5350; }
+}
+[data-theme="dark"] { --mbr-fc-again: #ef5350; }
+.mbr-fc-rate-again { --mbr-fc-rating: var(--mbr-fc-again); }
 .mbr-fc-rate-hard { --mbr-fc-rating: #b7791f; }
 .mbr-fc-rate-good { --mbr-fc-rating: var(--pico-ins-color, #2e7d32); }
 .mbr-fc-rate-easy { --mbr-fc-rating: var(--pico-primary, #0172ad); }
