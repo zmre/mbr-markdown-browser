@@ -7644,7 +7644,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     (
         "/mermaid.min.js",
-        include_bytes!("../templates/mermaid.11.16.1.min.js"),
+        include_bytes!("../templates/mermaid.12.1.0.min.js"),
         "application/javascript",
     ),
     // Reveal.js presentation framework

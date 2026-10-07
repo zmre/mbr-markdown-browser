@@ -80,6 +80,18 @@ describe('UNIT MbrMermaidElement', () => {
     })
   })
 
+  it('pins the pre-12 dagre layout and classic look', async () => {
+    document.body.insertAdjacentHTML('beforeend', '<pre class="mermaid">graph LR;A--&gt;B</pre>')
+    const mermaid = stubMermaid()
+
+    element = await mount()
+
+    expect(mermaid.initialize.mock.calls[0][0]).toMatchObject({
+      layout: 'dagre',
+      look: 'classic',
+    })
+  })
+
   it('renders exactly the blocks it detected', async () => {
     document.body.insertAdjacentHTML(
       'beforeend',

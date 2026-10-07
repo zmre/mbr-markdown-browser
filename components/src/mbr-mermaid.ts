@@ -19,6 +19,8 @@ interface MermaidConfig {
   startOnLoad: boolean
   theme: string
   securityLevel: MermaidSecurityLevel
+  layout: string
+  look: string
 }
 
 /** Options for mermaid.run() */
@@ -51,6 +53,15 @@ function mermaidInitOptions(prefersDark: boolean): MermaidConfig {
     // drops the page theme/CSS and breaks in-diagram links, so it is not
     // usable here.
     securityLevel: 'strict',
+    // Mermaid 12 changed two defaults that re-lay out and recolour every
+    // existing diagram: the global layout became ELK (from dagre) and most
+    // diagram types default to the `neo` look (from `classic`). Pin the 11.x
+    // values so upgrading mbr does not silently redraw a repository's diagrams,
+    // and because dagre is the cheaper layout on the render path. These sit at
+    // the initialize() layer, so a diagram can still opt in per block with
+    // `config: { layout: elk, look: neo }` front matter.
+    layout: 'dagre',
+    look: 'classic',
   }
 }
 
