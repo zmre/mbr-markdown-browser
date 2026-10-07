@@ -249,6 +249,15 @@ describe('partial dates', () => {
     expect(lifeYears({ dates: { birthday: '1950-06', death: '2001' } })).toEqual({ born: '1950', died: '2001' })
   })
 
+  it('matches date labels in any case (older site.json kept the authored case)', () => {
+    expect(lifeYears({ 'dates.Birthday': '1960-01-02', born: '1950' }).born).toBe('1960')
+    expect(lifeYears({ 'dates.Birthday': '1960-01-02' }).born).toBe('1960')
+    expect(lifeYears({ 'dates.DEATH': '2001' }).died).toBe('2001')
+    expect(lifeYears({ dates: { Birthday: '1960-01-02' }, born: '1950' }).born).toBe('1960')
+    // An exact key still wins over a case variant.
+    expect(lifeYears({ 'dates.Birthday': '1900', 'dates.birthday': '1960' }).born).toBe('1960')
+  })
+
   it('falls back to born when the birthday has no year', () => {
     expect(lifeYears({ 'dates.birthday': '--03-19', born: '1927' }).born).toBe('1927')
   })

@@ -850,6 +850,56 @@ const CONTACT_NOTE: &str = concat!(
     "Notes about Jane.\n",
 );
 
+/// A date label is matched case-insensitively everywhere, so `site.json` must
+/// publish it under the lowercase key the charts read: an authored `Birthday`
+/// both beats the legacy `born` and *is* the chart's birth year.
+#[tokio::test]
+async fn test_site_json_date_keys_are_lowercase() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/ada.md",
+        "---\ntype: person\nborn: 1950\ndates:\n  Birthday: 1960-01-02\n  Wedding Day: 1985-06-01\n---\n",
+    );
+    repo.create_markdown(
+        "people/bea.md",
+        "---\ntype: person\ndates:\n  - DEATH: 2001\n---\n",
+    );
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let site: serde_json::Value =
+        serde_json::from_str(&server.get_text("/.mbr/site.json").await).unwrap();
+    let fm = |url: &str| {
+        site["markdown_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["url_path"] == url)
+            .unwrap_or_else(|| panic!("{url} in site.json"))["frontmatter"]
+            .clone()
+    };
+    let ada = fm("/people/ada/");
+    assert_eq!(ada["dates.birthday"], "1960-01-02", "{ada}");
+    assert_eq!(ada["dates.wedding day"], "1985-06-01", "{ada}");
+    let bea = fm("/people/bea/");
+    assert_eq!(bea["dates.death"], "2001", "{bea}");
+    for person in [&ada, &bea] {
+        let dates: Vec<&String> = person
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("dates."))
+            .collect();
+        assert!(
+            dates.iter().all(|k| **k == k.to_lowercase()),
+            "one canonical lowercase key per date: {dates:?}"
+        );
+    }
+
+    // The card agrees: one birthday, the authored one.
+    let html = server.get_text("/people/ada/").await;
+    assert!(html.contains("1960"), "{html}");
+}
+
 /// Contact details stay on the page and out of `site.json` (contract 0.2);
 /// dates and aliases are normalized for the charts.
 #[tokio::test]

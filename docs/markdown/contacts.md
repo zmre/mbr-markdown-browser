@@ -187,7 +187,8 @@ and death date (or on their own line when the date is unknown).
 
 `born:` and `died:` — the original genealogy fields — still work and mean
 `dates.birthday` and `dates.death`; if both spellings are present, the `dates`
-entry wins.
+entry wins. Date labels are not case-sensitive: `Birthday:` is the birthday,
+on the card and in the family charts alike.
 
 The same rules power the `humandate` template filter, so a custom template can
 write `{{ some_date | humandate }}` for any of these forms.

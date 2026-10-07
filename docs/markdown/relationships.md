@@ -80,6 +80,8 @@ relationships:
 In `site.json` every person and organization carries its dates as
 `dates.<label>` strings, with legacy `born`/`died` folded into
 `dates.birthday`/`dates.death`, so charts and custom components read one shape.
+The label is lowercased (`Birthday:` is published as `dates.birthday`), since
+labels are matched without regard to case.
 
 ### Aliases
 

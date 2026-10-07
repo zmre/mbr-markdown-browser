@@ -243,16 +243,32 @@ export function yearOf(value: unknown): string | undefined {
 }
 
 /**
+ * `record[key]`, else the first key equal to it ignoring case. The exact key is
+ * the fast path; the scan runs only on a miss, over one note's frontmatter.
+ */
+function entryIgnoringCase(record: Record<string, unknown>, key: string): unknown {
+  const exact = record[key]
+  if (exact != null && exact !== '') return exact
+  const lower = key.toLowerCase()
+  for (const [k, value] of Object.entries(record)) {
+    if (k.toLowerCase() === lower && value != null && value !== '') return value
+  }
+  return undefined
+}
+
+/**
  * A date from frontmatter by contract label. site.json flattens `dates:` into
  * dot keys (`dates.birthday`); a page's own `window.frontmatter` may still be
- * nested, so both shapes are read.
+ * nested, so both shapes are read. Labels match case-insensitively, as they do
+ * on the server: it publishes lowercase keys, but an older site.json kept the
+ * authored case (`dates.Birthday`), and a nested map always does.
  */
 function datesEntry(fm: Record<string, unknown>, label: string): unknown {
-  const flat = fm[`dates.${label}`]
-  if (flat != null && flat !== '') return flat
+  const flat = entryIgnoringCase(fm, `dates.${label}`)
+  if (flat !== undefined) return flat
   const nested = fm['dates']
   if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
-    return (nested as Record<string, unknown>)[label]
+    return entryIgnoringCase(nested as Record<string, unknown>, label)
   }
   return undefined
 }

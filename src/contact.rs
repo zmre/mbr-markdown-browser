@@ -988,8 +988,9 @@ fn split_extension(lower: &str) -> (&str, Option<String>) {
 ///   note, so labeled aliases resolve wikilinks and relationship endpoints.
 /// - On person/organization notes, every date — `dates` in any accepted shape,
 ///   plus legacy `born`/`died` — is written as a `dates.<label>` string
-///   ([`PartialDate::iso`] when parseable). This is the `site.json` contract
-///   the charts read; `born`/`died` stay as authored for existing templates.
+///   ([`PartialDate::iso`] when parseable), the label **lowercased**. This is
+///   the `site.json` contract the charts read; `born`/`died` stay as authored
+///   for existing templates.
 ///
 /// Costs nothing on a note with neither key.
 pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Hash) {
@@ -1023,7 +1024,16 @@ pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Ha
         })
         .collect();
     for date in parse_dates(&fm, None) {
-        hm.insert(format!("dates.{}", date.label), Value::String(date.value));
+        // Lowercase, because every reader of a label matches it
+        // case-insensitively (`has` and `rank` above) except a key lookup: the
+        // charts read exactly `dates.birthday`. The generic simplifier has
+        // already flattened a `dates:` map under the authored case, so that
+        // copy goes, leaving one canonical key per date.
+        let canonical = date.label.to_lowercase();
+        if canonical != date.label {
+            hm.remove(&format!("dates.{}", date.label));
+        }
+        hm.insert(format!("dates.{canonical}"), Value::String(date.value));
     }
 }
 
@@ -1476,6 +1486,36 @@ mod tests {
         assert_eq!(hm["dates.anniversary"], json!("--03-19"));
         let other = simplified("type: event\nborn: 1898\n");
         assert!(other.is_empty());
+    }
+
+    /// Labels match case-insensitively (`has`, `rank`), so the published key
+    /// must not keep the authored case: the charts look up `dates.birthday`.
+    #[test]
+    fn normalize_writes_lowercase_date_keys() {
+        let hm = simplified("type: person\nborn: 1950\ndates:\n  Birthday: 1960-01-02\n");
+        assert_eq!(hm["dates.birthday"], json!("1960-01-02"));
+        assert!(!hm.contains_key("dates.Birthday"), "{hm:?}");
+
+        let mut flattened = SimpleMetadata::new();
+        // What the generic simplifier has already written by the time the hook
+        // runs: the nested map flattened with the authored case.
+        flattened.insert("dates.Birthday".to_string(), json!("1960-01-02"));
+        let y = yaml("type: person\ndates:\n  Birthday: 1960-01-02\n");
+        normalize_simplified(&mut flattened, y.as_hash().unwrap());
+        assert_eq!(flattened.len(), 1, "{flattened:?}");
+        assert_eq!(flattened["dates.birthday"], json!("1960-01-02"));
+    }
+
+    #[test]
+    fn mixed_case_birthday_beats_legacy_born_on_the_card() {
+        let c = contact("type: person\nborn: 1950\ndates:\n  Birthday: 1960-01-02\n");
+        let birthdays: Vec<_> = c
+            .dates
+            .iter()
+            .filter(|d| d.label.eq_ignore_ascii_case("birthday"))
+            .map(|d| d.value.as_str())
+            .collect();
+        assert_eq!(birthdays, ["1960-01-02"]);
     }
 
     #[test]
