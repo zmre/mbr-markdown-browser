@@ -978,12 +978,18 @@ body > header nav > ul.mbr-title-group > li.mbr-nav-title > strong {
  * The tooltip is Pico's, added by `components/src/nav-title.ts` only while the
  * text is actually clipped -- so the focus ring below appears only on a title
  * that has something hidden to reveal.
+ * But exclude the mbr-nav-title from tooltip dotted underline
  */
 body > header nav > ul.mbr-title-group > li.mbr-nav-title[data-tooltip] {
   cursor: help;
+  border-bottom: none;
 }
 
-body > header nav > ul.mbr-title-group > li.mbr-nav-title[data-tooltip]::before {
+body
+  > header
+  nav
+  > ul.mbr-title-group
+  > li.mbr-nav-title[data-tooltip]::before {
   /*
    * Long titles are the whole reason this exists, so let the bubble wrap rather
    * than run off the edge of a narrow window.
@@ -1258,7 +1264,9 @@ a.mbr-link-enhanced[data-tooltip]::after {
  * Absolutely positioned so it cannot push the icon off centre -- as a flex
  * sibling it would share the box and shift the icon left.
  */
-.mbr-review-marker[data-mbr-review-count]:not([data-mbr-review-count="1"])::after {
+.mbr-review-marker[data-mbr-review-count]:not(
+    [data-mbr-review-count="1"]
+  )::after {
   content: attr(data-mbr-review-count);
   position: absolute;
   top: -0.35em;
@@ -1685,7 +1693,10 @@ main dl > dd:focus-within ~ dt ~ dd {
  * `<dd>`, which `dd:focus-within ~ dd` keeps open but which would close the
  * answers *before* it; this keeps the earlier answers of the same card open
  * too (the `:not()` stops at the previous card, as with the marker rule). */
-body.flashcard main dl > dd:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within)) {
+body.flashcard
+  main
+  dl
+  > dd:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within)) {
   visibility: visible;
   height: auto;
   padding-block: 0 var(--mbr-dl-item-spacing);
@@ -1941,19 +1952,39 @@ main dl > dd.mbr-fc-history ul {
   border: 1px solid var(--pico-muted-border-color);
   /* Fallback first: color-mix() is the wash, where supported. */
   background: var(--pico-card-sectioning-background-color);
-  background: color-mix(in srgb, var(--mbr-chat-color) 10%, var(--pico-background-color));
+  background: color-mix(
+    in srgb,
+    var(--mbr-chat-color) 10%,
+    var(--pico-background-color)
+  );
   border-color: color-mix(in srgb, var(--mbr-chat-color) 30%, transparent);
   overflow-wrap: anywhere;
 }
 
-.mbr-chat-c0 { --mbr-chat-color: var(--mbr-chat-c0); }
-.mbr-chat-c1 { --mbr-chat-color: var(--mbr-chat-c1); }
-.mbr-chat-c2 { --mbr-chat-color: var(--mbr-chat-c2); }
-.mbr-chat-c3 { --mbr-chat-color: var(--mbr-chat-c3); }
-.mbr-chat-c4 { --mbr-chat-color: var(--mbr-chat-c4); }
-.mbr-chat-c5 { --mbr-chat-color: var(--mbr-chat-c5); }
-.mbr-chat-c6 { --mbr-chat-color: var(--mbr-chat-c6); }
-.mbr-chat-c7 { --mbr-chat-color: var(--mbr-chat-c7); }
+.mbr-chat-c0 {
+  --mbr-chat-color: var(--mbr-chat-c0);
+}
+.mbr-chat-c1 {
+  --mbr-chat-color: var(--mbr-chat-c1);
+}
+.mbr-chat-c2 {
+  --mbr-chat-color: var(--mbr-chat-c2);
+}
+.mbr-chat-c3 {
+  --mbr-chat-color: var(--mbr-chat-c3);
+}
+.mbr-chat-c4 {
+  --mbr-chat-color: var(--mbr-chat-c4);
+}
+.mbr-chat-c5 {
+  --mbr-chat-color: var(--mbr-chat-c5);
+}
+.mbr-chat-c6 {
+  --mbr-chat-color: var(--mbr-chat-c6);
+}
+.mbr-chat-c7 {
+  --mbr-chat-color: var(--mbr-chat-c7);
+}
 
 .mbr-chat-right {
   align-self: flex-end;

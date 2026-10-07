@@ -203,14 +203,20 @@ question to peek at its answer.
 
 What does **mbr** stand for?
 : Markdown browser.
+: ___Review History___
+  * 2026-10-06 20:59 - Easy
 
 Which key opens search in mbr?
 : `/` (slash).
+: ___Review History___
+  * 2026-10-06 20:59 - Good
 
 How do you write a markdown link to example.com with the text "Example"?
 : ```markdown
   [Example](https://example.com)
   ```
+: ___Review History___
+  * 2026-10-06 21:00 - Easy
 
 Which two frontmatter fields set a page's `<body>` classes?
 : `style`
@@ -233,12 +239,14 @@ What is the capital of Australia?
   * 2026-09-14 08:12 - Again
   * 2026-09-14 08:24 - Good
   * 2026-09-17 19:40 - Good
+  * 2026-10-06 20:59 - Again
 
 What is the chemical symbol for gold?
 : Au, from the Latin *aurum*.
 : ___Review History___
   * 2026-09-20 21:03 - Fail
   * 2026-09-20 21:15 - Hard
+  * 2026-10-06 20:59 - Easy
 
 Which planet has the shortest day?
 : Jupiter — it turns once in about 9 hours and 56 minutes.
