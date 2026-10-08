@@ -2,6 +2,22 @@
 
 ## What's Next
 
+* **Review follow-ups (2026-10-07 review of #323–#329)**
+  * [ ] Search modal: typing clears the selection (`mbr-search.ts` `_handleInput` sets `_selectedIndex = -1`) until results land, so a quick Enter is dropped and the highlight blinks; `_setResults` already resets to 0, so delete that line (optionally replay a pending Enter).
+  * [ ] Search modal: `_lastPointer` is only recorded by `mousemove` on rows, so a pointer resting outside the rows can still hijack the selection when a longer list renders under it. Track pointer position on the whole `.modal`.
+  * [ ] `type:` facet: `TYPE_TOKEN` in `search-extras/facets.ts` lets an unclosed quote swallow the rest of the query (`type:"Meeting rust` drops `rust`); use `"[^"]*"|\S*`. Server `facet_matches` is substring, so `type:person` also matches `salesperson` — match `type:` exactly or label the options.
+  * [ ] Flashcard deck: mode/filter/resize keys still work while a rating write is pending, so the in-memory rating can land on a different card or session. Capture mode + index before the `await` in `_rate` and skip the session update if they changed (or ignore those keys while `_pending`).
+  * [ ] Flashcard deck: its window capture-phase keydown swallows keys for the GUI find bar opened over it (Enter does nothing, Esc closes the deck, Tab is trapped). Let events whose composed path is in `mbr-find-bar` (or outside the deck) through.
+  * [ ] Relationships: an inverse pair with different `category` values is published as-is with no warning (docs say they must match); reconcile first-declared-wins with a warning like hierarchy.
+  * [ ] Contacts: map-form `aliases` leave stale `aliases.<label>` dot keys next to the flat list in `site.json` (duplicate info-panel rows); remove them in `normalize_simplified`. Also decide whether singular `email`/`phone`/`address`/`website` keys should be private.
+  * [ ] Contacts: `Contact::from_yaml` reads only lowercase keys, so `Emails:` is (safely) not shown on the card; consider case-insensitive reading.
+  * [ ] Family chart: a person's `image` reaches family-chart's `CardImage` unescaped (`<image href="${image}">` via d3 `.html()`); escape or URL-validate `avatar` in `genealogy/family-chart-view.ts`.
+  * [ ] Org chart: after an in-place "+N more" expansion, Reset returns to the expanded view at the current zoom rather than a fresh fit; add a `showView()` to `graph/viewport-controller.ts`. "+N more" cards below the focus still navigate (would need a per-parent expanded set in `buildOrgTree`).
+  * [ ] Chat blocks: `docs/markdown/chat.md` says move/rename skips links inside chat blocks — wrong, `link_rewrite` rewrites them (and inside every code fence; decide whether plain fences should be rewritten at all). Markers inside a chat bubble are highlighted but not listed by the task browser (`scan_source_tasks` skips fences); guard `mark_incomplete_blocks` or document it in CLAUDE.md. A `[^1]:` footnote definition inside a bubble yields a duplicate id.
+  * [ ] Flashcard writer: files with lone `\r` line endings put every card on "line 1"; ordered history lists copy the last item's number. Add an integration test for 401 / symlink escape on `/.mbr/flashcard-review`.
+  * [ ] `templates/_head.html` hard-codes the concentric threshold default `0.7` alongside `DEFAULT_FLASHCARDS_CONCENTRIC_THRESHOLD`; pass it from Rust.
+  * [ ] `scripts/update-assets.sh` example version strings (hljs 11.11.2, mermaid 11.16.1) are stale.
+
 * **Relationships & genealogy** (see [docs](docs/markdown/relationships.md))
   * [ ] Edit-mode support for structured person data: a friendlier way to view/edit the person frontmatter (born, died, born_place, gender, aliases, relationships) than hand-editing raw YAML in the in-browser editor — e.g. a small form for the known fields.
   * [ ] Wire the editor to the person `image` frontmatter field — pick/replace the portrait. Image upload itself is done (`editor-crepe.ts` `uploadFile` → `POST /.mbr/upload`, reachable from the upload button, drag-drop and paste), but every result path targets a ProseMirror body node; nothing writes a frontmatter key, so the portrait is still set by hand-typing `image:` into the raw YAML textarea.
