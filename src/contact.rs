@@ -1044,9 +1044,16 @@ pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Ha
 /// Applied at serialization time rather than in the simplifier on purpose: the
 /// in-memory map still holds them, so server-side search can match a phone
 /// number, while the file every page view downloads does not.
+///
+/// The root is compared **case-insensitively**: YAML keys are case-sensitive,
+/// so `Emails:` or `PHONES.work` is a different key to the card reader, but
+/// it is the same private data to a reader of `site.json`. Erring towards
+/// withholding is the only safe direction for a privacy filter.
 pub fn is_public_frontmatter_key(key: &str) -> bool {
     let root = key.split_once('.').map_or(key, |(root, _)| root);
-    !PRIVATE_DETAIL_KEYS.contains(&root)
+    !PRIVATE_DETAIL_KEYS
+        .iter()
+        .any(|private| private.eq_ignore_ascii_case(root))
 }
 
 /// `serialize_with` adapter for `MarkdownInfo::frontmatter`: see
@@ -1539,6 +1546,59 @@ mod tests {
             "phone",
         ] {
             assert!(is_public_frontmatter_key(public), "{public}");
+        }
+    }
+
+    /// Regression: `Emails: x@y` used to be published in `site.json` because
+    /// the root was compared case-sensitively.
+    #[test]
+    fn public_keys_drop_contact_details_in_any_case() {
+        for private in [
+            "Emails",
+            "EMAILS",
+            "eMaIlS",
+            "Phones",
+            "PHONES.work",
+            "Urls.Homepage",
+            "SOCIAL.linkedin",
+            "IM",
+            "Im.signal",
+            "Addresses.home",
+            "ADDRESSES.home.city",
+        ] {
+            assert!(!is_public_frontmatter_key(private), "{private}");
+        }
+        for public in ["Title", "Dates.birthday", "EmailsX", "PHONE", "Imx"] {
+            assert!(is_public_frontmatter_key(public), "{public}");
+        }
+    }
+
+    /// End to end through the `site.json` serializer: no case variant of a
+    /// private key, flat or dotted, survives.
+    #[test]
+    fn serialized_frontmatter_omits_private_keys_in_any_case() {
+        #[derive(serde::Serialize)]
+        struct Wrapper {
+            #[serde(serialize_with = "serialize_public_frontmatter")]
+            frontmatter: Option<SimpleMetadata>,
+        }
+        let mut fm = SimpleMetadata::new();
+        for (k, v) in [
+            ("title", "Ada"),
+            ("Emails", "UPPERLEAK@acme.com"),
+            ("PHONES", "+1 555 0100"),
+            ("Addresses.home", "1 Leak Lane"),
+            ("Urls.blog", "https://leak.example"),
+        ] {
+            fm.insert(k.to_string(), json!(v));
+        }
+        let out = serde_json::to_string(&Wrapper {
+            frontmatter: Some(fm),
+        })
+        .unwrap();
+        assert!(out.contains("\"title\":\"Ada\""), "{out}");
+        for leaked in ["UPPERLEAK", "555", "Leak Lane", "leak.example"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
         }
     }
 
