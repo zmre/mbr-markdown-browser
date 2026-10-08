@@ -42,7 +42,7 @@
  * A small stack that grows as it is learned (`concentric.ts`). It needs no
  * writer: with one (editing on) each rating is saved exactly as spaced
  * repetition saves it; without one — or once a conflict or a 403 has stopped
- * writes —
+ * writes (a 403 silently: its notice is kept for spaced repetition) —
  * ratings live in this session only (`card.history` in memory, no write, no
  * line shifting).
  *
@@ -231,6 +231,12 @@ export class MbrFlashcardDeckElement extends LitElement {
   @state() private _historyOpen = false
   @state() private _message: string | null = null
   @state() private _writesBlocked = false
+  /**
+   * A refused write's notice (a 403), held back until spaced repetition is
+   * chosen: only that mode promises a saved schedule, so only there is the
+   * refusal worth interrupting for. Cleared once shown, so it shows once.
+   */
+  private _pendingRefusal: string | null = null
   @state() private _pending: Rating | null = null
   @state() private _announcement = ''
   @state() private _concentric: ConcentricState | null = null
@@ -364,6 +370,12 @@ export class MbrFlashcardDeckElement extends LitElement {
     this._nothingDue = undefined
     this._ratingCounts = { again: 0, hard: 0, good: 0, easy: 0 }
     this._fresh = new Set()
+    if (mode === 'srs' && this._pendingRefusal) {
+      // Writes were refused earlier this session, silently: say so now that
+      // the mode which depends on them was chosen.
+      this._message = this._announcement = this._pendingRefusal
+      this._pendingRefusal = null
+    }
     if (mode === 'srs') {
       // Planned over the eligible cards only, then mapped back to deck indices.
       const plan = planSession(
@@ -494,8 +506,14 @@ export class MbrFlashcardDeckElement extends LitElement {
       if (!this.isConnected) return
 
       if (!outcome.ok) {
-        this._message = outcome.message
-        this._announcement = outcome.message
+        if (outcome.kind === 'refused' && this._mode !== 'srs') {
+          // Concentric never needed the writer: carry on session-only,
+          // silently. The notice waits for spaced repetition, if chosen.
+          this._pendingRefusal = outcome.message
+        } else {
+          this._message = outcome.message
+          this._announcement = outcome.message
+        }
         // Every later write would be refused as well (a stale file, or a 403
         // that no retry can fix); finish the session as a read-only one rather
         // than failing — and re-showing the notice — card after card. An

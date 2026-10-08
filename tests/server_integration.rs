@@ -6613,6 +6613,98 @@ async fn test_edit_allows_any_host_when_token_configured() {
     assert_eq!(no_token.status(), 401);
 }
 
+/// The `editEnabled` a page tells its components, as rendered for `host`.
+async fn page_edit_enabled(server: &TestServer, path: &str, host: &str) -> bool {
+    let html = server
+        .client
+        .get(server.url(path))
+        .header("Host", host)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    if html.contains("editEnabled: true,") {
+        true
+    } else {
+        assert!(
+            html.contains("editEnabled: false,"),
+            "no editEnabled in page"
+        );
+        false
+    }
+}
+
+#[tokio::test]
+async fn test_page_edit_enabled_follows_the_host_gate_without_a_token() {
+    // Regression: behind `tailscale serve` (Host = the tailnet name, no token
+    // configured) every write is a 403, yet the page said editing was on, so
+    // the flashcard deck announced the refusal on every rating.
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    repo.create_markdown("index.md", "# Home\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let port = server.port;
+    for path in ["/note/", "/"] {
+        assert!(
+            page_edit_enabled(&server, path, &format!("localhost:{port}")).await,
+            "{path} at localhost must advertise editing"
+        );
+        assert!(
+            page_edit_enabled(&server, path, &format!("127.0.0.1:{port}")).await,
+            "{path} at 127.0.0.1 must advertise editing"
+        );
+        assert!(
+            !page_edit_enabled(&server, path, "avalon.example.ts.net:5201").await,
+            "{path} at a Host the endpoints refuse must not advertise editing"
+        );
+    }
+    // The endpoint agrees: the same Host is refused.
+    let refused = server
+        .client
+        .get(server.url("/.mbr/raw/note.md"))
+        .header("X-MBR-Edit", "1")
+        .header("Host", "avalon.example.ts.net:5201")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403);
+}
+
+#[tokio::test]
+async fn test_page_edit_enabled_on_any_host_when_a_token_is_configured() {
+    // With a token the Host is not checked; the 401 → enter-token flow is how a
+    // remote reader edits, so the page must keep offering it.
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    assert!(page_edit_enabled(&server, "/note/", "avalon.example.ts.net:5201").await);
+}
+
+#[tokio::test]
+async fn test_page_edit_enabled_false_when_editing_is_off() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n\nbody");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let port = server.port;
+    assert!(!page_edit_enabled(&server, "/note/", &format!("localhost:{port}")).await);
+}
+
 // ==================== File-management editing endpoints ====================
 
 /// POST helper carrying the CSRF header + JSON body for the file endpoints.

@@ -260,9 +260,9 @@ export const TOKEN_MESSAGE = 'Editing needs a token — open the editor (e) and 
 
 /**
  * What to say on a 403. Not "editing is not enabled": nothing here writes
- * unless the page says editing is on, so in practice a 403 is
- * `check_edit_access` refusing the address the page was loaded at (a `Host`
- * it does not recognise, e.g. behind a reverse proxy).
+ * unless the page says editing is on, and the server says so only for a
+ * `Host` `check_edit_access` accepts — so a 403 means the server's config
+ * changed under an open page.
  */
 const REFUSED_MESSAGE = 'This server is not accepting edits from this page.'
 

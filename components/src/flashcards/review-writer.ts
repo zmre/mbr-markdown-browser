@@ -36,8 +36,9 @@ function failure(status: number, tokenMessage: string): Extract<ReviewOutcome, {
     case 401:
       return { ok: false, kind: 'auth', message: tokenMessage }
     case 403:
-      // Not "editing is off": the trigger builds no writer then, so a 403 here
-      // almost always means `check_edit_access` refused this page's address.
+      // Not "editing is off": the trigger builds no writer then, and the
+      // server renders editing off for a Host it would refuse. A 403 here is
+      // a page outliving its server's config (restarted without `--edit`).
       return { ok: false, kind: 'refused', message: REFUSED_MESSAGE }
     case 422:
       // The only 422 a well-formed request from this module can earn is `at`

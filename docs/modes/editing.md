@@ -223,6 +223,17 @@ not need `edit_require_token_on_loopback` to make the proxied deployment safe.
 Because the proxy presents its own public `Host`, the `Host` check below is
 skipped once a token is configured: the token is then the authority.
 
+**Without a token, a page reached under any other name is read-only.** Behind
+`tailscale serve`, a reverse proxy or a hostname alias, the `Host` is not a
+loopback name, and with no `edit_token_hash` configured every write would be
+refused with `403`. So mbr renders such pages as if editing were off: no editor
+button, task checkboxes that do not toggle, and flashcard decks that rate in
+memory only (spaced repetition is not offered). Pages loaded at `localhost` or
+`127.0.0.1` on the same server still edit normally. To edit, or to save
+flashcard reviews, over Tailscale or a proxy, generate a token with
+`mbr --generate-edit-token`, put its `edit_token_hash` in `.mbr/config.toml`,
+and enter the token when asked.
+
 ## Security model
 
 - **CSRF protection (always on):** every editing request must carry an

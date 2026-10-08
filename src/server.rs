@@ -2952,7 +2952,7 @@ impl Server {
         // Without a token, the only thing separating a DNS-rebound attacker
         // page from the real local UI is the name it used to reach us.
         let token_configured = config.edit_token_hash.is_some();
-        if !token_configured && !host_header_is_allowed(headers, config.bind_ip) {
+        if !Self::host_may_edit(config, headers) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Host header does not name this server",
@@ -2978,6 +2978,28 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// Whether a request that reached us under this `Host` could ever pass
+    /// [`Self::check_edit_access`]'s Host gate.
+    ///
+    /// With a token configured the Host is not checked (the token is the
+    /// defence, and a 401 is how a remote reader is asked for it). Without one,
+    /// only a loopback name or the bind address may edit. Shared with
+    /// [`Self::page_edit_enabled`] so a page never advertises editing the
+    /// endpoints will refuse with a 403.
+    fn host_may_edit(config: &ServerState, headers: &HeaderMap) -> bool {
+        config.edit_token_hash.is_some() || host_header_is_allowed(headers, config.bind_ip)
+    }
+
+    /// The `edit_enabled` a page rendered for this request should advertise.
+    ///
+    /// `config.edit_enabled` alone is not enough: a page reached through
+    /// `tailscale serve` or a reverse proxy, with no token configured, would
+    /// say editing is on and then have every write refused with a 403 — the
+    /// task checkboxes, the editor and flashcard reviews all failing per click.
+    fn page_edit_enabled(config: &ServerState, headers: &HeaderMap) -> bool {
+        config.edit_enabled && Self::host_may_edit(config, headers)
     }
 
     /// Best-effort same-origin check for CSRF protection.
@@ -4484,7 +4506,8 @@ impl Server {
                     return Ok(canonical_redirect_response(&canonical, req.uri().query()));
                 }
                 tracing::debug!("rendering markdown: {:?}", &md_path);
-                Self::markdown_to_html(&md_path, &config)
+                let edit_enabled = Self::page_edit_enabled(&config, req.headers());
+                Self::markdown_to_html(&md_path, &config, edit_enabled)
                     .await
                     .map_err(|e| {
                         tracing::error!("Error rendering markdown: {e}");
@@ -6330,9 +6353,12 @@ impl Server {
         None
     }
 
+    /// `edit_enabled` is the per-request value from [`Self::page_edit_enabled`],
+    /// not `config.edit_enabled`.
     async fn markdown_to_html(
         md_path: &Path,
         config: &ServerState,
+        edit_enabled: bool,
     ) -> Result<Response<Body>, MbrError> {
         let root_path = config.base_dir.as_path();
 
@@ -6417,10 +6443,11 @@ impl Server {
             "gui_mode".into(),
             if config.gui_mode { "true" } else { "" }.into(),
         );
-        // Indicate whether in-browser editing is enabled (drives the edit button)
+        // Whether this page may edit (drives the edit button, task checkboxes and
+        // flashcard reviews): off when the request's Host would be refused.
         frontmatter.insert(
             "edit_enabled".into(),
-            if config.edit_enabled { "true" } else { "" }.into(),
+            if edit_enabled { "true" } else { "" }.into(),
         );
 
         // Compute breadcrumbs based on the URL path, not the file path
@@ -6899,7 +6926,10 @@ impl Server {
 
     /// Handler for the root path "/" - renders the home page using the same
     /// logic as other directories but with the home.html template.
-    async fn home_page(State(config): State<ServerState>) -> Result<impl IntoResponse, StatusCode> {
+    async fn home_page(
+        State(config): State<ServerState>,
+        headers: HeaderMap,
+    ) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("home_page handler");
 
         let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
@@ -6916,7 +6946,8 @@ impl Server {
         match resolve_request_path(&resolver_config, "") {
             ResolvedPath::MarkdownFile(md_path) => {
                 tracing::debug!("home: rendering index markdown: {:?}", &md_path);
-                Self::markdown_to_html(&md_path, &config)
+                let edit_enabled = Self::page_edit_enabled(&config, &headers);
+                Self::markdown_to_html(&md_path, &config, edit_enabled)
                     .await
                     .map_err(|e| {
                         tracing::error!("Error rendering home markdown: {e}");
