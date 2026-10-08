@@ -1977,6 +1977,49 @@ async fn test_build_contact_card_relative_image_and_company_link() {
     assert_eq!(employer["derived"], true);
 }
 
+/// Regression: the organization declares `employee` and its URL
+/// (`/people/acme/`) sorts before the person's, so the aggregated edge keeps
+/// the org's direction and endpoint text — the card must still link the
+/// person's wikilinked `company`. The person's `type` also carries stray
+/// whitespace, which must gate the charts the same way it gates the card.
+#[tokio::test]
+async fn test_build_company_link_when_org_declares_employee_and_type_has_whitespace() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: \" person \"\ntitle: Jane Doe\ncompany: \"[[acme]]\"\n---\nHi.\n",
+    );
+    repo.create_markdown(
+        "people/acme.md",
+        "---\ntype: organization\ntitle: Acme\nrelationships:\n  - type: employee\n    to: \"[[Jane Doe]]\"\n---\nCo.\n",
+    );
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
+    assert!(
+        html.contains(r#"<a href="..&#x2F;..&#x2F;people&#x2F;acme&#x2F;">acme</a>"#),
+        "company link: {html}"
+    );
+    assert!(
+        html.contains("<mbr-genealogy></mbr-genealogy>"),
+        "whitespace around `type` must not hide the charts: {html}"
+    );
+    assert!(html.contains(r#"<body class="person">"#), "{html}");
+
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr").join("site.json")).unwrap())
+            .unwrap();
+    let jane = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/people/jane/")
+        .unwrap();
+    assert_eq!(
+        jane["frontmatter"]["type"], "person",
+        "site.json carries the trimmed type"
+    );
+}
+
 #[tokio::test]
 async fn test_build_person_page_has_genealogy_element() {
     let (_guard, output) = build_genealogy().await;

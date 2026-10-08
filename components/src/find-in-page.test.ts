@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildTextIndex,
+  collapsedAnswersAround,
   compileQuery,
+  createMatchScan,
   findMatchOffsets,
+  highlightRangeForMatch,
   rangeForMatch,
   scrollRangeIntoView,
   type TextIndex,
@@ -207,6 +210,79 @@ describe('findMatchOffsets', () => {
   })
 })
 
+describe('createMatchScan', () => {
+  const markup = Array.from({ length: 500 }, (_, i) => `<p>needle ${i}</p>`).join('')
+
+  it('makes bounded progress per step even past its deadline', () => {
+    const textIndex = index(markup)
+    const scan = createMatchScan(textIndex, compileQuery('needle', false)!, 1000)
+    // A deadline already in the past: every step still advances, by one check
+    // interval, so a resumed scan can never stall.
+    let steps = 0
+    while (!scan.step(0)) steps++
+    expect(steps).toBeGreaterThan(1)
+    expect(scan.result().total).toBe(500)
+  })
+
+  it('produces exactly what a one-shot findMatchOffsets does', () => {
+    const textIndex = index(markup)
+    const sliced = createMatchScan(textIndex, compileQuery('e', false)!, 700)
+    while (!sliced.step(0)) {
+      /* resume */
+    }
+    const whole = findMatchOffsets(textIndex, compileQuery('e', false)!, 700)
+    expect(sliced.result().total).toBe(whole.total)
+    expect(Array.from(sliced.result().starts)).toEqual(Array.from(whole.starts))
+    expect(Array.from(sliced.result().ends)).toEqual(Array.from(whole.ends))
+    // The cap limits stored offsets, never the count.
+    expect(whole.starts.length).toBe(700)
+    expect(whole.total).toBeGreaterThan(700)
+  })
+
+  it('finishes in one step when given an unbounded deadline', () => {
+    const scan = createMatchScan(index(markup), compileQuery('needle', false)!, 10)
+    expect(scan.step(Number.POSITIVE_INFINITY)).toBe(true)
+    expect(scan.result().total).toBe(500)
+  })
+})
+
+describe('highlightRangeForMatch', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  class FakeStaticRange {
+    constructor(readonly init: StaticRangeInit) {}
+  }
+
+  it('builds a StaticRange with the same endpoints rangeForMatch would', () => {
+    vi.stubGlobal('StaticRange', FakeStaticRange)
+    const textIndex = index('<p>one <em>two</em> three</p>')
+    const { starts, ends } = findMatchOffsets(textIndex, compileQuery('one two', false)!, 10)
+    const live = rangeForMatch(textIndex, starts[0], ends[0])!
+    const painted = highlightRangeForMatch(textIndex, starts[0], ends[0]) as unknown as FakeStaticRange
+    expect(painted).toBeInstanceOf(FakeStaticRange)
+    expect(painted.init).toEqual({
+      startContainer: live.startContainer,
+      startOffset: live.startOffset,
+      endContainer: live.endContainer,
+      endOffset: live.endOffset,
+    })
+  })
+
+  it('returns null for offsets on a separator, like rangeForMatch', () => {
+    vi.stubGlobal('StaticRange', FakeStaticRange)
+    const textIndex = index('<p>a</p><p>b</p>')
+    expect(highlightRangeForMatch(textIndex, 1, 2)).toBeNull()
+  })
+
+  it('falls back to a live Range where StaticRange is missing', () => {
+    vi.stubGlobal('StaticRange', undefined)
+    const textIndex = index('<p>alpha</p>')
+    expect(highlightRangeForMatch(textIndex, 0, 5)?.toString()).toBe('alpha')
+  })
+})
+
 describe('rangeForMatch', () => {
   it('spans several text nodes without mutating the DOM', () => {
     // No <mark> wrapping, no split text nodes, so none of the enhancers' cached
@@ -253,5 +329,61 @@ describe('scrollRangeIntoView', () => {
     const range = rangeForMatch(textIndex, start, start + 5)!
     expect(() => scrollRangeIntoView(range, 40)).not.toThrow()
     expect(window.scrollY).toBe(0)
+  })
+})
+
+describe('collapsedAnswersAround', () => {
+  const themes: HTMLStyleElement[] = []
+
+  /** Mount markup in main#wrapper under a slice of theme.css's collapse rule. */
+  function mount(markup: string): HTMLElement {
+    const theme = document.createElement('style')
+    themes.push(theme)
+    theme.textContent = 'dl > dd { visibility: hidden; } dl > dd.open { visibility: visible; }'
+    document.head.appendChild(theme)
+    const wrapper = document.createElement('main')
+    wrapper.id = 'wrapper'
+    wrapper.innerHTML = markup
+    document.body.appendChild(wrapper)
+    return wrapper
+  }
+
+  afterEach(() => {
+    for (const theme of themes.splice(0)) theme.remove()
+    document.body.innerHTML = ''
+  })
+
+  const ids = (entries: HTMLElement[][]) => entries.map((entry) => entry.map((dd) => dd.id))
+  const textIn = (id: string) => document.getElementById(id)!.firstChild!
+
+  it('returns the whole run of answers around a collapsed one', () => {
+    const root = mount('<dl><dt>Q</dt><dd id="a">x</dd><dd id="b">y</dd><dt>R</dt><dd id="c">z</dd></dl>')
+    expect(ids(collapsedAnswersAround(textIn('b'), root))).toEqual([['a', 'b']])
+    expect(ids(collapsedAnswersAround(textIn('c'), root))).toEqual([['c']])
+  })
+
+  it('is empty outside any answer, and for an answer already open', () => {
+    const root = mount('<p id="p">x</p><dl><dt id="q">Q</dt><dd id="a" class="open">y</dd></dl>')
+    expect(collapsedAnswersAround(textIn('p'), root)).toEqual([])
+    expect(collapsedAnswersAround(textIn('q'), root)).toEqual([])
+    expect(collapsedAnswersAround(textIn('a'), root)).toEqual([])
+  })
+
+  it('opens every collapsed level of a nested list, innermost first', () => {
+    const root = mount(
+      '<dl><dt>Q</dt><dd id="outer"><dl><dt>Q2</dt><dd id="inner"><em id="em">x</em></dd></dl></dd></dl>',
+    )
+    expect(ids(collapsedAnswersAround(textIn('em'), root))).toEqual([['inner'], ['outer']])
+  })
+
+  it('never reaches past the root', () => {
+    const root = mount('<p>x</p>')
+    // A deck overlay or any other list outside main#wrapper.
+    document.body.insertAdjacentHTML('beforeend', '<dl><dt>Q</dt><dd id="out">x</dd></dl>')
+    expect(collapsedAnswersAround(textIn('out'), root)).toEqual([])
+    // ...including a root that is itself inside a collapsed answer.
+    const nested = mount('<dl><dt>Q</dt><dd id="host"><section id="s"><p id="in">x</p></section></dd></dl>')
+    const section = nested.querySelector('section')!
+    expect(collapsedAnswersAround(textIn('in'), section)).toEqual([])
   })
 })

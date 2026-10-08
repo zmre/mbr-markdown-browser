@@ -5,11 +5,14 @@ import {
   ORG_CARD_W,
   ORG_MAX_INITIAL_SCALE,
   ORG_MIN_TITLE_PX,
+  ORG_EXPAND_STEP,
   ORG_TITLE_PX,
+  anchoredOrgView,
   buildOrgTree,
   computeOrgInitialView,
   computeOrgLayout,
   hasWorkHierarchy,
+  nextOrgBudget,
   type OrgCard,
   type OrgNode,
 } from './org-layout.js'
@@ -195,6 +198,89 @@ describe('buildOrgTree', () => {
     expect(children.filter((c) => c.kind === 'person')).toHaveLength(6)
     expect(children.some((c) => c.isFocus)).toBe(true)
     expect(children[children.length - 1]).toMatchObject({ kind: 'more', moreCount: 14 })
+  })
+})
+
+/** An organization employing `n` people directly (no reporting lines). */
+function flatOrg(n: number) {
+  const people = Array.from({ length: n }, (_, i) => ({
+    path: `/staff/p${String(i).padStart(4, '0')}/`,
+    fm: { title: `Person ${String(i).padStart(4, '0')}` },
+  }))
+  return buildSiteNotes(
+    [{ path: '/org/', fm: { type: 'organization', title: 'Big' } }, ...people],
+    people.map((p) => [p.path, 'employer', '/org/'] as [string, string, string])
+  )
+}
+
+describe('expanding a focus-targeted "+N more" card', () => {
+  it('grows the budget by exactly the hidden count, up to one step', () => {
+    expect(nextOrgBudget(80, 21)).toBe(101)
+    expect(nextOrgBudget(80, 5000)).toBe(80 + ORG_EXPAND_STEP)
+    expect(nextOrgBudget(80, 0)).toBe(80)
+    expect(nextOrgBudget(80, -3)).toBe(80)
+  })
+
+  it('reveals every hidden employee of an organization at the next budget', () => {
+    const notes = flatOrg(100)
+    const capped = buildOrgTree('/org/', notes, registry)!
+    const more = capped.root.children.find((c) => c.kind === 'more')!
+    // The repro: 79 cards plus "+21 more" pointing back at the page itself.
+    expect(more).toMatchObject({ moreCount: 21, target: '/org/' })
+
+    const grown = buildOrgTree('/org/', notes, registry, { maxNodes: nextOrgBudget(80, more.moreCount!) })!
+    expect(grown.root.children.filter((c) => c.kind === 'person')).toHaveLength(100)
+    expect(grown.root.children.some((c) => c.kind === 'more')).toBe(false)
+    expect(grown.hidden).toBe(0)
+  })
+
+  it('reveals a large organization one step at a time', () => {
+    const notes = flatOrg(1000)
+    const first = buildOrgTree('/org/', notes, registry)!
+    const budget = nextOrgBudget(80, first.hidden)
+    const next = buildOrgTree('/org/', notes, registry, { maxNodes: budget })!
+    expect(next.root.children.filter((c) => c.kind === 'person')).toHaveLength(budget - 1)
+    expect(next.root.children[next.root.children.length - 1]).toMatchObject({ kind: 'more', moreCount: 1000 - (budget - 1), target: '/org/' })
+  })
+
+  it("reveals a person's direct reports without opening deeper levels", () => {
+    // Boss has 100 reports; the first report has two of their own.
+    const reports = Array.from({ length: 100 }, (_, i) => ({ path: `/r${String(i).padStart(3, '0')}/`, fm: { title: `R${String(i).padStart(3, '0')}` } }))
+    const notes = buildSiteNotes(
+      [{ path: '/boss/', fm: { title: 'Boss' } }, ...reports, { path: '/x/', fm: { title: 'X' } }, { path: '/y/', fm: { title: 'Y' } }],
+      [
+        ...reports.map((p) => [p.path, 'reports_to', '/boss/'] as [string, string, string]),
+        ['/x/', 'reports_to', '/r000/'],
+        ['/y/', 'reports_to', '/r000/'],
+      ]
+    )
+    const capped = buildOrgTree('/boss/', notes, registry)!
+    const more = capped.root.children.find((c) => c.kind === 'more')!
+    expect(more).toMatchObject({ moreCount: 21, target: '/boss/' })
+
+    const grown = buildOrgTree('/boss/', notes, registry, { maxNodes: nextOrgBudget(80, more.moreCount!) })!
+    expect(grown.root.children.filter((c) => c.kind === 'person')).toHaveLength(100)
+    expect(grown.root.children.some((c) => c.kind === 'more')).toBe(false)
+    // The extra budget went to the focus's own row; R000's reports stay collapsed.
+    const r000 = grown.root.children.find((c) => c.id === '/r000/')!
+    expect(r000.children).toEqual([expect.objectContaining({ kind: 'more', moreCount: 2, target: '/r000/' })])
+  })
+
+  it('anchors the view on the slot the more card occupied', () => {
+    const view = { x: 100, y: 50, w: 800, h: 600 }
+    const moreCard = { x: 500, y: 300, w: 184, h: 30 }
+    const revealed = { x: 700, y: 311, w: 184, h: 52 }
+    // Same top-left corner → the view moves by exactly the slot's displacement.
+    expect(anchoredOrgView(view, moreCard, revealed)).toEqual({ x: 300, y: 50, w: 800, h: 600 })
+  })
+
+  it('lays out a 2000-person organization quickly', () => {
+    const tree = buildOrgTree('/org/', flatOrg(2000), registry, { maxNodes: 2001 })!
+    const start = performance.now()
+    const layout = computeOrgLayout(tree)
+    expect(layout.cards).toHaveLength(2001)
+    // Measured ~1 ms; a generous bound that still catches a quadratic regression.
+    expect(performance.now() - start).toBeLessThan(250)
   })
 })
 

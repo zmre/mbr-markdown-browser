@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::file_write::{FileWriteLocks, atomic_write};
 use crate::link_grep::{
     compute_patterns_for_folder, compute_relative_path, get_folder_url_path, page_and_folder_urls,
 };
@@ -380,23 +381,38 @@ pub fn rewrite_bare_wikilink(content: &str, old_name: &str, new_stem: &str) -> S
     .into_owned()
 }
 
-/// Writes `bytes` to `path` atomically via a temp file in the same directory
-/// followed by a rename.
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file.md");
-    let tmp = parent.join(format!(".{file_name}.mbr-tmp"));
-    std::fs::write(&tmp, bytes)?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+/// Applies `rewrite` to the file at `path`, whose text was `observed` when the
+/// walker read it, and writes the result back if anything changed. Returns
+/// whether it wrote.
+///
+/// The walker reads every candidate without a lock (almost none change). Only
+/// a file that does change is locked — under its canonical path, the key the
+/// server's other writers use — then **re-read** and rewritten from the
+/// current text, so a task toggle or flashcard review that landed since the
+/// walker's read is kept rather than overwritten. With `locks` `None` there is
+/// no other writer to exclude and `observed` is used as is.
+fn rewrite_in_place(
+    path: &Path,
+    observed: &str,
+    locks: Option<&FileWriteLocks>,
+    rewrite: impl Fn(&str) -> String,
+) -> std::io::Result<bool> {
+    if rewrite(observed) == observed {
+        return Ok(false);
     }
+    let Some(locks) = locks else {
+        atomic_write(path, rewrite(observed).as_bytes())?;
+        return Ok(true);
+    };
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let _guard = locks.lock_blocking(&key);
+    let current = std::fs::read_to_string(path)?;
+    let rewritten = rewrite(&current);
+    if rewritten == current {
+        return Ok(false);
+    }
+    atomic_write(path, rewritten.as_bytes())?;
+    Ok(true)
 }
 
 /// Iterates markdown files under `root_dir`, skipping ignored directories and
@@ -460,6 +476,11 @@ fn markdown_files<'a>(
 /// Aho-Corasick automaton (mirroring [`crate::link_grep::find_inbound_links`]);
 /// only gate hits run the full [`rewrite_links_for_move`] rewrite and an atomic
 /// write.
+///
+/// `locks` is the server's [`FileWriteLocks`]; each changed file is rewritten
+/// under its lock (see [`rewrite_in_place`]). `None` where nothing else writes.
+/// The caller must not hold a lock on any file the walk can reach.
+#[allow(clippy::too_many_arguments)]
 pub fn rewrite_inbound_links_for_move(
     old_url: &str,
     new_url: &str,
@@ -468,6 +489,7 @@ pub fn rewrite_inbound_links_for_move(
     ignore_dirs: &[String],
     ignore_globs: &[String],
     skip_abs: &HashSet<PathBuf>,
+    locks: Option<&FileWriteLocks>,
 ) -> std::io::Result<Vec<PathBuf>> {
     if old_url.trim_matches('/').is_empty() {
         return Ok(Vec::new());
@@ -515,9 +537,8 @@ pub fn rewrite_inbound_links_for_move(
             if !ac.is_match(&content) {
                 continue;
             }
-            let rewritten = rewrite_links_for_move(old_url, new_url, folder, &content);
-            if rewritten != content {
-                atomic_write(path, rewritten.as_bytes())?;
+            let rewrite = |text: &str| rewrite_links_for_move(old_url, new_url, folder, text);
+            if rewrite_in_place(path, &content, locks, rewrite)? {
                 changed.push(path.clone());
             }
         }
@@ -532,6 +553,7 @@ pub fn rewrite_inbound_links_for_move(
 ///
 /// Returns the absolute paths that were changed. `delta` is a list of
 /// `(old_name, new_stem)` pairs; typically just the changed filename stem.
+/// `locks` as for [`rewrite_inbound_links_for_move`].
 #[allow(clippy::too_many_arguments)]
 pub fn rewrite_bare_wikilinks_for_rename(
     delta: &[(String, String)],
@@ -543,6 +565,7 @@ pub fn rewrite_bare_wikilinks_for_rename(
     index_file: &str,
     wikilink_index: &WikilinkIndex,
     skip_abs: &HashSet<PathBuf>,
+    locks: Option<&FileWriteLocks>,
 ) -> std::io::Result<Vec<PathBuf>> {
     if delta.is_empty() {
         return Ok(Vec::new());
@@ -568,25 +591,27 @@ pub fn rewrite_bare_wikilinks_for_rename(
             .and_then(|n| n.to_str())
             .is_some_and(|n| n == index_file);
 
-        let mut new_content = content.clone();
-        let mut file_changed = false;
-        for (name, new_stem) in delta {
-            if normalize_name(name) == normalize_name(new_stem) {
-                continue;
-            }
-            // Guard: only rewrite names that (pre-move) resolved to old_url.
-            match wikilink_index.resolve_wikilink(name, &file_url, file_is_index) {
-                Some(u) if normalize_url_path(&u) == old_norm => {}
-                _ => continue,
-            }
-            let updated = rewrite_bare_wikilink(&new_content, name, new_stem);
-            if updated != new_content {
-                new_content = updated;
-                file_changed = true;
-            }
+        // Guard: only rewrite names that (pre-move) resolved to old_url.
+        let names: Vec<&(String, String)> = delta
+            .iter()
+            .filter(|(name, new_stem)| normalize_name(name) != normalize_name(new_stem))
+            .filter(|(name, _)| {
+                wikilink_index
+                    .resolve_wikilink(name, &file_url, file_is_index)
+                    .is_some_and(|u| normalize_url_path(&u) == old_norm)
+            })
+            .collect();
+        if names.is_empty() {
+            continue;
         }
-        if file_changed {
-            atomic_write(&path, new_content.as_bytes())?;
+        let rewrite = |text: &str| {
+            names
+                .iter()
+                .fold(text.to_string(), |acc, (name, new_stem)| {
+                    rewrite_bare_wikilink(&acc, name, new_stem)
+                })
+        };
+        if rewrite_in_place(&path, &content, locks, rewrite)? {
             changed.push(path);
         }
     }
@@ -596,6 +621,93 @@ pub fn rewrite_bare_wikilinks_for_rename(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== rewrite_in_place: concurrent writers =====
+
+    /// A write that lands between the walker's unlocked read and its own write
+    /// must survive: the rewrite is re-applied to the text on disk under the
+    /// file's lock, not to the stale copy the walker read.
+    #[test]
+    fn rewrite_in_place_rereads_under_the_lock() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("note.md");
+        let observed = "- [ ] task\n\nSee [g](/guide/).\n";
+        std::fs::write(&path, observed).expect("seed");
+        let key = path.canonicalize().expect("canonical");
+        let locks = FileWriteLocks::default();
+        let rewrite = |text: &str| rewrite_links_for_move("/guide/", "/manual/", "/", text);
+
+        std::thread::scope(|scope| {
+            // Another writer holds the file while it toggles the task.
+            let guard = locks.lock_blocking(&key);
+            let walker = scope.spawn(|| rewrite_in_place(&path, observed, Some(&locks), rewrite));
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert!(!walker.is_finished(), "the walker must wait for the lock");
+            std::fs::write(&path, observed.replace("[ ]", "[x]")).expect("toggle");
+            drop(guard);
+            assert!(walker.join().expect("walker").expect("rewrite"));
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "- [x] task\n\nSee [g](/manual/).\n",
+            "both the toggle and the link rewrite are kept"
+        );
+    }
+
+    #[test]
+    fn rewrite_in_place_skips_files_with_nothing_to_change() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("note.md");
+        std::fs::write(&path, "No links here.\n").expect("seed");
+        let locks = FileWriteLocks::default();
+        let rewrite = |text: &str| rewrite_links_for_move("/guide/", "/manual/", "/", text);
+        assert!(!rewrite_in_place(&path, "No links here.\n", Some(&locks), rewrite).unwrap());
+        // Without a lock table (no concurrent writers) the observed text is used.
+        let observed = "See [g](/guide/).\n";
+        std::fs::write(&path, observed).expect("seed");
+        assert!(rewrite_in_place(&path, observed, None, rewrite).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "See [g](/manual/).\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbound_rewrite_keeps_permissions_and_leaves_no_temp_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().canonicalize().expect("canonical root");
+        std::fs::create_dir(root.join("refs")).expect("mkdir");
+        let linking = root.join("refs/abs.md");
+        std::fs::write(&linking, "See [g](/guide/).\n").expect("seed");
+        std::fs::set_permissions(&linking, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        let locks = FileWriteLocks::default();
+        let changed = rewrite_inbound_links_for_move(
+            "/guide/",
+            "/manual/",
+            &root,
+            &["md".to_string()],
+            &[],
+            &[],
+            &HashSet::new(),
+            Some(&locks),
+        )
+        .expect("walk");
+        assert_eq!(changed, vec![linking.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(&linking).unwrap(),
+            "See [g](/manual/).\n"
+        );
+        let mode = std::fs::metadata(&linking).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("refs"))
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".mbr-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
 
     // ===== rewrite_links_for_move: inline links =====
 

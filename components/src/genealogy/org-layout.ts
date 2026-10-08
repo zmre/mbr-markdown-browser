@@ -21,7 +21,12 @@
  * means each note is placed at most once.
  *
  * Size is bounded by `maxNodes`; whatever does not fit collapses into a
- * "+N more" card that links to the person whose reports it stands for.
+ * "+N more" card whose `target` is the note whose reports it stands for. The
+ * view navigates there — except when that note is the focus, where it would be
+ * a no-op: it rebuilds in place with a budget grown by `nextOrgBudget`. That
+ * works because the focus is always the FIRST node `expand` visits (the root of
+ * an organization chart; the only seed below a person), so extra budget goes to
+ * the focus's own hidden reports before anything deeper.
  *
  * LAYOUT (`computeOrgLayout`): a tidy top-down tree with orthogonal "bus"
  * connectors. Siblings are grouped by `department` into labelled boxes, and a
@@ -79,6 +84,24 @@ export interface OrgTreeOptions {
 export const DEFAULT_ORG_MAX_NODES = 80
 export const DEFAULT_REPORTS_DEPTH = 2
 export const DEFAULT_MAX_PEERS = 12
+/**
+ * Most cards one "+N more" activation reveals. Building and laying out is cheap
+ * (measured ~10 ms build + ~1 ms layout for a 2000-person organization); the
+ * bound is on SVG DOM per click, and a step that is still short leaves a fresh
+ * "+N more" card for the remainder.
+ */
+export const ORG_EXPAND_STEP = 400
+
+/**
+ * The `maxNodes` that reveals the next step of a focus-targeted "+N more" card
+ * holding `moreCount` notes. Exact rather than doubled: the focus is expanded
+ * first, so `current + moreCount` shows all of its reports and leaves every
+ * deeper level exactly as collapsed as it was.
+ */
+export function nextOrgBudget(current: number, moreCount: number): number {
+  const step = Math.min(Math.max(0, Math.floor(moreCount)), ORG_EXPAND_STEP)
+  return Math.max(1, Math.floor(current)) + step
+}
 /** Safety bound on the upward management walk. */
 const MAX_CHAIN = 32
 
@@ -305,7 +328,8 @@ export function buildOrgTree(
     // upward to its top so a report whose manager declares no employer still
     // lands under that manager instead of vanishing.
     const root = place(focus)
-    const tops: string[] = []
+    // Insertion-ordered set: `parentOf` asks membership once per placed note.
+    const tops = new Set<string>()
     for (const employee of index.inferiors(focus)) {
       const seen = new Set<string>()
       let top = employee
@@ -313,12 +337,13 @@ export function buildOrgTree(
         seen.add(top)
         top = m.path
       }
-      if (top !== focus && !tops.includes(top)) tops.push(top)
+      if (top !== focus) tops.add(top)
     }
+    const topList = [...tops]
     const managerParent = (p: string) => index.manager(p)
-    const orgChildren = (p: string) => (p === focus ? tops : index.childrenOf(p, managerParent))
+    const orgChildren = (p: string) => (p === focus ? topList : index.childrenOf(p, managerParent))
     const parentOf = (p: string) =>
-      tops.includes(p) ? index.superiors(p).find((s) => s.path === focus) ?? { path: focus, relType: 'employee' } : managerParent(p)
+      tops.has(p) ? index.superiors(p).find((s) => s.path === focus) ?? { path: focus, relType: 'employee' } : managerParent(p)
     expand([{ node: root, depthLeft: Number.POSITIVE_INFINITY }], orgChildren, parentOf)
     return { root, hidden }
   }
@@ -681,4 +706,22 @@ export function computeOrgInitialView(p: OrgViewParams): { x: number; y: number;
     w,
     h,
   }
+}
+
+type CardBox = Pick<OrgCard, 'x' | 'y' | 'w' | 'h'>
+
+/**
+ * The view after a re-layout that keeps one spot fixed on screen: `view`
+ * translated so the top-left corner of `after` sits where `before`'s did. Top
+ * left, not center, because a "+N more" pill (30 high) is replaced by a full
+ * card (52 high) in the same slot. Scale is untouched — expanding never zooms.
+ */
+export function anchoredOrgView(
+  view: { x: number; y: number; w: number; h: number },
+  before: CardBox,
+  after: CardBox
+): { x: number; y: number; w: number; h: number } {
+  const dx = after.x - after.w / 2 - (before.x - before.w / 2)
+  const dy = after.y - after.h / 2 - (before.y - before.h / 2)
+  return { x: view.x + dx, y: view.y + dy, w: view.w, h: view.h }
 }
