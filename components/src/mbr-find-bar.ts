@@ -5,9 +5,12 @@ import {
   SEARCH_ROOT_SELECTOR,
   buildTextIndex,
   compileQuery,
-  findMatchOffsets,
+  createMatchScan,
+  highlightRangeForMatch,
   rangeForMatch,
   scrollRangeIntoView,
+  type MatchOffsets,
+  type MatchScan,
   type TextIndex,
 } from './find-in-page.js';
 
@@ -17,8 +20,35 @@ const HIGHLIGHT_ALL = 'mbr-find';
 /** Highlight registry name for the match the reader is currently on. */
 const HIGHLIGHT_ACTIVE = 'mbr-find-active';
 
-/** Trailing debounce on typing. Enter / find-next flush any pending scan. */
-const INPUT_DEBOUNCE_MS = 120;
+/**
+ * Trailing debounce on typing, scaled by query length. Short queries are the
+ * expensive ones — a single letter matches a large fraction of a long page —
+ * and they are also the ones most likely to be superseded by the next
+ * keystroke, so they wait longer. Enter / find-next flush any pending scan, so
+ * the wait never delays a reader who asks for a result.
+ */
+function inputDebounceMs(query: string): number {
+  const length = query.trim().length;
+  if (length <= 1) return 350;
+  if (length === 2) return 200;
+  return 120;
+}
+
+/**
+ * Time budget for one slice of a match scan before yielding to the event loop.
+ * Well under a 16 ms frame, so a keystroke arriving mid-scan is handled within
+ * a slice and abandons the stale scan (see {@link MbrFindBarElement._generation}).
+ * WebKit has no `isInputPending`, so the budget is fixed rather than adaptive.
+ */
+const SCAN_SLICE_MS = 6;
+
+/**
+ * Ranges added to the highlight registry per animation frame. Registration is
+ * the expensive half of painting: measured in WebKit 26, each newly registered
+ * range costs ~45 us on the next rendering update, so 100 per frame is ~4.5 ms
+ * — and 2000 in one go stalled the page for ~95 ms.
+ */
+const PAINT_SLICE = 100;
 
 /** Coalescing window for content mutations while the bar is open. */
 const REINDEX_DEBOUNCE_MS = 250;
@@ -31,20 +61,61 @@ const REINDEX_DEBOUNCE_MS = 250;
 const MATCH_CAP = 10000;
 
 /**
- * Most `Range`s materialized at once. Live ranges are not free — the engine
- * revalidates every one on every DOM mutation — so past this a sliding window
- * around the active match is painted instead.
+ * Most ranges painted at once; past this a sliding window around the active
+ * match is painted instead. Painting is frame-paced (see {@link PAINT_SLICE}),
+ * so this bounds the total registration work per query rather than any single
+ * stall. 1000 is still dozens of screens of a one-letter query.
  */
-const HIGHLIGHT_CAP = 2000;
+const HIGHLIGHT_CAP = 1000;
 
 const NO_OFFSETS = new Int32Array(0);
+
+/** `id` of the `<style>` installed by {@link installSelectableStyle}. */
+export const SELECTABLE_STYLE_ID = 'mbr-find-selectable';
+
+/**
+ * Makes all searchable text selectable while the bar is open.
+ *
+ * WebKit paints `::highlight()` through its selection-painting code, which
+ * moves a range endpoint that sits in `user-select: none` text forward to the
+ * next selectable position. So a match in unselectable text either paints
+ * nothing or paints the wrong element. theme.css gives every `main dl > dt`
+ * `user-select: none` (the FAQ toggles on click), and searching a flashcard
+ * question washed the whole of the next selectable block, a heading several
+ * collapsed answers further down, instead of the match. Live ranges and
+ * `StaticRange`s behave the same, and the registered ranges are correct.
+ *
+ * Fixing that one rule in theme.css would not be enough: a repository's own
+ * `.mbr/theme.css` can make anything unselectable. So the override belongs to
+ * the find bar, lives exactly as long as the bar is open, and leaves the
+ * page's `user-select: none` alone at every other time. `!important` outranks any
+ * author rule that is not itself `!important`; `*` is needed because only
+ * WebKit inherits `-webkit-user-select`.
+ */
+const SELECTABLE_CSS =
+  `${SEARCH_ROOT_SELECTOR}, ${SEARCH_ROOT_SELECTOR} * ` +
+  '{ -webkit-user-select: text !important; user-select: text !important; }';
+
+/** Install the {@link SELECTABLE_CSS} override in `<head>`, once. */
+function installSelectableStyle(): void {
+  if (document.getElementById(SELECTABLE_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = SELECTABLE_STYLE_ID;
+  style.textContent = SELECTABLE_CSS;
+  // In <head>, outside main#wrapper, so the content observer never sees it.
+  document.head.appendChild(style);
+}
+
+function removeSelectableStyle(): void {
+  document.getElementById(SELECTABLE_STYLE_ID)?.remove();
+}
 
 /**
  * The document-scoped Custom Highlight API, or `null` where it is missing
  * (older WebKitGTK is the realistic gap; WKWebView needs Safari 17.2+ and
  * WebView2 needs Chromium 105+). Resolved per call so a test can stub it.
  */
-function highlightApi(): { registry: HighlightRegistry; create: (ranges: Range[]) => Highlight } | null {
+function highlightApi(): { registry: HighlightRegistry; create: (ranges: AbstractRange[]) => Highlight } | null {
   const scope = globalThis as { CSS?: { highlights?: HighlightRegistry }; Highlight?: typeof Highlight };
   const registry = scope.CSS?.highlights;
   const ctor = scope.Highlight;
@@ -65,6 +136,28 @@ function highlightWindow(count: number, active: number): [number, number] {
   const half = HIGHLIGHT_CAP >> 1;
   const from = Math.max(0, Math.min(Math.max(active, 0) - half, count - HIGHLIGHT_CAP));
   return [from, from + HIGHLIGHT_CAP];
+}
+
+/** A scan in progress, resumed slice by slice from a zero-delay timer. */
+interface ScanJob {
+  scan: MatchScan;
+  resetActive: boolean;
+  generation: number;
+}
+
+/**
+ * Highlight registration in progress: ranges are added outward from the
+ * active match, so what is on screen paints first. `above` is the next index
+ * at or after the active one, `below` the next one before it.
+ */
+interface PaintJob {
+  highlight: Highlight;
+  from: number;
+  to: number;
+  above: number;
+  below: number;
+  preferAbove: boolean;
+  frame?: number;
 }
 
 declare global {
@@ -92,7 +185,18 @@ declare global {
  * Highlight painting is styled from `templates/theme.css`, not from
  * `static styles` below: `CSS.highlights` is a DOCUMENT-scoped registry and the
  * ranges live in the light DOM under `main#wrapper`, so a `::highlight()` rule
- * inside this shadow root would match nothing at all.
+ * inside this shadow root would match nothing at all. Page text must also be
+ * selectable, or WebKit paints the highlight in the wrong place; see
+ * {@link SELECTABLE_CSS}.
+ *
+ * Typing must never wait on searching. Four things keep it that way, each
+ * measured against WebKit on a 900k-character page: the debounce is longer for
+ * short (expensive) queries; the scan is time-sliced and abandoned the moment
+ * the query changes; painted ranges are `StaticRange`s, which WebKit does not
+ * revalidate on every keystroke the way it does live ones; and registration is
+ * spread over animation frames, nearest-first. Stepping touches only the
+ * one-range active highlight — it sits above the rest via `priority`, so the
+ * "all" highlight can include it and never has to be rebuilt.
  */
 @customElement('mbr-find-bar')
 export class MbrFindBarElement extends LitElement implements MbrOverlay {
@@ -117,6 +221,14 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   @state()
   private _total = 0;
 
+  /**
+   * Whether `_total` / `_activeIndex` describe a finished scan. False while the
+   * first result for a query is still debounced or scanning, so the label shows
+   * nothing rather than a premature "No results".
+   */
+  @state()
+  private _hasResult = false;
+
   @query('#find-input')
   private _input!: HTMLInputElement;
 
@@ -126,10 +238,16 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   private _matchEnds: Int32Array = NO_OFFSETS;
 
   /**
-   * Bumped on every query change and re-checked before painting, so a scan can
-   * later be time-sliced across rAF without repainting a stale result set.
+   * Bumped on every query change and on close, and re-checked after every
+   * yield of a sliced scan, so stale work is dropped rather than painted.
    */
   private _generation = 0;
+
+  private _scan: ScanJob | null = null;
+  private _scanTimer?: number;
+  private _paintJob: PaintJob | null = null;
+  /** Half-open slice of matches the "all" highlight covers (or is filling). */
+  private _window: [number, number] = [0, 0];
 
   private _searchTimer?: number;
   private _reindexTimer?: number;
@@ -161,6 +279,8 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   public open(): void {
     const wasOpen = this._isOpen;
     this._isOpen = true;
+    // Before anything is painted: highlights in unselectable text misplace.
+    installSelectableStyle();
     // Indexing is lazy: never at page load, and not again while the bar is
     // already open (the mutation observer keeps it fresh from there).
     if (!this._index) this._rebuildIndex();
@@ -186,14 +306,18 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
    */
   public close(): void {
     this._isOpen = false;
+    this._generation++;
+    this._cancelScan();
     this._clearSearchTimer();
     this._clearReindexTimer();
     this._disconnectObserver();
     this._clearHighlights();
+    removeSelectableStyle();
     this._index = null;
     this._matchStarts = NO_OFFSETS;
     this._matchEnds = NO_OFFSETS;
     this._total = 0;
+    this._hasResult = false;
     this._activeIndex = -1;
   }
 
@@ -219,32 +343,78 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     // Find Next with the bar shut is a normal way to resume a search, so this
     // opens rather than no-ops. open() restores the index and re-runs the
     // retained query, which is what makes the step below meaningful.
-    if (!this._isOpen) {
-      this.open();
-    } else {
-      this._flushPendingSearch();
-    }
+    if (!this._isOpen) this.open();
+    // Debounced or mid-scan, the result is needed now: stepping must never land
+    // on a stale match set.
+    this._flushPendingSearch();
 
     const count = this._matchStarts.length;
     if (count === 0) return;
     this._activeIndex = (this._activeIndex + direction + count) % count;
-    this._paint();
+    const [from, to] = this._window;
+    if (this._activeIndex >= from && this._activeIndex < to) {
+      this._paintActive();
+    } else {
+      this._repaint();
+    }
   }
 
   private _runSearch(resetActive: boolean): void {
     const generation = ++this._generation;
+    this._cancelScan();
     const pattern = compileQuery(this._query, this._caseSensitive);
     if (!pattern || !this._index) {
       this._resetMatches();
       return;
     }
 
-    const { starts, ends, total } = findMatchOffsets(this._index, pattern, MATCH_CAP);
-    if (generation !== this._generation) return;
+    this._scan = { scan: createMatchScan(this._index, pattern, MATCH_CAP), resetActive, generation };
+    this._continueScan();
+  }
 
+  /** Run one slice of the current scan; reschedule itself until it is done. */
+  private _continueScan(): void {
+    const job = this._scan;
+    if (!job) return;
+    if (job.generation !== this._generation) {
+      this._scan = null;
+      return;
+    }
+    if (!job.scan.step(performance.now() + SCAN_SLICE_MS)) {
+      // Yield so a keystroke can run; it bumps the generation and the next
+      // slice drops this scan instead of finishing it.
+      this._scanTimer = window.setTimeout(() => {
+        this._scanTimer = undefined;
+        this._continueScan();
+      }, 0);
+      return;
+    }
+    this._scan = null;
+    this._applyMatches(job.scan.result(), job.resetActive);
+  }
+
+  /** Complete an in-flight scan synchronously. */
+  private _finishScan(): void {
+    const job = this._scan;
+    if (!job) return;
+    this._cancelScan();
+    if (job.generation !== this._generation) return;
+    job.scan.step(Number.POSITIVE_INFINITY);
+    this._applyMatches(job.scan.result(), job.resetActive);
+  }
+
+  private _cancelScan(): void {
+    this._scan = null;
+    if (this._scanTimer === undefined) return;
+    clearTimeout(this._scanTimer);
+    this._scanTimer = undefined;
+  }
+
+  private _applyMatches({ starts, ends, total }: MatchOffsets, resetActive: boolean): void {
     this._matchStarts = starts;
     this._matchEnds = ends;
     this._total = total;
+    this._hasResult = true;
     if (starts.length === 0) {
       this._activeIndex = -1;
     } else if (resetActive || this._activeIndex < 0) {
@@ -252,47 +422,111 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     } else {
       this._activeIndex = Math.min(this._activeIndex, starts.length - 1);
     }
-    this._paint();
+    this._repaint();
   }
 
-  private _paint(): void {
+  /**
+   * Replace both highlights for a new match set (or a window move): register
+   * an empty "all" highlight, paint the active match, fill the first slice
+   * nearest it now and the rest one slice per animation frame.
+   */
+  private _repaint(): void {
     const index = this._index;
     const count = this._matchStarts.length;
-    if (!index || count === 0) {
-      this._clearHighlights();
+    this._clearHighlights();
+    if (!index || count === 0) return;
+
+    const api = highlightApi();
+    if (!api) {
+      this._paintActive();
       return;
     }
 
     const [from, to] = highlightWindow(count, this._activeIndex);
-    const others: Range[] = [];
-    let active: Range | null = null;
-    for (let i = from; i < to; i++) {
-      const range = rangeForMatch(index, this._matchStarts[i], this._matchEnds[i]);
-      if (!range) continue;
-      if (i === this._activeIndex) {
-        active = range;
-      } else {
-        others.push(range);
+    const active = Math.max(this._activeIndex, from);
+    const highlight = api.create([]);
+    // Registered before the active highlight, so the active one also wins on
+    // registration order where `priority` is unsupported.
+    api.registry.set(HIGHLIGHT_ALL, highlight);
+    this._window = [from, to];
+    this._paintActive();
+
+    const job: PaintJob = { highlight, from, to, above: active, below: active - 1, preferAbove: true };
+    if (!this._paintSlice(job)) {
+      this._paintJob = job;
+      this._schedulePaint(job);
+    }
+  }
+
+  /** Add up to {@link PAINT_SLICE} ranges, nearest the active match first. Returns true when done. */
+  private _paintSlice(job: PaintJob): boolean {
+    const index = this._index;
+    if (!index) return true;
+    let budget = PAINT_SLICE;
+    while (budget > 0 && (job.above < job.to || job.below >= job.from)) {
+      const takeAbove = job.above < job.to && (job.preferAbove || job.below < job.from);
+      const i = takeAbove ? job.above++ : job.below--;
+      job.preferAbove = !takeAbove;
+      const range = highlightRangeForMatch(index, this._matchStarts[i], this._matchEnds[i]);
+      if (range) {
+        job.highlight.add(range);
+        budget--;
       }
     }
+    return job.above >= job.to && job.below < job.from;
+  }
 
-    // Two registries, set once per settled query rather than once per match.
+  private _schedulePaint(job: PaintJob): void {
+    job.frame = requestAnimationFrame(() => {
+      job.frame = undefined;
+      if (this._paintJob !== job) return;
+      if (this._paintSlice(job)) {
+        this._paintJob = null;
+      } else {
+        this._schedulePaint(job);
+      }
+    });
+  }
+
+  private _cancelPaint(): void {
+    const job = this._paintJob;
+    this._paintJob = null;
+    if (job?.frame !== undefined) cancelAnimationFrame(job.frame);
+  }
+
+  /**
+   * Paint and scroll to the active match only. With the Highlight API this is
+   * a one-range highlight drawn above the "all" one (which also contains it),
+   * so stepping never re-registers the rest.
+   */
+  private _paintActive(): void {
+    const index = this._index;
+    const i = this._activeIndex;
+    if (!index || i < 0) return;
+    const active = rangeForMatch(index, this._matchStarts[i], this._matchEnds[i]);
+
     const api = highlightApi();
     if (api) {
-      api.registry.set(HIGHLIGHT_ALL, api.create(others));
-      if (active) {
-        api.registry.set(HIGHLIGHT_ACTIVE, api.create([active]));
-      } else {
+      if (!active) {
         api.registry.delete(HIGHLIGHT_ACTIVE);
+        return;
       }
+      const highlight = api.create([highlightRangeForMatch(index, this._matchStarts[i], this._matchEnds[i]) ?? active]);
+      highlight.priority = 1;
+      api.registry.set(HIGHLIGHT_ACTIVE, highlight);
+      scrollRangeIntoView(active, this._barHeight());
+      return;
     }
 
     if (active) {
-      // A real Selection as well: free, matches native behaviour, and it is the
-      // whole fallback when ::highlight() is unsupported or a custom template
-      // dropped theme.css. WebKit blurs whatever was focused when the document
-      // selection changes outside it, which would otherwise steal focus from
-      // the input mid-keystroke on every settled scan.
+      // No CSS.highlights, so a real Selection is the only paint there is. It
+      // must stay the fallback, never an extra: WebKit blurs the focused
+      // element when the document selection moves outside it, and applies that
+      // blur AFTER addRange() returns (during its next selection update), so
+      // a refocus here is a no-op that the blur then overrides — the input lost
+      // focus after every typed character. And a focused text field owns the
+      // frame selection in WebKit, so the two could never coexist anyway. The
+      // refocus below only helps engines that blur synchronously.
       const hadFocus = this.shadowRoot?.activeElement === this._input;
       this._selectRange(active);
       scrollRangeIntoView(active, this._barHeight());
@@ -304,11 +538,14 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     this._matchStarts = NO_OFFSETS;
     this._matchEnds = NO_OFFSETS;
     this._total = 0;
+    this._hasResult = false;
     this._activeIndex = -1;
     this._clearHighlights();
   }
 
   private _clearHighlights(): void {
+    this._cancelPaint();
+    this._window = [0, 0];
     const api = highlightApi();
     if (api) {
       api.registry.delete(HIGHLIGHT_ALL);
@@ -384,11 +621,13 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     this._reindexTimer = undefined;
   }
 
-  /** Run a debounced scan now, so stepping never lands on a stale match set. */
+  /** Run a debounced or in-flight scan to completion now. */
   private _flushPendingSearch(): void {
-    if (this._searchTimer === undefined) return;
-    this._clearSearchTimer();
-    this._runSearch(true);
+    if (this._searchTimer !== undefined) {
+      this._clearSearchTimer();
+      this._runSearch(true);
+    }
+    this._finishScan();
   }
 
   // ========================================
@@ -397,7 +636,11 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
 
   private _handleInput(e: Event): void {
     this._query = (e.target as HTMLInputElement).value;
+    // Abandon whatever the previous query still had in flight — scan slices
+    // and paint frames alike — so the next keystroke never waits on them.
     this._generation++;
+    this._cancelScan();
+    this._cancelPaint();
     this._clearSearchTimer();
     if (!this._query.trim()) {
       // Clearing the box has to un-paint immediately; a debounce here reads as lag.
@@ -407,7 +650,7 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     this._searchTimer = window.setTimeout(() => {
       this._searchTimer = undefined;
       this._runSearch(true);
-    }, INPUT_DEBOUNCE_MS);
+    }, inputDebounceMs(this._query));
   }
 
   private _handleKeydown(e: KeyboardEvent): void {
@@ -440,9 +683,13 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   // Render
   // ========================================
 
-  /** "N of M", or a no-results notice, or nothing until something is typed. */
+  /**
+   * "N of M", or a no-results notice, or nothing until something is typed and
+   * scanned. While a newer query is pending this still describes the previous
+   * result — which is also what is painted.
+   */
   private _statusLabel(): string {
-    if (!this._query.trim()) return '';
+    if (!this._query.trim() || !this._hasResult) return '';
     if (this._total === 0) return 'No results';
     return `${this._activeIndex + 1} of ${this._total}`;
   }

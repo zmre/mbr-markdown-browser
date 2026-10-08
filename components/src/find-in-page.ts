@@ -6,8 +6,9 @@
  *
  * The pipeline is: flatten a subtree into one string (`buildTextIndex`),
  * compile the user's query (`compileQuery`), scan for offsets
- * (`findMatchOffsets`), then map offsets back onto live `Range`s
- * (`rangeForMatch`). Counting and painting stay decoupled: the scan allocates
+ * (`findMatchOffsets`, or the resumable `createMatchScan`), then map offsets
+ * back onto ranges (`highlightRangeForMatch` for painting, `rangeForMatch` where
+ * a live `Range` is needed). Counting and painting stay decoupled: the scan allocates
  * no `Range`s at all, so "N of M" is exact even when the caller paints only a
  * window of the matches.
  *
@@ -225,27 +226,92 @@ export function compileQuery(query: string, caseSensitive: boolean): RegExp | nu
  * with more matches than anyone would ever want painted.
  */
 export function findMatchOffsets(index: TextIndex, re: RegExp, cap: number): MatchOffsets {
+  const scan = createMatchScan(index, re, cap);
+  scan.step(Number.POSITIVE_INFINITY);
+  return scan.result();
+}
+
+/**
+ * Regex iterations between two clock reads in {@link MatchScan.step}. Small
+ * enough that a slice overshoots its deadline by well under a millisecond,
+ * large enough that `performance.now()` is not the hot path.
+ */
+const SCAN_CHECK_INTERVAL = 64;
+
+/**
+ * A {@link findMatchOffsets} scan that can be suspended and resumed, so a
+ * caller can spread a long scan over several tasks and keep the main thread
+ * free for input between them.
+ *
+ * The regex's own `lastIndex` is the cursor, so `re` must not be shared with
+ * anything else while the scan is live (`compileQuery` returns a fresh one).
+ */
+export interface MatchScan {
+  /**
+   * Scan until finished or until `performance.now()` reaches `deadline`.
+   * Returns `true` once the scan is complete. Always makes progress — at
+   * least {@link SCAN_CHECK_INTERVAL} iterations — even with a deadline that
+   * has already passed, so a resumed scan cannot stall.
+   */
+  step(deadline: number): boolean;
+  /** The offsets found. Only meaningful once {@link MatchScan.step} returned `true`. */
+  result(): MatchOffsets;
+}
+
+export function createMatchScan(index: TextIndex, re: RegExp, cap: number): MatchScan {
   const starts: number[] = [];
   const ends: number[] = [];
+  const text = index.text;
   let total = 0;
-
+  let done = false;
   re.lastIndex = 0;
-  for (let match = re.exec(index.text); match !== null; match = re.exec(index.text)) {
-    if (match[0].length === 0) {
-      // A zero-length match leaves lastIndex where it was; without this nudge
-      // the loop spins forever. `compileQuery` cannot produce one, but a
-      // caller-supplied pattern can.
-      re.lastIndex++;
-      continue;
-    }
-    total++;
-    if (starts.length < cap) {
-      starts.push(match.index);
-      ends.push(match.index + match[0].length);
-    }
-  }
 
-  return { starts: Int32Array.from(starts), ends: Int32Array.from(ends), total };
+  return {
+    step(deadline: number): boolean {
+      let budget = SCAN_CHECK_INTERVAL;
+      while (!done) {
+        const match = re.exec(text);
+        if (match === null) {
+          done = true;
+          break;
+        }
+        if (match[0].length === 0) {
+          // A zero-length match leaves lastIndex where it was; without this
+          // nudge the loop spins forever. `compileQuery` cannot produce one,
+          // but a caller-supplied pattern can.
+          re.lastIndex++;
+        } else {
+          total++;
+          if (starts.length < cap) {
+            starts.push(match.index);
+            ends.push(match.index + match[0].length);
+          }
+        }
+        if (--budget === 0) {
+          if (performance.now() >= deadline) return false;
+          budget = SCAN_CHECK_INTERVAL;
+        }
+      }
+      return true;
+    },
+    result(): MatchOffsets {
+      return { starts: Int32Array.from(starts), ends: Int32Array.from(ends), total };
+    },
+  };
+}
+
+/** `[startNode, startOffset, endNode, endOffset]` for a match, or `null`. */
+type Endpoints = [Text, number, Text, number];
+
+function matchEndpoints(index: TextIndex, start: number, end: number): Endpoints | null {
+  if (start < 0 || end <= start || end > index.text.length) return null;
+
+  const startChunk = chunkIndexAt(index.starts, start);
+  const endChunk = chunkIndexAt(index.starts, end - 1);
+  const startNode = index.nodes[startChunk];
+  const endNode = index.nodes[endChunk];
+  if (!startNode || !endNode) return null;
+  return [startNode, start - index.starts[startChunk], endNode, end - index.starts[endChunk]];
 }
 
 /**
@@ -256,20 +322,46 @@ export function findMatchOffsets(index: TextIndex, re: RegExp, cap: number): Mat
  * the Custom Highlight API beats wrapping hits in `<mark>`: no DOM mutation, no
  * split text nodes, and none of the enhancers' cached node references are
  * invalidated.
+ *
+ * Use this only where a live range is actually needed (geometry, Selection).
+ * For painting, use {@link highlightRangeForMatch}.
  */
 export function rangeForMatch(index: TextIndex, start: number, end: number): Range | null {
-  if (start < 0 || end <= start || end > index.text.length) return null;
-
-  const startChunk = chunkIndexAt(index.starts, start);
-  const endChunk = chunkIndexAt(index.starts, end - 1);
-  const startNode = index.nodes[startChunk];
-  const endNode = index.nodes[endChunk];
-  if (!startNode || !endNode) return null;
+  const endpoints = matchEndpoints(index, start, end);
+  if (!endpoints) return null;
 
   const range = document.createRange();
-  range.setStart(startNode, start - index.starts[startChunk]);
-  range.setEnd(endNode, end - index.starts[endChunk]);
+  range.setStart(endpoints[0], endpoints[1]);
+  range.setEnd(endpoints[2], endpoints[3]);
   return range;
+}
+
+/**
+ * Like {@link rangeForMatch}, but returns a `StaticRange` wherever the engine
+ * has one, for handing to a `Highlight`.
+ *
+ * This is the difference between typing lag and none. WebKit revalidates every
+ * registered LIVE range on every rendering update that follows a DOM change —
+ * and a keystroke in the find input is one. Measured in WebKit 26 on a
+ * 900k-character page, 2000 registered live ranges stalled the main thread
+ * ~95 ms per keystroke; the same 2000 as `StaticRange`s, ~3 ms, flat in N.
+ *
+ * A static range does not follow DOM edits, which costs nothing here: the
+ * find bar rebuilds its index and repaints on any content mutation anyway.
+ * Falls back to a live range where `StaticRange` is missing (happy-dom).
+ */
+export function highlightRangeForMatch(index: TextIndex, start: number, end: number): AbstractRange | null {
+  const ctor = (globalThis as { StaticRange?: typeof StaticRange }).StaticRange;
+  if (typeof ctor !== 'function') return rangeForMatch(index, start, end);
+
+  const endpoints = matchEndpoints(index, start, end);
+  if (!endpoints) return null;
+  return new ctor({
+    startContainer: endpoints[0],
+    startOffset: endpoints[1],
+    endContainer: endpoints[2],
+    endOffset: endpoints[3],
+  });
 }
 
 /**

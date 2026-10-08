@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildTextIndex,
   compileQuery,
+  createMatchScan,
   findMatchOffsets,
+  highlightRangeForMatch,
   rangeForMatch,
   scrollRangeIntoView,
   type TextIndex,
@@ -204,6 +206,79 @@ describe('findMatchOffsets', () => {
     const pattern = compileQuery('ab', false)!
     pattern.lastIndex = 3
     expect(findMatchOffsets(textIndex, pattern, 10).total).toBe(2)
+  })
+})
+
+describe('createMatchScan', () => {
+  const markup = Array.from({ length: 500 }, (_, i) => `<p>needle ${i}</p>`).join('')
+
+  it('makes bounded progress per step even past its deadline', () => {
+    const textIndex = index(markup)
+    const scan = createMatchScan(textIndex, compileQuery('needle', false)!, 1000)
+    // A deadline already in the past: every step still advances, by one check
+    // interval, so a resumed scan can never stall.
+    let steps = 0
+    while (!scan.step(0)) steps++
+    expect(steps).toBeGreaterThan(1)
+    expect(scan.result().total).toBe(500)
+  })
+
+  it('produces exactly what a one-shot findMatchOffsets does', () => {
+    const textIndex = index(markup)
+    const sliced = createMatchScan(textIndex, compileQuery('e', false)!, 700)
+    while (!sliced.step(0)) {
+      /* resume */
+    }
+    const whole = findMatchOffsets(textIndex, compileQuery('e', false)!, 700)
+    expect(sliced.result().total).toBe(whole.total)
+    expect(Array.from(sliced.result().starts)).toEqual(Array.from(whole.starts))
+    expect(Array.from(sliced.result().ends)).toEqual(Array.from(whole.ends))
+    // The cap limits stored offsets, never the count.
+    expect(whole.starts.length).toBe(700)
+    expect(whole.total).toBeGreaterThan(700)
+  })
+
+  it('finishes in one step when given an unbounded deadline', () => {
+    const scan = createMatchScan(index(markup), compileQuery('needle', false)!, 10)
+    expect(scan.step(Number.POSITIVE_INFINITY)).toBe(true)
+    expect(scan.result().total).toBe(500)
+  })
+})
+
+describe('highlightRangeForMatch', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  class FakeStaticRange {
+    constructor(readonly init: StaticRangeInit) {}
+  }
+
+  it('builds a StaticRange with the same endpoints rangeForMatch would', () => {
+    vi.stubGlobal('StaticRange', FakeStaticRange)
+    const textIndex = index('<p>one <em>two</em> three</p>')
+    const { starts, ends } = findMatchOffsets(textIndex, compileQuery('one two', false)!, 10)
+    const live = rangeForMatch(textIndex, starts[0], ends[0])!
+    const painted = highlightRangeForMatch(textIndex, starts[0], ends[0]) as unknown as FakeStaticRange
+    expect(painted).toBeInstanceOf(FakeStaticRange)
+    expect(painted.init).toEqual({
+      startContainer: live.startContainer,
+      startOffset: live.startOffset,
+      endContainer: live.endContainer,
+      endOffset: live.endOffset,
+    })
+  })
+
+  it('returns null for offsets on a separator, like rangeForMatch', () => {
+    vi.stubGlobal('StaticRange', FakeStaticRange)
+    const textIndex = index('<p>a</p><p>b</p>')
+    expect(highlightRangeForMatch(textIndex, 1, 2)).toBeNull()
+  })
+
+  it('falls back to a live Range where StaticRange is missing', () => {
+    vi.stubGlobal('StaticRange', undefined)
+    const textIndex = index('<p>alpha</p>')
+    expect(highlightRangeForMatch(textIndex, 0, 5)?.toString()).toBe('alpha')
   })
 })
 
