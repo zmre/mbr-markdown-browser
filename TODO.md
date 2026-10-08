@@ -2,10 +2,6 @@
 
 ## What's Next
 
-* [ ] Reveal.js has a new major version, 6.x, we need to update to it
-  * API stays the same
-  * The HTML and CSS are *not* wildly changed: v6 removes zero CSS classes (adds two), and `.reveal > .slides > section` plus every `Reveal.initialize()` option are unchanged. The real work is our three `reveal.theme.*.css`, which are patched forks (Source Sans Pro `@import` stripped, globals removed so they inherit from Pico; `blank` has no upstream counterpart at all) and would need re-deriving against v6 — where themes now inline their fonts as base64, taking `black.css` from 7 KB to 575 KB, so the strip is worth keeping.
-  * `scripts/update-assets.sh --reveal 6.0.1` handles the mechanical part (core + `dist/reveal.css` + the notes plugin, which moved to `dist/plugin/notes.js`) and deliberately leaves the themes alone.
 * **Relationships & genealogy** (see [docs](docs/markdown/relationships.md))
   * [ ] Edit-mode support for structured person data: a friendlier way to view/edit the person frontmatter (born, died, born_place, gender, aliases, relationships) than hand-editing raw YAML in the in-browser editor — e.g. a small form for the known fields.
   * [ ] Wire the editor to the person `image` frontmatter field — pick/replace the portrait. Image upload itself is done (`editor-crepe.ts` `uploadFile` → `POST /.mbr/upload`, reachable from the upload button, drag-drop and paste), but every result path targets a ProseMirror body node; nothing writes a frontmatter key, so the portrait is still set by hand-typing `image:` into the raw YAML textarea.
