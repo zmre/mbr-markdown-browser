@@ -687,9 +687,9 @@
               # -parse-as-library: Don't look for main() function
               # -application-extension: Mark as app extension (required for sandboxing)
               # -e _NSExtensionMain: Use extension entry point instead of _main
-              # -dead_strip: drop every symbol the extension never reaches. libmbr.a is
-              # the whole Rust core (LTO folds it into few objects), so without this
-              # ld keeps all of it, embedded web assets included.
+              # -dead_strip: drop every function and constant the extension never
+              # reaches. ld pulls in each libmbr.a member that resolves a symbol and
+              # keeps all of it otherwise, embedded web assets included.
               swiftc \
                 -O \
                 -parse-as-library \
