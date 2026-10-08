@@ -560,6 +560,12 @@
             # and pulls in the macOS-only `uniffi` build-dependency even on Linux.
             # Re-add the gate so the bin (and uniffi) is only built when `ffi` is on
             # — enabled on Darwin, off elsewhere via cliFeatures.
+            #
+            # The same stripping un-gates the `mbr` bin (`required-features =
+            # ["cli"]`) and the `[[test]]` targets. Those need no re-gating:
+            # every deps-only build here (this one and cargoArtifactsMinimal)
+            # enables `cli`, `server` and `ssg`, and the only build without them,
+            # mbr-quicklook-staticlib, passes `--lib`.
             grep -q 'required-features = \["ffi"\]' Cargo.toml \
               || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
 
@@ -570,10 +576,14 @@
           '';
         });
 
-      # The exact feature set Windows ships: GUI, no media-metadata, no ffi.
-      # Bound once so `packages.clippy-minimal`, `packages.tests-minimal`, and
-      # ci.yml's Windows job cannot drift apart silently.
-      minimalFeatures = "gui";
+      # The exact feature set Windows ships: every default subsystem except
+      # media-metadata, and no ffi. Used with `--no-default-features`, so each
+      # subsystem feature has to be named (Cargo.toml `[features]`); `gui`
+      # alone would build a library with no `mbr` binary in it. Bound once so
+      # `packages.clippy-minimal`, `packages.tests-minimal`, and ci.yml's and
+      # release.yml's Windows jobs cannot drift apart silently (the workflows
+      # spell the same string out; change them together).
+      minimalFeatures = "gui,server,watcher,ssg,cli";
 
       # Dependency artifacts for the minimal feature set.
       #
@@ -996,7 +1006,7 @@
           # builder.
           #
           # Cargo feature combinations are only as tested as the combinations you
-          # build. `--no-default-features --features gui` turns off
+          # build. `--no-default-features --features ${minimalFeatures}` turns off
           # `media-metadata`, which cfg-gates whole CLI arguments — and a stale
           # `conflicts_with_all` reference to a gated argument makes clap panic at
           # startup on *every* invocation, not just in tests. That is a

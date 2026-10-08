@@ -337,7 +337,10 @@ jobs:
           rustflags: ""
 
       - name: Build release binary
-        run: cargo build --release --no-default-features --features gui
+        # Same list as ci.yml's Windows job and flake.nix's `minimalFeatures`:
+        # every default subsystem except media-metadata. `gui` alone would
+        # build no `mbr` binary (it needs `cli`).
+        run: cargo build --release --no-default-features --features gui,server,watcher,ssg,cli
 
       # Duplicated from ci.yml on purpose: this job builds the exe that actually
       # ships, and a release must not be able to go out with a CRT dependency
