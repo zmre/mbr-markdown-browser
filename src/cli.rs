@@ -5,7 +5,11 @@ use std::path::PathBuf;
 
 /// Markdown browser and previewer
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+// `name` because clap otherwise takes it from the *package*
+// (`mbr-markdown-browser`), not the binary, so `mbr --version` printed
+// `mbr-markdown-browser X.Y.Z` and the usage line named a command that does not
+// exist. The release workflow's Homebrew check expects `mbr X.Y.Z`.
+#[command(name = "mbr", version, about, long_about = None)]
 // The mode flags below are mutually exclusive. This is expressed as an
 // `ArgGroup` rather than per-argument `conflicts_with_all` lists because two of
 // the members are `#[cfg(feature = "media-metadata")]`. A `#[cfg]`-removed
@@ -616,6 +620,17 @@ mod tests {
     fn test_command_definition_is_valid() {
         use clap::CommandFactory;
         Args::command().debug_assert();
+    }
+
+    /// `update-homebrew-cask` in release.yml compares `mbr --version` against
+    /// exactly `mbr X.Y.Z`; 0.6.2 shipped printing the package name instead.
+    #[test]
+    fn test_version_output_names_the_binary() {
+        use clap::CommandFactory;
+        assert_eq!(
+            Args::command().render_version(),
+            format!("mbr {}\n", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     /// The mode flags are mutually exclusive. Only the ungated flags are used
