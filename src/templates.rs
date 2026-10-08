@@ -1275,6 +1275,52 @@ mod tests {
         );
     }
 
+    /// Renders a page from a real markdown file, so the frontmatter goes
+    /// through the same simplifier the server and the build use.
+    fn render_parsed(frontmatter: &str) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("note.md");
+        std::fs::write(&file, format!("---\n{frontmatter}---\nBody.\n")).unwrap();
+        let parsed = crate::markdown::parse(&file).unwrap();
+        render_page(parsed.frontmatter, HashMap::new())
+    }
+
+    /// Whitespace around `type` must gate every feature the same way: the
+    /// contact card and the implied company edge already trim, so the
+    /// templates' exact `type == "person"` has to see the trimmed value too.
+    #[test]
+    fn test_type_with_surrounding_whitespace_gates_like_the_trimmed_value() {
+        let html = render_parsed("type: \" person\"\n");
+        assert!(html.contains("<mbr-genealogy></mbr-genealogy>"), "{html}");
+        assert!(
+            html.contains("components/mbr-genealogy.min.js"),
+            "prefetch: {html}"
+        );
+        assert_eq!(body_tag(&html), r#"<body class="person">"#);
+        assert_eq!(
+            parse_js_value(&html, "window.frontmatter = ")["type"],
+            json!("person")
+        );
+
+        let html = render_parsed("type: \"Meeting Notes \"\n");
+        assert_eq!(body_tag(&html), r#"<body class="meeting-notes">"#);
+        assert_eq!(
+            parse_js_value(&html, "window.frontmatter = ")["type"],
+            json!("Meeting Notes")
+        );
+
+        let html = render_parsed("type: \"flashcard \"\n");
+        assert_eq!(body_tag(&html), r#"<body class="flashcard">"#);
+
+        let html = render_parsed("type: \"   \"\n");
+        assert_eq!(body_tag(&html), "<body>");
+        assert!(
+            parse_js_value(&html, "window.frontmatter = ")
+                .get("type")
+                .is_none()
+        );
+    }
+
     // ------------------------------------------------------------------
     // Contact card
     // ------------------------------------------------------------------
