@@ -421,7 +421,7 @@ impl From<&ServerState> for ListingCaches {
 #[derive(Debug)]
 enum LiveReloadAction {
     /// Serialize and forward this event to the client.
-    Forward(crate::watcher::FileChangeEvent),
+    Forward(crate::change_event::FileChangeEvent),
     /// This client fell behind and the channel dropped events; keep listening.
     Skip,
     /// The sender is gone (server shutting down); close the socket.
@@ -435,7 +435,7 @@ enum LiveReloadAction {
 /// only cost this client a missed reload, and the client re-fetches the page
 /// on the next event it does receive.
 fn live_reload_action(
-    result: Result<crate::watcher::FileChangeEvent, broadcast::error::RecvError>,
+    result: Result<crate::change_event::FileChangeEvent, broadcast::error::RecvError>,
 ) -> LiveReloadAction {
     match result {
         Ok(event) => LiveReloadAction::Forward(event),
@@ -1210,7 +1210,7 @@ pub struct ServerState {
     pub templates: crate::templates::Templates,
     pub repo: Arc<Repo>,
     pub oembed_timeout_ms: u64,
-    pub file_change_tx: Option<broadcast::Sender<crate::watcher::FileChangeEvent>>,
+    pub file_change_tx: Option<broadcast::Sender<crate::change_event::FileChangeEvent>>,
     /// Optional template folder that overrides default .mbr/ and compiled defaults
     pub template_folder: Option<std::path::PathBuf>,
     /// Sort configuration for file listings
@@ -1868,7 +1868,7 @@ impl Server {
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
         let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
-            crate::watcher::FileChangeEvent,
+            crate::change_event::FileChangeEvent,
         >(crate::watcher::BROADCAST_CAPACITY);
         let tx_for_watcher = file_change_tx.clone();
 
@@ -2055,17 +2055,17 @@ impl Server {
                                 Err(broadcast::error::RecvError::Lagged(_)) => {
                                     // Too many events queued — force full rescan
                                     pending_events.clear();
-                                    pending_events.push(crate::watcher::FileChangeEvent {
+                                    pending_events.push(crate::change_event::FileChangeEvent {
                                         path: String::new(),
                                         relative_path: String::new(),
-                                        event: crate::watcher::ChangeEventType::Created,
+                                        event: crate::change_event::ChangeEventType::Created,
                                     });
                                     // Push over threshold to trigger full rescan
                                     for _ in 0..SURGICAL_THRESHOLD {
-                                        pending_events.push(crate::watcher::FileChangeEvent {
+                                        pending_events.push(crate::change_event::FileChangeEvent {
                                             path: String::new(),
                                             relative_path: String::new(),
-                                            event: crate::watcher::ChangeEventType::Created,
+                                            event: crate::change_event::ChangeEventType::Created,
                                         });
                                     }
                                     break;
@@ -2080,9 +2080,9 @@ impl Server {
                 let relevant_events: Vec<_> = pending_events
                     .into_iter()
                     .filter(|event| match event.event {
-                        crate::watcher::ChangeEventType::Created
-                        | crate::watcher::ChangeEventType::Deleted => true,
-                        crate::watcher::ChangeEventType::Modified => {
+                        crate::change_event::ChangeEventType::Created
+                        | crate::change_event::ChangeEventType::Deleted => true,
+                        crate::change_event::ChangeEventType::Modified => {
                             markdown_extensions_for_invalidation
                                 .iter()
                                 .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
@@ -2110,8 +2110,8 @@ impl Server {
                     let has_tag_changes = relevant_events.iter().any(|e| {
                         matches!(
                             e.event,
-                            crate::watcher::ChangeEventType::Deleted
-                                | crate::watcher::ChangeEventType::Modified
+                            crate::change_event::ChangeEventType::Deleted
+                                | crate::change_event::ChangeEventType::Modified
                         )
                     });
 
@@ -2143,7 +2143,10 @@ impl Server {
                                     .pin()
                                     .get(&abs_path)
                                     .map(|info| info.url_path.clone()),
-                                matches!(event.event, crate::watcher::ChangeEventType::Deleted),
+                                matches!(
+                                    event.event,
+                                    crate::change_event::ChangeEventType::Deleted
+                                ),
                             ));
                             repo.invalidate_file(&abs_path, &event.event);
                             // After `repo.invalidate_file`, never before: a
@@ -3220,10 +3223,10 @@ impl Server {
         if let Some(tx) = &config.file_change_tx {
             let relative =
                 pathdiff::diff_paths(&md_path, &config.base_dir).unwrap_or_else(|| md_path.clone());
-            let _ = tx.send(crate::watcher::FileChangeEvent {
+            let _ = tx.send(crate::change_event::FileChangeEvent {
                 path: md_path.to_string_lossy().to_string(),
                 relative_path: relative.to_string_lossy().to_string(),
-                event: crate::watcher::ChangeEventType::Modified,
+                event: crate::change_event::ChangeEventType::Modified,
             });
         }
 
@@ -3345,10 +3348,14 @@ impl Server {
     /// to see the change. (A flashcard review inserts lines, which moves every
     /// task below it, so it needs the invalidation as much as a toggle does.)
     fn announce_in_place_edit(config: &ServerState, md_path: &Path) {
-        Self::broadcast_change(config, md_path, crate::watcher::ChangeEventType::Modified);
+        Self::broadcast_change(
+            config,
+            md_path,
+            crate::change_event::ChangeEventType::Modified,
+        );
         config.task_index.invalidate_file(
             md_path,
-            &crate::watcher::ChangeEventType::Modified,
+            &crate::change_event::ChangeEventType::Modified,
             &config.repo,
             &config.base_dir,
         );
@@ -3505,12 +3512,12 @@ impl Server {
     fn broadcast_change(
         config: &ServerState,
         abs_path: &Path,
-        event: crate::watcher::ChangeEventType,
+        event: crate::change_event::ChangeEventType,
     ) {
         if let Some(tx) = &config.file_change_tx {
             let relative = pathdiff::diff_paths(abs_path, &config.base_dir)
                 .unwrap_or_else(|| abs_path.to_path_buf());
-            let _ = tx.send(crate::watcher::FileChangeEvent {
+            let _ = tx.send(crate::change_event::FileChangeEvent {
                 path: abs_path.to_string_lossy().to_string(),
                 relative_path: relative.to_string_lossy().to_string(),
                 event,
@@ -3573,13 +3580,13 @@ impl Server {
         // in invalidate_file, so no tag-index rebuild is needed.
         config
             .repo
-            .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
+            .invalidate_file(&dst, &crate::change_event::ChangeEventType::Created);
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
         ListingCaches::from(config).invalidate();
         config.inbound_link_cache.invalidate_all();
 
-        Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
+        Self::broadcast_change(config, &dst, crate::change_event::ChangeEventType::Created);
 
         Ok(CreateResponse {
             url_path,
@@ -3622,7 +3629,11 @@ impl Server {
             return Err(FileOpError::AlreadyExists);
         }
         std::fs::create_dir_all(&target).map_err(FileOpError::Io)?;
-        Self::broadcast_change(config, &target, crate::watcher::ChangeEventType::Created);
+        Self::broadcast_change(
+            config,
+            &target,
+            crate::change_event::ChangeEventType::Created,
+        );
         Ok(MkdirResponse { path: rel_path })
     }
 
@@ -3731,7 +3742,7 @@ impl Server {
         Self::broadcast_change(
             config,
             &final_path,
-            crate::watcher::ChangeEventType::Created,
+            crate::change_event::ChangeEventType::Created,
         );
 
         Ok(UploadResponse {
@@ -3934,10 +3945,10 @@ impl Server {
         // A5: surgical repo/cache updates + broadcasts.
         config
             .repo
-            .invalidate_file(&src, &crate::watcher::ChangeEventType::Deleted);
+            .invalidate_file(&src, &crate::change_event::ChangeEventType::Deleted);
         config
             .repo
-            .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
+            .invalidate_file(&dst, &crate::change_event::ChangeEventType::Created);
         let mut changed_union: Vec<PathBuf> = Vec::new();
         for p in rewritten_paths.iter().chain(wiki_paths.iter()) {
             if !changed_union.iter().any(|q| q == p) {
@@ -3947,7 +3958,7 @@ impl Server {
         for p in &changed_union {
             config
                 .repo
-                .invalidate_file(p, &crate::watcher::ChangeEventType::Modified);
+                .invalidate_file(p, &crate::change_event::ChangeEventType::Modified);
         }
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
@@ -3956,10 +3967,10 @@ impl Server {
         config.inbound_link_cache.invalidate_all();
         config.link_cache.invalidate_all();
 
-        Self::broadcast_change(config, &src, crate::watcher::ChangeEventType::Deleted);
-        Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
+        Self::broadcast_change(config, &src, crate::change_event::ChangeEventType::Deleted);
+        Self::broadcast_change(config, &dst, crate::change_event::ChangeEventType::Created);
         for p in &changed_union {
-            Self::broadcast_change(config, p, crate::watcher::ChangeEventType::Modified);
+            Self::broadcast_change(config, p, crate::change_event::ChangeEventType::Modified);
         }
 
         let to_urls = |paths: &[PathBuf]| -> Vec<String> {
@@ -8756,7 +8767,7 @@ mod tests {
     /// for that tab.
     #[tokio::test]
     async fn test_live_reload_action_keeps_forwarding_after_lag() {
-        use crate::watcher::{ChangeEventType, FileChangeEvent};
+        use crate::change_event::{ChangeEventType, FileChangeEvent};
 
         let event = |name: &str| FileChangeEvent {
             path: format!("/repo/{name}"),
@@ -8792,7 +8803,7 @@ mod tests {
     /// When the sender is dropped (server shutting down) the loop closes.
     #[tokio::test]
     async fn test_live_reload_action_closes_when_sender_dropped() {
-        let (tx, mut rx) = broadcast::channel::<crate::watcher::FileChangeEvent>(2);
+        let (tx, mut rx) = broadcast::channel::<crate::change_event::FileChangeEvent>(2);
         drop(tx);
         assert!(matches!(
             live_reload_action(rx.recv().await),

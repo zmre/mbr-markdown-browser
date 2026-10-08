@@ -6,10 +6,10 @@
 //! Uses RecommendedWatcher (FSEvents on macOS) for kernel-level efficiency —
 //! no per-file stat polling, handles large directories without CPU overhead.
 
+use crate::change_event::{ChangeEventType, FileChangeEvent};
 use crate::errors::WatcherError;
 use crate::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
@@ -18,35 +18,6 @@ use tracing::{debug, error, info, trace};
 /// Capacity of the broadcast channel for file change events.
 /// If clients don't keep up, the oldest messages will be dropped.
 pub(crate) const BROADCAST_CAPACITY: usize = 100;
-
-/// Represents a file system change event.
-///
-/// Only `relative_path` and `event` cross the wire: this struct is broadcast to
-/// every live-reload WebSocket client, and an absolute path would leak the OS
-/// username, the home directory layout, and private note filenames.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FileChangeEvent {
-    /// The absolute path to the changed file.
-    ///
-    /// **Server-side only** (`#[serde(skip)]`): consumed in-process by the
-    /// template hot-reload and repo-invalidation tasks. It is never serialized
-    /// to WebSocket clients — see the struct docs.
-    #[serde(skip)]
-    pub path: String,
-    /// The path relative to the repository root.
-    pub relative_path: String,
-    /// The type of change event.
-    pub event: ChangeEventType,
-}
-
-/// Type of file system change event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ChangeEventType {
-    Modified,
-    Created,
-    Deleted,
-}
 
 /// File watcher that monitors the repository for changes.
 pub struct FileWatcher {
@@ -318,31 +289,6 @@ mod tests {
             .expect("watcher delivered no event for its readiness probe");
         fs::remove_file(&probe).unwrap();
     }
-
-    #[test]
-    fn test_serialized_event_omits_absolute_path() {
-        // The live-reload WebSocket broadcasts this struct to any client that
-        // completes a handshake, so the absolute path must never be on the
-        // wire: it leaks the OS username, home layout, and private filenames.
-        let event = FileChangeEvent {
-            path: "/Users/someone/private notes/secret.md".to_string(),
-            relative_path: "private notes/secret.md".to_string(),
-            event: ChangeEventType::Modified,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(
-            !json.contains("/Users/someone"),
-            "absolute path leaked into the broadcast payload: {json}"
-        );
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(
-            parsed.get("path").is_none(),
-            "`path` must not be serialized: {json}"
-        );
-        assert_eq!(parsed["relative_path"], "private notes/secret.md");
-        assert_eq!(parsed["event"], "modified");
-    }
-
     #[tokio::test]
     async fn test_watcher_creates_and_receives_events() {
         let temp_dir = TempDir::new().unwrap();
