@@ -10,7 +10,7 @@
 //! re-point in `browser.rs`, so the two can never resolve the same target to
 //! different URLs.
 
-use crate::server::MediaViewerType;
+use crate::media::MediaViewerType;
 use std::path::Path;
 
 /// Builds a URL path from a relative filesystem path.

@@ -2,6 +2,10 @@
 //!
 //! This module handles the `![caption](url)` markdown syntax when the URL points to
 //! media files (video, audio, PDF) or embeddable content (YouTube).
+//!
+//! It also owns [`MediaViewerType`], the kind of `/.mbr/{videos,pdfs,audio,images}/`
+//! viewer page a media file opens in, shared by the server, the static build and
+//! launch-URL construction.
 
 use crate::audio::Audio;
 use crate::vid::Vid;
@@ -208,9 +212,118 @@ impl MediaEmbed {
     }
 }
 
+/// Type of media for the viewer page.
+///
+/// Used to route requests to the appropriate media viewer template
+/// at `/.mbr/videos/`, `/.mbr/pdfs/`, `/.mbr/audio/`, or `/.mbr/images/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaViewerType {
+    Video,
+    Pdf,
+    Audio,
+    Image,
+}
+
+impl MediaViewerType {
+    /// Parse from route path.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/videos/"), Some(MediaViewerType::Video));
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/pdfs/"), Some(MediaViewerType::Pdf));
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/audio/"), Some(MediaViewerType::Audio));
+    /// assert_eq!(MediaViewerType::from_route("/.mbr/images/"), Some(MediaViewerType::Image));
+    /// assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
+    /// ```
+    #[must_use]
+    pub fn from_route(path: &str) -> Option<Self> {
+        match path {
+            "/.mbr/videos/" => Some(Self::Video),
+            "/.mbr/pdfs/" => Some(Self::Pdf),
+            "/.mbr/audio/" => Some(Self::Audio),
+            "/.mbr/images/" => Some(Self::Image),
+            _ => None,
+        }
+    }
+
+    /// Template name for this media type.
+    #[must_use]
+    pub const fn template_name(&self) -> &'static str {
+        "media_viewer.html"
+    }
+
+    /// Human-readable label for this media type.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Video => "Video",
+            Self::Pdf => "PDF",
+            Self::Audio => "Audio",
+            Self::Image => "Image",
+        }
+    }
+
+    /// Lowercase string representation for template context.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Pdf => "pdf",
+            Self::Audio => "audio",
+            Self::Image => "image",
+        }
+    }
+
+    /// Determine media type from a file extension (case-insensitive).
+    ///
+    /// Returns `None` for unrecognized extensions.
+    #[must_use]
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            // Video
+            "mp4" | "m4v" | "mov" | "webm" | "flv" | "mpg" | "mpeg" | "avi" | "3gp" | "wmv"
+            | "mkv" | "ts" | "mts" | "m2ts" | "vob" | "divx" | "xvid" | "asf" | "rm" | "rmvb"
+            | "f4v" | "ogv" => Some(Self::Video),
+            // Audio
+            "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "aiff" | "aif" | "oga" | "opus"
+            | "wma" => Some(Self::Audio),
+            // Image
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "svg" => {
+                Some(Self::Image)
+            }
+            // PDF
+            "pdf" => Some(Self::Pdf),
+            _ => None,
+        }
+    }
+
+    /// Determine media type from a file path by inspecting its extension.
+    ///
+    /// Returns `None` if the path has no extension or the extension is unrecognized.
+    #[must_use]
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(Self::from_extension)
+    }
+
+    /// Returns the server route path for this media viewer type.
+    #[must_use]
+    pub const fn route_path(&self) -> &'static str {
+        match self {
+            Self::Video => "/.mbr/videos/",
+            Self::Pdf => "/.mbr/pdfs/",
+            Self::Audio => "/.mbr/audio/",
+            Self::Image => "/.mbr/images/",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     // YouTube detection tests
     #[test]
@@ -523,5 +636,185 @@ mod tests {
         };
         assert_eq!(youtube.html_close(), "</figcaption></figure>");
         assert_eq!(pdf.html_close(), "</figcaption></figure>");
+    }
+
+    // ==================== MediaViewerType Tests ====================
+
+    #[test]
+    fn test_media_viewer_type_from_route_videos() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/videos/"),
+            Some(MediaViewerType::Video)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_pdfs() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/pdfs/"),
+            Some(MediaViewerType::Pdf)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_audio() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/audio/"),
+            Some(MediaViewerType::Audio)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_images() {
+        assert_eq!(
+            MediaViewerType::from_route("/.mbr/images/"),
+            Some(MediaViewerType::Image)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_route_invalid() {
+        assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
+        assert_eq!(MediaViewerType::from_route("/.mbr/videos"), None); // missing trailing slash
+        assert_eq!(MediaViewerType::from_route("/.mbr/unknown/"), None);
+    }
+
+    #[test]
+    fn test_media_viewer_type_template_name() {
+        assert_eq!(MediaViewerType::Video.template_name(), "media_viewer.html");
+        assert_eq!(MediaViewerType::Pdf.template_name(), "media_viewer.html");
+        assert_eq!(MediaViewerType::Audio.template_name(), "media_viewer.html");
+    }
+
+    #[test]
+    fn test_media_viewer_type_label() {
+        assert_eq!(MediaViewerType::Video.label(), "Video");
+        assert_eq!(MediaViewerType::Pdf.label(), "PDF");
+        assert_eq!(MediaViewerType::Audio.label(), "Audio");
+    }
+
+    #[test]
+    fn test_media_viewer_type_as_str() {
+        assert_eq!(MediaViewerType::Video.as_str(), "video");
+        assert_eq!(MediaViewerType::Pdf.as_str(), "pdf");
+        assert_eq!(MediaViewerType::Audio.as_str(), "audio");
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_video() {
+        for ext in &[
+            "mp4", "m4v", "mov", "webm", "flv", "mpg", "mpeg", "avi", "3gp", "wmv", "mkv", "ts",
+            "mts", "m2ts", "vob", "divx", "xvid", "asf", "rm", "rmvb", "f4v", "ogv",
+        ] {
+            assert_eq!(
+                MediaViewerType::from_extension(ext),
+                Some(MediaViewerType::Video),
+                "Expected Video for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_audio() {
+        for ext in &[
+            "mp3", "wav", "ogg", "flac", "aac", "m4a", "aiff", "aif", "oga", "opus", "wma",
+        ] {
+            assert_eq!(
+                MediaViewerType::from_extension(ext),
+                Some(MediaViewerType::Audio),
+                "Expected Audio for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_image() {
+        for ext in &[
+            "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "svg",
+        ] {
+            assert_eq!(
+                MediaViewerType::from_extension(ext),
+                Some(MediaViewerType::Image),
+                "Expected Image for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_pdf() {
+        assert_eq!(
+            MediaViewerType::from_extension("pdf"),
+            Some(MediaViewerType::Pdf)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_case_insensitive() {
+        assert_eq!(
+            MediaViewerType::from_extension("MP4"),
+            Some(MediaViewerType::Video)
+        );
+        assert_eq!(
+            MediaViewerType::from_extension("Pdf"),
+            Some(MediaViewerType::Pdf)
+        );
+        assert_eq!(
+            MediaViewerType::from_extension("JPG"),
+            Some(MediaViewerType::Image)
+        );
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_extension_unknown() {
+        assert_eq!(MediaViewerType::from_extension("md"), None);
+        assert_eq!(MediaViewerType::from_extension("html"), None);
+        assert_eq!(MediaViewerType::from_extension("rs"), None);
+        assert_eq!(MediaViewerType::from_extension(""), None);
+    }
+
+    #[test]
+    fn test_media_viewer_type_from_path() {
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("videos/demo.mp4")),
+            Some(MediaViewerType::Video)
+        );
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("music/song.mp3")),
+            Some(MediaViewerType::Audio)
+        );
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("images/photo.jpg")),
+            Some(MediaViewerType::Image)
+        );
+        assert_eq!(
+            MediaViewerType::from_path(Path::new("docs/paper.pdf")),
+            Some(MediaViewerType::Pdf)
+        );
+        assert_eq!(MediaViewerType::from_path(Path::new("readme.md")), None);
+        assert_eq!(MediaViewerType::from_path(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn test_media_viewer_type_route_path() {
+        assert_eq!(MediaViewerType::Video.route_path(), "/.mbr/videos/");
+        assert_eq!(MediaViewerType::Pdf.route_path(), "/.mbr/pdfs/");
+        assert_eq!(MediaViewerType::Audio.route_path(), "/.mbr/audio/");
+        assert_eq!(MediaViewerType::Image.route_path(), "/.mbr/images/");
+    }
+
+    #[test]
+    fn test_media_viewer_type_route_path_roundtrips_with_from_route() {
+        for media_type in &[
+            MediaViewerType::Video,
+            MediaViewerType::Pdf,
+            MediaViewerType::Audio,
+            MediaViewerType::Image,
+        ] {
+            assert_eq!(
+                MediaViewerType::from_route(media_type.route_path()),
+                Some(*media_type),
+                "route_path -> from_route roundtrip failed for {media_type:?}"
+            );
+        }
     }
 }
