@@ -50,6 +50,7 @@ pub mod embedded_pico;
 pub mod errors;
 #[cfg(feature = "gui")]
 pub mod external_open;
+pub mod file_write;
 pub mod flashcards;
 pub mod html;
 pub mod launch_url;

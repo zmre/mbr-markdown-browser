@@ -16,6 +16,7 @@ use crate::config::{RelationType, SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::{MbrError, ServerError, TaskPatchError};
+use crate::file_write::{FileWriteLocks, create_unique_temp_file};
 use crate::link_grep::InboundLinkCache;
 use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
@@ -1329,6 +1330,9 @@ pub struct ServerState {
     pub edit_token_hash: Option<String>,
     /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
     pub upload_max_bytes: usize,
+    /// Serializes read-patch-write cycles on one file across the in-place
+    /// write endpoints (`/.mbr/edit`, `/.mbr/task`, `/.mbr/flashcard-review`).
+    pub file_write_locks: Arc<FileWriteLocks>,
 }
 
 /// JSON body for `POST /.mbr/edit/{*path}`.
@@ -2312,6 +2316,7 @@ impl Server {
             tasks_stamp_done,
             tasks_default_include,
             task_index,
+            file_write_locks: Arc::new(FileWriteLocks::default()),
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -3182,6 +3187,9 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        // Held across the hash check and the write, so no other write can
+        // land in between and be overwritten unseen.
+        let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         // Optimistic concurrency: reject if the file changed since it was loaded.
         let current = match tokio::fs::read(&md_path).await {
@@ -3202,20 +3210,8 @@ impl Server {
         let new_bytes = req.content.into_bytes();
         let new_hash = crate::edit_auth::content_hash(&new_bytes);
 
-        // Atomic write: write a temp file in the same directory, then rename.
-        let parent = md_path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = md_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file.md");
-        let tmp_path = parent.join(format!(".{file_name}.mbr-tmp"));
-        if let Err(e) = tokio::fs::write(&tmp_path, &new_bytes).await {
-            tracing::error!("Failed to write temp file: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
-        }
-        if let Err(e) = tokio::fs::rename(&tmp_path, &md_path).await {
-            tracing::error!("Failed to rename temp file into place: {e}");
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+        if let Err(e) = Self::atomic_write_file_async(&md_path, new_bytes).await {
+            tracing::error!("Failed to save markdown: {e:?}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
         }
 
@@ -3266,8 +3262,8 @@ impl Server {
     /// | Status | Cause |
     /// |--------|-------|
     /// | `403` / `401` | [`Self::check_edit_access`] (disabled, CSRF, cross-origin, `Host`, token) |
-    /// | `404` | The path is not an editable markdown file |
-    /// | `400` | Path outside the root, unreadable/not-UTF-8 file, no such line, or the line is not a task |
+    /// | `404` | The path is not an editable markdown file, or it could not be read |
+    /// | `400` | Path outside the root, a file that is not UTF-8, no such line, or the line is not a task |
     /// | `409` | The line no longer matches `expected` |
     /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
     /// | `500` | The write failed |
@@ -3284,6 +3280,7 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         let source = match Self::read_markdown_source(&md_path, "task toggle").await {
             Ok(source) => source,
@@ -3308,7 +3305,7 @@ impl Server {
                 }
             };
 
-        if let Err(e) = Self::atomic_write_file(&md_path, patched.source.as_bytes()) {
+        if let Err(e) = Self::atomic_write_file_async(&md_path, patched.source.into_bytes()).await {
             tracing::error!("Failed to write task toggle: {e:?}");
             return e.into_response();
         }
@@ -3325,7 +3322,8 @@ impl Server {
     /// Reads a markdown file a line-level write is about to patch.
     ///
     /// Shared by `POST /.mbr/task` and `POST /.mbr/flashcard-review`; `action`
-    /// only names the caller in the log line.
+    /// only names the caller in the log line. Callers hold the file's
+    /// [`FileWriteLocks`] guard from before this read until after the write.
     async fn read_markdown_source(
         md_path: &Path,
         action: &str,
@@ -3384,9 +3382,9 @@ impl Server {
     /// | Status | Cause |
     /// |--------|-------|
     /// | `403` / `401` | [`Self::check_edit_access`] |
-    /// | `404` | The path is not an editable markdown file |
-    /// | `400` | Path outside the root, or an unreadable/not-UTF-8 file |
-    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale |
+    /// | `404` | The path is not an editable markdown file, or it could not be read |
+    /// | `400` | Path outside the root, or a file that is not UTF-8 |
+    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale — or no insertion keeps every other card intact |
     /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
     /// | `500` | The write failed |
     pub async fn flashcard_review_handler(
@@ -3407,6 +3405,7 @@ impl Server {
                 Ok(time) => time,
                 Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
             };
+        let _write_guard = config.file_write_locks.lock(&md_path).await;
         let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
             Ok(source) => source,
             Err(err) => return err.into_response(),
@@ -3423,14 +3422,15 @@ impl Server {
             Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
         };
 
-        if let Err(e) = Self::atomic_write_file(&md_path, patch.source.as_bytes()) {
+        let entry_line = patch.entry_line();
+        if let Err(e) = Self::atomic_write_file_async(&md_path, patch.source.into_bytes()).await {
             tracing::error!("Failed to write flashcard review: {e:?}");
             return e.into_response();
         }
         Self::announce_in_place_edit(&config, &md_path);
 
         Json(FlashcardReviewResponse {
-            line: patch.entry_line(),
+            line: entry_line,
             entry: patch.entry,
             inserted_at: patch.inserted_at,
             inserted: patch.inserted,
@@ -3485,20 +3485,19 @@ impl Server {
         crate::url_path::path_to_url(&relative)
     }
 
-    /// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
+    /// [`crate::file_write::atomic_write`], with the error the file-operation
+    /// endpoints answer with. Blocking; async callers use
+    /// [`Self::atomic_write_file_async`].
     fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), FileOpError> {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file.md");
-        let tmp = parent.join(format!(".{file_name}.mbr-tmp"));
-        std::fs::write(&tmp, bytes).map_err(FileOpError::Io)?;
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(FileOpError::Io(e));
-        }
-        Ok(())
+        crate::file_write::atomic_write(path, bytes).map_err(FileOpError::Io)
+    }
+
+    /// [`Self::atomic_write_file`] off the async executor.
+    async fn atomic_write_file_async(path: &Path, bytes: Vec<u8>) -> Result<(), FileOpError> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::atomic_write_file(&path, &bytes))
+            .await
+            .map_err(|e| FileOpError::Io(std::io::Error::other(e)))?
     }
 
     /// Broadcasts a `FileChangeEvent` for live-reload + watcher reconciliation.
@@ -3822,6 +3821,18 @@ impl Server {
         let old_is_index = Self::path_is_index(&src, &config.index_file);
         let new_is_index = Self::path_is_index(&dst, &config.index_file);
 
+        // From the first read of the source until it is gone, no other write
+        // may touch either file: a toggle landing on the source in between
+        // would be lost with it, or would recreate it after the delete. `src`
+        // is canonical and `dst` is resolved under the canonical root, so these
+        // are the keys the other writers use. Both are taken in path order
+        // (`lock_all_blocking`) and released before the repo-wide rewrites
+        // below, which lock each file they change one at a time — never two
+        // locks held while waiting for a third.
+        let move_guards = config
+            .file_write_locks
+            .lock_all_blocking(&[src.as_path(), dst.as_path()]);
+
         // A4-C delta names (bare `[[Name]]` rewrite on stem change) need the
         // source frontmatter (title/aliases) so still-resolvable names are kept.
         let src_meta = crate::markdown::extract_metadata_from_file(&src).ok();
@@ -3861,8 +3872,17 @@ impl Server {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file.md");
-        let tmp = parent_dir.join(format!(".{dst_name}.mbr-tmp"));
-        std::fs::write(&tmp, moved_content.as_bytes()).map_err(FileOpError::Io)?;
+        let (tmp, mut tmp_file) =
+            create_unique_temp_file(parent_dir, dst_name).map_err(FileOpError::Io)?;
+        // The moved note keeps the source's permissions, as a rename would.
+        let written = std::io::Write::write_all(&mut tmp_file, moved_content.as_bytes())
+            .and_then(|()| std::fs::metadata(&src))
+            .and_then(|meta| tmp_file.set_permissions(meta.permissions()));
+        drop(tmp_file);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FileOpError::Io(e));
+        }
         let rename_result = if case_only {
             std::fs::remove_file(&src).and_then(|()| std::fs::rename(&tmp, &dst))
         } else {
@@ -3872,6 +3892,7 @@ impl Server {
             let _ = std::fs::remove_file(&tmp);
             return Err(FileOpError::Io(e));
         }
+        drop(move_guards);
 
         // Skip set for the repo-wide walkers: the destination file (already
         // written); the source no longer exists so it won't be walked.
@@ -3890,6 +3911,7 @@ impl Server {
             &config.ignore_dirs,
             &config.ignore_globs,
             &skip,
+            Some(&config.file_write_locks),
         )
         .map_err(FileOpError::Io)?;
 
@@ -3904,6 +3926,7 @@ impl Server {
             &config.index_file,
             &config.repo.wikilink_index,
             &skip,
+            Some(&config.file_write_locks),
         )
         .map_err(FileOpError::Io)?;
 

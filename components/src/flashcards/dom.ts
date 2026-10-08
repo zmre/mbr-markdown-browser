@@ -3,11 +3,11 @@
  * `<dd>` is a card's review history, and the in-place edits the page needs
  * after a review is written.
  *
- * Stateless DOM helpers shared by both bundles. The main bundle uses
- * {@link hasDeck} and {@link decorateHistory} (the reading view's collapsed
- * history line, which must work in static builds without the chunk); the lazy
- * chunk uses the rest. Exports the main bundle does not import are tree-shaken
- * out of it.
+ * Stateless DOM helpers for the two lazy chunks; the main bundle does not
+ * import this module. The reading chunk (`reading.ts`) uses
+ * {@link decorateAllHistories} — the collapsed history line, which must work in
+ * static builds — and `progress.ts` reads cards through it; the deck chunk uses
+ * the rest. Exports a chunk does not import are tree-shaken out of it.
  */
 import { isHistoryLabel, parseHistory, summarizeHistory, type HistoryEntry } from './history.js'
 

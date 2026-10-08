@@ -835,6 +835,20 @@ impl BlockLines {
         self.entries.push(crate::html::BlockLine { at, line });
     }
 
+    /// The line recorded for slot `at`, if any.
+    ///
+    /// For a pass-1 rewrite that replaces a recorded block start with another:
+    /// the replacement inherits the original's line from *this* table, so its
+    /// numbering depends only on `BlockLines`'s own gate, never on whether
+    /// [`TextLines`] happened to compute a line for the triggering event.
+    fn line_recorded_at(&self, at: usize) -> Option<u32> {
+        let at = u32::try_from(at).ok()?;
+        self.entries
+            .last()
+            .filter(|entry| entry.at == at)
+            .map(|entry| entry.line)
+    }
+
     /// Shifts every record at or after `at` up by one, after the caller has
     /// *inserted* an event at `at`.
     ///
@@ -905,8 +919,9 @@ impl BlockLineCursor<'_> {
 ///
 /// Every push in [`collect_events_and_headings`] goes through this, so a future
 /// arm cannot forget to record and leave pass 3 anchoring a marker to the wrong
-/// line. `line` is `None` for every event that is not the current input event,
-/// which makes the guards here belt-and-braces rather than the only check.
+/// line. `line` is `None` for every event that is not the current input event
+/// (or, for the remark-hint rewrite, the block start it replaces), which makes
+/// the guards here belt-and-braces rather than the only check.
 ///
 /// The two record kinds are mutually exclusive — a `Start` is not a `Text` — so
 /// one `else if` covers both tables.
@@ -1284,24 +1299,29 @@ fn collect_events_and_headings<'a>(
             // matching GitHub-style alert blockquote (Tip/Warning/Caution).
             Event::Text(text) if matches!(events.last(), Some(Event::Start(Tag::Paragraph))) => {
                 if let Some((kind, rest)) = detect_hint_prefix(text) {
-                    // A `Start(Paragraph)` is never recorded, so this pop cannot
-                    // orphan anything today; routing it through `pop_event`
-                    // anyway means a future edit here cannot silently corrupt
-                    // the table.
+                    // The `Start(Paragraph)` being replaced *is* recorded (under
+                    // `ReviewLines::Emit`), so read its line before `pop_event`
+                    // truncates the record, and give it to both synthesized
+                    // block starts. `source_line` cannot be used for them: it is
+                    // this `Text` event's line, computed only when `TextLines`
+                    // is on, so under `--no-mark-incomplete` it is `None` and
+                    // the alert would lose `data-mbr-line`. The hint prefix
+                    // opens the paragraph, so both lines are the same anyway.
+                    let block_line = block_lines.line_recorded_at(events.len() - 1);
                     pop_event(&mut events, text_lines, block_lines); // remove the Start(Paragraph)
                     push_event(
                         &mut events,
                         text_lines,
                         block_lines,
                         Event::Start(Tag::BlockQuote(Some(kind))),
-                        source_line,
+                        block_line,
                     );
                     push_event(
                         &mut events,
                         text_lines,
                         block_lines,
                         Event::Start(Tag::Paragraph),
-                        source_line,
+                        block_line,
                     );
                     // The hint prefix is stripped from the front of the same
                     // run, so the remainder is still on the run's line.
@@ -6173,9 +6193,9 @@ mod tests {
     ///
     /// Both tables record, which is the default server configuration
     /// (`review_enabled` and `mark_incomplete` are both on). It also matters for
-    /// the rewrites: a synthesized block start inherits the line of the *input*
-    /// event that triggered it, and that line is only computed when some table
-    /// asks for it.
+    /// the rewrites: a synthesized block start inherits a line from an event
+    /// it replaces, and a line is only computed when some table asks for it.
+    /// [`render_review_with`] covers the configurations where only one does.
     fn pass_one<'a>(md: &'a str) -> (Vec<Event<'a>>, Vec<(u32, u32)>) {
         let mut block_lines = BlockLines::recording();
         let (events, _, _) = collect_events_and_headings(
@@ -6618,6 +6638,54 @@ mod tests {
         assert_eq!(ReviewLines::for_server(true, true), ReviewLines::Emit);
         assert_eq!(ReviewLines::for_server(false, true), ReviewLines::TermsOnly);
         assert_eq!(ReviewLines::for_server(false, false), ReviewLines::Omit);
+    }
+
+    /// Regression: a remark-hint alert took its block lines from the hint
+    /// `Text` event's line, which is computed only when `TextLines` records —
+    /// so with `--no-mark-incomplete` and review on, both the alert's
+    /// `<blockquote>` and its `<p>` lost `data-mbr-line` and review notes could
+    /// not anchor inside tips, warnings or cautions. The two gates must stay
+    /// independent: the output is the same whether markers are on or off.
+    #[tokio::test]
+    async fn remark_hint_lines_survive_no_mark_incomplete() {
+        for (prefix, class) in [
+            ("!>", "markdown-alert-tip"),
+            ("?>", "markdown-alert-warning"),
+            ("x>", "markdown-alert-caution"),
+        ] {
+            let md = format!("Intro.\n\n{prefix} an alert here\n\nAfter.\n");
+            let review = ReviewLines::for_server(true, false);
+            let off = render_review_with(&md, false, review).await;
+            let on = render_review_with(&md, true, review).await;
+            let expected = format!(
+                r#"<blockquote class="{class}" data-mbr-line="3">
+<p data-mbr-line="3">"#
+            );
+            assert!(
+                off.contains(&expected),
+                "{prefix} with markers off: expected {expected} in {off}"
+            );
+            assert!(
+                on.contains(&expected),
+                "{prefix} with markers on: expected {expected} in {on}"
+            );
+            assert_eq!(emitted_block_lines(&off), vec![1, 3, 3, 5], "{off}");
+            assert_eq!(off, on, "markers must not change review numbering");
+        }
+    }
+
+    /// The hint fix reads the replaced paragraph's record, and a terms-only
+    /// table never records a paragraph — so the alert stays unnumbered there,
+    /// in either marker mode, exactly like the `Omit` render.
+    #[tokio::test]
+    async fn remark_hint_terms_only_numbers_nothing() {
+        let md = "Intro.\n\n!> a tip\n\nTerm\n: answer\n";
+        for mark_incomplete in [false, true] {
+            let terms = render_review_with(md, mark_incomplete, ReviewLines::TermsOnly).await;
+            let omit = render_review_with(md, mark_incomplete, ReviewLines::Omit).await;
+            assert_eq!(emitted_block_lines(&terms), vec![5], "{terms}");
+            assert_eq!(terms.replace(" data-mbr-line=\"5\"", ""), omit);
+        }
     }
 
     /// With the feature off the writer must produce exactly the bytes it

@@ -1578,7 +1578,8 @@ main dl > dt::before {
  * between the two. Without the `:not()` every question above the open one
  * would point down as well. */
 main dl > dt:focus::before,
-main dl > dt:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within))::before {
+main dl > dt:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within))::before,
+main dl > dt:has(+ dd.mbr-find-reveal)::before {
   transform: rotate(90deg);
 }
 
@@ -1609,6 +1610,16 @@ main dl > dd {
   color: var(--mbr-dl-answer-color);
 }
 
+/* Pico gives `p`, `ol`, `ul`, `blockquote`, `address`, `table`, `th` and `td`
+ * an explicit `color: var(--pico-color)`, so an answer holding a list, a loose
+ * paragraph or a table drew those in the question's colour, not the answer's.
+ * Inherit instead -- at any depth, since a nested list's `ul` is colored too.
+ * Links, code, headings and `li::marker` set their own colour and are untouched;
+ * a pull quote's rule out-ranks this one, so it keeps its own colour as well. */
+main dl > dd :where(p, ol, ul, blockquote, address, table, th, td) {
+  color: inherit;
+}
+
 /* Open answer.
  *
  * The combinator is `~`, not `+`, because one question may legitimately own
@@ -1633,6 +1644,20 @@ main dl > dd {
 main dl > dt:focus ~ dd,
 main dl > dd:focus-within,
 main dl > dd:focus-within ~ dd {
+  visibility: visible;
+  height: auto;
+  padding-block: 0 var(--mbr-dl-item-spacing);
+}
+
+/* The GUI find bar's stand-in for `dt:focus` (`<mbr-find-bar>`, class
+ * `FIND_REVEAL_CLASS` in `find-in-page.ts`). When the active match is inside a
+ * collapsed answer the bar opens it -- but it cannot focus the question, since
+ * focus must stay in the find input, so it puts this class on every `<dd>` of
+ * the entry instead (the same set `dt:focus ~ dd` opens) and the marker rule
+ * above turns for it too. Being on the answers themselves, it needs no "until
+ * the next question" counterpart. The bar removes it when the active match
+ * moves on, and after the bar closes, on the reader's next click elsewhere. */
+main dl > dd.mbr-find-reveal {
   visibility: visible;
   height: auto;
   padding-block: 0 var(--mbr-dl-item-spacing);

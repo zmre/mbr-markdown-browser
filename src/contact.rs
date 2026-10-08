@@ -470,10 +470,18 @@ impl Contact {
     }
 
     /// Fills [`Company::url`] from the note's resolved relationships: the
-    /// implied `employer` edge whose raw endpoint is exactly the authored
-    /// `company`. Reading it back from the index (rather than resolving the
-    /// wikilink again here) guarantees the card links to the same note the
-    /// relationship graph does.
+    /// `employer` edge this note's `company` wikilink implied. Reading it back
+    /// from the index (rather than resolving the wikilink again here)
+    /// guarantees the card links to the same note the relationship graph does.
+    ///
+    /// Matches on the [`ResolvedRelationship::implied`] flag and the predicate
+    /// as seen *from this note*, never on how the edge was stored: when the
+    /// organization's `employee` declaration (or an explicit `employer` with
+    /// other casing or an alias) is aggregated first, the shared edge keeps
+    /// that declaration's direction, type and endpoint text, none of which
+    /// spell the authored `company`.
+    ///
+    /// [`ResolvedRelationship::implied`]: crate::relationships::ResolvedRelationship::implied
     pub fn resolve_company(
         &mut self,
         relationships: &[crate::relationships::ResolvedRelationship],
@@ -485,10 +493,9 @@ impl Contact {
             .iter()
             .find(|r| {
                 r.resolved
-                    && r.direction == crate::relationships::Direction::Outgoing
-                    && r.rel_type
+                    && r.implied
+                    && r.predicate
                         .eq_ignore_ascii_case(crate::relationships::COMPANY_RELATION_TYPE)
-                    && r.neighbor_raw.trim() == company.raw
             })
             .map(|r| r.neighbor.clone());
     }
@@ -984,6 +991,12 @@ fn split_extension(lower: &str) -> (&str, Option<String>) {
 /// The frontmatter simplifier's contact hook. Called once per note on the
 /// simplified map, with the raw YAML it came from:
 ///
+/// - A string `type` is trimmed for **every** note (and dropped when blank),
+///   because it gates features by exact comparison in places that cannot all
+///   be made to trim — `{% if type == "person" %}` in templates (including a
+///   repository's own overrides), `site.json` readers in the browser, the
+///   search `type:` facet. `type: " person"` would otherwise get the contact
+///   card (Rust trims) but not the charts (templates do not).
 /// - `aliases` becomes a flat array of names (labels dropped) for **every**
 ///   note, so labeled aliases resolve wikilinks and relationship endpoints.
 /// - On person/organization notes, every date — `dates` in any accepted shape,
@@ -995,6 +1008,7 @@ fn split_extension(lower: &str) -> (&str, Option<String>) {
 /// Costs nothing on a note with neither key.
 pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Hash) {
     let key = |k: &str| Yaml::String(k.to_string());
+    normalize_type(hm);
     if let Some(aliases) = hash.get(&key(ALIASES_KEY)) {
         let json = crate::relationships::yaml_to_json(aliases);
         let names = alias_names(Some(&json))
@@ -1037,6 +1051,24 @@ pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Ha
     }
 }
 
+/// Trims a string `type` in place, removing it when nothing is left. Any other
+/// shape (a list, a number) is left as authored.
+fn normalize_type(hm: &mut SimpleMetadata) {
+    let Some(Value::String(raw)) = hm.get("type") else {
+        return;
+    };
+    let trimmed = raw.trim();
+    if trimmed.len() == raw.len() {
+        return;
+    }
+    if trimmed.is_empty() {
+        hm.remove("type");
+    } else {
+        let trimmed = Value::String(trimmed.to_string());
+        hm.insert("type".to_string(), trimmed);
+    }
+}
+
 /// The frontmatter as published in `site.json`: everything except the
 /// [`PRIVATE_DETAIL_KEYS`], including their flattened `emails.work`-style
 /// variants.
@@ -1044,9 +1076,16 @@ pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Ha
 /// Applied at serialization time rather than in the simplifier on purpose: the
 /// in-memory map still holds them, so server-side search can match a phone
 /// number, while the file every page view downloads does not.
+///
+/// The root is compared **case-insensitively**: YAML keys are case-sensitive,
+/// so `Emails:` or `PHONES.work` is a different key to the card reader, but
+/// it is the same private data to a reader of `site.json`. Erring towards
+/// withholding is the only safe direction for a privacy filter.
 pub fn is_public_frontmatter_key(key: &str) -> bool {
     let root = key.split_once('.').map_or(key, |(root, _)| root);
-    !PRIVATE_DETAIL_KEYS.contains(&root)
+    !PRIVATE_DETAIL_KEYS
+        .iter()
+        .any(|private| private.eq_ignore_ascii_case(root))
 }
 
 /// `serialize_with` adapter for `MarkdownInfo::frontmatter`: see
@@ -1207,7 +1246,7 @@ mod tests {
     fn resolve_company_reads_the_implied_employer_edge() {
         use crate::relationships::{Direction, ResolvedRelationship};
         let mut c = contact("type: person\ncompany: \"[[Acme Corp]]\"\n");
-        let edge = |rel_type: &str, raw: &str, resolved: bool| ResolvedRelationship {
+        let edge = |rel_type: &str, implied: bool, resolved: bool| ResolvedRelationship {
             rel_type: rel_type.into(),
             predicate: rel_type.into(),
             neighbor: if resolved {
@@ -1216,18 +1255,22 @@ mod tests {
                 String::new()
             },
             neighbor_title: "Acme Corp".into(),
-            neighbor_raw: raw.into(),
+            neighbor_raw: "[[Acme Corp]]".into(),
             resolved,
             direction: Direction::Outgoing,
             label: None,
             attributes: Default::default(),
             derived: true,
+            implied,
         };
-        c.resolve_company(&[edge("spouse", "[[Acme Corp]]", true)]);
+        c.resolve_company(&[edge("spouse", true, true)]);
         assert_eq!(c.company.as_ref().unwrap().url, None);
-        c.resolve_company(&[edge("employer", "[[Acme Corp]]", false)]);
+        c.resolve_company(&[edge("employer", true, false)]);
         assert_eq!(c.company.as_ref().unwrap().url, None);
-        c.resolve_company(&[edge("employer", "[[Acme Corp]]", true)]);
+        // An `employer` edge the note declared itself, not via `company`.
+        c.resolve_company(&[edge("employer", false, true)]);
+        assert_eq!(c.company.as_ref().unwrap().url, None);
+        c.resolve_company(&[edge("employer", true, true)]);
         assert_eq!(
             c.company.as_ref().unwrap().url.as_deref(),
             Some("/orgs/acme/")
@@ -1472,6 +1515,20 @@ mod tests {
     }
 
     #[test]
+    fn normalize_trims_type_for_every_note() {
+        let run = |v: Value| {
+            let mut hm = SimpleMetadata::from([("type".to_string(), v)]);
+            normalize_simplified(&mut hm, yaml("title: x\n").as_hash().unwrap());
+            hm.get("type").cloned()
+        };
+        assert_eq!(run(json!(" person ")), Some(json!("person")));
+        assert_eq!(run(json!("Meeting Notes\t")), Some(json!("Meeting Notes")));
+        assert_eq!(run(json!("flashcard")), Some(json!("flashcard")));
+        assert_eq!(run(json!("  ")), None, "blank type is no type");
+        assert_eq!(run(json!(["a ", "b"])), Some(json!(["a ", "b"])));
+    }
+
+    #[test]
     fn normalize_flattens_aliases_for_every_note() {
         let hm = simplified("aliases:\n  - A\n  - nickname: N\n");
         assert_eq!(hm["aliases"], json!(["A", "N"]));
@@ -1539,6 +1596,59 @@ mod tests {
             "phone",
         ] {
             assert!(is_public_frontmatter_key(public), "{public}");
+        }
+    }
+
+    /// Regression: `Emails: x@y` used to be published in `site.json` because
+    /// the root was compared case-sensitively.
+    #[test]
+    fn public_keys_drop_contact_details_in_any_case() {
+        for private in [
+            "Emails",
+            "EMAILS",
+            "eMaIlS",
+            "Phones",
+            "PHONES.work",
+            "Urls.Homepage",
+            "SOCIAL.linkedin",
+            "IM",
+            "Im.signal",
+            "Addresses.home",
+            "ADDRESSES.home.city",
+        ] {
+            assert!(!is_public_frontmatter_key(private), "{private}");
+        }
+        for public in ["Title", "Dates.birthday", "EmailsX", "PHONE", "Imx"] {
+            assert!(is_public_frontmatter_key(public), "{public}");
+        }
+    }
+
+    /// End to end through the `site.json` serializer: no case variant of a
+    /// private key, flat or dotted, survives.
+    #[test]
+    fn serialized_frontmatter_omits_private_keys_in_any_case() {
+        #[derive(serde::Serialize)]
+        struct Wrapper {
+            #[serde(serialize_with = "serialize_public_frontmatter")]
+            frontmatter: Option<SimpleMetadata>,
+        }
+        let mut fm = SimpleMetadata::new();
+        for (k, v) in [
+            ("title", "Ada"),
+            ("Emails", "UPPERLEAK@acme.com"),
+            ("PHONES", "+1 555 0100"),
+            ("Addresses.home", "1 Leak Lane"),
+            ("Urls.blog", "https://leak.example"),
+        ] {
+            fm.insert(k.to_string(), json!(v));
+        }
+        let out = serde_json::to_string(&Wrapper {
+            frontmatter: Some(fm),
+        })
+        .unwrap();
+        assert!(out.contains("\"title\":\"Ada\""), "{out}");
+        for leaked in ["UPPERLEAK", "555", "Leak Lane", "leak.example"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
         }
     }
 

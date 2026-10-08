@@ -85,8 +85,12 @@ A few details worth knowing:
   class, though the value still flows through to templates and `site.json`.
 - **A type that slugifies to nothing adds nothing.** `type: "!!!"` leaves no
   empty class behind.
-- **Templates see `type` as you wrote it.** Only the body class is slugified, so
-  a template condition like `{% if type == "person" %}` still matches.
+- **Templates see `type` as you wrote it, minus surrounding whitespace.** Only
+  the body class is slugified, so a template condition like
+  `{% if type == "person" %}` still matches. Leading and trailing whitespace is
+  trimmed everywhere, including templates, `site.json` and search, so
+  `type: " person"` behaves exactly like `type: person`. A blank `type` counts
+  as no type.
 
 `type` is more than a class name. It also drives features such as the contact
 card on `person` / `organization` notes (see [Contacts](contacts/)) and the

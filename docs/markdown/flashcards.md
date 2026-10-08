@@ -222,8 +222,13 @@ and eligible cards not yet folded in.
 written to the card's [review history](#the-review-history) exactly as a spaced
 repetition rating is, so practice counts toward FSRS scheduling later. Without
 editing — a static site, a read-only server — ratings last for the session only:
-they steer the stack but nothing is written. If a write fails because the note
-changed on disk, the deck says so and carries on session-only.
+they steer the stack but nothing is written. If a write fails, the deck says so
+and the rating still counts for the session. When the note changed on disk, the
+deck stops writing and carries on session-only; any other failure (a missing
+[edit token](../modes/editing/), the server unreachable) is retried with the
+next rating, so saving resumes as soon as it can. Spaced repetition instead
+keeps the card on screen after such a failure, so the same rating can be
+retried.
 
 The growth threshold is configurable with
 [`flashcards_concentric_threshold`](../reference/configuration.md#flashcard-settings)

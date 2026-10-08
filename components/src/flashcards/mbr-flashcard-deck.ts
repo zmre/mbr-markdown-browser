@@ -479,25 +479,36 @@ export class MbrFlashcardDeckElement extends LitElement {
       this._pending = rating
       const outcome = await this.recordReview({ line, rating })
       this._pending = null
+      if (outcome.ok) {
+        // The page behind is not reloaded: renumber the lines below the
+        // insert, then show the entry in the card's history there too. This
+        // runs before the `isConnected` check on purpose: the writer has
+        // already spliced the inserted lines into the shared source-line
+        // cache, so a deck closed mid-write must still bring the page's line
+        // numbers in step, or a later task toggle below the card addresses
+        // the wrong line (and the server, seeing `expected` match, accepts it).
+        shiftSourceLines(this.root, outcome.insertedAt, outcome.insertedCount)
+        appendHistoryEntry(card.parts, outcome.entry, outcome.insertedAt, outcome.line)
+      }
       if (!this.isConnected) return
 
       if (!outcome.ok) {
         this._message = outcome.message
         this._announcement = outcome.message
         // Every later write would be refused as well; finish the session as a
-        // read-only one rather than failing card after card.
+        // read-only one rather than failing card after card. An `auth` or
+        // `other` failure does not block: the next rating tries again, so
+        // saving resumes once a token is entered or the network is back.
         if (outcome.kind === 'conflict') this._writesBlocked = true
-        // Any other failure keeps the card so the rating can be retried. After
-        // a conflict Concentric keeps going, session-only, with this rating.
-        if (this._mode !== 'concentric' || outcome.kind !== 'conflict') return
+        // Spaced repetition keeps the card so the rating can be retried.
+        // Concentric keeps going with this rating, session-only — it never
+        // needed the writer, and stalling on a 401 would leave the default
+        // mode stuck on a token-protected server.
+        if (this._mode !== 'concentric') return
       } else {
         this._message = null
         saved = true
         entry = parseHistoryEntry(outcome.entry) ?? entry
-        // The page behind is not reloaded: renumber the lines below the
-        // insert, then show the entry in the card's history there too.
-        shiftSourceLines(this.root, outcome.insertedAt, outcome.insertedCount)
-        appendHistoryEntry(card.parts, outcome.entry, outcome.insertedAt, outcome.line)
       }
     }
 
