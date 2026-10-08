@@ -230,6 +230,16 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   @state()
   private _isOpen = false;
 
+  /**
+   * Index into `_results` of the highlighted row, or -1 for none. This is the
+   * **only** thing that marks a row as selected: the `.selected` class, the
+   * scroll-into-view and `Enter` all read it, and nothing else may paint a row
+   * as highlighted (there is deliberately no `.result:hover` rule — a hover
+   * highlight follows the pointer, not this index, so a row left under a
+   * stationary mouse looked selected alongside the keyboard's row). Written
+   * only by keyboard navigation, `_selectFromPointer` (real pointer movement)
+   * and `_setResults` (0 whenever a new result list lands).
+   */
   @state()
   private _selectedIndex = -1;
 
@@ -290,6 +300,18 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
    * one and land last, leaving results that do not match the visible query.
    */
   private _searchGeneration = 0;
+
+  /**
+   * Last pointer position seen over the results, or `null` before the first one
+   * of this modal session. Mouse selection requires the pointer to have moved
+   * since then: browsers (WebKit, which is the GUI's webview, and Chromium)
+   * re-dispatch mouseover/mouseenter/mousemove at an unchanged position when
+   * content moves under a stationary cursor — results re-rendering, or the list
+   * scrolling for `Ctrl-N` — and acting on those let the row that happened to
+   * sit under the pointer steal the selection from the first result and from the
+   * keyboard.
+   */
+  private _lastPointer: { x: number; y: number } | null = null;
 
   /**
    * Build a predicate that reports whether the search run identified by
@@ -420,6 +442,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _openSearch() {
     this._isOpen = true;
+    this._lastPointer = null;
     if (getMbrConfig().serverMode) this._loadSiteFacets();
     this.updateComplete.then(() => {
       this._input?.focus();
@@ -451,8 +474,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   private _closeSearch() {
     this._isOpen = false;
     this._query = '';
-    this._results = [];
-    this._selectedIndex = -1;
+    this._setResults([]);
+    this._lastPointer = null;
     this._error = null;
     // Invalidate any in-flight search so its response cannot repopulate the
     // results we just cleared (visible again the next time the modal opens).
@@ -497,9 +520,33 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         this._performSearch();
       }, 150);
     } else {
-      this._results = [];
+      this._setResults([]);
       this._totalMatches = 0;
     }
+  }
+
+  /**
+   * Replace the result list. Every write of `_results` goes through here so a
+   * new list always starts with its first row selected: an index carried over
+   * from the previous list (moved there by `Ctrl-N` or the mouse while the next
+   * query was in flight) would otherwise land on whatever row now sits at that
+   * position.
+   */
+  private _setResults(results: SearchResult[]): void {
+    this._results = results;
+    this._selectedIndex = results.length > 0 ? 0 : -1;
+  }
+
+  /**
+   * Select the row under the pointer, but only when the pointer has actually
+   * moved (see `_lastPointer`). The first event of a session only records a
+   * baseline, so a modal opening under a resting cursor selects nothing.
+   */
+  private _selectFromPointer(e: MouseEvent, index: number): void {
+    const last = this._lastPointer;
+    this._lastPointer = { x: e.clientX, y: e.clientY };
+    if (last === null || (last.x === e.clientX && last.y === e.clientY)) return;
+    if (index !== this._selectedIndex) this._selectedIndex = index;
   }
 
   private _handleKeydown(e: KeyboardEvent) {
@@ -559,7 +606,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       case 'Enter':
         e.preventDefault();
         if (this._selectedIndex >= 0 && this._results[this._selectedIndex]) {
-          const selectedLink = this.shadowRoot?.querySelector('a.result.selected') as HTMLAnchorElement | null;
+          // Located by the index itself, not by a `.selected` class that might
+          // not have been rendered yet.
+          const selectedLink =
+            this.shadowRoot?.querySelectorAll<HTMLAnchorElement>('a.result')[this._selectedIndex] ?? null;
           if (selectedLink) {
             if (isNewTabModifier(e)) {
               openInNewTab(selectedLink.href);
@@ -715,7 +765,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         throw new Error(data.error || `Search failed: ${response.status}`);
       }
       if (isStale()) return;
-      this._results = data.results.map((r: SearchResult) => ({ ...r, snippetHtml: null }));
+      this._setResults(data.results.map((r: SearchResult) => ({ ...r, snippetHtml: null })));
       this._totalMatches = data.total_matches;
       this._durationMs = data.duration_ms;
     } catch (err) {
@@ -726,7 +776,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       if (isStale()) return;
       console.error('Search error:', err);
       this._error = err instanceof Error ? err.message : 'Search failed';
-      this._results = [];
+      this._setResults([]);
     } finally {
       // Only the newest run owns the loading indicator; a superseded run
       // clearing it would hide "Searching..." while a search is still running.
@@ -754,7 +804,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       if (isStale()) return;
       if (!pagefind) {
         this._error = 'Search index not available. Run "npx pagefind --site <build_dir> --output-subdir .mbr/pagefind" after building.';
-        this._results = [];
+        this._setResults([]);
         return;
       }
 
@@ -772,7 +822,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       this._totalMatches = searchResponse.results.length;
 
       // Map Pagefind results to our format
-      this._results = resultData.map((data, index): SearchResult => ({
+      this._setResults(resultData.map((data, index): SearchResult => ({
         url_path: data.url,
         title: data.meta?.title || null,
         description: null,
@@ -782,14 +832,14 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         snippetHtml: data.excerpt || null, // Pagefind provides HTML with <mark> tags
         is_content_match: true, // Pagefind searches content
         filetype: 'markdown', // Pagefind indexes HTML from markdown
-      }));
+      })));
 
       this._durationMs = Math.round(performance.now() - startTime);
     } catch (err) {
       if (isStale()) return;
       console.error('Pagefind search error:', err);
       this._error = err instanceof Error ? err.message : 'Search failed';
-      this._results = [];
+      this._setResults([]);
     } finally {
       if (generation === this._searchGeneration) {
         this._isLoading = false;
@@ -805,7 +855,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       <a
         href=${resolveUrl(result.url_path)}
         class="result ${isSelected ? 'selected' : ''} ${result.is_content_match ? 'content-match' : 'metadata-match'}"
-        @mouseenter=${() => this._selectedIndex = index}
+        @mousemove=${(e: MouseEvent) => this._selectFromPointer(e, index)}
       >
         <div class="result-header">
           <span class="result-title">${title}</span>
@@ -1211,7 +1261,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       transition: background 0.1s ease;
     }
 
-    .result:hover,
+    /* .selected only, never :hover — _selectedIndex is the one source of the
+       highlight, and real pointer movement moves it (_selectFromPointer). */
     .result.selected {
       background: var(--pico-primary-focus, rgba(99, 102, 241, 0.15));
     }
