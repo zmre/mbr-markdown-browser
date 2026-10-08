@@ -30,16 +30,27 @@ name = "mbr"
 bench = false
 
 [features]
-default = ["gui", "media-metadata"]
+# The full desktop app. Every subsystem is listed even where another feature
+# already implies it, so this line alone says what `mbr` ships.
+#
+# Without default features the library is the render core only (markdown,
+# templates, config, repo scan, search, indexes, assets): what the QuickLook
+# staticlib links (`--no-default-features --features ffi`) and what a mobile
+# shell builds on. Windows ships everything except `media-metadata`; that
+# exact list is `minimalFeatures` in flake.nix, and ci.yml/release.yml repeat
+# it, so change all three together.
+default = ["gui", "media-metadata", "server", "watcher", "ssg", "cli"]
 # GUI feature enables native window/browser functionality (wry, tao, muda, rfd)
 # plus the per-platform system-URL-handler crates `external_open` uses to send
 # off-site links to the user's browser/mail client instead of the mbr window.
-# Disable for QuickLook builds: cargo build --release --no-default-features
+# The window is a client of the in-process HTTP server, hence `server`.
 gui = [
+    "server",
     "dep:wry",
     "dep:tao",
     "dep:muda",
     "dep:rfd",
+    "dep:image",
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
     "dep:windows-sys",
@@ -47,27 +58,45 @@ gui = [
     "dep:gtk",
 ]
 # Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
-media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile"]
+media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile", "dep:image"]
 # Static ffmpeg linking for (remove runtime ffmpeg dependency)
 ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
-# FFI for QuickLook extension - only needed when building the staticlib
+# The axum HTTP server (`server.rs`): routes, live-reload WebSocket, edit
+# endpoints. Works without `watcher` — the change channel still carries the
+# server's own writes, there are just no events from disk.
+server = [
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:futures-util",
+    "dep:tracing-subscriber",
+]
+# Filesystem watcher (`watcher.rs`, notify) feeding live reload and index
+# invalidation. Only useful with `server`, but compiles on its own.
+watcher = ["dep:notify"]
+# Static site generator (`build.rs`) plus its pagefind search index.
+ssg = ["dep:pagefind"]
+# The `mbr` command-line binary (`cli.rs`, `main.rs`). Its modes are the
+# server and the static build, so it implies both.
+cli = ["server", "ssg", "dep:clap", "dep:rpassword", "dep:tracing-subscriber"]
+# UniFFI exports for the Apple Swift shells (QuickLook staticlib).
 ffi = ["dep:uniffi"]
 
 [dependencies]
 # winit = "0.30.11"
-axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"] }
+axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"], optional = true }
 # `serde` is needed so `tasks::Task`'s NaiveDateTime fields cross the HTTP boundary.
 chrono = { version = "0.4", default-features = false, features = [
     "std",
     "clock",
     "serde",
 ] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 figment = { version = "0.10", features = ["toml", "env"] }
 futures = "0.3.32"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 glob = "0.3.3"
-notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"], optional = true }
 html-escape = "0.2.13"
 itertools = "0.15.0"
 lru = "0.18"
@@ -99,10 +128,10 @@ tera = { version = "1.20", features = ["preserve_order", "date-locale"] }
 time = "0.3"
 tokio = {version="1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"]}
 tokio-util = { version = "0.7", features = ["io"] }
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.7", features = ["fs", "trace", "set-header", "compression-gzip"] }
+tower = { version = "0.5", features = ["util"], optional = true }
+tower-http = { version = "0.7", features = ["fs", "trace", "set-header", "compression-gzip"], optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 url = "2.5"
 walkdir = "2.5"
 thiserror = "2.0"
@@ -113,7 +142,7 @@ argon2 = "0.6"
 # argon2's password-hash, so naming it adds no crate.
 getrandom = "0.4"
 sha2 = "0.11"
-rpassword = "7"
+rpassword = { version = "7", optional = true }
 # default-features = false drops the "encoding" feature (YamlDecoder), which we never
 # use: 0.13 pins encoding_rs below 0.8.40 and would add a second, older copy.
 yaml-rust2 = { version = "0.13", default-features = false }
@@ -128,11 +157,11 @@ grep-searcher = "0.1"
 # portpicker), which we never use and which drags in the C-built zstd-sys.
 # Never enable "extended": its lindera-unidic dependency downloads a dictionary
 # from S3 in a build script, which breaks sandboxed/nix builds.
-pagefind = { version = "1.5", default-features = false }
+pagefind = { version = "1.5", default-features = false, optional = true }
 aho-corasick = "1.1"
 
 # Image processing with minimal features (only needed formats)
-image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"], optional = true }
 # GUI dependencies (optional, enabled by default "gui" feature)
 tao = { version = "0.37.0", optional = true }
 muda = { version = "0.21", optional = true }
@@ -197,6 +226,9 @@ uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]
+# `test_support` captures log output in unit tests under every feature set,
+# including ones where `server`/`cli` (which bring it in) are off.
+tracing-subscriber = "0.3"
 criterion = { version = "0.8", features = ["async_tokio"] }
 filetime = "0.2"
 flate2 = "1.0"
@@ -206,7 +238,24 @@ tempfile = "3.27"
 [[bin]]
 name = "mbr"
 path = "src/main.rs"
+required-features = ["cli"]
 bench = false
+
+# Integration tests that drive a subsystem the lib only has with its feature.
+# Declared explicitly (autotests still discovers the rest) so a
+# `--no-default-features` test run skips them instead of failing to compile.
+[[test]]
+name = "server_integration"
+required-features = ["server"]
+
+[[test]]
+name = "build_integration"
+required-features = ["ssg"]
+
+# Runs the real `mbr` binary (`CARGO_BIN_EXE_mbr`), which only exists with `cli`.
+[[test]]
+name = "cli_integration"
+required-features = ["cli"]
 
 [[bin]]
 name = "uniffi-bindgen"

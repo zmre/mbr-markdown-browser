@@ -9,6 +9,7 @@ use thiserror::Error;
 /// Top-level error type for the mbr application.
 #[derive(Debug, Error)]
 pub enum MbrError {
+    #[cfg(feature = "server")]
     #[error("Server error: {0}")]
     Server(#[from] ServerError),
 
@@ -31,6 +32,7 @@ pub enum MbrError {
     #[error("Browser error: {0}")]
     Browser(#[from] BrowserError),
 
+    #[cfg(feature = "watcher")]
     #[error("Watcher error: {0}")]
     Watcher(#[from] crate::watcher::WatcherError),
 
@@ -70,6 +72,7 @@ pub enum MbrError {
 }
 
 /// Errors related to the HTTP server.
+#[cfg(feature = "server")]
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("Failed to bind to {addr}")]
@@ -591,6 +594,7 @@ mod tests {
         assert!(config_err.to_string().contains("Configuration error"));
     }
 
+    #[cfg(feature = "server")]
     #[test]
     fn test_server_error_display() {
         let err = ServerError::BindFailed {
@@ -742,6 +746,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[test]
     fn test_server_error_to_mbr_error() {
         let server_err = ServerError::TracingInit;

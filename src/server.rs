@@ -938,7 +938,60 @@ pub struct Server {
     pub gui_mode: bool,
     /// File watcher handle - kept alive for the lifetime of the server.
     /// When Server is dropped, this is dropped, stopping the watcher.
-    _watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>,
+    #[cfg(feature = "watcher")]
+    _watcher_handle: WatcherHandle,
+}
+
+/// Where the background thread parks the file watcher once it is running.
+#[cfg(feature = "watcher")]
+type WatcherHandle = Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>;
+
+/// Starts the file watcher on a background thread so a large repository
+/// cannot delay server startup, feeding `tx`. A watcher that fails to start
+/// only disables events from disk: the channel and everything subscribed to
+/// it keep working.
+///
+/// Without the `watcher` feature none of this exists and `tx` carries only
+/// the server's own writes (task toggles, edits, uploads, renames).
+#[cfg(feature = "watcher")]
+fn spawn_file_watcher(
+    base_dir: PathBuf,
+    template_folder: Option<PathBuf>,
+    ignore_dirs: Vec<String>,
+    ignore_globs: Vec<String>,
+    explicit_hidden_dirs: Vec<PathBuf>,
+    tx: broadcast::Sender<crate::change_event::FileChangeEvent>,
+) -> WatcherHandle {
+    let watcher_handle: WatcherHandle = Arc::new(std::sync::Mutex::new(None));
+    let watcher_handle_for_thread = Arc::clone(&watcher_handle);
+
+    std::thread::spawn(move || {
+        match crate::watcher::FileWatcher::new_with_sender(
+            &base_dir,
+            template_folder.as_deref(),
+            &ignore_dirs,
+            &ignore_globs,
+            &explicit_hidden_dirs,
+            tx,
+        ) {
+            Ok(watcher) => {
+                tracing::info!("File watcher initialized successfully (background)");
+                // Store the watcher in the shared handle so it stays alive
+                // and can be properly dropped when Server is dropped
+                if let Ok(mut guard) = watcher_handle_for_thread.lock() {
+                    *guard = Some(watcher);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize file watcher: {}. Live reload disabled.",
+                    e
+                );
+            }
+        }
+    });
+
+    watcher_handle
 }
 
 /// Configuration for initializing a Server instance.
@@ -1772,46 +1825,19 @@ impl Server {
         let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
             crate::change_event::FileChangeEvent,
         >(crate::change_event::BROADCAST_CAPACITY);
-        let tx_for_watcher = file_change_tx.clone();
 
-        // Initialize file watcher in background to avoid blocking server startup
-        let base_dir_for_watcher = base_dir.clone();
-        let template_folder_for_watcher = template_folder.clone();
-        let watcher_ignore_dirs_for_watcher = watcher_ignore_dirs.clone();
-        let ignore_globs_for_watcher = ignore_globs.clone();
-        let explicit_hidden_dirs_for_watcher = explicit_hidden_dirs.clone();
-
-        // Create a handle to store the watcher once it's initialized.
-        // This ensures proper cleanup when Server is dropped.
-        let watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let watcher_handle_for_thread = Arc::clone(&watcher_handle);
-
-        std::thread::spawn(move || {
-            match crate::watcher::FileWatcher::new_with_sender(
-                &base_dir_for_watcher,
-                template_folder_for_watcher.as_deref(),
-                &watcher_ignore_dirs_for_watcher,
-                &ignore_globs_for_watcher,
-                &explicit_hidden_dirs_for_watcher,
-                tx_for_watcher,
-            ) {
-                Ok(watcher) => {
-                    tracing::info!("File watcher initialized successfully (background)");
-                    // Store the watcher in the shared handle so it stays alive
-                    // and can be properly dropped when Server is dropped
-                    if let Ok(mut guard) = watcher_handle_for_thread.lock() {
-                        *guard = Some(watcher);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to initialize file watcher: {}. Live reload disabled.",
-                        e
-                    );
-                }
-            }
-        });
+        #[cfg(feature = "watcher")]
+        let watcher_handle = spawn_file_watcher(
+            base_dir.clone(),
+            template_folder.clone(),
+            watcher_ignore_dirs,
+            ignore_globs.clone(),
+            explicit_hidden_dirs.clone(),
+            file_change_tx.clone(),
+        );
+        // Only the watcher reads this setting.
+        #[cfg(not(feature = "watcher"))]
+        let _ = watcher_ignore_dirs;
 
         // Spawn background task to reload templates when .html files change
         let templates_for_reload = templates.clone();
@@ -2287,6 +2313,7 @@ impl Server {
             ip,
             port,
             gui_mode,
+            #[cfg(feature = "watcher")]
             _watcher_handle: watcher_handle,
         })
     }
