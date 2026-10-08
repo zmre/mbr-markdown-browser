@@ -1329,6 +1329,56 @@ pub struct ServerState {
     pub edit_token_hash: Option<String>,
     /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
     pub upload_max_bytes: usize,
+    /// Serializes read-patch-write cycles on one file across the in-place
+    /// write endpoints (`/.mbr/edit`, `/.mbr/task`, `/.mbr/flashcard-review`).
+    pub file_write_locks: Arc<FileWriteLocks>,
+}
+
+/// One async mutex per file, for the endpoints that read a file, patch it
+/// and write it back.
+///
+/// Without it two writes to the same note — a task toggle and a flashcard
+/// review a moment apart, or two windows — both read the old text and the
+/// second rename silently drops the first one's change.
+///
+/// Entries are `Weak`: a file's mutex lives exactly as long as someone holds
+/// or awaits it, and dead entries are swept on every acquisition, so the map
+/// only ever holds the files being written right now.
+#[derive(Default)]
+pub struct FileWriteLocks {
+    locks: parking_lot::Mutex<
+        std::collections::HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>,
+    >,
+}
+
+impl FileWriteLocks {
+    /// Waits for exclusive write access to `path`, which should be canonical
+    /// so two spellings of one file share a lock.
+    pub async fn lock(&self, path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut locks = self.locks.lock();
+            locks.retain(|_, weak| weak.strong_count() > 0);
+            match locks.get(path).and_then(std::sync::Weak::upgrade) {
+                Some(mutex) => mutex,
+                None => {
+                    let mutex = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(path.to_path_buf(), Arc::downgrade(&mutex));
+                    mutex
+                }
+            }
+        };
+        mutex.lock_owned().await
+    }
+
+    /// Files with a live lock (held or awaited). For tests.
+    #[cfg(test)]
+    fn live(&self) -> usize {
+        self.locks
+            .lock()
+            .values()
+            .filter(|weak| weak.strong_count() > 0)
+            .count()
+    }
 }
 
 /// JSON body for `POST /.mbr/edit/{*path}`.
@@ -1554,6 +1604,40 @@ impl IntoResponse for FileOpError {
 /// Rejects any `..` or absolute component, joins onto `canonical_base`, then
 /// canonicalizes the deepest **existing** ancestor and asserts it stays within
 /// the root (so a symlink in the existing portion cannot escape).
+/// Creates a fresh temp file beside a write target, for a write-then-rename.
+///
+/// The name is hidden (leading dot, so the scanner and watcher skip it),
+/// derived from the target's, and unique per process and call — `create_new`
+/// guarantees no two writers ever share one, which a fixed `.{name}.mbr-tmp`
+/// did not: concurrent writers truncated each other's temp file and the loser's
+/// rename failed with `ENOENT`.
+fn create_unique_temp_file(
+    dir: &Path,
+    file_name: &str,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // A leftover from a crashed process can only collide on a reused pid;
+    // move past it rather than fail.
+    const ATTEMPTS: u32 = 16;
+    let pid = std::process::id();
+    let mut last_error = None;
+    for _ in 0..ATTEMPTS {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(".{file_name}.{pid}-{n}.mbr-tmp"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("no free temp file name")))
+}
+
 fn resolve_new_target_path(canonical_base: &Path, rel: &str) -> Result<PathBuf, FileOpError> {
     let clean = rel.trim_start_matches('/');
     if clean.is_empty() {
@@ -2312,6 +2396,7 @@ impl Server {
             tasks_stamp_done,
             tasks_default_include,
             task_index,
+            file_write_locks: Arc::new(FileWriteLocks::default()),
             edit_enabled,
             edit_require_token_on_loopback,
             edit_token_hash,
@@ -3182,6 +3267,9 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        // Held across the hash check and the write, so no other write can
+        // land in between and be overwritten unseen.
+        let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         // Optimistic concurrency: reject if the file changed since it was loaded.
         let current = match tokio::fs::read(&md_path).await {
@@ -3202,20 +3290,8 @@ impl Server {
         let new_bytes = req.content.into_bytes();
         let new_hash = crate::edit_auth::content_hash(&new_bytes);
 
-        // Atomic write: write a temp file in the same directory, then rename.
-        let parent = md_path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = md_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file.md");
-        let tmp_path = parent.join(format!(".{file_name}.mbr-tmp"));
-        if let Err(e) = tokio::fs::write(&tmp_path, &new_bytes).await {
-            tracing::error!("Failed to write temp file: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
-        }
-        if let Err(e) = tokio::fs::rename(&tmp_path, &md_path).await {
-            tracing::error!("Failed to rename temp file into place: {e}");
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+        if let Err(e) = Self::atomic_write_file_async(&md_path, new_bytes).await {
+            tracing::error!("Failed to save markdown: {e:?}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
         }
 
@@ -3266,8 +3342,8 @@ impl Server {
     /// | Status | Cause |
     /// |--------|-------|
     /// | `403` / `401` | [`Self::check_edit_access`] (disabled, CSRF, cross-origin, `Host`, token) |
-    /// | `404` | The path is not an editable markdown file |
-    /// | `400` | Path outside the root, unreadable/not-UTF-8 file, no such line, or the line is not a task |
+    /// | `404` | The path is not an editable markdown file, or it could not be read |
+    /// | `400` | Path outside the root, a file that is not UTF-8, no such line, or the line is not a task |
     /// | `409` | The line no longer matches `expected` |
     /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
     /// | `500` | The write failed |
@@ -3284,6 +3360,7 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         let source = match Self::read_markdown_source(&md_path, "task toggle").await {
             Ok(source) => source,
@@ -3308,7 +3385,7 @@ impl Server {
                 }
             };
 
-        if let Err(e) = Self::atomic_write_file(&md_path, patched.source.as_bytes()) {
+        if let Err(e) = Self::atomic_write_file_async(&md_path, patched.source.into_bytes()).await {
             tracing::error!("Failed to write task toggle: {e:?}");
             return e.into_response();
         }
@@ -3325,7 +3402,8 @@ impl Server {
     /// Reads a markdown file a line-level write is about to patch.
     ///
     /// Shared by `POST /.mbr/task` and `POST /.mbr/flashcard-review`; `action`
-    /// only names the caller in the log line.
+    /// only names the caller in the log line. Callers hold the file's
+    /// [`FileWriteLocks`] guard from before this read until after the write.
     async fn read_markdown_source(
         md_path: &Path,
         action: &str,
@@ -3384,9 +3462,9 @@ impl Server {
     /// | Status | Cause |
     /// |--------|-------|
     /// | `403` / `401` | [`Self::check_edit_access`] |
-    /// | `404` | The path is not an editable markdown file |
-    /// | `400` | Path outside the root, or an unreadable/not-UTF-8 file |
-    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale |
+    /// | `404` | The path is not an editable markdown file, or it could not be read |
+    /// | `400` | Path outside the root, or a file that is not UTF-8 |
+    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale — or no insertion keeps every other card intact |
     /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
     /// | `500` | The write failed |
     pub async fn flashcard_review_handler(
@@ -3407,6 +3485,7 @@ impl Server {
                 Ok(time) => time,
                 Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
             };
+        let _write_guard = config.file_write_locks.lock(&md_path).await;
         let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
             Ok(source) => source,
             Err(err) => return err.into_response(),
@@ -3423,14 +3502,15 @@ impl Server {
             Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
         };
 
-        if let Err(e) = Self::atomic_write_file(&md_path, patch.source.as_bytes()) {
+        let entry_line = patch.entry_line();
+        if let Err(e) = Self::atomic_write_file_async(&md_path, patch.source.into_bytes()).await {
             tracing::error!("Failed to write flashcard review: {e:?}");
             return e.into_response();
         }
         Self::announce_in_place_edit(&config, &md_path);
 
         Json(FlashcardReviewResponse {
-            line: patch.entry_line(),
+            line: entry_line,
             entry: patch.entry,
             inserted_at: patch.inserted_at,
             inserted: patch.inserted,
@@ -3486,19 +3566,45 @@ impl Server {
     }
 
     /// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
+    ///
+    /// The temp file has a name of its own (see [`create_unique_temp_file`]),
+    /// so concurrent writers never share one, and when `path` already exists
+    /// it takes over that file's permissions — a rename replaces the inode,
+    /// and a note that was `0600` must not come back `0644`. Blocking; async
+    /// callers use [`Self::atomic_write_file_async`].
     fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), FileOpError> {
+        use std::io::Write;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file.md");
-        let tmp = parent.join(format!(".{file_name}.mbr-tmp"));
-        std::fs::write(&tmp, bytes).map_err(FileOpError::Io)?;
-        if let Err(e) = std::fs::rename(&tmp, path) {
+        let (tmp, mut file) =
+            create_unique_temp_file(parent, file_name).map_err(FileOpError::Io)?;
+        let written = file
+            .write_all(bytes)
+            .and_then(|()| match std::fs::metadata(path) {
+                Ok(existing) => file.set_permissions(existing.permissions()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            })
+            .and_then(|()| {
+                drop(file);
+                std::fs::rename(&tmp, path)
+            });
+        if let Err(e) = written {
             let _ = std::fs::remove_file(&tmp);
             return Err(FileOpError::Io(e));
         }
         Ok(())
+    }
+
+    /// [`Self::atomic_write_file`] off the async executor.
+    async fn atomic_write_file_async(path: &Path, bytes: Vec<u8>) -> Result<(), FileOpError> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::atomic_write_file(&path, &bytes))
+            .await
+            .map_err(|e| FileOpError::Io(std::io::Error::other(e)))?
     }
 
     /// Broadcasts a `FileChangeEvent` for live-reload + watcher reconciliation.
@@ -3861,8 +3967,13 @@ impl Server {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file.md");
-        let tmp = parent_dir.join(format!(".{dst_name}.mbr-tmp"));
-        std::fs::write(&tmp, moved_content.as_bytes()).map_err(FileOpError::Io)?;
+        let (tmp, mut tmp_file) =
+            create_unique_temp_file(parent_dir, dst_name).map_err(FileOpError::Io)?;
+        if let Err(e) = std::io::Write::write_all(&mut tmp_file, moved_content.as_bytes()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FileOpError::Io(e));
+        }
+        drop(tmp_file);
         let rename_result = if case_only {
             std::fs::remove_file(&src).and_then(|()| std::fs::rename(&tmp, &dst))
         } else {
@@ -9854,6 +9965,99 @@ mod tests {
         assert!(!predicate.should_compress(&response_with_content_type("text/event-stream")));
         // ...and normal text still compresses.
         assert!(predicate.should_compress(&response_with_content_type("text/html")));
+    }
+
+    // ---- in-place writes ----------------------------------------------------
+
+    /// Names in `dir` that look like one of our temp files.
+    fn temp_files_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".mbr-tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn unique_temp_files_never_share_a_name() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (a, _fa) = create_unique_temp_file(temp.path(), "note.md").expect("first");
+        let (b, _fb) = create_unique_temp_file(temp.path(), "note.md").expect("second");
+        assert_ne!(a, b);
+        for path in [&a, &b] {
+            let name = path.file_name().and_then(|n| n.to_str()).expect("name");
+            assert!(
+                name.starts_with(".note.md.") && name.ends_with(".mbr-tmp"),
+                "{name}"
+            );
+        }
+    }
+
+    /// Concurrent writers to one file each get their own temp file, so every
+    /// rename succeeds (the shared `.{name}.mbr-tmp` made the loser `ENOENT`)
+    /// and nothing is left behind.
+    #[test]
+    fn concurrent_atomic_writes_all_succeed_and_leave_no_temp_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("note.md");
+        std::fs::write(&path, "start\n").expect("seed");
+        let results: Vec<_> = std::thread::scope(|scope| {
+            (0..16)
+                .map(|i| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        Server::atomic_write_file(path, format!("writer {i}\n").as_bytes())
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().expect("writer thread"))
+                .collect()
+        });
+        for result in &results {
+            assert!(result.is_ok(), "{result:?}");
+        }
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.starts_with("writer "), "{text}");
+        assert_eq!(temp_files_in(temp.path()), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("private.md");
+        std::fs::write(&path, "secret\n").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        Server::atomic_write_file(&path, b"still secret\n").expect("write");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "still secret\n");
+    }
+
+    #[tokio::test]
+    async fn file_write_locks_serialize_one_path_and_forget_it_afterwards() {
+        let locks = Arc::new(FileWriteLocks::default());
+        let a = Path::new("/repo/a.md");
+        let guard = locks.lock(a).await;
+        // Another file is independent.
+        drop(locks.lock(Path::new("/repo/b.md")).await);
+
+        // The same file waits until the first guard is dropped.
+        let waiter = {
+            let locks = Arc::clone(&locks);
+            tokio::spawn(async move { drop(locks.lock(Path::new("/repo/a.md")).await) })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished(), "second lock on a.md must wait");
+        drop(guard);
+        waiter.await.expect("waiter");
+
+        // Nothing holds or awaits a lock now, so nothing is kept alive.
+        assert_eq!(locks.live(), 0);
+        drop(locks.lock(a).await);
+        assert!(locks.locks.lock().len() <= 1, "dead entries are swept");
     }
 }
 

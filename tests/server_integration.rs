@@ -9082,6 +9082,83 @@ async fn test_chat_block_renders_bubbles_with_transformed_links() {
     );
 }
 
+/// Two toggles of different lines in one file, in flight at once, must both
+/// land: each handler reads, patches and renames the whole file, so without
+/// per-file serialization the second rename silently drops the first change
+/// (and with a shared temp-file name, one of them fails outright).
+#[tokio::test]
+async fn test_concurrent_task_toggles_on_one_file_both_land() {
+    const SOURCE: &str = "- [ ] alpha\n- [ ] beta\n- [ ] gamma\n- [ ] delta\n";
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let body = |line: u32, text: &str, to: &str| {
+        serde_json::json!({
+            "path": "notes.md", "line": line,
+            "expected": format!("- [{}] {text}", if to == "done" { ' ' } else { 'x' }),
+            "to": to,
+        })
+    };
+    let names = ["alpha", "beta", "gamma", "delta"];
+    // Several rounds, every line at once, to give a race room to show.
+    for (round, to) in ["done", "open", "done", "open", "done"]
+        .into_iter()
+        .enumerate()
+    {
+        let (a, b, c, d) = tokio::join!(
+            edit_post(&server, "/.mbr/task", body(1, names[0], to)),
+            edit_post(&server, "/.mbr/task", body(2, names[1], to)),
+            edit_post(&server, "/.mbr/task", body(3, names[2], to)),
+            edit_post(&server, "/.mbr/task", body(4, names[3], to)),
+        );
+        for (i, resp) in [a, b, c, d].into_iter().enumerate() {
+            assert_eq!(resp.status(), 200, "round {round}, line {}", i + 1);
+        }
+        let mark = if to == "done" { 'x' } else { ' ' };
+        let want: String = names
+            .iter()
+            .map(|name| format!("- [{mark}] {name}\n"))
+            .collect();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            want,
+            "round {round}: every toggle must survive"
+        );
+    }
+    // No temp file is left beside the note.
+    let leftovers: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".mbr-tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// A rename replaces the file, so the write must carry the original
+/// permissions over rather than leave a private note world-readable.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_task_toggle_preserves_file_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(&server, "/.mbr/task", toggle_body("done")).await;
+    assert_eq!(resp.status(), 200);
+    assert_ne!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "mode after toggle: {mode:o}");
+}
+
 // ============================================================================
 // Flashcard review (`POST /.mbr/flashcard-review`)
 // ============================================================================

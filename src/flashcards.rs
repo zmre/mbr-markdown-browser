@@ -202,7 +202,8 @@ impl ReviewPatch {
 /// * a history definition with no list yet — a `* ` item at the definition's
 ///   content indentation, right after it;
 /// * no history definition — `: ___Review History___` plus the item, right
-///   after the term's last definition, copying that definition's `: ` prefix.
+///   after the term's last definition, copying that definition's `: ` prefix
+///   (see [`definition_prefix`] for when it is not copied verbatim).
 ///
 /// Every other byte is untouched: inserted lines use the terminator of the
 /// line they follow (so CRLF files stay CRLF), and a file without a trailing
@@ -224,17 +225,27 @@ impl ReviewPatch {
 /// : A2
 /// ~~~
 ///
-/// Here `Q2` is a card. A history bullet inserted above it would give it a
-/// paragraph to continue, and the card would silently merge into `Q1`'s
-/// history. So when the line after the insert point is non-blank, unindented
-/// and not a `:` definition, a blank line follows the entry. (The common shape,
-/// `Q2` straight after a one-line answer, needs nothing: that `Q2` was a lazy
-/// continuation of the answer before the write, never a card.)
+/// Here `Q2` is a card, and so it is indented by up to three spaces. A history
+/// bullet inserted above it would give it a paragraph to continue, and the
+/// card would silently merge into `Q1`'s history. So when the line after the
+/// insert point is non-blank and not a `:` definition, a blank line follows
+/// the entry, whatever its indentation. (The common shape, `Q2` straight after
+/// a one-line answer, needs nothing: that `Q2` was a lazy continuation of the
+/// answer before the write, never a card.)
+///
+/// # Verified, not predicted
+///
+/// That rule is a prediction of how the parser will read the result, so the
+/// result is re-parsed: every term must still be a term on its (shifted) line,
+/// and the new entry must be the last item of the target's history. A patch
+/// that fails is retried with the separating blank line; if that fails too the
+/// review is refused rather than written.
 ///
 /// # Errors
 ///
-/// [`FlashcardPatchError`] — every variant means the client is looking at a
-/// stale copy of the file.
+/// [`FlashcardPatchError`]. [`FlashcardPatchError::UnsafeInsert`] when no
+/// insertion passes the check above; every other variant means the client is
+/// looking at a stale copy of the file.
 ///
 /// # Examples
 ///
@@ -269,8 +280,9 @@ pub fn append_review(
     }
 
     let not_a_term = FlashcardPatchError::NotATerm { line: term_line };
-    let term = scan_terms(source)
-        .into_iter()
+    let terms = scan_terms(source);
+    let term = terms
+        .iter()
         .find(|term| term.line == term_line)
         .ok_or(not_a_term)?;
 
@@ -285,7 +297,7 @@ pub fn append_review(
             vec![bullet_after(source, item.start, &entry)],
         ),
         Some(history) => {
-            let indent = content_indent(definition_prefix(source, history.range.start));
+            let indent = content_indent(&definition_prefix(source, history.range.start));
             (
                 last_line_of(source, &lines, &history.range),
                 vec![format!("{indent}* {entry}")],
@@ -300,7 +312,7 @@ pub fn append_review(
                 last_line_of(source, &lines, &last.range),
                 vec![
                     format!("{prefix}{HISTORY_LABEL}"),
-                    format!("{}* {entry}", content_indent(prefix)),
+                    format!("{}* {entry}", content_indent(&prefix)),
                 ],
             )
         }
@@ -308,33 +320,83 @@ pub fn append_review(
 
     let glued = line_span(source, after_line.saturating_add(1))
         .map(|span| split_line_terminator(&source[span]).0)
-        .is_some_and(starts_a_glued_block);
-    let inserted: Vec<String> = inserted
-        .into_iter()
-        .chain(glued.then(String::new))
-        .collect();
-
+        .is_some_and(could_be_absorbed);
     let fallback_terminator = if term_terminator.is_empty() {
         "\n"
     } else {
         term_terminator
     };
-    let source = insert_lines_after(source, after_line, &inserted, fallback_terminator);
-    Ok(ReviewPatch {
-        source,
-        entry,
-        inserted_at: after_line.saturating_add(1),
-        inserted,
-    })
+    let build = |separate: bool| {
+        let inserted: Vec<String> = inserted
+            .iter()
+            .cloned()
+            .chain(separate.then(String::new))
+            .collect();
+        ReviewPatch {
+            source: insert_lines_after(source, after_line, &inserted, fallback_terminator),
+            entry: entry.clone(),
+            inserted_at: after_line.saturating_add(1),
+            inserted,
+        }
+    };
+
+    // Defence in depth: the shape rules above are a prediction of how the
+    // parser will read the result. Check it with the parser itself, and fall
+    // back to the separating blank line before refusing outright.
+    let term_lines: Vec<u32> = terms.iter().map(|term| term.line).collect();
+    std::iter::once(glued)
+        .chain((!glued).then_some(true))
+        .map(build)
+        .find(|patch| keeps_every_card(patch, &term_lines, term_line))
+        .ok_or(FlashcardPatchError::UnsafeInsert { line: term_line })
 }
 
-/// True when `line` follows the insert point so closely that it could be read
-/// as a lazy continuation of the new entry: non-blank, unindented, and not a
-/// `:` definition (which continues the list as it should).
-fn starts_a_glued_block(line: &str) -> bool {
-    line.chars()
-        .next()
-        .is_some_and(|c| !c.is_whitespace() && c != ':')
+/// True when `line`, directly after the insert point, could be swallowed by
+/// the new entry: anything non-blank that is not a `:` definition (which
+/// continues the definition list as it should).
+///
+/// Indentation does not matter. A line below the entry's content column is a
+/// lazy continuation of its paragraph; one at or past it is an ordinary
+/// continuation. Either way the next card's term — which may be indented up to
+/// three spaces — would stop being a term.
+fn could_be_absorbed(line: &str) -> bool {
+    let content = line.trim_start_matches([' ', '\t']);
+    !content.is_empty() && !content.starts_with(':')
+}
+
+/// Whether `patch` re-parses as the same deck plus one entry: every term is
+/// still a term (on its old line, shifted past the insert), and the new entry
+/// is the last item of `term_line`'s history definition — the one the next
+/// review will append to.
+fn keeps_every_card(patch: &ReviewPatch, term_lines: &[u32], term_line: u32) -> bool {
+    let shift = u32::try_from(patch.inserted.len()).unwrap_or(u32::MAX);
+    let after = scan_terms(&patch.source);
+    let moved = term_lines.iter().map(|&line| {
+        if line >= patch.inserted_at {
+            line.saturating_add(shift)
+        } else {
+            line
+        }
+    });
+    if !after.iter().map(|term| term.line).eq(moved) {
+        return false;
+    }
+    let Some(span) = line_span(&patch.source, patch.entry_line()) else {
+        return false;
+    };
+    // The entry's last character, which only its own list item can contain.
+    let text = split_line_terminator(&patch.source[span.clone()])
+        .0
+        .trim_end();
+    let Some(entry_end) = (span.start + text.len()).checked_sub(1) else {
+        return false;
+    };
+    after
+        .iter()
+        .find(|term| term.line == term_line)
+        .and_then(|term| term.definitions.iter().find(|d| d.history))
+        .and_then(|history| history.last_item.as_ref())
+        .is_some_and(|item| item.contains(&entry_end))
 }
 
 /// True when inline `text` — the words inside the emphasis that opens a
@@ -566,21 +628,28 @@ fn last_line_of(source: &str, lines: &LineIndex, range: &Range<usize>) -> u32 {
 }
 
 /// The `: ` prefix (leading blanks, colon, following blanks) of the definition
-/// starting at `offset`, or the canonical `": "` if the line has another shape.
-fn definition_prefix(source: &str, offset: usize) -> &str {
+/// starting at `offset`, for a new definition placed after it.
+///
+/// The leading blanks are copied, and so is a gap of one to four spaces after
+/// the colon. A wider gap, or one holding a tab, is *not*: five or more columns
+/// after the marker make the definition's content an indented code block, so
+/// a label written with that prefix would be code, never recognised as the
+/// history, and every review would add another one. Those get `": "`.
+fn definition_prefix(source: &str, offset: usize) -> String {
+    /// The widest gap after `:` that still starts ordinary content.
+    const MAX_GAP: usize = 4;
     let line = line_containing(source, offset);
     let lead = line.len() - line.trim_start_matches([' ', '\t']).len();
-    match line[lead..].strip_prefix(':') {
-        Some(rest) => {
-            let gap = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-            if gap == 0 {
-                ": "
-            } else {
-                &line[..lead + 1 + gap]
-            }
-        }
-        None => ": ",
-    }
+    let gap = line[lead..]
+        .strip_prefix(':')
+        .map_or(0, |rest| rest.len() - rest.trim_start_matches(' ').len());
+    let gap = if (1..=MAX_GAP).contains(&gap) { gap } else { 1 };
+    let lead = if line[lead..].starts_with(':') {
+        &line[..lead]
+    } else {
+        ""
+    };
+    format!("{lead}:{}", " ".repeat(gap))
 }
 
 /// Indentation that puts a line inside a definition whose first line starts
@@ -1296,6 +1365,137 @@ mod tests {
         );
     }
 
+    /// A term may be indented up to three spaces. One space after a closed
+    /// fence keeps `Q2` outside the definition (whose content column is two),
+    /// so it is a card — and must stay one.
+    #[test]
+    fn an_indented_term_glued_to_a_closed_fence_stays_a_term() {
+        let source = "Q1\n: A1\n\n  ```\n  code\n  ```\n Q2\n: A2\n";
+        assert_eq!(rendered_terms(source), ["Q1", "Q2"]);
+        let patched = assert_rating_keeps_cards(source, 1);
+        assert_eq!(
+            patched,
+            concat!(
+                "Q1\n: A1\n\n  ```\n  code\n  ```\n",
+                ": ___Review History___\n",
+                "  * 2026-10-06 13:45 - Good\n",
+                "\n",
+                " Q2\n: A2\n",
+            )
+        );
+        // Rating the indented card itself works too.
+        assert_rating_keeps_cards(source, 7);
+        // Two or three spaces put the line inside `Q1`'s definition instead
+        // (a paragraph after the fence): not a card, before or after.
+        for indent in ["  ", "   "] {
+            let inside = source.replace("\n Q2", &format!("\n{indent}Q2"));
+            assert_eq!(rendered_terms(&inside), ["Q1"], "{inside:?}");
+            assert_rating_keeps_cards(&inside, 1);
+        }
+    }
+
+    /// The same trap one level down: the history's last bullet ends in a
+    /// fence, and the next card's term is glued to it.
+    #[test]
+    fn a_term_glued_to_a_history_bullet_ending_in_a_fence_stays_a_term() {
+        for indent in ["", " "] {
+            let source = format!(
+                concat!(
+                    "Q1\n",
+                    ": A1\n",
+                    ": ___Review History___\n",
+                    "  * 2026-10-01 08:00 - Good\n",
+                    "\n",
+                    "    ```\n",
+                    "    x\n",
+                    "    ```\n",
+                    "{}Q2\n",
+                    ": A2\n",
+                ),
+                indent
+            );
+            assert_eq!(rendered_terms(&source), ["Q1", "Q2"], "{source:?}");
+            let patch = append(&source, 1).unwrap();
+            assert_eq!(
+                patch.inserted,
+                vec!["  * 2026-10-06 13:45 - Good", ""],
+                "{source:?}"
+            );
+            assert_eq!((patch.inserted_at, patch.entry_line()), (9, 9));
+            let again = assert_rating_keeps_cards(&assert_rating_keeps_cards(&source, 1), 1);
+            assert_eq!(rendered_terms(&again), ["Q1", "Q2"]);
+        }
+    }
+
+    /// The re-parse refuses a patch that would swallow the next card, which is
+    /// what the glued-line rule exists to avoid.
+    #[test]
+    fn verification_rejects_a_patch_that_swallows_a_card() {
+        let source = "Q1\n: A1\n\n  ```\n  code\n  ```\n Q2\n: A2\n";
+        let inserted = vec![
+            ": ___Review History___".to_string(),
+            "  * 2026-10-06 13:45 - Good".to_string(),
+        ];
+        let bad = ReviewPatch {
+            source: insert_lines_after(source, 6, &inserted, "\n"),
+            entry: "2026-10-06 13:45 - Good".to_string(),
+            inserted_at: 7,
+            inserted,
+        };
+        assert_eq!(rendered_terms(&bad.source), ["Q1"], "the patch is bad");
+        let term_lines: Vec<u32> = scan_terms(source).iter().map(|t| t.line).collect();
+        assert_eq!(term_lines, [1, 7]);
+        assert!(!keeps_every_card(&bad, &term_lines, 1));
+        assert!(keeps_every_card(
+            &append(source, 1).unwrap(),
+            &term_lines,
+            1
+        ));
+    }
+
+    /// Five or more columns after `:` make the answer an indented code block.
+    /// Copying that prefix onto the history label would make it code too:
+    /// never recognised, so every review would add another history.
+    #[test]
+    fn a_wide_or_tabbed_answer_gap_is_not_copied_onto_the_history() {
+        for source in [
+            "Q?\n:     A\n",
+            "Q?\n:\t\tA\n",
+            "Q?\n: \tA\n",
+            "Q?\n:      A\n",
+        ] {
+            let mut patched = source.to_string();
+            for minute in 0..3 {
+                patched = append_review(&patched, 1, "Q?", Rating::Good, at(10, minute))
+                    .unwrap()
+                    .source;
+            }
+            assert_eq!(
+                patched,
+                format!(
+                    "{source}: ___Review History___\n  * 2026-10-06 10:00 - Good\n  * 2026-10-06 10:01 - Good\n  * 2026-10-06 10:02 - Good\n"
+                ),
+                "{source:?}"
+            );
+            let terms = scan_terms(&patched);
+            assert_eq!(terms.len(), 1);
+            assert_eq!(
+                terms[0].definitions.iter().filter(|d| d.history).count(),
+                1,
+                "{patched:?}"
+            );
+        }
+        // Up to four spaces is ordinary content, and is copied with its indent.
+        assert_eq!(
+            appended("Q?\n:    A\n", 1),
+            "Q?\n:    A\n:    ___Review History___\n     * 2026-10-06 13:45 - Good\n"
+        );
+        assert_eq!(
+            appended("Q?\n : A\n", 1),
+            "Q?\n : A\n : ___Review History___\n   * 2026-10-06 13:45 - Good\n"
+        );
+    }
+
     // ---- properties ---------------------------------------------------------
 
     /// One generated card: its term, its answers and an optional history.
@@ -1304,6 +1504,8 @@ mod tests {
         loose: bool,
         /// No blank line between this card's term and the previous card.
         glued: bool,
+        /// Spaces in front of a glued term (0–3; a term may be indented).
+        indent: usize,
         answers: Vec<u8>,
         history: Option<(char, Vec<u8>)>,
     }
@@ -1347,15 +1549,17 @@ mod tests {
         (
             any::<bool>(),
             any::<bool>(),
+            0usize..4,
             prop::collection::vec(0u8..5, 1..4),
             prop::option::of((
                 prop::sample::select(vec!['*', '-']),
                 prop::collection::vec(0u8..6, 0..4),
             )),
         )
-            .prop_map(|(loose, glued, answers, history)| GenCard {
+            .prop_map(|(loose, glued, indent, answers, history)| GenCard {
                 loose,
                 glued,
+                indent,
                 answers,
                 history,
             })
@@ -1400,14 +1604,17 @@ mod tests {
                         // A glued line that the parser will read as a lazy
                         // continuation is not a term, so it must not be named
                         // like one: `terms` below is the generator's own
-                        // prediction, checked against the scanner.
-                        let name = if glued && !previous.is_some_and(GenCard::ends_in_a_fence) {
-                            "Glued"
-                        } else {
-                            "Term"
-                        };
+                        // prediction, checked against the scanner. After a
+                        // fence, two or more spaces reach the definition's
+                        // content column (2), making the line a paragraph
+                        // inside it rather than a term.
+                        let indent = if glued { card.indent } else { 0 };
+                        let is_term = !glued
+                            || (previous.is_some_and(GenCard::ends_in_a_fence) && indent < 2);
+                        let name = if is_term { "Term" } else { "Glued" };
                         let card_text = format!(
-                            "{name} {term_index}?{separator}{}",
+                            "{}{name} {term_index}?{separator}{}",
+                            " ".repeat(indent),
                             definitions.join(separator)
                         );
                         match blocks.last_mut() {
@@ -1426,7 +1633,7 @@ mod tests {
                 let terms: Vec<u32> = text
                     .split('\n')
                     .enumerate()
-                    .filter(|(_, line)| line.starts_with("Term "))
+                    .filter(|(_, line)| line.trim_start().starts_with("Term "))
                     .map(|(i, _)| i as u32 + 1)
                     .collect();
                 if crlf {
