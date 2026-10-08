@@ -65,7 +65,7 @@ jobs:
       # helped within a single workflow — Cachix is what carries store paths
       # between CI and Release.
       - name: Setup Cachix
-        uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -142,7 +142,7 @@ jobs:
       # Same setup as build-components above — see the comment there for why the
       # cachix step and `extraPullNames` are load-bearing rather than cosmetic.
       - name: Setup Cachix
-        uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -267,7 +267,7 @@ jobs:
       # target here that ci.yml does not build reintroduces the cold-cache stall
       # that got the Intel leg deleted.
       - name: Setup Cachix
-        uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: zmre
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
