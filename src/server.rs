@@ -22,7 +22,7 @@ use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
 use crate::media::MediaViewerType;
 use crate::oembed_cache::OembedCache;
-use crate::page_context::{self, ModeFlags, PageChrome, UrlMode};
+use crate::page_context::{self, ModeFlags, PageChrome, UrlMode, markdown_file_to_json};
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
@@ -1771,7 +1771,7 @@ impl Server {
         // Create a broadcast channel for file changes - watcher will be initialized in background
         let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
             crate::change_event::FileChangeEvent,
-        >(crate::watcher::BROADCAST_CAPACITY);
+        >(crate::change_event::BROADCAST_CAPACITY);
         let tx_for_watcher = file_change_tx.clone();
 
         // Initialize file watcher in background to avoid blocking server startup
@@ -7161,60 +7161,6 @@ fn cached_dir_subdirs(
     computed
 }
 
-/// Transforms markdown file info into a JSON value for template rendering.
-pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
-    use serde_json::json;
-
-    let title = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("title"))
-        .cloned()
-        .unwrap_or_else(|| {
-            serde_json::Value::String(
-                file_info
-                    .raw_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Untitled")
-                    .to_string(),
-            )
-        });
-
-    let description = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("description"))
-        .cloned();
-
-    let tags = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("tags"))
-        .cloned();
-
-    let note_type = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("type"))
-        .cloned();
-
-    let modified_date = chrono::DateTime::from_timestamp(file_info.modified as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    json!({
-        "title": title,
-        "url_path": file_info.url_path,
-        "description": description,
-        "tags": tags,
-        "type": note_type,
-        "modified_date": modified_date,
-        "modified": file_info.modified,
-        "name": file_info.raw_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
-    })
-}
-
 // ============================================================================
 // Cache header helpers (extracted for testability and reuse)
 // ============================================================================
@@ -7465,83 +7411,6 @@ mod tests {
         // Canonicalized once by the caller, as `Server::init` does: match.
         let canonical = link.canonicalize().unwrap_or(link);
         assert!(should_reload_template(&event_path, Some(&canonical)));
-    }
-
-    #[test]
-    fn test_markdown_file_to_json_with_frontmatter() {
-        let mut frontmatter = crate::markdown::SimpleMetadata::new();
-        frontmatter.insert(
-            "title".to_string(),
-            serde_json::Value::String("My Title".to_string()),
-        );
-        frontmatter.insert(
-            "description".to_string(),
-            serde_json::Value::String("My description".to_string()),
-        );
-        frontmatter.insert("tags".to_string(), serde_json::json!(["rust", "testing"]));
-
-        let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("test.md"),
-            url_path: "/test/".to_string(),
-            frontmatter: Some(frontmatter),
-            created: 1699000000,
-            modified: 1700000000,
-            relationships: Vec::new(),
-        };
-
-        let json = markdown_file_to_json(&file_info);
-
-        assert_eq!(json["title"], "My Title");
-        assert_eq!(json["url_path"], "/test/");
-        assert_eq!(json["description"], "My description");
-        assert_eq!(json["tags"], serde_json::json!(["rust", "testing"]));
-        assert_eq!(json["modified"], 1700000000);
-        assert_eq!(json["name"], "test.md");
-    }
-
-    #[test]
-    fn test_markdown_file_to_json_without_frontmatter() {
-        let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("my-document.md"),
-            url_path: "/my-document/".to_string(),
-            frontmatter: None,
-            created: 1699000000,
-            modified: 1700000000,
-            relationships: Vec::new(),
-        };
-
-        let json = markdown_file_to_json(&file_info);
-
-        // Should use file stem as title when no frontmatter
-        assert_eq!(json["title"], "my-document");
-        assert_eq!(json["url_path"], "/my-document/");
-        assert!(json["description"].is_null());
-        assert!(json["tags"].is_null());
-    }
-
-    #[test]
-    fn test_markdown_file_to_json_partial_frontmatter() {
-        let mut frontmatter = crate::markdown::SimpleMetadata::new();
-        frontmatter.insert(
-            "title".to_string(),
-            serde_json::Value::String("Only Title".to_string()),
-        );
-        // No description or tags
-
-        let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("partial.md"),
-            url_path: "/partial/".to_string(),
-            frontmatter: Some(frontmatter),
-            created: 1699000000,
-            modified: 1700000000,
-            relationships: Vec::new(),
-        };
-
-        let json = markdown_file_to_json(&file_info);
-
-        assert_eq!(json["title"], "Only Title");
-        assert!(json["description"].is_null());
-        assert!(json["tags"].is_null());
     }
 
     // ==================== validate_media_path Tests ====================

@@ -7,6 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Capacity of the broadcast channel that carries [`FileChangeEvent`]s.
+/// If clients don't keep up, the oldest messages will be dropped.
+///
+/// Lives here rather than in the watcher because the server creates the
+/// channel whether or not a watcher feeds it: in-process writers announce
+/// their own edits on it, and a build without the `watcher` feature still
+/// has live reload for those.
+pub const BROADCAST_CAPACITY: usize = 100;
+
 /// Represents a file system change event.
 ///
 /// Only `relative_path` and `event` cross the wire: this struct is broadcast to
