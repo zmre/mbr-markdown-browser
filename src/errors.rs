@@ -359,9 +359,11 @@ pub enum ReviewTimeError {
 
 /// Why [`crate::flashcards::append_review`] refused to record a review.
 ///
-/// All three mean the client's picture of the file is stale — the line moved,
-/// changed, or no longer opens a top-level definition-list term — so the
-/// handler answers every one of them with `409 Conflict`.
+/// The first three mean the client's picture of the file is stale — the line
+/// moved, changed, or no longer opens a top-level definition-list term. The
+/// last means the writer could not find an insertion that leaves every card
+/// intact, so it refused rather than corrupt the note. The handler answers
+/// every one of them with `409 Conflict`; nothing is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum FlashcardPatchError {
     #[error("The file has no line {line}")]
@@ -372,6 +374,9 @@ pub enum FlashcardPatchError {
 
     #[error("Line {line} does not start a top-level definition-list term")]
     NotATerm { line: u32 },
+
+    #[error("Recording a review for line {line} would change the note's other cards")]
+    UnsafeInsert { line: u32 },
 }
 
 /// Errors related to video metadata extraction.

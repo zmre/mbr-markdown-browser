@@ -11,7 +11,23 @@ import type { MbrFindBarElement } from './mbr-find-bar.js'
  */
 
 /** Stand-in for the Custom Highlight API, which happy-dom does not implement. */
-class FakeHighlight extends Set<AbstractRange> {}
+class FakeHighlight extends Set<AbstractRange> {
+  priority = 0
+}
+
+/** Stand-in for `StaticRange`, which happy-dom does not implement either. */
+class FakeStaticRange {
+  readonly startContainer: Node
+  readonly startOffset: number
+  readonly endContainer: Node
+  readonly endOffset: number
+  constructor(init: StaticRangeInit) {
+    this.startContainer = init.startContainer
+    this.startOffset = init.startOffset
+    this.endContainer = init.endContainer
+    this.endOffset = init.endOffset
+  }
+}
 
 const PAGE = `
   <span class="sr-only" data-pagefind-weight="10">Guide</span>
@@ -23,12 +39,17 @@ const PAGE = `
 let bar: MbrFindBarElement
 let registry: Map<string, FakeHighlight>
 
-/** Type into the find input and let the trailing debounce fire. */
-async function type(text: string): Promise<void> {
+/** Set the find input's value and fire `input`, without waiting for anything. */
+function enter(text: string): void {
   const input = bar.shadowRoot!.querySelector('#find-input') as HTMLInputElement
   input.value = text
   input.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
-  await vi.advanceTimersByTimeAsync(200)
+}
+
+/** Type into the find input and let the (longest, one-letter) debounce fire. */
+async function type(text: string): Promise<void> {
+  enter(text)
+  await vi.advanceTimersByTimeAsync(400)
   await bar.updateComplete
 }
 
@@ -49,6 +70,7 @@ beforeEach(async () => {
   registry = new Map()
   vi.stubGlobal('CSS', { highlights: registry })
   vi.stubGlobal('Highlight', FakeHighlight)
+  vi.stubGlobal('StaticRange', FakeStaticRange)
 
   const wrapper = document.createElement('main')
   wrapper.id = 'wrapper'
@@ -63,6 +85,10 @@ beforeEach(async () => {
 afterEach(() => {
   bar.remove()
   document.body.innerHTML = ''
+  window.getSelection()?.removeAllRanges()
+  // Several tests spy on Selection.prototype.addRange; an unrestored spy would
+  // be captured as the "real" one by the next and recurse.
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -142,27 +168,40 @@ describe('MbrFindBarElement searching', () => {
 
   it('registers both highlight registries for a settled query', async () => {
     await type('alpha')
-    expect(registry.get('mbr-find')?.size).toBe(2)
+    // "All" includes the active match: the active highlight sits above it via
+    // priority, which is what lets stepping leave "all" untouched.
+    expect(registry.get('mbr-find')?.size).toBe(3)
     expect(registry.get('mbr-find-active')?.size).toBe(1)
+    expect(registry.get('mbr-find-active')?.priority).toBe(1)
   })
 
-  it('keeps focus in the input when a settled scan changes the document selection', async () => {
-    // WebKit blurs whatever was focused when window.getSelection() changes
-    // outside it. Simulate that so a settled scan mid-keystroke cannot regress
-    // to stealing focus from the input.
+  it('never touches the document selection, so typing keeps focus in the input', async () => {
+    // WebKit applies the blur caused by a selection moving outside the focused
+    // element AFTER addRange() returns, during its next selection update, so a
+    // refocus straight after the call is a no-op and the blur still lands.
+    // Model that deferral: against code that selects the active match, the
+    // input is blurred once the microtask runs, whatever it did in between.
     const realAddRange = Selection.prototype.addRange
-    vi.spyOn(Selection.prototype, 'addRange').mockImplementation(function (this: Selection, range: Range) {
-      realAddRange.call(this, range)
-      const active = bar.shadowRoot?.activeElement as HTMLElement | null
-      active?.blur()
-    })
+    const addRange = vi
+      .spyOn(Selection.prototype, 'addRange')
+      .mockImplementation(function (this: Selection, range: Range) {
+        realAddRange.call(this, range)
+        queueMicrotask(() => (bar.shadowRoot?.activeElement as HTMLElement | null)?.blur())
+      })
 
     const input = bar.shadowRoot!.querySelector('#find-input') as HTMLInputElement
     input.focus()
     expect(bar.shadowRoot?.activeElement).toBe(input)
+    const selectionBefore = document.getSelection()?.rangeCount ?? 0
 
+    await type('a')
+    await type('al')
     await type('alpha')
+    await vi.advanceTimersByTimeAsync(0)
 
+    expect(status()).toBe('1 of 3')
+    expect(addRange).not.toHaveBeenCalled()
+    expect(document.getSelection()?.rangeCount ?? 0).toBe(selectionBefore)
     expect(bar.shadowRoot?.activeElement).toBe(input)
   })
 
@@ -223,7 +262,18 @@ describe('MbrFindBarElement stepping', () => {
     await bar.updateComplete
     const second = [...registry.get('mbr-find-active')!][0]
     expect(second).not.toBe(first)
-    expect(registry.get('mbr-find')?.size).toBe(2)
+    expect(registry.get('mbr-find')?.size).toBe(3)
+  })
+
+  it('steps without re-registering the "all" highlight', async () => {
+    // Rebuilding it re-registers every range, which WebKit charges ~45us each
+    // for on the next frame — ~95 ms per Enter at the old cap.
+    const all = registry.get('mbr-find')
+    bar.findNext()
+    bar.findNext()
+    await bar.updateComplete
+    expect(registry.get('mbr-find')).toBe(all)
+    expect(status()).toBe('3 of 3')
   })
 
   it('does nothing when there are no matches', async () => {
@@ -306,6 +356,80 @@ describe('MbrFindBarElement close()', () => {
   })
 })
 
+/**
+ * Regression: WebKit paints `::highlight()` through its selection code, which
+ * moves an endpoint in `user-select: none` text forward to the next selectable
+ * position. theme.css makes every FAQ question (`main dl > dt`) unselectable,
+ * so searching a flashcard question painted the next heading a few collapsed
+ * answers down and not the match. The registered ranges were correct
+ * throughout, so the only check happy-dom can make is the cause: while the bar
+ * is open, page text must compute as selectable.
+ */
+describe('MbrFindBarElement unselectable text', () => {
+  const selectableStyle = () => document.querySelectorAll('head style#mbr-find-selectable')
+
+  beforeEach(() => {
+    const theme = document.createElement('style')
+    theme.id = 'theme-under-test'
+    theme.textContent = 'main dl > dt { -webkit-user-select: none; user-select: none; }'
+    document.head.appendChild(theme)
+    document.getElementById('wrapper')!.insertAdjacentHTML(
+      'beforeend',
+      '<dl><dt><strong>T1-B11: question</strong></dt><dd>answer</dd></dl>',
+    )
+  })
+
+  afterEach(() => {
+    document.getElementById('theme-under-test')?.remove()
+  })
+
+  const userSelect = (el: Element) => getComputedStyle(el).getPropertyValue('user-select')
+
+  it('makes a user-select: none question selectable only while open', async () => {
+    const dt = document.querySelector('dt')!
+    const strong = dt.querySelector('strong')!
+    expect(userSelect(dt)).toBe('none')
+
+    bar.open()
+    await bar.updateComplete
+    expect(userSelect(dt)).toBe('text')
+    expect(userSelect(strong)).toBe('text')
+
+    bar.close()
+    expect(userSelect(dt)).toBe('none')
+  })
+
+  it('installs the override before the first paint and finds the question', async () => {
+    bar.open()
+    await bar.updateComplete
+    await type('t1-b11')
+    expect(status()).toBe('1 of 1')
+    expect(selectableStyle()).toHaveLength(1)
+    // Outside main#wrapper, so installing it cannot trigger a reindex.
+    expect(document.getElementById('wrapper')!.querySelector('style')).toBeNull()
+  })
+
+  it('installs exactly one override however often open() fires', async () => {
+    bar.open()
+    bar.open()
+    bar.open()
+    await bar.updateComplete
+    expect(selectableStyle()).toHaveLength(1)
+  })
+
+  it('removes the override on close and when the element is disconnected', async () => {
+    bar.open()
+    await bar.updateComplete
+    bar.close()
+    expect(selectableStyle()).toHaveLength(0)
+
+    bar.open()
+    await bar.updateComplete
+    bar.remove()
+    expect(selectableStyle()).toHaveLength(0)
+  })
+})
+
 describe('MbrFindBarElement without the Custom Highlight API', () => {
   beforeEach(async () => {
     // The realistic gap is an older WebKitGTK. Everything except painting has
@@ -328,6 +452,44 @@ describe('MbrFindBarElement without the Custom Highlight API', () => {
     await type('gamma')
     expect(window.getSelection()?.toString()).toBe('gamma')
   })
+
+  it('moves the fallback Selection with the active match', async () => {
+    await type('alpha')
+    const first = window.getSelection()!.getRangeAt(0)
+    bar.findNext()
+    await bar.updateComplete
+    const second = window.getSelection()!.getRangeAt(0)
+    expect(window.getSelection()?.toString()).toBe('alpha')
+    expect(second.startContainer === first.startContainer && second.startOffset === first.startOffset).toBe(false)
+  })
+
+  it('keeps focus in the input when a settled scan changes the document selection', async () => {
+    // Without CSS.highlights the Selection is the only paint, so it has to be
+    // set. Simulate an engine that blurs synchronously inside addRange (the
+    // case the refocus can repair) and check the active match is still the
+    // selection afterwards.
+    const realAddRange = Selection.prototype.addRange
+    vi.spyOn(Selection.prototype, 'addRange').mockImplementation(function (this: Selection, range: Range) {
+      realAddRange.call(this, range)
+      const active = bar.shadowRoot?.activeElement as HTMLElement | null
+      active?.blur()
+    })
+
+    const input = bar.shadowRoot!.querySelector('#find-input') as HTMLInputElement
+    input.focus()
+    expect(bar.shadowRoot?.activeElement).toBe(input)
+
+    await type('gamma')
+
+    expect(bar.shadowRoot?.activeElement).toBe(input)
+    expect(window.getSelection()?.toString()).toBe('gamma')
+  })
+
+  it('releases the fallback Selection on close', async () => {
+    await type('gamma')
+    bar.close()
+    expect(window.getSelection()?.rangeCount).toBe(0)
+  })
 })
 
 describe('MbrFindBarElement reindexing', () => {
@@ -343,5 +505,399 @@ describe('MbrFindBarElement reindexing', () => {
     await bar.updateComplete
 
     expect(status()).toBe('1 of 4')
+  })
+})
+
+/**
+ * Enough matches that a scan takes several slices and painting several frames
+ * (`PAINT_SLICE` is 100).
+ */
+function bigPage(count: number): string {
+  return Array.from({ length: count }, (_, i) => `<p>alpha ${i} gamma</p>`).join('')
+}
+
+describe('MbrFindBarElement input responsiveness', () => {
+  beforeEach(async () => {
+    bar.open()
+    await bar.updateComplete
+  })
+
+  it('debounces short queries longer than long ones', async () => {
+    // One letter: 350 ms.
+    enter('a')
+    await vi.advanceTimersByTimeAsync(340)
+    await bar.updateComplete
+    expect(status()).toBe('')
+    await vi.advanceTimersByTimeAsync(20)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 9')
+
+    // Two letters: 200 ms.
+    enter('al')
+    await vi.advanceTimersByTimeAsync(190)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 9')
+    await vi.advanceTimersByTimeAsync(20)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 3')
+
+    // Three or more: 120 ms.
+    enter('gam')
+    await vi.advanceTimersByTimeAsync(110)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 3')
+    await vi.advanceTimersByTimeAsync(20)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 1')
+  })
+
+  it('restarts the debounce on every keystroke', async () => {
+    enter('g')
+    await vi.advanceTimersByTimeAsync(300)
+    enter('ga')
+    await vi.advanceTimersByTimeAsync(150)
+    await bar.updateComplete
+    // Neither the one-letter nor the two-letter timer has fired yet.
+    expect(status()).toBe('')
+    await vi.advanceTimersByTimeAsync(60)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 1')
+  })
+
+  it('flushes a pending one-letter search immediately on Enter', async () => {
+    enter('g')
+    await press('Enter')
+    // Flushed (match 1), then stepped.
+    expect(status()).toBe('2 of 2')
+  })
+})
+
+describe('MbrFindBarElement sliced work', () => {
+  /** Make every clock read 10 ms later than the last, so each scan slice ends after one check. */
+  function slowClock(): void {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => (now += 10))
+  }
+
+  beforeEach(async () => {
+    document.getElementById('wrapper')!.innerHTML = bigPage(300)
+    bar.open()
+    await bar.updateComplete
+  })
+
+  it('yields between scan slices and still reports the exact total', async () => {
+    slowClock()
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(120)
+    await bar.updateComplete
+    // First slice ran and yielded; nothing applied yet.
+    expect(status()).toBe('')
+    await vi.advanceTimersByTimeAsync(50)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 300')
+  })
+
+  it('abandons a stale scan when the query changes mid-scan', async () => {
+    slowClock()
+    const set = vi.spyOn(registry, 'set')
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(120)
+    // Scan for "alpha" is in flight. Typing must drop it, not finish it.
+    enter('alpha 299 gamma')
+    await vi.advanceTimersByTimeAsync(500)
+    await bar.updateComplete
+
+    expect(status()).toBe('1 of 1')
+    // Only the "alpha 299 gamma" result was ever painted: one "all", one active.
+    expect(set.mock.calls.map(([name]) => name)).toEqual(['mbr-find', 'mbr-find-active'])
+  })
+
+  it('finishes an in-flight scan synchronously when stepping', async () => {
+    slowClock()
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(120)
+    expect(status()).toBe('')
+
+    bar.findNext()
+    await bar.updateComplete
+    expect(status()).toBe('2 of 300')
+  })
+
+  it('paints nearest-first, one slice per frame, until every match is painted', async () => {
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(120)
+    await bar.updateComplete
+    const all = registry.get('mbr-find')!
+    expect(status()).toBe('1 of 300')
+    // The first slice is synchronous; the rest follow frame by frame.
+    expect(all.size).toBe(100)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(registry.get('mbr-find')).toBe(all)
+    expect(all.size).toBe(300)
+  })
+
+  it('stops painting the previous result as soon as the query changes', async () => {
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(120)
+    const all = registry.get('mbr-find')!
+    expect(all.size).toBe(100)
+    // Next keystroke: its debounce has not fired, but the old paint frames
+    // must already be off the main thread.
+    enter('alph')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(all.size).toBe(100)
+  })
+
+  it('cancels in-flight scanning and painting on close', async () => {
+    slowClock()
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(120)
+    bar.close()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(registry.size).toBe(0)
+
+    vi.mocked(performance.now).mockRestore()
+    bar.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(registry.get('mbr-find')!.size).toBeLessThan(300)
+    bar.close()
+    await vi.advanceTimersByTimeAsync(500)
+    // No paint frame survived the close to re-register anything.
+    expect(registry.size).toBe(0)
+  })
+
+  it('paints with StaticRange, not live ranges', async () => {
+    await type('alpha 7 gamma')
+    const [painted] = [...registry.get('mbr-find')!]
+    const [active] = [...registry.get('mbr-find-active')!]
+    expect(painted).toBeInstanceOf(FakeStaticRange)
+    expect(active).toBeInstanceOf(FakeStaticRange)
+  })
+})
+
+/**
+ * theme.css collapses every `main dl > dd` until its question has focus. The
+ * find bar keeps focus in its input, so it reveals the answer holding the
+ * ACTIVE match with `mbr-find-reveal` instead. The stylesheet below is the
+ * relevant slice of theme.css; happy-dom cascades it into getComputedStyle,
+ * which is what the bar reads to decide an answer is collapsed.
+ */
+describe('MbrFindBarElement collapsed answers', () => {
+  const REVEAL = 'mbr-find-reveal'
+
+  beforeEach(async () => {
+    const theme = document.createElement('style')
+    theme.id = 'theme-under-test'
+    theme.textContent = [
+      'main dl > dd { visibility: hidden; }',
+      'main dl > dd.mbr-find-reveal { visibility: visible; }',
+      // Stands in for an answer the reader opened by some other means.
+      'main dl > dd.user-open { visibility: visible; }',
+    ].join('\n')
+    document.head.appendChild(theme)
+    document.getElementById('wrapper')!.insertAdjacentHTML(
+      'beforeend',
+      `<p id="prose">licensing in prose</p>
+       <dl>
+         <dt id="q1">Question one</dt>
+         <dd id="a1">first licensing answer</dd>
+         <dd id="a1b">its second answer</dd>
+         <dt id="q2">Question two</dt>
+         <dd id="a2">another licensing answer</dd>
+         <dt id="q3">Question three</dt>
+         <dd id="a3" class="user-open">already open licensing answer</dd>
+       </dl>`,
+    )
+    bar.open()
+    await bar.updateComplete
+  })
+
+  afterEach(() => {
+    document.getElementById('theme-under-test')?.remove()
+  })
+
+  const revealed = () => [...document.querySelectorAll(`.${REVEAL}`)].map((el) => el.id)
+  const input = () => bar.shadowRoot!.querySelector('#find-input') as HTMLInputElement
+
+  it('leaves a match outside any answer alone', async () => {
+    await type('licensing')
+    expect(status()).toBe('1 of 4')
+    expect(revealed()).toEqual([])
+  })
+
+  it('opens the whole entry holding the active match, and only that one', async () => {
+    await type('licensing')
+    bar.findNext()
+    await bar.updateComplete
+    expect(status()).toBe('2 of 4')
+    // Both answers of question one, as a click on it would open; question
+    // two's answer also has a (painted) match but is not active, so stays shut.
+    expect(revealed()).toEqual(['a1', 'a1b'])
+    expect(getComputedStyle(document.getElementById('a1')!).visibility).toBe('visible')
+    expect(getComputedStyle(document.getElementById('a2')!).visibility).toBe('hidden')
+  })
+
+  it('closes the answer it opened when the active match moves on', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.findNext()
+    expect(revealed()).toEqual(['a2'])
+    bar.findPrevious()
+    bar.findPrevious()
+    expect(revealed()).toEqual([])
+  })
+
+  it('closes the answer it opened when the query changes or is cleared', async () => {
+    await type('licensing')
+    bar.findNext()
+    expect(revealed()).toEqual(['a1', 'a1b'])
+    await type('prose')
+    expect(revealed()).toEqual([])
+
+    await type('another')
+    expect(revealed()).toEqual(['a2'])
+    enter('')
+    expect(revealed()).toEqual([])
+  })
+
+  it('never touches an answer that was already open', async () => {
+    await type('licensing')
+    bar.findPrevious()
+    await bar.updateComplete
+    expect(status()).toBe('4 of 4')
+    expect(revealed()).toEqual([])
+    bar.findNext()
+    const a3 = document.getElementById('a3')!
+    expect(a3.className).toBe('user-open')
+    expect(getComputedStyle(a3).visibility).toBe('visible')
+  })
+
+  it('reveals before it scrolls, so the scroll measures the open layout', async () => {
+    const a1 = document.getElementById('a1')!
+    const openAtMeasure: boolean[] = []
+    vi.spyOn(Range.prototype, 'getBoundingClientRect').mockImplementation(function (this: Range) {
+      openAtMeasure.push(a1.classList.contains(REVEAL))
+      // Far below the viewport, so scrollRangeIntoView actually scrolls.
+      return { top: 5000, bottom: 5020, left: 0, right: 50, width: 50, height: 20, x: 0, y: 5000 } as DOMRect
+    })
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    await type('first licensing')
+    expect(scrollTo).toHaveBeenCalled()
+    expect(openAtMeasure).toEqual([true])
+  })
+
+  it('keeps focus in the find input while revealing', async () => {
+    await type('licensing')
+    expect(bar.shadowRoot?.activeElement).toBe(input())
+    bar.findNext()
+    bar.findNext()
+    await bar.updateComplete
+    expect(revealed()).toEqual(['a2'])
+    expect(bar.shadowRoot?.activeElement).toBe(input())
+    expect(window.getSelection()?.rangeCount ?? 0).toBe(0)
+  })
+
+  it('does not reindex because of its own class changes', async () => {
+    await type('licensing')
+    const rebuild = vi.spyOn(bar as unknown as { _rebuildIndex(): void }, '_rebuildIndex')
+    bar.findNext()
+    bar.findNext()
+    await vi.advanceTimersByTimeAsync(1000)
+    await bar.updateComplete
+    expect(rebuild).not.toHaveBeenCalled()
+    expect(status()).toBe('3 of 4')
+  })
+
+  it('leaves the last answer open on close, until the reader clicks elsewhere', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.close()
+    expect(revealed()).toEqual(['a1', 'a1b'])
+
+    // Selecting text inside the answer must not shut it.
+    document.getElementById('a1')!.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    expect(revealed()).toEqual(['a1', 'a1b'])
+
+    document.getElementById('prose')!.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    expect(revealed()).toEqual([])
+  })
+
+  it('closes it on a focus move elsewhere, and stops listening afterwards', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.close()
+    const remove = vi.spyOn(document, 'removeEventListener')
+    document.getElementById('q2')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    expect(revealed()).toEqual([])
+    expect(remove.mock.calls.map(([type]) => type).sort()).toEqual(['focusin', 'pointerdown'])
+  })
+
+  it('hands the open answer back to the bar on reopen, and clears it on disconnect', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.close()
+    bar.open()
+    await vi.advanceTimersByTimeAsync(0)
+    await bar.updateComplete
+    // The retained query re-ran from match 1, which is in prose.
+    expect(status()).toBe('1 of 4')
+    expect(revealed()).toEqual([])
+
+    bar.findNext()
+    bar.close()
+    bar.remove()
+    expect(revealed()).toEqual([])
+  })
+})
+
+/**
+ * A reindex (content mutation), case toggle or reopen swaps `_index` and starts
+ * a new scan, but `_matchStarts` / `_matchEnds` keep the OLD offsets until that
+ * scan lands. A frame-paced paint job still running from before would pair the
+ * new index with the old offsets and paint ranges on the wrong text.
+ */
+describe('MbrFindBarElement reindex during a paint', () => {
+  beforeEach(async () => {
+    // Past HIGHLIGHT_CAP (1000), so stepping out of the window repaints it.
+    document.getElementById('wrapper')!.innerHTML = bigPage(1500)
+    bar.open()
+    await bar.updateComplete
+  })
+
+  /** The text each painted range covers. Every match here sits in one text node. */
+  const paintedTexts = (highlight: Set<AbstractRange>) =>
+    [...highlight].map((range) => (range.startContainer as Text).data.slice(range.startOffset, range.endOffset))
+
+  it('never paints a slice with the previous scan\'s offsets against the new index', async () => {
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(1000)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 1500')
+
+    // Shifts every later offset by the new paragraph's length. The reindex it
+    // schedules fires 250 ms later.
+    const p = document.createElement('p')
+    p.textContent = 'xyzzy'
+    document.getElementById('wrapper')!.prepend(p)
+    await vi.advanceTimersByTimeAsync(240)
+
+    // Wrap to the last match: outside the painted window, so a fresh
+    // multi-frame paint starts and is still running when the reindex fires.
+    bar.findPrevious()
+    const all = registry.get('mbr-find')!
+    // Keep the reindex scan in flight across several frames, so a surviving
+    // paint job would get to run against the new index.
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => (now += 10))
+    await vi.advanceTimersByTimeAsync(60)
+
+    const texts = paintedTexts(all)
+    expect(texts.length).toBeGreaterThan(0)
+    expect(texts.filter((text) => text !== 'alpha')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await bar.updateComplete
+    expect(status()).toBe('1500 of 1500')
+    expect(paintedTexts(registry.get('mbr-find')!).filter((text) => text !== 'alpha')).toEqual([])
   })
 })

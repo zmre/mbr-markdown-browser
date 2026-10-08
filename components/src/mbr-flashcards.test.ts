@@ -199,4 +199,26 @@ describe('<mbr-flashcards>', () => {
     await vi.waitFor(() => expect(document.querySelector('dt.mbr-fc-last-again')).not.toBeNull())
     window.frontmatter = undefined
   })
+
+  it('redraws the indicators for a write that completes after the deck closed', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    writeReply = { ok: true, entry: '2026-10-20 10:00 - Good', line: 10, insertedAt: 10, insertedCount: 1 }
+    installDeckPage()
+    window.frontmatter = { markdown_source: 'deck.md' }
+    await mount()
+    await vi.waitFor(() => expect(document.querySelector('dt.mbr-fc-last-easy')).not.toBeNull())
+    trigger.open()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    const deck = document.querySelector('mbr-flashcard-deck') as unknown as {
+      recordReview: (t: unknown) => Promise<unknown>
+    }
+    // Esc while the write is in flight: close() runs before the write lands.
+    const pending = deck.recordReview({ line: 5, rating: 'again' })
+    trigger.close()
+    await pending
+    // The deck appends the entry to the page after the writer resolves.
+    document.querySelector('dd[data-mbr-line="7"] ul')!.insertAdjacentHTML('beforeend', '<li>2026-12-20 10:00 - Again</li>')
+    await vi.waitFor(() => expect(document.querySelector('dt.mbr-fc-last-again')).not.toBeNull())
+    window.frontmatter = undefined
+  })
 })

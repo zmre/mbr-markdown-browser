@@ -267,6 +267,34 @@ describe('spaced repetition', () => {
     expect(isFlipped()).toBe(true)
   })
 
+  it('still updates the page, exactly once, when the deck is closed mid-write', async () => {
+    // The writer has already spliced the inserted lines into the shared
+    // source cache by the time it resolves; leaving the page unshifted would
+    // aim a later task toggle below the card at the wrong line.
+    let resolve!: (outcome: ReviewOutcome) => void
+    const root = await mount({
+      recorder: (target) => {
+        calls.push(target)
+        return new Promise((r) => (resolve = r))
+      },
+    })
+    await select('srs')
+    await key(' ')
+    await key('3')
+    expect(calls).toHaveLength(1)
+    const line = calls[0].line
+    const historyItems = root.querySelectorAll('li').length
+    deck.remove()
+    resolve({ ok: true, entry: '2026-10-20 10:00 - Good', line: line + 3, insertedAt: line + 3, insertedCount: 1 })
+    await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.mbr-task-check')!.dataset.mbrTaskLine).toBe('31'))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(root.querySelector<HTMLElement>('.mbr-task-check')!.id).toBe('mbr-task-31')
+    expect(root.querySelector('.mbr-incomplete')!.id).toBe('mbr-marker-32')
+    // The entry joined the card's history, once.
+    expect(root.querySelectorAll('li')).toHaveLength(historyItems + 1)
+    expect(Array.from(root.querySelectorAll('li')).filter((li) => li.textContent === '2026-10-20 10:00 - Good')).toHaveLength(1)
+  })
+
   it('says nothing is due when every card is scheduled later', async () => {
     const future = '2999-01-01 00:00 - Easy'
     const root = installDeckPage(
@@ -378,6 +406,32 @@ describe('concentric mode', () => {
     expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull()
     await key(' ')
     expect(deck.querySelector('.mbr-fc-ratings')).not.toBeNull()
+  })
+
+  it('keeps going session-only on an auth or network failure, and tries to save again', async () => {
+    // A token-protected server answers 401 after every page load (the token is
+    // memory-only): Concentric must not stall on it.
+    reply = { ok: false, kind: 'auth', message: 'Editing needs a token' }
+    await mount({ html: SECTIONED_DECK_HTML, recorder })
+    await select('concentric')
+    await rate('3')
+    await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
+    await deck.updateComplete
+    expect(calls).toHaveLength(1)
+    expect(isFlipped()).toBe(false)
+    expect(deck.querySelector('.mbr-fc-banner')!.textContent).toContain('token')
+    // Rated and moved on, rather than left flipped awaiting a retry.
+    // Not read-only: once a token exists, the next rating is saved.
+    reply = { ok: false, kind: 'other', message: 'Network error' }
+    await rate('3')
+    await vi.waitFor(() => expect(calls).toHaveLength(2))
+    await deck.updateComplete
+    expect(isFlipped()).toBe(false)
+    reply = ok
+    await rate('3')
+    await vi.waitFor(() => expect(calls).toHaveLength(3))
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
   })
 
   it('updates the Cards box when the stack grows, and reports mastery', async () => {

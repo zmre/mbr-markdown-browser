@@ -199,7 +199,14 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
       record &&
       (async (target) => {
         const outcome = await record(target)
-        if (outcome.ok) this._wrote = true
+        if (outcome.ok) {
+          // Still open: `close()` redraws once for the whole session.
+          if (this._deck === deck) this._wrote = true
+          // Closed mid-write: `close()` has already run, so redraw here. On a
+          // later task, not now — the deck appends the entry to the page only
+          // after this wrapper returns, and the indicators read that entry.
+          else scheduleIdleTask(() => decorateReading(false))
+        }
         return outcome
       })
     deck.concentricThreshold = getFlashcardsConcentricThreshold()

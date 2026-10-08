@@ -118,6 +118,20 @@ pub struct ResolvedRelationship {
     /// (i.e. produced by inverse/symmetric derivation or declared by a third
     /// note about two other notes).
     pub derived: bool,
+    /// True when the note this entry is attached to *implied* the edge through
+    /// another frontmatter field — today only a person's `company: "[[X]]"`
+    /// (see [`RawRelationship::implicit`]).
+    ///
+    /// Survives deduplication: when the organization's own `employee`
+    /// declaration (or the person's explicit `employer`) is aggregated first,
+    /// the edge keeps *that* declaration's endpoint text, so the raw string can
+    /// no longer say which entry the `company` wikilink resolved to. This flag
+    /// can, which is how [`crate::contact::Contact::resolve_company`] links the
+    /// card to the very note the name index chose.
+    ///
+    /// In-memory only: not part of the `site.json` wire format.
+    #[serde(skip)]
+    pub implied: bool,
 }
 
 /// A cycle detected over the **hierarchical** relationship edges.
@@ -1117,6 +1131,8 @@ struct AggregatedEdge {
     attributes: BTreeMap<String, serde_json::Value>,
     /// URLs of notes that declared this edge (for the `derived` flag).
     declarers: HashSet<String>,
+    /// URLs of notes that implied this edge (for the `implied` flag).
+    implied_by: HashSet<String>,
 }
 
 /// Everything a relationship build produces: the per-note map plus the
@@ -1249,8 +1265,11 @@ pub fn build_relationships(
                 label: rel.label.clone(),
                 attributes: rel.attributes.clone(),
                 declarers: HashSet::new(),
+                implied_by: HashSet::new(),
             });
-            if !rel.implicit {
+            if rel.implicit {
+                edge.implied_by.insert(note.url.clone());
+            } else {
                 edge.declarers.insert(note.url.clone());
             }
             // Merge attributes (first declaration wins on key conflict).
@@ -1288,6 +1307,7 @@ pub fn build_relationships(
                 label: edge.label.clone(),
                 attributes: edge.attributes.clone(),
                 derived: !edge.declarers.contains(&anchor.url),
+                implied: edge.implied_by.contains(&anchor.url),
             };
             result.entry(anchor.url.clone()).or_default().push(entry);
         };
@@ -1315,10 +1335,15 @@ pub fn build_relationships(
                 .then_with(|| a.neighbor_raw.cmp(&b.neighbor_raw))
         });
         rels.dedup_by(|a, b| {
-            a.predicate == b.predicate
+            let duplicate = a.predicate == b.predicate
                 && a.neighbor == b.neighbor
                 && a.neighbor_raw == b.neighbor_raw
-                && a.direction == b.direction
+                && a.direction == b.direction;
+            // `a` is the one dropped: keep its `implied` on the survivor.
+            if duplicate {
+                b.implied |= a.implied;
+            }
+            duplicate
         });
     }
 
@@ -2063,6 +2088,110 @@ mod tests {
         assert!(!jane[0].resolved);
         assert_eq!(jane[0].neighbor, "");
         assert_eq!(jane[0].neighbor_title, "Nowhere Inc");
+    }
+
+    /// The URL the contact card links `company` to, after a full build.
+    fn card_company_url(
+        notes: &[NoteRelInput],
+        person_url: &str,
+        frontmatter: &str,
+    ) -> Option<String> {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let map = build_relationship_map(notes, &reg, &["md".to_string()]);
+        let mut contact = crate::contact::Contact::from_yaml(&parse_yaml(frontmatter)).unwrap();
+        contact.resolve_company(map.get(person_url).map(Vec::as_slice).unwrap_or(&[]));
+        contact.company.and_then(|c| c.url)
+    }
+
+    /// Regression: an organization that declares `employee` and sorts before
+    /// the person owns the aggregated edge, so the person's entry is stored as
+    /// `employee`/incoming with the org's title as raw text. The card must
+    /// still link.
+    #[test]
+    fn company_links_when_the_org_declares_employee_and_sorts_first() {
+        let fm = "type: person\ncompany: \"[[Acme]]\"\n";
+        let notes = vec![
+            note(
+                "/people/acme/",
+                "Acme",
+                "acme",
+                vec![rel_to("employee", "[[Jane Doe]]")],
+            ),
+            note(
+                "/people/jane/",
+                "Jane Doe",
+                "jane",
+                parse_relationships(&parse_yaml(fm)),
+            ),
+        ];
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        let jane = &map["/people/jane/"];
+        assert_eq!(jane.len(), 1, "{jane:?}");
+        assert_eq!(jane[0].predicate, "employer");
+        assert_eq!(jane[0].direction, Direction::Incoming);
+        assert!(jane[0].implied);
+        assert!(!map["/people/acme/"][0].implied, "only the implying note");
+
+        assert_eq!(
+            card_company_url(&notes, "/people/jane/", fm).as_deref(),
+            Some("/people/acme/")
+        );
+    }
+
+    /// Regression: the person's own explicit `employer` (different casing,
+    /// an alias) is parsed before the implied edge and wins the raw text.
+    #[test]
+    fn company_links_through_alias_and_casing_differences() {
+        let fm = "type: person\ncompany: \"[[acme]]\"\nrelationships:\n  - type: employer\n    to: \"[[ACME CORPORATION]]\"\n";
+        let mut acme = note("/orgs/acme-corp/", "Acme Corporation", "acme-corp", vec![]);
+        acme.aliases = vec!["Acme".to_string()];
+        let notes = vec![
+            note(
+                "/people/jane/",
+                "Jane Doe",
+                "jane",
+                parse_relationships(&parse_yaml(fm)),
+            ),
+            acme,
+        ];
+        assert_eq!(
+            card_company_url(&notes, "/people/jane/", fm).as_deref(),
+            Some("/orgs/acme-corp/")
+        );
+    }
+
+    /// With several employers, the card links the one `company` names — not
+    /// whichever `employer` edge happens to sort first.
+    #[test]
+    fn company_links_the_named_employer_among_several() {
+        let fm = "type: person\ncompany: \"[[Zeta]]\"\nrelationships:\n  - type: employer\n    to: \"[[Alpha]]\"\n";
+        let notes = vec![
+            note("/orgs/alpha/", "Alpha", "alpha", vec![]),
+            note("/orgs/zeta/", "Zeta", "zeta", vec![]),
+            note(
+                "/people/jane/",
+                "Jane Doe",
+                "jane",
+                parse_relationships(&parse_yaml(fm)),
+            ),
+        ];
+        assert_eq!(
+            card_company_url(&notes, "/people/jane/", fm).as_deref(),
+            Some("/orgs/zeta/")
+        );
+    }
+
+    #[test]
+    fn implied_flag_is_not_serialized() {
+        let reg = RelationTypeRegistry::from_types(&genealogy_types());
+        let notes = vec![
+            person_with_company("/people/jane/", "Jane Doe", "[[Acme Corp]]"),
+            note("/orgs/acme/", "Acme Corp", "acme", vec![]),
+        ];
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        let json = serde_json::to_value(&map["/people/jane/"][0]).unwrap();
+        assert!(json.get("implied").is_none(), "{json}");
     }
 
     #[test]
