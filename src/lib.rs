@@ -1,6 +1,20 @@
 //! mbr - Markdown Browser
 //!
 //! A markdown previewer, browser, and static site generator.
+//!
+//! Subsystems are Cargo features (`server`, `watcher`, `ssg`, `cli`, `gui`,
+//! `media-metadata`, `ffi`; see Cargo.toml). With none of them this is the
+//! render core alone, which is what the QuickLook staticlib links.
+
+// UniFFI's generated UDL scaffolding (`OUT_DIR/mbr.uniffi.rs`) holds its
+// interface metadata in one large `const` byte array
+// (`UNIFFI_META_CONST_UDL_MBR`), which trips `clippy::large_const_arrays`.
+// The generated code is not ours to change, and an `#[allow]` on the
+// `include_scaffolding!` call is discarded as an unused attribute. Wrapping
+// the include in a module would scope the allow but move `UniFfiTag` off the
+// crate root, where UniFFI's proc-macro exports look for it. So the allow is
+// crate-wide, and only when `ffi` is on.
+#![cfg_attr(feature = "ffi", allow(clippy::large_const_arrays))]
 
 // Include the UniFFI scaffolding generated from mbr.udl (only when ffi feature is enabled)
 // This must be in the crate root (lib.rs) for UniFFI to work properly
@@ -37,10 +51,12 @@ pub mod attrs;
 pub mod audio;
 #[cfg(feature = "gui")]
 pub mod browser;
+#[cfg(feature = "ssg")]
 pub mod build;
 pub mod cache;
 pub mod change_event;
 pub mod chat;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
 pub mod constants;
@@ -79,6 +95,7 @@ pub mod readability;
 pub mod relationships;
 pub mod repo;
 pub mod search;
+#[cfg(feature = "server")]
 pub mod server;
 pub mod sorting;
 pub mod tag_index;
@@ -101,10 +118,12 @@ pub mod video_remux;
 pub mod video_transcode;
 #[cfg(feature = "media-metadata")]
 pub mod video_transcode_cache;
+#[cfg(feature = "watcher")]
 pub mod watcher;
 pub mod wikilink;
 pub mod wikilink_index;
 
+#[cfg(feature = "ssg")]
 pub use build::{BuildStats, Builder};
 pub use config::{Config, RelationType, SortField, TagSource, find_root_dir};
 #[cfg(feature = "media-metadata")]

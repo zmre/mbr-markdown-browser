@@ -23,6 +23,11 @@ settings:
     # Build only for arm64 (matching Rust library)
     ARCHS: arm64
     VALID_ARCHS: arm64
+    # ld keeps every libmbr.a member it pulls in whole; let it drop what the
+    # extension never reaches (unused embedded assets included). Same as
+    # `-dead_strip` in flake.nix's mbr-quicklook link, so the dev build
+    # matches what ships.
+    DEAD_CODE_STRIPPING: YES
 
 configs:
   Debug:
@@ -75,7 +80,7 @@ targets:
         # Use clang as the linker driver (fixes Xcode 16 linker issues)
         LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
         # Library search paths for Rust static library
-        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../target/release
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../target/release
         # Link to Rust static library and required macOS frameworks
         # Note: GUI deps (wry/tao) and ffmpeg excluded via --no-default-features to avoid SDL dependency
         OTHER_LDFLAGS: $(inherited) -lmbr -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
@@ -109,7 +114,7 @@ targets:
         # Use clang as the linker driver (fixes Xcode 16 linker issues)
         LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
         # Inherit search paths from MBRPreview target
-        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../target/release
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../target/release
         OTHER_LDFLAGS: $(inherited) -lmbr -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
         HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
         SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated

@@ -8,18 +8,27 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$SCRIPT_DIR"
 
-# Ensure Rust library is built WITHOUT GUI or media-metadata features
-# QuickLook extensions run in a sandboxed environment without GUI access or ffmpeg
-# The 'ffi' feature enables UniFFI exports needed for Swift bindings
+# Build the Rust core alone: no server, watcher, static site generator, CLI,
+# GUI or media-metadata (see Cargo.toml [features]). QuickLook extensions run
+# sandboxed without GUI access or ffmpeg, and none of the rest is reachable
+# from a preview. The `ffi` feature enables the UniFFI exports Swift calls.
+# Same command as flake.nix's mbr-quicklook-staticlib.
 echo "Building Rust library (minimal features for QuickLook)..."
-cargo build --release --no-default-features --features ffi --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release --lib --no-default-features --features ffi --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
 # Regenerate Xcode project
 echo "Generating Xcode project..."
 xcodegen generate
+
+# A fixed derived-data directory per checkout. Xcode's default
+# (~/Library/Developer/Xcode/DerivedData/MBRQuickLook-<hash of the project
+# path>) gets a new directory for every checkout or move of this project, and
+# picking one of those by name installed whichever happened to sort first —
+# often a stale build from another worktree.
+DERIVED_DATA="$PROJECT_ROOT/target/quicklook-derived-data"
 
 # Build the extension
 echo "Building QuickLook extension..."
@@ -28,12 +37,10 @@ xcodebuild \
     -scheme MBRQuickLook \
     -configuration Release \
     -arch arm64 \
+    -derivedDataPath "$DERIVED_DATA" \
     build
 
-# Get the derived data path
-DERIVED_DATA="$HOME/Library/Developer/Xcode/DerivedData"
-BUILD_DIR=$(find "$DERIVED_DATA" -maxdepth 1 -name "MBRQuickLook-*" -type d | head -1)
-EXTENSION_PATH="$BUILD_DIR/Build/Products/Release/MBRQuickLookHost.app/Contents/PlugIns/MBRPreview.appex"
+EXTENSION_PATH="$DERIVED_DATA/Build/Products/Release/MBRQuickLookHost.app/Contents/PlugIns/MBRPreview.appex"
 
 echo ""
 echo "Build complete!"

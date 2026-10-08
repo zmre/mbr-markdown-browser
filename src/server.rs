@@ -22,7 +22,7 @@ use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
 use crate::media::MediaViewerType;
 use crate::oembed_cache::OembedCache;
-use crate::page_context::{self, ModeFlags, PageChrome, UrlMode};
+use crate::page_context::{self, ModeFlags, PageChrome, UrlMode, markdown_file_to_json};
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use crate::repo::MarkdownInfo;
 use crate::search::{SearchEngine, SearchQuery, search_other_files};
@@ -938,7 +938,60 @@ pub struct Server {
     pub gui_mode: bool,
     /// File watcher handle - kept alive for the lifetime of the server.
     /// When Server is dropped, this is dropped, stopping the watcher.
-    _watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>,
+    #[cfg(feature = "watcher")]
+    _watcher_handle: WatcherHandle,
+}
+
+/// Where the background thread parks the file watcher once it is running.
+#[cfg(feature = "watcher")]
+type WatcherHandle = Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>;
+
+/// Starts the file watcher on a background thread so a large repository
+/// cannot delay server startup, feeding `tx`. A watcher that fails to start
+/// only disables events from disk: the channel and everything subscribed to
+/// it keep working.
+///
+/// Without the `watcher` feature none of this exists and `tx` carries only
+/// the server's own writes (task toggles, edits, uploads, renames).
+#[cfg(feature = "watcher")]
+fn spawn_file_watcher(
+    base_dir: PathBuf,
+    template_folder: Option<PathBuf>,
+    ignore_dirs: Vec<String>,
+    ignore_globs: Vec<String>,
+    explicit_hidden_dirs: Vec<PathBuf>,
+    tx: broadcast::Sender<crate::change_event::FileChangeEvent>,
+) -> WatcherHandle {
+    let watcher_handle: WatcherHandle = Arc::new(std::sync::Mutex::new(None));
+    let watcher_handle_for_thread = Arc::clone(&watcher_handle);
+
+    std::thread::spawn(move || {
+        match crate::watcher::FileWatcher::new_with_sender(
+            &base_dir,
+            template_folder.as_deref(),
+            &ignore_dirs,
+            &ignore_globs,
+            &explicit_hidden_dirs,
+            tx,
+        ) {
+            Ok(watcher) => {
+                tracing::info!("File watcher initialized successfully (background)");
+                // Store the watcher in the shared handle so it stays alive
+                // and can be properly dropped when Server is dropped
+                if let Ok(mut guard) = watcher_handle_for_thread.lock() {
+                    *guard = Some(watcher);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize file watcher: {}. Live reload disabled.",
+                    e
+                );
+            }
+        }
+    });
+
+    watcher_handle
 }
 
 /// Configuration for initializing a Server instance.
@@ -1771,47 +1824,20 @@ impl Server {
         // Create a broadcast channel for file changes - watcher will be initialized in background
         let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
             crate::change_event::FileChangeEvent,
-        >(crate::watcher::BROADCAST_CAPACITY);
-        let tx_for_watcher = file_change_tx.clone();
+        >(crate::change_event::BROADCAST_CAPACITY);
 
-        // Initialize file watcher in background to avoid blocking server startup
-        let base_dir_for_watcher = base_dir.clone();
-        let template_folder_for_watcher = template_folder.clone();
-        let watcher_ignore_dirs_for_watcher = watcher_ignore_dirs.clone();
-        let ignore_globs_for_watcher = ignore_globs.clone();
-        let explicit_hidden_dirs_for_watcher = explicit_hidden_dirs.clone();
-
-        // Create a handle to store the watcher once it's initialized.
-        // This ensures proper cleanup when Server is dropped.
-        let watcher_handle: Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let watcher_handle_for_thread = Arc::clone(&watcher_handle);
-
-        std::thread::spawn(move || {
-            match crate::watcher::FileWatcher::new_with_sender(
-                &base_dir_for_watcher,
-                template_folder_for_watcher.as_deref(),
-                &watcher_ignore_dirs_for_watcher,
-                &ignore_globs_for_watcher,
-                &explicit_hidden_dirs_for_watcher,
-                tx_for_watcher,
-            ) {
-                Ok(watcher) => {
-                    tracing::info!("File watcher initialized successfully (background)");
-                    // Store the watcher in the shared handle so it stays alive
-                    // and can be properly dropped when Server is dropped
-                    if let Ok(mut guard) = watcher_handle_for_thread.lock() {
-                        *guard = Some(watcher);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to initialize file watcher: {}. Live reload disabled.",
-                        e
-                    );
-                }
-            }
-        });
+        #[cfg(feature = "watcher")]
+        let watcher_handle = spawn_file_watcher(
+            base_dir.clone(),
+            template_folder.clone(),
+            watcher_ignore_dirs,
+            ignore_globs.clone(),
+            explicit_hidden_dirs.clone(),
+            file_change_tx.clone(),
+        );
+        // Only the watcher reads this setting.
+        #[cfg(not(feature = "watcher"))]
+        let _ = watcher_ignore_dirs;
 
         // Spawn background task to reload templates when .html files change
         let templates_for_reload = templates.clone();
@@ -2287,6 +2313,7 @@ impl Server {
             ip,
             port,
             gui_mode,
+            #[cfg(feature = "watcher")]
             _watcher_handle: watcher_handle,
         })
     }
@@ -7192,60 +7219,6 @@ fn cached_dir_subdirs(
     computed
 }
 
-/// Transforms markdown file info into a JSON value for template rendering.
-pub fn markdown_file_to_json(file_info: &MarkdownInfo) -> serde_json::Value {
-    use serde_json::json;
-
-    let title = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("title"))
-        .cloned()
-        .unwrap_or_else(|| {
-            serde_json::Value::String(
-                file_info
-                    .raw_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Untitled")
-                    .to_string(),
-            )
-        });
-
-    let description = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("description"))
-        .cloned();
-
-    let tags = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("tags"))
-        .cloned();
-
-    let note_type = file_info
-        .frontmatter
-        .as_ref()
-        .and_then(|fm| fm.get("type"))
-        .cloned();
-
-    let modified_date = chrono::DateTime::from_timestamp(file_info.modified as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    json!({
-        "title": title,
-        "url_path": file_info.url_path,
-        "description": description,
-        "tags": tags,
-        "type": note_type,
-        "modified_date": modified_date,
-        "modified": file_info.modified,
-        "name": file_info.raw_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
-    })
-}
-
 // ============================================================================
 // Cache header helpers (extracted for testability and reuse)
 // ============================================================================
@@ -7496,83 +7469,6 @@ mod tests {
         // Canonicalized once by the caller, as `Server::init` does: match.
         let canonical = link.canonicalize().unwrap_or(link);
         assert!(should_reload_template(&event_path, Some(&canonical)));
-    }
-
-    #[test]
-    fn test_markdown_file_to_json_with_frontmatter() {
-        let mut frontmatter = crate::markdown::SimpleMetadata::new();
-        frontmatter.insert(
-            "title".to_string(),
-            serde_json::Value::String("My Title".to_string()),
-        );
-        frontmatter.insert(
-            "description".to_string(),
-            serde_json::Value::String("My description".to_string()),
-        );
-        frontmatter.insert("tags".to_string(), serde_json::json!(["rust", "testing"]));
-
-        let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("test.md"),
-            url_path: "/test/".to_string(),
-            frontmatter: Some(frontmatter),
-            created: 1699000000,
-            modified: 1700000000,
-            relationships: Vec::new(),
-        };
-
-        let json = markdown_file_to_json(&file_info);
-
-        assert_eq!(json["title"], "My Title");
-        assert_eq!(json["url_path"], "/test/");
-        assert_eq!(json["description"], "My description");
-        assert_eq!(json["tags"], serde_json::json!(["rust", "testing"]));
-        assert_eq!(json["modified"], 1700000000);
-        assert_eq!(json["name"], "test.md");
-    }
-
-    #[test]
-    fn test_markdown_file_to_json_without_frontmatter() {
-        let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("my-document.md"),
-            url_path: "/my-document/".to_string(),
-            frontmatter: None,
-            created: 1699000000,
-            modified: 1700000000,
-            relationships: Vec::new(),
-        };
-
-        let json = markdown_file_to_json(&file_info);
-
-        // Should use file stem as title when no frontmatter
-        assert_eq!(json["title"], "my-document");
-        assert_eq!(json["url_path"], "/my-document/");
-        assert!(json["description"].is_null());
-        assert!(json["tags"].is_null());
-    }
-
-    #[test]
-    fn test_markdown_file_to_json_partial_frontmatter() {
-        let mut frontmatter = crate::markdown::SimpleMetadata::new();
-        frontmatter.insert(
-            "title".to_string(),
-            serde_json::Value::String("Only Title".to_string()),
-        );
-        // No description or tags
-
-        let file_info = MarkdownInfo {
-            raw_path: PathBuf::from("partial.md"),
-            url_path: "/partial/".to_string(),
-            frontmatter: Some(frontmatter),
-            created: 1699000000,
-            modified: 1700000000,
-            relationships: Vec::new(),
-        };
-
-        let json = markdown_file_to_json(&file_info);
-
-        assert_eq!(json["title"], "Only Title");
-        assert!(json["description"].is_null());
-        assert!(json["tags"].is_null());
     }
 
     // ==================== validate_media_path Tests ====================

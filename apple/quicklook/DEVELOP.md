@@ -92,7 +92,7 @@ in the HTML, because no attachment was minted for it, and therefore loads nothin
 
 ```bash
 # Build everything (Rust + Swift extension)
-cd quicklook
+cd apple/quicklook
 ./build.sh
 
 # Build and install to MBR.app-template
@@ -108,15 +108,15 @@ If you need more control:
 cd components ; bun install && bun run build
 
 # 1. Build Rust library with FFI feature (minimal features for sandbox)
-cargo build --release --no-default-features --features ffi
+cargo build --release --lib --no-default-features --features ffi
 
 # 2. Regenerate UniFFI bindings (REQUIRED after Rust API changes!)
 cargo run --bin uniffi-bindgen --features ffi -- \
     generate --library target/release/libmbr.a \
-    --language swift --out-dir quicklook/Generated
+    --language swift --out-dir apple/quicklook/Generated
 
 # 3. Generate Xcode project
-cd quicklook
+cd apple/quicklook
 xcodegen generate
 
 # 4. Build extension
@@ -145,7 +145,7 @@ cp -R ~/Library/Developer/Xcode/DerivedData/MBRQuickLook-*/Build/Products/Releas
 
 # Re-sign (required after copying)
 codesign --force --sign - \
-    --entitlements quicklook/MBRPreview/MBRPreview.entitlements \
+    --entitlements apple/quicklook/MBRPreview/MBRPreview.entitlements \
     ~/Applications/MBRQuickLookHost.app/Contents/PlugIns/MBRPreview.appex
 codesign --force --sign - ~/Applications/MBRQuickLookHost.app
 
@@ -310,10 +310,10 @@ If the crash log shows:
 **Solution**: Regenerate UniFFI bindings:
 
 ```bash
-cargo build --release --no-default-features --features ffi
+cargo build --release --lib --no-default-features --features ffi
 cargo run --bin uniffi-bindgen --features ffi -- \
     generate --library target/release/libmbr.a \
-    --language swift --out-dir quicklook/Generated
+    --language swift --out-dir apple/quicklook/Generated
 ```
 
 Then rebuild and reinstall the extension.
@@ -470,7 +470,7 @@ Regenerate bindings after ANY change to:
 
 ### Binding Files
 
-Generated files in `quicklook/Generated/`:
+Generated files in `apple/quicklook/Generated/`:
 
 - `mbr.swift` - Swift bindings
 - `mbrFFI.h` - C header for FFI
@@ -511,7 +511,7 @@ Update versions in:
 |------|---------|
 | Build extension | `./build.sh` |
 | Build + install | `./build.sh install` |
-| Regenerate bindings | `cargo run --bin uniffi-bindgen --features ffi -- generate --library target/release/libmbr.a --language swift --out-dir quicklook/Generated` |
+| Regenerate bindings | `cargo run --bin uniffi-bindgen --features ffi -- generate --library target/release/libmbr.a --language swift --out-dir apple/quicklook/Generated` |
 | Test preview | `qlmanage -p /path/to/file.md` |
 | Check registration | `pluginkit -mAv -p com.apple.quicklook.preview \| grep mbr` |
 | Enable extension | `pluginkit -e use -i com.zmre.mbr.quicklook-host.MBRPreview` |

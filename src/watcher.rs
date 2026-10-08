@@ -6,7 +6,7 @@
 //! Uses RecommendedWatcher (FSEvents on macOS) for kernel-level efficiency —
 //! no per-file stat polling, handles large directories without CPU overhead.
 
-use crate::change_event::{ChangeEventType, FileChangeEvent};
+use crate::change_event::{BROADCAST_CAPACITY, ChangeEventType, FileChangeEvent};
 use crate::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use std::collections::HashSet;
@@ -14,10 +14,6 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, trace};
-
-/// Capacity of the broadcast channel for file change events.
-/// If clients don't keep up, the oldest messages will be dropped.
-pub(crate) const BROADCAST_CAPACITY: usize = 100;
 
 /// Errors related to file watching.
 ///

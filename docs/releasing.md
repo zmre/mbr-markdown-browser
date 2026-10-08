@@ -38,7 +38,7 @@ then the DMG — is the price of the app working without a network.
 
 `scripts/make-macos-dmg.sh` signs `Contents/Frameworks/libpdfium.dylib`, then
 `Contents/PlugIns/MBRPreview.appex` (with its entitlements —
-`quicklook/MBRPreview/MBRPreview.entitlements`), then `MBR.app` itself. A
+`apple/quicklook/MBRPreview/MBRPreview.entitlements`), then `MBR.app` itself. A
 signature over the bundle seals its contents, so signing a nested binary
 afterwards would invalidate the outer one. `--deep` is deprecated for signing
 on macOS 13+ (it silently applies the same options to nested code and misses
@@ -175,7 +175,7 @@ drives `WKWebView`, whose JIT lives in the out-of-process
 space, so `com.apple.security.cs.allow-jit` and its relatives are not needed.
 `MBRPreview.appex` (the QuickLook extension) does carry an entitlement — a
 broad, deliberately-scoped-in-code temporary-exception file-read grant; see the
-comment in `quicklook/MBRPreview/MBRPreview.entitlements` for why it is that
+comment in `apple/quicklook/MBRPreview/MBRPreview.entitlements` for why it is that
 wide and what actually constrains it. If notarization ever rejects either for
 entitlement reasons, that is the first thing to revisit.
 

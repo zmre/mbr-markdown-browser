@@ -111,7 +111,8 @@ between CI, Release, and your laptop:
   `--all-features`: `ffi` is macOS-only by design, so `--all-features` fails to
   compile on Linux
 - `nix build .#clippy-minimal` / `.#tests-minimal` — the feature set Windows
-  ships (`--no-default-features --features gui`), run on Linux
+  ships (`--no-default-features --features gui,server,watcher,ssg,cli`:
+  everything but `media-metadata`), run on Linux
 - `nix build .#mbr` — full build on x86_64-linux, aarch64-linux, and macOS
 - `nix build .#swiftfmt` / `.#swiftlint-check` — QuickLook extension (macOS)
 - `cargo clippy` / `cargo test` / `cargo build` on Windows (no Nix there)
@@ -315,10 +316,10 @@ The extension uses UniFFI to call Rust code from Swift. Build with:
 
 ```bash
 # From nix development shell
-nix develop -c bash -c './quicklook/build.sh'
+nix develop -c bash -c './apple/quicklook/build.sh'
 
 # Build and install into local MBR.app
-nix develop -c bash -c './quicklook/build.sh install'
+nix develop -c bash -c './apple/quicklook/build.sh install'
 ```
 
 **Requirements:**
@@ -328,7 +329,7 @@ nix develop -c bash -c './quicklook/build.sh install'
 ### Extension Architecture
 
 ```
-quicklook/
+apple/quicklook/
 ├── build.sh                          # Build script
 ├── project.yml                       # xcodegen project definition
 ├── Host/                             # Minimal host app (required for embedding)
@@ -346,7 +347,7 @@ quicklook/
 ### How It Works
 
 1. **UniFFI Bindings**: The Rust `render_preview()` function (in `src/quicklook.rs`) is exposed to Swift via UniFFI. It returns a `PreviewDocument`: the HTML plus the local files that HTML references.
-2. **Static Library**: Rust code is compiled as `libmbr.a` without GUI dependencies (`--no-default-features`)
+2. **Static Library**: Rust code is compiled as `libmbr.a` from the render core alone (`--no-default-features --features ffi`): no server, watcher, static site generator, CLI, GUI or media-metadata. The extension links it with dead-code stripping, so only what `render_preview()` reaches ends up in `MBRPreview`
 3. **Swift Extension**: `PreviewProvider.swift` calls the Rust function and returns a `QLPreviewReply` carrying the HTML and its attachments
 
 The preview is **data-based**, not view-based: `QLIsDataBasedPreview` is `true` and
@@ -366,19 +367,44 @@ addresses them as `cid:<id>`.
 
 ### Feature Flags
 
-The `gui` feature controls whether wry/tao/muda/rfd dependencies are included:
+Each subsystem is a Cargo feature. The default set is the full desktop app;
+with `--no-default-features` the library is the render core alone (markdown,
+templates, config, repository scan, search, indexes, embedded assets).
+
+| Feature | Adds | Implies |
+|---------|------|---------|
+| `server` | the axum HTTP server (`server.rs`): routes, live-reload WebSocket, edit endpoints | |
+| `watcher` | the filesystem watcher (`watcher.rs`, notify) feeding live reload and index invalidation | |
+| `ssg` | the static site generator (`build.rs`) and its pagefind index | |
+| `cli` | the `mbr` binary (`cli.rs`, `main.rs`) | `server`, `ssg` |
+| `gui` | the native window (wry/tao/muda/rfd) and OS link hand-off | `server` |
+| `media-metadata` | video/audio metadata, HLS transcoding, PDF covers (ffmpeg, pdfium) | |
+| `ffmpeg-static` | statically linked ffmpeg | |
+| `ffi` | UniFFI exports for the Swift shells (QuickLook) | |
 
 ```bash
-# Build with GUI (default) - for main MBR binary
+# Full desktop app (default)
 cargo build --release
 
-# Build without GUI - for QuickLook extension
-cargo build --release --no-default-features
+# What Windows ships: everything except media-metadata
+cargo build --release --no-default-features --features gui,server,watcher,ssg,cli
+
+# QuickLook staticlib: the render core plus the UniFFI exports
+cargo build --release --lib --no-default-features --features ffi
 ```
 
-The QuickLook extension **must** be built without the `gui` feature because:
+The server works without `watcher`: live reload still announces the server's
+own writes (task toggles, edits), just not changes made on disk by other
+programs.
+
+The QuickLook extension **must** be built without the `gui` and
+`media-metadata` features because:
 - QuickLook extensions run in a sandboxed environment without GUI access
 - wry/tao require SDL3 which isn't available in the sandbox
+- ffmpeg/pdfium crash in the sandbox
+
+The server, watcher, static site generator and CLI are left out as well:
+nothing in a preview reaches them, and they are most of the code.
 
 ### Testing the Extension
 
@@ -398,7 +424,7 @@ pluginkit -m -i com.zmre.mbr.MBRPreview
 
 **Extension crashes:**
 1. Check crash logs in `~/Library/Logs/DiagnosticReports/`
-2. Ensure extension was built with `--no-default-features`
+2. Ensure the staticlib was built with `--no-default-features --features ffi`
 
 **Conflicting extensions:**
 ```bash
