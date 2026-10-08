@@ -31,12 +31,10 @@ use crate::{
     page_context::{self, ModeFlags, PageChrome, UrlMode},
     path_resolver::OwnedPathResolverConfig,
     repo::{MarkdownInfo, Repo},
-    server::{
-        MediaViewerType, generate_breadcrumbs, get_current_dir_name, get_parent_path,
-        markdown_file_to_json,
-    },
+    server::{MediaViewerType, markdown_file_to_json},
     sorting::sort_files,
     templates::Templates,
+    url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path},
 };
 
 /// The repository's config file, relative to `.mbr/`.
@@ -105,34 +103,6 @@ fn url_depth(url_path: &str) -> usize {
         .split('/')
         .filter(|s| !s.is_empty())
         .count()
-}
-
-/// Build the relative path prefix for .mbr assets based on page depth.
-///
-/// Examples:
-/// - depth 0 → ".mbr/"
-/// - depth 1 → "../.mbr/"
-/// - depth 2 → "../../.mbr/"
-pub(crate) fn relative_base(depth: usize) -> String {
-    if depth == 0 {
-        ".mbr/".to_string()
-    } else {
-        format!("{}.mbr/", "../".repeat(depth))
-    }
-}
-
-/// Build the relative path prefix to root based on page depth.
-///
-/// Examples:
-/// - depth 0 → "" (empty string, already at root)
-/// - depth 1 → "../"
-/// - depth 2 → "../../"
-pub(crate) fn relative_root(depth: usize) -> String {
-    if depth == 0 {
-        String::new()
-    } else {
-        "../".repeat(depth)
-    }
 }
 
 /// Prints a progress stage message to stdout.
@@ -2996,38 +2966,6 @@ mod tests {
         assert_eq!(url_depth("/docs/guide/"), 2);
         assert_eq!(url_depth("/a/b/c/"), 3);
         assert_eq!(url_depth("/a/b/c/d/e/"), 5);
-    }
-
-    #[test]
-    fn test_relative_base_at_root() {
-        assert_eq!(relative_base(0), ".mbr/");
-    }
-
-    #[test]
-    fn test_relative_base_one_level() {
-        assert_eq!(relative_base(1), "../.mbr/");
-    }
-
-    #[test]
-    fn test_relative_base_multiple_levels() {
-        assert_eq!(relative_base(2), "../../.mbr/");
-        assert_eq!(relative_base(3), "../../../.mbr/");
-    }
-
-    #[test]
-    fn test_relative_root_at_root() {
-        assert_eq!(relative_root(0), "");
-    }
-
-    #[test]
-    fn test_relative_root_one_level() {
-        assert_eq!(relative_root(1), "../");
-    }
-
-    #[test]
-    fn test_relative_root_multiple_levels() {
-        assert_eq!(relative_root(2), "../../");
-        assert_eq!(relative_root(3), "../../../");
     }
 
     // ============================================================================
