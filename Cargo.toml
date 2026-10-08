@@ -196,9 +196,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ], optional = true }
 
-# UniFFI is only used for the macOS QuickLook Swift extension (ffi feature).
-# Target-gate it to macOS so Linux/Windows builds never compile the Swift
-# bindings generator, even transitively as a build-dependency.
 [target.'cfg(target_os = "macos")'.dependencies]
 # `external_open`: NSWorkspace::openURL, the only way a WKWebView-hosted app can
 # reach the user's default handler (unlike UIKit, WKWebView never falls back to
@@ -214,15 +211,24 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSString",
     "NSURL",
 ], optional = true }
+
+# UniFFI is only used by the Apple Swift shells (ffi feature): the macOS
+# QuickLook extension and the iOS app. Target-gate it to Apple platforms so
+# Linux/Windows builds never compile the Swift bindings generator, even
+# transitively as a build-dependency. `target_vendor`, not `target_os`, so the
+# iOS staticlib (aarch64-apple-ios[-sim]) gets it too.
+[target.'cfg(target_vendor = "apple")'.dependencies]
 # Pinned to 0.31: uniffi_bindgen 0.32 pulls askama 0.16, which reads askama.toml
 # via a CARGO_MANIFEST_DIR-relative path that breaks under crane's split vendoring
 # (macOS mbr-quicklook-staticlib build fails). Revisit when crane/askama interop is fixed.
 uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
 
-# Non-optional (like a plain build-dependency) but macOS-only: build.rs needs
+# Non-optional (like a plain build-dependency) but Apple-only: build.rs needs
 # it whenever the ffi feature is on, and a feature can't reliably activate a
-# build-dependency via `dep:`. Absent entirely on Linux/Windows.
-[target.'cfg(target_os = "macos")'.build-dependencies]
+# build-dependency via `dep:`. Absent entirely on Linux/Windows. Cargo selects
+# build-dependencies by the *target* platform's cfg, so this is what lets
+# build.rs find uniffi under `--target aarch64-apple-ios[-sim]`.
+[target.'cfg(target_vendor = "apple")'.build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]

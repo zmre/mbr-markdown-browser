@@ -155,9 +155,9 @@ jobs:
       # plus `ffi` on Darwin only, which is precisely what the `build` job below
       # compiles the shipped artifacts from.
       #
-      # Do NOT use `--all-features` here. `ffi` (UniFFI bindings for the macOS
-      # QuickLook extension) is macOS-only *by design*: `uniffi` is declared
-      # solely under [target.'cfg(target_os = "macos")'] in Cargo.toml, as both a
+      # Do NOT use `--all-features` here. `ffi` (UniFFI bindings for the Apple
+      # Swift shells) is Apple-only *by design*: `uniffi` is declared solely
+      # under [target.'cfg(target_vendor = "apple")'] in Cargo.toml, as both a
       # dependency and a build-dependency. On Linux `--all-features` therefore
       # enables `ffi` while the crate is absent, and three things fail to
       # compile: build.rs, the `uniffi-bindgen` bin (required-features = ["ffi"]),
