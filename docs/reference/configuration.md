@@ -404,7 +404,7 @@ for the current markdown file. See the [editing guide](../modes/editing.md).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `edit_enabled` | bool | `false` | Enable the `/.mbr/raw` and `/.mbr/edit` endpoints and the edit button. Also enabled by `--edit`. |
+| `edit_enabled` | bool | `false` | Enable the `/.mbr/raw` and `/.mbr/edit` endpoints and the edit button. Also enabled by `--edit`. Without an `edit_token_hash`, pages reached under a non-loopback `Host` (e.g. `tailscale serve`, a reverse proxy) render read-only, since their writes would be refused. |
 | `edit_token_hash` | string / unset | (unset) | Argon2 PHC hash of the shared editing token. **Required** when editing is enabled on a non-loopback host. Generate with `mbr --generate-edit-token`. Never sent to the frontend. |
 | `edit_require_token_on_loopback` | bool | `false` | Require the token even for loopback callers. When `false`, local (127.0.0.1) edits need no token but are still CSRF-protected. |
 | `upload_max_bytes` | number | `26214400` (25 MiB) | Maximum size in bytes of a single asset uploaded via `/.mbr/upload` (the editor's image uploader). Larger bodies are rejected with `413 Payload Too Large`. |

@@ -224,7 +224,14 @@ repetition rating is, so practice counts toward FSRS scheduling later. Without
 editing — a static site, a read-only server — ratings last for the session only:
 they steer the stack but nothing is written. If a write fails, the deck says so
 and the rating still counts for the session. When the note changed on disk, the
-deck stops writing and carries on session-only; any other failure (a missing
+deck stops writing and carries on session-only. A page reached under a hostname
+the server will not take edits from (behind `tailscale serve` or a reverse proxy,
+with no [edit token](../modes/editing/) configured) is rendered with editing
+off, so its ratings are session-only from the start; to save reviews there,
+configure an `edit_token_hash` (`mbr --generate-edit-token`). Should a write
+still be refused (`403`, e.g. the server restarted without `--edit` under an
+open page), the deck stops writing without a notice — except in spaced
+repetition, which says so once. Any other failure (a missing
 [edit token](../modes/editing/), the server unreachable) is retried with the
 next rating, so saving resumes as soon as it can. Spaced repetition instead
 keeps the card on screen after such a failure, so the same rating can be

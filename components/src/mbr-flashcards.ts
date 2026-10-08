@@ -85,10 +85,23 @@ let importChunk = (file: string): Promise<ChunkModule> =>
 let deckChunk: Promise<ChunkModule | null> | null = null
 let readingChunk: Promise<ChunkModule | null> | null = null
 
-/** Test hook: replace the chunk importer; `file` names the chunk wanted. */
+/**
+ * Set once a write is refused with a 403 (`kind: 'refused'`), for the life of
+ * the page. The page says editing is on, but the server will not take edits
+ * from the address it was loaded at; nothing a reader does on this page changes
+ * that, so later opens get no writer — no FSRS on offer, and Concentric rates
+ * in memory without a notice — instead of one more refused write per open.
+ */
+let writesRefused = false
+
+/**
+ * Test hook: replace the chunk importer; `file` names the chunk wanted. Also
+ * forgets the page-lifetime state, as a fresh page would.
+ */
 export function setFlashcardsChunkImporter(importer: (file: string) => Promise<unknown>): void {
   importChunk = importer as typeof importChunk
   deckChunk = readingChunk = null
+  writesRefused = false
 }
 
 function chunkFailed(err: unknown): null {
@@ -109,10 +122,13 @@ function decorateReading(histories: boolean): void {
   })
 }
 
-/** The writer's main-bundle state, or `null` when reviews cannot be written. */
+/**
+ * The writer's main-bundle state, or `null` when reviews cannot be written:
+ * editing off, no source path, or a write already refused on this page.
+ */
 function reviewServices(): ReviewServices | null {
   const path = currentDocumentPath()
-  return isEditEnabled() && path
+  return isEditEnabled() && !writesRefused && path
     ? {
         path,
         read: readSourceLines,
@@ -199,6 +215,7 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
       record &&
       (async (target) => {
         const outcome = await record(target)
+        if (!outcome.ok && outcome.kind === 'refused') writesRefused = true
         if (outcome.ok) {
           // Still open: `close()` redraws once for the whole session.
           if (this._deck === deck) this._wrote = true

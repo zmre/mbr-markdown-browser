@@ -242,6 +242,27 @@ describe('spaced repetition', () => {
     expect(counter()).toBe('Due 2 · New 1')
   })
 
+  it('says once that writes were refused, then stops writing', async () => {
+    reply = { ok: false, kind: 'refused', message: 'This server is not accepting edits from this page.' }
+    await mountSrs()
+    await key(' ')
+    await key('3')
+    await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')!.textContent).toContain('not accepting edits')
+    deck.querySelector<HTMLButtonElement>('.mbr-fc-banner button')!.click()
+    await deck.updateComplete
+    // Read-only from here, as after a conflict: Space pages, nothing is sent,
+    // and the dismissed notice does not come back.
+    expect(deck.querySelector('.mbr-fc-ratings')).toBeNull()
+    await key(' ')
+    await key(' ')
+    await key('3')
+    await deck.updateComplete
+    expect(calls).toHaveLength(1)
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+  })
+
   it('stops writing after a conflict and says so', async () => {
     reply = { ok: false, kind: 'conflict', message: 'This note changed on disk — reload to continue reviewing.' }
     await mountSrs()
@@ -406,6 +427,46 @@ describe('concentric mode', () => {
     expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull()
     await key(' ')
     expect(deck.querySelector('.mbr-fc-ratings')).not.toBeNull()
+  })
+
+  it('stops writing after a refused write, silently', async () => {
+    // Regression: a 403 (a `Host` the server does not recognise, e.g. behind
+    // `tailscale serve`) used to be retried — and re-announced — on every
+    // rating. Concentric needs no writer, so it now says nothing at all.
+    reply = { ok: false, kind: 'refused', message: 'This server is not accepting edits from this page.' }
+    await mount({ html: SECTIONED_DECK_HTML, recorder })
+    await select('concentric')
+    await rate('3')
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+    // Rated and moved on, session-only: no further write, still no notice.
+    expect(isFlipped()).toBe(false)
+    await rate('3')
+    await rate('2')
+    await deck.updateComplete
+    expect(calls).toHaveLength(1)
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+  })
+
+  it('keeps a silent refusal for spaced repetition, shown once when it is chosen', async () => {
+    reply = { ok: false, kind: 'refused', message: 'This server is not accepting edits from this page.' }
+    await mount({ html: SECTIONED_DECK_HTML, recorder })
+    await select('concentric')
+    await rate('3')
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+    await select('srs')
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')!.textContent).toContain('not accepting edits')
+    deck.querySelector<HTMLButtonElement>('.mbr-fc-banner button')!.click()
+    await deck.updateComplete
+    await select('concentric')
+    await select('srs')
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+    expect(calls).toHaveLength(1)
   })
 
   it('keeps going session-only on an auth or network failure, and tries to save again', async () => {

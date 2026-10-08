@@ -151,6 +151,9 @@ describe('toggleTask', () => {
     expect(await toggleTask({ path: 'notes.md', line: 3, to: 'done' })).toMatchObject({
       ok: false,
       kind: 'auth',
+      // Not "editing is not enabled": the page only writes when it says editing
+      // is on, so a 403 is the server refusing this page's address.
+      message: 'This server is not accepting edits from this page.',
     })
 
     resetTaskToggleState()

@@ -25,6 +25,9 @@ const REVIEW_ENDPOINT = '/.mbr/flashcard-review'
 
 const CONFLICT_MESSAGE = 'This note changed on disk — reload to continue reviewing.'
 
+const REFUSED_MESSAGE =
+  'This server is not accepting edits from this page, so reviews are not being saved.'
+
 /** Human-readable reason for a failed read or write, by status. */
 function failure(status: number, tokenMessage: string): Extract<ReviewOutcome, { ok: false }> {
   switch (status) {
@@ -33,7 +36,10 @@ function failure(status: number, tokenMessage: string): Extract<ReviewOutcome, {
     case 401:
       return { ok: false, kind: 'auth', message: tokenMessage }
     case 403:
-      return { ok: false, kind: 'auth', message: 'Editing is not enabled on this server.' }
+      // Not "editing is off": the trigger builds no writer then, and the
+      // server renders editing off for a Host it would refuse. A 403 here is
+      // a page outliving its server's config (restarted without `--edit`).
+      return { ok: false, kind: 'refused', message: REFUSED_MESSAGE }
     case 422:
       // The only 422 a well-formed request from this module can earn is `at`
       // further from the server's clock than any time zone.
