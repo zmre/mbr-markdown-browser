@@ -548,6 +548,15 @@ fn compression_predicate() -> impl tower_http::compression::Predicate {
     DefaultPredicate::new().and(compress_by_content_type)
 }
 
+/// Lets `?` and `MbrError::from` turn a failed response build into
+/// [`MbrError::Http`]. Lives here, beside the only code that builds responses,
+/// so `errors.rs` does not depend on axum.
+impl From<axum::http::Error> for MbrError {
+    fn from(err: axum::http::Error) -> Self {
+        MbrError::Http(Box::new(err))
+    }
+}
+
 /// Query parameters for media viewer routes.
 #[derive(Debug, serde::Deserialize)]
 pub struct MediaViewerQuery {
@@ -7354,6 +7363,25 @@ fn build_tag_index_outbound_links(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_http_build_error_converts_to_mbr_error() {
+        // `MbrError::Http` is type-erased so `errors.rs` does not depend on
+        // axum; the conversion here must keep the message and the source.
+        let http_err = Response::builder()
+            .header("bad header name", "x")
+            .body(Body::empty())
+            .unwrap_err();
+        let inner = http_err.to_string();
+        let err = MbrError::from(http_err);
+        assert!(matches!(err, MbrError::Http(_)));
+        assert_eq!(
+            err.to_string(),
+            format!("Failed to build HTTP response: {inner}")
+        );
+        let source = std::error::Error::source(&err).expect("source is kept");
+        assert_eq!(source.to_string(), inner);
+    }
 
     #[test]
     fn test_capitalize_first_ascii() {

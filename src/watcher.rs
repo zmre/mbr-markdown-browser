@@ -7,17 +7,37 @@
 //! no per-file stat polling, handles large directories without CPU overhead.
 
 use crate::change_event::{ChangeEventType, FileChangeEvent};
-use crate::errors::WatcherError;
 use crate::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, trace};
 
 /// Capacity of the broadcast channel for file change events.
 /// If clients don't keep up, the oldest messages will be dropped.
 pub(crate) const BROADCAST_CAPACITY: usize = 100;
+
+/// Errors related to file watching.
+///
+/// Defined here rather than in [`crate::errors`] because its sources are
+/// `notify` errors, and the shared error module must not depend on `notify`.
+#[derive(Debug, Error)]
+pub enum WatcherError {
+    #[error("Failed to initialize file watcher")]
+    WatcherInit(#[source] notify::Error),
+
+    #[error("Failed to watch path: {path}")]
+    WatchFailed {
+        path: PathBuf,
+        #[source]
+        source: notify::Error,
+    },
+
+    #[error("Failed to send file change event")]
+    BroadcastFailed,
+}
 
 /// File watcher that monitors the repository for changes.
 pub struct FileWatcher {
