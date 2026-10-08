@@ -14,6 +14,7 @@ use pulldown_cmark::{
     Options, Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
 };
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::Read,
@@ -1688,6 +1689,192 @@ fn close_task(output: &mut Vec<Event<'_>>, task: PendingTask) {
     }
 }
 
+/// Everything a full render needs besides the markdown text itself.
+///
+/// Shared by [`render_str`], [`render_sync`] and [`render_with_cache`], which
+/// differ only in where the text comes from and in whether bare URLs may be
+/// fetched over the network (see [`render_with_cache`]).
+pub struct RenderOptions<'a> {
+    /// Repository root, for resolving links and media.
+    pub root_path: &'a Path,
+    /// OpenGraph enrichment timeout. `0` disables it: no fetches and no
+    /// cached network results. No-network embeds are produced regardless.
+    pub oembed_timeout_ms: u64,
+    pub link_transform_config: LinkTransformConfig,
+    /// Shared OpenGraph cache: read by every entry point, written only by the
+    /// async one, which is the only one that fetches.
+    pub oembed_cache: Option<Arc<OembedCache>>,
+    /// True in server/GUI mode, false in build/CLI mode.
+    pub server_mode: bool,
+    /// True when dynamic video transcoding is enabled.
+    pub transcode_enabled: bool,
+    /// Valid tag source names for `[[Source:value]]` wikilink transformation.
+    pub valid_tag_sources: HashSet<String>,
+    /// Whether to emit `data-mbr-line` on block elements.
+    pub review: ReviewLines,
+    /// Whether to highlight TK/TODO/FIXME/XXX (pass 3).
+    pub mark_incomplete: bool,
+    pub incomplete_markers: &'a [String],
+    pub wikilink_index: Option<Arc<WikilinkIndex>>,
+}
+
+/// Pass 1's output plus the state passes 2 and 3 read back.
+///
+/// Bundled so the async and sync entry points cannot drift apart between
+/// passes: everything that differs between them happens between
+/// [`first_pass`] and [`finish_render`].
+struct FirstPass<'a> {
+    events: Vec<Event<'a>>,
+    headings: Vec<HeadingInfo>,
+    section_attrs: HashMap<usize, ParsedAttrs>,
+    marker_rule: Option<Arc<MarkerRule>>,
+    text_lines: TextLines,
+    block_lines: BlockLines,
+}
+
+/// Strips a leading BOM and substitutes `[[Source:value]]` tag wikilinks with
+/// standard markdown links, which must happen before the parser sees the text.
+fn prepare_source<'s>(source: &'s str, valid_tag_sources: &HashSet<String>) -> Cow<'s, str> {
+    let source = strip_bom(source);
+    if valid_tag_sources.is_empty() {
+        Cow::Borrowed(source)
+    } else {
+        Cow::Owned(transform_wikilinks(source, valid_tag_sources))
+    }
+}
+
+/// Pass 1 of a full render.
+///
+/// A single merged pass: collect events, extract headings with anchor IDs,
+/// detect `--- {attrs}` rule patterns, and rewrite task list items (merging
+/// what were previously the heading extraction loop, transform_rule_attrs and
+/// a separate task pass into one iteration). Running the task rewrite here
+/// rather than after `process_all_events` also means the annotations are gone
+/// before text is counted for readability and scanned for bare URLs.
+///
+/// The marker rule is fetched *before* pass 1 because it decides whether pass 1
+/// has to record the source line of every text run for pass 3. `cached`, not
+/// `new`: compiling the pattern costs ~80µs, which is several times a small
+/// page's entire render, and this runs per page.
+fn first_pass<'a>(markdown_input: &'a str, opts: &RenderOptions<'_>) -> FirstPass<'a> {
+    let marker_rule = opts
+        .mark_incomplete
+        .then(|| MarkerRule::cached(opts.incomplete_markers))
+        .flatten();
+    let mut text_lines = if marker_rule.is_some() {
+        TextLines::recording()
+    } else {
+        TextLines::disabled()
+    };
+    // Independent of the marker rule: `review_enabled` and `mark_incomplete` are
+    // separate switches, which is why these are two tables.
+    let mut block_lines = BlockLines::for_mode(opts.review);
+    let (events, headings, section_attrs) = collect_events_and_headings(
+        markdown_input,
+        TaskMarkup::Render,
+        &mut text_lines,
+        &mut block_lines,
+    );
+    FirstPass {
+        events,
+        headings,
+        section_attrs,
+        marker_rule,
+        text_lines,
+        block_lines,
+    }
+}
+
+/// Passes 2 and 3 of a full render, then HTML generation.
+///
+/// `prefetched_oembed` is the only input that differs between the entry
+/// points; `file` only names the file in diagnostics.
+fn finish_render(
+    first: FirstPass<'_>,
+    markdown_input: &str,
+    file: &Path,
+    prefetched_oembed: HashMap<String, PageInfo>,
+    opts: RenderOptions<'_>,
+) -> Result<MarkdownRenderResult, MarkdownError> {
+    let FirstPass {
+        events,
+        headings,
+        section_attrs,
+        marker_rule,
+        text_lines,
+        mut block_lines,
+    } = first;
+
+    // Detect if the first heading is an H1 (used for conditional title rendering in templates)
+    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
+
+    // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
+    let (processed_events, state) = process_all_events(
+        events,
+        opts.root_path,
+        file,
+        opts.link_transform_config,
+        prefetched_oembed,
+        opts.server_mode,
+        opts.transcode_enabled,
+        opts.valid_tag_sources,
+        opts.wikilink_index,
+    );
+
+    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
+    // mode. It also re-keys `block_lines` onto its own output; skipping it
+    // leaves the pass-1 keying, which is correct because passes 1 and 2 are 1:1.
+    let processed_events = match &marker_rule {
+        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines, &mut block_lines),
+        None => processed_events,
+    };
+
+    // Generate HTML output and extract frontmatter
+    finalize_render(
+        processed_events,
+        state,
+        section_attrs,
+        markdown_input,
+        headings,
+        has_h1,
+        block_lines,
+    )
+}
+
+/// Renders markdown text to HTML, synchronously and without network access.
+///
+/// The one full-render pipeline: [`render_sync`] is this plus a file read, and
+/// [`render_with_cache`] shares every pass and differs only in fetching
+/// OpenGraph metadata over the network.
+///
+/// No-network embeds (YouTube, Giphy, GitHub gist, and bare-URL media) ARE
+/// produced — they are pure CPU (regex/string) and require no I/O, so they
+/// work regardless of `oembed_timeout_ms`. OpenGraph results are never fetched
+/// here; when `oembed_timeout_ms > 0` and a cache is present, previously cached
+/// network results are merged in.
+///
+/// `file` only names the source in diagnostics (e.g. a YAML frontmatter parse
+/// warning); it is never read.
+pub fn render_str(
+    source: &str,
+    file: &Path,
+    opts: RenderOptions<'_>,
+) -> Result<MarkdownRenderResult, MarkdownError> {
+    let markdown_input = prepare_source(source, &opts.valid_tag_sources);
+    let first = first_pass(&markdown_input, &opts);
+
+    let mut prefetched_oembed = collect_local_embeds(&first.events);
+    if opts.oembed_timeout_ms > 0
+        && let Some(ref cache) = opts.oembed_cache
+    {
+        for (url, info) in collect_cached_oembed(&first.events, cache) {
+            prefetched_oembed.entry(url).or_insert(info);
+        }
+    }
+
+    finish_render(first, &markdown_input, file, prefetched_oembed, opts)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn render(
     file: PathBuf,
@@ -1719,16 +1906,15 @@ pub async fn render(
     .await
 }
 
-/// Renders markdown to HTML with optional OEmbed caching support.
+/// Renders a markdown file to HTML with optional OEmbed caching support.
 ///
-/// When `oembed_cache` is provided, cached results are used when available and
-/// new results are cached for future use. URLs are fetched in parallel for improved
-/// performance when multiple bare URLs are present in the document.
+/// Identical to [`render_str`] except that, when `oembed_timeout_ms > 0`, bare
+/// URLs are enriched with OpenGraph metadata fetched over the network. When
+/// `oembed_cache` is provided, cached results are used when available and new
+/// results are cached for future use. URLs are fetched in parallel for
+/// improved performance when multiple bare URLs are present in the document.
 ///
-/// - `server_mode`: True in server/GUI mode, false in build/CLI mode
-/// - `transcode_enabled`: True when dynamic video transcoding is enabled
-/// - `valid_tag_sources`: Set of valid tag source names for wikilink transformation
-/// - `review`: whether to emit `data-mbr-line` on block elements
+/// See [`RenderOptions`] for the parameters.
 #[allow(clippy::too_many_arguments)]
 pub async fn render_with_cache(
     file: PathBuf,
@@ -1746,107 +1932,52 @@ pub async fn render_with_cache(
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Read markdown input. Use tokio's async filesystem API so this (potentially
     // slow) read does not block a tokio worker thread in the async render path.
-    let mut raw_markdown_input =
+    let raw_markdown_input =
         tokio::fs::read_to_string(&file)
             .await
             .map_err(|e| MarkdownError::ReadFailed {
                 path: file.clone(),
                 source: e,
             })?;
-    strip_bom_in_place(&mut raw_markdown_input);
 
-    // Transform [[Source:value]] wikilinks to standard markdown links before parsing
-    let markdown_input = if valid_tag_sources.is_empty() {
-        raw_markdown_input
-    } else {
-        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
+    let opts = RenderOptions {
+        root_path,
+        oembed_timeout_ms,
+        link_transform_config,
+        oembed_cache,
+        server_mode,
+        transcode_enabled,
+        valid_tag_sources,
+        review,
+        mark_incomplete,
+        incomplete_markers,
+        wikilink_index,
     };
-
-    // Single merged pass: collect events, extract headings with anchor IDs,
-    // detect `--- {attrs}` rule patterns, and rewrite task list items (merging
-    // what were previously the heading extraction loop, transform_rule_attrs
-    // and a separate task pass into one iteration). Running the task rewrite
-    // here rather than after `process_all_events` also means the annotations
-    // are gone before text is counted for readability and scanned for bare URLs.
-    //
-    // The marker rule is fetched *before* pass 1 because it decides whether
-    // pass 1 has to record the source line of every text run for pass 3.
-    // `cached`, not `new`: compiling the pattern costs ~80µs, which is several
-    // times a small page's entire render, and this runs per page.
-    let marker_rule = mark_incomplete
-        .then(|| MarkerRule::cached(incomplete_markers))
-        .flatten();
-    let mut text_lines = if marker_rule.is_some() {
-        TextLines::recording()
-    } else {
-        TextLines::disabled()
-    };
-    // Independent of the marker rule: `review_enabled` and `mark_incomplete` are
-    // separate switches, which is why these are two tables.
-    let mut block_lines = BlockLines::for_mode(review);
-    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
-        &markdown_input,
-        TaskMarkup::Render,
-        &mut text_lines,
-        &mut block_lines,
-    );
-
-    // Detect if the first heading is an H1 (used for conditional title rendering in templates)
-    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
+    let markdown_input = prepare_source(&raw_markdown_input, &opts.valid_tag_sources);
+    let first = first_pass(&markdown_input, &opts);
 
     // No-network embeds (YouTube/Giphy/gist/bare media) are pure CPU and require
     // no I/O, so they are produced regardless of `oembed_timeout_ms` — the docs
     // promise they keep working when oembed is disabled. Only network OpenGraph
     // enrichment is gated by the timeout; `prefetch_oembed_urls` must stay behind
     // that gate because calling it at timeout 0 would fill the cache with empty
-    // `PageInfo`s. Keep this block in sync with `render_sync`, which duplicates
-    // the same pipeline for the rayon/build path.
-    let mut prefetched_oembed = collect_local_embeds(&events_with_ids);
-    if oembed_timeout_ms > 0 {
+    // `PageInfo`s. This is the only step that differs from `render_str`.
+    let mut prefetched_oembed = collect_local_embeds(&first.events);
+    if opts.oembed_timeout_ms > 0 {
         for (url, info) in
-            prefetch_oembed_urls(&events_with_ids, oembed_timeout_ms, &oembed_cache).await
+            prefetch_oembed_urls(&first.events, opts.oembed_timeout_ms, &opts.oembed_cache).await
         {
             prefetched_oembed.entry(url).or_insert(info);
         }
     }
 
-    // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
-    let (processed_events, state) = process_all_events(
-        events_with_ids,
-        root_path,
-        &file,
-        link_transform_config,
-        prefetched_oembed,
-        server_mode,
-        transcode_enabled,
-        valid_tag_sources,
-        wikilink_index,
-    );
-
-    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
-    // mode. It also re-keys `block_lines` onto its own output; skipping it
-    // leaves the pass-1 keying, which is correct because passes 1 and 2 are 1:1.
-    let processed_events = match &marker_rule {
-        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines, &mut block_lines),
-        None => processed_events,
-    };
-
-    // Generate HTML output and extract frontmatter
-    finalize_render(
-        processed_events,
-        state,
-        section_attrs,
-        &markdown_input,
-        headings,
-        has_h1,
-        block_lines,
-    )
+    finish_render(first, &markdown_input, &file, prefetched_oembed, opts)
 }
 
 /// Runs process_event over all events, returning the processed events and final state.
 ///
-/// This is the shared event processing pass used by both `render_with_cache` (async)
-/// and `render_sync`. It handles link transforms, media embeds, YAML frontmatter,
+/// This is the shared event processing pass used by every full render (through
+/// `finish_render`) and by `extract_outbound_links_sync`. It handles link transforms, media embeds, YAML frontmatter,
 /// vid shortcodes, bare URL oembed lookups, and word counting.
 ///
 /// `file_path` is only used to name the file in diagnostics (e.g. a YAML
@@ -2287,11 +2418,8 @@ fn finalize_render(
     })
 }
 
-/// Synchronous version of `render_with_cache()` for use from rayon threads.
-///
-/// Performs the same rendering pipeline but without async: file reading (already sync),
-/// wikilink transformation, merged heading + rule-attrs pass, process_event pass, and
-/// HTML generation.
+/// Synchronous counterpart of [`render_with_cache`] for use from rayon threads:
+/// reads `file` and renders it with [`render_str`].
 ///
 /// No-network embeds (Giphy, GitHub gist, and bare-URL media) ARE produced in the
 /// sync path — they are pure CPU (regex/string) and require no I/O, so they work in
@@ -2313,89 +2441,26 @@ pub fn render_sync(
     incomplete_markers: &[String],
     wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
-    // Read markdown input
-    let mut raw_markdown_input =
-        fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
-            path: file.clone(),
-            source: e,
-        })?;
-    strip_bom_in_place(&mut raw_markdown_input);
-
-    // Transform [[Source:value]] wikilinks to standard markdown links before parsing
-    let markdown_input = if valid_tag_sources.is_empty() {
-        raw_markdown_input
-    } else {
-        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
-    };
-
-    // Single merged pass: collect events, extract headings with anchor IDs,
-    // detect `--- {attrs}` rule patterns, and rewrite task list items. As in
-    // `render_with_cache`, the marker rule is compiled first because it decides
-    // whether pass 1 records text-run source lines for pass 3.
-    let marker_rule = mark_incomplete
-        .then(|| MarkerRule::cached(incomplete_markers))
-        .flatten();
-    let mut text_lines = if marker_rule.is_some() {
-        TextLines::recording()
-    } else {
-        TextLines::disabled()
-    };
-    // Independent of the marker rule, exactly as in `render_with_cache`.
-    let mut block_lines = BlockLines::for_mode(review);
-    let (events_with_ids, headings, section_attrs) = collect_events_and_headings(
-        &markdown_input,
-        TaskMarkup::Render,
-        &mut text_lines,
-        &mut block_lines,
-    );
-
-    // Detect if the first heading is an H1
-    let has_h1 = headings.first().is_some_and(|h| h.level == 1);
-
-    // No-network embeds (Giphy/gist/media) are cheap and require no I/O, so
-    // compute them even in the sync/build path (they work regardless of
-    // oembed_timeout_ms). Network OpenGraph results are only pulled from cache
-    // here (the sync path never performs network fetches).
-    // Mirrors the equivalent block in `render_with_cache`; the two entry points
-    // duplicate the whole pipeline and must be changed together.
-    let mut prefetched_oembed = collect_local_embeds(&events_with_ids);
-    if oembed_timeout_ms > 0
-        && let Some(ref cache) = oembed_cache
-    {
-        for (url, info) in collect_cached_oembed(&events_with_ids, cache) {
-            prefetched_oembed.entry(url).or_insert(info);
-        }
-    }
-
-    // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
-    let (processed_events, state) = process_all_events(
-        events_with_ids,
-        root_path,
+    let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+        path: file.clone(),
+        source: e,
+    })?;
+    render_str(
+        &raw_markdown_input,
         &file,
-        link_transform_config,
-        prefetched_oembed,
-        server_mode,
-        transcode_enabled,
-        valid_tag_sources,
-        wikilink_index,
-    );
-
-    // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
-    // mode. It also re-keys `block_lines` onto its own output.
-    let processed_events = match &marker_rule {
-        Some(rule) => mark_incomplete_blocks(processed_events, rule, &text_lines, &mut block_lines),
-        None => processed_events,
-    };
-
-    // Generate HTML output and extract frontmatter
-    finalize_render(
-        processed_events,
-        state,
-        section_attrs,
-        &markdown_input,
-        headings,
-        has_h1,
-        block_lines,
+        RenderOptions {
+            root_path,
+            oembed_timeout_ms,
+            link_transform_config,
+            oembed_cache,
+            server_mode,
+            transcode_enabled,
+            valid_tag_sources,
+            review,
+            mark_incomplete,
+            incomplete_markers,
+            wikilink_index,
+        },
     )
 }
 
@@ -2424,18 +2489,11 @@ pub fn extract_outbound_links_sync(
     valid_tag_sources: HashSet<String>,
     wikilink_index: Option<Arc<WikilinkIndex>>,
 ) -> Result<Vec<OutboundLink>, MarkdownError> {
-    let mut raw_markdown_input =
-        fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
-            path: file.clone(),
-            source: e,
-        })?;
-    strip_bom_in_place(&mut raw_markdown_input);
-
-    let markdown_input = if valid_tag_sources.is_empty() {
-        raw_markdown_input
-    } else {
-        transform_wikilinks(&raw_markdown_input, &valid_tag_sources)
-    };
+    let raw_markdown_input = fs::read_to_string(&file).map_err(|e| MarkdownError::ReadFailed {
+        path: file.clone(),
+        source: e,
+    })?;
+    let markdown_input = prepare_source(&raw_markdown_input, &valid_tag_sources);
 
     // Task markup is skipped: it rewrites text runs, never link destinations,
     // so it cannot change which links this function collects -- and this runs
@@ -3153,34 +3211,120 @@ mod tests {
     /// Renders with an explicit `server_mode`, for asserting that output does
     /// *not* vary between a served page and a static build.
     async fn render_markdown_with_mode(content: &str, server_mode: bool) -> String {
+        render_str_with_mode(content, server_mode).html
+    }
+
+    /// Options for an in-memory render rooted at `root`: no oembed, no review
+    /// lines, no incomplete markers, no tag sources.
+    fn plain_options(root: &Path, server_mode: bool) -> RenderOptions<'_> {
+        RenderOptions {
+            root_path: root,
+            oembed_timeout_ms: 0,
+            link_transform_config: LinkTransformConfig {
+                markdown_extensions: vec!["md".to_string()],
+                index_file: "index.md".to_string(),
+                is_index_file: false,
+                url_depth: None,
+                current_page_url: String::new(),
+                markdown_page_probe: None,
+            },
+            oembed_cache: None,
+            server_mode,
+            transcode_enabled: false,
+            valid_tag_sources: HashSet::new(),
+            review: ReviewLines::Omit,
+            mark_incomplete: false,
+            incomplete_markers: &[],
+            wikilink_index: None,
+        }
+    }
+
+    /// Renders `content` without touching the filesystem.
+    fn render_str_with_mode(content: &str, server_mode: bool) -> MarkdownRenderResult {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        render_str(
+            content,
+            &root.join("note.md"),
+            plain_options(root, server_mode),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn render_str_strips_bom_before_frontmatter() {
+        let result = render_str_with_mode("\u{feff}---\ntitle: Hi\n---\n\n# Body\n", false);
+        assert_eq!(
+            result.frontmatter.get("title").and_then(|v| v.as_str()),
+            Some("Hi")
+        );
+        assert!(result.html.contains("Body"));
+        assert!(!result.html.contains("title: Hi"));
+    }
+
+    /// `render_sync` is `render_str` plus a file read, and the async path
+    /// shares every pass with it: all three must produce identical pages, with
+    /// every optional table (review lines, incomplete markers, tag wikilinks)
+    /// switched on.
+    #[tokio::test]
+    async fn render_str_matches_file_entry_points() {
+        let content = "---\ntitle: T\ntags: [a]\n---\n\n# Head TODO: one\n\n\
+            - [ ] task @due(2026-01-02)\n- item with [[Tags:rust]] and https://example.com/x.mp4\n\n\
+            ```rust\nfn x() {}\n```\n\n--- {#s .c}\n\nTerm\n: def\n";
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
         let path = file.path().to_path_buf();
         let root = path.parent().unwrap().to_path_buf();
-        let config = LinkTransformConfig {
-            markdown_extensions: vec!["md".to_string()],
-            index_file: "index.md".to_string(),
-            is_index_file: false,
-            url_depth: None,
-            current_page_url: String::new(),
-            markdown_page_probe: None,
+        let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
+        let tags: HashSet<String> = ["tags".to_string()].into_iter().collect();
+        let opts = || RenderOptions {
+            review: ReviewLines::Emit,
+            mark_incomplete: true,
+            incomplete_markers: &markers,
+            valid_tag_sources: tags.clone(),
+            ..plain_options(&root, true)
         };
-        render(
-            path,
-            &root,
-            0,
-            config,
-            server_mode,
-            false,
-            HashSet::new(),
-            ReviewLines::Omit,
-            false,
-            &[],
-            None,
+
+        let from_str = render_str(content, &path, opts()).unwrap();
+        let o = opts();
+        let from_sync = render_sync(
+            path.clone(),
+            o.root_path,
+            o.oembed_timeout_ms,
+            o.link_transform_config,
+            o.oembed_cache,
+            o.server_mode,
+            o.transcode_enabled,
+            o.valid_tag_sources,
+            o.review,
+            o.mark_incomplete,
+            o.incomplete_markers,
+            o.wikilink_index,
+        )
+        .unwrap();
+        let o = opts();
+        let from_async = render_with_cache(
+            path.clone(),
+            o.root_path,
+            o.oembed_timeout_ms,
+            o.link_transform_config,
+            o.oembed_cache,
+            o.server_mode,
+            o.transcode_enabled,
+            o.valid_tag_sources,
+            o.review,
+            o.mark_incomplete,
+            o.incomplete_markers,
+            o.wikilink_index,
         )
         .await
-        .unwrap()
-        .html
+        .unwrap();
+
+        assert!(from_str.html.contains("data-mbr-line"));
+        assert!(from_str.html.contains("mbr-marker-"));
+        assert_eq!(from_str.html, from_sync.html);
+        assert_eq!(from_str.html, from_async.html);
+        assert_eq!(from_str.frontmatter, from_sync.frontmatter);
+        assert_eq!(from_str.outbound_links, from_async.outbound_links);
     }
 
     async fn render_markdown_with_config(
