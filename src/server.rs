@@ -20,6 +20,7 @@ use crate::file_write::{FileWriteLocks, create_unique_temp_file};
 use crate::link_grep::InboundLinkCache;
 use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
+use crate::media::MediaViewerType;
 use crate::oembed_cache::OembedCache;
 use crate::page_context::{self, ModeFlags, PageChrome, UrlMode};
 use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
@@ -28,6 +29,7 @@ use crate::search::{SearchEngine, SearchQuery, search_other_files};
 use crate::sorting::sort_files;
 use crate::task_query::IncludeFilter;
 use crate::templates;
+use crate::url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path};
 #[cfg(feature = "media-metadata")]
 use crate::video_metadata_cache::VideoMetadataCache;
 #[cfg(feature = "media-metadata")]
@@ -420,7 +422,7 @@ impl From<&ServerState> for ListingCaches {
 #[derive(Debug)]
 enum LiveReloadAction {
     /// Serialize and forward this event to the client.
-    Forward(crate::watcher::FileChangeEvent),
+    Forward(crate::change_event::FileChangeEvent),
     /// This client fell behind and the channel dropped events; keep listening.
     Skip,
     /// The sender is gone (server shutting down); close the socket.
@@ -434,7 +436,7 @@ enum LiveReloadAction {
 /// only cost this client a missed reload, and the client re-fetches the page
 /// on the next event it does receive.
 fn live_reload_action(
-    result: Result<crate::watcher::FileChangeEvent, broadcast::error::RecvError>,
+    result: Result<crate::change_event::FileChangeEvent, broadcast::error::RecvError>,
 ) -> LiveReloadAction {
     match result {
         Ok(event) => LiveReloadAction::Forward(event),
@@ -546,111 +548,12 @@ fn compression_predicate() -> impl tower_http::compression::Predicate {
     DefaultPredicate::new().and(compress_by_content_type)
 }
 
-/// Type of media for the viewer page.
-///
-/// Used to route requests to the appropriate media viewer template
-/// at `/.mbr/videos/`, `/.mbr/pdfs/`, `/.mbr/audio/`, or `/.mbr/images/`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaViewerType {
-    Video,
-    Pdf,
-    Audio,
-    Image,
-}
-
-impl MediaViewerType {
-    /// Parse from route path.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// assert_eq!(MediaViewerType::from_route("/.mbr/videos/"), Some(MediaViewerType::Video));
-    /// assert_eq!(MediaViewerType::from_route("/.mbr/pdfs/"), Some(MediaViewerType::Pdf));
-    /// assert_eq!(MediaViewerType::from_route("/.mbr/audio/"), Some(MediaViewerType::Audio));
-    /// assert_eq!(MediaViewerType::from_route("/.mbr/images/"), Some(MediaViewerType::Image));
-    /// assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
-    /// ```
-    #[must_use]
-    pub fn from_route(path: &str) -> Option<Self> {
-        match path {
-            "/.mbr/videos/" => Some(Self::Video),
-            "/.mbr/pdfs/" => Some(Self::Pdf),
-            "/.mbr/audio/" => Some(Self::Audio),
-            "/.mbr/images/" => Some(Self::Image),
-            _ => None,
-        }
-    }
-
-    /// Template name for this media type.
-    #[must_use]
-    pub const fn template_name(&self) -> &'static str {
-        "media_viewer.html"
-    }
-
-    /// Human-readable label for this media type.
-    #[must_use]
-    pub const fn label(&self) -> &'static str {
-        match self {
-            Self::Video => "Video",
-            Self::Pdf => "PDF",
-            Self::Audio => "Audio",
-            Self::Image => "Image",
-        }
-    }
-
-    /// Lowercase string representation for template context.
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Video => "video",
-            Self::Pdf => "pdf",
-            Self::Audio => "audio",
-            Self::Image => "image",
-        }
-    }
-
-    /// Determine media type from a file extension (case-insensitive).
-    ///
-    /// Returns `None` for unrecognized extensions.
-    #[must_use]
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext.to_ascii_lowercase().as_str() {
-            // Video
-            "mp4" | "m4v" | "mov" | "webm" | "flv" | "mpg" | "mpeg" | "avi" | "3gp" | "wmv"
-            | "mkv" | "ts" | "mts" | "m2ts" | "vob" | "divx" | "xvid" | "asf" | "rm" | "rmvb"
-            | "f4v" | "ogv" => Some(Self::Video),
-            // Audio
-            "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "aiff" | "aif" | "oga" | "opus"
-            | "wma" => Some(Self::Audio),
-            // Image
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "svg" => {
-                Some(Self::Image)
-            }
-            // PDF
-            "pdf" => Some(Self::Pdf),
-            _ => None,
-        }
-    }
-
-    /// Determine media type from a file path by inspecting its extension.
-    ///
-    /// Returns `None` if the path has no extension or the extension is unrecognized.
-    #[must_use]
-    pub fn from_path(path: &std::path::Path) -> Option<Self> {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(Self::from_extension)
-    }
-
-    /// Returns the server route path for this media viewer type.
-    #[must_use]
-    pub const fn route_path(&self) -> &'static str {
-        match self {
-            Self::Video => "/.mbr/videos/",
-            Self::Pdf => "/.mbr/pdfs/",
-            Self::Audio => "/.mbr/audio/",
-            Self::Image => "/.mbr/images/",
-        }
+/// Lets `?` and `MbrError::from` turn a failed response build into
+/// [`MbrError::Http`]. Lives here, beside the only code that builds responses,
+/// so `errors.rs` does not depend on axum.
+impl From<axum::http::Error> for MbrError {
+    fn from(err: axum::http::Error) -> Self {
+        MbrError::Http(Box::new(err))
     }
 }
 
@@ -1209,7 +1112,7 @@ pub struct ServerState {
     pub templates: crate::templates::Templates,
     pub repo: Arc<Repo>,
     pub oembed_timeout_ms: u64,
-    pub file_change_tx: Option<broadcast::Sender<crate::watcher::FileChangeEvent>>,
+    pub file_change_tx: Option<broadcast::Sender<crate::change_event::FileChangeEvent>>,
     /// Optional template folder that overrides default .mbr/ and compiled defaults
     pub template_folder: Option<std::path::PathBuf>,
     /// Sort configuration for file listings
@@ -1867,7 +1770,7 @@ impl Server {
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
         let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
-            crate::watcher::FileChangeEvent,
+            crate::change_event::FileChangeEvent,
         >(crate::watcher::BROADCAST_CAPACITY);
         let tx_for_watcher = file_change_tx.clone();
 
@@ -2054,17 +1957,17 @@ impl Server {
                                 Err(broadcast::error::RecvError::Lagged(_)) => {
                                     // Too many events queued — force full rescan
                                     pending_events.clear();
-                                    pending_events.push(crate::watcher::FileChangeEvent {
+                                    pending_events.push(crate::change_event::FileChangeEvent {
                                         path: String::new(),
                                         relative_path: String::new(),
-                                        event: crate::watcher::ChangeEventType::Created,
+                                        event: crate::change_event::ChangeEventType::Created,
                                     });
                                     // Push over threshold to trigger full rescan
                                     for _ in 0..SURGICAL_THRESHOLD {
-                                        pending_events.push(crate::watcher::FileChangeEvent {
+                                        pending_events.push(crate::change_event::FileChangeEvent {
                                             path: String::new(),
                                             relative_path: String::new(),
-                                            event: crate::watcher::ChangeEventType::Created,
+                                            event: crate::change_event::ChangeEventType::Created,
                                         });
                                     }
                                     break;
@@ -2079,9 +1982,9 @@ impl Server {
                 let relevant_events: Vec<_> = pending_events
                     .into_iter()
                     .filter(|event| match event.event {
-                        crate::watcher::ChangeEventType::Created
-                        | crate::watcher::ChangeEventType::Deleted => true,
-                        crate::watcher::ChangeEventType::Modified => {
+                        crate::change_event::ChangeEventType::Created
+                        | crate::change_event::ChangeEventType::Deleted => true,
+                        crate::change_event::ChangeEventType::Modified => {
                             markdown_extensions_for_invalidation
                                 .iter()
                                 .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
@@ -2109,8 +2012,8 @@ impl Server {
                     let has_tag_changes = relevant_events.iter().any(|e| {
                         matches!(
                             e.event,
-                            crate::watcher::ChangeEventType::Deleted
-                                | crate::watcher::ChangeEventType::Modified
+                            crate::change_event::ChangeEventType::Deleted
+                                | crate::change_event::ChangeEventType::Modified
                         )
                     });
 
@@ -2142,7 +2045,10 @@ impl Server {
                                     .pin()
                                     .get(&abs_path)
                                     .map(|info| info.url_path.clone()),
-                                matches!(event.event, crate::watcher::ChangeEventType::Deleted),
+                                matches!(
+                                    event.event,
+                                    crate::change_event::ChangeEventType::Deleted
+                                ),
                             ));
                             repo.invalidate_file(&abs_path, &event.event);
                             // After `repo.invalidate_file`, never before: a
@@ -3219,10 +3125,10 @@ impl Server {
         if let Some(tx) = &config.file_change_tx {
             let relative =
                 pathdiff::diff_paths(&md_path, &config.base_dir).unwrap_or_else(|| md_path.clone());
-            let _ = tx.send(crate::watcher::FileChangeEvent {
+            let _ = tx.send(crate::change_event::FileChangeEvent {
                 path: md_path.to_string_lossy().to_string(),
                 relative_path: relative.to_string_lossy().to_string(),
-                event: crate::watcher::ChangeEventType::Modified,
+                event: crate::change_event::ChangeEventType::Modified,
             });
         }
 
@@ -3344,10 +3250,14 @@ impl Server {
     /// to see the change. (A flashcard review inserts lines, which moves every
     /// task below it, so it needs the invalidation as much as a toggle does.)
     fn announce_in_place_edit(config: &ServerState, md_path: &Path) {
-        Self::broadcast_change(config, md_path, crate::watcher::ChangeEventType::Modified);
+        Self::broadcast_change(
+            config,
+            md_path,
+            crate::change_event::ChangeEventType::Modified,
+        );
         config.task_index.invalidate_file(
             md_path,
-            &crate::watcher::ChangeEventType::Modified,
+            &crate::change_event::ChangeEventType::Modified,
             &config.repo,
             &config.base_dir,
         );
@@ -3504,12 +3414,12 @@ impl Server {
     fn broadcast_change(
         config: &ServerState,
         abs_path: &Path,
-        event: crate::watcher::ChangeEventType,
+        event: crate::change_event::ChangeEventType,
     ) {
         if let Some(tx) = &config.file_change_tx {
             let relative = pathdiff::diff_paths(abs_path, &config.base_dir)
                 .unwrap_or_else(|| abs_path.to_path_buf());
-            let _ = tx.send(crate::watcher::FileChangeEvent {
+            let _ = tx.send(crate::change_event::FileChangeEvent {
                 path: abs_path.to_string_lossy().to_string(),
                 relative_path: relative.to_string_lossy().to_string(),
                 event,
@@ -3572,13 +3482,13 @@ impl Server {
         // in invalidate_file, so no tag-index rebuild is needed.
         config
             .repo
-            .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
+            .invalidate_file(&dst, &crate::change_event::ChangeEventType::Created);
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
         ListingCaches::from(config).invalidate();
         config.inbound_link_cache.invalidate_all();
 
-        Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
+        Self::broadcast_change(config, &dst, crate::change_event::ChangeEventType::Created);
 
         Ok(CreateResponse {
             url_path,
@@ -3621,7 +3531,11 @@ impl Server {
             return Err(FileOpError::AlreadyExists);
         }
         std::fs::create_dir_all(&target).map_err(FileOpError::Io)?;
-        Self::broadcast_change(config, &target, crate::watcher::ChangeEventType::Created);
+        Self::broadcast_change(
+            config,
+            &target,
+            crate::change_event::ChangeEventType::Created,
+        );
         Ok(MkdirResponse { path: rel_path })
     }
 
@@ -3730,7 +3644,7 @@ impl Server {
         Self::broadcast_change(
             config,
             &final_path,
-            crate::watcher::ChangeEventType::Created,
+            crate::change_event::ChangeEventType::Created,
         );
 
         Ok(UploadResponse {
@@ -3933,10 +3847,10 @@ impl Server {
         // A5: surgical repo/cache updates + broadcasts.
         config
             .repo
-            .invalidate_file(&src, &crate::watcher::ChangeEventType::Deleted);
+            .invalidate_file(&src, &crate::change_event::ChangeEventType::Deleted);
         config
             .repo
-            .invalidate_file(&dst, &crate::watcher::ChangeEventType::Created);
+            .invalidate_file(&dst, &crate::change_event::ChangeEventType::Created);
         let mut changed_union: Vec<PathBuf> = Vec::new();
         for p in rewritten_paths.iter().chain(wiki_paths.iter()) {
             if !changed_union.iter().any(|q| q == p) {
@@ -3946,7 +3860,7 @@ impl Server {
         for p in &changed_union {
             config
                 .repo
-                .invalidate_file(p, &crate::watcher::ChangeEventType::Modified);
+                .invalidate_file(p, &crate::change_event::ChangeEventType::Modified);
         }
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
@@ -3955,10 +3869,10 @@ impl Server {
         config.inbound_link_cache.invalidate_all();
         config.link_cache.invalidate_all();
 
-        Self::broadcast_change(config, &src, crate::watcher::ChangeEventType::Deleted);
-        Self::broadcast_change(config, &dst, crate::watcher::ChangeEventType::Created);
+        Self::broadcast_change(config, &src, crate::change_event::ChangeEventType::Deleted);
+        Self::broadcast_change(config, &dst, crate::change_event::ChangeEventType::Created);
         for p in &changed_union {
-            Self::broadcast_change(config, p, crate::watcher::ChangeEventType::Modified);
+            Self::broadcast_change(config, p, crate::change_event::ChangeEventType::Modified);
         }
 
         let to_urls = |paths: &[PathBuf]| -> Vec<String> {
@@ -4461,17 +4375,16 @@ impl Server {
     /// Serve from compiled-in DEFAULT_FILES or KATEX_FILES with cache headers.
     fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
         // First check DEFAULT_FILES
-        let file = DEFAULT_FILES
-            .iter()
-            .find(|(name, _, _)| path == *name)
+        let file = crate::assets::default_file(path)
             // Then check KATEX_FILES (embedded KaTeX CSS, JS, and fonts)
             .or_else(|| {
                 embedded_katex::KATEX_FILES
                     .iter()
                     .find(|(name, _, _)| path == *name)
+                    .map(|(_, bytes, mime)| (*bytes, *mime))
             });
 
-        if let Some((_name, bytes, mime)) = file {
+        if let Some((bytes, mime)) = file {
             tracing::debug!("found default file");
 
             // Generate ETag from content
@@ -4479,10 +4392,10 @@ impl Server {
 
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, *mime)
+                .header(header::CONTENT_TYPE, mime)
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .header(header::ETAG, etag)
-                .body(axum::body::Body::from(*bytes))
+                .body(axum::body::Body::from(bytes))
                 .inspect_err(|e| tracing::error!("Error rendering default file: {e}"))
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         } else {
@@ -7046,63 +6959,6 @@ impl Server {
 // Pure helper functions for directory listing (extracted for testability)
 // ============================================================================
 
-/// A breadcrumb entry for navigation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct Breadcrumb {
-    pub name: String,
-    pub url: String,
-}
-
-impl Breadcrumb {
-    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            url: url.into(),
-        }
-    }
-}
-
-/// Generates breadcrumb navigation from a relative path.
-///
-/// Always starts with "Home" → "/" and includes all path components.
-/// The last component is not included in the returned breadcrumbs (it's the current page).
-pub fn generate_breadcrumbs(relative_path: &Path) -> Vec<Breadcrumb> {
-    let path_components: Vec<_> = relative_path
-        .components()
-        .filter_map(|c| {
-            if let std::path::Component::Normal(s) = c {
-                s.to_str()
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // For root (no path components), return empty breadcrumbs
-    // The current page name will be shown separately, avoiding "Home > Home"
-    if path_components.is_empty() {
-        return vec![];
-    }
-
-    // Start with Home
-    let mut breadcrumbs = vec![Breadcrumb::new("Home", "/")];
-
-    // Add all but the last component (last is current page/directory)
-    for (idx, _) in path_components
-        .iter()
-        .enumerate()
-        .take(path_components.len().saturating_sub(1))
-    {
-        // Join the already-extracted `&str` components directly: routing them
-        // back through a `PathBuf` would reintroduce the platform separator.
-        let url = format!("/{}/", path_components[..=idx].join("/"));
-        let name = path_components[idx].to_string();
-        breadcrumbs.push(Breadcrumb::new(name, url));
-    }
-
-    breadcrumbs
-}
-
 /// Decides whether a watcher file event should trigger a template reload.
 ///
 /// `template_folder` must already be canonicalized by the caller. `notify`
@@ -7128,40 +6984,6 @@ fn should_reload_template(event_path: &str, template_folder: Option<&Path>) -> b
         None => Path::new(event_path)
             .components()
             .any(|c| c.as_os_str() == ".mbr"),
-    }
-}
-
-/// Gets the current directory name from a relative path.
-pub fn get_current_dir_name(relative_path: &Path) -> String {
-    relative_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(String::from)
-        .unwrap_or_else(|| "Home".to_string())
-}
-
-/// Gets the parent path URL for "up" navigation.
-pub fn get_parent_path(relative_path: &Path) -> Option<String> {
-    let path_components: Vec<_> = relative_path
-        .components()
-        .filter_map(|c| {
-            if let std::path::Component::Normal(s) = c {
-                s.to_str()
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if path_components.len() > 1 {
-        // Join the `&str` components directly rather than via `PathBuf`, which
-        // would use `\` on Windows.
-        let parent = path_components[..path_components.len() - 1].join("/");
-        Some(format!("/{}/", parent))
-    } else if !path_components.is_empty() {
-        Some("/".to_string())
-    } else {
-        None
     }
 }
 
@@ -7472,258 +7294,6 @@ const CACHE_CONTROL_NO_CACHE: &str = "no-cache";
 /// Standard cache control header for truly dynamic content that shouldn't be cached.
 const CACHE_CONTROL_NO_STORE: &str = "no-store";
 
-/// [`DEFAULT_FILES`] route of the lazy task-browser chunk.
-///
-/// Named because `build.rs` has to skip exactly this entry: the task browser is
-/// server/GUI only (the index is built from live files), so shipping the chunk
-/// into a static site would be dead weight behind a button that cannot exist.
-pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
-
-/// [`DEFAULT_FILES`] route of the lazy review-notes chunk.
-///
-/// Skipped by `build.rs` for the same reason as [`TASKS_CHUNK_ROUTE`]: review
-/// notes anchor to the `data-mbr-line` attributes only a server/GUI render
-/// emits, so `<mbr-review>` never renders in a static site and the chunk would
-/// be an unreachable payload in every generated page.
-pub const REVIEW_CHUNK_ROUTE: &str = "/components/mbr-review.min.js";
-
-/// [`DEFAULT_FILES`] route of the lazy search-panel extras chunk (folder picker,
-/// note-type list).
-///
-/// Skipped by `build.rs` like [`TASKS_CHUNK_ROUTE`]: the controls it serves —
-/// the scope select and the folder scope — render only in server/GUI mode,
-/// because static search is Pagefind, which has neither facets nor folders.
-pub const SEARCH_EXTRAS_CHUNK_ROUTE: &str = "/components/mbr-search-extras.min.js";
-
-pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
-    (
-        "/favicon.png",
-        include_bytes!("../templates/favicon.png"),
-        "image/png",
-    ),
-    (
-        "/theme.css",
-        include_bytes!("../templates/theme.css"),
-        "text/css",
-    ),
-    (
-        "/user.css",
-        include_bytes!("../templates/user.css"),
-        "text/css",
-    ),
-    (
-        "/pico.min.css",
-        include_bytes!("../templates/pico-main/pico.min.css"),
-        "text/css",
-    ),
-    (
-        "/components/mbr-components.min.js",
-        include_bytes!("../templates/components-js/mbr-components.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Heavy Milkdown/Crepe editor chunk, lazy-loaded by <mbr-editor>.
-        "/components/mbr-editor.min.js",
-        include_bytes!("../templates/components-js/mbr-editor.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Sidebar mini force-graph chunk (d3-force), lazy-loaded by <mbr-info>
-        // when the info panel first opens.
-        "/components/mbr-graph.min.js",
-        include_bytes!("../templates/components-js/mbr-graph.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Relationship-charts chunk (family-chart, timeline tree, org chart),
-        // lazy-loaded by <mbr-genealogy> on person/organization pages only.
-        "/components/mbr-genealogy.min.js",
-        include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Task-browser panel chunk, lazy-loaded by <mbr-tasks> the first time
-        // the panel is opened. Deliberately excluded from static builds — see
-        // `TASKS_CHUNK_ROUTE` in build.rs.
-        TASKS_CHUNK_ROUTE,
-        include_bytes!("../templates/components-js/mbr-tasks.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Review-notes panel and form, lazy-loaded by <mbr-review> the first
-        // time a note is written or the list is opened. Deliberately excluded
-        // from static builds — see `REVIEW_CHUNK_ROUTE` in build.rs.
-        REVIEW_CHUNK_ROUTE,
-        include_bytes!("../templates/components-js/mbr-review.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Search-panel folder picker and note-type list, lazy-loaded by
-        // <mbr-search> the first time the modal opens. Deliberately excluded
-        // from static builds — see `SEARCH_EXTRAS_CHUNK_ROUTE` in build.rs.
-        SEARCH_EXTRAS_CHUNK_ROUTE,
-        include_bytes!("../templates/components-js/mbr-search-extras.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Flashcard review overlay (+ ts-fsrs), lazy-loaded by <mbr-flashcards>
-        // when a deck is opened. Ships in static builds: In order / Random
-        // review needs no server, only spaced repetition does.
-        "/components/mbr-flashcards.min.js",
-        include_bytes!("../templates/components-js/mbr-flashcards.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Flashcard reading view (collapsed review-history summaries), imported
-        // by <mbr-flashcards> at idle on `type: flashcard` pages only. Separate
-        // from the deck so reading a note never fetches ts-fsrs.
-        "/components/mbr-flashcards-reading.min.js",
-        include_bytes!("../templates/components-js/mbr-flashcards-reading.min.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.dark.css",
-        include_bytes!("../templates/hljs.dark.11.12.0.css"),
-        "text/css",
-    ),
-    (
-        "/hljs.atom-one-dark.css",
-        include_bytes!("../templates/hljs.atom-one-dark.11.12.0.css"),
-        "text/css",
-    ),
-    (
-        "/hljs.js",
-        include_bytes!("../templates/hljs.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.css.js",
-        include_bytes!("../templates/hljs.lang.css.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.javascript.js",
-        include_bytes!("../templates/hljs.lang.javascript.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.typescript.js",
-        include_bytes!("../templates/hljs.lang.typescript.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.rust.js",
-        include_bytes!("../templates/hljs.lang.rust.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.python.js",
-        include_bytes!("../templates/hljs.lang.python.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.bash.js",
-        include_bytes!("../templates/hljs.lang.bash.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.java.js",
-        include_bytes!("../templates/hljs.lang.java.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.scala.js",
-        include_bytes!("../templates/hljs.lang.scala.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.go.js",
-        include_bytes!("../templates/hljs.lang.go.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.ruby.js",
-        include_bytes!("../templates/hljs.lang.ruby.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.nix.js",
-        include_bytes!("../templates/hljs.lang.nix.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.json.js",
-        include_bytes!("../templates/hljs.lang.json.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.yaml.js",
-        include_bytes!("../templates/hljs.lang.yaml.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.xml.js",
-        include_bytes!("../templates/hljs.lang.xml.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.sql.js",
-        include_bytes!("../templates/hljs.lang.sql.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.dockerfile.js",
-        include_bytes!("../templates/hljs.lang.dockerfile.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.markdown.js",
-        include_bytes!("../templates/hljs.lang.markdown.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/mermaid.min.js",
-        include_bytes!("../templates/mermaid.12.1.0.min.js"),
-        "application/javascript",
-    ),
-    // Reveal.js presentation framework
-    (
-        "/reveal.js",
-        include_bytes!("../templates/reveal.6.0.2.js"),
-        "application/javascript",
-    ),
-    (
-        "/reveal.css",
-        include_bytes!("../templates/reveal.6.0.2.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-theme-blank.css",
-        include_bytes!("../templates/reveal.theme.blank.5.2.1.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-theme-black.css",
-        include_bytes!("../templates/reveal.theme.black.5.2.1.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-theme-white.css",
-        include_bytes!("../templates/reveal.theme.white.5.2.1.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-slides.css",
-        include_bytes!("../templates/reveal-slides.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-notes.js",
-        include_bytes!("../templates/reveal.notes.6.0.2.js"),
-        "application/javascript",
-    ),
-];
-
 // ============================================================================
 // Tag page link helpers
 // ============================================================================
@@ -7795,6 +7365,25 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn test_http_build_error_converts_to_mbr_error() {
+        // `MbrError::Http` is type-erased so `errors.rs` does not depend on
+        // axum; the conversion here must keep the message and the source.
+        let http_err = Response::builder()
+            .header("bad header name", "x")
+            .body(Body::empty())
+            .unwrap_err();
+        let inner = http_err.to_string();
+        let err = MbrError::from(http_err);
+        assert!(matches!(err, MbrError::Http(_)));
+        assert_eq!(
+            err.to_string(),
+            format!("Failed to build HTTP response: {inner}")
+        );
+        let source = std::error::Error::source(&err).expect("source is kept");
+        assert_eq!(source.to_string(), inner);
+    }
+
+    #[test]
     fn test_capitalize_first_ascii() {
         assert_eq!(capitalize_first("tags"), "Tags");
         assert_eq!(capitalize_first("t"), "T");
@@ -7813,90 +7402,6 @@ mod tests {
     #[test]
     fn test_capitalize_first_empty() {
         assert_eq!(capitalize_first(""), "");
-    }
-
-    #[test]
-    fn test_generate_breadcrumbs_root() {
-        let path = Path::new("");
-        let breadcrumbs = generate_breadcrumbs(path);
-
-        // Root returns empty breadcrumbs to avoid "Home > Home" duplication
-        // The template handles showing just "Home" as the current page
-        assert_eq!(breadcrumbs.len(), 0);
-    }
-
-    #[test]
-    fn test_generate_breadcrumbs_single_level() {
-        let path = Path::new("docs");
-        let breadcrumbs = generate_breadcrumbs(path);
-
-        // Home only - "docs" is the current directory, not shown in breadcrumbs
-        assert_eq!(breadcrumbs.len(), 1);
-        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
-    }
-
-    #[test]
-    fn test_generate_breadcrumbs_two_levels() {
-        let path = Path::new("docs/api");
-        let breadcrumbs = generate_breadcrumbs(path);
-
-        assert_eq!(breadcrumbs.len(), 2);
-        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
-        assert_eq!(breadcrumbs[1], Breadcrumb::new("docs", "/docs/"));
-    }
-
-    #[test]
-    fn test_generate_breadcrumbs_deep_nesting() {
-        let path = Path::new("/a/b/c/d");
-        let breadcrumbs = generate_breadcrumbs(path);
-
-        assert_eq!(breadcrumbs.len(), 4);
-        assert_eq!(breadcrumbs[0], Breadcrumb::new("Home", "/"));
-        assert_eq!(breadcrumbs[1], Breadcrumb::new("a", "/a/"));
-        assert_eq!(breadcrumbs[2], Breadcrumb::new("b", "/a/b/"));
-        assert_eq!(breadcrumbs[3], Breadcrumb::new("c", "/a/b/c/"));
-    }
-
-    #[test]
-    fn test_get_current_dir_name_root() {
-        let path = Path::new("");
-        assert_eq!(get_current_dir_name(path), "Home");
-    }
-
-    #[test]
-    fn test_get_current_dir_name_single_level() {
-        let path = Path::new("docs");
-        assert_eq!(get_current_dir_name(path), "docs");
-    }
-
-    #[test]
-    fn test_get_current_dir_name_nested() {
-        let path = Path::new("a/b/c");
-        assert_eq!(get_current_dir_name(path), "c");
-    }
-
-    #[test]
-    fn test_get_parent_path_root() {
-        let path = Path::new("");
-        assert_eq!(get_parent_path(path), None);
-    }
-
-    #[test]
-    fn test_get_parent_path_single_level() {
-        let path = Path::new("docs");
-        assert_eq!(get_parent_path(path), Some("/".to_string()));
-    }
-
-    #[test]
-    fn test_get_parent_path_two_levels() {
-        let path = Path::new("docs/api");
-        assert_eq!(get_parent_path(path), Some("/docs/".to_string()));
-    }
-
-    #[test]
-    fn test_get_parent_path_deep() {
-        let path = Path::new("a/b/c/d");
-        assert_eq!(get_parent_path(path), Some("/a/b/c/".to_string()));
     }
 
     #[test]
@@ -8037,196 +7542,6 @@ mod tests {
         assert_eq!(json["title"], "Only Title");
         assert!(json["description"].is_null());
         assert!(json["tags"].is_null());
-    }
-
-    #[test]
-    fn test_breadcrumb_equality() {
-        let b1 = Breadcrumb::new("Home", "/");
-        let b2 = Breadcrumb::new("Home", "/");
-        let b3 = Breadcrumb::new("Docs", "/docs/");
-
-        assert_eq!(b1, b2);
-        assert_ne!(b1, b3);
-    }
-
-    // ==================== MediaViewerType Tests ====================
-
-    #[test]
-    fn test_media_viewer_type_from_route_videos() {
-        assert_eq!(
-            MediaViewerType::from_route("/.mbr/videos/"),
-            Some(MediaViewerType::Video)
-        );
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_route_pdfs() {
-        assert_eq!(
-            MediaViewerType::from_route("/.mbr/pdfs/"),
-            Some(MediaViewerType::Pdf)
-        );
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_route_audio() {
-        assert_eq!(
-            MediaViewerType::from_route("/.mbr/audio/"),
-            Some(MediaViewerType::Audio)
-        );
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_route_images() {
-        assert_eq!(
-            MediaViewerType::from_route("/.mbr/images/"),
-            Some(MediaViewerType::Image)
-        );
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_route_invalid() {
-        assert_eq!(MediaViewerType::from_route("/some/other/path"), None);
-        assert_eq!(MediaViewerType::from_route("/.mbr/videos"), None); // missing trailing slash
-        assert_eq!(MediaViewerType::from_route("/.mbr/unknown/"), None);
-    }
-
-    #[test]
-    fn test_media_viewer_type_template_name() {
-        assert_eq!(MediaViewerType::Video.template_name(), "media_viewer.html");
-        assert_eq!(MediaViewerType::Pdf.template_name(), "media_viewer.html");
-        assert_eq!(MediaViewerType::Audio.template_name(), "media_viewer.html");
-    }
-
-    #[test]
-    fn test_media_viewer_type_label() {
-        assert_eq!(MediaViewerType::Video.label(), "Video");
-        assert_eq!(MediaViewerType::Pdf.label(), "PDF");
-        assert_eq!(MediaViewerType::Audio.label(), "Audio");
-    }
-
-    #[test]
-    fn test_media_viewer_type_as_str() {
-        assert_eq!(MediaViewerType::Video.as_str(), "video");
-        assert_eq!(MediaViewerType::Pdf.as_str(), "pdf");
-        assert_eq!(MediaViewerType::Audio.as_str(), "audio");
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_extension_video() {
-        for ext in &[
-            "mp4", "m4v", "mov", "webm", "flv", "mpg", "mpeg", "avi", "3gp", "wmv", "mkv", "ts",
-            "mts", "m2ts", "vob", "divx", "xvid", "asf", "rm", "rmvb", "f4v", "ogv",
-        ] {
-            assert_eq!(
-                MediaViewerType::from_extension(ext),
-                Some(MediaViewerType::Video),
-                "Expected Video for extension '{ext}'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_extension_audio() {
-        for ext in &[
-            "mp3", "wav", "ogg", "flac", "aac", "m4a", "aiff", "aif", "oga", "opus", "wma",
-        ] {
-            assert_eq!(
-                MediaViewerType::from_extension(ext),
-                Some(MediaViewerType::Audio),
-                "Expected Audio for extension '{ext}'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_extension_image() {
-        for ext in &[
-            "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "svg",
-        ] {
-            assert_eq!(
-                MediaViewerType::from_extension(ext),
-                Some(MediaViewerType::Image),
-                "Expected Image for extension '{ext}'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_extension_pdf() {
-        assert_eq!(
-            MediaViewerType::from_extension("pdf"),
-            Some(MediaViewerType::Pdf)
-        );
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_extension_case_insensitive() {
-        assert_eq!(
-            MediaViewerType::from_extension("MP4"),
-            Some(MediaViewerType::Video)
-        );
-        assert_eq!(
-            MediaViewerType::from_extension("Pdf"),
-            Some(MediaViewerType::Pdf)
-        );
-        assert_eq!(
-            MediaViewerType::from_extension("JPG"),
-            Some(MediaViewerType::Image)
-        );
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_extension_unknown() {
-        assert_eq!(MediaViewerType::from_extension("md"), None);
-        assert_eq!(MediaViewerType::from_extension("html"), None);
-        assert_eq!(MediaViewerType::from_extension("rs"), None);
-        assert_eq!(MediaViewerType::from_extension(""), None);
-    }
-
-    #[test]
-    fn test_media_viewer_type_from_path() {
-        assert_eq!(
-            MediaViewerType::from_path(Path::new("videos/demo.mp4")),
-            Some(MediaViewerType::Video)
-        );
-        assert_eq!(
-            MediaViewerType::from_path(Path::new("music/song.mp3")),
-            Some(MediaViewerType::Audio)
-        );
-        assert_eq!(
-            MediaViewerType::from_path(Path::new("images/photo.jpg")),
-            Some(MediaViewerType::Image)
-        );
-        assert_eq!(
-            MediaViewerType::from_path(Path::new("docs/paper.pdf")),
-            Some(MediaViewerType::Pdf)
-        );
-        assert_eq!(MediaViewerType::from_path(Path::new("readme.md")), None);
-        assert_eq!(MediaViewerType::from_path(Path::new("noext")), None);
-    }
-
-    #[test]
-    fn test_media_viewer_type_route_path() {
-        assert_eq!(MediaViewerType::Video.route_path(), "/.mbr/videos/");
-        assert_eq!(MediaViewerType::Pdf.route_path(), "/.mbr/pdfs/");
-        assert_eq!(MediaViewerType::Audio.route_path(), "/.mbr/audio/");
-        assert_eq!(MediaViewerType::Image.route_path(), "/.mbr/images/");
-    }
-
-    #[test]
-    fn test_media_viewer_type_route_path_roundtrips_with_from_route() {
-        for media_type in &[
-            MediaViewerType::Video,
-            MediaViewerType::Pdf,
-            MediaViewerType::Audio,
-            MediaViewerType::Image,
-        ] {
-            assert_eq!(
-                MediaViewerType::from_route(media_type.route_path()),
-                Some(*media_type),
-                "route_path -> from_route roundtrip failed for {media_type:?}"
-            );
-        }
     }
 
     // ==================== validate_media_path Tests ====================
@@ -9193,7 +8508,7 @@ mod tests {
     /// for that tab.
     #[tokio::test]
     async fn test_live_reload_action_keeps_forwarding_after_lag() {
-        use crate::watcher::{ChangeEventType, FileChangeEvent};
+        use crate::change_event::{ChangeEventType, FileChangeEvent};
 
         let event = |name: &str| FileChangeEvent {
             path: format!("/repo/{name}"),
@@ -9229,7 +8544,7 @@ mod tests {
     /// When the sender is dropped (server shutting down) the loop closes.
     #[tokio::test]
     async fn test_live_reload_action_closes_when_sender_dropped() {
-        let (tx, mut rx) = broadcast::channel::<crate::watcher::FileChangeEvent>(2);
+        let (tx, mut rx) = broadcast::channel::<crate::change_event::FileChangeEvent>(2);
         drop(tx);
         assert!(matches!(
             live_reload_action(rx.recv().await),
@@ -9885,158 +9200,7 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
-    // Strategy for valid path component names
-    fn path_component_strategy() -> impl Strategy<Value = String> {
-        "[a-zA-Z0-9_-]{1,15}"
-    }
-
     proptest! {
-        /// Breadcrumb count: Home + all components except the last (current dir)
-        /// For 0 components: [] = 0 (root page, no breadcrumbs to avoid "Home > Home")
-        /// For 1 component: [Home] = 1 (last component is current dir, not a link)
-        /// For 2+ components: [Home, c1, c2, ...] = components.len()
-        #[test]
-        fn prop_breadcrumb_count_matches_path_depth(
-            components in proptest::collection::vec(path_component_strategy(), 0..5)
-        ) {
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-            let breadcrumbs = generate_breadcrumbs(path);
-
-            // Breadcrumbs = "Home" + all components except the last (which is current dir)
-            // For empty path (root), return empty to avoid "Home > Home"
-            let expected_count = if components.is_empty() {
-                0  // Empty for root page
-            } else {
-                components.len()  // Home + all but last = components.len()
-            };
-            prop_assert_eq!(
-                breadcrumbs.len(),
-                expected_count,
-                "Path {:?} should have {} breadcrumbs, got {}",
-                path,
-                expected_count,
-                breadcrumbs.len()
-            );
-        }
-
-        /// For non-empty paths, first breadcrumb is always "Home" with url "/"
-        #[test]
-        fn prop_first_breadcrumb_is_home(
-            components in proptest::collection::vec(path_component_strategy(), 1..5)
-        ) {
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-            let breadcrumbs = generate_breadcrumbs(path);
-
-            prop_assert!(!breadcrumbs.is_empty(), "Non-root paths should have at least Home breadcrumb");
-            prop_assert_eq!(&breadcrumbs[0].name, "Home");
-            prop_assert_eq!(&breadcrumbs[0].url, "/");
-        }
-
-        /// For 2+ components, last breadcrumb is second-to-last path component
-        #[test]
-        fn prop_last_breadcrumb_matches_parent_component(
-            components in proptest::collection::vec(path_component_strategy(), 2..5)
-        ) {
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-            let breadcrumbs = generate_breadcrumbs(path);
-
-            let last_breadcrumb = breadcrumbs.last().unwrap();
-            // The second-to-last component is the parent dir
-            let parent_component = &components[components.len() - 2];
-            prop_assert_eq!(
-                &last_breadcrumb.name,
-                parent_component,
-                "Last breadcrumb should be {:?}, got {:?}",
-                parent_component,
-                last_breadcrumb.name
-            );
-        }
-
-        /// All breadcrumb URLs end with /
-        #[test]
-        fn prop_breadcrumb_urls_end_with_slash(
-            components in proptest::collection::vec(path_component_strategy(), 0..5)
-        ) {
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-            let breadcrumbs = generate_breadcrumbs(path);
-
-            for bc in &breadcrumbs {
-                prop_assert!(
-                    bc.url.ends_with('/'),
-                    "Breadcrumb URL {:?} should end with /",
-                    bc.url
-                );
-            }
-        }
-
-        /// get_current_dir_name returns the last path component
-        #[test]
-        fn prop_current_dir_name_is_last_component(
-            components in proptest::collection::vec(path_component_strategy(), 1..5)
-        ) {
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-            let name = get_current_dir_name(path);
-
-            let expected = components.last().unwrap();
-            prop_assert_eq!(
-                &name,
-                expected,
-                "Current dir name should be {:?}, got {:?}",
-                expected,
-                name
-            );
-        }
-
-        /// get_parent_path returns None for root, Some for others
-        #[test]
-        fn prop_parent_path_behavior(
-            components in proptest::collection::vec(path_component_strategy(), 0..5)
-        ) {
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-            let parent = get_parent_path(path);
-
-            if components.is_empty() {
-                prop_assert!(parent.is_none(), "Root should have no parent");
-            } else {
-                prop_assert!(parent.is_some(), "Non-root should have parent");
-                let parent_str = parent.unwrap();
-                prop_assert!(
-                    parent_str.ends_with('/'),
-                    "Parent path should end with /: {:?}",
-                    parent_str
-                );
-            }
-        }
-
-        /// Parent path is shorter than original path (fewer characters)
-        #[test]
-        fn prop_parent_path_shorter_than_original(
-            components in proptest::collection::vec(path_component_strategy(), 2..5)
-        ) {
-            // Need at least 2 components - for single component, parent is "/"
-            // which is hard to compare meaningfully
-            let path_str = components.join("/");
-            let path = Path::new(&path_str);
-
-            if let Some(parent) = get_parent_path(path) {
-                // Parent path should be shorter in character length
-                // (excluding the trailing slash we add)
-                let parent_trimmed = parent.trim_end_matches('/');
-                prop_assert!(
-                    parent_trimmed.len() < path_str.len(),
-                    "Parent {:?} should be shorter than {:?}",
-                    parent_trimmed,
-                    path_str
-                );
-            }
-        }
-
         // ==================== validate_media_path Property Tests ====================
 
         /// Any path containing ".." should be rejected

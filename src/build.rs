@@ -27,16 +27,15 @@ use crate::{
     link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url, sort_inbound_links},
     link_transform::{LinkTransformConfig, make_relative_url},
     markdown,
+    media::MediaViewerType,
     oembed_cache::OembedCache,
     page_context::{self, ModeFlags, PageChrome, UrlMode},
     path_resolver::OwnedPathResolverConfig,
     repo::{MarkdownInfo, Repo},
-    server::{
-        DEFAULT_FILES, MediaViewerType, generate_breadcrumbs, get_current_dir_name,
-        get_parent_path, markdown_file_to_json,
-    },
+    server::markdown_file_to_json,
     sorting::sort_files,
     templates::Templates,
+    url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path},
 };
 
 /// The repository's config file, relative to `.mbr/`.
@@ -105,34 +104,6 @@ fn url_depth(url_path: &str) -> usize {
         .split('/')
         .filter(|s| !s.is_empty())
         .count()
-}
-
-/// Build the relative path prefix for .mbr assets based on page depth.
-///
-/// Examples:
-/// - depth 0 → ".mbr/"
-/// - depth 1 → "../.mbr/"
-/// - depth 2 → "../../.mbr/"
-pub(crate) fn relative_base(depth: usize) -> String {
-    if depth == 0 {
-        ".mbr/".to_string()
-    } else {
-        format!("{}.mbr/", "../".repeat(depth))
-    }
-}
-
-/// Build the relative path prefix to root based on page depth.
-///
-/// Examples:
-/// - depth 0 → "" (empty string, already at root)
-/// - depth 1 → "../"
-/// - depth 2 → "../../"
-pub(crate) fn relative_root(depth: usize) -> String {
-    if depth == 0 {
-        String::new()
-    } else {
-        "../".repeat(depth)
-    }
 }
 
 /// Prints a progress stage message to stdout.
@@ -2098,7 +2069,7 @@ impl Builder {
         }
 
         // Step 3: Write DEFAULT_FILES using route names (skip if file exists)
-        for (route, content, _mime_type) in DEFAULT_FILES.iter() {
+        for (route, content, _mime_type) in crate::assets::DEFAULT_FILES.iter() {
             // Skip empty files (like /user.css)
             if content.is_empty() {
                 continue;
@@ -2114,7 +2085,7 @@ impl Builder {
             // reading live files and `POST /.mbr/tasks` only exists in
             // server/GUI mode, so `<mbr-tasks>` never renders here and the
             // chunk would be an unreachable payload in every generated site.
-            if *route == crate::server::TASKS_CHUNK_ROUTE {
+            if *route == crate::assets::TASKS_CHUNK_ROUTE {
                 continue;
             }
 
@@ -2122,14 +2093,14 @@ impl Builder {
             // to a `data-mbr-line` attribute, and a static build renders with
             // `ReviewLines::Omit` — so there is nothing here to anchor to,
             // `<mbr-review>` never renders, and the chunk is unreachable.
-            if *route == crate::server::REVIEW_CHUNK_ROUTE {
+            if *route == crate::assets::REVIEW_CHUNK_ROUTE {
                 continue;
             }
 
             // Skip the search-extras chunk: it serves the scope select and
             // folder scope, which render only in server/GUI mode. Static
             // search is Pagefind, with no facets or folders to pick.
-            if *route == crate::server::SEARCH_EXTRAS_CHUNK_ROUTE {
+            if *route == crate::assets::SEARCH_EXTRAS_CHUNK_ROUTE {
                 continue;
             }
 
@@ -2996,38 +2967,6 @@ mod tests {
         assert_eq!(url_depth("/docs/guide/"), 2);
         assert_eq!(url_depth("/a/b/c/"), 3);
         assert_eq!(url_depth("/a/b/c/d/e/"), 5);
-    }
-
-    #[test]
-    fn test_relative_base_at_root() {
-        assert_eq!(relative_base(0), ".mbr/");
-    }
-
-    #[test]
-    fn test_relative_base_one_level() {
-        assert_eq!(relative_base(1), "../.mbr/");
-    }
-
-    #[test]
-    fn test_relative_base_multiple_levels() {
-        assert_eq!(relative_base(2), "../../.mbr/");
-        assert_eq!(relative_base(3), "../../../.mbr/");
-    }
-
-    #[test]
-    fn test_relative_root_at_root() {
-        assert_eq!(relative_root(0), "");
-    }
-
-    #[test]
-    fn test_relative_root_one_level() {
-        assert_eq!(relative_root(1), "../");
-    }
-
-    #[test]
-    fn test_relative_root_multiple_levels() {
-        assert_eq!(relative_root(2), "../../");
-        assert_eq!(relative_root(3), "../../../");
     }
 
     // ============================================================================

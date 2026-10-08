@@ -22,12 +22,12 @@
 //!
 //! [reply]: https://developer.apple.com/documentation/quicklook/qlpreviewreply
 
+use crate::assets;
 use crate::config::{self, Config};
 use crate::embedded_hljs;
 use crate::embedded_pico;
 use crate::link_transform::LinkTransformConfig;
 use crate::markdown;
-use crate::server::DEFAULT_FILES;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -718,7 +718,7 @@ fn build_inline_css(
     if let Some(custom) = custom_theme {
         css.push_str(custom);
     } else {
-        css.push_str(get_embedded_file("/theme.css"));
+        css.push_str(embedded_text(assets::THEME_CSS));
     }
     css.push('\n');
 
@@ -783,7 +783,7 @@ fn build_inline_js(config: &QuickLookConfig) -> String {
 
     // Mermaid diagrams
     if config.include_mermaid {
-        js.push_str(get_embedded_file("/mermaid.min.js"));
+        js.push_str(embedded_text(assets::MERMAID_JS));
         js.push('\n');
     }
 
@@ -793,14 +793,12 @@ fn build_inline_js(config: &QuickLookConfig) -> String {
     js
 }
 
-/// Get content of an embedded file by path.
-fn get_embedded_file(path: &str) -> &'static str {
-    for (name, content, _mime) in DEFAULT_FILES.iter() {
-        if *name == path {
-            return std::str::from_utf8(content).unwrap_or("");
-        }
-    }
-    ""
+/// Text of a compiled-in asset, or `""` if it is not valid UTF-8.
+///
+/// Takes the asset itself rather than a route so QuickLook names only the
+/// assets it inlines, never the whole [`assets::DEFAULT_FILES`] table.
+fn embedded_text(asset: &'static [u8]) -> &'static str {
+    std::str::from_utf8(asset).unwrap_or("")
 }
 
 /// QuickLook-specific CSS overrides.

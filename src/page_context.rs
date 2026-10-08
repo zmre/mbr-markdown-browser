@@ -21,15 +21,16 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::build::{relative_base, relative_root};
 use crate::config::TagSource;
 use crate::edit_auth::content_hash;
 use crate::link_transform::make_relative_url;
 use crate::markdown::HeadingInfo;
 use crate::readability::ReadabilityScores;
-use crate::server::{Breadcrumb, generate_breadcrumbs, get_current_dir_name};
 use crate::tag_index::{TagInfo, TaggedPage};
 use crate::task_query::IncludeFilter;
+use crate::url_helpers::{
+    Breadcrumb, generate_breadcrumbs, get_current_dir_name, relative_base, relative_root,
+};
 
 /// How URLs are emitted into a template context.
 pub enum UrlMode {

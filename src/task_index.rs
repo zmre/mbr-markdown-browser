@@ -31,10 +31,10 @@ use std::sync::Arc;
 use papaya::HashMap;
 use serde::Serialize;
 
+use crate::change_event::ChangeEventType;
 use crate::errors::TaskIndexError;
 use crate::repo::{MarkdownInfo, Repo};
 use crate::tasks::{MarkerRule, Task, TaskKind, TaskStatus, scan_source_tasks_with_markers};
-use crate::watcher::ChangeEventType;
 
 /// Largest markdown file the task scanner will read, in bytes.
 ///

@@ -1264,19 +1264,19 @@ impl Repo {
     /// Surgically invalidate a single file, updating only the affected cache entries.
     ///
     /// Much cheaper than `clear()` + `scan_all()` for small batches of file changes.
-    pub fn invalidate_file(&self, abs_path: &Path, event: &crate::watcher::ChangeEventType) {
+    pub fn invalidate_file(&self, abs_path: &Path, event: &crate::change_event::ChangeEventType) {
         let extension = abs_path.extension().and_then(|x| x.to_str()).unwrap_or("");
         let is_markdown = is_markdown_extension(extension, &self.markdown_extensions);
 
         match event {
-            crate::watcher::ChangeEventType::Deleted => {
+            crate::change_event::ChangeEventType::Deleted => {
                 if is_markdown {
                     self.markdown_files.pin().remove(abs_path);
                 } else {
                     self.other_files.pin().remove(abs_path);
                 }
             }
-            crate::watcher::ChangeEventType::Created => {
+            crate::change_event::ChangeEventType::Created => {
                 if is_markdown {
                     if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
                         let url = build_markdown_url_path(
@@ -1341,7 +1341,7 @@ impl Repo {
                     self.other_files.pin().insert(abs_path.to_path_buf(), info);
                 }
             }
-            crate::watcher::ChangeEventType::Modified => {
+            crate::change_event::ChangeEventType::Modified => {
                 if is_markdown {
                     // Re-extract frontmatter and update
                     if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {

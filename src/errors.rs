@@ -32,7 +32,7 @@ pub enum MbrError {
     Browser(#[from] BrowserError),
 
     #[error("Watcher error: {0}")]
-    Watcher(#[from] WatcherError),
+    Watcher(#[from] crate::watcher::WatcherError),
 
     #[error("Build error: {0}")]
     Build(Box<BuildError>),
@@ -51,8 +51,13 @@ pub enum MbrError {
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 
+    /// Building an HTTP response failed.
+    ///
+    /// Type-erased so this module does not depend on the HTTP stack: the
+    /// server converts `axum::http::Error` into it (see the `From` impl in
+    /// `server.rs`), which keeps `?` working there unchanged.
     #[error("Failed to build HTTP response: {0}")]
-    Http(#[from] axum::http::Error),
+    Http(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("Background task failed: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
@@ -280,23 +285,6 @@ pub enum ExternalOpenError {
 
     #[error("The system refused to open {url}: {reason}")]
     LaunchFailed { url: String, reason: String },
-}
-
-/// Errors related to file watching.
-#[derive(Debug, Error)]
-pub enum WatcherError {
-    #[error("Failed to initialize file watcher")]
-    WatcherInit(#[source] notify::Error),
-
-    #[error("Failed to watch path: {path}")]
-    WatchFailed {
-        path: PathBuf,
-        #[source]
-        source: notify::Error,
-    },
-
-    #[error("Failed to send file change event")]
-    BroadcastFailed,
 }
 
 /// Errors related to search functionality.
