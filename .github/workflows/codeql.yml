@@ -140,6 +140,7 @@ jobs:
           -framework ExtensionKit \
           -module-name MBRPreview \
           -Xlinker -e -Xlinker _NSExtensionMain \
+          -Xlinker -dead_strip \
           -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
           -I quicklook/Generated \
           -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \

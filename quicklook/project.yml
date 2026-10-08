@@ -23,6 +23,10 @@ settings:
     # Build only for arm64 (matching Rust library)
     ARCHS: arm64
     VALID_ARCHS: arm64
+    # libmbr.a is the whole Rust core; let ld drop what the extension never
+    # calls (unused assets included). Same as `-dead_strip` in flake.nix's
+    # mbr-quicklook link, so the dev build matches what ships.
+    DEAD_CODE_STRIPPING: YES
 
 configs:
   Debug:

@@ -649,8 +649,10 @@
             // {
               inherit cargoArtifacts;
               pname = "mbr-quicklook-staticlib";
-              # Build only the staticlib without GUI or media-metadata features
-              # These would pull in SDL/ffmpeg which crash in QuickLook sandbox
+              # Build only the staticlib, with no default features: no server,
+              # watcher, ssg or cli (unreachable from a preview, and the bulk of
+              # the code), and no GUI or media-metadata, which would pull in
+              # SDL/ffmpeg that crash in the QuickLook sandbox.
               # Enable ffi feature for UniFFI bindings (required for Swift interop)
               cargoExtraArgs = "--locked --no-default-features --features ffi --lib";
 
@@ -685,6 +687,9 @@
               # -parse-as-library: Don't look for main() function
               # -application-extension: Mark as app extension (required for sandboxing)
               # -e _NSExtensionMain: Use extension entry point instead of _main
+              # -dead_strip: drop every symbol the extension never reaches. libmbr.a is
+              # the whole Rust core (LTO folds it into few objects), so without this
+              # ld keeps all of it, embedded web assets included.
               swiftc \
                 -O \
                 -parse-as-library \
@@ -704,6 +709,7 @@
                 -framework ExtensionKit \
                 -module-name MBRPreview \
                 -Xlinker -e -Xlinker _NSExtensionMain \
+                -Xlinker -dead_strip \
                 -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
                 -I quicklook/Generated \
                 -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
