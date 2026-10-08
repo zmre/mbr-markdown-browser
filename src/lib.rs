@@ -32,6 +32,7 @@ pub fn http_client(timeout: std::time::Duration) -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+pub mod assets;
 pub mod attrs;
 pub mod audio;
 #[cfg(feature = "gui")]

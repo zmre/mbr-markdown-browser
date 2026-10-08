@@ -3284,7 +3284,7 @@ async fn test_components_js_bundle_no_missing_imports() {
 
     // The `<mbr-editor>` trigger intentionally lazy-loads the heavy Crepe editor
     // chunk via a runtime dynamic import. That chunk is explicitly served (see
-    // DEFAULT_FILES in server.rs), so it is allowed — but any OTHER absolute
+    // DEFAULT_FILES in assets.rs), so it is allowed — but any OTHER absolute
     // `/.mbr/components/` chunk import would be an unserved code-split artifact.
     const EDITOR_CHUNK: &str = "/.mbr/components/mbr-editor.min.js";
     let stripped = js_content

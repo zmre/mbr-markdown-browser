@@ -32,8 +32,8 @@ use crate::{
     path_resolver::OwnedPathResolverConfig,
     repo::{MarkdownInfo, Repo},
     server::{
-        DEFAULT_FILES, MediaViewerType, generate_breadcrumbs, get_current_dir_name,
-        get_parent_path, markdown_file_to_json,
+        MediaViewerType, generate_breadcrumbs, get_current_dir_name, get_parent_path,
+        markdown_file_to_json,
     },
     sorting::sort_files,
     templates::Templates,
@@ -2098,7 +2098,7 @@ impl Builder {
         }
 
         // Step 3: Write DEFAULT_FILES using route names (skip if file exists)
-        for (route, content, _mime_type) in DEFAULT_FILES.iter() {
+        for (route, content, _mime_type) in crate::assets::DEFAULT_FILES.iter() {
             // Skip empty files (like /user.css)
             if content.is_empty() {
                 continue;
@@ -2114,7 +2114,7 @@ impl Builder {
             // reading live files and `POST /.mbr/tasks` only exists in
             // server/GUI mode, so `<mbr-tasks>` never renders here and the
             // chunk would be an unreachable payload in every generated site.
-            if *route == crate::server::TASKS_CHUNK_ROUTE {
+            if *route == crate::assets::TASKS_CHUNK_ROUTE {
                 continue;
             }
 
@@ -2122,14 +2122,14 @@ impl Builder {
             // to a `data-mbr-line` attribute, and a static build renders with
             // `ReviewLines::Omit` — so there is nothing here to anchor to,
             // `<mbr-review>` never renders, and the chunk is unreachable.
-            if *route == crate::server::REVIEW_CHUNK_ROUTE {
+            if *route == crate::assets::REVIEW_CHUNK_ROUTE {
                 continue;
             }
 
             // Skip the search-extras chunk: it serves the scope select and
             // folder scope, which render only in server/GUI mode. Static
             // search is Pagefind, with no facets or folders to pick.
-            if *route == crate::server::SEARCH_EXTRAS_CHUNK_ROUTE {
+            if *route == crate::assets::SEARCH_EXTRAS_CHUNK_ROUTE {
                 continue;
             }
 

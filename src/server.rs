@@ -4461,17 +4461,16 @@ impl Server {
     /// Serve from compiled-in DEFAULT_FILES or KATEX_FILES with cache headers.
     fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
         // First check DEFAULT_FILES
-        let file = DEFAULT_FILES
-            .iter()
-            .find(|(name, _, _)| path == *name)
+        let file = crate::assets::default_file(path)
             // Then check KATEX_FILES (embedded KaTeX CSS, JS, and fonts)
             .or_else(|| {
                 embedded_katex::KATEX_FILES
                     .iter()
                     .find(|(name, _, _)| path == *name)
+                    .map(|(_, bytes, mime)| (*bytes, *mime))
             });
 
-        if let Some((_name, bytes, mime)) = file {
+        if let Some((bytes, mime)) = file {
             tracing::debug!("found default file");
 
             // Generate ETag from content
@@ -4479,10 +4478,10 @@ impl Server {
 
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, *mime)
+                .header(header::CONTENT_TYPE, mime)
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .header(header::ETAG, etag)
-                .body(axum::body::Body::from(*bytes))
+                .body(axum::body::Body::from(bytes))
                 .inspect_err(|e| tracing::error!("Error rendering default file: {e}"))
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         } else {
@@ -7471,258 +7470,6 @@ const CACHE_CONTROL_NO_CACHE: &str = "no-cache";
 
 /// Standard cache control header for truly dynamic content that shouldn't be cached.
 const CACHE_CONTROL_NO_STORE: &str = "no-store";
-
-/// [`DEFAULT_FILES`] route of the lazy task-browser chunk.
-///
-/// Named because `build.rs` has to skip exactly this entry: the task browser is
-/// server/GUI only (the index is built from live files), so shipping the chunk
-/// into a static site would be dead weight behind a button that cannot exist.
-pub const TASKS_CHUNK_ROUTE: &str = "/components/mbr-tasks.min.js";
-
-/// [`DEFAULT_FILES`] route of the lazy review-notes chunk.
-///
-/// Skipped by `build.rs` for the same reason as [`TASKS_CHUNK_ROUTE`]: review
-/// notes anchor to the `data-mbr-line` attributes only a server/GUI render
-/// emits, so `<mbr-review>` never renders in a static site and the chunk would
-/// be an unreachable payload in every generated page.
-pub const REVIEW_CHUNK_ROUTE: &str = "/components/mbr-review.min.js";
-
-/// [`DEFAULT_FILES`] route of the lazy search-panel extras chunk (folder picker,
-/// note-type list).
-///
-/// Skipped by `build.rs` like [`TASKS_CHUNK_ROUTE`]: the controls it serves —
-/// the scope select and the folder scope — render only in server/GUI mode,
-/// because static search is Pagefind, which has neither facets nor folders.
-pub const SEARCH_EXTRAS_CHUNK_ROUTE: &str = "/components/mbr-search-extras.min.js";
-
-pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
-    (
-        "/favicon.png",
-        include_bytes!("../templates/favicon.png"),
-        "image/png",
-    ),
-    (
-        "/theme.css",
-        include_bytes!("../templates/theme.css"),
-        "text/css",
-    ),
-    (
-        "/user.css",
-        include_bytes!("../templates/user.css"),
-        "text/css",
-    ),
-    (
-        "/pico.min.css",
-        include_bytes!("../templates/pico-main/pico.min.css"),
-        "text/css",
-    ),
-    (
-        "/components/mbr-components.min.js",
-        include_bytes!("../templates/components-js/mbr-components.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Heavy Milkdown/Crepe editor chunk, lazy-loaded by <mbr-editor>.
-        "/components/mbr-editor.min.js",
-        include_bytes!("../templates/components-js/mbr-editor.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Sidebar mini force-graph chunk (d3-force), lazy-loaded by <mbr-info>
-        // when the info panel first opens.
-        "/components/mbr-graph.min.js",
-        include_bytes!("../templates/components-js/mbr-graph.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Relationship-charts chunk (family-chart, timeline tree, org chart),
-        // lazy-loaded by <mbr-genealogy> on person/organization pages only.
-        "/components/mbr-genealogy.min.js",
-        include_bytes!("../templates/components-js/mbr-genealogy.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Task-browser panel chunk, lazy-loaded by <mbr-tasks> the first time
-        // the panel is opened. Deliberately excluded from static builds — see
-        // `TASKS_CHUNK_ROUTE` in build.rs.
-        TASKS_CHUNK_ROUTE,
-        include_bytes!("../templates/components-js/mbr-tasks.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Review-notes panel and form, lazy-loaded by <mbr-review> the first
-        // time a note is written or the list is opened. Deliberately excluded
-        // from static builds — see `REVIEW_CHUNK_ROUTE` in build.rs.
-        REVIEW_CHUNK_ROUTE,
-        include_bytes!("../templates/components-js/mbr-review.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Search-panel folder picker and note-type list, lazy-loaded by
-        // <mbr-search> the first time the modal opens. Deliberately excluded
-        // from static builds — see `SEARCH_EXTRAS_CHUNK_ROUTE` in build.rs.
-        SEARCH_EXTRAS_CHUNK_ROUTE,
-        include_bytes!("../templates/components-js/mbr-search-extras.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Flashcard review overlay (+ ts-fsrs), lazy-loaded by <mbr-flashcards>
-        // when a deck is opened. Ships in static builds: In order / Random
-        // review needs no server, only spaced repetition does.
-        "/components/mbr-flashcards.min.js",
-        include_bytes!("../templates/components-js/mbr-flashcards.min.js"),
-        "application/javascript",
-    ),
-    (
-        // Flashcard reading view (collapsed review-history summaries), imported
-        // by <mbr-flashcards> at idle on `type: flashcard` pages only. Separate
-        // from the deck so reading a note never fetches ts-fsrs.
-        "/components/mbr-flashcards-reading.min.js",
-        include_bytes!("../templates/components-js/mbr-flashcards-reading.min.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.dark.css",
-        include_bytes!("../templates/hljs.dark.11.12.0.css"),
-        "text/css",
-    ),
-    (
-        "/hljs.atom-one-dark.css",
-        include_bytes!("../templates/hljs.atom-one-dark.11.12.0.css"),
-        "text/css",
-    ),
-    (
-        "/hljs.js",
-        include_bytes!("../templates/hljs.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.css.js",
-        include_bytes!("../templates/hljs.lang.css.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.javascript.js",
-        include_bytes!("../templates/hljs.lang.javascript.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.typescript.js",
-        include_bytes!("../templates/hljs.lang.typescript.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.rust.js",
-        include_bytes!("../templates/hljs.lang.rust.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.python.js",
-        include_bytes!("../templates/hljs.lang.python.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.bash.js",
-        include_bytes!("../templates/hljs.lang.bash.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.java.js",
-        include_bytes!("../templates/hljs.lang.java.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.scala.js",
-        include_bytes!("../templates/hljs.lang.scala.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.go.js",
-        include_bytes!("../templates/hljs.lang.go.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.ruby.js",
-        include_bytes!("../templates/hljs.lang.ruby.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.nix.js",
-        include_bytes!("../templates/hljs.lang.nix.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.json.js",
-        include_bytes!("../templates/hljs.lang.json.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.yaml.js",
-        include_bytes!("../templates/hljs.lang.yaml.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.xml.js",
-        include_bytes!("../templates/hljs.lang.xml.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.sql.js",
-        include_bytes!("../templates/hljs.lang.sql.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.dockerfile.js",
-        include_bytes!("../templates/hljs.lang.dockerfile.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/hljs.lang.markdown.js",
-        include_bytes!("../templates/hljs.lang.markdown.11.12.0.js"),
-        "application/javascript",
-    ),
-    (
-        "/mermaid.min.js",
-        include_bytes!("../templates/mermaid.12.1.0.min.js"),
-        "application/javascript",
-    ),
-    // Reveal.js presentation framework
-    (
-        "/reveal.js",
-        include_bytes!("../templates/reveal.6.0.2.js"),
-        "application/javascript",
-    ),
-    (
-        "/reveal.css",
-        include_bytes!("../templates/reveal.6.0.2.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-theme-blank.css",
-        include_bytes!("../templates/reveal.theme.blank.5.2.1.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-theme-black.css",
-        include_bytes!("../templates/reveal.theme.black.5.2.1.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-theme-white.css",
-        include_bytes!("../templates/reveal.theme.white.5.2.1.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-slides.css",
-        include_bytes!("../templates/reveal-slides.css"),
-        "text/css",
-    ),
-    (
-        "/reveal-notes.js",
-        include_bytes!("../templates/reveal.notes.6.0.2.js"),
-        "application/javascript",
-    ),
-];
 
 // ============================================================================
 // Tag page link helpers

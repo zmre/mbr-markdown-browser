@@ -11,7 +11,7 @@
 //! - Invalid value -> None (caller should show 404 + warning)
 
 // Default (no color)
-const PICO_DEFAULT: &[u8] = include_bytes!("../templates/pico-main/pico.min.css");
+pub(crate) const PICO_DEFAULT: &[u8] = include_bytes!("../templates/pico-main/pico.min.css");
 const PICO_FLUID_DEFAULT: &[u8] =
     include_bytes!("../templates/pico-main/pico.fluid.classless.min.css");
 
