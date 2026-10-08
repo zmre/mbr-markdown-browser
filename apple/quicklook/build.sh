@@ -23,6 +23,13 @@ cargo build --release --lib --no-default-features --features ffi --manifest-path
 echo "Generating Xcode project..."
 xcodegen generate
 
+# A fixed derived-data directory per checkout. Xcode's default
+# (~/Library/Developer/Xcode/DerivedData/MBRQuickLook-<hash of the project
+# path>) gets a new directory for every checkout or move of this project, and
+# picking one of those by name installed whichever happened to sort first —
+# often a stale build from another worktree.
+DERIVED_DATA="$PROJECT_ROOT/target/quicklook-derived-data"
+
 # Build the extension
 echo "Building QuickLook extension..."
 xcodebuild \
@@ -30,12 +37,10 @@ xcodebuild \
     -scheme MBRQuickLook \
     -configuration Release \
     -arch arm64 \
+    -derivedDataPath "$DERIVED_DATA" \
     build
 
-# Get the derived data path
-DERIVED_DATA="$HOME/Library/Developer/Xcode/DerivedData"
-BUILD_DIR=$(find "$DERIVED_DATA" -maxdepth 1 -name "MBRQuickLook-*" -type d | head -1)
-EXTENSION_PATH="$BUILD_DIR/Build/Products/Release/MBRQuickLookHost.app/Contents/PlugIns/MBRPreview.appex"
+EXTENSION_PATH="$DERIVED_DATA/Build/Products/Release/MBRQuickLookHost.app/Contents/PlugIns/MBRPreview.appex"
 
 echo ""
 echo "Build complete!"
