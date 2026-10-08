@@ -2,17 +2,27 @@
  * Org chart view: renders the pure `org-layout.ts` output as an SVG via
  * lit-html, with pan/zoom from the shared `SvgViewportController` and
  * click/keyboard navigation on the cards. A "+N more" card navigates to the
- * person whose hidden reports it stands for, where they are drawn in full.
+ * person whose hidden reports it stands for, where they are drawn in full —
+ * unless that person is the focus, whose page this already is: then the chart
+ * rebuilds in place with a larger budget (`nextOrgBudget`), keeping the spot the
+ * card occupied fixed on screen and handing keyboard focus to the first card it
+ * revealed.
  */
 import { html, render, svg, nothing, type TemplateResult } from 'lit'
+import { repeat } from 'lit/directives/repeat.js'
 import { SvgViewportController } from '../graph/viewport-controller.js'
 import { nodeTitle } from '../graph/relationship-graph.js'
+import { parseViewBox, type ViewBox } from '../graph/viewport.js'
 import {
+  DEFAULT_ORG_MAX_NODES,
+  ORG_EXPAND_STEP,
   ORG_TITLE_PX,
   buildOrgTree,
   computeOrgInitialView,
+  anchoredOrgView,
   computeOrgLayout,
   hasWorkHierarchy,
+  nextOrgBudget,
   type OrgCard,
   type OrgLayout,
 } from './org-layout.js'
@@ -46,39 +56,53 @@ function buildingIcon(x: number, y: number): TemplateResult {
   `
 }
 
+/**
+ * Tooltip and accessible name of a "+N more" card. One that expands in place
+ * says what it will reveal (a step, when the remainder is larger than one);
+ * one that navigates names where the hidden notes are.
+ */
+export function moreCardText(card: OrgCard, expands: boolean, titleOf: (path: string) => string): string {
+  const count = card.moreCount ?? 0
+  if (!expands) return `${count} more — open ${titleOf(card.target)} to see them`
+  return count > ORG_EXPAND_STEP ? `Show ${ORG_EXPAND_STEP} more (of ${count})` : `Show ${count} more`
+}
+
 function cardTemplate(
   card: OrgCard,
   titleOf: (path: string) => string,
+  expandsInPlace: (card: OrgCard) => boolean,
   onActivate: (card: OrgCard) => void,
   onKeydown: (e: KeyboardEvent, card: OrgCard) => void
 ): TemplateResult {
   const left = card.x - card.w / 2
   const top = card.y - card.h / 2
   const also = (card.also ?? []).map(titleOf)
-  const tooltip =
-    card.kind === 'more'
-      ? `${card.moreCount} more — open ${titleOf(card.target)} to see them`
-      : [card.title, card.jobTitle, also.length ? `Also reports to ${also.join(', ')}` : '']
-          .filter(Boolean)
-          .join('\n')
-  const label = card.kind === 'more' ? `Show ${card.moreCount} more under ${titleOf(card.target)}` : `Go to ${card.title}`
 
   if (card.kind === 'more') {
+    const expands = expandsInPlace(card)
+    const text = moreCardText(card, expands, titleOf)
+    // An in-place expansion changes this page, so it is a button, not a link.
     return svg`
-      <g class="${cardClass(card)}" role="link" tabindex="0" aria-label="${label}"
+      <g class="${cardClass(card)}" role="${expands ? 'button' : 'link'}" tabindex="0" aria-label="${text}"
+        data-org-id="${card.id}"
         @click=${() => onActivate(card)} @keydown=${(e: KeyboardEvent) => onKeydown(e, card)}>
-        <title>${tooltip}</title>
+        <title>${text}</title>
         <rect x="${left}" y="${top}" width="${card.w}" height="${card.h}" rx="${card.h / 2}"></rect>
         <text class="org-more-text" x="${card.x}" y="${card.y + 4}" text-anchor="middle">${card.title}</text>
       </g>
     `
   }
 
+  const tooltip = [card.title, card.jobTitle, also.length ? `Also reports to ${also.join(', ')}` : '']
+    .filter(Boolean)
+    .join('\n')
+  const label = `Go to ${card.title}`
   const isOrg = card.kind === 'organization'
   const textX = left + (isOrg ? 34 : 16)
   const hasSub = Boolean(card.jobTitle)
   return svg`
     <g class="${cardClass(card)}" role="link" tabindex="0" aria-label="${label}"
+      data-org-id="${card.id}"
       @click=${() => onActivate(card)} @keydown=${(e: KeyboardEvent) => onKeydown(e, card)}>
       <title>${tooltip}</title>
       <rect class="org-card-bg" x="${left}" y="${top}" width="${card.w}" height="${card.h}" rx="8"></rect>
@@ -101,6 +125,7 @@ function chartTemplate(
   layout: OrgLayout,
   titleOf: (path: string) => string,
   handlers: {
+    expandsInPlace: (card: OrgCard) => boolean
     onActivate: (card: OrgCard) => void
     onKeydown: (e: KeyboardEvent, card: OrgCard) => void
     onZoomIn: () => void
@@ -128,7 +153,11 @@ function chartTemplate(
         )}
       </g>
       <g class="org-cards">
-        ${layout.cards.map((card) => cardTemplate(card, titleOf, handlers.onActivate, handlers.onKeydown))}
+        ${repeat(
+          layout.cards,
+          (card) => card.id,
+          (card) => cardTemplate(card, titleOf, handlers.expandsInPlace, handlers.onActivate, handlers.onKeydown)
+        )}
       </g>
     </svg>
     <div class="rel-graph-controls">
@@ -146,7 +175,8 @@ function mountOrgChart(container: HTMLElement, ctx: GenealogyContext): Genealogy
   canvas.className = 'org-canvas'
   container.appendChild(canvas)
 
-  const tree = buildOrgTree(ctx.focusPath, ctx.notesByPath, ctx.registry)
+  let maxNodes = DEFAULT_ORG_MAX_NODES
+  const tree = buildOrgTree(ctx.focusPath, ctx.notesByPath, ctx.registry, { maxNodes })
   if (!tree) {
     const empty = document.createElement('p')
     empty.className = 'gen-empty'
@@ -155,11 +185,46 @@ function mountOrgChart(container: HTMLElement, ctx: GenealogyContext): Genealogy
     return { destroy: () => canvas.remove() }
   }
 
-  const layout = computeOrgLayout(tree)
+  let layout = computeOrgLayout(tree)
   const titleOf = (path: string) => nodeTitle(ctx.notesByPath.get(path)?.frontmatter ?? {}, path)
   let controller: SvgViewportController | null = null
+  // Navigating to the page already shown would do nothing, so a "+N more" card
+  // standing for the focus's own reports reveals them here instead.
+  const expandsInPlace = (card: OrgCard) => card.kind === 'more' && card.target === ctx.focusPath
+
+  const expand = (card: OrgCard) => {
+    const budget = nextOrgBudget(maxNodes, card.moreCount ?? 0)
+    const rebuilt = buildOrgTree(ctx.focusPath, ctx.notesByPath, ctx.registry, { maxNodes: budget })
+    if (!rebuilt) return
+    maxNodes = budget
+    const before = layout
+    const shown = new Set(before.cards.map((c) => c.id))
+    layout = computeOrgLayout(rebuilt)
+    // The first card this click revealed takes the "+N more" card's slot, so
+    // pin that slot to the screen: the user's eye stays where they clicked.
+    // Deeper "+N more" ids are renumbered by a rebuild, hence `kind` too.
+    const revealed = layout.cards.find((c) => c.kind !== 'more' && !shown.has(c.id))
+    const focusBefore = before.cards.find((c) => c.isFocus)
+    const focusAfter = layout.cards.find((c) => c.isFocus)
+    const [from, to] = revealed
+      ? [card, revealed]
+      : focusBefore && focusAfter
+        ? [focusBefore, focusAfter]
+        : [null, null]
+    const view = parseViewBox(canvas.querySelector('svg')?.getAttribute('viewBox') ?? null)
+    draw(view && from && to ? anchoredOrgView(view, from, to) : null)
+    if (revealed) {
+      const el = [...canvas.querySelectorAll<SVGGElement>('.org-card')].find(
+        (g) => g.getAttribute('data-org-id') === revealed.id
+      )
+      // preventScroll: the canvas is overflow:hidden and positioned by viewBox;
+      // a scrolled canvas would misalign every pointer-to-SVG mapping.
+      el?.focus({ preventScroll: true })
+    }
+  }
   const go = (card: OrgCard) => {
-    if (card.target !== ctx.focusPath) ctx.navigate(card.target)
+    if (expandsInPlace(card)) expand(card)
+    else if (card.target !== ctx.focusPath) ctx.navigate(card.target)
   }
   const onActivate = (card: OrgCard) => {
     // A pan that started on a card must not navigate (see timeline-view).
@@ -173,26 +238,42 @@ function mountOrgChart(container: HTMLElement, ctx: GenealogyContext): Genealogy
     }
   }
 
-  render(
-    chartTemplate(layout, titleOf, {
-      onActivate,
-      onKeydown,
-      onZoomIn: () => controller?.zoomIn(),
-      onZoomOut: () => controller?.zoomOut(),
-      onReset: () => controller?.reset(),
-    }),
-    canvas
-  )
-
-  const svgEl = canvas.querySelector('svg')
-  if (svgEl instanceof SVGSVGElement) {
+  /**
+   * Render `layout` and (re)attach the viewport controller. `view` is the view
+   * to show; `null` means the opening view. A fresh controller per render,
+   * because the content box — its zoom-out floor — has changed.
+   */
+  const draw = (view: ViewBox | null) => {
+    render(
+      chartTemplate(layout, titleOf, {
+        expandsInPlace,
+        onActivate,
+        onKeydown,
+        onZoomIn: () => controller?.zoomIn(),
+        onZoomOut: () => controller?.zoomOut(),
+        onReset: () => controller?.reset(),
+      }),
+      canvas
+    )
+    const svgEl = canvas.querySelector('svg')
+    if (!(svgEl instanceof SVGSVGElement)) return
+    controller?.destroy()
+    // Lit rewrites `viewBox` only when its parts change; the controller must
+    // read the full content box, never the previous controller's zoomed view.
+    svgEl.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`)
+    controller = new SvgViewportController(canvas, svgEl)
+    if (view) {
+      // `setHomeView` is the controller's only way to show a given view, so
+      // Reset returns here too — the expanded chart at the reader's zoom.
+      controller.setHomeView(view)
+      return
+    }
     // Readable first, complete second: fit to width down to a 12px title,
     // centered on the focus; wider charts pan. `setHomeView` (rather than the
     // `initialView` option) because a small chart's view is LARGER than the
     // content, which must widen the zoom-out floor rather than clamp to it.
     const rect = canvas.getBoundingClientRect()
     const focus = layout.cards.find((c) => c.isFocus)
-    controller = new SvgViewportController(canvas, svgEl)
     controller.setHomeView(
       computeOrgInitialView({
         contentWidth: layout.width,
@@ -204,6 +285,7 @@ function mountOrgChart(container: HTMLElement, ctx: GenealogyContext): Genealogy
       })
     )
   }
+  draw(null)
 
   return {
     destroy() {
