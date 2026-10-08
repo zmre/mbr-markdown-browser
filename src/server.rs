@@ -16,6 +16,7 @@ use crate::config::{RelationType, SortField, TagSource};
 use crate::embedded_katex;
 use crate::embedded_pico;
 use crate::errors::{MbrError, ServerError, TaskPatchError};
+use crate::file_write::{FileWriteLocks, create_unique_temp_file};
 use crate::link_grep::InboundLinkCache;
 use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use crate::link_transform::LinkTransformConfig;
@@ -1334,53 +1335,6 @@ pub struct ServerState {
     pub file_write_locks: Arc<FileWriteLocks>,
 }
 
-/// One async mutex per file, for the endpoints that read a file, patch it
-/// and write it back.
-///
-/// Without it two writes to the same note — a task toggle and a flashcard
-/// review a moment apart, or two windows — both read the old text and the
-/// second rename silently drops the first one's change.
-///
-/// Entries are `Weak`: a file's mutex lives exactly as long as someone holds
-/// or awaits it, and dead entries are swept on every acquisition, so the map
-/// only ever holds the files being written right now.
-#[derive(Default)]
-pub struct FileWriteLocks {
-    locks: parking_lot::Mutex<
-        std::collections::HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>,
-    >,
-}
-
-impl FileWriteLocks {
-    /// Waits for exclusive write access to `path`, which should be canonical
-    /// so two spellings of one file share a lock.
-    pub async fn lock(&self, path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
-        let mutex = {
-            let mut locks = self.locks.lock();
-            locks.retain(|_, weak| weak.strong_count() > 0);
-            match locks.get(path).and_then(std::sync::Weak::upgrade) {
-                Some(mutex) => mutex,
-                None => {
-                    let mutex = Arc::new(tokio::sync::Mutex::new(()));
-                    locks.insert(path.to_path_buf(), Arc::downgrade(&mutex));
-                    mutex
-                }
-            }
-        };
-        mutex.lock_owned().await
-    }
-
-    /// Files with a live lock (held or awaited). For tests.
-    #[cfg(test)]
-    fn live(&self) -> usize {
-        self.locks
-            .lock()
-            .values()
-            .filter(|weak| weak.strong_count() > 0)
-            .count()
-    }
-}
-
 /// JSON body for `POST /.mbr/edit/{*path}`.
 #[derive(serde::Deserialize)]
 pub struct EditRequest {
@@ -1604,40 +1558,6 @@ impl IntoResponse for FileOpError {
 /// Rejects any `..` or absolute component, joins onto `canonical_base`, then
 /// canonicalizes the deepest **existing** ancestor and asserts it stays within
 /// the root (so a symlink in the existing portion cannot escape).
-/// Creates a fresh temp file beside a write target, for a write-then-rename.
-///
-/// The name is hidden (leading dot, so the scanner and watcher skip it),
-/// derived from the target's, and unique per process and call — `create_new`
-/// guarantees no two writers ever share one, which a fixed `.{name}.mbr-tmp`
-/// did not: concurrent writers truncated each other's temp file and the loser's
-/// rename failed with `ENOENT`.
-fn create_unique_temp_file(
-    dir: &Path,
-    file_name: &str,
-) -> std::io::Result<(PathBuf, std::fs::File)> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    // A leftover from a crashed process can only collide on a reused pid;
-    // move past it rather than fail.
-    const ATTEMPTS: u32 = 16;
-    let pid = std::process::id();
-    let mut last_error = None;
-    for _ in 0..ATTEMPTS {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = dir.join(format!(".{file_name}.{pid}-{n}.mbr-tmp"));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| std::io::Error::other("no free temp file name")))
-}
-
 fn resolve_new_target_path(canonical_base: &Path, rel: &str) -> Result<PathBuf, FileOpError> {
     let clean = rel.trim_start_matches('/');
     if clean.is_empty() {
@@ -3565,38 +3485,11 @@ impl Server {
         crate::url_path::path_to_url(&relative)
     }
 
-    /// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
-    ///
-    /// The temp file has a name of its own (see [`create_unique_temp_file`]),
-    /// so concurrent writers never share one, and when `path` already exists
-    /// it takes over that file's permissions — a rename replaces the inode,
-    /// and a note that was `0600` must not come back `0644`. Blocking; async
-    /// callers use [`Self::atomic_write_file_async`].
+    /// [`crate::file_write::atomic_write`], with the error the file-operation
+    /// endpoints answer with. Blocking; async callers use
+    /// [`Self::atomic_write_file_async`].
     fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), FileOpError> {
-        use std::io::Write;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file.md");
-        let (tmp, mut file) =
-            create_unique_temp_file(parent, file_name).map_err(FileOpError::Io)?;
-        let written = file
-            .write_all(bytes)
-            .and_then(|()| match std::fs::metadata(path) {
-                Ok(existing) => file.set_permissions(existing.permissions()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e),
-            })
-            .and_then(|()| {
-                drop(file);
-                std::fs::rename(&tmp, path)
-            });
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(FileOpError::Io(e));
-        }
-        Ok(())
+        crate::file_write::atomic_write(path, bytes).map_err(FileOpError::Io)
     }
 
     /// [`Self::atomic_write_file`] off the async executor.
@@ -3928,6 +3821,18 @@ impl Server {
         let old_is_index = Self::path_is_index(&src, &config.index_file);
         let new_is_index = Self::path_is_index(&dst, &config.index_file);
 
+        // From the first read of the source until it is gone, no other write
+        // may touch either file: a toggle landing on the source in between
+        // would be lost with it, or would recreate it after the delete. `src`
+        // is canonical and `dst` is resolved under the canonical root, so these
+        // are the keys the other writers use. Both are taken in path order
+        // (`lock_all_blocking`) and released before the repo-wide rewrites
+        // below, which lock each file they change one at a time — never two
+        // locks held while waiting for a third.
+        let move_guards = config
+            .file_write_locks
+            .lock_all_blocking(&[src.as_path(), dst.as_path()]);
+
         // A4-C delta names (bare `[[Name]]` rewrite on stem change) need the
         // source frontmatter (title/aliases) so still-resolvable names are kept.
         let src_meta = crate::markdown::extract_metadata_from_file(&src).ok();
@@ -3969,11 +3874,15 @@ impl Server {
             .unwrap_or("file.md");
         let (tmp, mut tmp_file) =
             create_unique_temp_file(parent_dir, dst_name).map_err(FileOpError::Io)?;
-        if let Err(e) = std::io::Write::write_all(&mut tmp_file, moved_content.as_bytes()) {
+        // The moved note keeps the source's permissions, as a rename would.
+        let written = std::io::Write::write_all(&mut tmp_file, moved_content.as_bytes())
+            .and_then(|()| std::fs::metadata(&src))
+            .and_then(|meta| tmp_file.set_permissions(meta.permissions()));
+        drop(tmp_file);
+        if let Err(e) = written {
             let _ = std::fs::remove_file(&tmp);
             return Err(FileOpError::Io(e));
         }
-        drop(tmp_file);
         let rename_result = if case_only {
             std::fs::remove_file(&src).and_then(|()| std::fs::rename(&tmp, &dst))
         } else {
@@ -3983,6 +3892,7 @@ impl Server {
             let _ = std::fs::remove_file(&tmp);
             return Err(FileOpError::Io(e));
         }
+        drop(move_guards);
 
         // Skip set for the repo-wide walkers: the destination file (already
         // written); the source no longer exists so it won't be walked.
@@ -4001,6 +3911,7 @@ impl Server {
             &config.ignore_dirs,
             &config.ignore_globs,
             &skip,
+            Some(&config.file_write_locks),
         )
         .map_err(FileOpError::Io)?;
 
@@ -4015,6 +3926,7 @@ impl Server {
             &config.index_file,
             &config.repo.wikilink_index,
             &skip,
+            Some(&config.file_write_locks),
         )
         .map_err(FileOpError::Io)?;
 
@@ -9965,99 +9877,6 @@ mod tests {
         assert!(!predicate.should_compress(&response_with_content_type("text/event-stream")));
         // ...and normal text still compresses.
         assert!(predicate.should_compress(&response_with_content_type("text/html")));
-    }
-
-    // ---- in-place writes ----------------------------------------------------
-
-    /// Names in `dir` that look like one of our temp files.
-    fn temp_files_in(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir)
-            .expect("read dir")
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-            .filter(|name| name.ends_with(".mbr-tmp"))
-            .collect()
-    }
-
-    #[test]
-    fn unique_temp_files_never_share_a_name() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let (a, _fa) = create_unique_temp_file(temp.path(), "note.md").expect("first");
-        let (b, _fb) = create_unique_temp_file(temp.path(), "note.md").expect("second");
-        assert_ne!(a, b);
-        for path in [&a, &b] {
-            let name = path.file_name().and_then(|n| n.to_str()).expect("name");
-            assert!(
-                name.starts_with(".note.md.") && name.ends_with(".mbr-tmp"),
-                "{name}"
-            );
-        }
-    }
-
-    /// Concurrent writers to one file each get their own temp file, so every
-    /// rename succeeds (the shared `.{name}.mbr-tmp` made the loser `ENOENT`)
-    /// and nothing is left behind.
-    #[test]
-    fn concurrent_atomic_writes_all_succeed_and_leave_no_temp_files() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("note.md");
-        std::fs::write(&path, "start\n").expect("seed");
-        let results: Vec<_> = std::thread::scope(|scope| {
-            (0..16)
-                .map(|i| {
-                    let path = &path;
-                    scope.spawn(move || {
-                        Server::atomic_write_file(path, format!("writer {i}\n").as_bytes())
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| handle.join().expect("writer thread"))
-                .collect()
-        });
-        for result in &results {
-            assert!(result.is_ok(), "{result:?}");
-        }
-        let text = std::fs::read_to_string(&path).expect("read back");
-        assert!(text.starts_with("writer "), "{text}");
-        assert_eq!(temp_files_in(temp.path()), Vec::<String>::new());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_write_keeps_the_file_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("private.md");
-        std::fs::write(&path, "secret\n").expect("seed");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
-        Server::atomic_write_file(&path, b"still secret\n").expect("write");
-        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "still secret\n");
-    }
-
-    #[tokio::test]
-    async fn file_write_locks_serialize_one_path_and_forget_it_afterwards() {
-        let locks = Arc::new(FileWriteLocks::default());
-        let a = Path::new("/repo/a.md");
-        let guard = locks.lock(a).await;
-        // Another file is independent.
-        drop(locks.lock(Path::new("/repo/b.md")).await);
-
-        // The same file waits until the first guard is dropped.
-        let waiter = {
-            let locks = Arc::clone(&locks);
-            tokio::spawn(async move { drop(locks.lock(Path::new("/repo/a.md")).await) })
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(!waiter.is_finished(), "second lock on a.md must wait");
-        drop(guard);
-        waiter.await.expect("waiter");
-
-        // Nothing holds or awaits a lock now, so nothing is kept alive.
-        assert_eq!(locks.live(), 0);
-        drop(locks.lock(a).await);
-        assert!(locks.locks.lock().len() <= 1, "dead entries are swept");
     }
 }
 

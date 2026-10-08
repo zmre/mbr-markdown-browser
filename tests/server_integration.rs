@@ -6736,6 +6736,128 @@ async fn test_create_markdown_traversal_rejected() {
     assert!(!repo.path().parent().unwrap().join("escape.md").exists());
 }
 
+/// A move rewrites links in other notes while those notes may be written by
+/// someone else. A task toggle on a linking note, racing the move, must keep
+/// both its own change and the link rewrite.
+#[tokio::test]
+async fn test_move_and_toggle_on_a_linking_note_both_land() {
+    let repo = TestRepo::new();
+    repo.create_markdown("guide.md", "# Guide\n");
+    let linking = repo.create_markdown("refs/abs.md", "- [ ] task\n\nSee [g](/guide/).\n");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let names = ["guide", "manual"];
+    for round in 0..6 {
+        let (from, to) = (names[round % 2], names[(round + 1) % 2]);
+        let (was, now) = if round % 2 == 0 {
+            (' ', 'x')
+        } else {
+            ('x', ' ')
+        };
+        let move_url = format!("/.mbr/move/{from}.md");
+        let (moved, toggled) = tokio::join!(
+            edit_post(
+                &server,
+                &move_url,
+                serde_json::json!({ "to": format!("{to}.md") }),
+            ),
+            edit_post(
+                &server,
+                "/.mbr/task",
+                serde_json::json!({
+                    "path": "refs/abs.md", "line": 1,
+                    "expected": format!("- [{was}] task"),
+                    "to": if now == 'x' { "done" } else { "open" },
+                }),
+            ),
+        );
+        assert_eq!(moved.status(), 200, "round {round}: move");
+        assert_eq!(toggled.status(), 200, "round {round}: toggle");
+        assert_eq!(
+            std::fs::read_to_string(&linking).unwrap(),
+            format!("- [{now}] task\n\nSee [g](/{to}/).\n"),
+            "round {round}: both writes must survive"
+        );
+    }
+}
+
+/// A toggle racing a move of its own note either lands before the move (and
+/// travels with it) or finds the note gone. It must never bring the old file
+/// back after the move deleted it.
+#[tokio::test]
+async fn test_toggle_racing_a_move_of_its_note_is_never_lost_or_resurrected() {
+    let repo = TestRepo::new();
+    for round in 0..6 {
+        repo.create_markdown(&format!("old{round}.md"), "- [ ] task\n");
+    }
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    for round in 0..6 {
+        let move_url = format!("/.mbr/move/old{round}.md");
+        let (moved, toggled) = tokio::join!(
+            edit_post(
+                &server,
+                &move_url,
+                serde_json::json!({ "to": format!("new{round}.md") }),
+            ),
+            edit_post(
+                &server,
+                "/.mbr/task",
+                serde_json::json!({
+                    "path": format!("old{round}.md"), "line": 1,
+                    "expected": "- [ ] task", "to": "done",
+                }),
+            ),
+        );
+        assert_eq!(moved.status(), 200, "round {round}: move");
+        assert!(
+            !repo.path().join(format!("old{round}.md")).exists(),
+            "round {round}: the moved-away note came back"
+        );
+        let moved_text =
+            std::fs::read_to_string(repo.path().join(format!("new{round}.md"))).unwrap();
+        if toggled.status() == 200 {
+            assert_eq!(moved_text, "- [x] task\n", "round {round}: toggle lost");
+        } else {
+            assert_eq!(moved_text, "- [ ] task\n", "round {round}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_move_keeps_the_note_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    let note = repo.create_markdown("private.md", "# Private\n");
+    std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/move/private.md",
+        serde_json::json!({ "to": "secret.md" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let mode = std::fs::metadata(repo.path().join("secret.md"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "mode after move: {mode:o}");
+}
+
 #[tokio::test]
 async fn test_move_markdown_rewrites_inbound_links() {
     let repo = TestRepo::new();
