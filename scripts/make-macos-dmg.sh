@@ -86,7 +86,7 @@ chmod -R u+w "$APP"
 # one modified after signing is reported as "damaged" with no way through.
 # Sign innermost-out; `--deep` is deprecated for signing on macOS 13+, so nested
 # code is signed explicitly, but --deep is still fine for verification.
-ENTITLEMENTS="$(cd "$(dirname "$0")/.." && pwd)/quicklook/MBRPreview/MBRPreview.entitlements"
+ENTITLEMENTS="$(cd "$(dirname "$0")/.." && pwd)/apple/quicklook/MBRPreview/MBRPreview.entitlements"
 
 # Strip build-machine metadata (quarantine, provenance xattrs) before signing.
 xattr -cr "$APP"

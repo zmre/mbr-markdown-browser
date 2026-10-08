@@ -142,10 +142,10 @@ jobs:
           -Xlinker -e -Xlinker _NSExtensionMain \
           -Xlinker -dead_strip \
           -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
-          -I quicklook/Generated \
-          -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
-          quicklook/Generated/mbr.swift \
-          quicklook/MBRPreview/PreviewProvider.swift
+          -I apple/quicklook/Generated \
+          -Xcc -fmodule-map-file=apple/quicklook/Generated/mbrFFI.modulemap \
+          apple/quicklook/Generated/mbr.swift \
+          apple/quicklook/MBRPreview/PreviewProvider.swift
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4.38.2
