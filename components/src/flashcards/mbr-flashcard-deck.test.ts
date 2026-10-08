@@ -408,6 +408,28 @@ describe('concentric mode', () => {
     expect(deck.querySelector('.mbr-fc-ratings')).not.toBeNull()
   })
 
+  it('stops writing after a refused write, so the notice is shown once and stays dismissed', async () => {
+    // Regression: a 403 (a `Host` the server does not recognise, e.g. behind a
+    // reverse proxy) used to be retried — and re-announced — on every rating.
+    reply = { ok: false, kind: 'refused', message: 'This server is not accepting edits from this page.' }
+    await mount({ html: SECTIONED_DECK_HTML, recorder })
+    await select('concentric')
+    await rate('3')
+    await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
+    await deck.updateComplete
+    expect(calls).toHaveLength(1)
+    deck.querySelector<HTMLButtonElement>('.mbr-fc-banner button')!.click()
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+    // Rated and moved on, session-only: no further write, no new notice.
+    expect(isFlipped()).toBe(false)
+    await rate('3')
+    await rate('2')
+    await deck.updateComplete
+    expect(calls).toHaveLength(1)
+    expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
+  })
+
   it('keeps going session-only on an auth or network failure, and tries to save again', async () => {
     // A token-protected server answers 401 after every page load (the token is
     // memory-only): Concentric must not stall on it.

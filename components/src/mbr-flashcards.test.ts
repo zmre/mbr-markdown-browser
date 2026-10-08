@@ -128,6 +128,51 @@ describe('<mbr-flashcards>', () => {
     expect(services).toBeNull()
   })
 
+  it('builds no writer for later opens once a write was refused (403)', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    writeReply = { ok: false, kind: 'refused', message: 'This server is not accepting edits from this page.' }
+    installDeckPage()
+    window.frontmatter = { markdown_source: 'deck.md' }
+    await mount()
+    const openDeck = async () => {
+      trigger.open()
+      await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+      return document.querySelector('mbr-flashcard-deck') as unknown as {
+        recordReview: ((t: unknown) => Promise<unknown>) | null
+      }
+    }
+    const first = await openDeck()
+    expect(typeof first.recordReview).toBe('function')
+    await first.recordReview!({ line: 5, rating: 'good' })
+    trigger.close()
+
+    // Same page, reopened: no writer, so no FSRS and a silent Concentric.
+    services = null
+    const second = await openDeck()
+    expect(second.recordReview).toBeNull()
+    expect(services).toBeNull()
+    window.frontmatter = undefined
+  })
+
+  it('keeps the writer for later opens after a failure that may clear up (401)', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    writeReply = { ok: false, kind: 'auth', message: 'Editing needs a token' }
+    installDeckPage()
+    window.frontmatter = { markdown_source: 'deck.md' }
+    await mount()
+    trigger.open()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    const deck = document.querySelector('mbr-flashcard-deck') as unknown as {
+      recordReview: (t: unknown) => Promise<unknown>
+    }
+    await deck.recordReview({ line: 5, rating: 'good' })
+    trigger.close()
+    trigger.open()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    expect(typeof (document.querySelector('mbr-flashcard-deck') as unknown as { recordReview: unknown }).recordReview).toBe('function')
+    window.frontmatter = undefined
+  })
+
   it('shares the slides guards: not with a modifier, not while typing', async () => {
     installDeckPage()
     document.body.insertAdjacentHTML('beforeend', '<input id="field">')

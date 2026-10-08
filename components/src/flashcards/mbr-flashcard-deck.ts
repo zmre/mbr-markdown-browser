@@ -41,7 +41,8 @@
  *
  * A small stack that grows as it is learned (`concentric.ts`). It needs no
  * writer: with one (editing on) each rating is saved exactly as spaced
- * repetition saves it; without one — or once a conflict has stopped writes —
+ * repetition saves it; without one — or once a conflict or a 403 has stopped
+ * writes —
  * ratings live in this session only (`card.history` in memory, no write, no
  * line shifting).
  *
@@ -495,11 +496,13 @@ export class MbrFlashcardDeckElement extends LitElement {
       if (!outcome.ok) {
         this._message = outcome.message
         this._announcement = outcome.message
-        // Every later write would be refused as well; finish the session as a
-        // read-only one rather than failing card after card. An `auth` or
-        // `other` failure does not block: the next rating tries again, so
-        // saving resumes once a token is entered or the network is back.
-        if (outcome.kind === 'conflict') this._writesBlocked = true
+        // Every later write would be refused as well (a stale file, or a 403
+        // that no retry can fix); finish the session as a read-only one rather
+        // than failing — and re-showing the notice — card after card. An
+        // `auth` or `other` failure does not block: the next rating tries
+        // again, so saving resumes once a token is entered or the network is
+        // back.
+        if (outcome.kind === 'conflict' || outcome.kind === 'refused') this._writesBlocked = true
         // Spaced repetition keeps the card so the rating can be retried.
         // Concentric keeps going with this rating, session-only — it never
         // needed the writer, and stalling on a 401 would leave the default

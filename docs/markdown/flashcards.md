@@ -223,8 +223,12 @@ written to the card's [review history](#the-review-history) exactly as a spaced
 repetition rating is, so practice counts toward FSRS scheduling later. Without
 editing — a static site, a read-only server — ratings last for the session only:
 they steer the stack but nothing is written. If a write fails, the deck says so
-and the rating still counts for the session. When the note changed on disk, the
-deck stops writing and carries on session-only; any other failure (a missing
+and the rating still counts for the session. When the note changed on disk, or
+the server refuses edits from the address the page was loaded at (a hostname it
+does not recognise, as behind a reverse proxy or `tailscale serve`, with no edit
+token configured), the deck says so once, stops writing and carries on
+session-only; after a refusal, reopening the deck on that page offers no spaced
+repetition and Concentric runs session-only without a notice. Any other failure (a missing
 [edit token](../modes/editing/), the server unreachable) is retried with the
 next rating, so saving resumes as soon as it can. Spaced repetition instead
 keeps the card on screen after such a failure, so the same rating can be

@@ -19,6 +19,10 @@ export interface ReviewTarget {
  *
  * `kind: 'conflict'` means the file changed under the page: every further
  * write would be refused too, so the deck stops writing for the session.
+ * `kind: 'refused'` (a 403) is just as permanent: editing is off, or the server
+ * will not take edits from the address this page was loaded at (a `Host` it
+ * does not recognise, e.g. behind a reverse proxy or `tailscale serve`). The
+ * deck stops writing, and the trigger builds no writer for later opens.
  */
 export type ReviewOutcome =
   | {
@@ -32,7 +36,7 @@ export type ReviewOutcome =
       /** How many lines were inserted (1, or 2 with a new history label). */
       readonly insertedCount: number
     }
-  | { readonly ok: false; readonly kind: 'conflict' | 'auth' | 'other'; readonly message: string }
+  | { readonly ok: false; readonly kind: 'conflict' | 'refused' | 'auth' | 'other'; readonly message: string }
 
 /** The writer the deck uses (built by `review-writer.ts::makeReviewRecorder`). */
 export type ReviewRecorder = (target: ReviewTarget) => Promise<ReviewOutcome>

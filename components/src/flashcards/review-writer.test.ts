@@ -150,6 +150,23 @@ describe('makeReviewRecorder', () => {
     expect(isEditTokenRequired()).toBe(true)
   })
 
+  it('reports a 403 on the write as a refusal, not a token problem', async () => {
+    route({ ok: false, status: 403 })
+    const outcome = await recordReview({ line: 1, rating: 'good' })
+    expect(outcome).toMatchObject({ ok: false, kind: 'refused' })
+    expect(outcome.ok === false && outcome.message).not.toMatch(/token/)
+    expect(isEditTokenRequired()).toBe(false)
+  })
+
+  it('reports a 403 on the source read as a refusal, without writing', async () => {
+    // `/.mbr/raw` sits behind the same `check_edit_access`, so a refused
+    // address fails here first.
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 403 }))
+    const outcome = await recordReview({ line: 1, rating: 'good' })
+    expect(outcome).toMatchObject({ ok: false, kind: 'refused' })
+    expect(fetchMock.mock.calls.some((c) => c[0] === '/.mbr/flashcard-review')).toBe(false)
+  })
+
   it('treats a line past the end of the file as a conflict, without writing', async () => {
     route({ ok: true, status: 200 })
     const outcome = await recordReview({ line: 99, rating: 'easy' })

@@ -258,6 +258,14 @@ async function sourceLines(path: string): Promise<SourceRead> {
  */
 export const TOKEN_MESSAGE = 'Editing needs a token — open the editor (e) and enter it first.'
 
+/**
+ * What to say on a 403. Not "editing is not enabled": nothing here writes
+ * unless the page says editing is on, so in practice a 403 is
+ * `check_edit_access` refusing the address the page was loaded at (a `Host`
+ * it does not recognise, e.g. behind a reverse proxy).
+ */
+const REFUSED_MESSAGE = 'This server is not accepting edits from this page.'
+
 /** Human-readable reason for a failed write, by status. */
 function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other'; message: string } {
   switch (status) {
@@ -269,7 +277,7 @@ function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other';
     case 401:
       return { kind: 'auth', message: TOKEN_MESSAGE }
     case 403:
-      return { kind: 'auth', message: 'Editing is not enabled on this server.' }
+      return { kind: 'auth', message: REFUSED_MESSAGE }
     case 400:
       // The endpoint returns 400 for several line-level refusals (not a task,
       // no such line, unreadable file); the common one by far is the first.
@@ -296,7 +304,7 @@ function describeReadFailure(status: number): {
     case 401:
       return { kind: 'auth', message: TOKEN_MESSAGE }
     case 403:
-      return { kind: 'auth', message: 'Editing is not enabled on this server.' }
+      return { kind: 'auth', message: REFUSED_MESSAGE }
     default:
       return { kind: 'other', message: 'Could not read the file to update it.' }
   }
