@@ -312,11 +312,11 @@
           || (builtins.match ".*\\.entitlements$" path != null)
           || (builtins.match ".*\\.modulemap$" path != null)
           || (builtins.match ".*\\.h$" path != null) # C headers for FFI
-          || (builtins.match ".*/quicklook/project\\.yml$" path != null)
-          || (builtins.match ".*/quicklook/build\\.sh$" path != null)
+          || (builtins.match ".*/apple/quicklook/project\\.yml$" path != null)
+          || (builtins.match ".*/apple/quicklook/build\\.sh$" path != null)
           # Swift tooling config
-          || (builtins.match ".*/quicklook/\\.swiftformat$" path != null)
-          || (builtins.match ".*/quicklook/\\.swiftlint\\.yml$" path != null);
+          || (builtins.match ".*/apple/quicklook/\\.swiftformat$" path != null)
+          || (builtins.match ".*/apple/quicklook/\\.swiftlint\\.yml$" path != null);
       };
 
       # Shared native build inputs
@@ -560,6 +560,12 @@
             # and pulls in the macOS-only `uniffi` build-dependency even on Linux.
             # Re-add the gate so the bin (and uniffi) is only built when `ffi` is on
             # — enabled on Darwin, off elsewhere via cliFeatures.
+            #
+            # The same stripping un-gates the `mbr` bin (`required-features =
+            # ["cli"]`) and the `[[test]]` targets. Those need no re-gating:
+            # every deps-only build here (this one and cargoArtifactsMinimal)
+            # enables `cli`, `server` and `ssg`, and the only build without them,
+            # mbr-quicklook-staticlib, passes `--lib`.
             grep -q 'required-features = \["ffi"\]' Cargo.toml \
               || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
 
@@ -570,10 +576,14 @@
           '';
         });
 
-      # The exact feature set Windows ships: GUI, no media-metadata, no ffi.
-      # Bound once so `packages.clippy-minimal`, `packages.tests-minimal`, and
-      # ci.yml's Windows job cannot drift apart silently.
-      minimalFeatures = "gui";
+      # The exact feature set Windows ships: every default subsystem except
+      # media-metadata, and no ffi. Used with `--no-default-features`, so each
+      # subsystem feature has to be named (Cargo.toml `[features]`); `gui`
+      # alone would build a library with no `mbr` binary in it. Bound once so
+      # `packages.clippy-minimal`, `packages.tests-minimal`, and ci.yml's and
+      # release.yml's Windows jobs cannot drift apart silently (the workflows
+      # spell the same string out; change them together).
+      minimalFeatures = "gui,server,watcher,ssg,cli";
 
       # Dependency artifacts for the minimal feature set.
       #
@@ -639,8 +649,10 @@
             // {
               inherit cargoArtifacts;
               pname = "mbr-quicklook-staticlib";
-              # Build only the staticlib without GUI or media-metadata features
-              # These would pull in SDL/ffmpeg which crash in QuickLook sandbox
+              # Build only the staticlib, with no default features: no server,
+              # watcher, ssg or cli (unreachable from a preview, and the bulk of
+              # the code), and no GUI or media-metadata, which would pull in
+              # SDL/ffmpeg that crash in the QuickLook sandbox.
               # Enable ffi feature for UniFFI bindings (required for Swift interop)
               cargoExtraArgs = "--locked --no-default-features --features ffi --lib";
 
@@ -675,6 +687,9 @@
               # -parse-as-library: Don't look for main() function
               # -application-extension: Mark as app extension (required for sandboxing)
               # -e _NSExtensionMain: Use extension entry point instead of _main
+              # -dead_strip: drop every function and constant the extension never
+              # reaches. ld pulls in each libmbr.a member that resolves a symbol and
+              # keeps all of it otherwise, embedded web assets included.
               swiftc \
                 -O \
                 -parse-as-library \
@@ -694,11 +709,12 @@
                 -framework ExtensionKit \
                 -module-name MBRPreview \
                 -Xlinker -e -Xlinker _NSExtensionMain \
+                -Xlinker -dead_strip \
                 -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
-                -I quicklook/Generated \
-                -Xcc -fmodule-map-file=quicklook/Generated/mbrFFI.modulemap \
-                quicklook/Generated/mbr.swift \
-                quicklook/MBRPreview/PreviewProvider.swift
+                -I apple/quicklook/Generated \
+                -Xcc -fmodule-map-file=apple/quicklook/Generated/mbrFFI.modulemap \
+                apple/quicklook/Generated/mbr.swift \
+                apple/quicklook/MBRPreview/PreviewProvider.swift
 
               # Copy Info.plist to complete the .appex bundle structure.
               #
@@ -711,7 +727,7 @@
               #
               # --replace-fail: if a token is renamed on either side this build
               # fails loudly instead of silently shipping the unexpanded text.
-              cp quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
+              cp apple/quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
               substituteInPlace build/MBRPreview.appex/Contents/Info.plist \
                 --replace-fail '$(PRODUCT_BUNDLE_IDENTIFIER)' 'com.zmre.mbr.MBRPreview' \
                 --replace-fail '$(MARKETING_VERSION)' '${version}' \
@@ -874,7 +890,7 @@
                   # the two builds. plutil rewrites the plist, which also drops
                   # the comments - harmless here, and it guarantees AMFI gets
                   # well-formed XML.
-                  cp ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                  cp ${./apple/quicklook/MBRPreview/MBRPreview.entitlements} \
                     $TMPDIR/appex-adhoc.entitlements
                   chmod u+w $TMPDIR/appex-adhoc.entitlements
                   # The dots must be escaped: plutil reads -insert's argument as
@@ -913,7 +929,7 @@
                     if ! /usr/bin/grep -q "$key" $TMPDIR/appex-entitlements.plist; then
                       echo "error: $key missing from the signed MBRPreview.appex" >&2
                       echo "       QuickLook would silently never load it. See" >&2
-                      echo "       quicklook/MBRPreview/MBRPreview.entitlements." >&2
+                      echo "       apple/quicklook/MBRPreview/MBRPreview.entitlements." >&2
                       exit 1
                     fi
                   done
@@ -996,7 +1012,7 @@
           # builder.
           #
           # Cargo feature combinations are only as tested as the combinations you
-          # build. `--no-default-features --features gui` turns off
+          # build. `--no-default-features --features ${minimalFeatures}` turns off
           # `media-metadata`, which cfg-gates whole CLI arguments — and a stale
           # `conflicts_with_all` reference to a gated argument makes clap panic at
           # startup on *every* invocation, not just in tests. That is a
@@ -1052,7 +1068,7 @@
             pkgs.runCommand "mbr-swiftfmt-check" {
               nativeBuildInputs = [pkgs.swiftformat];
             } ''
-              cd ${src}/quicklook
+              cd ${src}/apple/quicklook
               # Use explicit exclusion since config file may not be accessible in sandbox
               swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed" && exit 1)
               touch $out
@@ -1066,7 +1082,7 @@
               # SwiftLint needs HOME for cache directory
               HOME = "/tmp";
             } ''
-              cd ${src}/quicklook
+              cd ${src}/apple/quicklook
               # Check for violations (swiftlint may error about cache but still report correctly)
               output=$(swiftlint lint --config .swiftlint.yml . 2>&1 || true)
               echo "$output"
@@ -1212,7 +1228,7 @@
                 /usr/bin/codesign --force --sign - \
                   staging/MBR.app/Contents/Frameworks/libpdfium.dylib 2>/dev/null || true
                 /usr/bin/codesign --force --sign - \
-                  --entitlements ${./quicklook/MBRPreview/MBRPreview.entitlements} \
+                  --entitlements ${./apple/quicklook/MBRPreview/MBRPreview.entitlements} \
                   staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
                 /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || true
 

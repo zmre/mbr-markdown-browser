@@ -10,7 +10,7 @@
 	<string>MBRPreview</string>
 	<!--
 	  The three parenthesised tokens below are Xcode build settings, expanded
-	  by xcodebuild when the extension is built from quicklook/project.yml
+	  by xcodebuild when the extension is built from apple/quicklook/project.yml
 	  (the local dev flow). The SHIPPING build is the Nix one, which copies
 	  this file verbatim and therefore has to expand them itself - see the
 	  `mbr-quicklook` derivation in flake.nix, which substitutes all three

@@ -3822,6 +3822,8 @@ async fn test_links_json_reflects_removed_links_after_edit() {
 /// neither link cache re-checks mtimes, so a watcher batch that does not drop
 /// them serves pre-edit links until the 300 s inbound TTL (never, for the
 /// outbound cache, which has no TTL at all).
+// Needs events from disk, which only the `watcher` feature produces.
+#[cfg(feature = "watcher")]
 #[tokio::test]
 async fn test_links_json_refreshes_after_watcher_sees_external_edit() {
     let repo = TestRepo::new();
@@ -7961,6 +7963,8 @@ async fn test_site_json_cache_invalidated_when_file_created() {
 
 /// An edit made outside the server (an external editor, `git pull`) must also
 /// drop the cached site.json body, via the watcher's debounced invalidation.
+// Needs events from disk, which only the `watcher` feature produces.
+#[cfg(feature = "watcher")]
 #[tokio::test]
 async fn test_site_json_cache_invalidated_by_watcher_edit() {
     let repo = TestRepo::new();
@@ -8519,6 +8523,8 @@ async fn test_tasks_endpoint_calendar_mode_buckets_by_due_date() {
 /// The watcher must keep the task index fresh once it has been built, the same
 /// way it keeps links.json fresh (see
 /// `test_links_json_refreshes_after_watcher_sees_external_edit`).
+// Needs events from disk, which only the `watcher` feature produces.
+#[cfg(feature = "watcher")]
 #[tokio::test]
 async fn test_tasks_refresh_after_watcher_sees_external_edit() {
     let repo = TestRepo::new();

@@ -1,5 +1,5 @@
 // UniFFI binding generator binary
-// Run with: cargo run --bin uniffi-bindgen -- generate --library target/release/libmbr.a --language swift --out-dir quicklook/Generated
+// Run with: cargo run --bin uniffi-bindgen -- generate --library target/release/libmbr.a --language swift --out-dir apple/quicklook/Generated
 
 fn main() {
     uniffi::uniffi_bindgen_main();
