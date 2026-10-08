@@ -1578,7 +1578,8 @@ main dl > dt::before {
  * between the two. Without the `:not()` every question above the open one
  * would point down as well. */
 main dl > dt:focus::before,
-main dl > dt:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within))::before {
+main dl > dt:has(~ dd:focus-within):not(:has(~ dt ~ dd:focus-within))::before,
+main dl > dt:has(+ dd.mbr-find-reveal)::before {
   transform: rotate(90deg);
 }
 
@@ -1643,6 +1644,20 @@ main dl > dd :where(p, ol, ul, blockquote, address, table, th, td) {
 main dl > dt:focus ~ dd,
 main dl > dd:focus-within,
 main dl > dd:focus-within ~ dd {
+  visibility: visible;
+  height: auto;
+  padding-block: 0 var(--mbr-dl-item-spacing);
+}
+
+/* The GUI find bar's stand-in for `dt:focus` (`<mbr-find-bar>`, class
+ * `FIND_REVEAL_CLASS` in `find-in-page.ts`). When the active match is inside a
+ * collapsed answer the bar opens it -- but it cannot focus the question, since
+ * focus must stay in the find input, so it puts this class on every `<dd>` of
+ * the entry instead (the same set `dt:focus ~ dd` opens) and the marker rule
+ * above turns for it too. Being on the answers themselves, it needs no "until
+ * the next question" counterpart. The bar removes it when the active match
+ * moves on, and after the bar closes, on the reader's next click elsewhere. */
+main dl > dd.mbr-find-reveal {
   visibility: visible;
   height: auto;
   padding-block: 0 var(--mbr-dl-item-spacing);

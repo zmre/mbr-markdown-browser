@@ -365,6 +365,54 @@ export function highlightRangeForMatch(index: TextIndex, start: number, end: num
 }
 
 /**
+ * Class the find bar puts on a definition-list answer to hold it open while a
+ * match inside it is active. `templates/theme.css` styles it next to the
+ * `dt:focus ~ dd` rule it stands in for: that FAQ disclosure is driven by
+ * `:focus`, and the find bar must keep focus in its own input.
+ */
+export const FIND_REVEAL_CLASS = 'mbr-find-reveal';
+
+/**
+ * The collapsed definition-list answers that hide `node`, each widened to its
+ * whole entry: one array per entry, holding every `<dd>` in that run of
+ * consecutive answers, because clicking a question opens all of its answers
+ * and this reveal should look the same. Innermost entry first; empty when
+ * nothing between `node` and `root` is collapsed.
+ *
+ * "Collapsed" is read from the computed style (`visibility: hidden`, which is
+ * how theme.css hides an answer) rather than assumed from the markup, so an
+ * answer that is already open -- by the reader, or by an earlier reveal -- is
+ * left out, as is every answer under a repository theme that never collapses
+ * `<dl>`s. The caller therefore only ever undoes what it actually opened.
+ *
+ * Cost is one `closest()` and one style read per enclosing answer (almost
+ * always zero or one), so it is meant for the single active match, never per
+ * match.
+ */
+export function collapsedAnswersAround(node: Node, root: Element): HTMLElement[][] {
+  const entries: HTMLElement[][] = [];
+  let element: Element | null = node instanceof Element ? node : node.parentElement;
+  while (element) {
+    const answer = element.closest('dl > dd');
+    if (!(answer instanceof HTMLElement) || answer === root || !root.contains(answer)) break;
+    if (getComputedStyle(answer).visibility === 'hidden') entries.push(answerEntry(answer));
+    element = answer.parentElement;
+  }
+  return entries;
+}
+
+/** Every `<dd>` in the run of consecutive answers `answer` belongs to. */
+function answerEntry(answer: HTMLElement): HTMLElement[] {
+  let first: Element = answer;
+  while (first.previousElementSibling?.tagName === 'DD') first = first.previousElementSibling;
+  const entry: HTMLElement[] = [];
+  for (let dd: Element | null = first; dd?.tagName === 'DD'; dd = dd.nextElementSibling) {
+    if (dd instanceof HTMLElement) entry.push(dd);
+  }
+  return entry;
+}
+
+/**
  * Scroll `range` into view, leaving `topInset` pixels clear at the top for the
  * find bar itself. No-ops when the range is already comfortably on screen.
  */

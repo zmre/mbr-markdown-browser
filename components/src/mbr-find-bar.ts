@@ -2,8 +2,10 @@ import { LitElement, css, html, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
 import type { MbrOverlay } from './overlay.js';
 import {
+  FIND_REVEAL_CLASS,
   SEARCH_ROOT_SELECTOR,
   buildTextIndex,
+  collapsedAnswersAround,
   compileQuery,
   createMatchScan,
   highlightRangeForMatch,
@@ -94,7 +96,13 @@ export const SELECTABLE_STYLE_ID = 'mbr-find-selectable';
  */
 const SELECTABLE_CSS =
   `${SEARCH_ROOT_SELECTOR}, ${SEARCH_ROOT_SELECTOR} * ` +
-  '{ -webkit-user-select: text !important; user-select: text !important; }';
+  '{ -webkit-user-select: text !important; user-select: text !important; }' +
+  // Definition-list answers snap open and shut while the bar is open. The find
+  // bar reveals the answer holding the active match (FIND_REVEAL_CLASS) and
+  // shuts the one it opened before, then scrolls; where theme.css animates the
+  // height (`interpolate-size`, i.e. Chromium/WebView2), an answer still
+  // shrinking above the new match would drag it off the spot just scrolled to.
+  `${SEARCH_ROOT_SELECTOR} dl > dd { transition: none !important; }`;
 
 /** Install the {@link SELECTABLE_CSS} override in `<head>`, once. */
 function installSelectableStyle(): void {
@@ -254,6 +262,16 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   private _observer: MutationObserver | null = null;
   private _ownsSelection = false;
 
+  /**
+   * Answer entries this bar opened with {@link FIND_REVEAL_CLASS}, innermost
+   * first. Only these are ever closed again, so an answer the reader opened is
+   * never touched.
+   */
+  private _revealed: HTMLElement[][] = [];
+
+  /** Whether {@link _dismissReveal} is listening (bar closed, answer still open). */
+  private _dismissArmed = false;
+
   // ========================================
   // Lifecycle
   // ========================================
@@ -261,6 +279,7 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   override disconnectedCallback() {
     super.disconnectedCallback();
     this.close();
+    this._unrevealAll();
   }
 
   // ========================================
@@ -279,6 +298,9 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   public open(): void {
     const wasOpen = this._isOpen;
     this._isOpen = true;
+    // Back to the bar managing the reveal: the next active match reconciles it.
+    this._disarmDismiss();
+    if (!this._query.trim()) this._unrevealAll();
     // Before anything is painted: highlights in unselectable text misplace.
     installSelectableStyle();
     // Indexing is lazy: never at page load, and not again while the bar is
@@ -303,6 +325,12 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
    *
    * The query itself survives, so a later Find Next resumes where the reader
    * left off — again matching a native find bar.
+   *
+   * An answer the active match revealed stays open: native find leaves the
+   * reader where they landed, and shutting it would hide the very text they
+   * searched for the moment they press Escape to read it. It closes on the
+   * reader's next pointer press or focus move outside it (see
+   * {@link _dismissReveal}), which is when a click-opened answer closes too.
    */
   public close(): void {
     this._isOpen = false;
@@ -313,6 +341,7 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     this._disconnectObserver();
     this._clearHighlights();
     removeSelectableStyle();
+    if (this._revealed.length > 0) this._armDismiss();
     this._index = null;
     this._matchStarts = NO_OFFSETS;
     this._matchEnds = NO_OFFSETS;
@@ -362,6 +391,11 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   private _runSearch(resetActive: boolean): void {
     const generation = ++this._generation;
     this._cancelScan();
+    // A paint job still running from the previous result reads _matchStarts /
+    // _matchEnds, which stay the OLD offsets until this scan lands. After a
+    // reindex (or a case toggle, or reopen) it would pair them with the NEW
+    // index and paint ranges on the wrong text, so it must stop here.
+    this._cancelPaint();
     const pattern = compileQuery(this._query, this._caseSensitive);
     if (!pattern || !this._index) {
       this._resetMatches();
@@ -434,7 +468,10 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     const index = this._index;
     const count = this._matchStarts.length;
     this._clearHighlights();
-    if (!index || count === 0) return;
+    if (!index || count === 0) {
+      this._unrevealAll();
+      return;
+    }
 
     const api = highlightApi();
     if (!api) {
@@ -502,8 +539,14 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   private _paintActive(): void {
     const index = this._index;
     const i = this._activeIndex;
-    if (!index || i < 0) return;
+    if (!index || i < 0) {
+      this._unrevealAll();
+      return;
+    }
     const active = rangeForMatch(index, this._matchStarts[i], this._matchEnds[i]);
+    // Before scrolling: the scroll measures the range, and the reveal (and
+    // closing the previous one, which may sit above it) moves the layout.
+    this._revealAnswerFor(active?.startContainer ?? null);
 
     const api = highlightApi();
     if (api) {
@@ -541,6 +584,79 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
     this._hasResult = false;
     this._activeIndex = -1;
     this._clearHighlights();
+    this._unrevealAll();
+  }
+
+  // ========================================
+  // Revealing collapsed answers
+  // ========================================
+
+  /**
+   * Open the collapsed definition-list answer(s) holding the active match, and
+   * close whichever ones this bar opened for an earlier match.
+   *
+   * theme.css opens an answer on `dt:focus`, which the bar cannot borrow: focus
+   * has to stay in the find input. So it adds {@link FIND_REVEAL_CLASS}, which
+   * theme.css styles exactly like the focused state, marker included. A class
+   * change is an attribute mutation, which the content observer does not watch
+   * (`childList`/`characterData` only), so revealing cannot trigger a reindex.
+   *
+   * Only the active match reveals; the other painted matches stay collapsed.
+   */
+  private _revealAnswerFor(node: Node | null): void {
+    const root = node ? document.querySelector(SEARCH_ROOT_SELECTOR) : null;
+    if (!node || !root) {
+      this._unrevealAll();
+      return;
+    }
+    // Entries already opened for a previous match that also hold this one stay
+    // open — no close-and-reopen for two matches in the same answer.
+    const keep = this._revealed.filter((entry) => entry.some((dd) => dd.contains(node)));
+    for (const entry of this._revealed) {
+      if (!keep.includes(entry)) this._unreveal(entry);
+    }
+    // Read after the closes above, so "collapsed" reflects the page as it now is.
+    const opened = collapsedAnswersAround(node, root);
+    for (const entry of opened) {
+      for (const dd of entry) dd.classList.add(FIND_REVEAL_CLASS);
+    }
+    this._revealed = [...opened, ...keep];
+  }
+
+  private _unreveal(entry: HTMLElement[]): void {
+    for (const dd of entry) dd.classList.remove(FIND_REVEAL_CLASS);
+  }
+
+  private _unrevealAll(): void {
+    this._disarmDismiss();
+    for (const entry of this._revealed) this._unreveal(entry);
+    this._revealed = [];
+  }
+
+  /**
+   * After close(), the reader's next pointer press or focus move closes the
+   * answer the find bar left open — unless it lands inside that answer, so
+   * selecting its text does not shut it. Clicking its own question focuses the
+   * `<dt>`, which keeps it open through the page's normal rule.
+   */
+  private _dismissReveal = (e: Event): void => {
+    const target = e.target;
+    if (target instanceof Node && this._revealed.some((entry) => entry.some((dd) => dd.contains(target)))) return;
+    this._unrevealAll();
+  };
+
+  private _armDismiss(): void {
+    if (this._dismissArmed) return;
+    this._dismissArmed = true;
+    document.addEventListener('pointerdown', this._dismissReveal, true);
+    document.addEventListener('focusin', this._dismissReveal, true);
+  }
+
+  private _disarmDismiss(): void {
+    if (!this._dismissArmed) return;
+    this._dismissArmed = false;
+    document.removeEventListener('pointerdown', this._dismissReveal, true);
+    document.removeEventListener('focusin', this._dismissReveal, true);
   }
 
   private _clearHighlights(): void {
@@ -583,7 +699,9 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
    * Watch the page for content changes, but only while the bar is open — which
    * is approximately never, so the cost when closed is zero. Painting mutates
    * no DOM, so this cannot feed itself; what it catches is hljs, KaTeX or
-   * Mermaid finishing after the bar opened.
+   * Mermaid finishing after the bar opened. `attributes` must stay off: the
+   * answer reveal is a class change, and observing it would reindex on every
+   * step that opens or closes an answer.
    */
   private _observeContent(): void {
     if (this._observer || typeof MutationObserver === 'undefined') return;

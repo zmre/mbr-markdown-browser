@@ -674,3 +674,230 @@ describe('MbrFindBarElement sliced work', () => {
     expect(active).toBeInstanceOf(FakeStaticRange)
   })
 })
+
+/**
+ * theme.css collapses every `main dl > dd` until its question has focus. The
+ * find bar keeps focus in its input, so it reveals the answer holding the
+ * ACTIVE match with `mbr-find-reveal` instead. The stylesheet below is the
+ * relevant slice of theme.css; happy-dom cascades it into getComputedStyle,
+ * which is what the bar reads to decide an answer is collapsed.
+ */
+describe('MbrFindBarElement collapsed answers', () => {
+  const REVEAL = 'mbr-find-reveal'
+
+  beforeEach(async () => {
+    const theme = document.createElement('style')
+    theme.id = 'theme-under-test'
+    theme.textContent = [
+      'main dl > dd { visibility: hidden; }',
+      'main dl > dd.mbr-find-reveal { visibility: visible; }',
+      // Stands in for an answer the reader opened by some other means.
+      'main dl > dd.user-open { visibility: visible; }',
+    ].join('\n')
+    document.head.appendChild(theme)
+    document.getElementById('wrapper')!.insertAdjacentHTML(
+      'beforeend',
+      `<p id="prose">licensing in prose</p>
+       <dl>
+         <dt id="q1">Question one</dt>
+         <dd id="a1">first licensing answer</dd>
+         <dd id="a1b">its second answer</dd>
+         <dt id="q2">Question two</dt>
+         <dd id="a2">another licensing answer</dd>
+         <dt id="q3">Question three</dt>
+         <dd id="a3" class="user-open">already open licensing answer</dd>
+       </dl>`,
+    )
+    bar.open()
+    await bar.updateComplete
+  })
+
+  afterEach(() => {
+    document.getElementById('theme-under-test')?.remove()
+  })
+
+  const revealed = () => [...document.querySelectorAll(`.${REVEAL}`)].map((el) => el.id)
+  const input = () => bar.shadowRoot!.querySelector('#find-input') as HTMLInputElement
+
+  it('leaves a match outside any answer alone', async () => {
+    await type('licensing')
+    expect(status()).toBe('1 of 4')
+    expect(revealed()).toEqual([])
+  })
+
+  it('opens the whole entry holding the active match, and only that one', async () => {
+    await type('licensing')
+    bar.findNext()
+    await bar.updateComplete
+    expect(status()).toBe('2 of 4')
+    // Both answers of question one, as a click on it would open; question
+    // two's answer also has a (painted) match but is not active, so stays shut.
+    expect(revealed()).toEqual(['a1', 'a1b'])
+    expect(getComputedStyle(document.getElementById('a1')!).visibility).toBe('visible')
+    expect(getComputedStyle(document.getElementById('a2')!).visibility).toBe('hidden')
+  })
+
+  it('closes the answer it opened when the active match moves on', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.findNext()
+    expect(revealed()).toEqual(['a2'])
+    bar.findPrevious()
+    bar.findPrevious()
+    expect(revealed()).toEqual([])
+  })
+
+  it('closes the answer it opened when the query changes or is cleared', async () => {
+    await type('licensing')
+    bar.findNext()
+    expect(revealed()).toEqual(['a1', 'a1b'])
+    await type('prose')
+    expect(revealed()).toEqual([])
+
+    await type('another')
+    expect(revealed()).toEqual(['a2'])
+    enter('')
+    expect(revealed()).toEqual([])
+  })
+
+  it('never touches an answer that was already open', async () => {
+    await type('licensing')
+    bar.findPrevious()
+    await bar.updateComplete
+    expect(status()).toBe('4 of 4')
+    expect(revealed()).toEqual([])
+    bar.findNext()
+    const a3 = document.getElementById('a3')!
+    expect(a3.className).toBe('user-open')
+    expect(getComputedStyle(a3).visibility).toBe('visible')
+  })
+
+  it('reveals before it scrolls, so the scroll measures the open layout', async () => {
+    const a1 = document.getElementById('a1')!
+    const openAtMeasure: boolean[] = []
+    vi.spyOn(Range.prototype, 'getBoundingClientRect').mockImplementation(function (this: Range) {
+      openAtMeasure.push(a1.classList.contains(REVEAL))
+      // Far below the viewport, so scrollRangeIntoView actually scrolls.
+      return { top: 5000, bottom: 5020, left: 0, right: 50, width: 50, height: 20, x: 0, y: 5000 } as DOMRect
+    })
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    await type('first licensing')
+    expect(scrollTo).toHaveBeenCalled()
+    expect(openAtMeasure).toEqual([true])
+  })
+
+  it('keeps focus in the find input while revealing', async () => {
+    await type('licensing')
+    expect(bar.shadowRoot?.activeElement).toBe(input())
+    bar.findNext()
+    bar.findNext()
+    await bar.updateComplete
+    expect(revealed()).toEqual(['a2'])
+    expect(bar.shadowRoot?.activeElement).toBe(input())
+    expect(window.getSelection()?.rangeCount ?? 0).toBe(0)
+  })
+
+  it('does not reindex because of its own class changes', async () => {
+    await type('licensing')
+    const rebuild = vi.spyOn(bar as unknown as { _rebuildIndex(): void }, '_rebuildIndex')
+    bar.findNext()
+    bar.findNext()
+    await vi.advanceTimersByTimeAsync(1000)
+    await bar.updateComplete
+    expect(rebuild).not.toHaveBeenCalled()
+    expect(status()).toBe('3 of 4')
+  })
+
+  it('leaves the last answer open on close, until the reader clicks elsewhere', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.close()
+    expect(revealed()).toEqual(['a1', 'a1b'])
+
+    // Selecting text inside the answer must not shut it.
+    document.getElementById('a1')!.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    expect(revealed()).toEqual(['a1', 'a1b'])
+
+    document.getElementById('prose')!.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    expect(revealed()).toEqual([])
+  })
+
+  it('closes it on a focus move elsewhere, and stops listening afterwards', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.close()
+    const remove = vi.spyOn(document, 'removeEventListener')
+    document.getElementById('q2')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    expect(revealed()).toEqual([])
+    expect(remove.mock.calls.map(([type]) => type).sort()).toEqual(['focusin', 'pointerdown'])
+  })
+
+  it('hands the open answer back to the bar on reopen, and clears it on disconnect', async () => {
+    await type('licensing')
+    bar.findNext()
+    bar.close()
+    bar.open()
+    await vi.advanceTimersByTimeAsync(0)
+    await bar.updateComplete
+    // The retained query re-ran from match 1, which is in prose.
+    expect(status()).toBe('1 of 4')
+    expect(revealed()).toEqual([])
+
+    bar.findNext()
+    bar.close()
+    bar.remove()
+    expect(revealed()).toEqual([])
+  })
+})
+
+/**
+ * A reindex (content mutation), case toggle or reopen swaps `_index` and starts
+ * a new scan, but `_matchStarts` / `_matchEnds` keep the OLD offsets until that
+ * scan lands. A frame-paced paint job still running from before would pair the
+ * new index with the old offsets and paint ranges on the wrong text.
+ */
+describe('MbrFindBarElement reindex during a paint', () => {
+  beforeEach(async () => {
+    // Past HIGHLIGHT_CAP (1000), so stepping out of the window repaints it.
+    document.getElementById('wrapper')!.innerHTML = bigPage(1500)
+    bar.open()
+    await bar.updateComplete
+  })
+
+  /** The text each painted range covers. Every match here sits in one text node. */
+  const paintedTexts = (highlight: Set<AbstractRange>) =>
+    [...highlight].map((range) => (range.startContainer as Text).data.slice(range.startOffset, range.endOffset))
+
+  it('never paints a slice with the previous scan\'s offsets against the new index', async () => {
+    enter('alpha')
+    await vi.advanceTimersByTimeAsync(1000)
+    await bar.updateComplete
+    expect(status()).toBe('1 of 1500')
+
+    // Shifts every later offset by the new paragraph's length. The reindex it
+    // schedules fires 250 ms later.
+    const p = document.createElement('p')
+    p.textContent = 'xyzzy'
+    document.getElementById('wrapper')!.prepend(p)
+    await vi.advanceTimersByTimeAsync(240)
+
+    // Wrap to the last match: outside the painted window, so a fresh
+    // multi-frame paint starts and is still running when the reindex fires.
+    bar.findPrevious()
+    const all = registry.get('mbr-find')!
+    // Keep the reindex scan in flight across several frames, so a surviving
+    // paint job would get to run against the new index.
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => (now += 10))
+    await vi.advanceTimersByTimeAsync(60)
+
+    const texts = paintedTexts(all)
+    expect(texts.length).toBeGreaterThan(0)
+    expect(texts.filter((text) => text !== 'alpha')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await bar.updateComplete
+    expect(status()).toBe('1500 of 1500')
+    expect(paintedTexts(registry.get('mbr-find')!).filter((text) => text !== 'alpha')).toEqual([])
+  })
+})

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildTextIndex,
+  collapsedAnswersAround,
   compileQuery,
   createMatchScan,
   findMatchOffsets,
@@ -328,5 +329,61 @@ describe('scrollRangeIntoView', () => {
     const range = rangeForMatch(textIndex, start, start + 5)!
     expect(() => scrollRangeIntoView(range, 40)).not.toThrow()
     expect(window.scrollY).toBe(0)
+  })
+})
+
+describe('collapsedAnswersAround', () => {
+  const themes: HTMLStyleElement[] = []
+
+  /** Mount markup in main#wrapper under a slice of theme.css's collapse rule. */
+  function mount(markup: string): HTMLElement {
+    const theme = document.createElement('style')
+    themes.push(theme)
+    theme.textContent = 'dl > dd { visibility: hidden; } dl > dd.open { visibility: visible; }'
+    document.head.appendChild(theme)
+    const wrapper = document.createElement('main')
+    wrapper.id = 'wrapper'
+    wrapper.innerHTML = markup
+    document.body.appendChild(wrapper)
+    return wrapper
+  }
+
+  afterEach(() => {
+    for (const theme of themes.splice(0)) theme.remove()
+    document.body.innerHTML = ''
+  })
+
+  const ids = (entries: HTMLElement[][]) => entries.map((entry) => entry.map((dd) => dd.id))
+  const textIn = (id: string) => document.getElementById(id)!.firstChild!
+
+  it('returns the whole run of answers around a collapsed one', () => {
+    const root = mount('<dl><dt>Q</dt><dd id="a">x</dd><dd id="b">y</dd><dt>R</dt><dd id="c">z</dd></dl>')
+    expect(ids(collapsedAnswersAround(textIn('b'), root))).toEqual([['a', 'b']])
+    expect(ids(collapsedAnswersAround(textIn('c'), root))).toEqual([['c']])
+  })
+
+  it('is empty outside any answer, and for an answer already open', () => {
+    const root = mount('<p id="p">x</p><dl><dt id="q">Q</dt><dd id="a" class="open">y</dd></dl>')
+    expect(collapsedAnswersAround(textIn('p'), root)).toEqual([])
+    expect(collapsedAnswersAround(textIn('q'), root)).toEqual([])
+    expect(collapsedAnswersAround(textIn('a'), root)).toEqual([])
+  })
+
+  it('opens every collapsed level of a nested list, innermost first', () => {
+    const root = mount(
+      '<dl><dt>Q</dt><dd id="outer"><dl><dt>Q2</dt><dd id="inner"><em id="em">x</em></dd></dl></dd></dl>',
+    )
+    expect(ids(collapsedAnswersAround(textIn('em'), root))).toEqual([['inner'], ['outer']])
+  })
+
+  it('never reaches past the root', () => {
+    const root = mount('<p>x</p>')
+    // A deck overlay or any other list outside main#wrapper.
+    document.body.insertAdjacentHTML('beforeend', '<dl><dt>Q</dt><dd id="out">x</dd></dl>')
+    expect(collapsedAnswersAround(textIn('out'), root)).toEqual([])
+    // ...including a root that is itself inside a collapsed answer.
+    const nested = mount('<dl><dt>Q</dt><dd id="host"><section id="s"><p id="in">x</p></section></dd></dl>')
+    const section = nested.querySelector('section')!
+    expect(collapsedAnswersAround(textIn('in'), section)).toEqual([])
   })
 })
