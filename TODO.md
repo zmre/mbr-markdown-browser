@@ -55,7 +55,7 @@
 * [ ] We should change it so on open of the app without any specified dir (or the root as assumed), we pop up some sort of splash page where the user can select from recents or select open. Maybe give some info on the app. Today that case shows a bare `rfd` native folder picker and exits on cancel (`main.rs` `needs_folder_picker`/`show_folder_picker`) — that's the stopgap to replace. Nothing tracks recently-opened *folders*; the only "recent" list is recently-viewed files within a repo, in localStorage.
 
 * **Publish**
-  * [ ] Publish to a homebrew cask?
+  * [x] Publish to a homebrew cask?
   * [ ] Publish to determinate's flake hub?
   * [ ] Any publishing to linux repos?
 

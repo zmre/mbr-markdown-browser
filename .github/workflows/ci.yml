@@ -463,6 +463,110 @@ jobs:
       - name: SwiftLint check
         run: nix build -L .#swiftlint-check
 
+  # Lint the Homebrew cask (Casks/mbr.rb) and smoke-test the script release.yml
+  # uses to bump it, so a hand edit to either cannot break the tap unnoticed.
+  # The release job runs the same style/audit before every automated bump; this
+  # covers everything else. Only does real work when one of those two files
+  # changed, using the same diff-against-base approach as components-lock-sync
+  # below (a job-level `paths:` filter is per-workflow, not per-job). On a push
+  # to main the base is the previous tip, so a direct push is checked too.
+  cask-lint:
+    name: Homebrew Cask Lint
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect cask changes
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          # An all-zero `before` is a newly created branch: nothing to diff
+          # against, so check unconditionally.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(Casks/|scripts/update-cask\.sh$)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Every failure case must exit non-zero and leave the scratch copy
+      # untouched; the good case must change exactly the two lines.
+      - name: Smoke-test scripts/update-cask.sh
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/mbr.rb"
+          good_sha=$(printf '%064d' 0 | tr 0 a)
+
+          expect_fail() {
+            cp Casks/mbr.rb "$scratch"
+            if CASK_FILE="$scratch" scripts/update-cask.sh "$@"; then
+              echo "::error::update-cask.sh accepted bad input: $*"
+              exit 1
+            fi
+            cmp -s Casks/mbr.rb "$scratch" || {
+              echo "::error::update-cask.sh modified the cask despite failing: $*"
+              exit 1
+            }
+          }
+          expect_fail 1.2 "$good_sha"
+          expect_fail v1.2.3 "$good_sha"
+          expect_fail 1.2.3 "$(printf '%064d' 0 | tr 0 A)"
+          expect_fail 1.2.3 abc123
+
+          # The cask must contain each line exactly once.
+          grep -v '^  sha256 ' Casks/mbr.rb > "$scratch.nosha"
+          if CASK_FILE="$scratch.nosha" scripts/update-cask.sh 1.2.3 "$good_sha"; then
+            echo "::error::update-cask.sh accepted a cask with no sha256 line"
+            exit 1
+          fi
+
+          cp Casks/mbr.rb "$scratch"
+          CASK_FILE="$scratch" scripts/update-cask.sh 1.2.3 "$good_sha"
+          changed=$(diff Casks/mbr.rb "$scratch" | grep -c '^>' || true)
+          grep -qx '  version "1.2.3"' "$scratch"
+          grep -qx "  sha256 \"$good_sha\"" "$scratch"
+          if [ "$changed" -ne 2 ]; then
+            echo "::error::Expected update-cask.sh to change exactly 2 lines, changed $changed"
+            exit 1
+          fi
+          echo "update-cask.sh behaves."
+
+      # `brew tap` clones the repository, so it sees the checked-out commit,
+      # which is what this run is testing. `brew trust`: Homebrew 6+ will not
+      # load casks from an untrusted third-party tap; guarded for older images.
+      # `--online` checks the URL and sha256 against the published release, so
+      # a hand edit with a wrong checksum fails here rather than for users.
+      #
+      # `brew style` is scoped to the cask with `--cask zmre/mbr/mbr`. Given the
+      # tap name instead, it lints every file in the tap, which here is the
+      # whole repository: shfmt over scripts/ and actionlint over workflows,
+      # with Homebrew's style rules rather than this project's.
+      - name: brew style and audit
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          HOMEBREW_NO_ANALYTICS: 1
+          HOMEBREW_NO_ENV_HINTS: 1
+          # `brew audit --online` queries the GitHub API. Unauthenticated, that
+          # is 60 requests/hour per IP, which shared macOS runners exhaust.
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          brew tap zmre/mbr "$GITHUB_WORKSPACE"
+          if brew help trust > /dev/null 2>&1; then
+            brew trust --tap zmre/mbr
+          fi
+          brew style --cask zmre/mbr/mbr
+          brew audit --cask --online zmre/mbr/mbr
+
   # Guard against Dependabot (or manual) bumps of components/ dependencies that
   # forget to regenerate components/package-lock.json and the flake's npmDepsHash.
   # The Nix component build (`nix build .#mbr-components`) reads package-lock.json

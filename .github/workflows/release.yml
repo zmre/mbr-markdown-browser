@@ -664,7 +664,16 @@ jobs:
 
           ### Installation
 
-          **macOS (easiest):** download `mbr-macos-arm64.dmg`, open it, and drag
+          **macOS (Homebrew):**
+          ```bash
+          brew tap zmre/mbr https://github.com/zmre/mbr-markdown-browser
+          brew install --cask zmre/mbr/mbr
+          ```
+
+          This installs the same notarized `MBR.app` as the DMG and puts `mbr`
+          on your PATH. Later releases arrive with `brew upgrade`.
+
+          **macOS (DMG):** download `mbr-macos-arm64.dmg`, open it, and drag
           `MBR.app` to the Applications folder. This DMG is signed with a
           Developer ID certificate and notarized by Apple, so it opens
           normally — no Gatekeeper workaround needed.
@@ -757,3 +766,207 @@ jobs:
         run: cargo publish --allow-dirty --no-verify --token "$CARGO_REGISTRY_TOKEN"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Point the Homebrew cask (Casks/mbr.rb) at the release just published, and
+  # push that straight to main. The tap is this repository itself (`brew tap
+  # zmre/mbr https://github.com/zmre/mbr-markdown-browser`), so main is what
+  # every `brew update` reads; there is no separate homebrew-* repo to bump.
+  #
+  # `needs: release`, not `needs: package-dmg`: the cask's URL is the public
+  # release asset, so nothing here can be checked (or would work for a user)
+  # until the GitHub Release exists. It also inherits `release`'s dry-run gate
+  # for free: on a dry run `release` is skipped, and a skipped dependency skips
+  # this job too. The `if:` below adds only the prerelease rule (a '-' in the
+  # version, the same test as `prerelease:` on the release step). An rc must
+  # never become what `brew upgrade` installs.
+  #
+  # The DMG, never mbr-macos-arm64.tar.gz: the DMG is Developer ID signed,
+  # notarized and stapled by `package-dmg`, so the cask needs no quarantine
+  # workaround. The tarball's app is only ad-hoc signed and Gatekeeper would
+  # block it on first launch.
+  #
+  # Why a deploy key rather than GITHUB_TOKEN: main is protected by a
+  # repository ruleset ("protect main") that requires a PR and a passing
+  # Clippy check, and deploy keys are on its bypass list. GITHUB_TOKEN cannot
+  # be, so its push is rejected. Classic branch protection cannot exempt a
+  # deploy key at all, which is why main must not have any. The key's private half is the HOMEBREW_CASK_DEPLOY_KEY secret;
+  # see docs/releasing.md for the one-time setup. Because the push goes over
+  # SSH with that key, this job's token only needs to read the release.
+  #
+  # A deploy-key push, unlike a GITHUB_TOKEN one, DOES trigger workflows, hence
+  # `[skip ci]` in the commit message: the cask has already been styled,
+  # audited and installed below, and running all of ci.yml over a two-line
+  # change to a Ruby file is waste.
+  #
+  # Idempotent. If main already has this version and checksum (a re-run, or a
+  # manual reissue) the job succeeds without committing. It also refuses to
+  # move the cask backwards, so reissuing an older release cannot downgrade
+  # what Homebrew users get.
+  update-homebrew-cask:
+    name: Update Homebrew cask
+    needs: [validate-version, release]
+    if: ${{ !contains(needs.validate-version.outputs.version, '-') }}
+    # brew is preinstalled on the macOS runners, and the install smoke test
+    # below needs a real Mac anyway.
+    runs-on: macos-latest
+    permissions:
+      contents: read
+
+    env:
+      VERSION: ${{ needs.validate-version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # `ref: main`, not the tag. The commit this job makes belongs on main,
+      # and checking out the tag would leave it on a detached HEAD with nowhere
+      # to push. Main may already be ahead of the tag (anything merged since);
+      # that is fine, since only Casks/mbr.rb is touched.
+      #
+      # `ssh-key` makes the checkout use SSH with the deploy key, and the
+      # default `persist-credentials: true` (spelled out so nobody "hardens"
+      # it away) leaves it configured for the `git push` at the end.
+      #
+      # fetch-depth: 0 so the retry loop's `git pull --rebase` never has to
+      # rebase across a shallow boundary.
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          ssh-key: ${{ secrets.HOMEBREW_CASK_DEPLOY_KEY }}
+          persist-credentials: true
+          fetch-depth: 0
+
+      # Two independent sources for the checksum must agree: the SHA256SUMS
+      # file `release` published, and a hash of the DMG as GitHub actually
+      # serves it. A mismatch means the asset changed after the checksums were
+      # written (or the download was corrupted), and pushing either value would
+      # ship users a cask that fails its own verification.
+      - name: Fetch the release checksum
+        id: sha
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release" \
+            --pattern SHA256SUMS \
+            --pattern mbr-macos-arm64.dmg
+
+          # Exact filename match on the second field. A plain grep for the name
+          # would also match any future asset that merely contains it.
+          sums=$(awk '$2 == "mbr-macos-arm64.dmg" { print $1 }' "$RUNNER_TEMP/release/SHA256SUMS")
+          if [ "$(printf '%s\n' "$sums" | grep -c .)" -ne 1 ]; then
+            echo "::error::Expected exactly one mbr-macos-arm64.dmg line in SHA256SUMS"
+            cat "$RUNNER_TEMP/release/SHA256SUMS" >&2
+            exit 1
+          fi
+          actual=$(shasum -a 256 "$RUNNER_TEMP/release/mbr-macos-arm64.dmg" | awk '{ print $1 }')
+          if [ "$sums" != "$actual" ]; then
+            echo "::error::SHA256SUMS says $sums but the downloaded DMG hashes to $actual"
+            exit 1
+          fi
+          echo "mbr-macos-arm64.dmg sha256: $actual"
+          echo "sha256=$actual" >> "$GITHUB_OUTPUT"
+
+      - name: Update Casks/mbr.rb
+        id: update
+        env:
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          current=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/mbr.rb)
+          echo "Cask on main: $current; release: $VERSION"
+
+          # `sort -V` puts the higher version last. If that is not the release
+          # we are processing, main is already ahead (a reissue of an older
+          # version) and must not be rolled back.
+          newest=$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n1)
+          if [ "$current" != "$VERSION" ] && [ "$newest" = "$current" ]; then
+            echo "::notice::Cask is already at $current, newer than $VERSION; leaving it alone."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          scripts/update-cask.sh "$VERSION" "$SHA256"
+
+          if git diff --quiet -- Casks/mbr.rb; then
+            echo "Cask already points at $VERSION with this checksum; nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git --no-pager diff -- Casks/mbr.rb
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Committed before any brew command runs, and that order matters:
+      # `brew tap` clones the repository, so it sees committed history only.
+      # Tapping the workspace with the edit still uncommitted would audit and
+      # install the OLD cask and pass. Nothing is pushed until every check
+      # below has passed.
+      - name: Commit
+        if: ${{ steps.update.outputs.changed == 'true' }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Homebrew cask: mbr $VERSION [skip ci]" -- Casks/mbr.rb
+
+      # The same commands a user runs, against the commit about to be pushed.
+      # `brew audit --online` downloads the DMG and checks the URL and sha256;
+      # the install proves the app lands in /Applications, the `binary` symlink
+      # puts `mbr` on PATH, and that binary runs and reports the right version.
+      #
+      # `brew trust`: Homebrew 6+ refuses to load casks from third-party taps
+      # until they are trusted. A user gets that by installing with the fully
+      # qualified name; style and audit come first here, so the tap is trusted
+      # explicitly. Guarded so an older runner image without the command still
+      # works.
+      #
+      # `brew style --cask zmre/mbr/mbr`, not `brew style zmre/mbr`: the tap is
+      # the whole repository, and the tap-wide form lints every script and
+      # workflow in it with Homebrew's rules, failing on files the cask does
+      # not depend on.
+      - name: Verify the cask with Homebrew
+        if: ${{ steps.update.outputs.changed == 'true' }}
+        env:
+          HOMEBREW_NO_ANALYTICS: 1
+          HOMEBREW_NO_ENV_HINTS: 1
+          # `brew audit --online` queries the GitHub API. Unauthenticated, that
+          # is 60 requests/hour per IP, which shared macOS runners exhaust.
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          brew tap zmre/mbr "$GITHUB_WORKSPACE"
+          if brew help trust > /dev/null 2>&1; then
+            brew trust --tap zmre/mbr
+          fi
+          brew style --cask zmre/mbr/mbr
+          brew audit --cask --online zmre/mbr/mbr
+          brew install --cask zmre/mbr/mbr
+
+          reported=$(mbr --version)
+          echo "Installed: $reported"
+          if [ "$reported" != "mbr $VERSION" ]; then
+            echo "::error::Expected 'mbr $VERSION' from the installed binary, got '$reported'"
+            exit 1
+          fi
+
+      # main can move while a release is running (a merge during the ~30
+      # minutes of builds), which turns the push into a non-fast-forward. Rebase
+      # onto the new main and retry; the commit only touches Casks/mbr.rb, so a
+      # conflict means someone edited the cask by hand mid-release, and that
+      # should fail loudly rather than be resolved here.
+      - name: Push to main
+        if: ${{ steps.update.outputs.changed == 'true' }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "Pushed cask update for $VERSION."
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; rebasing onto the latest main."
+            sleep $((attempt * 5))
+            git pull --rebase origin main
+          done
+          echo "::error::Could not push the cask update after 5 attempts. Run scripts/update-cask.sh $VERSION <sha256> by hand (see docs/releasing.md)."
+          exit 1

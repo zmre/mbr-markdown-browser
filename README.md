@@ -43,6 +43,10 @@ Oh and on mac, it includes a quicklook plugin that's head and shoulders above an
 ### Install
 
 ```bash
+# macOS (Homebrew, Apple Silicon)
+brew tap zmre/mbr https://github.com/zmre/mbr-markdown-browser
+brew install --cask zmre/mbr/mbr
+
 # Using Nix to quick run without installing
 nix run --accept-flake-config github:zmre/mbr-markdown-browser -- /path/to/notes
 

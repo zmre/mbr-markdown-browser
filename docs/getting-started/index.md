@@ -5,7 +5,36 @@ order: 1
 ---
 # Installation
 
-mbr can be installed via Nix (recommended), Cargo, or from binary releases.  More can be added so file an [issue](https://github.com/zmre/mbr-markdown-browser/issues) if you have a request.
+mbr can be installed via Homebrew (macOS), Nix (recommended), Cargo, or from binary releases.  More can be added so file an [issue](https://github.com/zmre/mbr-markdown-browser/issues) if you have a request.
+
+## Homebrew (macOS)
+
+```bash
+brew tap zmre/mbr https://github.com/zmre/mbr-markdown-browser
+brew install --cask zmre/mbr/mbr
+```
+
+The cask lives in the mbr repository itself rather than in a separate
+`homebrew-*` repo, so Homebrew needs the explicit tap URL. That is why it takes
+two commands. Installing by the full name `zmre/mbr/mbr` also tells Homebrew
+you trust the tap.
+
+This installs:
+
+* `MBR.app` in `/Applications`, the same signed and notarized app as the DMG
+
+* `mbr` on your `PATH`, linked to the binary inside the app
+
+* The [QuickLook extension](../modes/quicklook/), which macOS registers the
+  first time you launch `MBR.app`. Open it once after installing.
+
+Apple Silicon and macOS 14 (Sonoma) or later only.
+
+```bash
+brew upgrade --cask mbr        # update to the latest release
+brew uninstall --cask mbr      # remove the app and the mbr link
+brew uninstall --zap --cask mbr  # also remove caches, preferences and WebKit data
+```
 
 ## Using Nix (Recommended)
 
@@ -156,16 +185,21 @@ folder. You can also extract a `.tar.gz` and move `MBR.app` yourself.
 > your app under "Open with", and click **Change All**. See
 > [QuickLook Preview](../modes/quicklook/) for the full list of claimed types.
 
-These builds are ad-hoc signed but not notarized, so macOS blocks the first
-launch. Open **System Settings › Privacy & Security** and click **Open Anyway**,
-or clear the quarantine flag from a terminal:
+The DMG is signed with a Developer ID certificate and notarized by Apple, so
+`MBR.app` from the DMG (or from Homebrew, which installs the same DMG) opens
+normally.
+
+The `.tar.gz` app bundle is only ad-hoc signed, not notarized, so macOS blocks
+its first launch if the archive was downloaded through a browser. Open
+**System Settings › Privacy & Security** and click **Open Anyway**, or clear
+the quarantine flag from a terminal:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/MBR.app
 ```
 
-Extracting the tarball with `tar` in a terminal avoids the quarantine flag
-entirely, since command-line tools do not set it.
+Downloading and extracting the tarball with command-line tools (`curl`, `tar`)
+avoids the quarantine flag entirely, since they do not set it.
 
 ### Windows
 
