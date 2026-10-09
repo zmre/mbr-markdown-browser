@@ -239,7 +239,7 @@ struct LinkIndexConfig {
 ///
 /// Link resolution must match what a real render would produce, or the info
 /// panel would show backlinks the page does not actually contain. That is why
-/// this goes through the same `extract_outbound_links_sync` →
+/// this goes through the same `extract_outbound_links_from_vault` →
 /// `resolve_outbound_links` pair the request path uses, with the same
 /// `LinkTransformConfig`, rather than re-deriving URLs.
 fn index_page_links(
@@ -263,8 +263,9 @@ fn index_page_links(
         markdown_page_probe: None,
     };
 
-    match markdown::extract_outbound_links_sync(
-        path.to_path_buf(),
+    match markdown::extract_outbound_links_from_vault(
+        repo.vault().as_ref(),
+        path,
         &cfg.base_dir,
         link_transform_config,
         true, // server_mode
@@ -5156,7 +5157,8 @@ impl Server {
 
                     let valid_tag_sources =
                         mbr_core::config::tag_sources_to_set(&config.tag_sources);
-                    match markdown::render_with_cache(
+                    match markdown::render_from_vault_with_cache(
+                        Arc::clone(config.repo.vault()),
                         md_path,
                         &config.base_dir,
                         config.oembed_timeout_ms,
@@ -5448,7 +5450,8 @@ impl Server {
 
                 let valid_tag_sources = mbr_core::config::tag_sources_to_set(&config.tag_sources);
 
-                match markdown::render_with_cache(
+                match markdown::render_from_vault_with_cache(
+                    Arc::clone(config.repo.vault()),
                     md_path,
                     &config.base_dir,
                     config.oembed_timeout_ms,
@@ -6406,7 +6409,8 @@ impl Server {
         let transcode_enabled = false;
 
         let valid_tag_sources = mbr_core::config::tag_sources_to_set(&config.tag_sources);
-        let render_result = markdown::render_with_cache(
+        let render_result = markdown::render_from_vault_with_cache(
+            Arc::clone(config.repo.vault()),
             md_path.to_path_buf(),
             root_path,
             config.oembed_timeout_ms,

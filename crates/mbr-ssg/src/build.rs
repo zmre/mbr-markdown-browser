@@ -1099,7 +1099,8 @@ impl Builder {
         // Build mode defaults `mark_incomplete=false` (off unless config/CLI override).
         let valid_tag_sources = mbr_core::config::tag_sources_to_set(&self.config.tag_sources);
         let mark_incomplete = self.config.mark_incomplete.unwrap_or(false);
-        let render_result = markdown::render_sync(
+        let render_result = markdown::render_sync_from_vault(
+            self.repo.vault().as_ref(),
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,

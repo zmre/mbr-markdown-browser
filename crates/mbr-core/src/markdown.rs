@@ -1952,7 +1952,86 @@ pub async fn render_with_cache(
         incomplete_markers,
         wikilink_index,
     };
-    let markdown_input = prepare_source(&raw_markdown_input, &opts.valid_tag_sources);
+    render_text_with_cache(&raw_markdown_input, &file, opts).await
+}
+
+/// [`render_with_cache`] for a file in a vault: `file` is its index key
+/// ([`crate::vault::Vault::key`]), read through `vault` on a blocking thread
+/// (as `tokio::fs` would read it), then rendered identically.
+#[allow(clippy::too_many_arguments)]
+pub async fn render_from_vault_with_cache(
+    vault: Arc<dyn crate::vault::Vault>,
+    file: PathBuf,
+    root_path: &Path,
+    oembed_timeout_ms: u64,
+    link_transform_config: LinkTransformConfig,
+    oembed_cache: Option<Arc<OembedCache>>,
+    server_mode: bool,
+    transcode_enabled: bool,
+    valid_tag_sources: HashSet<String>,
+    review: ReviewLines,
+    mark_incomplete: bool,
+    incomplete_markers: &[String],
+    wikilink_index: Option<Arc<WikilinkIndex>>,
+) -> Result<MarkdownRenderResult, MarkdownError> {
+    let raw_markdown_input = read_source_blocking(vault, file.clone()).await?;
+
+    let opts = RenderOptions {
+        root_path,
+        oembed_timeout_ms,
+        link_transform_config,
+        oembed_cache,
+        server_mode,
+        transcode_enabled,
+        valid_tag_sources,
+        review,
+        mark_incomplete,
+        incomplete_markers,
+        wikilink_index,
+    };
+    render_text_with_cache(&raw_markdown_input, &file, opts).await
+}
+
+/// Reads a markdown source through `vault` by its index key `file`.
+///
+/// The error names the key, as the file-based readers name the path, and
+/// keeps the I/O kind ([`crate::vault::VaultError`]'s conversion), so a
+/// missing file is still `NotFound`.
+pub fn read_source(vault: &dyn crate::vault::Vault, file: &Path) -> Result<String, MarkdownError> {
+    vault
+        .vault_path(file)
+        .and_then(|path| vault.read_to_string(&path))
+        .map_err(|e| MarkdownError::ReadFailed {
+            path: file.to_path_buf(),
+            source: e.into(),
+        })
+}
+
+/// [`read_source`] on tokio's blocking pool, which is where `tokio::fs` does
+/// its reads too.
+async fn read_source_blocking(
+    vault: Arc<dyn crate::vault::Vault>,
+    file: PathBuf,
+) -> Result<String, MarkdownError> {
+    let key = file.clone();
+    tokio::task::spawn_blocking(move || read_source(vault.as_ref(), &key))
+        .await
+        .map_err(|e| MarkdownError::ReadFailed {
+            path: file,
+            source: std::io::Error::other(e),
+        })?
+}
+
+/// The async render of already-read text: [`render_str`] plus network
+/// OpenGraph enrichment. Shared by [`render_with_cache`] and
+/// [`render_from_vault_with_cache`], which differ only in where the text
+/// comes from.
+async fn render_text_with_cache(
+    raw_markdown_input: &str,
+    file: &Path,
+    opts: RenderOptions<'_>,
+) -> Result<MarkdownRenderResult, MarkdownError> {
+    let markdown_input = prepare_source(raw_markdown_input, &opts.valid_tag_sources);
     let first = first_pass(&markdown_input, &opts);
 
     // No-network embeds (YouTube/Giphy/gist/bare media) are pure CPU and require
@@ -1970,7 +2049,7 @@ pub async fn render_with_cache(
         }
     }
 
-    finish_render(first, &markdown_input, &file, prefetched_oembed, opts)
+    finish_render(first, &markdown_input, file, prefetched_oembed, opts)
 }
 
 /// Runs process_event over all events, returning the processed events and final state.
@@ -2463,6 +2542,44 @@ pub fn render_sync(
     )
 }
 
+/// [`render_sync`] for a file in a vault: `file` is its index key, read
+/// through `vault` ([`read_source`]) and rendered identically.
+#[allow(clippy::too_many_arguments)]
+pub fn render_sync_from_vault(
+    vault: &dyn crate::vault::Vault,
+    file: PathBuf,
+    root_path: &Path,
+    oembed_timeout_ms: u64,
+    link_transform_config: LinkTransformConfig,
+    oembed_cache: Option<Arc<OembedCache>>,
+    server_mode: bool,
+    transcode_enabled: bool,
+    valid_tag_sources: HashSet<String>,
+    review: ReviewLines,
+    mark_incomplete: bool,
+    incomplete_markers: &[String],
+    wikilink_index: Option<Arc<WikilinkIndex>>,
+) -> Result<MarkdownRenderResult, MarkdownError> {
+    let raw_markdown_input = read_source(vault, &file)?;
+    render_str(
+        &raw_markdown_input,
+        &file,
+        RenderOptions {
+            root_path,
+            oembed_timeout_ms,
+            link_transform_config,
+            oembed_cache,
+            server_mode,
+            transcode_enabled,
+            valid_tag_sources,
+            review,
+            mark_incomplete,
+            incomplete_markers,
+            wikilink_index,
+        },
+    )
+}
+
 /// Extract only the outbound links of a markdown file.
 ///
 /// Runs the same sync pipeline as [`render_sync`] — BOM strip, tag-wikilink
@@ -2492,7 +2609,52 @@ pub fn extract_outbound_links_sync(
         path: file.clone(),
         source: e,
     })?;
-    let markdown_input = prepare_source(&raw_markdown_input, &valid_tag_sources);
+    Ok(extract_outbound_links_from_str(
+        &raw_markdown_input,
+        &file,
+        root_path,
+        link_transform_config,
+        server_mode,
+        valid_tag_sources,
+        wikilink_index,
+    ))
+}
+
+/// [`extract_outbound_links_sync`] for a file in a vault: `file` is its index
+/// key, read through `vault` ([`read_source`]).
+pub fn extract_outbound_links_from_vault(
+    vault: &dyn crate::vault::Vault,
+    file: &Path,
+    root_path: &Path,
+    link_transform_config: LinkTransformConfig,
+    server_mode: bool,
+    valid_tag_sources: HashSet<String>,
+    wikilink_index: Option<Arc<WikilinkIndex>>,
+) -> Result<Vec<OutboundLink>, MarkdownError> {
+    let raw_markdown_input = read_source(vault, file)?;
+    Ok(extract_outbound_links_from_str(
+        &raw_markdown_input,
+        file,
+        root_path,
+        link_transform_config,
+        server_mode,
+        valid_tag_sources,
+        wikilink_index,
+    ))
+}
+
+/// The outbound links of already-read markdown text; `file` only names it in
+/// diagnostics. See [`extract_outbound_links_sync`].
+pub fn extract_outbound_links_from_str(
+    raw_markdown_input: &str,
+    file: &Path,
+    root_path: &Path,
+    link_transform_config: LinkTransformConfig,
+    server_mode: bool,
+    valid_tag_sources: HashSet<String>,
+    wikilink_index: Option<Arc<WikilinkIndex>>,
+) -> Vec<OutboundLink> {
+    let markdown_input = prepare_source(raw_markdown_input, &valid_tag_sources);
 
     // Task markup is skipped: it rewrites text runs, never link destinations,
     // so it cannot change which links this function collects -- and this runs
@@ -2511,7 +2673,7 @@ pub fn extract_outbound_links_sync(
     let (_processed_events, state) = process_all_events(
         events_with_ids,
         root_path,
-        &file,
+        file,
         link_transform_config,
         prefetched_oembed,
         server_mode,
@@ -2521,11 +2683,11 @@ pub fn extract_outbound_links_sync(
     );
 
     let mut seen_targets: HashSet<String> = HashSet::new();
-    Ok(state
+    state
         .collected_links
         .into_iter()
         .filter(|link| seen_targets.insert(link.to.clone()))
-        .collect())
+        .collect()
 }
 
 /// Compute no-network oembed results (Giphy, gist, bare-URL media) for all
@@ -7195,6 +7357,149 @@ mod tests {
         assert!(!html.contains("<img src=x"), "{html}");
         assert!(html.contains("&lt;img src=x"), "{html}");
         assert!(html.contains("&lt;b&gt;"), "{html}");
+    }
+
+    // ---- reading through a vault --------------------------------------------
+
+    fn mem_vault() -> std::sync::Arc<crate::vault::MemVault> {
+        std::sync::Arc::new(
+            crate::vault::MemVault::new()
+                .with_file(
+                    "docs/page.md",
+                    "---\ntitle: Vault Page\n---\n\n# Hello\n\nSee [other](other.md).\n",
+                )
+                .with_file("docs/other.md", "# Other\n"),
+        )
+    }
+
+    fn key(vault: &crate::vault::MemVault, rel: &str) -> PathBuf {
+        use crate::vault::Vault;
+        vault.key(&crate::vault::VaultPath::new(rel).unwrap())
+    }
+
+    /// The sync render reads through the vault (no filesystem behind it) and
+    /// produces the same page the text alone would.
+    #[test]
+    fn render_sync_from_vault_matches_render_str() {
+        let vault = mem_vault();
+        let file = key(&vault, "docs/page.md");
+        let root = PathBuf::from(crate::vault::MemVault::DEFAULT_ROOT);
+        let from_vault = render_sync_from_vault(
+            vault.as_ref(),
+            file.clone(),
+            &root,
+            0,
+            LinkTransformConfig::default(),
+            None,
+            false,
+            false,
+            HashSet::new(),
+            ReviewLines::Omit,
+            false,
+            &[],
+            None,
+        )
+        .expect("render through the vault");
+        let source = String::from_utf8(vault.contents("docs/page.md").unwrap()).unwrap();
+        let from_text = render_str(
+            &source,
+            &file,
+            RenderOptions {
+                root_path: &root,
+                oembed_timeout_ms: 0,
+                link_transform_config: LinkTransformConfig::default(),
+                oembed_cache: None,
+                server_mode: false,
+                transcode_enabled: false,
+                valid_tag_sources: HashSet::new(),
+                review: ReviewLines::Omit,
+                mark_incomplete: false,
+                incomplete_markers: &[],
+                wikilink_index: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(from_vault.html, from_text.html);
+        assert!(from_vault.html.contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn render_from_vault_with_cache_reads_through_the_vault() {
+        let vault = mem_vault();
+        let root = PathBuf::from(crate::vault::MemVault::DEFAULT_ROOT);
+        let rendered = render_from_vault_with_cache(
+            vault.clone(),
+            key(&vault, "docs/page.md"),
+            &root,
+            0,
+            LinkTransformConfig::default(),
+            None,
+            true,
+            false,
+            HashSet::new(),
+            ReviewLines::Omit,
+            false,
+            &[],
+            None,
+        )
+        .await
+        .expect("render");
+        assert!(rendered.html.contains("Hello"), "{}", rendered.html);
+        assert_eq!(
+            rendered.frontmatter.get("title").and_then(|v| v.as_str()),
+            Some("Vault Page")
+        );
+
+        // A missing file is a `ReadFailed` naming the key, still `NotFound`.
+        let missing = key(&vault, "docs/missing.md");
+        let err = render_from_vault_with_cache(
+            vault.clone(),
+            missing.clone(),
+            &root,
+            0,
+            LinkTransformConfig::default(),
+            None,
+            true,
+            false,
+            HashSet::new(),
+            ReviewLines::Omit,
+            false,
+            &[],
+            None,
+        )
+        .await
+        .expect_err("missing file");
+        match err {
+            MarkdownError::ReadFailed { path, source } => {
+                assert_eq!(path, missing);
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_outbound_links_from_vault_matches_the_text() {
+        let vault = mem_vault();
+        let file = key(&vault, "docs/page.md");
+        let root = PathBuf::from(crate::vault::MemVault::DEFAULT_ROOT);
+        let links = extract_outbound_links_from_vault(
+            vault.as_ref(),
+            &file,
+            &root,
+            LinkTransformConfig::default(),
+            true,
+            HashSet::new(),
+            None,
+        )
+        .expect("links");
+        let targets: Vec<&str> = links.iter().map(|l| l.to.as_str()).collect();
+        assert_eq!(targets, vec!["other.md"]);
+        // A key outside the vault is refused, not read from disk.
+        assert!(
+            read_source(vault.as_ref(), Path::new("/etc/hosts")).is_err(),
+            "keys outside the vault must not be readable"
+        );
     }
 }
 
