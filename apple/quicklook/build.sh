@@ -17,8 +17,16 @@ cd "$SCRIPT_DIR"
 # access or ffmpeg, and none of the rest is reachable from a preview. Produces
 # target/release/libmbr_ffi.a. Same command as flake.nix's
 # mbr-quicklook-staticlib.
+#
+# The caller's DEVELOPER_DIR (the Xcode one xcodebuild below needs) is kept
+# away from cargo. Inside the nix dev shell, the cc wrapper that links build
+# scripts carries its own SDK (DEVELOPER_DIR_<role>) and refuses to link when
+# DEVELOPER_DIR names a different one ("Multiple conflicting values defined
+# for DEVELOPER_DIR_arm64_apple_darwin"), so any build script that needs
+# relinking failed the build. Outside nix, unsetting it just falls back to
+# xcode-select's toolchain.
 echo "Building Rust library (mbr-ffi, for QuickLook)..."
-cargo build --release -p mbr-ffi --lib --manifest-path "$PROJECT_ROOT/Cargo.toml"
+env -u DEVELOPER_DIR cargo build --release -p mbr-ffi --lib --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
 # Regenerate Xcode project
 echo "Generating Xcode project..."
