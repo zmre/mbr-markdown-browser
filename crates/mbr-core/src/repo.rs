@@ -1728,7 +1728,7 @@ pub fn is_markdown_extension(extension: &str, markdown_extensions: &[String]) ->
 /// # Examples
 ///
 /// ```
-/// use mbr::repo::parse_tag_values;
+/// use mbr_core::repo::parse_tag_values;
 ///
 /// let tags: Vec<String> = parse_tag_values("rust, programming, web dev").collect();
 /// assert_eq!(tags, vec!["rust", "programming", "web dev"]);
@@ -1745,7 +1745,7 @@ pub fn parse_tag_values(values: &str) -> impl Iterator<Item = String> + '_ {
 /// # Examples
 ///
 /// ```
-/// use mbr::repo::extract_tag_values;
+/// use mbr_core::repo::extract_tag_values;
 ///
 /// // From array
 /// let val = serde_json::json!(["rust", "python"]);

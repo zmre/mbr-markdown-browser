@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```
-//! use mbr::readability::{ReadabilityCounts, scores};
+//! use mbr_core::readability::{ReadabilityCounts, scores};
 //!
 //! let counts = ReadabilityCounts {
 //!     words: 10,
@@ -76,7 +76,7 @@ pub struct ReadabilityScores {
 /// # Examples
 ///
 /// ```
-/// use mbr::readability::count_syllables;
+/// use mbr_core::readability::count_syllables;
 /// assert_eq!(count_syllables("the"), 1);
 /// assert_eq!(count_syllables("cat"), 1);
 /// assert_eq!(count_syllables("apple"), 2);

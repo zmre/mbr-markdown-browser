@@ -251,7 +251,7 @@ impl ReviewPatch {
 ///
 /// ```
 /// use chrono::NaiveDate;
-/// use mbr::flashcards::{Rating, append_review};
+/// use mbr_core::flashcards::{Rating, append_review};
 ///
 /// let reviewed_at = NaiveDate::from_ymd_opt(2026, 10, 6)
 ///     .and_then(|d| d.and_hms_opt(13, 45, 0))

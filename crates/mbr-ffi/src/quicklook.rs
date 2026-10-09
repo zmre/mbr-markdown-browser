@@ -22,12 +22,12 @@
 //!
 //! [reply]: https://developer.apple.com/documentation/quicklook/qlpreviewreply
 
-use crate::assets;
-use crate::config::{self, Config};
-use crate::embedded_hljs;
-use crate::embedded_pico;
-use crate::link_transform::LinkTransformConfig;
-use crate::markdown;
+use mbr_core::assets;
+use mbr_core::config::{self, Config};
+use mbr_core::embedded_hljs;
+use mbr_core::embedded_pico;
+use mbr_core::link_transform::LinkTransformConfig;
+use mbr_core::markdown;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -2007,7 +2007,7 @@ mod tests {
         eprintln!("\n=== Root found: {:?} ===", root);
 
         // Check config
-        let config = crate::config::Config::read(&root).unwrap_or_default();
+        let config = mbr_core::config::Config::read(&root).unwrap_or_default();
         eprintln!("=== Config static_folder: {:?} ===", config.static_folder);
 
         // Check if static folder exists

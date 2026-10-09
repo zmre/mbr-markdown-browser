@@ -1709,9 +1709,10 @@ fn canonical_key(
 
 /// Normalises a name for case-insensitive matching: trimmed and lowercased.
 ///
-/// Shared with [`crate::wikilink_index`] so body-wikilink resolution uses the
-/// exact same title/alias/stem matching as typed relationships.
-pub(crate) fn normalize_name(s: &str) -> String {
+/// Shared with [`crate::wikilink_index`] and the server's rename handling so
+/// body-wikilink resolution and link rewriting use the exact same
+/// title/alias/stem matching as typed relationships.
+pub fn normalize_name(s: &str) -> String {
     s.trim().to_lowercase()
 }
 

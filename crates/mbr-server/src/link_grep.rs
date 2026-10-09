@@ -18,7 +18,7 @@
 //! 5. Only when a match is found, extract link details with regex
 //!
 //! Bare `[[Name]]` wiki links do not name a path at all: the renderer resolves
-//! them through [`crate::wikilink_index::WikilinkIndex`] by title, alias, or
+//! them through [`mbr_core::wikilink_index::WikilinkIndex`] by title, alias, or
 //! filename stem. Those names are therefore added to the pattern set as well
 //! (gate + wiki regex only — never the inline/reference regexes, where a name
 //! is not a URL).
@@ -34,8 +34,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use crate::link_index::{InboundLink, sort_inbound_links};
-use crate::repo::{build_markdown_url_path, should_ignore};
+use mbr_core::link_index::{InboundLink, sort_inbound_links};
+use mbr_core::repo::{build_markdown_url_path, should_ignore};
 
 /// Result of scanning for inbound links to a page.
 #[derive(Clone)]
@@ -771,7 +771,7 @@ pub(crate) fn get_folder_url_path(file_url_path: &str) -> String {
 ///
 /// Returns `(page_url, folder_url)`:
 /// - `page_url` is the **canonical** site URL — the same value
-///   [`crate::repo::build_markdown_url_path`] puts in `site.json`, so
+///   [`mbr_core::repo::build_markdown_url_path`] puts in `site.json`, so
 ///   `docs/index.md` collapses to `/docs/`. This is what gets reported as
 ///   `InboundLink::from`. Pass `index_file: None` when the caller has no index
 ///   file configured, which keeps the positional form.
@@ -839,7 +839,7 @@ fn compute_url_path(file_path: &Path, root_dir: &Path, markdown_extensions: &[St
 /// The bare `[[Name]]` forms that resolve to `path`: its frontmatter `title`,
 /// its frontmatter `aliases`, and its filename stem.
 ///
-/// Mirrors the note inputs [`crate::wikilink_index::WikilinkIndex`] is built
+/// Mirrors the note inputs [`mbr_core::wikilink_index::WikilinkIndex`] is built
 /// from (`Repo::collect_note_inputs`), so grep-based backlinks see the same
 /// names the renderer resolves. Names carrying wiki-link syntax (`/`, `[`, `]`,
 /// `|`, `#`) are dropped: path forms are already covered by the path patterns,
@@ -850,14 +850,14 @@ fn wikilink_names_for_target(path: &Path) -> Vec<String> {
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string();
-    let metadata = crate::markdown::extract_metadata_from_file(path)
+    let metadata = mbr_core::markdown::extract_metadata_from_file(path)
         .map(|m| m.metadata)
         .unwrap_or_default();
     let title = metadata
         .get("title")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let aliases = crate::contact::alias_names_in(&metadata);
+    let aliases = mbr_core::contact::alias_names_in(&metadata);
 
     let mut seen: HashSet<String> = HashSet::new();
     std::iter::once(stem)
@@ -1183,7 +1183,7 @@ mod tests {
                 page_and_folder_urls(Path::new(file), root, &extensions, Some("index.md"));
             assert_eq!(
                 page,
-                crate::repo::build_markdown_url_path(Path::new(file), root, "index.md"),
+                mbr_core::repo::build_markdown_url_path(Path::new(file), root, "index.md"),
                 "canonical URL mismatch for {file}"
             );
         }
@@ -1953,12 +1953,12 @@ mod tests {
         pages: &[(&str, &str, bool)],
         target_url: &str,
     ) -> Vec<(String, String)> {
-        use crate::link_index::resolve_relative_url;
-        use crate::link_transform::LinkTransformConfig;
+        use mbr_core::link_index::resolve_relative_url;
+        use mbr_core::link_transform::LinkTransformConfig;
 
         let mut inbound: Vec<(String, String)> = Vec::new();
         for (rel_path, page_url, is_index) in pages {
-            let rendered = crate::markdown::render_sync(
+            let rendered = mbr_core::markdown::render_sync(
                 root.join(rel_path),
                 root,
                 0,
@@ -1975,7 +1975,7 @@ mod tests {
                 false,
                 HashSet::new(),
                 // Only the outbound links are read; the HTML is discarded.
-                crate::markdown::ReviewLines::Omit,
+                mbr_core::markdown::ReviewLines::Omit,
                 false,
                 &[],
                 None,

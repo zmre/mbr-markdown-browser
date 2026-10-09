@@ -1,9 +1,9 @@
 //! File change events: what the watcher broadcasts and what the in-process
 //! writers (task toggles, edits, uploads, renames) announce.
 //!
-//! Kept apart from [`crate::watcher`] so the repository index, the task index
-//! and the server can consume and produce events without depending on the
-//! `notify` crate. Only the watcher itself needs that.
+//! Kept apart from the watcher (`mbr_server::watcher`) so the repository index,
+//! the task index and the server can consume and produce events without
+//! depending on the `notify` crate. Only the watcher itself needs that.
 
 use serde::{Deserialize, Serialize};
 

@@ -1322,7 +1322,7 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use mbr::html::push_html_mbr;
+/// use mbr_core::html::push_html_mbr;
 /// use pulldown_cmark::Parser;
 ///
 /// let markdown = "First section\n\n---\n\nSecond section";
@@ -1355,8 +1355,8 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use mbr::html::push_html_mbr_with_attrs;
-/// use mbr::attrs::ParsedAttrs;
+/// use mbr_core::html::push_html_mbr_with_attrs;
+/// use mbr_core::attrs::ParsedAttrs;
 /// use pulldown_cmark::Parser;
 /// use std::collections::HashMap;
 ///
@@ -1389,7 +1389,7 @@ pub fn push_html_mbr_with_attrs<'a, I>(
 /// # Example
 ///
 /// ```rust,ignore
-/// use mbr::html::{push_html_with_config, HtmlConfig};
+/// use mbr_core::html::{push_html_with_config, HtmlConfig};
 /// use pulldown_cmark::Parser;
 ///
 /// let config = HtmlConfig {

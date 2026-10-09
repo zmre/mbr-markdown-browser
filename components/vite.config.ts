@@ -36,9 +36,9 @@ export default {
           // Serve other /.mbr/* from templates (CSS, etc.)
           if (req.url?.startsWith('/.mbr/')) {
             const filePath = req.url.slice(6); // Remove '/.mbr/' prefix
-            const templatePath = resolve(import.meta.dirname, '..', 'templates', filePath);
+            const templatePath = resolve(import.meta.dirname, '..', 'crates', 'mbr-core', 'templates', filePath);
             if (existsSync(templatePath)) {
-              req.url = '/../templates/' + filePath;
+              req.url = '/../crates/mbr-core/templates/' + filePath;
             }
           }
           next();
@@ -47,7 +47,7 @@ export default {
     },
   ],
   build: {
-    outDir: '../templates/components-js',
+    outDir: '../crates/mbr-core/templates/components-js',
     emptyOutDir: true,
     sourcemap: false, // Disable sourcemaps in production for smaller bundle
     minify: 'terser', // Use terser for more aggressive minification than esbuild

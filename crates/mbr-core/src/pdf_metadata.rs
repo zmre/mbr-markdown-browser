@@ -471,7 +471,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_pdfs_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfs")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/pdfs")
     }
 
     // ==================== parse_pdf_cover_request tests ====================

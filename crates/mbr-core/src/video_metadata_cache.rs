@@ -114,13 +114,11 @@ impl VideoMetadataCache {
     }
 
     /// Returns the number of entries in the cache.
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.cache.len()
     }
 
     /// Returns true if the cache is empty.
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.cache.is_empty()
     }

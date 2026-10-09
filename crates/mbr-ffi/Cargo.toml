@@ -1,0 +1,48 @@
+[package]
+name = "mbr-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "UniFFI surface of mbr, the markdown browser, for its Apple shells (QuickLook)"
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+build = "build.rs"
+
+[lib]
+# `staticlib` is `libmbr_ffi.a`, what the QuickLook extension links
+# (`-lmbr_ffi`); `lib` lets the `mbr` crate re-export it under `ffi`.
+crate-type = ["lib", "staticlib"]
+name = "mbr_ffi"
+bench = false
+
+[dependencies]
+mbr-core.workspace = true
+
+html-escape.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+tera.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+# UniFFI is only used by the Apple Swift shells: the macOS QuickLook extension
+# and the iOS app. Target-gate it to Apple platforms so Linux/Windows builds
+# never compile it, even transitively as a build-dependency. `target_vendor`,
+# not `target_os`, so the iOS staticlib (aarch64-apple-ios[-sim]) gets it too.
+# Runtime support only: the `cli` feature (bindings generator, clap) belongs to
+# the `uniffi-bindgen` binary in the `mbr` crate.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+uniffi.workspace = true
+
+# Apple-only, like the runtime dependency above. Cargo selects
+# build-dependencies by the *target* platform's cfg, so this is what lets
+# build.rs find uniffi under `--target aarch64-apple-ios[-sim]`.
+[target.'cfg(target_vendor = "apple")'.build-dependencies]
+uniffi = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+tempfile.workspace = true

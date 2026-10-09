@@ -1,0 +1,84 @@
+[package]
+name = "mbr-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Render core of mbr, the markdown browser: markdown, templates, config, repository scan, search and indexes"
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+
+# `templates/` holds the compiled-in pages, CSS and vendored JS that
+# `include_bytes!`/`include_str!` embed. `components-js/` under it is
+# gitignored (vite writes it), so it has to be named here for `cargo publish`
+# to ship it.
+include = ["src/**/*", "templates/**/*"]
+
+[lib]
+name = "mbr_core"
+bench = false
+
+[features]
+# Media metadata extraction (ffmpeg, pdfium): PDF/video/audio probes in the
+# repository scan, PDF covers, and the HLS transcode/remux pipeline the server
+# serves. Off in the QuickLook/iOS builds, which must not link ffmpeg/SDL.
+media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile", "dep:image"]
+# Static ffmpeg linking (remove runtime ffmpeg dependency)
+ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
+
+[dependencies]
+aho-corasick.workspace = true
+argon2.workspace = true
+chrono.workspace = true
+figment.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+glob.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+html-escape.workspace = true
+http.workspace = true
+itertools.workspace = true
+lopdf.workspace = true
+lru.workspace = true
+nucleo-matcher.workspace = true
+papaya.workspace = true
+parking_lot.workspace = true
+pathdiff.workspace = true
+percent-encoding.workspace = true
+pulldown-cmark.workspace = true
+pulldown-cmark-escape.workspace = true
+rayon.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+scraper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tera.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+walkdir.workspace = true
+webpki-roots.workspace = true
+yaml-rust2.workspace = true
+
+# media-metadata
+ffmpeg-next = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+metadata = { workspace = true, optional = true }
+pdfium-render = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true } # Collision-free temp files for HLS segment transcoding
+
+[dev-dependencies]
+filetime.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+# `test_support` captures log output in unit tests.
+tracing-subscriber.workspace = true

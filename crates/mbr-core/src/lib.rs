@@ -1,0 +1,118 @@
+//! mbr-core — the render core of mbr, the markdown browser.
+//!
+//! Markdown rendering, templates, configuration, the repository scan, search,
+//! the task/link/tag indexes and the embedded web assets. Everything here is
+//! pure or touches the filesystem only at its edges; there is no HTTP server,
+//! file watcher, CLI, GUI or static-site generator in this crate, and the
+//! compiler enforces it: those live in `mbr-server`, `mbr-ssg` and the `mbr`
+//! binary, which depend on this crate and never the other way round. This is
+//! what the QuickLook staticlib (`mbr-ffi`) and a mobile shell build on.
+//!
+//! The one optional subsystem is `media-metadata` (ffmpeg/pdfium probes and
+//! the video transcode/remux pipeline), because the repository scan itself
+//! reads media metadata when it is on.
+
+/// Returns a reqwest `ClientBuilder` pre-configured with bundled Mozilla root
+/// certificates. This avoids reliance on the system certificate store, which
+/// may be absent in sandboxed or minimal Linux environments (e.g. Nix builds).
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    use std::sync::Arc;
+    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("safe default protocol versions")
+    .with_root_certificates(Arc::new(rustls::RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+    )))
+    .with_no_client_auth();
+    reqwest::Client::builder().use_preconfigured_tls(tls_config)
+}
+
+/// Build a reqwest HTTP client with bundled Mozilla root certificates.
+pub fn http_client(timeout: std::time::Duration) -> reqwest::Client {
+    http_client_builder()
+        .timeout(timeout)
+        .build()
+        .expect("failed to build HTTP client")
+}
+
+pub mod assets;
+pub mod attrs;
+pub mod audio;
+pub mod cache;
+pub mod change_event;
+pub mod chat;
+pub mod config;
+pub mod constants;
+pub mod contact;
+pub mod edit_auth;
+pub mod embedded_hljs;
+pub mod embedded_katex;
+pub mod embedded_pico;
+pub mod errors;
+pub mod flashcards;
+pub mod html;
+pub mod link_index;
+pub mod link_transform;
+pub mod markdown;
+pub mod media;
+pub mod oembed;
+pub mod oembed_cache;
+pub mod page_context;
+pub mod page_errors;
+pub mod path_resolver;
+#[cfg(feature = "media-metadata")]
+pub mod pdf_metadata;
+pub mod readability;
+pub mod relationships;
+pub mod repo;
+pub mod search;
+pub mod sorting;
+pub mod tag_index;
+pub mod task_index;
+pub mod task_query;
+pub mod tasks;
+pub mod templates;
+#[cfg(test)]
+mod test_support;
+pub mod url_helpers;
+pub mod url_path;
+pub mod vid;
+#[cfg(feature = "media-metadata")]
+pub mod video_metadata;
+#[cfg(feature = "media-metadata")]
+pub mod video_metadata_cache;
+#[cfg(feature = "media-metadata")]
+pub mod video_remux;
+#[cfg(feature = "media-metadata")]
+pub mod video_transcode;
+#[cfg(feature = "media-metadata")]
+pub mod video_transcode_cache;
+pub mod wikilink;
+pub mod wikilink_index;
+
+pub use config::{Config, RelationType, SortField, TagSource, find_root_dir};
+#[cfg(feature = "media-metadata")]
+pub use errors::MetadataError;
+#[cfg(feature = "media-metadata")]
+pub use errors::PdfMetadataError;
+pub use errors::{BuildError, ConfigError, MbrError, SearchError, TaskIndexError};
+pub use markdown::{MarkdownRenderResult, ParsedDocument};
+pub use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd,
+};
+pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
+pub use sorting::sort_files;
+pub use task_index::{FileTasks, TaskIndex};
+pub use task_query::{
+    DueBucket, DueFilter, IncludeFilter, TaskGroup, TaskMode, TaskQuery, TaskQueryResponse,
+    due_bucket, parse_task_query, run_query,
+};
+pub use tasks::{
+    Annotations, MarkerRule, Task, TaskKind, TaskPriority, TaskStatus, parse_marker_line,
+    parse_task_line, scan_source_tasks, scan_source_tasks_with_markers, set_marker,
+    strip_annotations,
+};
+#[cfg(feature = "media-metadata")]
+pub use video_transcode::TranscodeError;

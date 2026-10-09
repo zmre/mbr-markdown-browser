@@ -187,7 +187,7 @@ pub enum DueBucket {
 ///
 /// ```
 /// use chrono::NaiveDate;
-/// use mbr::task_query::{DueBucket, due_bucket};
+/// use mbr_core::task_query::{DueBucket, due_bucket};
 ///
 /// let today = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
 /// let due = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap().and_hms_opt(9, 0, 0);
@@ -267,7 +267,7 @@ fn has_tag_prefix(task: &Task, needle: &str) -> bool {
 /// # Examples
 ///
 /// ```
-/// use mbr::task_query::parse_task_query;
+/// use mbr_core::task_query::parse_task_query;
 ///
 /// let terms = parse_task_query("Report  #Work");
 /// assert_eq!(terms.words, ["report"]);
@@ -297,7 +297,7 @@ pub fn parse_task_query(q: &str) -> QueryTerms {
 /// # Examples
 ///
 /// ```
-/// use mbr::task_query::normalize_folder;
+/// use mbr_core::task_query::normalize_folder;
 ///
 /// assert_eq!(normalize_folder(Some("docs")).as_deref(), Some("/docs/"));
 /// assert_eq!(normalize_folder(Some("/docs/")).as_deref(), Some("/docs/"));

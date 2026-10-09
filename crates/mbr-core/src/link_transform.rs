@@ -132,7 +132,7 @@ impl Default for LinkTransformConfig {
 /// # Examples
 ///
 /// ```
-/// use mbr::link_transform::{transform_link, LinkTransformConfig};
+/// use mbr_core::link_transform::{transform_link, LinkTransformConfig};
 ///
 /// let config = LinkTransformConfig {
 ///     markdown_extensions: vec!["md".to_string()],
