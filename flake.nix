@@ -69,9 +69,10 @@
       # components never reach a cached build derivation.
       craneLibDev = (crane.mkLib pkgs).overrideToolchain rustToolchainDev;
 
-      # Read version from Cargo.toml - single source of truth
+      # Read version from Cargo.toml - single source of truth. It is the
+      # workspace's `[workspace.package]` version, which every crate inherits.
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-      version = cargoToml.package.version;
+      version = cargoToml.workspace.package.version;
 
       # Info.plist content for macOS app bundle
       infoPlist = pkgs.writeText "Info.plist" ''
@@ -534,7 +535,7 @@
         // {
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
-          cargoExtraArgs = "--locked --features ${cliFeatures}";
+          cargoExtraArgs = "--locked --workspace --features ${cliFeatures}";
 
           # crane defaults to `zstd -3`; -19 takes this artifact from 942 MB to
           # 582 MB (measured) for byte-identical contents. Worth it because this
@@ -557,22 +558,25 @@
             # crane's mkDummySrc strips `required-features` from every [[bin]]
             # (see crane's cleanCargoToml.nix). That un-gates the `uniffi-bindgen`
             # binary, so a deps-only `cargo build`/`check` builds it unconditionally
-            # and pulls in the macOS-only `uniffi` build-dependency even on Linux.
-            # Re-add the gate so the bin (and uniffi) is only built when `ffi` is on
-            # — enabled on Darwin, off elsewhere via cliFeatures.
+            # and pulls in its macOS-only `uniffi` dependency (with the bindgen's
+            # `cli` feature) even on Linux. Re-add the gate so the bin (and uniffi)
+            # is only built when `ffi` is on — enabled on Darwin, off elsewhere via
+            # cliFeatures.
             #
             # The same stripping un-gates the `mbr` bin (`required-features =
             # ["cli"]`) and the `[[test]]` targets. Those need no re-gating:
             # every deps-only build here (this one and cargoArtifactsMinimal)
             # enables `cli`, `server` and `ssg`, and the only build without them,
-            # mbr-quicklook-staticlib, passes `--lib`.
+            # mbr-quicklook-staticlib, selects `-p mbr-ffi --lib`, which has no
+            # bins or tests. The workspace members declare no required-features
+            # of their own, so the root Cargo.toml is the only file to patch.
             grep -q 'required-features = \["ffi"\]' Cargo.toml \
               || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
 
             # Create empty component files for dependency resolution
             # Must match the actual file names produced by vite build (see vite.config.ts)
-            mkdir -p templates/components-js
-            touch templates/components-js/mbr-components.min.js
+            mkdir -p crates/mbr-core/templates/components-js
+            touch crates/mbr-core/templates/components-js/mbr-components.min.js
           '';
         });
 
@@ -602,7 +606,7 @@
         // {
           src = craneLib.cleanCargoSource ./.;
           pname = "mbr-minimal";
-          cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+          cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures}";
 
           # Same reasoning as cargoArtifacts above. This one is 747 MB at crane's
           # default, and the two together were 1.69 GB per system — over the 5 GB
@@ -612,12 +616,12 @@
             # Same crane mkDummySrc workaround as cargoArtifacts above — see the
             # comment there. It matters more here: `ffi` is off in this feature
             # set, so an un-gated uniffi-bindgen bin would pull the macOS-only
-            # uniffi build-dependency into a build that never wants it.
+            # uniffi dependency into a build that never wants it.
             grep -q 'required-features = \["ffi"\]' Cargo.toml \
               || sed -i '/path = "uniffi-bindgen.rs"/a required-features = ["ffi"]' Cargo.toml
 
-            mkdir -p templates/components-js
-            touch templates/components-js/mbr-components.min.js
+            mkdir -p crates/mbr-core/templates/components-js
+            touch crates/mbr-core/templates/components-js/mbr-components.min.js
           '';
         });
     in rec {
@@ -639,32 +643,32 @@
             '';
             installPhase = ''
               mkdir -p $out
-              cp -r ../templates/components-js/* $out/
+              cp -r ../crates/mbr-core/templates/components-js/* $out/
             '';
           };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          # QuickLook staticlib: builds libmbr.a without GUI/ffmpeg for sandbox compatibility
+          # QuickLook staticlib: builds libmbr_ffi.a without GUI/ffmpeg for sandbox compatibility
           mbr-quicklook-staticlib = craneLib.buildPackage (commonArgs
             // {
               inherit cargoArtifacts;
               pname = "mbr-quicklook-staticlib";
-              # Build only the staticlib, with no default features: no server,
-              # watcher, ssg or cli (unreachable from a preview, and the bulk of
-              # the code), and no GUI or media-metadata, which would pull in
-              # SDL/ffmpeg that crash in the QuickLook sandbox.
-              # Enable ffi feature for UniFFI bindings (required for Swift interop)
-              cargoExtraArgs = "--locked --no-default-features --features ffi --lib";
+              # Build only the `mbr-ffi` crate: UniFFI over `mbr-core`, with no
+              # server, watcher, ssg or cli (unreachable from a preview, and the
+              # bulk of the code), and no GUI or media-metadata, which would pull
+              # in SDL/ffmpeg that crash in the QuickLook sandbox. The workspace
+              # split makes that a crate boundary rather than a feature list.
+              cargoExtraArgs = "--locked -p mbr-ffi --lib";
 
               preBuild = ''
-                mkdir -p templates/components-js
-                cp -r ${packages.mbr-components}/* templates/components-js/
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
               '';
 
               # Only install the static library
               installPhaseCommand = ''
                 mkdir -p $out/lib
-                cp target/release/libmbr.a $out/lib/
+                cp target/release/libmbr_ffi.a $out/lib/
               '';
             });
 
@@ -688,7 +692,7 @@
               # -application-extension: Mark as app extension (required for sandboxing)
               # -e _NSExtensionMain: Use extension entry point instead of _main
               # -dead_strip: drop every function and constant the extension never
-              # reaches. ld pulls in each libmbr.a member that resolves a symbol and
+              # reaches. ld pulls in each libmbr_ffi.a member that resolves a symbol and
               # keeps all of it otherwise, embedded web assets included.
               swiftc \
                 -O \
@@ -697,7 +701,7 @@
                 -target ${swiftTarget} \
                 -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
                 -L ${packages.mbr-quicklook-staticlib}/lib \
-                -lmbr \
+                -lmbr_ffi \
                 -framework Foundation \
                 -framework CoreFoundation \
                 -framework Security \
@@ -747,12 +751,12 @@
             // {
               inherit cargoArtifacts;
               pname = "mbr-cli";
-              cargoExtraArgs = "--locked --features ${cliFeatures}";
+              cargoExtraArgs = "--locked -p mbr-markdown-browser --features ${cliFeatures}";
               doCheck = false; # Tests run separately via packages.tests
 
               preBuild = ''
-                mkdir -p templates/components-js
-                cp -r ${packages.mbr-components}/* templates/components-js/
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
               '';
 
               meta = with pkgs.lib; {
@@ -988,11 +992,11 @@
           clippy = craneLib.cargoClippy (commonArgs
             // {
               inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+              cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
 
               preBuild = ''
-                mkdir -p templates/components-js
-                cp -r ${packages.mbr-components}/* templates/components-js/
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
               '';
             });
 
@@ -1000,11 +1004,11 @@
           tests = craneLib.cargoTest (commonArgs
             // {
               inherit cargoArtifacts;
-              cargoTestExtraArgs = "--features ${cliFeatures}";
+              cargoTestExtraArgs = "--workspace --features ${cliFeatures}";
 
               preBuild = ''
-                mkdir -p templates/components-js
-                cp -r ${packages.mbr-components}/* templates/components-js/
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
               '';
             });
 
@@ -1028,12 +1032,12 @@
             // {
               cargoArtifacts = cargoArtifactsMinimal;
               pname = "mbr-minimal";
-              cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+              cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures}";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
 
               preBuild = ''
-                mkdir -p templates/components-js
-                cp -r ${packages.mbr-components}/* templates/components-js/
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
               '';
             });
 
@@ -1048,17 +1052,18 @@
               # fails the build. The sibling `tests` attr above puts them in
               # cargoTestExtraArgs instead, which is fine there only because it
               # passes `--features` alone.
-              cargoExtraArgs = "--locked --no-default-features --features ${minimalFeatures}";
+              cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures}";
 
               preBuild = ''
-                mkdir -p templates/components-js
-                cp -r ${packages.mbr-components}/* templates/components-js/
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
               '';
             });
 
           # Format check
           fmt = craneLib.cargoFmt {
             inherit src;
+            cargoExtraArgs = "--all";
           };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {

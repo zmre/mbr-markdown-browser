@@ -4,7 +4,8 @@
 # Usage: ./scripts/bump-version.sh <new_version>
 # Example: ./scripts/bump-version.sh 0.4.0
 #
-# This script updates only Cargo.toml since flake.nix reads the version from it.
+# This script updates only the root Cargo.toml: the workspace version every
+# crate inherits, and the internal crate pins. flake.nix reads the version from it.
 
 set -euo pipefail
 
@@ -43,17 +44,22 @@ if [[ "$CURRENT_VERSION" == "$NEW_VERSION" ]]; then
     exit 1
 fi
 
-# Update Cargo.toml
+# Update Cargo.toml: `[workspace.package]`'s version, which every crate in the
+# workspace inherits, and the exact `=X.Y.Z` pins on the internal crates in
+# `[workspace.dependencies]` (crates.io records those, so they must match).
 echo "Updating Cargo.toml..."
-sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$PROJECT_DIR/Cargo.toml"
+sed -i.bak \
+    -e "s/^version = \".*\"/version = \"$NEW_VERSION\"/" \
+    -e "s/^\(mbr-[a-z]* = { path = \"crates\/mbr-[a-z]*\", version = \"=\)[^\"]*\"/\1$NEW_VERSION\"/" \
+    "$PROJECT_DIR/Cargo.toml"
 rm -f "$PROJECT_DIR/Cargo.toml.bak"
 
 # Build and place components (required for cargo check)
 echo "Building frontend components..."
 cd "$PROJECT_DIR"
 nix build .#mbr-components
-mkdir -p templates/components-js
-cp -r result/* templates/components-js/
+mkdir -p crates/mbr-core/templates/components-js
+cp -r result/* crates/mbr-core/templates/components-js/
 
 # Update Cargo.lock by running cargo check
 echo "Updating Cargo.lock..."

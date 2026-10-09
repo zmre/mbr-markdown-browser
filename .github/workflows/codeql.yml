@@ -128,7 +128,7 @@ jobs:
           -target arm64-apple-macos14.0 \
           -sdk "$SDK_PATH" \
           -L "$STATICLIB_PATH" \
-          -lmbr \
+          -lmbr_ffi \
           -framework Foundation \
           -framework CoreFoundation \
           -framework Security \

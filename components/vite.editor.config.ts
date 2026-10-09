@@ -37,7 +37,7 @@ export default {
     },
   },
   build: {
-    outDir: '../templates/components-js',
+    outDir: '../crates/mbr-core/templates/components-js',
     emptyOutDir: false,
     sourcemap: false,
     target: 'es2020',

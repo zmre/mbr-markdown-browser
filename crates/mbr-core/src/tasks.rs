@@ -54,7 +54,7 @@
 //! # Examples
 //!
 //! ```
-//! use mbr::tasks::{TaskPriority, TaskStatus, parse_task_line};
+//! use mbr_core::tasks::{TaskPriority, TaskStatus, parse_task_line};
 //!
 //! let task = parse_task_line("- [ ] ship it !!! #work @due(2026-08-05)", 12).unwrap();
 //! assert_eq!(task.line, 12);
@@ -491,7 +491,7 @@ fn utf16_offset(s: &str, byte_offset: usize) -> u32 {
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::{TaskStatus, parse_task_line};
+/// use mbr_core::tasks::{TaskStatus, parse_task_line};
 ///
 /// assert!(parse_task_line("not a task", 1).is_none());
 /// assert!(parse_task_line("- [y] unknown marker", 1).is_none());
@@ -576,7 +576,7 @@ pub fn parse_task_line(line: &str, line_number: u32) -> Option<Task> {
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::{MarkerRule, TaskKind, TaskStatus, parse_marker_line};
+/// use mbr_core::tasks::{MarkerRule, TaskKind, TaskStatus, parse_marker_line};
 ///
 /// let rule = MarkerRule::new(&["TODO".to_string()]).expect("one marker compiles");
 ///
@@ -633,7 +633,7 @@ pub fn parse_marker_line(line: &str, line_number: u32, rule: &MarkerRule) -> Opt
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::{TaskStatus, set_marker};
+/// use mbr_core::tasks::{TaskStatus, set_marker};
 ///
 /// let line = "\t2)  [ ]   buy milk   @due(2026-08-05)";
 /// assert_eq!(
@@ -678,7 +678,7 @@ pub fn set_marker(line: &str, status: TaskStatus) -> Option<String> {
 ///
 /// ```
 /// use chrono::NaiveDate;
-/// use mbr::tasks::{TaskStatus, set_status};
+/// use mbr_core::tasks::{TaskStatus, set_status};
 ///
 /// let now = NaiveDate::from_ymd_opt(2026, 8, 4)
 ///     .and_then(|d| d.and_hms_opt(14, 32, 0))
@@ -738,7 +738,7 @@ pub struct PatchedSource {
 ///
 /// ```
 /// use chrono::NaiveDate;
-/// use mbr::tasks::{TaskStatus, patch_task_line};
+/// use mbr_core::tasks::{TaskStatus, patch_task_line};
 ///
 /// let now = NaiveDate::from_ymd_opt(2026, 8, 4)
 ///     .and_then(|d| d.and_hms_opt(14, 32, 0))
@@ -875,7 +875,7 @@ fn done_annotations(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> 
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::scan_source_tasks;
+/// use mbr_core::tasks::scan_source_tasks;
 ///
 /// let source = "---\ntitle: Notes\n---\n\n- [ ] real task\n\n```\n- [ ] sample\n```\n";
 /// let tasks = scan_source_tasks(source);
@@ -914,7 +914,7 @@ pub fn scan_source_tasks(source: &str) -> Vec<Task> {
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::{MarkerRule, TaskKind, scan_source_tasks_with_markers};
+/// use mbr_core::tasks::{MarkerRule, TaskKind, scan_source_tasks_with_markers};
 ///
 /// let rule = MarkerRule::new(&["TODO".to_string()]).expect("one marker compiles");
 /// let source = "- [ ] TODO: ship it\n\nthe rest is TODO\n";
@@ -978,7 +978,7 @@ pub fn scan_source_tasks_with_markers(source: &str, markers: Option<&MarkerRule>
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::strip_annotations;
+/// use mbr_core::tasks::strip_annotations;
 ///
 /// let (text, ann) = strip_annotations("email #work #WORK bob @due(2026-08-05 09:30)");
 /// assert_eq!(text, "email bob");
@@ -1036,7 +1036,7 @@ const RUN_BOUNDARY_REPLACEMENT: char = '\u{fffd}';
 /// # Examples
 ///
 /// ```
-/// use mbr::tasks::strip_annotations_across_runs;
+/// use mbr_core::tasks::strip_annotations_across_runs;
 ///
 /// let (runs, ann) = strip_annotations_across_runs(&["fix ", "this", " #bug"]);
 /// assert_eq!(runs, ["fix ", "this", ""]);

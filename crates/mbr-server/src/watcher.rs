@@ -6,8 +6,8 @@
 //! Uses RecommendedWatcher (FSEvents on macOS) for kernel-level efficiency —
 //! no per-file stat polling, handles large directories without CPU overhead.
 
-use crate::change_event::{BROADCAST_CAPACITY, ChangeEventType, FileChangeEvent};
-use crate::repo::should_ignore;
+use mbr_core::change_event::{BROADCAST_CAPACITY, ChangeEventType, FileChangeEvent};
+use mbr_core::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use tracing::{debug, error, info, trace};
 
 /// Errors related to file watching.
 ///
-/// Defined here rather than in [`crate::errors`] because its sources are
+/// Defined here rather than in [`mbr_core::errors`] because its sources are
 /// `notify` errors, and the shared error module must not depend on `notify`.
 #[derive(Debug, Error)]
 pub enum WatcherError {

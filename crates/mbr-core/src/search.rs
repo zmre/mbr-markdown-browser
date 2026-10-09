@@ -70,7 +70,7 @@ impl ParsedQuery {
 /// # Examples
 ///
 /// ```
-/// use mbr::search::parse_query;
+/// use mbr_core::search::parse_query;
 ///
 /// let parsed = parse_query("rust async");
 /// assert_eq!(parsed.terms, vec!["rust", "async"]);

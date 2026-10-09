@@ -12,7 +12,7 @@ node_modules
 components/node_modules
 dist
 dist-ssr
-templates/components-js
+crates/mbr-core/templates/components-js
 *.local
 result
 # `nix build -o result-<something>` symlinks (e.g. -o result-release)

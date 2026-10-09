@@ -92,7 +92,7 @@ impl ParsedWikilink {
 /// # Examples
 ///
 /// ```
-/// use mbr::wikilink::sanitize_path_component;
+/// use mbr_core::wikilink::sanitize_path_component;
 ///
 /// assert_eq!(sanitize_path_component("rust"), "rust");
 /// assert_eq!(sanitize_path_component("/etc/passwd"), "etc/passwd");
@@ -134,7 +134,7 @@ fn has_drive_prefix(segment: &str) -> bool {
 /// # Examples
 ///
 /// ```
-/// use mbr::wikilink::normalize_tag_value;
+/// use mbr_core::wikilink::normalize_tag_value;
 ///
 /// assert_eq!(normalize_tag_value("Joshua Jay"), "joshua_jay");
 /// assert_eq!(normalize_tag_value("rust"), "rust");
@@ -206,7 +206,7 @@ fn is_url_scheme(source: &str) -> bool {
 ///
 /// ```
 /// use std::collections::HashSet;
-/// use mbr::wikilink::transform_wikilinks;
+/// use mbr_core::wikilink::transform_wikilinks;
 ///
 /// let sources: HashSet<String> = ["tags"].iter().map(|s| s.to_string()).collect();
 /// let input = "Check out [[Tags:rust]] and [[Tags:programming]]!";
@@ -830,7 +830,7 @@ fn parse_wikilink_inner(inner: &str, valid_sources: &HashSet<String>) -> Option<
 ///
 /// ```
 /// use std::collections::HashSet;
-/// use mbr::wikilink::parse_tag_link;
+/// use mbr_core::wikilink::parse_tag_link;
 ///
 /// let sources: HashSet<String> = ["tags", "performers"].iter().map(|s| s.to_string()).collect();
 ///

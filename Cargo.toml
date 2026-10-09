@@ -1,31 +1,175 @@
-[package]
-name = "mbr-markdown-browser"
+# The workspace comes first on purpose: scripts/bump-version.sh and
+# release.yml's validate-version read the release version as the first
+# `^version = "..."` line of this file, which is `[workspace.package]`'s.
+[workspace]
+members = [
+    "crates/mbr-core",
+    "crates/mbr-server",
+    "crates/mbr-ssg",
+    "crates/mbr-ffi",
+]
+# Plain `cargo build`/`test`/`clippy` from the repository root cover every
+# crate, as they did when this was one crate. `--workspace` is equivalent.
+default-members = [
+    ".",
+    "crates/mbr-core",
+    "crates/mbr-server",
+    "crates/mbr-ssg",
+    "crates/mbr-ffi",
+]
+resolver = "3"
+
+# Single source of truth for the release version and the shared metadata.
+# Every member inherits these, so a version bump touches this table plus the
+# internal-crate pins in [workspace.dependencies] below (bump-version.sh does
+# both).
+[workspace.package]
 version = "0.6.2"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Patrick Walsh <pwalsh@well.com>"]
 license = "GPL-3.0-or-later"
-readme = "README.md"
-description = "A fast, featureful markdown viewer, browser, and (optional) static site generator"
 homepage = "https://github.com/zmre/mbr-markdown-browser/"
 repository = "https://github.com/zmre/mbr-markdown-browser/"
 documentation = "https://zmre.github.io/mbr-markdown-browser/"
+
+[workspace.dependencies]
+# Internal crates. `version` is what crates.io records; the exact pin keeps
+# the published crates in lockstep (scripts/bump-version.sh rewrites it).
+mbr-core = { path = "crates/mbr-core", version = "=0.6.2" }
+mbr-server = { path = "crates/mbr-server", version = "=0.6.2" }
+mbr-ssg = { path = "crates/mbr-ssg", version = "=0.6.2" }
+mbr-ffi = { path = "crates/mbr-ffi", version = "=0.6.2" }
+
+aho-corasick = "1.1"
+# Editing feature: password/token hashing for the edit endpoint
+argon2 = "0.6"
+axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"] }
+# `serde` is needed so `tasks::Task`'s NaiveDateTime fields cross the HTTP boundary.
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+clap = { version = "4.5", features = ["derive"] }
+ffmpeg-next = "7.1" # Direct dep to control log level (suppress warnings from metadata crate)
+figment = { version = "0.10", features = ["toml", "env"] }
+futures = "0.3.32"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Random bytes for `--generate-edit-token`. Already in the tree at 0.4 via
+# argon2's password-hash, so naming it adds no crate.
+getrandom = "0.4"
+glob = "0.3.3"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+html-escape = "0.2.13"
+# `MbrError::Http`'s `From<http::Error>`. Already in the tree via reqwest and
+# axum at this major version, so naming it adds no crate.
+http = "1"
+# Image processing with minimal features (only needed formats)
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+itertools = "0.15.0"
+lopdf = { version = "0.45", default-features = false, features = ["rayon"] }
+lru = "0.18"
+metadata = "0.1.10" # Requires ffmpeg for video/audio metadata extraction
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+nucleo-matcher = "0.3"
+# default-features = false drops the "serve" feature (actix-web + actix-files +
+# portpicker), which we never use and which drags in the C-built zstd-sys.
+# Never enable "extended": its lindera-unidic dependency downloads a dictionary
+# from S3 in a build script, which breaks sandboxed/nix builds.
+pagefind = { version = "1.5", default-features = false }
+papaya = "0.2.4"
+parking_lot = "0.12"
+pathdiff = "0.2.3"
+pdfium-render = { version = "0.9", default-features = false, features = ["image_025", "pdfium_7543"] } # PDF cover; pdfium_7543 is the newest API level not above nixpkgs-26.05 pdfium-binaries 7749
+percent-encoding = "2.3"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
+pulldown-cmark-escape = { version = "0.11", default-features = false }
+rayon = "1.11"
+regex = "1.13"
+# "rustls-no-provider" (not "rustls"): the plain feature force-enables the
+# aws-lc-rs crypto provider, which needs NASM + a C toolchain on
+# x86_64-pc-windows-msvc and is not displaced by selecting ring elsewhere
+# (cargo features are additive). We supply our own provider via
+# `mbr_core::http_client_builder()` -> `use_preconfigured_tls`, so reqwest must
+# not pick one for us.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
+rpassword = "7"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+scraper = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+tempfile = "3.27"
+tera = { version = "1.20", features = ["preserve_order", "date-locale"] }
+thiserror = "2.0"
+time = "0.3"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "set-header", "compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Pinned to 0.31: uniffi_bindgen 0.32 pulls askama 0.16, which reads askama.toml
+# via a CARGO_MANIFEST_DIR-relative path that breaks under crane's split vendoring
+# (macOS mbr-quicklook-staticlib build fails). Revisit when crane/askama interop is fixed.
+uniffi = "0.31"
+url = "2.5"
+walkdir = "2.5"
+webpki-roots = "1"
+# default-features = false drops the "encoding" feature (YamlDecoder), which we never
+# use: 0.13 pins encoding_rs below 0.8.40 and would add a second, older copy.
+yaml-rust2 = { version = "0.13", default-features = false }
+
+# GUI stack (the `mbr` binary's `gui` feature).
+wry = { version = "0.57", features = ["devtools"] }
+tao = "0.37.0"
+muda = "0.21"
+# Do NOT add the `common-controls-v6` feature: it wires the Windows/Linux
+# folder-or-file prompt (`open_picker.rs`) to `TaskDialogIndirect`, which is
+# exported only by the manifest-activated v6 `comctl32.dll` — a Rust binary
+# embeds no such manifest, so the statically linked import resolves against
+# the wrong `comctl32.dll` and Windows refuses to start the process at all
+# (`STATUS_ENTRYPOINT_NOT_FOUND`), for every invocation, not just the ones
+# that show the dialog. See `open_picker.rs`'s module doc comment.
+rfd = "0.17"
+gio = "0.18"
+gtk = "0.18"
+windows-sys = "0.61.2"
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false }
+
+# Dev/bench only.
+criterion = { version = "0.8", features = ["async_tokio"] }
+filetime = "0.2"
+flate2 = "1.0"
+proptest = "1.11"
+
+[package]
+name = "mbr-markdown-browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+readme = "README.md"
+description = "A fast, featureful markdown viewer, browser, and (optional) static site generator"
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
 keywords = ["markdown", "gui", "cli", "productivity", "static"]
 categories = ["command-line-utilities", "gui", "template-engine"]
-build = "build.rs"
 autobenches = false
 
 include = [
     "src/**/*",
-    "build.rs",
-    "templates/**/*",
+    "uniffi-bindgen.rs",
     "mbr-icon.png",
     "/LICENSE",
     "/README.md",
 ]
 
 [lib]
-crate-type = ["lib", "staticlib"]
 name = "mbr"
 bench = false
 
@@ -33,12 +177,13 @@ bench = false
 # The full desktop app. Every subsystem is listed even where another feature
 # already implies it, so this line alone says what `mbr` ships.
 #
-# Without default features the library is the render core only (markdown,
-# templates, config, repo scan, search, indexes, assets): what the QuickLook
-# staticlib links (`--no-default-features --features ffi`) and what a mobile
-# shell builds on. Windows ships everything except `media-metadata`; that
-# exact list is `minimalFeatures` in flake.nix, and ci.yml/release.yml repeat
-# it, so change all three together.
+# Each feature forwards to the member crate that implements it. Without
+# default features this crate is `mbr-core` re-exported (markdown, templates,
+# config, repo scan, search, indexes, assets). The QuickLook staticlib is its
+# own crate, `mbr-ffi` (`cargo build -p mbr-ffi`), and links none of this.
+# Windows ships everything except `media-metadata`; that exact list is
+# `minimalFeatures` in flake.nix, and ci.yml/release.yml repeat it, so change
+# all three together.
 default = ["gui", "media-metadata", "server", "watcher", "ssg", "cli"]
 # GUI feature enables native window/browser functionality (wry, tao, muda, rfd)
 # plus the per-platform system-URL-handler crates `external_open` uses to send
@@ -57,140 +202,74 @@ gui = [
     "dep:gio",
     "dep:gtk",
 ]
-# Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency
-media-metadata = ["dep:metadata", "dep:ffmpeg-next", "dep:pdfium-render", "dep:tempfile", "dep:image"]
+# Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency.
+# Implemented in mbr-core (the repo scan reads it); the server's media routes
+# and the CLI's extract flags follow it.
+media-metadata = [
+    "mbr-core/media-metadata",
+    "mbr-server?/media-metadata",
+    "dep:ffmpeg-next",
+]
 # Static ffmpeg linking for (remove runtime ffmpeg dependency)
-ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
-# The axum HTTP server (`server.rs`): routes, live-reload WebSocket, edit
+ffmpeg-static = ["mbr-core/ffmpeg-static"]
+# The axum HTTP server (`mbr-server`): routes, live-reload WebSocket, edit
 # endpoints. Works without `watcher` — the change channel still carries the
 # server's own writes, there are just no events from disk.
-server = [
-    "dep:axum",
-    "dep:tower",
-    "dep:tower-http",
-    "dep:futures-util",
-    "dep:tracing-subscriber",
-]
-# Filesystem watcher (`watcher.rs`, notify) feeding live reload and index
-# invalidation. Only useful with `server`, but compiles on its own.
-watcher = ["dep:notify"]
-# Static site generator (`build.rs`) plus its pagefind search index.
-ssg = ["dep:pagefind"]
+server = ["dep:mbr-server"]
+# Filesystem watcher (`mbr_server::watcher`, notify) feeding live reload and
+# index invalidation. Only useful with `server`; it is a feature of that crate.
+watcher = ["dep:mbr-server", "mbr-server/watcher"]
+# Static site generator (`mbr-ssg`) plus its pagefind search index.
+ssg = ["dep:mbr-ssg"]
 # The `mbr` command-line binary (`cli.rs`, `main.rs`). Its modes are the
 # server and the static build, so it implies both.
 cli = ["server", "ssg", "dep:clap", "dep:rpassword", "dep:tracing-subscriber"]
-# UniFFI exports for the Apple Swift shells (QuickLook staticlib).
-ffi = ["dep:uniffi"]
+# UniFFI exports for the Apple Swift shells (`mbr-ffi`), re-exported here, plus
+# the `uniffi-bindgen` binary that generates the Swift bindings. The staticlib
+# the QuickLook extension links is built from `mbr-ffi` directly.
+ffi = ["dep:mbr-ffi", "dep:uniffi"]
 
 [dependencies]
-# winit = "0.30.11"
-axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"], optional = true }
-# `serde` is needed so `tasks::Task`'s NaiveDateTime fields cross the HTTP boundary.
-chrono = { version = "0.4", default-features = false, features = [
-    "std",
-    "clock",
-    "serde",
-] }
-clap = { version = "4.5", features = ["derive"], optional = true }
-figment = { version = "0.10", features = ["toml", "env"] }
-futures = "0.3.32"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
-glob = "0.3.3"
-notify = { version = "8.2", default-features = false, features = ["macos_fsevent"], optional = true }
-html-escape = "0.2.13"
-itertools = "0.15.0"
-lru = "0.18"
-metadata = { version = "0.1.10", optional = true } # Requires ffmpeg for video/audio metadata extraction
-ffmpeg-next = { version = "7.1", optional = true }  # Direct dep to control log level (suppress warnings from metadata crate)
-pdfium-render = { version = "0.9", optional = true, default-features = false, features = ["image_025", "pdfium_7543"] } # PDF cover; pdfium_7543 is the newest API level not above nixpkgs-26.05 pdfium-binaries 7749
-tempfile = { version = "3.27", optional = true } # Collision-free temp files for HLS segment transcoding (media-metadata)
-papaya = "0.2.4"
-pathdiff = "0.2.3"
-lopdf = { version = "0.45", default-features = false, features = ["rayon"] }
-percent-encoding = "2.3"
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html", "simd"] }
-pulldown-cmark-escape = { version = "0.11", default-features = false }
-rayon = "1.11"
-regex = "1.13"
-# "rustls-no-provider" (not "rustls"): the plain feature force-enables the
-# aws-lc-rs crypto provider, which needs NASM + a C toolchain on
-# x86_64-pc-windows-msvc and is not displaced by selecting ring elsewhere
-# (cargo features are additive). We supply our own provider via
-# `lib::http_client_builder()` -> `use_preconfigured_tls`, so reqwest must not
-# pick one for us.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-webpki-roots = "1"
-scraper = "0.27"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tera = { version = "1.20", features = ["preserve_order", "date-locale"] }
-time = "0.3"
-tokio = {version="1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"]}
-tokio-util = { version = "0.7", features = ["io"] }
-tower = { version = "0.5", features = ["util"], optional = true }
-tower-http = { version = "0.7", features = ["fs", "trace", "set-header", "compression-gzip"], optional = true }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-url = "2.5"
-walkdir = "2.5"
-thiserror = "2.0"
-parking_lot = "0.12"
-# Editing feature: password/token hashing for the edit endpoint
-argon2 = "0.6"
-# Random bytes for `--generate-edit-token`. Already in the tree at 0.4 via
-# argon2's password-hash, so naming it adds no crate.
-getrandom = "0.4"
-sha2 = "0.11"
-rpassword = { version = "7", optional = true }
-# default-features = false drops the "encoding" feature (YamlDecoder), which we never
-# use: 0.13 pins encoding_rs below 0.8.40 and would add a second, older copy.
-yaml-rust2 = { version = "0.13", default-features = false }
-# GUI dependencies (optional, enabled by default "gui" feature)
-wry = { version = "0.57", default-features = true, features = ["devtools"], optional = true }
+mbr-core.workspace = true
+mbr-server = { workspace = true, optional = true }
+mbr-ssg = { workspace = true, optional = true }
+mbr-ffi = { workspace = true, optional = true }
 
-# Search functionality
-nucleo-matcher = "0.3"
-grep-regex = "0.1"
-grep-searcher = "0.1"
-# default-features = false drops the "serve" feature (actix-web + actix-files +
-# portpicker), which we never use and which drags in the C-built zstd-sys.
-# Never enable "extended": its lindera-unidic dependency downloads a dictionary
-# from S3 in a build script, which breaks sandboxed/nix builds.
-pagefind = { version = "1.5", default-features = false, optional = true }
-aho-corasick = "1.1"
-
-# Image processing with minimal features (only needed formats)
-image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"], optional = true }
+clap = { workspace = true, optional = true }
+ffmpeg-next = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+parking_lot.workspace = true
+pathdiff.workspace = true
+percent-encoding.workspace = true
+rpassword = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+url.workspace = true
 # GUI dependencies (optional, enabled by default "gui" feature)
-tao = { version = "0.37.0", optional = true }
-muda = { version = "0.21", optional = true }
-# Do NOT add the `common-controls-v6` feature: it wires the Windows/Linux
-# folder-or-file prompt (`open_picker.rs`) to `TaskDialogIndirect`, which is
-# exported only by the manifest-activated v6 `comctl32.dll` — a Rust binary
-# embeds no such manifest, so the statically linked import resolves against
-# the wrong `comctl32.dll` and Windows refuses to start the process at all
-# (`STATUS_ENTRYPOINT_NOT_FOUND`), for every invocation, not just the ones
-# that show the dialog. See `open_picker.rs`'s module doc comment.
-rfd = { version = "0.17", optional = true }
+wry = { workspace = true, optional = true }
+tao = { workspace = true, optional = true }
+muda = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-muda = { version = "0.21", features = ["gtk3"], optional = true }
+muda = { workspace = true, features = ["gtk3"], optional = true }
 # `external_open`: gio's AppInfo::launch_default_for_uri is the desktop-portal
 # aware equivalent of xdg-open without the process spawn. Pinned to the gio the
 # GTK stack (gtk/webkit2gtk under tao/wry/muda) already uses, so this adds no
 # crate; a newer gio would link a second glib. Move it only with that stack.
-gio = { version = "0.18", optional = true }
+gio = { workspace = true, optional = true }
 # `browser`: the menu bar is a `GtkMenuBar` inside the window on Linux, so
 # hiding it (and making the hide survive a later `show_all()`) needs `WidgetExt`.
 # Same situation as gio above — gtk 0.18.2 is already in the tree via
 # tao/muda/webkit2gtk at this exact version, so naming it adds no crate.
-gtk = { version = "0.18", optional = true }
+gtk = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # `external_open`: ShellExecuteW. windows-sys 0.61.2 is already in the tree many
 # times over; only the feature gates below are new, and those add no crate.
-windows-sys = { version = "0.61.2", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -202,44 +281,37 @@ windows-sys = { version = "0.61.2", features = [
 # it on its own). Both crates are already in the tree at exactly these versions
 # via tao/wry; promoting them to direct dependencies and adding the NSWorkspace
 # feature gate adds no crate to the graph. Safe wrappers, so no `unsafe` here.
-objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+objc2-app-kit = { workspace = true, features = [
     "std",
     "NSWorkspace",
 ], optional = true }
-objc2-foundation = { version = "0.3.2", default-features = false, features = [
+objc2-foundation = { workspace = true, features = [
     "std",
     "NSString",
     "NSURL",
 ], optional = true }
 
-# UniFFI is only used by the Apple Swift shells (ffi feature): the macOS
-# QuickLook extension and the iOS app. Target-gate it to Apple platforms so
-# Linux/Windows builds never compile the Swift bindings generator, even
-# transitively as a build-dependency. `target_vendor`, not `target_os`, so the
-# iOS staticlib (aarch64-apple-ios[-sim]) gets it too.
+# The `uniffi-bindgen` binary only (ffi feature). Its `cli` feature is what
+# pulls clap into the graph, so it is enabled here, in the application crate,
+# and never in `mbr-ffi`: `cargo build -p mbr-ffi` (the QuickLook/iOS
+# staticlib) builds no clap. Apple-only like the rest of UniFFI.
 [target.'cfg(target_vendor = "apple")'.dependencies]
-# Pinned to 0.31: uniffi_bindgen 0.32 pulls askama 0.16, which reads askama.toml
-# via a CARGO_MANIFEST_DIR-relative path that breaks under crane's split vendoring
-# (macOS mbr-quicklook-staticlib build fails). Revisit when crane/askama interop is fixed.
-uniffi = { version = "0.31", features = ["cli", "bindgen"], optional = true }
+uniffi = { workspace = true, features = ["cli"], optional = true }
 
-# Non-optional (like a plain build-dependency) but Apple-only: build.rs needs
-# it whenever the ffi feature is on, and a feature can't reliably activate a
-# build-dependency via `dep:`. Absent entirely on Linux/Windows. Cargo selects
-# build-dependencies by the *target* platform's cfg, so this is what lets
-# build.rs find uniffi under `--target aarch64-apple-ios[-sim]`.
-[target.'cfg(target_vendor = "apple")'.build-dependencies]
-uniffi = { version = "0.31", features = ["build"] }
-
+# The integration tests and benches name these directly; before the workspace
+# split they were this crate's own dependencies.
 [dev-dependencies]
-# `test_support` captures log output in unit tests under every feature set,
-# including ones where `server`/`cli` (which bring it in) are off.
-tracing-subscriber = "0.3"
-criterion = { version = "0.8", features = ["async_tokio"] }
-filetime = "0.2"
-flate2 = "1.0"
-proptest = "1.11"
-tempfile = "3.27"
+chrono.workspace = true
+criterion.workspace = true
+filetime.workspace = true
+flate2.workspace = true
+papaya.workspace = true
+proptest.workspace = true
+pulldown-cmark.workspace = true
+rayon.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 
 [[bin]]
 name = "mbr"

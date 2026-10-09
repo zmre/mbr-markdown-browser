@@ -31,10 +31,10 @@ use crate::file_write::{FileWriteLocks, atomic_write};
 use crate::link_grep::{
     compute_patterns_for_folder, compute_relative_path, get_folder_url_path, page_and_folder_urls,
 };
-use crate::link_index::{is_internal_link, normalize_url_path, resolve_relative_url};
-use crate::relationships::normalize_name;
-use crate::repo::{is_markdown_extension, should_ignore};
-use crate::wikilink_index::WikilinkIndex;
+use mbr_core::link_index::{is_internal_link, normalize_url_path, resolve_relative_url};
+use mbr_core::relationships::normalize_name;
+use mbr_core::repo::{is_markdown_extension, should_ignore};
+use mbr_core::wikilink_index::WikilinkIndex;
 
 /// The bare link "bases" that could reference `old_url` from `source_folder`:
 /// the absolute path, the folder-relative path, and (when applicable) the

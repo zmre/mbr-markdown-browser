@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use papaya::HashMap as ConcurrentHashMap;
 
-use crate::{
+use mbr_core::{
     config::Config,
     embedded_katex, embedded_pico,
     errors::BuildError,
@@ -408,7 +408,7 @@ pub struct Builder {
     /// extension-less static file. Static output has no server to redirect a
     /// non-canonical URL to the canonical one, so getting this right at render
     /// time is the only chance.
-    markdown_page_probe: crate::link_transform::MarkdownPageProbe,
+    markdown_page_probe: mbr_core::link_transform::MarkdownPageProbe,
 }
 
 impl Builder {
@@ -428,13 +428,13 @@ impl Builder {
         // Built once, not per file: every rendered page shares it and the
         // closure only holds a few small owned strings.
         let markdown_page_probe =
-            crate::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
+            mbr_core::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
                 base_dir: config.root_dir.clone(),
                 canonical_base_dir: config.root_dir.canonicalize().ok(),
                 static_folder: config.static_folder.clone(),
                 markdown_extensions: config.markdown_extensions.clone(),
                 index_file: config.index_file.clone(),
-                tag_sources: crate::config::tag_sources_to_url_sources(&config.tag_sources),
+                tag_sources: mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
             });
 
         Ok(Builder {
@@ -879,7 +879,7 @@ impl Builder {
                 // the href yields `../beta/`, which resolves to the real page
                 // URL. The server's inbound index does the same, so both modes
                 // now agree.
-                let transformed = crate::link_transform::transform_link(
+                let transformed = mbr_core::link_transform::transform_link(
                     &link.to,
                     &LinkTransformConfig {
                         markdown_extensions: self.config.markdown_extensions.clone(),
@@ -1097,7 +1097,7 @@ impl Builder {
         // Render markdown to HTML synchronously
         // In build mode, server_mode=false and transcode is disabled (transcode is server-only).
         // Build mode defaults `mark_incomplete=false` (off unless config/CLI override).
-        let valid_tag_sources = crate::config::tag_sources_to_set(&self.config.tag_sources);
+        let valid_tag_sources = mbr_core::config::tag_sources_to_set(&self.config.tag_sources);
         let mark_incomplete = self.config.mark_incomplete.unwrap_or(false);
         let render_result = markdown::render_sync(
             path.to_path_buf(),
@@ -1119,7 +1119,7 @@ impl Builder {
         )
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),
-            source: Box::new(crate::MbrError::Io(std::io::Error::other(e.to_string()))),
+            source: Box::new(mbr_core::MbrError::Io(std::io::Error::other(e.to_string()))),
         })?;
         // Record any frontmatter parse error so it can be summarized after the
         // parallel render pass completes (mirrors broken-link reporting).
@@ -1136,12 +1136,12 @@ impl Builder {
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
         let contact = render_result.contact;
-        let readability_counts = crate::readability::ReadabilityCounts {
+        let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
             syllables: render_result.syllable_count,
         };
-        let readability_scores = crate::readability::scores(&readability_counts);
+        let readability_scores = mbr_core::readability::scores(&readability_counts);
 
         // Store outbound links in the build link index for generating links.json files
         if self.config.link_tracking && !outbound_links.is_empty() {
@@ -1322,7 +1322,7 @@ impl Builder {
         ));
         // Each folder's index-note frontmatter, keyed by folder URL, so a
         // section page can order its subfolders the way the sidebar does.
-        let folder_frontmatter = crate::sorting::folder_index_frontmatter(
+        let folder_frontmatter = mbr_core::sorting::folder_index_frontmatter(
             self.repo.markdown_files.pin().iter().map(|(_, info)| info),
             &self.config.index_file,
         );
@@ -1385,7 +1385,7 @@ impl Builder {
         &self,
         relative_dir: &Path,
         dir_index: &DirChildrenIndex,
-        folder_frontmatter: &HashMap<String, crate::markdown::SimpleMetadata>,
+        folder_frontmatter: &HashMap<String, mbr_core::markdown::SimpleMetadata>,
         tera: &tera::Tera,
     ) -> Result<(), BuildError> {
         let is_root = relative_dir.as_os_str().is_empty();
@@ -1434,7 +1434,7 @@ impl Builder {
         let dir_prefix = if is_root {
             "/".to_string()
         } else {
-            format!("/{}/", crate::url_path::path_to_url(relative_dir))
+            format!("/{}/", mbr_core::url_path::path_to_url(relative_dir))
         };
 
         // Look up this directory's direct child files and immediate subdirs from
@@ -1475,14 +1475,14 @@ impl Builder {
                 } else {
                     format!("{}{}/", dir_prefix, name)
                 };
-                crate::sorting::folder_entry(
+                mbr_core::sorting::folder_entry(
                     name,
                     make_relative_url(&abs_url_path, depth),
                     folder_frontmatter.get(&abs_url_path),
                 )
             })
             .collect();
-        crate::sorting::sort_folders(&mut subdirs_json, &self.config.sort);
+        mbr_core::sorting::sort_folders(&mut subdirs_json, &self.config.sort);
         context.insert(
             "subdirs".to_string(),
             serde_json::Value::Array(subdirs_json),
@@ -1767,8 +1767,8 @@ impl Builder {
         );
 
         // Sanitize source and value to prevent path traversal
-        let safe_source = crate::wikilink::sanitize_path_component(source);
-        let safe_value = crate::wikilink::sanitize_path_component(value);
+        let safe_source = mbr_core::wikilink::sanitize_path_component(source);
+        let safe_value = mbr_core::wikilink::sanitize_path_component(value);
         if safe_source.is_empty() || safe_value.is_empty() {
             tracing::warn!(
                 "Skipping tag page with empty sanitized source={source:?} value={value:?}"
@@ -1837,7 +1837,7 @@ impl Builder {
             serde_json::Value::String(plural_label),
         );
 
-        let safe_source = crate::wikilink::sanitize_path_component(source);
+        let safe_source = mbr_core::wikilink::sanitize_path_component(source);
         if safe_source.is_empty() {
             tracing::warn!("Skipping tag source index with empty sanitized source={source:?}");
             return None;
@@ -2068,7 +2068,7 @@ impl Builder {
         }
 
         // Step 3: Write DEFAULT_FILES using route names (skip if file exists)
-        for (route, content, _mime_type) in crate::assets::DEFAULT_FILES.iter() {
+        for (route, content, _mime_type) in mbr_core::assets::DEFAULT_FILES.iter() {
             // Skip empty files (like /user.css)
             if content.is_empty() {
                 continue;
@@ -2084,7 +2084,7 @@ impl Builder {
             // reading live files and `POST /.mbr/tasks` only exists in
             // server/GUI mode, so `<mbr-tasks>` never renders here and the
             // chunk would be an unreachable payload in every generated site.
-            if *route == crate::assets::TASKS_CHUNK_ROUTE {
+            if *route == mbr_core::assets::TASKS_CHUNK_ROUTE {
                 continue;
             }
 
@@ -2092,14 +2092,14 @@ impl Builder {
             // to a `data-mbr-line` attribute, and a static build renders with
             // `ReviewLines::Omit` — so there is nothing here to anchor to,
             // `<mbr-review>` never renders, and the chunk is unreachable.
-            if *route == crate::assets::REVIEW_CHUNK_ROUTE {
+            if *route == mbr_core::assets::REVIEW_CHUNK_ROUTE {
                 continue;
             }
 
             // Skip the search-extras chunk: it serves the scope select and
             // folder scope, which render only in server/GUI mode. Static
             // search is Pagefind, with no facets or folders to pick.
-            if *route == crate::assets::SEARCH_EXTRAS_CHUNK_ROUTE {
+            if *route == mbr_core::assets::SEARCH_EXTRAS_CHUNK_ROUTE {
                 continue;
             }
 
@@ -2168,8 +2168,9 @@ impl Builder {
         }
 
         // Step 4: Generate site.json with sort config and tags
-        let mut response = serde_json::to_value(&self.repo)
-            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
+        let mut response = serde_json::to_value(&self.repo).map_err(|e| {
+            BuildError::RepoScan(mbr_core::errors::RepoError::JsonSerializeFailed(e))
+        })?;
 
         // Add sort config and tags to the response
         if let Some(obj) = response.as_object_mut() {
@@ -2231,8 +2232,9 @@ impl Builder {
                 .inject_into_site_json(&mut response);
         }
 
-        let site_json = serde_json::to_string(&response)
-            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
+        let site_json = serde_json::to_string(&response).map_err(|e| {
+            BuildError::RepoScan(mbr_core::errors::RepoError::JsonSerializeFailed(e))
+        })?;
         let site_json_path = mbr_output.join("site.json");
         fs::write(&site_json_path, site_json).map_err(|e| BuildError::WriteFailed {
             path: site_json_path,
@@ -2243,8 +2245,9 @@ impl Builder {
         let media_data = serde_json::json!({
             "other_files": &self.repo.other_files,
         });
-        let media_json = serde_json::to_string(&media_data)
-            .map_err(|e| BuildError::RepoScan(crate::errors::RepoError::JsonSerializeFailed(e)))?;
+        let media_json = serde_json::to_string(&media_data).map_err(|e| {
+            BuildError::RepoScan(mbr_core::errors::RepoError::JsonSerializeFailed(e))
+        })?;
         let media_json_path = mbr_output.join("media.json");
         fs::write(&media_json_path, media_json).map_err(|e| BuildError::WriteFailed {
             path: media_json_path,
@@ -2490,7 +2493,7 @@ impl Builder {
     /// Validates internal links in all generated HTML files.
     ///
     /// Scans all HTML files for `<a href="...">` links, filters to internal
-    /// links with [`crate::url_path::is_external_url`] (the same predicate the
+    /// links with [`mbr_core::url_path::is_external_url`] (the same predicate the
     /// renderer and the link tracker use, so a href can never be rewritten by
     /// one and reported broken by another), and checks that each one resolves
     /// to an existing file or directory in the output.
@@ -2552,7 +2555,7 @@ impl Builder {
                         // `blob:`, so those valid hrefs were joined onto the
                         // source directory and reported as broken internal
                         // links (fatal under `--fail-on-broken-links`).
-                        if href.starts_with('#') || crate::url_path::is_external_url(href) {
+                        if href.starts_with('#') || mbr_core::url_path::is_external_url(href) {
                             continue;
                         }
 
@@ -2838,7 +2841,7 @@ mod tests {
             let dir_prefix = if is_root {
                 "/".to_string()
             } else {
-                format!("/{}/", crate::url_path::path_to_url(dir))
+                format!("/{}/", mbr_core::url_path::path_to_url(dir))
             };
 
             // Reference (old) full-scan logic.
@@ -2974,10 +2977,10 @@ mod tests {
 
     /// Helper to create a minimal Builder for testing link-related methods.
     pub(super) fn test_builder(output_dir: PathBuf, root_dir: PathBuf) -> Builder {
-        use crate::config::Config;
-        use crate::oembed_cache::OembedCache;
-        use crate::repo::Repo;
-        use crate::templates::Templates;
+        use mbr_core::config::Config;
+        use mbr_core::oembed_cache::OembedCache;
+        use mbr_core::repo::Repo;
+        use mbr_core::templates::Templates;
         use papaya::HashMap as ConcurrentHashMap;
         use std::sync::Arc;
 
@@ -2993,13 +2996,13 @@ mod tests {
         let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
 
         let markdown_page_probe =
-            crate::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
+            mbr_core::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
                 base_dir: config.root_dir.clone(),
                 canonical_base_dir: config.root_dir.canonicalize().ok(),
                 static_folder: config.static_folder.clone(),
                 markdown_extensions: config.markdown_extensions.clone(),
                 index_file: config.index_file.clone(),
-                tag_sources: crate::config::tag_sources_to_url_sources(&config.tag_sources),
+                tag_sources: mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
             });
 
         Builder {

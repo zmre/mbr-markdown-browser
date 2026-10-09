@@ -12,29 +12,30 @@ use std::collections::HashSet;
 use std::{net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
 
-use crate::config::{RelationType, SortField, TagSource};
-use crate::embedded_katex;
-use crate::embedded_pico;
-use crate::errors::{MbrError, ServerError, TaskPatchError};
+use crate::errors::ServerError;
 use crate::file_write::{FileWriteLocks, create_unique_temp_file};
 use crate::link_grep::InboundLinkCache;
-use crate::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
-use crate::link_transform::LinkTransformConfig;
-use crate::media::MediaViewerType;
-use crate::oembed_cache::OembedCache;
-use crate::page_context::{self, ModeFlags, PageChrome, UrlMode, markdown_file_to_json};
-use crate::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
-use crate::repo::MarkdownInfo;
-use crate::search::{SearchEngine, SearchQuery, search_other_files};
-use crate::sorting::sort_files;
-use crate::task_query::IncludeFilter;
-use crate::templates;
-use crate::url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path};
+use mbr_core::config::{RelationType, SortField, TagSource};
+use mbr_core::embedded_katex;
+use mbr_core::embedded_pico;
+use mbr_core::errors::{MbrError, TaskPatchError};
+use mbr_core::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
+use mbr_core::link_transform::LinkTransformConfig;
+use mbr_core::media::MediaViewerType;
+use mbr_core::oembed_cache::OembedCache;
+use mbr_core::page_context::{self, ModeFlags, PageChrome, UrlMode, markdown_file_to_json};
+use mbr_core::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
+use mbr_core::repo::MarkdownInfo;
+use mbr_core::search::{SearchEngine, SearchQuery, search_other_files};
+use mbr_core::sorting::sort_files;
+use mbr_core::task_query::IncludeFilter;
+use mbr_core::templates;
+use mbr_core::url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path};
 #[cfg(feature = "media-metadata")]
-use crate::video_metadata_cache::VideoMetadataCache;
+use mbr_core::video_metadata_cache::VideoMetadataCache;
 #[cfg(feature = "media-metadata")]
-use crate::video_transcode_cache::HlsCache;
-use crate::{markdown, repo::Repo};
+use mbr_core::video_transcode_cache::HlsCache;
+use mbr_core::{markdown, repo::Repo};
 use std::time::Instant;
 use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, services::ServeFile, trace::TraceLayer};
@@ -143,7 +144,7 @@ impl Drop for InflightSlot {
 struct HlsGenerationSlot<'a> {
     cache: &'a HlsCache,
     /// `None` once the producer settled the entry itself (complete or failed).
-    key: Option<crate::video_transcode_cache::HlsCacheKey>,
+    key: Option<mbr_core::video_transcode_cache::HlsCacheKey>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -151,7 +152,7 @@ struct HlsGenerationSlot<'a> {
 impl<'a> HlsGenerationSlot<'a> {
     fn new(
         cache: &'a HlsCache,
-        key: crate::video_transcode_cache::HlsCacheKey,
+        key: mbr_core::video_transcode_cache::HlsCacheKey,
         notify: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
@@ -175,7 +176,7 @@ impl Drop for HlsGenerationSlot<'_> {
             tracing::warn!("HLS generation abandoned for {key:?}; releasing the in-flight slot");
             self.cache.fail_generation(
                 key,
-                &crate::video_transcode::TranscodeError::TranscodeFailed(
+                &mbr_core::video_transcode::TranscodeError::TranscodeFailed(
                     "generation did not finish (request cancelled or worker panicked)".to_string(),
                 ),
             );
@@ -210,14 +211,14 @@ fn invalidate_derived_caches(
 /// request handler but impossible for the `'static` markdown-page probe the
 /// link transform carries into the renderer. Built per page render; the clones
 /// are a handful of short strings.
-fn owned_resolver_config(config: &ServerState) -> crate::path_resolver::OwnedPathResolverConfig {
-    crate::path_resolver::OwnedPathResolverConfig {
+fn owned_resolver_config(config: &ServerState) -> mbr_core::path_resolver::OwnedPathResolverConfig {
+    mbr_core::path_resolver::OwnedPathResolverConfig {
         base_dir: config.base_dir.clone(),
         canonical_base_dir: config.canonical_base_dir.clone(),
         static_folder: config.static_folder.clone(),
         markdown_extensions: config.markdown_extensions.clone(),
         index_file: config.index_file.clone(),
-        tag_sources: crate::config::tag_sources_to_url_sources(&config.tag_sources),
+        tag_sources: mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
     }
 }
 
@@ -280,11 +281,11 @@ fn index_page_links(
             // Running it through the same `transform_link` the renderer uses
             // for the href first gives `../alpha/`, which resolves to the
             // page's real URL.
-            let resolved: Vec<crate::link_index::OutboundLink> = links
+            let resolved: Vec<mbr_core::link_index::OutboundLink> = links
                 .into_iter()
                 .map(|mut link| {
                     if link.internal && !link.to.is_empty() {
-                        link.to = crate::link_transform::transform_link(
+                        link.to = mbr_core::link_transform::transform_link(
                             &link.to,
                             &LinkTransformConfig {
                                 markdown_extensions: cfg.markdown_extensions.clone(),
@@ -422,7 +423,7 @@ impl From<&ServerState> for ListingCaches {
 #[derive(Debug)]
 enum LiveReloadAction {
     /// Serialize and forward this event to the client.
-    Forward(crate::change_event::FileChangeEvent),
+    Forward(mbr_core::change_event::FileChangeEvent),
     /// This client fell behind and the channel dropped events; keep listening.
     Skip,
     /// The sender is gone (server shutting down); close the socket.
@@ -436,7 +437,7 @@ enum LiveReloadAction {
 /// only cost this client a missed reload, and the client re-fetches the page
 /// on the next event it does receive.
 fn live_reload_action(
-    result: Result<crate::change_event::FileChangeEvent, broadcast::error::RecvError>,
+    result: Result<mbr_core::change_event::FileChangeEvent, broadcast::error::RecvError>,
 ) -> LiveReloadAction {
     match result {
         Ok(event) => LiveReloadAction::Forward(event),
@@ -546,15 +547,6 @@ fn compression_predicate() -> impl tower_http::compression::Predicate {
     use tower_http::compression::predicate::{DefaultPredicate, Predicate};
 
     DefaultPredicate::new().and(compress_by_content_type)
-}
-
-/// Lets `?` and `MbrError::from` turn a failed response build into
-/// [`MbrError::Http`]. Lives here, beside the only code that builds responses,
-/// so `errors.rs` does not depend on axum.
-impl From<axum::http::Error> for MbrError {
-    fn from(err: axum::http::Error) -> Self {
-        MbrError::Http(Box::new(err))
-    }
 }
 
 /// Query parameters for media viewer routes.
@@ -960,7 +952,7 @@ fn spawn_file_watcher(
     ignore_dirs: Vec<String>,
     ignore_globs: Vec<String>,
     explicit_hidden_dirs: Vec<PathBuf>,
-    tx: broadcast::Sender<crate::change_event::FileChangeEvent>,
+    tx: broadcast::Sender<mbr_core::change_event::FileChangeEvent>,
 ) -> WatcherHandle {
     let watcher_handle: WatcherHandle = Arc::new(std::sync::Mutex::new(None));
     let watcher_handle_for_thread = Arc::clone(&watcher_handle);
@@ -1002,8 +994,8 @@ fn spawn_file_watcher(
 /// # Example
 ///
 /// ```ignore
-/// use mbr::server::ServerConfig;
-/// use mbr::config::Config;
+/// use mbr_server::server::ServerConfig;
+/// use mbr_core::config::Config;
 ///
 /// let config = Config::default();
 /// let server_config = ServerConfig::from(&config)
@@ -1023,7 +1015,7 @@ pub struct ServerConfig {
     pub watcher_ignore_dirs: Vec<String>,
     /// Repo-relative hidden directories named on the command line, exempt from
     /// the scanner's and watcher's leading-dot rule. See
-    /// [`crate::config::explicit_hidden_dirs`].
+    /// [`mbr_core::config::explicit_hidden_dirs`].
     pub explicit_hidden_dirs: Vec<std::path::PathBuf>,
     pub index_file: String,
     pub oembed_timeout_ms: u64,
@@ -1098,8 +1090,8 @@ impl ServerConfig {
     }
 }
 
-impl From<&crate::config::Config> for ServerConfig {
-    fn from(config: &crate::config::Config) -> Self {
+impl From<&mbr_core::config::Config> for ServerConfig {
+    fn from(config: &mbr_core::config::Config) -> Self {
         Self {
             ip: config.host.0,
             port: config.port,
@@ -1162,10 +1154,10 @@ pub struct ServerState {
     pub ignore_dirs: Vec<String>,
     pub ignore_globs: Vec<String>,
     pub index_file: String,
-    pub templates: crate::templates::Templates,
+    pub templates: mbr_core::templates::Templates,
     pub repo: Arc<Repo>,
     pub oembed_timeout_ms: u64,
-    pub file_change_tx: Option<broadcast::Sender<crate::change_event::FileChangeEvent>>,
+    pub file_change_tx: Option<broadcast::Sender<mbr_core::change_event::FileChangeEvent>>,
     /// Optional template folder that overrides default .mbr/ and compiled defaults
     pub template_folder: Option<std::path::PathBuf>,
     /// Sort configuration for file listings
@@ -1194,13 +1186,13 @@ pub struct ServerState {
     /// requests for an unchanged file never re-run a blocking ffmpeg demux.
     #[cfg(feature = "media-metadata")]
     pub video_resolution_cache:
-        Arc<papaya::HashMap<String, crate::video_transcode::VideoResolution>>,
+        Arc<papaya::HashMap<String, mbr_core::video_transcode::VideoResolution>>,
     /// Cache of playback-compatibility probes keyed by path+mtime. Both
     /// outcomes are cached, so a page reload never re-opens an unchanged file,
     /// and an edited file is transparently re-probed.
     #[cfg(feature = "media-metadata")]
     pub media_compat_cache:
-        Arc<papaya::HashMap<String, crate::video_metadata::PlaybackCompatibility>>,
+        Arc<papaya::HashMap<String, mbr_core::video_metadata::PlaybackCompatibility>>,
     /// Per-directory memoized sibling navigation lists (prev/next). Avoids an
     /// O(repo) scan on every markdown render; invalidated when files change.
     ///
@@ -1277,7 +1269,7 @@ pub struct ServerState {
     /// Deliberately *not* built at startup: it is filled on the first task
     /// query and then kept fresh by the watcher, so a server whose user never
     /// opens the task panel never pays for a full-repo read pass.
-    pub task_index: Arc<crate::task_index::TaskIndex>,
+    pub task_index: Arc<mbr_core::task_index::TaskIndex>,
     /// Whether the in-browser markdown editing endpoints are enabled.
     pub edit_enabled: bool,
     /// Require the editing token even for loopback callers.
@@ -1315,7 +1307,7 @@ pub struct TaskToggleRequest {
     /// ignored, everything else must match byte for byte.
     pub expected: String,
     /// Target status: `open`, `done` or `canceled`.
-    pub to: crate::tasks::TaskStatus,
+    pub to: mbr_core::tasks::TaskStatus,
 }
 
 /// Response for a successful `POST /.mbr/task`.
@@ -1342,9 +1334,9 @@ pub struct FlashcardReviewRequest {
     /// The exact current text of that line; the terminator is ignored.
     pub expected: String,
     /// `again`, `hard`, `good` or `easy`.
-    pub rating: crate::flashcards::Rating,
+    pub rating: mbr_core::flashcards::Rating,
     /// The reviewer's local wall-clock time, `YYYY-MM-DD HH:MM` — written as
-    /// the entry's timestamp after [`crate::flashcards::parse_review_time`]
+    /// the entry's timestamp after [`mbr_core::flashcards::parse_review_time`]
     /// checks it. Required.
     pub at: String,
 }
@@ -1605,7 +1597,7 @@ fn sanitize_upload_name(name: &str, markdown_extensions: &[String]) -> Option<St
     }
     let ext_lower = ext.to_ascii_lowercase();
     // Markdown files must be created via `/.mbr/create`, not uploaded.
-    if crate::repo::is_markdown_extension(&ext_lower, markdown_extensions) {
+    if mbr_core::repo::is_markdown_extension(&ext_lower, markdown_extensions) {
         return None;
     }
     // Only media types the rest of mbr already understands may be uploaded.
@@ -1638,7 +1630,7 @@ fn dedupe_name(dir: &Path, stem: &str, ext: &str, exists: impl Fn(&Path) -> bool
 #[derive(serde::Serialize)]
 struct SiteJson<'a> {
     index_file: &'a str,
-    markdown_files: &'a crate::repo::MarkdownFiles,
+    markdown_files: &'a mbr_core::repo::MarkdownFiles,
     sort: &'a [SortField],
     sidebar_style: &'a str,
     sidebar_max_items: usize,
@@ -1747,11 +1739,11 @@ impl Server {
             Arc::new(papaya::HashMap::new());
         #[cfg(feature = "media-metadata")]
         let video_resolution_cache: Arc<
-            papaya::HashMap<String, crate::video_transcode::VideoResolution>,
+            papaya::HashMap<String, mbr_core::video_transcode::VideoResolution>,
         > = Arc::new(papaya::HashMap::new());
         #[cfg(feature = "media-metadata")]
         let media_compat_cache: Arc<
-            papaya::HashMap<String, crate::video_metadata::PlaybackCompatibility>,
+            papaya::HashMap<String, mbr_core::video_metadata::PlaybackCompatibility>,
         > = Arc::new(papaya::HashMap::new());
 
         // Listing caches (per-directory files, per-directory subdirectories and
@@ -1823,8 +1815,8 @@ impl Server {
 
         // Create a broadcast channel for file changes - watcher will be initialized in background
         let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
-            crate::change_event::FileChangeEvent,
-        >(crate::change_event::BROADCAST_CAPACITY);
+            mbr_core::change_event::FileChangeEvent,
+        >(mbr_core::change_event::BROADCAST_CAPACITY);
 
         #[cfg(feature = "watcher")]
         let watcher_handle = spawn_file_watcher(
@@ -1901,7 +1893,7 @@ impl Server {
             base_dir: base_dir.clone(),
             index_file: index_file.clone(),
             markdown_extensions: markdown_extensions.clone(),
-            valid_tag_sources: crate::config::tag_sources_to_set(&tag_sources),
+            valid_tag_sources: mbr_core::config::tag_sources_to_set(&tag_sources),
         };
         if link_tracking {
             let repo_for_index = Arc::clone(&repo);
@@ -1934,7 +1926,7 @@ impl Server {
         //
         // Read once, at startup, exactly like `tasks_ignore_globs` — flipping
         // `mark_incomplete` takes a restart.
-        let task_index = Arc::new(crate::task_index::TaskIndex::with_markers(
+        let task_index = Arc::new(mbr_core::task_index::TaskIndex::with_markers(
             &tasks_ignore_globs,
             if mark_incomplete {
                 &incomplete_markers
@@ -1983,17 +1975,17 @@ impl Server {
                                 Err(broadcast::error::RecvError::Lagged(_)) => {
                                     // Too many events queued — force full rescan
                                     pending_events.clear();
-                                    pending_events.push(crate::change_event::FileChangeEvent {
+                                    pending_events.push(mbr_core::change_event::FileChangeEvent {
                                         path: String::new(),
                                         relative_path: String::new(),
-                                        event: crate::change_event::ChangeEventType::Created,
+                                        event: mbr_core::change_event::ChangeEventType::Created,
                                     });
                                     // Push over threshold to trigger full rescan
                                     for _ in 0..SURGICAL_THRESHOLD {
-                                        pending_events.push(crate::change_event::FileChangeEvent {
+                                        pending_events.push(mbr_core::change_event::FileChangeEvent {
                                             path: String::new(),
                                             relative_path: String::new(),
-                                            event: crate::change_event::ChangeEventType::Created,
+                                            event: mbr_core::change_event::ChangeEventType::Created,
                                         });
                                     }
                                     break;
@@ -2008,9 +2000,9 @@ impl Server {
                 let relevant_events: Vec<_> = pending_events
                     .into_iter()
                     .filter(|event| match event.event {
-                        crate::change_event::ChangeEventType::Created
-                        | crate::change_event::ChangeEventType::Deleted => true,
-                        crate::change_event::ChangeEventType::Modified => {
+                        mbr_core::change_event::ChangeEventType::Created
+                        | mbr_core::change_event::ChangeEventType::Deleted => true,
+                        mbr_core::change_event::ChangeEventType::Modified => {
                             markdown_extensions_for_invalidation
                                 .iter()
                                 .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
@@ -2038,8 +2030,8 @@ impl Server {
                     let has_tag_changes = relevant_events.iter().any(|e| {
                         matches!(
                             e.event,
-                            crate::change_event::ChangeEventType::Deleted
-                                | crate::change_event::ChangeEventType::Modified
+                            mbr_core::change_event::ChangeEventType::Deleted
+                                | mbr_core::change_event::ChangeEventType::Modified
                         )
                     });
 
@@ -2073,7 +2065,7 @@ impl Server {
                                     .map(|info| info.url_path.clone()),
                                 matches!(
                                     event.event,
-                                    crate::change_event::ChangeEventType::Deleted
+                                    mbr_core::change_event::ChangeEventType::Deleted
                                 ),
                             ));
                             repo.invalidate_file(&abs_path, &event.event);
@@ -2127,7 +2119,7 @@ impl Server {
                                     // Only reachable for a file the scan never
                                     // saw (created inside this batch, or
                                     // deleted before it was ever indexed).
-                                    None => crate::repo::build_markdown_url_path(
+                                    None => mbr_core::repo::build_markdown_url_path(
                                         abs_path,
                                         &link_index_cfg.base_dir,
                                         &link_index_cfg.index_file,
@@ -2753,7 +2745,7 @@ impl Server {
                 response.total_matches = response.results.len();
             }
 
-            Ok::<_, crate::errors::SearchError>(response)
+            Ok::<_, mbr_core::errors::SearchError>(response)
         })
         .await;
 
@@ -2841,7 +2833,7 @@ impl Server {
     /// results with `scan_in_progress: true` beat a hung panel.
     pub async fn tasks_handler(
         State(config): State<ServerState>,
-        Json(query): Json<crate::task_query::TaskQuery>,
+        Json(query): Json<mbr_core::task_query::TaskQuery>,
     ) -> Response<Body> {
         if !config.tasks_enabled {
             return Self::tasks_error(StatusCode::NOT_FOUND, "Task browsing is disabled");
@@ -2867,7 +2859,7 @@ impl Server {
         let files = config.task_index.snapshot();
         let today = chrono::Local::now().date_naive();
         let result = tokio::task::spawn_blocking(move || {
-            crate::task_query::run_query(&files, &query, today)
+            mbr_core::task_query::run_query(&files, &query, today)
         })
         .await;
 
@@ -2996,7 +2988,7 @@ impl Server {
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .map(str::trim);
             let ok = match (&config.edit_token_hash, provided) {
-                (Some(hash), Some(token)) => crate::edit_auth::verify_token(hash, token),
+                (Some(hash), Some(token)) => mbr_core::edit_auth::verify_token(hash, token),
                 _ => false,
             };
             if !ok {
@@ -3063,7 +3055,7 @@ impl Server {
         config: &ServerState,
         path: &str,
     ) -> Result<PathBuf, (StatusCode, &'static str)> {
-        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+        let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
             canonical_base_dir: config.canonical_base_dir.as_deref(),
@@ -3107,7 +3099,7 @@ impl Server {
 
         match tokio::fs::read(&md_path).await {
             Ok(bytes) => {
-                let hash = crate::edit_auth::content_hash(&bytes);
+                let hash = mbr_core::edit_auth::content_hash(&bytes);
                 let mut resp = (StatusCode::OK, bytes).into_response();
                 resp.headers_mut().insert(
                     header::CONTENT_TYPE,
@@ -3154,7 +3146,7 @@ impl Server {
                 return (StatusCode::NOT_FOUND, "File not found").into_response();
             }
         };
-        if crate::edit_auth::content_hash(&current) != req.base_hash {
+        if mbr_core::edit_auth::content_hash(&current) != req.base_hash {
             return (
                 StatusCode::CONFLICT,
                 "File changed on disk since it was loaded",
@@ -3163,7 +3155,7 @@ impl Server {
         }
 
         let new_bytes = req.content.into_bytes();
-        let new_hash = crate::edit_auth::content_hash(&new_bytes);
+        let new_hash = mbr_core::edit_auth::content_hash(&new_bytes);
 
         if let Err(e) = Self::atomic_write_file_async(&md_path, new_bytes).await {
             tracing::error!("Failed to save markdown: {e:?}");
@@ -3174,10 +3166,10 @@ impl Server {
         if let Some(tx) = &config.file_change_tx {
             let relative =
                 pathdiff::diff_paths(&md_path, &config.base_dir).unwrap_or_else(|| md_path.clone());
-            let _ = tx.send(crate::change_event::FileChangeEvent {
+            let _ = tx.send(mbr_core::change_event::FileChangeEvent {
                 path: md_path.to_string_lossy().to_string(),
                 relative_path: relative.to_string_lossy().to_string(),
-                event: crate::change_event::ChangeEventType::Modified,
+                event: mbr_core::change_event::ChangeEventType::Modified,
             });
         }
 
@@ -3247,7 +3239,8 @@ impl Server {
             .tasks_stamp_done
             .then(|| chrono::Local::now().naive_local());
         let patched =
-            match crate::tasks::patch_task_line(&source, req.line, &req.expected, req.to, stamp) {
+            match mbr_core::tasks::patch_task_line(&source, req.line, &req.expected, req.to, stamp)
+            {
                 Ok(patched) => patched,
                 Err(e) => {
                     let status = match e {
@@ -3302,11 +3295,11 @@ impl Server {
         Self::broadcast_change(
             config,
             md_path,
-            crate::change_event::ChangeEventType::Modified,
+            mbr_core::change_event::ChangeEventType::Modified,
         );
         config.task_index.invalidate_file(
             md_path,
-            &crate::change_event::ChangeEventType::Modified,
+            &mbr_core::change_event::ChangeEventType::Modified,
             &config.repo,
             &config.base_dir,
         );
@@ -3328,14 +3321,14 @@ impl Server {
     ///
     /// Same gate, same `expected` guard and same atomic write as
     /// [`Self::task_toggle_handler`]; the source surgery is
-    /// [`crate::flashcards::append_review`].
+    /// [`mbr_core::flashcards::append_review`].
     ///
     /// The entry is stamped with the **reviewer's** wall clock (`at`), not the
     /// server's: the format carries no offset and the deck replays entries as
     /// browser-local time, so a server in another time zone would put every
     /// review hours away from where FSRS's 1m/10m steps expect it. `at` is
     /// held to the exact entry format and to within
-    /// [`crate::flashcards::REVIEW_TIME_WINDOW_HOURS`] of the server's UTC
+    /// [`mbr_core::flashcards::REVIEW_TIME_WINDOW_HOURS`] of the server's UTC
     /// clock — any real time zone passes, garbage and far past/future do not.
     ///
     /// | Status | Cause |
@@ -3359,18 +3352,20 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
-        let reviewed_at =
-            match crate::flashcards::parse_review_time(&req.at, chrono::Utc::now().naive_utc()) {
-                Ok(time) => time,
-                Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
-            };
+        let reviewed_at = match mbr_core::flashcards::parse_review_time(
+            &req.at,
+            chrono::Utc::now().naive_utc(),
+        ) {
+            Ok(time) => time,
+            Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+        };
         let _write_guard = config.file_write_locks.lock(&md_path).await;
         let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
             Ok(source) => source,
             Err(err) => return err.into_response(),
         };
 
-        let patch = match crate::flashcards::append_review(
+        let patch = match mbr_core::flashcards::append_review(
             &source,
             req.line,
             &req.expected,
@@ -3423,7 +3418,7 @@ impl Server {
     fn path_has_markdown_extension(path: &Path, exts: &[String]) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
-            .map(|e| crate::repo::is_markdown_extension(&e.to_lowercase(), exts))
+            .map(|e| mbr_core::repo::is_markdown_extension(&e.to_lowercase(), exts))
             .unwrap_or(false)
     }
 
@@ -3441,7 +3436,7 @@ impl Server {
     /// `notes\image.png` on Windows.
     fn rel_path_string(path: &Path, base_dir: &Path) -> String {
         let relative = pathdiff::diff_paths(path, base_dir).unwrap_or_else(|| path.to_path_buf());
-        crate::url_path::path_to_url(&relative)
+        mbr_core::url_path::path_to_url(&relative)
     }
 
     /// [`crate::file_write::atomic_write`], with the error the file-operation
@@ -3463,12 +3458,12 @@ impl Server {
     fn broadcast_change(
         config: &ServerState,
         abs_path: &Path,
-        event: crate::change_event::ChangeEventType,
+        event: mbr_core::change_event::ChangeEventType,
     ) {
         if let Some(tx) = &config.file_change_tx {
             let relative = pathdiff::diff_paths(abs_path, &config.base_dir)
                 .unwrap_or_else(|| abs_path.to_path_buf());
-            let _ = tx.send(crate::change_event::FileChangeEvent {
+            let _ = tx.send(mbr_core::change_event::FileChangeEvent {
                 path: abs_path.to_string_lossy().to_string(),
                 relative_path: relative.to_string_lossy().to_string(),
                 event,
@@ -3524,20 +3519,24 @@ impl Server {
         Self::atomic_write_file(&dst, req.content.as_bytes())?;
 
         let url_path =
-            crate::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
+            mbr_core::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
         let rel_path = Self::rel_path_string(&dst, &config.base_dir);
 
         // Surgical state update (Created): the new file adds its own tags inline
         // in invalidate_file, so no tag-index rebuild is needed.
         config
             .repo
-            .invalidate_file(&dst, &crate::change_event::ChangeEventType::Created);
+            .invalidate_file(&dst, &mbr_core::change_event::ChangeEventType::Created);
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
         ListingCaches::from(config).invalidate();
         config.inbound_link_cache.invalidate_all();
 
-        Self::broadcast_change(config, &dst, crate::change_event::ChangeEventType::Created);
+        Self::broadcast_change(
+            config,
+            &dst,
+            mbr_core::change_event::ChangeEventType::Created,
+        );
 
         Ok(CreateResponse {
             url_path,
@@ -3583,7 +3582,7 @@ impl Server {
         Self::broadcast_change(
             config,
             &target,
-            crate::change_event::ChangeEventType::Created,
+            mbr_core::change_event::ChangeEventType::Created,
         );
         Ok(MkdirResponse { path: rel_path })
     }
@@ -3675,7 +3674,7 @@ impl Server {
         // Root-absolute URL that matches how mbr serves the file. Reuse
         // `build_static_url_path` (same util used for every static asset URL),
         // then percent-encode so special characters load in the browser.
-        let root_abs = crate::repo::build_static_url_path(
+        let root_abs = mbr_core::repo::build_static_url_path(
             &final_path,
             &config.base_dir,
             &config.static_folder,
@@ -3693,7 +3692,7 @@ impl Server {
         Self::broadcast_change(
             config,
             &final_path,
-            crate::change_event::ChangeEventType::Created,
+            mbr_core::change_event::ChangeEventType::Created,
         );
 
         Ok(UploadResponse {
@@ -3778,9 +3777,9 @@ impl Server {
 
         // Compute index-stripped page URLs before touching disk.
         let old_url =
-            crate::repo::build_markdown_url_path(&src, &config.base_dir, &config.index_file);
+            mbr_core::repo::build_markdown_url_path(&src, &config.base_dir, &config.index_file);
         let new_url =
-            crate::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
+            mbr_core::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
         let old_is_index = Self::path_is_index(&src, &config.index_file);
         let new_is_index = Self::path_is_index(&dst, &config.index_file);
 
@@ -3798,7 +3797,7 @@ impl Server {
 
         // A4-C delta names (bare `[[Name]]` rewrite on stem change) need the
         // source frontmatter (title/aliases) so still-resolvable names are kept.
-        let src_meta = crate::markdown::extract_metadata_from_file(&src).ok();
+        let src_meta = mbr_core::markdown::extract_metadata_from_file(&src).ok();
         let old_stem = src
             .file_stem()
             .and_then(|s| s.to_str())
@@ -3896,10 +3895,10 @@ impl Server {
         // A5: surgical repo/cache updates + broadcasts.
         config
             .repo
-            .invalidate_file(&src, &crate::change_event::ChangeEventType::Deleted);
+            .invalidate_file(&src, &mbr_core::change_event::ChangeEventType::Deleted);
         config
             .repo
-            .invalidate_file(&dst, &crate::change_event::ChangeEventType::Created);
+            .invalidate_file(&dst, &mbr_core::change_event::ChangeEventType::Created);
         let mut changed_union: Vec<PathBuf> = Vec::new();
         for p in rewritten_paths.iter().chain(wiki_paths.iter()) {
             if !changed_union.iter().any(|q| q == p) {
@@ -3909,7 +3908,7 @@ impl Server {
         for p in &changed_union {
             config
                 .repo
-                .invalidate_file(p, &crate::change_event::ChangeEventType::Modified);
+                .invalidate_file(p, &mbr_core::change_event::ChangeEventType::Modified);
         }
         config.repo.build_relationship_index();
         config.repo.build_wikilink_index();
@@ -3918,17 +3917,25 @@ impl Server {
         config.inbound_link_cache.invalidate_all();
         config.link_cache.invalidate_all();
 
-        Self::broadcast_change(config, &src, crate::change_event::ChangeEventType::Deleted);
-        Self::broadcast_change(config, &dst, crate::change_event::ChangeEventType::Created);
+        Self::broadcast_change(
+            config,
+            &src,
+            mbr_core::change_event::ChangeEventType::Deleted,
+        );
+        Self::broadcast_change(
+            config,
+            &dst,
+            mbr_core::change_event::ChangeEventType::Created,
+        );
         for p in &changed_union {
-            Self::broadcast_change(config, p, crate::change_event::ChangeEventType::Modified);
+            Self::broadcast_change(config, p, mbr_core::change_event::ChangeEventType::Modified);
         }
 
         let to_urls = |paths: &[PathBuf]| -> Vec<String> {
             paths
                 .iter()
                 .map(|p| {
-                    crate::repo::build_markdown_url_path(p, &config.base_dir, &config.index_file)
+                    mbr_core::repo::build_markdown_url_path(p, &config.base_dir, &config.index_file)
                 })
                 .collect()
         };
@@ -3948,7 +3955,7 @@ impl Server {
     /// new filename stem. Title and aliases are unchanged by a move, so in
     /// practice only a changed filename stem contributes.
     fn wikilink_delta_names(
-        frontmatter: Option<&crate::markdown::SimpleMetadata>,
+        frontmatter: Option<&mbr_core::markdown::SimpleMetadata>,
         old_stem: &str,
         new_stem: &str,
     ) -> Vec<(String, String)> {
@@ -3960,7 +3967,7 @@ impl Server {
                 .unwrap_or_else(|| stem.to_string())
         };
         let aliases: Vec<String> = frontmatter
-            .map(crate::contact::alias_names_in)
+            .map(mbr_core::contact::alias_names_in)
             .unwrap_or_default();
 
         let old_title = title_for(old_stem);
@@ -3969,10 +3976,10 @@ impl Server {
         // Names that still resolve to the file after the move must NOT be
         // rewritten: the new stem, the (unchanged) title, and any aliases.
         let mut new_names: HashSet<String> = HashSet::new();
-        new_names.insert(crate::relationships::normalize_name(new_stem));
-        new_names.insert(crate::relationships::normalize_name(&new_title));
+        new_names.insert(mbr_core::relationships::normalize_name(new_stem));
+        new_names.insert(mbr_core::relationships::normalize_name(&new_title));
         for a in &aliases {
-            new_names.insert(crate::relationships::normalize_name(a));
+            new_names.insert(mbr_core::relationships::normalize_name(a));
         }
 
         let mut out = Vec::new();
@@ -3981,7 +3988,7 @@ impl Server {
             .chain(std::iter::once(old_title))
             .chain(aliases.iter().cloned())
         {
-            let norm = crate::relationships::normalize_name(&cand);
+            let norm = mbr_core::relationships::normalize_name(&cand);
             if new_names.contains(&norm) || !seen.insert(norm) {
                 continue;
             }
@@ -4424,7 +4431,7 @@ impl Server {
     /// Serve from compiled-in DEFAULT_FILES or KATEX_FILES with cache headers.
     fn serve_default_file(path: &str) -> Result<Response<Body>, StatusCode> {
         // First check DEFAULT_FILES
-        let file = crate::assets::default_file(path)
+        let file = mbr_core::assets::default_file(path)
             // Then check KATEX_FILES (embedded KaTeX CSS, JS, and fonts)
             .or_else(|| {
                 embedded_katex::KATEX_FILES
@@ -4460,7 +4467,7 @@ impl Server {
     ) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("handle: {}", &path);
 
-        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+        let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
             canonical_base_dir: config.canonical_base_dir.as_deref(),
@@ -4519,9 +4526,9 @@ impl Server {
                 // Redirecting here is the general fix: it repairs hand-typed
                 // URLs, inbound external links and stale bookmarks, not just
                 // hrefs mbr generated itself.
-                if let Some(canonical) = crate::path_resolver::canonical_page_redirect(
+                if let Some(canonical) = mbr_core::path_resolver::canonical_page_redirect(
                     &path,
-                    &crate::repo::build_markdown_url_path(
+                    &mbr_core::repo::build_markdown_url_path(
                         &md_path,
                         config
                             .canonical_base_dir
@@ -4666,9 +4673,9 @@ impl Server {
     /// negative (`NotAvailable`) marker so the caller falls through to a 404.
     #[cfg(feature = "media-metadata")]
     fn metadata_response_from_cache(
-        cached: crate::video_metadata_cache::CachedMetadata,
+        cached: mbr_core::video_metadata_cache::CachedMetadata,
     ) -> Option<Response<Body>> {
-        use crate::video_metadata_cache::CachedMetadata;
+        use mbr_core::video_metadata_cache::CachedMetadata;
         match cached {
             CachedMetadata::Cover(bytes) => Some(Self::build_jpg_response(bytes)),
             CachedMetadata::Chapters(vtt) | CachedMetadata::Captions(vtt) => {
@@ -4685,14 +4692,14 @@ impl Server {
     #[cfg(feature = "media-metadata")]
     async fn extract_video_metadata_and_cache(
         video_file: std::path::PathBuf,
-        metadata_type: crate::video_metadata::MetadataType,
+        metadata_type: mbr_core::video_metadata::MetadataType,
         key: String,
         config: &ServerState,
     ) -> Option<Response<Body>> {
-        use crate::video_metadata::{
+        use mbr_core::video_metadata::{
             MetadataType, extract_captions, extract_chapters, extract_cover,
         };
-        use crate::video_metadata_cache::CachedMetadata;
+        use mbr_core::video_metadata_cache::CachedMetadata;
 
         // ffmpeg decoding is blocking CPU/IO work; keep it off the tokio worker
         // threads (finding #16). Owned `video_file`/`metadata_type` are `Send`.
@@ -4728,8 +4735,8 @@ impl Server {
     /// generated it, None otherwise (fall through to 404).
     #[cfg(feature = "media-metadata")]
     async fn try_serve_video_metadata(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::video_metadata::{MetadataType, parse_metadata_request};
-        use crate::video_metadata_cache::cache_key_with_mtime;
+        use mbr_core::video_metadata::{MetadataType, parse_metadata_request};
+        use mbr_core::video_metadata_cache::cache_key_with_mtime;
 
         // Check if this is a video metadata request
         let (video_url_path, metadata_type) = parse_metadata_request(path)?;
@@ -4831,8 +4838,8 @@ impl Server {
         sidecar_file_path: &std::path::Path,
         config: &ServerState,
     ) -> Option<Response<Body>> {
-        use crate::pdf_metadata::parse_pdf_cover_request;
-        use crate::video_metadata_cache::{CachedMetadata, cache_key_with_mtime};
+        use mbr_core::pdf_metadata::parse_pdf_cover_request;
+        use mbr_core::video_metadata_cache::{CachedMetadata, cache_key_with_mtime};
 
         // Check if this is a PDF cover request
         let _pdf_url_path = parse_pdf_cover_request(url_path)?;
@@ -4888,7 +4895,7 @@ impl Server {
             );
 
             // Generate new cover (async with concurrency control)
-            match crate::pdf_metadata::extract_cover_async(&pdf_file).await {
+            match mbr_core::pdf_metadata::extract_cover_async(&pdf_file).await {
                 Ok(bytes) => {
                     config
                         .video_metadata_cache
@@ -4932,8 +4939,8 @@ impl Server {
     /// 3. If no sidecar exists, the cover is dynamically generated from the PDF.
     #[cfg(feature = "media-metadata")]
     async fn try_serve_pdf_cover(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::pdf_metadata::parse_pdf_cover_request;
-        use crate::video_metadata_cache::{CachedMetadata, cache_key_with_mtime};
+        use mbr_core::pdf_metadata::parse_pdf_cover_request;
+        use mbr_core::video_metadata_cache::{CachedMetadata, cache_key_with_mtime};
 
         // Check if this is a PDF cover request
         let pdf_url_path = parse_pdf_cover_request(path)?;
@@ -4983,14 +4990,14 @@ impl Server {
         tracing::debug!("Generating PDF cover for: {}", pdf_file.display());
 
         // Generate the cover image (async with concurrency control)
-        match crate::pdf_metadata::extract_cover_async(&pdf_file).await {
+        match mbr_core::pdf_metadata::extract_cover_async(&pdf_file).await {
             Ok(bytes) => {
                 config
                     .video_metadata_cache
                     .insert(key, CachedMetadata::Cover(bytes.clone()));
                 Some(Self::build_jpg_response(bytes))
             }
-            Err(crate::errors::PdfMetadataError::PasswordProtected { .. }) => {
+            Err(mbr_core::errors::PdfMetadataError::PasswordProtected { .. }) => {
                 tracing::debug!("PDF is password-protected: {}", pdf_file.display());
                 config
                     .video_metadata_cache
@@ -5090,7 +5097,7 @@ impl Server {
     /// Returns Some(Response) if the request was for links.json and we successfully
     /// generated it, None otherwise (fall through to 404).
     async fn try_serve_links_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::link_index::PageLinks;
+        use mbr_core::link_index::PageLinks;
 
         // Check if this is a links.json request
         if !path.ends_with("links.json") {
@@ -5127,7 +5134,7 @@ impl Server {
             cached
         } else {
             // Resolve the path to find the markdown file
-            let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+            let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
             let resolver_config = PathResolverConfig {
                 base_dir: &config.base_dir,
                 canonical_base_dir: config.canonical_base_dir.as_deref(),
@@ -5163,7 +5170,8 @@ impl Server {
                         markdown_page_probe: None,
                     };
 
-                    let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
+                    let valid_tag_sources =
+                        mbr_core::config::tag_sources_to_set(&config.tag_sources);
                     match markdown::render_with_cache(
                         md_path,
                         &config.base_dir,
@@ -5322,7 +5330,7 @@ impl Server {
     async fn grep_inbound_links_bounded(
         page_url_path: &str,
         config: &ServerState,
-    ) -> Option<Vec<crate::link_index::InboundLink>> {
+    ) -> Option<Vec<mbr_core::link_index::InboundLink>> {
         use crate::link_grep::find_inbound_links;
 
         // Bound concurrent full-repo walks. The semaphore is never closed, so
@@ -5371,7 +5379,7 @@ impl Server {
     /// - `None` (→ 404) when the path is not `errors.json`, when link tracking
     ///   is disabled, or when the underlying page does not exist.
     async fn try_serve_errors_json(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::page_errors::{
+        use mbr_core::page_errors::{
             PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
             contact_problem_errors, detect_unresolved_wikilinks, frontmatter_parse_errors,
             relationship_cycle_errors, validate_internal_links, validate_media_references,
@@ -5408,7 +5416,7 @@ impl Server {
 
         tracing::debug!("errors.json request for page: {}", page_url_path);
 
-        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+        let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: &config.base_dir,
             canonical_base_dir: config.canonical_base_dir.as_deref(),
@@ -5431,11 +5439,11 @@ impl Server {
             ambiguous_wikilinks,
             contact_problems,
         ): (
-            Vec<crate::link_index::OutboundLink>,
+            Vec<mbr_core::link_index::OutboundLink>,
             String,
             Option<String>,
-            Vec<crate::wikilink_index::AmbiguousWikilink>,
-            Vec<crate::contact::ContactProblem>,
+            Vec<mbr_core::wikilink_index::AmbiguousWikilink>,
+            Vec<mbr_core::contact::ContactProblem>,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
                 let is_index_file = md_path
@@ -5455,13 +5463,13 @@ impl Server {
                     // every extension-less markdown link as non-canonical while
                     // the page a reader sees is perfectly fine.
                     markdown_page_probe: Some(
-                        crate::link_transform::filesystem_markdown_page_probe(
+                        mbr_core::link_transform::filesystem_markdown_page_probe(
                             owned_resolver_config(config),
                         ),
                     ),
                 };
 
-                let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
+                let valid_tag_sources = mbr_core::config::tag_sources_to_set(&config.tag_sources);
 
                 match markdown::render_with_cache(
                     md_path,
@@ -5613,9 +5621,9 @@ impl Server {
     async fn probe_playback_compat_cached(
         media_file: &std::path::Path,
         config: &ServerState,
-    ) -> Option<crate::video_metadata::PlaybackCompatibility> {
-        use crate::video_metadata::probe_playback_compatibility;
-        use crate::video_metadata_cache::cache_key_with_mtime;
+    ) -> Option<mbr_core::video_metadata::PlaybackCompatibility> {
+        use mbr_core::video_metadata::probe_playback_compatibility;
+        use mbr_core::video_metadata_cache::cache_key_with_mtime;
 
         let key = cache_key_with_mtime(media_file, "playback-compat");
         if let Some(compat) = config.media_compat_cache.pin().get(&key).cloned() {
@@ -5649,11 +5657,11 @@ impl Server {
         resolver_config: &PathResolverConfig<'_>,
         page_url: &str,
         config: &ServerState,
-    ) -> Vec<crate::page_errors::PageError> {
-        use crate::page_errors::{MediaKind, PageError, collect_media_references};
-        use crate::video_metadata::{PlaybackCompatibility, has_video_extension};
+    ) -> Vec<mbr_core::page_errors::PageError> {
         use futures::stream::StreamExt;
         use itertools::Itertools;
+        use mbr_core::page_errors::{MediaKind, PageError, collect_media_references};
+        use mbr_core::video_metadata::{PlaybackCompatibility, has_video_extension};
 
         // `collect_media_references` already dedupes by src; filtering to video
         // extensions keeps images and PDFs out of the ffmpeg path entirely.
@@ -5762,10 +5770,10 @@ impl Server {
     /// Build a response for one part of the stream-copy (remux) variant.
     #[cfg(feature = "media-metadata")]
     fn build_remux_response(
-        part: crate::video_remux::RemuxPart,
+        part: mbr_core::video_remux::RemuxPart,
         data: Arc<Vec<u8>>,
     ) -> Response<Body> {
-        use crate::video_remux::{
+        use mbr_core::video_remux::{
             INIT_CONTENT_TYPE, PLAYLIST_CONTENT_TYPE, RemuxPart, SEGMENT_CONTENT_TYPE,
         };
 
@@ -5803,14 +5811,14 @@ impl Server {
     /// player retrying or stalled with nothing to report.
     #[cfg(feature = "media-metadata")]
     async fn generate_remux_part<F>(
-        cache: &Arc<crate::video_transcode_cache::HlsCache>,
-        key: crate::video_transcode_cache::HlsCacheKey,
+        cache: &Arc<mbr_core::video_transcode_cache::HlsCache>,
+        key: mbr_core::video_transcode_cache::HlsCacheKey,
         generate: F,
     ) -> Result<Arc<Vec<u8>>, Box<Response<Body>>>
     where
-        F: FnOnce() -> Result<Vec<u8>, crate::video_transcode::TranscodeError> + Send + 'static,
+        F: FnOnce() -> Result<Vec<u8>, mbr_core::video_transcode::TranscodeError> + Send + 'static,
     {
-        use crate::video_transcode_cache::{HLS_WAIT_TIMEOUT, HlsCache, HlsCacheStartResult};
+        use mbr_core::video_transcode_cache::{HLS_WAIT_TIMEOUT, HlsCache, HlsCacheStartResult};
 
         match cache.start_generation(key.clone()) {
             HlsCacheStartResult::Started(notify) => {
@@ -5872,10 +5880,10 @@ impl Server {
     /// permanent failure.
     #[cfg(feature = "media-metadata")]
     fn remux_incomplete_response(
-        cache: &crate::video_transcode_cache::HlsCache,
-        key: &crate::video_transcode_cache::HlsCacheKey,
+        cache: &mbr_core::video_transcode_cache::HlsCache,
+        key: &mbr_core::video_transcode_cache::HlsCacheKey,
     ) -> Response<Body> {
-        use crate::video_transcode_cache::HlsCacheState;
+        use mbr_core::video_transcode_cache::HlsCacheState;
 
         match cache.get_state(key) {
             Some(HlsCacheState::Failed(message)) => {
@@ -5918,9 +5926,9 @@ impl Server {
     /// forever, so every failure gets a status and a reason.
     #[cfg(feature = "media-metadata")]
     fn build_remux_error_response(
-        error: &crate::video_transcode::TranscodeError,
+        error: &mbr_core::video_transcode::TranscodeError,
     ) -> Response<Body> {
-        use crate::video_transcode::TranscodeError;
+        use mbr_core::video_transcode::TranscodeError;
 
         let status = match error {
             // Nothing to copy, or nothing a player could decode.
@@ -5953,12 +5961,12 @@ impl Server {
     /// through to the remaining handlers.
     #[cfg(feature = "media-metadata")]
     async fn try_serve_remux_content(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::video_metadata_cache::cache_key_with_mtime;
-        use crate::video_remux::{
+        use mbr_core::video_metadata_cache::cache_key_with_mtime;
+        use mbr_core::video_remux::{
             RemuxPart, generate_remux_init, generate_remux_playlist, generate_remux_segment,
             parse_remux_request,
         };
-        use crate::video_transcode_cache::HlsCacheKey;
+        use mbr_core::video_transcode_cache::HlsCacheKey;
 
         let request = parse_remux_request(path)?;
 
@@ -6011,9 +6019,9 @@ impl Server {
     async fn probe_resolution_cached(
         video_file: &std::path::Path,
         config: &ServerState,
-    ) -> Option<crate::video_transcode::VideoResolution> {
-        use crate::video_metadata_cache::cache_key_with_mtime;
-        use crate::video_transcode::probe_video_resolution;
+    ) -> Option<mbr_core::video_transcode::VideoResolution> {
+        use mbr_core::video_metadata_cache::cache_key_with_mtime;
+        use mbr_core::video_transcode::probe_video_resolution;
 
         let key = cache_key_with_mtime(video_file, "resolution");
         if let Some(res) = config.video_resolution_cache.pin().get(&key).cloned() {
@@ -6039,11 +6047,11 @@ impl Server {
     /// successfully served it, None otherwise (fall through to other handlers).
     #[cfg(feature = "media-metadata")]
     async fn try_serve_hls_content(path: &str, config: &ServerState) -> Option<Response<Body>> {
-        use crate::video_transcode::{
+        use mbr_core::video_transcode::{
             HlsRequest, TranscodeError, generate_hls_playlist, parse_hls_request, should_transcode,
             transcode_segment,
         };
-        use crate::video_transcode_cache::{
+        use mbr_core::video_transcode_cache::{
             HLS_WAIT_TIMEOUT, HlsCacheKey, HlsCacheStartResult, HlsCacheState,
         };
 
@@ -6400,7 +6408,7 @@ impl Server {
             index_file: config.index_file.clone(),
             is_index_file,
             url_depth: None,
-            current_page_url: crate::repo::build_markdown_url_path(
+            current_page_url: mbr_core::repo::build_markdown_url_path(
                 md_path,
                 root_path,
                 &config.index_file,
@@ -6409,7 +6417,7 @@ impl Server {
             // markdown targets must come out with the trailing slash their
             // canonical URL has, or every relative link on the page they lead
             // to resolves one directory too high.
-            markdown_page_probe: Some(crate::link_transform::filesystem_markdown_page_probe(
+            markdown_page_probe: Some(mbr_core::link_transform::filesystem_markdown_page_probe(
                 owned_resolver_config(config),
             )),
         };
@@ -6420,7 +6428,7 @@ impl Server {
         #[cfg(not(feature = "media-metadata"))]
         let transcode_enabled = false;
 
-        let valid_tag_sources = crate::config::tag_sources_to_set(&config.tag_sources);
+        let valid_tag_sources = mbr_core::config::tag_sources_to_set(&config.tag_sources);
         let render_result = markdown::render_with_cache(
             md_path.to_path_buf(),
             root_path,
@@ -6446,12 +6454,12 @@ impl Server {
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
         let contact = render_result.contact;
-        let readability_counts = crate::readability::ReadabilityCounts {
+        let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
             syllables: render_result.syllable_count,
         };
-        let readability_scores = crate::readability::scores(&readability_counts);
+        let readability_scores = mbr_core::readability::scores(&readability_counts);
         // Use relative path for markdown_source so live reload can match it.
         // `path_to_url` keeps it `/`-separated: the editor splits this value on
         // `/` to build the raw/save URLs and to derive the note's folder for
@@ -6461,7 +6469,7 @@ impl Server {
             pathdiff::diff_paths(md_path, root_path).unwrap_or_else(|| md_path.to_path_buf());
         frontmatter.insert(
             "markdown_source".into(),
-            crate::url_path::path_to_url(&relative_md_path).into(),
+            mbr_core::url_path::path_to_url(&relative_md_path).into(),
         );
         // Indicate server mode for frontend search functionality
         frontmatter.insert("server_mode".into(), "true".into());
@@ -6503,7 +6511,7 @@ impl Server {
         // up, making the link cache a permanent miss. (The `replace` collapses
         // the `//` produced when the path is empty, i.e. the root index.)
         let current_url =
-            format!("/{}/", crate::url_path::path_to_url(&url_path_buf)).replace("//", "/");
+            format!("/{}/", mbr_core::url_path::path_to_url(&url_path_buf)).replace("//", "/");
 
         // Cache outbound links for links.json endpoint if link tracking is
         // enabled. An empty list is cached too: skipping the insert would leave
@@ -6683,7 +6691,7 @@ impl Server {
                     let parent = abs_path.parent()?;
                     if parent == dir_path.as_path() {
                         let name = abs_path.file_name()?.to_str()?.to_string();
-                        let mut url_path = crate::url_path::path_to_url(rel_path);
+                        let mut url_path = mbr_core::url_path::path_to_url(rel_path);
                         if !url_path.starts_with('/') {
                             url_path = "/".to_string() + &url_path;
                         }
@@ -6694,7 +6702,7 @@ impl Server {
                             .filter(|p| p.is_file())
                             .and_then(|p| markdown::extract_metadata_from_file(p).ok())
                             .map(|m| m.metadata);
-                        Some(crate::sorting::folder_entry(
+                        Some(mbr_core::sorting::folder_entry(
                             &name,
                             url_path,
                             index_fm.as_ref(),
@@ -6704,9 +6712,9 @@ impl Server {
                     }
                 })
                 .collect();
-            crate::sorting::sort_folders(&mut subdirs, &sort);
+            mbr_core::sorting::sort_folders(&mut subdirs, &sort);
 
-            Ok::<_, crate::errors::RepoError>((files, subdirs))
+            Ok::<_, mbr_core::errors::RepoError>((files, subdirs))
         })
         .await;
 
@@ -6722,7 +6730,7 @@ impl Server {
 
     async fn directory_to_html(
         dir_path: &Path,
-        templates: &crate::templates::Templates,
+        templates: &mbr_core::templates::Templates,
         root_path: &Path,
         config: &ServerState,
     ) -> Result<Response<Body>, MbrError> {
@@ -6959,7 +6967,7 @@ impl Server {
     ) -> Result<impl IntoResponse, StatusCode> {
         tracing::debug!("home_page handler");
 
-        let tag_url_sources = crate::config::tag_sources_to_url_sources(&config.tag_sources);
+        let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
         let resolver_config = PathResolverConfig {
             base_dir: config.base_dir.as_path(),
             canonical_base_dir: config.canonical_base_dir.as_deref(),
@@ -7106,7 +7114,7 @@ fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std:
 
 /// Builds the deduplicated list of immediate subdirectories of `dir` from the
 /// repo-relative paths of every indexed file, in sidebar order (see
-/// [`crate::sorting::sort_folders`]; `folder_frontmatter` supplies each
+/// [`mbr_core::sorting::sort_folders`]; `folder_frontmatter` supplies each
 /// folder's index-note title, keyed by folder URL).
 ///
 /// Derived from the file index rather than from a disk walk so it can be
@@ -7117,7 +7125,7 @@ fn immediate_subdir_name<'a>(file_path: &'a Path, dir: &Path) -> Option<&'a std:
 fn compute_subdir_entries<'a>(
     file_paths: impl Iterator<Item = &'a Path>,
     dir: &Path,
-    folder_frontmatter: &std::collections::HashMap<String, crate::markdown::SimpleMetadata>,
+    folder_frontmatter: &std::collections::HashMap<String, mbr_core::markdown::SimpleMetadata>,
     sort: &[SortField],
 ) -> Vec<serde_json::Value> {
     let mut entries = file_paths
@@ -7126,12 +7134,12 @@ fn compute_subdir_entries<'a>(
         .collect::<std::collections::BTreeSet<String>>()
         .into_iter()
         .map(|name| {
-            let url_path = format!("/{}/", crate::url_path::path_to_url(&dir.join(&name)));
+            let url_path = format!("/{}/", mbr_core::url_path::path_to_url(&dir.join(&name)));
             let index_fm = folder_frontmatter.get(&url_path);
-            crate::sorting::folder_entry(&name, url_path, index_fm)
+            mbr_core::sorting::folder_entry(&name, url_path, index_fm)
         })
         .collect::<Vec<_>>();
-    crate::sorting::sort_folders(&mut entries, sort);
+    mbr_core::sorting::sort_folders(&mut entries, sort);
     entries
 }
 
@@ -7141,8 +7149,8 @@ fn subfolder_index_frontmatter<'a>(
     files: impl Iterator<Item = &'a MarkdownInfo>,
     dir: &Path,
     index_file: &str,
-) -> std::collections::HashMap<String, crate::markdown::SimpleMetadata> {
-    crate::sorting::folder_index_frontmatter(
+) -> std::collections::HashMap<String, mbr_core::markdown::SimpleMetadata> {
+    mbr_core::sorting::folder_index_frontmatter(
         files.filter(|info| info.raw_path.parent().and_then(Path::parent) == Some(dir)),
         index_file,
     )
@@ -7308,10 +7316,10 @@ const CACHE_CONTROL_NO_STORE: &str = "no-store";
 fn build_tag_page_outbound_links(
     source: &str,
     value: &str,
-    tag_index: &crate::tag_index::TagIndex,
+    tag_index: &mbr_core::tag_index::TagIndex,
     tag_sources: &[TagSource],
-) -> Vec<crate::link_index::OutboundLink> {
-    use crate::link_index::OutboundLink;
+) -> Vec<mbr_core::link_index::OutboundLink> {
+    use mbr_core::link_index::OutboundLink;
 
     let mut outbound = Vec::new();
 
@@ -7347,9 +7355,9 @@ fn build_tag_page_outbound_links(
 /// Returns links to all individual tag pages under this source.
 fn build_tag_index_outbound_links(
     source: &str,
-    tag_index: &crate::tag_index::TagIndex,
-) -> Vec<crate::link_index::OutboundLink> {
-    use crate::link_index::OutboundLink;
+    tag_index: &mbr_core::tag_index::TagIndex,
+) -> Vec<mbr_core::link_index::OutboundLink> {
+    use mbr_core::link_index::OutboundLink;
 
     tag_index
         .get_all_tags(source)
@@ -7786,7 +7794,7 @@ mod tests {
     }
 
     fn mk_markdown_info(raw: &str, url: &str, title: &str) -> MarkdownInfo {
-        let mut frontmatter = crate::markdown::SimpleMetadata::new();
+        let mut frontmatter = mbr_core::markdown::SimpleMetadata::new();
         frontmatter.insert(
             "title".to_string(),
             serde_json::Value::String(title.to_string()),
@@ -7861,7 +7869,7 @@ mod tests {
             "---\ntitle: Mary Doe\naliases:\n  - nickname: Mare\n---\n",
         )
         .unwrap();
-        let fm = crate::markdown::extract_metadata_from_file(&path)
+        let fm = mbr_core::markdown::extract_metadata_from_file(&path)
             .unwrap()
             .metadata;
         let delta = Server::wikilink_delta_names(Some(&fm), "mare", "mary");
@@ -8020,7 +8028,7 @@ mod tests {
                 &[],
                 "index.md",
             );
-            crate::link_index::sort_inbound_links(&mut grepped);
+            mbr_core::link_index::sort_inbound_links(&mut grepped);
             let grepped: Vec<String> = grepped.into_iter().map(|l| l.from).collect();
 
             assert_eq!(
@@ -8205,7 +8213,7 @@ mod tests {
     #[cfg(feature = "media-metadata")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_metadata_single_flight_one_decode() {
-        use crate::video_metadata_cache::{CachedMetadata, VideoMetadataCache};
+        use mbr_core::video_metadata_cache::{CachedMetadata, VideoMetadataCache};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
@@ -8389,8 +8397,8 @@ mod tests {
     #[cfg(feature = "media-metadata")]
     #[tokio::test]
     async fn test_hls_generation_slot_released_when_future_dropped() {
-        use crate::video_transcode::TranscodeTarget;
-        use crate::video_transcode_cache::{HlsCacheKey, HlsCacheStartResult};
+        use mbr_core::video_transcode::TranscodeTarget;
+        use mbr_core::video_transcode_cache::{HlsCacheKey, HlsCacheStartResult};
 
         let cache = HlsCache::new(1024 * 1024);
         let key = HlsCacheKey::segment(
@@ -8435,7 +8443,7 @@ mod tests {
     /// for that tab.
     #[tokio::test]
     async fn test_live_reload_action_keeps_forwarding_after_lag() {
-        use crate::change_event::{ChangeEventType, FileChangeEvent};
+        use mbr_core::change_event::{ChangeEventType, FileChangeEvent};
 
         let event = |name: &str| FileChangeEvent {
             path: format!("/repo/{name}"),
@@ -8471,7 +8479,7 @@ mod tests {
     /// When the sender is dropped (server shutting down) the loop closes.
     #[tokio::test]
     async fn test_live_reload_action_closes_when_sender_dropped() {
-        let (tx, mut rx) = broadcast::channel::<crate::change_event::FileChangeEvent>(2);
+        let (tx, mut rx) = broadcast::channel::<mbr_core::change_event::FileChangeEvent>(2);
         drop(tx);
         assert!(matches!(
             live_reload_action(rx.recv().await),
@@ -8487,7 +8495,7 @@ mod tests {
     /// are derived from the same data and must go with them.
     #[test]
     fn test_invalidate_derived_caches_clears_link_caches() {
-        use crate::link_index::{InboundLink, OutboundLink};
+        use mbr_core::link_index::{InboundLink, OutboundLink};
 
         let listing_caches = ListingCaches {
             sibling_nav_cache: Arc::new(papaya::HashMap::new()),
@@ -8585,9 +8593,9 @@ mod tests {
     #[cfg(feature = "media-metadata")]
     #[test]
     fn test_media_cache_size_is_independent_of_oembed_cache_size() {
-        use crate::video_metadata_cache::{CachedMetadata, VideoMetadataCache};
+        use mbr_core::video_metadata_cache::{CachedMetadata, VideoMetadataCache};
 
-        let config = crate::config::Config {
+        let config = mbr_core::config::Config {
             oembed_cache_size: 0,
             ..Default::default()
         };
@@ -8631,7 +8639,7 @@ mod tests {
         std::fs::write(temp.path().join("index.md"), "# Test").unwrap();
 
         for gui_mode in [true, false] {
-            let config = crate::config::Config {
+            let config = mbr_core::config::Config {
                 root_dir: temp.path().to_path_buf(),
                 ..Default::default()
             };
@@ -8651,7 +8659,7 @@ mod tests {
     #[cfg(feature = "media-metadata")]
     #[test]
     fn test_metadata_response_from_cache_variants() {
-        use crate::video_metadata_cache::CachedMetadata;
+        use mbr_core::video_metadata_cache::CachedMetadata;
 
         let jpg = Server::metadata_response_from_cache(CachedMetadata::Cover(vec![0xFF, 0xD8]));
         assert!(jpg.is_some());

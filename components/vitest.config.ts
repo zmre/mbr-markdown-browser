@@ -3,8 +3,8 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 /**
- * `templates/theme.css`, read at config time and handed to the tests as a
- * constant.
+ * `crates/mbr-core/templates/theme.css`, read at config time and handed to the
+ * tests as a constant.
  *
  * `icons.test.ts` needs it: the six review-note icons are defined in CSS so the
  * in-document markers and the panel badge share one copy, and only a test that
@@ -17,7 +17,7 @@ import { defineConfig } from 'vitest/config'
  * directly and cannot be silently emptied.
  */
 const themeCss = readFileSync(
-  fileURLToPath(new URL('../templates/theme.css', import.meta.url)),
+  fileURLToPath(new URL('../crates/mbr-core/templates/theme.css', import.meta.url)),
   'utf8'
 )
 

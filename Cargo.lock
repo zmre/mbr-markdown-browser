@@ -3020,39 +3020,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
-name = "mbr-markdown-browser"
+name = "mbr-core"
 version = "0.6.2"
 dependencies = [
  "aho-corasick",
  "argon2",
- "axum",
  "chrono",
- "clap 4.6.7",
- "criterion",
  "ffmpeg-next",
  "figment",
  "filetime",
- "flate2",
  "futures",
- "futures-util",
  "getrandom 0.4.3",
- "gio",
  "glob",
  "grep-regex",
  "grep-searcher",
- "gtk",
  "html-escape",
+ "http",
  "image",
  "itertools 0.15.0",
  "lopdf",
  "lru",
  "metadata",
- "muda",
- "notify",
  "nucleo-matcher",
- "objc2-app-kit",
- "objc2-foundation",
- "pagefind",
  "papaya",
  "parking_lot",
  "pathdiff",
@@ -3064,31 +3053,131 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest",
- "rfd",
- "rpassword",
  "rustls",
  "scraper",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tao",
  "tempfile",
  "tera",
  "thiserror 2.0.21",
  "time",
  "tokio",
- "tokio-util",
- "tower",
- "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "walkdir",
+ "webpki-roots",
+ "yaml-rust2",
+]
+
+[[package]]
+name = "mbr-ffi"
+version = "0.6.2"
+dependencies = [
+ "html-escape",
+ "mbr-core",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "tera",
+ "thiserror 2.0.21",
+ "tokio",
+ "uniffi",
+]
+
+[[package]]
+name = "mbr-markdown-browser"
+version = "0.6.2"
+dependencies = [
+ "chrono",
+ "clap 4.6.7",
+ "criterion",
+ "ffmpeg-next",
+ "filetime",
+ "flate2",
+ "gio",
+ "gtk",
+ "image",
+ "mbr-core",
+ "mbr-ffi",
+ "mbr-server",
+ "mbr-ssg",
+ "muda",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "papaya",
+ "parking_lot",
+ "pathdiff",
+ "percent-encoding",
+ "proptest",
+ "pulldown-cmark",
+ "rayon",
+ "reqwest",
+ "rfd",
+ "rpassword",
+ "serde_json",
+ "tao",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uniffi",
  "url",
- "walkdir",
- "webpki-roots",
  "windows-sys 0.61.2",
  "wry",
- "yaml-rust2",
+]
+
+[[package]]
+name = "mbr-server"
+version = "0.6.2"
+dependencies = [
+ "aho-corasick",
+ "axum",
+ "chrono",
+ "futures",
+ "futures-util",
+ "itertools 0.15.0",
+ "mbr-core",
+ "notify",
+ "papaya",
+ "parking_lot",
+ "pathdiff",
+ "percent-encoding",
+ "proptest",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
+name = "mbr-ssg"
+version = "0.6.2"
+dependencies = [
+ "futures",
+ "mbr-core",
+ "pagefind",
+ "papaya",
+ "percent-encoding",
+ "proptest",
+ "rayon",
+ "scraper",
+ "serde_json",
+ "tempfile",
+ "tera",
+ "tokio",
+ "tracing",
+ "walkdir",
 ]
 
 [[package]]

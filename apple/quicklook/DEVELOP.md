@@ -6,7 +6,7 @@ This document covers building, testing, debugging, and troubleshooting the MBR Q
 
 The QuickLook extension consists of:
 
-1. **Rust library** (`src/quicklook.rs`) - Core rendering logic exposed via UniFFI
+1. **Rust library** (`crates/mbr-ffi/src/quicklook.rs`) - Core rendering logic exposed via UniFFI
 2. **Swift extension** (`MBRPreview/`) - macOS QuickLook extension that calls Rust
 3. **Host app** (`Host/`) - Required container app for the extension
 4. **UniFFI bindings** (`Generated/`) - Auto-generated Swift/C bindings
@@ -43,7 +43,7 @@ makes highlight.js and mermaid work). It cannot, however, reach the filesystem:
 - Local assets are `QLPreviewReply` attachments, addressed as `cid:<id>`. `cid:`
   resolves against that dictionary and nothing else, so there is no path for a
   script to name a file that is not already in it.
-- The dictionary is built by `collect_preview_attachments` (`src/quicklook.rs`),
+- The dictionary is built by `collect_preview_attachments` (`crates/mbr-ffi/src/quicklook.rs`),
   which attaches a file only when `Path::canonicalize` puts it inside the
   previewed repository root **and** it is a regular file. `..`, extra leading
   slashes and symlinks pointing out of the repo all resolve away before the
@@ -107,12 +107,12 @@ If you need more control:
 # 0. Build js artifacts needed by rust build
 cd components ; bun install && bun run build
 
-# 1. Build Rust library with FFI feature (minimal features for sandbox)
-cargo build --release --lib --no-default-features --features ffi
+# 1. Build the Rust staticlib (the mbr-ffi crate: UniFFI over the render core)
+cargo build --release -p mbr-ffi --lib
 
 # 2. Regenerate UniFFI bindings (REQUIRED after Rust API changes!)
 cargo run --bin uniffi-bindgen --features ffi -- \
-    generate --library target/release/libmbr.a \
+    generate --library target/release/libmbr_ffi.a \
     --language swift --out-dir apple/quicklook/Generated
 
 # 3. Generate Xcode project
@@ -223,7 +223,7 @@ The extension handles these UTIs (defined in `MBRPreview/Info.plist`):
 - `dyn.ah62d4rv4ge81e5pe` (the dynamic UTI for `.rmd`)
 - `public.plain-text` (covers `.txt`, `.log`, `.csv` and ~90 source extensions
   via `public.source-code`; those render through the plain-text path in
-  `src/quicklook.rs`, not the markdown parser)
+  `crates/mbr-ffi/src/quicklook.rs`, not the markdown parser)
 
 Entries that resolve to no declared type on the machine are skipped, but each one
 costs an `Invalid content type identifier ... specified in extension` error from
@@ -232,11 +232,11 @@ QuickLook on every preview — so do not add speculative identifiers.
 ### Rust Unit Tests
 
 ```bash
-# Run all quicklook tests (requires ffi feature)
-cargo test --lib --features ffi quicklook
+# Run all quicklook tests (the mbr-ffi crate)
+cargo test -p mbr-ffi
 
 # Run specific test
-cargo test --lib --features ffi test_render_preview_with_static_folder_image
+cargo test -p mbr-ffi test_render_preview_with_static_folder_image
 ```
 
 ## Debugging
@@ -310,9 +310,9 @@ If the crash log shows:
 **Solution**: Regenerate UniFFI bindings:
 
 ```bash
-cargo build --release --lib --no-default-features --features ffi
+cargo build --release -p mbr-ffi --lib
 cargo run --bin uniffi-bindgen --features ffi -- \
-    generate --library target/release/libmbr.a \
+    generate --library target/release/libmbr_ffi.a \
     --language swift --out-dir apple/quicklook/Generated
 ```
 
@@ -421,7 +421,7 @@ to the system previewer.
 Common causes:
 
 1. **Stale UniFFI bindings** - Regenerate (see above)
-2. **Missing Rust library** - Rebuild with `cargo build --release --features ffi`
+2. **Missing Rust library** - Rebuild with `cargo build --release -p mbr-ffi --lib`
 3. **Signing issues** - Re-sign the extension
 
 ### Images Broken in Preview
@@ -444,7 +444,7 @@ Check:
    QuickLook previews; it is not new.
 5. **Size caps** - an asset over 16 MiB, or one that would push the page's total
    past 64 MiB, is deliberately not attached (`MAX_ATTACHMENT_BYTES` /
-   `MAX_TOTAL_ATTACHMENT_BYTES` in `src/quicklook.rs`).
+   `MAX_TOTAL_ATTACHMENT_BYTES` in `crates/mbr-ffi/src/quicklook.rs`).
 
 ### "Can't get generator" Error
 
@@ -463,7 +463,7 @@ This happens because `-g` is for old-style `.qlgenerator` bundles, not modern `.
 
 Regenerate bindings after ANY change to:
 
-- Function signatures in `src/quicklook.rs`
+- Function signatures in `crates/mbr-ffi/src/quicklook.rs`
 - Error types (`QuickLookError`)
 - Return types
 - The `#[uniffi::export]` macro usage
@@ -511,11 +511,11 @@ Update versions in:
 |------|---------|
 | Build extension | `./build.sh` |
 | Build + install | `./build.sh install` |
-| Regenerate bindings | `cargo run --bin uniffi-bindgen --features ffi -- generate --library target/release/libmbr.a --language swift --out-dir apple/quicklook/Generated` |
+| Regenerate bindings | `cargo run --bin uniffi-bindgen --features ffi -- generate --library target/release/libmbr_ffi.a --language swift --out-dir apple/quicklook/Generated` |
 | Test preview | `qlmanage -p /path/to/file.md` |
 | Check registration | `pluginkit -mAv -p com.apple.quicklook.preview \| grep mbr` |
 | Enable extension | `pluginkit -e use -i com.zmre.mbr.quicklook-host.MBRPreview` |
 | Check file UTI | `mdls -name kMDItemContentType /path/to/file.md` |
 | View crash logs | `ls ~/Library/Logs/DiagnosticReports/*MBR*` |
-| Run Rust tests | `cargo test --lib --features ffi quicklook` |
+| Run Rust tests | `cargo test -p mbr-ffi` |
 | Kill QuickLook | `pkill -f qlmanage && pkill -f quicklookd` |

@@ -34,7 +34,7 @@ use std::path::{Component, Path};
 ///
 /// ```
 /// use std::path::Path;
-/// use mbr::url_path::path_to_url;
+/// use mbr_core::url_path::path_to_url;
 ///
 /// // Built with `join` so the separator is whatever the host uses natively;
 /// // the output is `/`-separated on every platform.
@@ -94,7 +94,7 @@ pub fn path_to_url(relative: &Path) -> String {
 ///   function correctly reports as internal.
 ///
 /// ```
-/// use mbr::url_path::is_external_url;
+/// use mbr_core::url_path::is_external_url;
 ///
 /// assert!(is_external_url("magnet:?xt=urn:btih:abc"));
 /// assert!(is_external_url("//cdn.example.com/x.js"));
@@ -122,12 +122,12 @@ pub fn is_external_url(url: &str) -> bool {
 /// one of those (`docs/a:b.md`) fails the character check and yields `None`
 /// without a separate delimiter scan.
 ///
-/// Crate-visible because [`crate::external_open`] needs the *name* of the
+/// Public because the `mbr` binary's `external_open` needs the *name* of the
 /// scheme, not just whether one is present: the GUI navigation policy refuses
 /// to hand `javascript:`, `vbscript:` and `data:` to the operating system. It
 /// reuses this scan so there is still one definition of what a scheme looks
 /// like — the whole point of this module.
-pub(crate) fn url_scheme(url: &str) -> Option<&str> {
+pub fn url_scheme(url: &str) -> Option<&str> {
     let colon = url.find(':')?;
     let scheme = &url[..colon];
 

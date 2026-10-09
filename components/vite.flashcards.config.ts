@@ -23,7 +23,7 @@ import { resolve } from 'node:path'
 // `minify: 'terser'` because rolldown-vite does not ship esbuild.
 export default {
   build: {
-    outDir: '../templates/components-js',
+    outDir: '../crates/mbr-core/templates/components-js',
     emptyOutDir: false,
     sourcemap: false,
     target: 'es2020',

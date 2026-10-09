@@ -13,7 +13,7 @@ For rapid UI iteration without full Rust rebuilds, use the `--template-folder` f
 
 ### Terminal 1: Component Watcher
 
-Watches TypeScript sources and rebuilds to `templates/components-js/` on change:
+Watches TypeScript sources and rebuilds to `crates/mbr-core/templates/components-js/` on change:
 
 ```bash
 cd components
@@ -26,30 +26,30 @@ bun run watch
 Watches Rust files and restarts the server, while ignoring template/component changes (those are handled by Terminal 1):
 
 ```bash
-cargo watch -i "templates/**" -i "components/**" -i "*.md" -q -c -x 'run --release --bin mbr -- -s --template-folder ./templates ./docs'
+cargo watch -i "crates/mbr-core/templates/**" -i "components/**" -i "*.md" -q -c -x 'run --release --bin mbr -- -s --template-folder ./crates/mbr-core/templates ./docs'
 ```
 
 This command:
-- `-i "templates/**"` - Ignores template file changes (HTML, CSS, JS)
+- `-i "crates/mbr-core/templates/**"` - Ignores template file changes (HTML, CSS, JS)
 - `-i "components/**"` - Ignores TypeScript source changes
 - `-i "*.md"` - Ignores the markdown files we might be using for testing
 - `-q` - Quiet mode (less cargo-watch output)
 - `-c` - Clears screen between runs
-- `--template-folder ./templates` - Loads templates from disk instead of compiled defaults
+- `--template-folder ./crates/mbr-core/templates` - Loads templates from disk instead of compiled defaults
 
 ### How It Works
 
-With `--template-folder ./templates`:
+With `--template-folder ./crates/mbr-core/templates`:
 
-1. **Templates** (`*.html`) are loaded from `./templates/` with fallback to compiled defaults
-2. **Assets** (`*.css`, `*.js`) are served from `./templates/` with fallback to compiled defaults
-3. **Components** (`/.mbr/components/*`) are mapped to `./templates/components-js/*`
+1. **Templates** (`*.html`) are loaded from `./crates/mbr-core/templates/` with fallback to compiled defaults
+2. **Assets** (`*.css`, `*.js`) are served from `./crates/mbr-core/templates/` with fallback to compiled defaults
+3. **Components** (`/.mbr/components/*`) are mapped to `./crates/mbr-core/templates/components-js/*`
 4. **File watcher** monitors both the markdown directory and the template folder for hot reload
 
 When you edit:
 - **Rust files** → cargo watch rebuilds and restarts the server
-- **HTML/CSS files in templates/** → Browser auto-reloads via WebSocket
-- **TypeScript in components/src/** → Vite rebuilds to `templates/components-js/`, then browser auto-reloads
+- **HTML/CSS files in crates/mbr-core/templates/** → Browser auto-reloads via WebSocket
+- **TypeScript in components/src/** → Vite rebuilds to `crates/mbr-core/templates/components-js/`, then browser auto-reloads
 
 ## Code Quality Requirements
 
@@ -61,10 +61,10 @@ All Rust code must be formatted with `rustfmt`:
 
 ```bash
 # Check formatting (CI runs this)
-cargo fmt -- --check
+cargo fmt --all -- --check
 
-# Auto-format all files
-cargo fmt
+# Auto-format every crate in the workspace
+cargo fmt --all
 ```
 
 ### Linting (cargo clippy)
@@ -73,11 +73,15 @@ All clippy warnings are treated as errors:
 
 ```bash
 # Check for lint issues (CI runs this)
-cargo clippy -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # See warnings without failing
-cargo clippy
+cargo clippy --workspace --all-targets
 ```
+
+The workspace's `default-members` are all of its crates, so the plain commands
+(`cargo clippy`, `cargo test`) already cover every crate; `--workspace` only
+makes that explicit.
 
 ### Pre-commit Hook
 
@@ -189,17 +193,19 @@ Skip benchmarks during a release with `SKIP_BENCHMARKS=1 ./scripts/bump-version.
 ## Build Commands
 
 ```bash
-# Build release binary
+# Build release binary (every workspace crate; `-p mbr-markdown-browser` for
+# the binary alone)
 cargo build --release
 
-# Run tests
-cargo test
+# Run tests (every workspace crate: `cargo test` covers the default members,
+# which are all of them; `--workspace` says so explicitly)
+cargo test --workspace
 
 # Build components only
 cd components && bun run build
 
 # Format and lint
-cargo fmt && cargo clippy -- -D warnings
+cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Release Packaging and Nix-Store Independence
@@ -346,8 +352,8 @@ apple/quicklook/
 
 ### How It Works
 
-1. **UniFFI Bindings**: The Rust `render_preview()` function (in `src/quicklook.rs`) is exposed to Swift via UniFFI. It returns a `PreviewDocument`: the HTML plus the local files that HTML references.
-2. **Static Library**: Rust code is compiled as `libmbr.a` from the render core alone (`--no-default-features --features ffi`): no server, watcher, static site generator, CLI, GUI or media-metadata. The extension links it with dead-code stripping, so only what `render_preview()` reaches ends up in `MBRPreview`
+1. **UniFFI Bindings**: The Rust `render_preview()` function (in `crates/mbr-ffi/src/quicklook.rs`) is exposed to Swift via UniFFI. It returns a `PreviewDocument`: the HTML plus the local files that HTML references.
+2. **Static Library**: Rust code is compiled as `libmbr_ffi.a` from the `mbr-ffi` crate (`cargo build --release -p mbr-ffi --lib`), which depends on the render core (`mbr-core`) alone: no server, watcher, static site generator, CLI, GUI or media-metadata. The extension links it with dead-code stripping, so only what `render_preview()` reaches ends up in `MBRPreview`
 3. **Swift Extension**: `PreviewProvider.swift` calls the Rust function and returns a `QLPreviewReply` carrying the HTML and its attachments
 
 The preview is **data-based**, not view-based: `QLIsDataBasedPreview` is `true` and
@@ -365,32 +371,50 @@ addresses them as `cid:<id>`.
 > but on macOS 26 attachments added there never reach QuickLook: the `cid:` URLs
 > resolve to nothing and every image in the preview is silently blank.
 
+### Workspace Layout
+
+mbr is a Cargo workspace. The crate boundaries are the layering: a crate can
+only use what it depends on, so the render core cannot reach the server, and
+the QuickLook staticlib cannot link the GUI.
+
+| Crate | Path | Contents | Depends on |
+|-------|------|----------|------------|
+| `mbr-core` | `crates/mbr-core` | markdown, templates (and the `templates/` assets they embed), config, repository scan, search, task/link/tag indexes, path resolution; `media-metadata` feature for ffmpeg/pdfium probes and HLS | — |
+| `mbr-server` | `crates/mbr-server` | the axum server, edit/move endpoints, `file_write`, `link_grep`, `link_rewrite`; `watcher` feature (notify) | `mbr-core` |
+| `mbr-ssg` | `crates/mbr-ssg` | the static site generator and pagefind | `mbr-core` |
+| `mbr-ffi` | `crates/mbr-ffi` | UniFFI exports (`quicklook.rs`, `mbr.udl`) → `libmbr_ffi.a`; empty on non-Apple targets | `mbr-core` |
+| `mbr-markdown-browser` | `.` (root) | the `mbr` binary (CLI, GUI window, OS integrations), the `uniffi-bindgen` binary, and the `mbr` library re-exporting everything for the integration tests and benches | all of the above |
+
+The version and shared metadata live once, in the root `Cargo.toml`'s
+`[workspace.package]`; every crate inherits them.
+
 ### Feature Flags
 
-Each subsystem is a Cargo feature. The default set is the full desktop app;
-with `--no-default-features` the library is the render core alone (markdown,
+Each subsystem is a Cargo feature of the root package, forwarding to the crate
+that implements it. The default set is the full desktop app; with
+`--no-default-features` the library is the render core alone (markdown,
 templates, config, repository scan, search, indexes, embedded assets).
 
 | Feature | Adds | Implies |
 |---------|------|---------|
-| `server` | the axum HTTP server (`server.rs`): routes, live-reload WebSocket, edit endpoints | |
-| `watcher` | the filesystem watcher (`watcher.rs`, notify) feeding live reload and index invalidation | |
-| `ssg` | the static site generator (`build.rs`) and its pagefind index | |
+| `server` | the axum HTTP server (`mbr-server`): routes, live-reload WebSocket, edit endpoints | |
+| `watcher` | the filesystem watcher (`mbr-server`'s `watcher` feature, notify) feeding live reload and index invalidation | |
+| `ssg` | the static site generator (`mbr-ssg`) and its pagefind index | |
 | `cli` | the `mbr` binary (`cli.rs`, `main.rs`) | `server`, `ssg` |
 | `gui` | the native window (wry/tao/muda/rfd) and OS link hand-off | `server` |
-| `media-metadata` | video/audio metadata, HLS transcoding, PDF covers (ffmpeg, pdfium) | |
+| `media-metadata` | video/audio metadata, HLS transcoding, PDF covers (ffmpeg, pdfium; `mbr-core`'s feature) | |
 | `ffmpeg-static` | statically linked ffmpeg | |
-| `ffi` | UniFFI exports for the Swift shells (QuickLook) | |
+| `ffi` | re-exports `mbr-ffi`, and builds the `uniffi-bindgen` binary | |
 
 ```bash
 # Full desktop app (default)
 cargo build --release
 
 # What Windows ships: everything except media-metadata
-cargo build --release --no-default-features --features gui,server,watcher,ssg,cli
+cargo build --release -p mbr-markdown-browser --no-default-features --features gui,server,watcher,ssg,cli
 
-# QuickLook staticlib: the render core plus the UniFFI exports
-cargo build --release --lib --no-default-features --features ffi
+# QuickLook staticlib: the mbr-ffi crate (UniFFI over the render core)
+cargo build --release -p mbr-ffi --lib
 ```
 
 The server works without `watcher`: live reload still announces the server's
@@ -424,7 +448,7 @@ pluginkit -m -i com.zmre.mbr.MBRPreview
 
 **Extension crashes:**
 1. Check crash logs in `~/Library/Logs/DiagnosticReports/`
-2. Ensure the staticlib was built with `--no-default-features --features ffi`
+2. Ensure the staticlib is `libmbr_ffi.a` from `cargo build --release -p mbr-ffi --lib`
 
 **Conflicting extensions:**
 ```bash

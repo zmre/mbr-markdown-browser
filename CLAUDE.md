@@ -15,21 +15,23 @@ This is a rust project and a serious engineering work.  ALWAYS USE the engineer 
 Before completing ANY Rust code changes, you MUST run these checks:
 
 ```bash
-# Format all Rust code
-cargo fmt
+# Format all Rust code (every crate in the workspace)
+cargo fmt --all
 
 # Check for lint issues (warnings are errors)
 # IMPORTANT: Use --all-targets to check test code too (matches CI)
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Run tests
-cargo test
+cargo test --workspace
 ```
 
 **These are blocking requirements.** Do not consider Rust work complete until:
-1. `cargo fmt` has been run (code is formatted)
-2. `cargo clippy --all-targets -- -D warnings` passes with no errors
-3. `cargo test` passes
+1. `cargo fmt --all` has been run (code is formatted)
+2. `cargo clippy --workspace --all-targets -- -D warnings` passes with no errors
+3. `cargo test --workspace` passes
+
+The workspace's `default-members` are all of its crates, so the plain `cargo fmt`/`clippy`/`test` cover them too; `--all`/`--workspace` makes it explicit, and is what CI and the flake pass.
 
 CI will reject any PR that fails these checks. The pre-commit hook enforces this locally, but you should run these explicitly to catch issues early.
 
@@ -38,10 +40,11 @@ CI will reject any PR that fails these checks. The pre-commit hook enforces this
 **When you touch feature gating** (a `#[cfg(feature = …)]`, an optional dependency, a module that moves between subsystems), also lint the non-default sets — CI builds them all, and an unused import under one set is an error there:
 
 ```bash
-cargo clippy --all-targets --no-default-features -- -D warnings                 # render core only
-cargo clippy --all-targets --no-default-features --features ffi -- -D warnings  # QuickLook staticlib (macOS)
-cargo clippy --all-targets --no-default-features --features gui,server,watcher,ssg,cli -- -D warnings  # Windows set
-cargo check --all-targets --no-default-features --features server              # server without the watcher
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings                 # every crate, no optional features
+cargo clippy -p mbr-core --all-targets -- -D warnings                                       # render core alone
+cargo clippy -p mbr-ffi --all-targets -- -D warnings                                        # QuickLook staticlib (macOS)
+cargo clippy --workspace --all-targets --no-default-features --features gui,server,watcher,ssg,cli -- -D warnings  # Windows set
+cargo check -p mbr-server --all-targets                                                     # server without the watcher
 ```
 
 ## When to Update Documentation and Tests (MANDATORY)
@@ -115,23 +118,46 @@ cargo run -- -b --output ./public /path/to/markdown/repo
 cargo watch -q -c -x 'run --release -- -s -p 5220 README.md'
 ```
 
+### Workspace Crates
+
+mbr is a Cargo workspace, and **the crate graph is the layering**: a crate can only name what it depends on, so the compiler, not a convention, keeps the render core free of the server, the server free of the GUI, and the QuickLook staticlib free of all of it. The graph is acyclic: `mbr-core` ← `mbr-server`, `mbr-ssg`, `mbr-ffi` ← the root package.
+
+| Crate (lib name) | Path | Modules | Key deps | Never depends on |
+|------------------|------|---------|----------|------------------|
+| `mbr-core` (`mbr_core`) | `crates/mbr-core` | markdown, html, templates, config, assets, embedded_*, url_helpers, url_path, change_event, media, attrs, audio, vid, chat, contact, relationships, tasks, task_query, task_index, flashcards, wikilink(_index), tag_index, link_index, link_transform, page_context, page_errors, readability, sorting, cache, constants, edit_auth, oembed(_cache), repo, path_resolver, search, errors; `media-metadata` feature: pdf_metadata, video_metadata(_cache), video_transcode(_cache), video_remux. Owns `templates/` (the `include_bytes!`'d assets, incl. the vite output `templates/components-js/`) | pulldown-cmark, tera, figment, papaya, rayon, reqwest+rustls, grep-*, argon2/sha2; ffmpeg/pdfium/metadata only under `media-metadata` | axum, notify, clap, pagefind, wry, uniffi |
+| `mbr-server` (`mbr_server`) | `crates/mbr-server` | server, errors (`ServerError`), file_write, link_grep, link_rewrite; `watcher` feature: watcher (`WatcherError`) | axum, tower(-http), futures-util, tracing-subscriber; notify under `watcher` | clap, wry, pagefind, uniffi |
+| `mbr-ssg` (`mbr_ssg`) | `crates/mbr-ssg` | build (`Builder`, `BuildStats`) | pagefind | axum, notify, clap, wry |
+| `mbr-ffi` (`mbr_ffi`) | `crates/mbr-ffi` | quicklook, `mbr.udl`, the UniFFI `build.rs`. `crate-type = ["lib", "staticlib"]` → **`libmbr_ffi.a`**, linked `-lmbr_ffi`. Compiles to nothing on non-Apple targets | uniffi (Apple only; runtime + `build`, never `cli`) | server, ssg, clap |
+| `mbr-markdown-browser` (`mbr`) | `.` | main, cli, browser, external_open, open_picker, macos_open, launch_url, errors (`BrowserError`, `ExternalOpenError`); the `mbr` and `uniffi-bindgen` bins; `lib.rs` re-exports every member at its pre-split path (`mbr::markdown`, `mbr::server`, `mbr::build`, `mbr::errors::ServerError`, …) for `tests/` and `benches/` | everything | — |
+
+Rules that follow from it:
+- **Cross-crate errors are type-erased in core.** `MbrError::Server`/`MbrError::Browser` (and `MbrError::Http`) hold an `UpstreamError` (`Box<dyn Error + Send + Sync>`); the crate owning the concrete type writes the `From` impl (`mbr_server::errors`, the root `errors.rs`), so `?` and the messages are unchanged and `downcast_ref` recovers the type. `From<http::Error>` lives in core because the orphan rule forbids it anywhere else (`http` is already in core's graph via reqwest). There is no `MbrError::Watcher`: nothing converted into it.
+- Something a higher crate needs from core must be `pub`, not `pub(crate)` (e.g. `relationships::normalize_name`, `url_path::url_scheme`), and a test helper it calls cannot be `#[cfg(test)]` in core (core's `cfg(test)` is off when another crate's tests build).
+- Doc links from core to higher crates are plain text (`mbr_server::watcher`), never `[`crate::…`]`.
+- Version and metadata are `[workspace.package]` in the root `Cargo.toml` (listed **first**, because `scripts/bump-version.sh` and release.yml read the first `^version = ` line); internal crates are pinned `=X.Y.Z` in `[workspace.dependencies]`, which bump-version.sh rewrites too. `cargo publish --workspace` (release.yml) publishes all five in dependency order.
+- Integration tests and benches stay at the root and go through the `mbr` re-exports.
+- `EnvFilter` matches targets by prefix, so the CLI's `mbr=<level>` filter (from `CARGO_CRATE_NAME`) also covers `mbr_core::…`, `mbr_server::…` and `mbr_ssg::…`.
+
 ### Cargo Features
 
-Subsystems are features, so non-desktop builds (the QuickLook staticlib, later iOS) leave them out. `default` lists every one of them and is the shipped desktop app. With `--no-default-features` the library is the **render core**: markdown/html/templates/config, repo scan, search, link/tag/task indexes, page context, assets.
+Subsystems are features of the root package, each forwarding to the crate that implements it, so non-desktop builds leave them out. `default` lists every one of them and is the shipped desktop app. With `--no-default-features` the root library is the **render core** (`mbr-core`) re-exported.
 
-| Feature | Optional deps | Modules / effect | Implies |
-|---------|---------------|------------------|---------|
-| `server` | axum, tower, tower-http, futures-util, tracing-subscriber | `server.rs`; `MbrError::Server`/`ServerError` | |
-| `watcher` | notify | `watcher.rs`; `MbrError::Watcher`. Without it the server still creates the change channel (`change_event::BROADCAST_CAPACITY`) and announces its own writes on it — only events from disk are missing (`spawn_file_watcher` is the one cfg'd call) | |
-| `ssg` | pagefind | `build.rs` (`Builder`, `BuildStats`) | |
+| Feature | Forwards to / optional deps | Modules / effect | Implies |
+|---------|------------------------------|------------------|---------|
+| `server` | `mbr-server` | `server.rs`; `ServerError` | |
+| `watcher` | `mbr-server/watcher` (notify) | `watcher.rs`. Without it the server still creates the change channel (`change_event::BROADCAST_CAPACITY`) and announces its own writes on it — only events from disk are missing (`spawn_file_watcher` is the one cfg'd call) | |
+| `ssg` | `mbr-ssg` (pagefind) | `build.rs` (`Builder`, `BuildStats`) | |
 | `cli` | clap, rpassword, tracing-subscriber | `cli.rs`; the `mbr` bin has `required-features = ["cli"]` | `server`, `ssg` |
 | `gui` | wry, tao, muda, rfd, image, objc2-*, windows-sys, gio, gtk | `browser.rs`, `external_open.rs`, `open_picker.rs`, `macos_open.rs` | `server` |
-| `media-metadata` | metadata, ffmpeg-next, pdfium-render, tempfile, image | `video_*`, `pdf_metadata.rs` | |
-| `ffi` | uniffi (Apple targets only) | `quicklook.rs`, the `uniffi-bindgen` bin | |
+| `media-metadata` | `mbr-core/media-metadata`, `mbr-server?/media-metadata`; ffmpeg-next (log level in `main.rs`) | `video_*`, `pdf_metadata.rs` (in core: the repo scan reads media metadata) | |
+| `ffmpeg-static` | `mbr-core/ffmpeg-static` | statically linked ffmpeg | |
+| `ffi` | `mbr-ffi`; uniffi with `cli` (Apple only) | re-exports `mbr::quicklook`; the `uniffi-bindgen` bin. The QuickLook staticlib itself is `cargo build -p mbr-ffi --lib`, which builds no clap | |
 
-Integration tests that need a subsystem declare it with `[[test]] required-features` in Cargo.toml (`server_integration` → `server`, `build_integration` → `ssg`, `cli_integration` → `cli`); a test that needs disk events is `#[cfg(feature = "watcher")]`. A core module must never name `crate::server`, `crate::watcher`, `crate::build` or `crate::cli` — shared helpers go in a neutral module (`page_context`, `url_helpers`, `change_event`, `assets`). Windows ships `gui,server,watcher,ssg,cli` (no `media-metadata`): that string is `minimalFeatures` in flake.nix and is repeated in ci.yml/release.yml's Windows jobs, so change them together.
+Member crates' own features: `mbr-core`: `media-metadata`, `ffmpeg-static`; `mbr-server`: `watcher`, `media-metadata`. `mbr-ssg` and `mbr-ffi` have none.
 
-**iOS check** (not in CI): `cargo check --lib --no-default-features --features ffi --target aarch64-apple-ios-sim` (and `--features ffi,server` for a shell that hosts the router). `uniffi` is gated `target_vendor = "apple"`, so it resolves for iOS. This needs the iOS std in the toolchain (`aarch64-apple-ios[-sim]` in flake.nix's `rustToolchainDev`, never in `rust-toolchain.toml`) and a *target-side* redirect to Xcode's iPhoneSimulator SDK: an `xcrun` shim running `/usr/bin/xcrun` with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, a target `clang` wrapper that unsets `MACOSX_DEPLOYMENT_TARGET` and sets `SDKROOT`, used as `CC_aarch64_apple_ios_sim` and `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER`, `AR_…=/usr/bin/ar`, `IPHONEOS_DEPLOYMENT_TARGET=26.0`, and `RUSTFLAGS` unset. Never export Xcode's `DEVELOPER_DIR`/`SDKROOT` globally: that breaks nix's host linker for build scripts.
+Integration tests that need a subsystem declare it with `[[test]] required-features` in Cargo.toml (`server_integration` → `server`, `build_integration` → `ssg`, `cli_integration` → `cli`); a test that needs disk events is `#[cfg(feature = "watcher")]`. Shared helpers go in a neutral core module (`page_context`, `url_helpers`, `change_event`, `assets`). Windows ships `gui,server,watcher,ssg,cli` (no `media-metadata`): that string is `minimalFeatures` in flake.nix and is repeated in ci.yml/release.yml's Windows jobs, so change them together.
+
+**iOS check** (not in CI): `cargo check -p mbr-ffi --target aarch64-apple-ios-sim` (and `-p mbr-core`, `-p mbr-server` for a shell that hosts the router). `uniffi` is gated `target_vendor = "apple"`, so it resolves for iOS. This needs the iOS std in the toolchain (`aarch64-apple-ios[-sim]` in flake.nix's `rustToolchainDev`, never in `rust-toolchain.toml`) and a *target-side* redirect to Xcode's iPhoneSimulator SDK: an `xcrun` shim running `/usr/bin/xcrun` with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, a target `clang` wrapper that unsets `MACOSX_DEPLOYMENT_TARGET` and sets `SDKROOT`, used as `CC_aarch64_apple_ios_sim` and `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER`, `AR_…=/usr/bin/ar`, `IPHONEOS_DEPLOYMENT_TARGET=26.0`, and `RUSTFLAGS` unset. Never export Xcode's `DEVELOPER_DIR`/`SDKROOT` globally: that breaks nix's host linker for build scripts.
 
 ### Key CLI Options
 
@@ -172,12 +198,14 @@ See `docs/reference/cli.md` for CLI flag documentation and `docs/reference/confi
 The project has comprehensive test coverage with ~462 tests:
 
 ```bash
-# Run all tests
-cargo test
+# Run all tests (every crate)
+cargo test --workspace
 
-# Run specific test modules
-cargo test --lib                    # Unit tests (~274 tests)
-cargo test --test server_integration # Integration tests (~68 tests)
+# Run specific crates / test targets
+cargo test -p mbr-core               # Core unit tests + doc tests
+cargo test -p mbr-server             # Server unit tests
+cargo test -p mbr-ffi                # QuickLook tests (macOS)
+cargo test --test server_integration # HTTP integration tests (root package)
 
 # Run with output
 cargo test -- --nocapture
@@ -187,7 +215,7 @@ cargo test -- --nocapture
 
 | Location | Description | Count |
 |----------|-------------|-------|
-| `src/*.rs` (unit tests) | Unit tests for each module | ~354 |
+| `crates/*/src/*.rs`, `src/*.rs` (unit tests) | Unit tests for each module, in the crate that owns it | ~2,100 |
 | `src/main.rs` | URL path builder tests | 10 |
 | `tests/build_integration.rs` | Build/static site tests | ~30 |
 | `tests/server_integration.rs` | HTTP integration tests | ~68 |
@@ -200,7 +228,7 @@ Property tests use `proptest` to verify invariants like:
 
 ## Benchmarks
 
-Criterion benchmarks measure performance of the critical rendering pipeline and supporting modules. Use `--no-default-features` to avoid requiring GUI/media-metadata system dependencies.
+Criterion benchmarks measure performance of the critical rendering pipeline and supporting modules. They live in the root package's `benches/` and reach `mbr-core` through the `mbr` re-exports, so every benched call is cross-crate exactly as it was when the bench was its own crate. Use `--no-default-features` to avoid requiring GUI/media-metadata system dependencies.
 
 ```bash
 # Compile benchmarks (fast check, no execution)
@@ -247,7 +275,7 @@ bun run dev        # Development server
 bun run build      # Production build (tsc + vite)
 ```
 
-Built components are placed in `dist/` and compiled into the binary via `include_bytes!`.
+Built components are written to `crates/mbr-core/templates/components-js/` (gitignored; every vite config's `outDir`) and compiled into the binary via `include_bytes!`.
 
 The build produces **nine bundles** — one main bundle plus eight lazy chunks, each with its own vite config:
 
@@ -267,18 +295,20 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 
 ## Architecture
 
-### Rust Modules (src/)
+### Rust Modules
+
+Each module lives in the crate the [Workspace Crates](#workspace-crates) table names (`crates/<crate>/src/<module>.rs`; the root package's are in `src/`).
 
 | Module | Purpose |
 |--------|---------|
 | `main.rs` | Entry point, CLI mode selection, `build_url_path()`. Built only with the `cli` feature (`required-features`) |
-| `lib.rs` | Library crate exports for integration tests; the `#[cfg(feature = …)]` module gates (see Cargo Features). Carries the crate-wide `allow(clippy::large_const_arrays)` under `ffi`, for UniFFI's generated scaffolding — an `#[allow]` on `include_scaffolding!` is ignored, and the include must stay at the crate root |
+| `lib.rs` | Root: re-exports `mbr_core::*` and each member crate at its pre-split path behind its feature, for the integration tests and benches. `crates/mbr-ffi/src/lib.rs` holds UniFFI's `include_scaffolding!` (Apple targets only) and the crate-wide `allow(clippy::large_const_arrays)` for its generated scaffolding — an `#[allow]` on `include_scaffolding!` is ignored, and the include must stay at the crate root |
 | `cli.rs` | Clap argument parsing (-s server, -g gui, -b build). `cli` feature |
 | `config.rs` | Figment-based config from `.mbr/config.toml` + env vars (`MBR_*`) |
-| `errors.rs` | Error types (`MbrError`, `ConfigError`, `BuildError`). **Must not depend on axum or notify**: `WatcherError` lives in `watcher.rs`, and `MbrError::Http` holds a boxed error whose `From<axum::http::Error>` impl is in `server.rs`. `MbrError::Server`/`ServerError` exist only with `server`, `MbrError::Watcher` only with `watcher` |
-| `server.rs` | Axum web server - routes, static file serving, markdown rendering. `server` feature; works without `watcher` (`spawn_file_watcher` is cfg'd, the change channel is not) |
-| `build.rs` | Static site generator - parallel HTML generation, asset symlinking. `ssg` feature; imports nothing from `server.rs` |
-| `watcher.rs` | notify-based file watcher (`FileWatcher`), turning disk changes into `FileChangeEvent`s on the server's change channel. `watcher` feature |
+| `errors.rs` | Core (`mbr-core`): `MbrError`, `ConfigError`, `BuildError` and every other core error; `MbrError::Server`/`Browser`/`Http` carry a boxed `UpstreamError` (see Workspace Crates). `mbr-server`'s `errors.rs` has `ServerError` and its `From` into `MbrError`; the root's re-exports core's plus `ServerError` and adds the GUI-only `BrowserError`/`ExternalOpenError`. `WatcherError` lives in `watcher.rs` |
+| `server.rs` | `mbr-server`. Axum web server - routes, static file serving, markdown rendering. Works without `watcher` (`spawn_file_watcher` is cfg'd, the change channel is not) |
+| `build.rs` | `mbr-ssg` (not a Cargo build script). Static site generator - parallel HTML generation, asset symlinking. Cannot import the server: `mbr-ssg` does not depend on it |
+| `watcher.rs` | `mbr-server`, `watcher` feature. notify-based file watcher (`FileWatcher`), turning disk changes into `FileChangeEvent`s on the server's change channel |
 | `page_context.rs` | Shared Tera context assembly for server pages and static builds (`UrlMode`, `ModeFlags`, `PageChrome`, `markdown_extra_context`), and `markdown_file_to_json`, the listing entry both modes emit |
 | `assets.rs` | Compiled-in default assets: one `pub const` per asset, the `DEFAULT_FILES` table built from them (served under `/.mbr/*`, copied by static builds), `default_file()` lookup, and the `*_CHUNK_ROUTE` constants `build.rs` skips. hljs and default Pico entries reuse the `embedded_hljs`/`embedded_pico` constants. QuickLook names the assets it inlines (`THEME_CSS`, `MERMAID_JS`), never the table |
 | `url_helpers.rs` | Pure, lexical page-chrome URLs: `Breadcrumb`/`generate_breadcrumbs`, `get_current_dir_name`, `get_parent_path`, and the static build's `relative_base`/`relative_root` depth prefixes. Shared by the server, the build and `page_context.rs` |
@@ -293,7 +323,7 @@ Stateful modules (top-level fetches/caches like `shared.ts`) live only in the ma
 | `browser.rs` | Native GUI window using wry/tao with devtools (requires `gui` feature). **On Linux the window is a `GtkApplicationWindow`, i.e. a `GtkBin` holding exactly one child** — tao's `default_vbox()` — so both the muda menu bar and the WebView must be packed into *that box*; adding either to the window makes GTK refuse the second and the page never appears. The menu bar is hidden by default on Linux (`gui_menu_bar`, `F10` toggles). **Hiding a `GtkMenuBar` disables every accelerator on it** — `gtk_menu_item_can_activate_accel` chains up the widget ancestry and refuses when an ancestor is not visible, so the accel group stays attached to the window but nothing on it activates (measured: Ctrl+O produced no menu event hidden, and did after F10). `linux_shortcut_for` is therefore a second, keyboard-side copy of the shortcut table, and the arm using it is **gated on `!menu_bar_visible`** so exactly one route is live and no action fires twice. Menu and keyboard both funnel into `perform_shortcut`, so each action has one implementation. `release_gtk_menu_bar_accel` hands `F10` back from GTK so the toggle works in both directions. Keyboard arms in the event loop act on **`Released`**: WebKitGTK re-dispatches a key press the page left unhandled back to the toplevel, so a `Pressed` arm fires twice for exactly the keys these arms want. They also match `logical_key`, not `physical_key`, which any synthetic input source fills with a keycode slot of its own choosing |
 | `external_open.rs` | Hands off-site links to the OS default handler (requires `gui` feature). Two policies, and the gap between them is the design: `decide_without_frame_info` backs the nav handler and lets **all** http(s) proceed, because wry passes it a bare URL and calls it for iframe loads too — cancelling off-origin there would blank the YouTube embed at `media.rs:160`; `SiteOrigin::decide` is origin-aware and used only where a frame provably isn't involved (new-window handler, IPC). Cross-origin http(s) clicks arrive instead from `mbr-link-enhancement.ts` over IPC, revalidated by `parse_ipc_open_request` because page content can post to IPC. **Launching is GUI-only and fails closed**: `open_external` refuses unless `mark_gui_active()` ran, which only `launch_browser` does — a server must never be induced to start applications on its host. Uses NSWorkspace/ShellExecuteW/gio, never a subprocess |
 | `external_open.rs` | GUI-only: which navigations leave the mbr window, and the OS hand-off (`NSWorkspace` / `ShellExecuteW` / gio — never a subprocess). Two policies, deliberately: `decide_without_frame_info` answers wry's navigation handler, which **is also called for `<iframe>` loads** (wry passes a bare URL and never checks `targetFrame.isMainFrame`), so it lets *all* http(s) through — cancelling cross-origin http(s) there would blank the YouTube embed at `media.rs:160`. `SiteOrigin::decide` is the full origin-aware policy and is only used where a frame cannot be involved: wry's new-window handler and `parse_ipc_open_request`. Clicked cross-origin links come from `components/src/mbr-link-enhancement.ts` over wry IPC and are re-validated here, since anything that can run script in the page can post to that channel. `javascript:`/`vbscript:`/`data:` are refused by both. URLs are never parsed and reserialized — `message://%3C…%3E` must reach the mail client byte for byte |
-| `quicklook.rs` | QuickLook preview rendering via UniFFI for macOS integration (`ffi` feature). The Swift extension is `apple/quicklook/` (XcodeGen `project.yml`, `build.sh`, `DEVELOP.md`); it links `libmbr.a` built `--lib --no-default-features --features ffi` — the render core, no server/watcher/ssg/cli — **with dead-code stripping** (`-Xlinker -dead_strip` in flake.nix's `mbr-quicklook`, `DEAD_CODE_STRIPPING` in project.yml): ld otherwise keeps every archive member it pulls in whole, embedded web assets included. `preview_mode_for()` routes by extension: markdown extensions (config + the built-in list `MBR.app` registers for) take the markdown pipeline; everything else renders verbatim in a `<pre>`, syntax highlighted when `embedded_hljs::language_for_extension()` matches. Text reads are capped at 1 MiB and highlighting at 256 KiB, and invalid UTF-8 is lossy-decoded — the app claims `public.plain-text`, so arbitrary files land here. `render_preview` returns a **`PreviewDocument`** — HTML *plus* the local files it references — because the preview is a **data-based `QLPreviewReply`**: macOS refuses a view-based reply outright ("View based preview response received when expecting a generation based preview") and falls back to the system plain-text previewer, which is indistinguishable from the extension not being installed. A data reply has no `WKWebView` and so no custom URL scheme; assets travel as attachments addressed `cid:{id}`. `collect_preview_attachments` is therefore the **whole** security boundary, and a stronger one than the `mbrfile://` handler it replaced — page script could name any path to that handler, but `cid:` resolves against the attachment list and nothing else. Attachments are read **eagerly**, hence `MAX_ATTACHMENT_BYTES`/`MAX_TOTAL_ATTACHMENT_BYTES`; an asset that does not fit keeps its authored URL, the same outcome as one that does not exist. `contained_canonical` requires `is_file()` because `starts_with` is reflexive and `/` canonicalizes to the root itself. The template emits **no `<base>`**: the reply is served from QuickLook's `x-apple-ql-id2://` URL, so a `file://` base could load nothing anyway and would make a bare `#heading` navigate away instead of scrolling |
+| `quicklook.rs` | `mbr-ffi`. QuickLook preview rendering via UniFFI for macOS integration. The Swift extension is `apple/quicklook/` (XcodeGen `project.yml`, `build.sh`, `DEVELOP.md`); it links `libmbr_ffi.a` built `cargo build --release -p mbr-ffi --lib` — the render core, no server/watcher/ssg/cli — **with dead-code stripping** (`-Xlinker -dead_strip` in flake.nix's `mbr-quicklook`, `DEAD_CODE_STRIPPING` in project.yml): ld otherwise keeps every archive member it pulls in whole, embedded web assets included. `preview_mode_for()` routes by extension: markdown extensions (config + the built-in list `MBR.app` registers for) take the markdown pipeline; everything else renders verbatim in a `<pre>`, syntax highlighted when `embedded_hljs::language_for_extension()` matches. Text reads are capped at 1 MiB and highlighting at 256 KiB, and invalid UTF-8 is lossy-decoded — the app claims `public.plain-text`, so arbitrary files land here. `render_preview` returns a **`PreviewDocument`** — HTML *plus* the local files it references — because the preview is a **data-based `QLPreviewReply`**: macOS refuses a view-based reply outright ("View based preview response received when expecting a generation based preview") and falls back to the system plain-text previewer, which is indistinguishable from the extension not being installed. A data reply has no `WKWebView` and so no custom URL scheme; assets travel as attachments addressed `cid:{id}`. `collect_preview_attachments` is therefore the **whole** security boundary, and a stronger one than the `mbrfile://` handler it replaced — page script could name any path to that handler, but `cid:` resolves against the attachment list and nothing else. Attachments are read **eagerly**, hence `MAX_ATTACHMENT_BYTES`/`MAX_TOTAL_ATTACHMENT_BYTES`; an asset that does not fit keeps its authored URL, the same outcome as one that does not exist. `contained_canonical` requires `is_file()` because `starts_with` is reflexive and `/` canonicalizes to the root itself. The template emits **no `<base>`**: the reply is served from QuickLook's `x-apple-ql-id2://` URL, so a `file://` base could load nothing anyway and would make a bare `#heading` navigate away instead of scrolling |
 | `vid.rs` | Video embed handling and shortcodes |
 | `video_transcode.rs` | HLS-based video transcoding - playlist generation and segment transcoding (requires `media-metadata` feature) |
 | `video_remux.rs` | On-the-fly stream-copy ("remux") fMP4 HLS variant for videos a browser refuses to play. Drops data/subtitle tracks without re-encoding; available without `--transcode`, server/GUI only (requires `media-metadata`) |
@@ -420,7 +450,7 @@ Components in `components/src/`:
 - `mbr-link-enhancement.ts` - GUI-only link handling (`<mbr-link-enhancement>`, emitted from `templates/_footer.html` under `{% if gui_mode %}`, and additionally guarded by `isGuiMode()`): the hover tooltips that stand in for the missing URL bar, plus **the delegated click listener that hands cross-origin `http(s)` links to the OS** via `window.ipc.postMessage("mbr:open-external:" + url)`. That half lives in the page rather than in `external_open.rs` for one reason: it can tell a clicked link from an `<iframe>` load, and wry's navigation handler cannot. It sends `anchor.href` (resolved, not the raw attribute), skips modifier- and non-left-clicks, `target`/`download` links and already-cancelled events the way a browser would, and calls `preventDefault()` **only after** the message is away, so a missing `window.ipc` degrades to an in-window navigation instead of a dead link. Application schemes are left to the Rust side.
 - `find-in-page.ts` - Pure matching logic behind the find bar (text indexing over `main#wrapper`, query compilation, match offsets, Range construction). Kept separate from the element so it is unit-testable under happy-dom, which has no `CSS.highlights`. Highlight styles live in `templates/theme.css`, not the element's `static styles`, because `CSS.highlights` is a document-scoped registry and the ranges are in the light DOM.
 - `mbr-tasks.ts` - Task-browser trigger (`<mbr-tasks>`, main bundle): a clipboard button in the nav plus the lowercase `t` shortcut. Emitted by `_nav.html` under `{% if server_mode and tasks_enabled %}`, and renders nothing without `tasksEnabled` (the index is built from live files, so static builds have no `POST /.mbr/tasks`). Lazy-loads the `mbr-tasks.min.js` chunk on first open via the same overridable-importer seam as `mbr-info.ts` (`setTasksChunkImporter`), and injects the endpoint, `resolveUrl` and `getTasksDefaultInclude()` as properties — the chunk cannot import `shared.ts` for any of them.
-- `tasks/` - Task-browser chunk: `mbr-tasks-panel.ts` (the two-pane overlay), `task-card.ts` (one card, restating theme.css's `--mbr-task-*` and `--mbr-incomplete-*` vocabulary inside the shadow root — custom properties cross the shadow boundary but the rules using them do not; a marker's card washes **only** the word at `marker_start`..`marker_end`, and degrades to plain text if that range is unusable), plus pure helpers — `types.ts` (the wire contract, derived from `src/task_query.rs`, **plus the `TaskToggler` service type the trigger injects**), `task-format.ts` (local-time date parsing, runtime overdue marking, progress math), `task-groups.ts` (display groups and the flat row list the keyboard walks; synthesizes the aggregate "Upcoming" heading the server does not send; `taskHref` is the **one** place a hit's deep link is built, picking `#mbr-marker-N` vs `#mbr-task-N` by kind — `_navigateTo` routes through it so click and `Enter` cannot disagree with the rendered `href`), `folder-tree.ts` (folder pane from the `folders` facet). Filtering, grouping and the x/y counts are the **server's** job — every filter change is a new debounced request. `Space` / `x` toggle the focused task and the card checkboxes are clickable, but only when the injected `editEnabled` is true; those keys otherwise stay with the filter field, which keeps focus throughout (they are claimed only once `_focusRow` is on a task, the same trade `Enter` makes). A `TaskHit` whose `kind` is `marker` is **read-only** in three places — `_renderTaskRow`'s `editable`, the `Space`/`x` branch (which returns *before* `preventDefault()`, so the key falls back to the filter field the way it does on a heading), and `_writeStatus` as defence in depth — and `task-card.ts` omits its checkbox **entirely** rather than disabling one, since `data-mbr-task-line`/`-status` are exactly what `task-toggle.ts` reads back and absent markup cannot be mistargeted; a `.mbr-task-check-spacer` keeps the text on the same rail. The ⚙ popover's fourth fieldset ("Show" → `include: all|tasks|markers`) is a `<select>` rendered **last**, and `_effectiveInclude` pins it to `tasks` in calendar mode — derived, not assigned, so `_setMode` needs no change and the user's category-mode choice survives the round trip. `_include` starts from the injected `defaultInclude` (`tasks_default_include`, default `tasks`), applied in `firstUpdated` because the panel is rebuilt on every open. **Two widen-when-empty fallbacks**, `_includeFallbackPending` and `_folderFallbackPending`, both armed only by the initial open and both captured-and-disarmed at the top of `_runQuery` (so a run the user supersedes hands its fallback to nobody, and the check runs *before* anything is committed — no flash of "No tasks match"). They chain: include first (widening what counts as an entry is less destructive than dropping the folder the user is standing in), re-arming the folder flag as it goes. Terminates because nothing re-arms the include flag and the folder flag is re-armed only on the include branch, which therefore runs once — at most three requests. Both **mutate the state they widen** rather than widening invisibly, so the Show select and the folder pane keep describing what is on screen.
+- `tasks/` - Task-browser chunk: `mbr-tasks-panel.ts` (the two-pane overlay), `task-card.ts` (one card, restating theme.css's `--mbr-task-*` and `--mbr-incomplete-*` vocabulary inside the shadow root — custom properties cross the shadow boundary but the rules using them do not; a marker's card washes **only** the word at `marker_start`..`marker_end`, and degrades to plain text if that range is unusable), plus pure helpers — `types.ts` (the wire contract, derived from `crates/mbr-core/src/task_query.rs`, **plus the `TaskToggler` service type the trigger injects**), `task-format.ts` (local-time date parsing, runtime overdue marking, progress math), `task-groups.ts` (display groups and the flat row list the keyboard walks; synthesizes the aggregate "Upcoming" heading the server does not send; `taskHref` is the **one** place a hit's deep link is built, picking `#mbr-marker-N` vs `#mbr-task-N` by kind — `_navigateTo` routes through it so click and `Enter` cannot disagree with the rendered `href`), `folder-tree.ts` (folder pane from the `folders` facet). Filtering, grouping and the x/y counts are the **server's** job — every filter change is a new debounced request. `Space` / `x` toggle the focused task and the card checkboxes are clickable, but only when the injected `editEnabled` is true; those keys otherwise stay with the filter field, which keeps focus throughout (they are claimed only once `_focusRow` is on a task, the same trade `Enter` makes). A `TaskHit` whose `kind` is `marker` is **read-only** in three places — `_renderTaskRow`'s `editable`, the `Space`/`x` branch (which returns *before* `preventDefault()`, so the key falls back to the filter field the way it does on a heading), and `_writeStatus` as defence in depth — and `task-card.ts` omits its checkbox **entirely** rather than disabling one, since `data-mbr-task-line`/`-status` are exactly what `task-toggle.ts` reads back and absent markup cannot be mistargeted; a `.mbr-task-check-spacer` keeps the text on the same rail. The ⚙ popover's fourth fieldset ("Show" → `include: all|tasks|markers`) is a `<select>` rendered **last**, and `_effectiveInclude` pins it to `tasks` in calendar mode — derived, not assigned, so `_setMode` needs no change and the user's category-mode choice survives the round trip. `_include` starts from the injected `defaultInclude` (`tasks_default_include`, default `tasks`), applied in `firstUpdated` because the panel is rebuilt on every open. **Two widen-when-empty fallbacks**, `_includeFallbackPending` and `_folderFallbackPending`, both armed only by the initial open and both captured-and-disarmed at the top of `_runQuery` (so a run the user supersedes hands its fallback to nobody, and the check runs *before* anything is committed — no flash of "No tasks match"). They chain: include first (widening what counts as an entry is less destructive than dropping the folder the user is standing in), re-arming the folder flag as it goes. Terminates because nothing re-arms the include flag and the folder flag is re-armed only on the include branch, which therefore runs once — at most three requests. Both **mutate the state they widen** rather than widening invisibly, so the Show select and the folder pane keep describing what is on screen.
 - `mbr-task-doc.ts` - In-document task behaviour (`<mbr-task-doc>`, main bundle, emitted from `_display_enhancements.html`): one delegated `click`/`contextmenu` listener on `main#wrapper` (left click completes, right click cancels, both `editEnabled`-gated), and the fragment handler that scrolls a deep-linked task clear of the sticky header and flashes it on load and on `hashchange`. `taskAnchorFromHash` returns the **element id** rather than a line number, so one strict regex (`^#?(mbr-(?:task|marker)-(\d+))$`) covers both anchors the renderer emits — `mbr-task-N` on a checkbox, `mbr-marker-N` on an incomplete-marker highlight — and the scroll/flash generalises for free (`flashTarget` is `closest('li') ?? el`, and `theme.css` styles the bare `.mbr-task-flash`). The write half needs no marker guard: `checkboxFrom` demands an `HTMLInputElement.mbr-task-check`, which a marker span can never be. The fragment half runs in static builds too. **The click handler deliberately does not `preventDefault()`** — cancelling a checkbox's click restores its pre-click state *after* the listener returns, silently undoing the optimistic flip; `data-mbr-task-status`, not `checked`, is the state the next click reads. A successful write no longer reloads the page, so the handler finishes the render itself: the optimistic flip covers box + status + strikethrough and `syncDoneChip` draws the stamp from the response.
 - `task-toggle.ts` - The one implementation of `POST /.mbr/task` (main bundle; injected into the panel as a property because it is stateful). Sources `expected` from `/.mbr/raw/<path>` and caches the file's lines for the page's lifetime — the rendered HTML cannot supply it, since annotations are stripped out of the display text. A successful write refreshes the cached line from the response and hands the same text back to the caller; a 409 drops the file. Also owns the **live-reload seam**: **every** task write registers itself, and `wasSelfWrite()` makes `<mbr-live-reload>` skip events for that file for a short window. A *window*, not a single consumable event, because one write is announced several times — the handler broadcasts before it responds, then the watcher echoes the atomic rename (twice, on macOS, ~7ms later) — and it is registered *before* the request, because the handler's broadcast can reach the page while the fetch is still pending. Suppression is not optional: the edit token lives only in memory, so a reload per checkbox would 401 the next click on a token-protected server. **The window alone is not enough**: the watcher's echo is at FSEvents' mercy — measured 1.0–4.6 s after the request on an idle macOS `/tmp`, sometimes coalesced minutes later — and an echo after the window reloaded the page (closing a flashcard deck mid-review; this predates the deck). So `noteSelfWrite` also records the path in `writtenPaths` for the page's lifetime, and for such a file `<mbr-live-reload>` asks `isOwnWriteEcho`, which re-reads `/.mbr/raw` (bypassing the cache) and skips the reload only when the disk equals the cached lines every write keeps in step; no cache (after a 409), a failed read, or any difference reloads as before. Other files still decide synchronously (`mayBeOwnWriteEcho` is the sync gate). What the reload used to buy is replaced by `task-chips.ts` plus the optimistic flip.
 - `task-chips.ts` - Redraws the `@done(...)` chip in the document from the source line the server wrote back, since nothing re-renders the page after a toggle. Mirrors `tasks.rs`'s `DATE_ANNOTATION`/`DATETIME` grammar to read the stamp and `html.rs::push_task_time` to render it — hand-formatted in English rather than `toLocaleDateString`, because the chip lands among sibling chips the *server* rendered (the opposite of `tasks/task-format.ts`'s choice, which renders the panel's own view in the reader's locale).
@@ -440,7 +470,7 @@ Display-enhancement elements (dynamic loaders like `<mbr-mermaid>` and `<mbr-hlj
 
 ### Template System
 
-The project uses Tera templates with a partial-based architecture. Templates are in `templates/`:
+The project uses Tera templates with a partial-based architecture. Templates are in `crates/mbr-core/templates/` (inside the core crate, which embeds them, so `cargo publish` ships them):
 
 **Main Templates:**
 - `index.html` - Markdown page template
@@ -512,7 +542,7 @@ mbr -s --theme fluid.blue ~/notes # Fluid typography with blue
 
 **Available themes:** default, fluid, amber, blue, cyan, fuchsia, green, grey, indigo, jade, lime, orange, pink, pumpkin, purple, red, sand, slate, violet, yellow, zinc
 
-Theme files are in `templates/pico-main/` and loaded dynamically by `embedded_pico.rs`.
+Theme files are in `crates/mbr-core/templates/pico-main/` and loaded dynamically by `embedded_pico.rs`.
 
 ### Markdown Extensions
 
@@ -546,7 +576,7 @@ The shortcode supports:
 **Note:** Pulldown-cmark's smart punctuation converts `"` to curly quotes (`"` `"`), so the regex supports both straight and curly quotes.
 
 **Page Styles and Types:**
-Two frontmatter fields form the `<body>` class list: `style` (a string, a space-separated string, or an array — every entry is a class) and `type` (a single string, slugified via `markdown::slugify` then `collapse_dashes`, e.g. `Meeting Notes` → `meeting-notes`, `Book Review (2024)` → `book-review-2024`). `collapse_dashes` is applied to the class only, never inside `slugify`: `slugify` also generates heading anchor ids, whose doubled dashes (`Hello, World!` → `hello--world`) are frozen because they are live `#anchor` targets in existing repos. `Templates::render_markdown_with_tera` combines them in `body_class_list` (`src/templates.rs`) — type first, styles after, deduped first-seen — and inserts the result as the `style` context variable, so a repo's existing `.mbr/index.html` gains the feature untouched. The `type` context variable is the authored value with surrounding whitespace trimmed (`contact::normalize_type`, run by the simplifier, so templates, `site.json`, `window.frontmatter`, search and the body class all see the same value; a blank `type` is dropped), but otherwise unslugified, because templates gate on its value (`{% if type == "person" %}`). `type` is aligned with the [OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) and is the preferred spelling for a note's kind; `style` remains for pure presentation. Shipped styles with CSS in `templates/theme.css`: `outline`, `kanban`, plus `slides` (`reveal-slides.css`, triggered client-side by the body class in `mbr-slides.ts`). User docs: `docs/markdown/styles.md`.
+Two frontmatter fields form the `<body>` class list: `style` (a string, a space-separated string, or an array — every entry is a class) and `type` (a single string, slugified via `markdown::slugify` then `collapse_dashes`, e.g. `Meeting Notes` → `meeting-notes`, `Book Review (2024)` → `book-review-2024`). `collapse_dashes` is applied to the class only, never inside `slugify`: `slugify` also generates heading anchor ids, whose doubled dashes (`Hello, World!` → `hello--world`) are frozen because they are live `#anchor` targets in existing repos. `Templates::render_markdown_with_tera` combines them in `body_class_list` (`crates/mbr-core/src/templates.rs`) — type first, styles after, deduped first-seen — and inserts the result as the `style` context variable, so a repo's existing `.mbr/index.html` gains the feature untouched. The `type` context variable is the authored value with surrounding whitespace trimmed (`contact::normalize_type`, run by the simplifier, so templates, `site.json`, `window.frontmatter`, search and the body class all see the same value; a blank `type` is dropped), but otherwise unslugified, because templates gate on its value (`{% if type == "person" %}`). `type` is aligned with the [OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) and is the preferred spelling for a note's kind; `style` remains for pure presentation. Shipped styles with CSS in `templates/theme.css`: `outline`, `kanban`, plus `slides` (`reveal-slides.css`, triggered client-side by the body class in `mbr-slides.ts`). User docs: `docs/markdown/styles.md`.
 
 ### Static Site Generation
 
@@ -665,7 +695,7 @@ nix run .#release
 nix flake check
 ```
 
-The flake uses `rustPlatform.buildRustPackage` with a `postInstall` phase that copies the macOS app bundle and performs ad-hoc code signing. Release archives are created in `release/`.
+The flake builds with crane over the whole workspace: `cargoArtifacts`/`cargoArtifactsMinimal` (deps-only, `--workspace`, zstd `-19`) feed `.#clippy`/`.#tests` (`--workspace`) and `.#clippy-minimal`/`.#tests-minimal`; `.#mbr-cli` builds `-p mbr-markdown-browser`; `.#mbr-quicklook-staticlib` builds `-p mbr-ffi --lib` and installs `lib/libmbr_ffi.a`, which `.#mbr-quicklook` links `-lmbr_ffi`; `.#fmt` is `cargo fmt --all`. The version comes from `workspace.package.version`. The mkDummySrc `required-features` workaround patches only the root `Cargo.toml` (the members declare none). The macOS `mbr` derivation assembles the app bundle and performs ad-hoc code signing. Release archives are created in `release/`.
 
 **Note:** Code signing verification may fail in Nix sandbox environment due to metadata changes, but the app still runs correctly.
 

@@ -78,26 +78,26 @@ jobs:
           nix build .#mbr-components
           echo "=== Nix build output ==="
           ls -la result/
-          mkdir -p templates/components-js
-          cp -v result/* templates/components-js/
+          mkdir -p crates/mbr-core/templates/components-js
+          cp -v result/* crates/mbr-core/templates/components-js/
           echo "=== Copied components ==="
-          ls -la templates/components-js/
+          ls -la crates/mbr-core/templates/components-js/
           # Fail fast if the required files don't exist
-          test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-tasks.min.js || { echo "FATAL: mbr-tasks.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-review.min.js || { echo "FATAL: mbr-review.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-search-extras.min.js || { echo "FATAL: mbr-search-extras.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-flashcards.min.js || { echo "FATAL: mbr-flashcards.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-flashcards-reading.min.js || { echo "FATAL: mbr-flashcards-reading.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-tasks.min.js || { echo "FATAL: mbr-tasks.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-review.min.js || { echo "FATAL: mbr-review.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-search-extras.min.js || { echo "FATAL: mbr-search-extras.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-flashcards.min.js || { echo "FATAL: mbr-flashcards.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-flashcards-reading.min.js || { echo "FATAL: mbr-flashcards-reading.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7
         with:
           name: components
-          path: templates/components-js/
+          path: crates/mbr-core/templates/components-js/
           retention-days: 1
           if-no-files-found: error
 
@@ -109,10 +109,10 @@ jobs:
   #
   # `nix build -L .#tests` supplies the components itself: the flake's `tests`
   # attr has a preBuild that copies `${packages.mbr-components}` into
-  # templates/components-js (flake.nix ~595-598). The downloaded artifact was
+  # crates/mbr-core/templates/components-js (flake.nix ~595-598). The downloaded artifact was
   # overwritten by that preBuild before a single test ran.
   #
-  # More to the point, the artifact is *invisible* to Nix. templates/components-js
+  # More to the point, the artifact is *invisible* to Nix. crates/mbr-core/templates/components-js
   # is gitignored (.gitignore:15) and `.#` resolves as a git-tree flake ref, so
   # those files are stripped from the flake source before the `src` filter in
   # flake.nix ever sees them. Verified empirically: `.#tests.drvPath` is
@@ -122,7 +122,7 @@ jobs:
   #
   # HAZARD: this holds only for the bare `.#` ref. `path:.#` copies untracked
   # files into the store and DOES hash differently (confirmed: different
-  # drvPath). If anyone un-gitignores templates/components-js, or switches this
+  # drvPath). If anyone un-gitignores crates/mbr-core/templates/components-js, or switches this
   # invocation to `path:.`, this decoupling silently becomes wrong.
   test:
     name: Test (${{ matrix.os }})
@@ -324,7 +324,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: components
-          path: templates/components-js/
+          path: crates/mbr-core/templates/components-js/
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
@@ -340,7 +340,7 @@ jobs:
         # Same list as ci.yml's Windows job and flake.nix's `minimalFeatures`:
         # every default subsystem except media-metadata. `gui` alone would
         # build no `mbr` binary (it needs `cli`).
-        run: cargo build --release --no-default-features --features gui,server,watcher,ssg,cli
+        run: cargo build --release -p mbr-markdown-browser --no-default-features --features gui,server,watcher,ssg,cli
 
       # Duplicated from ci.yml on purpose: this job builds the exe that actually
       # ships, and a release must not be able to go out with a CRT dependency
@@ -739,8 +739,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Publish to crates.io after the GitHub Release succeeds.
-  # --allow-dirty: templates/components-js/ is gitignored but must be present
-  #   in the tree so include_bytes! picks up the built component.
+  # --workspace: mbr-markdown-browser depends on the workspace's member crates
+  #   (mbr-core, mbr-server, mbr-ssg, mbr-ffi) by version, so every one of them
+  #   has to be on crates.io first. cargo (1.90+) publishes the set in
+  #   dependency order and waits for each to reach the index. Their versions are
+  #   all `[workspace.package]`'s, pinned to each other with `=`.
+  # --allow-dirty: crates/mbr-core/templates/components-js/ is gitignored but must be present
+  #   in the tree so include_bytes! picks up the built component (mbr-core's
+  #   `include` names it, so it is packaged despite the .gitignore).
   # --no-verify: the `test` and `build` jobs above have already compiled the
   #   crate with the shipped feature set; skipping the verify recompile avoids
   #   needing ffmpeg/pdfium system libs here.
@@ -763,10 +769,10 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: components
-          path: templates/components-js/
+          path: crates/mbr-core/templates/components-js/
 
       - name: Publish to crates.io
-        run: cargo publish --allow-dirty --no-verify --token "$CARGO_REGISTRY_TOKEN"
+        run: cargo publish --workspace --allow-dirty --no-verify --token "$CARGO_REGISTRY_TOKEN"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

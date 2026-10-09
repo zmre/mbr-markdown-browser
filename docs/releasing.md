@@ -74,7 +74,7 @@ the signing secrets or spending a tag.
 ## Cutting a release
 
 ```sh
-./scripts/bump-version.sh 0.7.0   # rewrites Cargo.toml, updates Cargo.lock, runs benchmarks
+./scripts/bump-version.sh 0.7.0   # rewrites the root Cargo.toml, updates Cargo.lock, runs benchmarks
 git diff                          # review
 git add -A && git commit -m "Release v0.7.0"
 git tag v0.7.0
@@ -84,6 +84,15 @@ git push origin main v0.7.0       # pushing the tag starts the release
 `validate-version` (the workflow's first real job) fails the run if the tag
 does not match `Cargo.toml`'s `version`, so a mistagged push fails loudly there
 rather than shipping a DMG whose About panel disagrees with its own filename.
+
+mbr is a Cargo workspace, and the version lives once, in the root
+`Cargo.toml`'s `[workspace.package]`, which every crate inherits. That table is
+the first thing in the file on purpose: both `bump-version.sh` and
+`validate-version` read the first `^version = ` line. The internal crates are
+also pinned to each other (`mbr-core = { path = …, version = "=X.Y.Z" }` in
+`[workspace.dependencies]`), and `bump-version.sh` rewrites those pins in the
+same pass. Nothing else carries the version: `flake.nix` reads
+`workspace.package.version`, and `mbr --version` is `CARGO_PKG_VERSION`.
 
 ## One-time Apple setup
 
@@ -185,6 +194,17 @@ entitlement reasons, that is the first thing to revisit.
 same way the release itself is — a dry run publishes nothing. It uses
 `CARGO_REGISTRY_TOKEN`, which predates this pipeline and is unrelated to the
 five Apple secrets above.
+
+It runs `cargo publish --workspace`, which publishes all five crates in
+dependency order — `mbr-core`, then `mbr-server`, `mbr-ssg` and `mbr-ffi`, then
+`mbr-markdown-browser` — waiting for each to reach the index before the next.
+`mbr-markdown-browser` depends on the others by version, so it cannot be
+published alone. The first release after the workspace split creates the four
+member crates on crates.io, so the token must be allowed to publish **new**
+crates (the `publish-new` scope), not only update `mbr-markdown-browser`.
+A re-run after a partial failure stops at the first crate whose version is
+already published; publish the rest with `cargo publish -p <crate>` in the
+order above.
 
 ## Updating the Homebrew cask
 

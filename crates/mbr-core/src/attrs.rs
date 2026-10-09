@@ -57,7 +57,7 @@ impl ParsedAttrs {
     /// # Examples
     ///
     /// ```
-    /// use mbr::attrs::ParsedAttrs;
+    /// use mbr_core::attrs::ParsedAttrs;
     ///
     /// let attrs = ParsedAttrs::parse("{#my-id .highlight}").unwrap();
     /// assert_eq!(attrs.id, Some("my-id".to_string()));
@@ -113,7 +113,7 @@ impl ParsedAttrs {
     /// # Examples
     ///
     /// ```
-    /// use mbr::attrs::ParsedAttrs;
+    /// use mbr_core::attrs::ParsedAttrs;
     ///
     /// let attrs = ParsedAttrs::parse("{#intro .highlight}").unwrap();
     /// assert_eq!(attrs.to_html_attr_string(), r#" id="intro" class="highlight""#);
