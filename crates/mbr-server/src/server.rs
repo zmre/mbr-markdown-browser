@@ -31,6 +31,7 @@ use mbr_core::sorting::sort_files;
 use mbr_core::task_query::IncludeFilter;
 use mbr_core::templates;
 use mbr_core::url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path};
+use mbr_core::vault::{Vault, VaultError, VaultPath};
 #[cfg(feature = "media-metadata")]
 use mbr_core::video_metadata_cache::VideoMetadataCache;
 #[cfg(feature = "media-metadata")]
@@ -1142,6 +1143,31 @@ impl From<&mbr_core::config::Config> for ServerConfig {
 }
 
 impl ServerState {
+    /// The repository's storage. Every read and write a handler makes on the
+    /// user's files goes through it ([`mbr_core::vault`]).
+    fn vault(&self) -> &dyn Vault {
+        self.repo.vault().as_ref()
+    }
+
+    /// The vault path of an index key — a path the resolver or
+    /// `resolve_new_target` produced. A key outside the vault is a traversal.
+    fn vault_path(&self, key: &Path) -> Result<VaultPath, FileOpError> {
+        Ok(self.vault().vault_path(key)?)
+    }
+
+    /// Whether anything (file or directory, links followed) is at `key`, as
+    /// `Path::exists` answered.
+    fn key_exists(&self, key: &Path) -> bool {
+        self.vault_path(key)
+            .is_ok_and(|path| matches!(self.vault().stat(&path), Ok(Some(_))))
+    }
+
+    /// Whether `key` is an existing directory, as `Path::is_dir` answered.
+    fn key_is_dir(&self, key: &Path) -> bool {
+        self.vault_path(key)
+            .is_ok_and(|path| self.vault().is_dir(&path))
+    }
+
     /// The path-resolver inputs for this server's repository: its vault and
     /// static overlay ([`Repo::vault`], [`Repo::static_vault`]) plus the
     /// configured resolution settings. One definition, so every handler
@@ -1482,6 +1508,15 @@ enum FileOpError {
     Io(std::io::Error),
 }
 
+impl From<VaultError> for FileOpError {
+    fn from(error: VaultError) -> Self {
+        match error {
+            VaultError::OutsideRoot { .. } | VaultError::InvalidPath(_) => Self::Traversal,
+            other => Self::Io(other.into()),
+        }
+    }
+}
+
 impl IntoResponse for FileOpError {
     fn into_response(self) -> Response {
         let (status, msg): (StatusCode, &'static str) = match self {
@@ -1523,37 +1558,35 @@ impl IntoResponse for FileOpError {
 /// Rejects any `..` or absolute component, joins onto `canonical_base`, then
 /// canonicalizes the deepest **existing** ancestor and asserts it stays within
 /// the root (so a symlink in the existing portion cannot escape).
-fn resolve_new_target_path(canonical_base: &Path, rel: &str) -> Result<PathBuf, FileOpError> {
+fn resolve_new_target_path(vault: &dyn Vault, rel: &str) -> Result<VaultPath, FileOpError> {
     let clean = rel.trim_start_matches('/');
     if clean.is_empty() {
         return Err(FileOpError::Traversal);
     }
-    // Reject `..`/absolute components before any filesystem access.
+    // Reject `..`/absolute components before any filesystem access. Stricter
+    // than `VaultPath`'s own normalization on purpose: a write target is never
+    // spelled with a `..`, so one that has it is refused rather than resolved.
     for component in Path::new(clean).components() {
         match component {
             std::path::Component::Normal(_) | std::path::Component::CurDir => {}
             _ => return Err(FileOpError::Traversal),
         }
     }
-
-    let candidate = canonical_base.join(clean);
-
-    // Canonicalize the deepest existing ancestor to defeat symlink escape
-    // through the already-existing portion of the path.
-    let mut ancestor = candidate.as_path();
-    let existing = loop {
-        if ancestor.exists() {
-            break ancestor;
-        }
-        match ancestor.parent() {
-            Some(p) => ancestor = p,
-            None => break ancestor,
-        }
-    };
-    let canonical_existing = existing.canonicalize().map_err(FileOpError::Io)?;
-    if !canonical_existing.starts_with(canonical_base) {
+    // `\` is a separator to `VaultPath` on every platform, so a Unix
+    // `a\..\b.md` would otherwise be normalized rather than refused.
+    if clean.split(['/', '\\']).any(|segment| segment == "..") {
         return Err(FileOpError::Traversal);
     }
+    let candidate = VaultPath::new(clean).map_err(|_| FileOpError::Traversal)?;
+
+    // Canonicalize the deepest existing ancestor to defeat symlink escape
+    // through the already-existing portion of the path. The vault root always
+    // exists, so the search ends there at the latest.
+    let existing = candidate
+        .ancestors()
+        .find(|ancestor| matches!(vault.stat(ancestor), Ok(Some(_))))
+        .unwrap_or_default();
+    vault.canonicalize(&existing)?;
 
     Ok(candidate)
 }
@@ -3067,13 +3100,15 @@ impl Server {
 
         match resolve_request_path(&resolver_config, path) {
             ResolvedPath::MarkdownFile(md_path) => {
-                let canonical = md_path.canonicalize().ok();
-                let base = config
-                    .canonical_base_dir
-                    .clone()
-                    .or_else(|| config.base_dir.canonicalize().ok());
-                match (canonical, base) {
-                    (Some(c), Some(b)) if c.starts_with(&b) && c.is_file() => Ok(c),
+                // Defense in depth: canonicalize again, inside the vault, so a
+                // link out of the repository can never be written through, and
+                // require an existing file.
+                let vault = config.vault();
+                match vault
+                    .vault_path(&md_path)
+                    .and_then(|path| vault.canonicalize(&path))
+                {
+                    Ok(canonical) if vault.is_file(&canonical) => Ok(vault.key(&canonical)),
                     _ => Err((StatusCode::BAD_REQUEST, "Invalid path")),
                 }
             }
@@ -3097,7 +3132,7 @@ impl Server {
             Err(err) => return err.into_response(),
         };
 
-        match tokio::fs::read(&md_path).await {
+        match Self::read_file_bytes(&config, &md_path).await {
             Ok(bytes) => {
                 let hash = mbr_core::edit_auth::content_hash(&bytes);
                 let mut resp = (StatusCode::OK, bytes).into_response();
@@ -3139,7 +3174,7 @@ impl Server {
         let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         // Optimistic concurrency: reject if the file changed since it was loaded.
-        let current = match tokio::fs::read(&md_path).await {
+        let current = match Self::read_file_bytes(&config, &md_path).await {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!("Failed to read markdown before save: {e}");
@@ -3157,7 +3192,7 @@ impl Server {
         let new_bytes = req.content.into_bytes();
         let new_hash = mbr_core::edit_auth::content_hash(&new_bytes);
 
-        if let Err(e) = Self::atomic_write_file_async(&md_path, new_bytes).await {
+        if let Err(e) = Self::atomic_write_file_async(&config, &md_path, new_bytes).await {
             tracing::error!("Failed to save markdown: {e:?}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
         }
@@ -3229,7 +3264,7 @@ impl Server {
         };
         let _write_guard = config.file_write_locks.lock(&md_path).await;
 
-        let source = match Self::read_markdown_source(&md_path, "task toggle").await {
+        let source = match Self::read_markdown_source(&config, &md_path, "task toggle").await {
             Ok(source) => source,
             Err(err) => return err.into_response(),
         };
@@ -3253,7 +3288,9 @@ impl Server {
                 }
             };
 
-        if let Err(e) = Self::atomic_write_file_async(&md_path, patched.source.into_bytes()).await {
+        if let Err(e) =
+            Self::atomic_write_file_async(&config, &md_path, patched.source.into_bytes()).await
+        {
             tracing::error!("Failed to write task toggle: {e:?}");
             return e.into_response();
         }
@@ -3273,10 +3310,11 @@ impl Server {
     /// only names the caller in the log line. Callers hold the file's
     /// [`FileWriteLocks`] guard from before this read until after the write.
     async fn read_markdown_source(
+        config: &ServerState,
         md_path: &Path,
         action: &str,
     ) -> Result<String, (StatusCode, &'static str)> {
-        match tokio::fs::read(md_path).await {
+        match Self::read_file_bytes(config, md_path).await {
             Ok(bytes) => String::from_utf8(bytes)
                 .map_err(|_| (StatusCode::BAD_REQUEST, "File is not valid UTF-8")),
             Err(e) => {
@@ -3359,7 +3397,7 @@ impl Server {
             Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
         };
         let _write_guard = config.file_write_locks.lock(&md_path).await;
-        let source = match Self::read_markdown_source(&md_path, "flashcard review").await {
+        let source = match Self::read_markdown_source(&config, &md_path, "flashcard review").await {
             Ok(source) => source,
             Err(err) => return err.into_response(),
         };
@@ -3376,7 +3414,9 @@ impl Server {
         };
 
         let entry_line = patch.entry_line();
-        if let Err(e) = Self::atomic_write_file_async(&md_path, patch.source.into_bytes()).await {
+        if let Err(e) =
+            Self::atomic_write_file_async(&config, &md_path, patch.source.into_bytes()).await
+        {
             tracing::error!("Failed to write flashcard review: {e:?}");
             return e.into_response();
         }
@@ -3400,17 +3440,8 @@ impl Server {
     /// markdown — callers enforce extensions where relevant (create/move do;
     /// mkdir does not).
     fn resolve_new_target(config: &ServerState, rel: &str) -> Result<PathBuf, FileOpError> {
-        let canonical_base = config
-            .canonical_base_dir
-            .clone()
-            .or_else(|| config.base_dir.canonicalize().ok())
-            .ok_or_else(|| {
-                FileOpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "repository root not found",
-                ))
-            })?;
-        resolve_new_target_path(&canonical_base, rel)
+        let vault = config.vault();
+        resolve_new_target_path(vault, rel).map(|path| vault.key(&path))
     }
 
     /// Whether `path` ends in a configured markdown extension (case-insensitive).
@@ -3438,19 +3469,43 @@ impl Server {
         mbr_core::url_path::path_to_url(&relative)
     }
 
-    /// [`crate::file_write::atomic_write`], with the error the file-operation
-    /// endpoints answer with. Blocking; async callers use
-    /// [`Self::atomic_write_file_async`].
-    fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), FileOpError> {
-        crate::file_write::atomic_write(path, bytes).map_err(FileOpError::Io)
+    /// [`Vault::write_atomic`] for an index key, with the error the
+    /// file-operation endpoints answer with. Blocking; async callers use
+    /// [`Self::atomic_write_file_async`]. For the desktop this is
+    /// [`crate::file_write::atomic_write`] (temp file beside the target,
+    /// permissions kept, rename).
+    fn atomic_write_file(
+        config: &ServerState,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), FileOpError> {
+        let target = config.vault_path(path)?;
+        Ok(config.vault().write_atomic(&target, bytes)?)
     }
 
     /// [`Self::atomic_write_file`] off the async executor.
-    async fn atomic_write_file_async(path: &Path, bytes: Vec<u8>) -> Result<(), FileOpError> {
-        let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || Self::atomic_write_file(&path, &bytes))
+    async fn atomic_write_file_async(
+        config: &ServerState,
+        path: &Path,
+        bytes: Vec<u8>,
+    ) -> Result<(), FileOpError> {
+        let vault = Arc::clone(config.repo.vault());
+        let target = config.vault_path(path)?;
+        tokio::task::spawn_blocking(move || vault.write_atomic(&target, &bytes))
             .await
             .map_err(|e| FileOpError::Io(std::io::Error::other(e)))?
+            .map_err(FileOpError::from)
+    }
+
+    /// The bytes of the file behind an index key, read through the vault on a
+    /// blocking thread (where `tokio::fs` read them).
+    async fn read_file_bytes(config: &ServerState, path: &Path) -> std::io::Result<Vec<u8>> {
+        let vault = Arc::clone(config.repo.vault());
+        let source = vault.vault_path(path)?;
+        tokio::task::spawn_blocking(move || vault.read(&source))
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::from)
     }
 
     /// Broadcasts a `FileChangeEvent` for live-reload + watcher reconciliation.
@@ -3504,18 +3559,18 @@ impl Server {
         if !Self::path_has_markdown_extension(&dst, &config.markdown_extensions) {
             return Err(FileOpError::NotMarkdown);
         }
-        if dst.exists() {
+        if config.key_exists(&dst) {
             return Err(FileOpError::AlreadyExists);
         }
         let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-        if !parent.exists() {
+        if !config.key_exists(parent) {
             if req.create_dirs {
-                std::fs::create_dir_all(parent).map_err(FileOpError::Io)?;
+                config.vault().create_dir_all(&config.vault_path(parent)?)?;
             } else {
                 return Err(FileOpError::ParentMissing);
             }
         }
-        Self::atomic_write_file(&dst, req.content.as_bytes())?;
+        Self::atomic_write_file(config, &dst, req.content.as_bytes())?;
 
         let url_path =
             mbr_core::repo::build_markdown_url_path(&dst, &config.base_dir, &config.index_file);
@@ -3569,15 +3624,17 @@ impl Server {
     fn do_mkdir(config: &ServerState, rel: &str) -> Result<MkdirResponse, FileOpError> {
         let target = Self::resolve_new_target(config, rel)?;
         let rel_path = Self::rel_path_string(&target, &config.base_dir);
-        if target.is_dir() {
+        if config.key_is_dir(&target) {
             // Idempotent: pre-creating an existing folder is retry-safe.
             return Ok(MkdirResponse { path: rel_path });
         }
-        if target.exists() {
+        if config.key_exists(&target) {
             // A file occupies the path.
             return Err(FileOpError::AlreadyExists);
         }
-        std::fs::create_dir_all(&target).map_err(FileOpError::Io)?;
+        config
+            .vault()
+            .create_dir_all(&config.vault_path(&target)?)?;
         Self::broadcast_change(
             config,
             &target,
@@ -3655,8 +3712,10 @@ impl Server {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        if !dest_dir.exists() {
-            std::fs::create_dir_all(&dest_dir).map_err(FileOpError::Io)?;
+        if !config.key_exists(&dest_dir) {
+            config
+                .vault()
+                .create_dir_all(&config.vault_path(&dest_dir)?)?;
         }
 
         // Collision policy: keep the name, suffix `-1`, `-2`, … on collision.
@@ -3666,9 +3725,9 @@ impl Server {
             .and_then(|s| s.to_str())
             .unwrap_or(&safe_name);
         let ext = name_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let final_path = dedupe_name(&dest_dir, stem, ext, |p| p.exists());
+        let final_path = dedupe_name(&dest_dir, stem, ext, |p| config.key_exists(p));
 
-        Self::atomic_write_file(&final_path, bytes)?;
+        Self::atomic_write_file(config, &final_path, bytes)?;
 
         // Root-absolute URL that matches how mbr serves the file. Reuse
         // `build_static_url_path` (same util used for every static asset URL),
@@ -3756,18 +3815,22 @@ impl Server {
 
         // Collision: destination exists and is not the same file. A case-only
         // rename on a case-insensitive filesystem canonicalizes back to source.
-        let dst_canon = dst.canonicalize().ok();
-        let case_only = dst.exists() && dst_canon.as_deref() == Some(src.as_path());
-        if dst.exists() && !case_only {
+        let vault = config.vault();
+        let src_path = config.vault_path(&src)?;
+        let dst_path = config.vault_path(&dst)?;
+        let dst_exists = config.key_exists(&dst);
+        let case_only =
+            dst_exists && vault.canonicalize(&dst_path).ok().as_ref() == Some(&src_path);
+        if dst_exists && !case_only {
             return Err(FileOpError::AlreadyExists);
         }
 
         // Create the destination parent if requested.
         let parent = dst.parent().unwrap_or_else(|| Path::new("."));
         let mut created_dirs = false;
-        if !parent.exists() {
+        if !config.key_exists(parent) {
             if req.create_dirs {
-                std::fs::create_dir_all(parent).map_err(FileOpError::Io)?;
+                vault.create_dir_all(&config.vault_path(parent)?)?;
                 created_dirs = true;
             } else {
                 return Err(FileOpError::ParentMissing);
@@ -3796,7 +3859,7 @@ impl Server {
 
         // A4-C delta names (bare `[[Name]]` rewrite on stem change) need the
         // source frontmatter (title/aliases) so still-resolvable names are kept.
-        let src_meta = mbr_core::markdown::extract_metadata_from_file(&src).ok();
+        let src_meta = mbr_core::markdown::extract_metadata_from_vault(vault, &src_path).ok();
         let old_stem = src
             .file_stem()
             .and_then(|s| s.to_str())
@@ -3815,7 +3878,7 @@ impl Server {
 
         // Read source, re-express its own relative links against the new folder
         // (A4-B), then write the rewritten content to the destination.
-        let src_content = std::fs::read_to_string(&src).map_err(FileOpError::Io)?;
+        let src_content = vault.read_to_string(&src_path)?;
         let moved_content = crate::link_rewrite::rewrite_moved_file_outbound_links(
             &old_url,
             old_is_index,
@@ -3828,30 +3891,26 @@ impl Server {
         // Content changed (A4-B), so this is a temp-write + delete-source, not a
         // plain rename. For a case-only rename the old-cased name must be removed
         // before the rename lands so the new case is preserved.
-        let parent_dir = dst.parent().unwrap_or_else(|| Path::new("."));
-        let dst_name = dst
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file.md");
-        let (tmp, mut tmp_file) =
-            create_unique_temp_file(parent_dir, dst_name).map_err(FileOpError::Io)?;
-        // The moved note keeps the source's permissions, as a rename would.
-        let written = std::io::Write::write_all(&mut tmp_file, moved_content.as_bytes())
-            .and_then(|()| std::fs::metadata(&src))
-            .and_then(|meta| tmp_file.set_permissions(meta.permissions()));
-        drop(tmp_file);
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(FileOpError::Io(e));
-        }
-        let rename_result = if case_only {
-            std::fs::remove_file(&src).and_then(|()| std::fs::rename(&tmp, &dst))
-        } else {
-            std::fs::rename(&tmp, &dst).and_then(|()| std::fs::remove_file(&src))
-        };
-        if let Err(e) = rename_result {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(FileOpError::Io(e));
+        match (vault.local_path(&src_path), vault.local_path(&dst_path)) {
+            (Some(local_src), Some(local_dst)) => {
+                Self::replace_moved_file_locally(
+                    &local_src,
+                    &local_dst,
+                    &moved_content,
+                    case_only,
+                )?;
+            }
+            // Without real paths there are no POSIX permissions to carry over:
+            // the vault's own atomic write, then the source goes.
+            _ => {
+                if case_only {
+                    vault.remove_file(&src_path)?;
+                    vault.write_atomic(&dst_path, moved_content.as_bytes())?;
+                } else {
+                    vault.write_atomic(&dst_path, moved_content.as_bytes())?;
+                    vault.remove_file(&src_path)?;
+                }
+            }
         }
         drop(move_guards);
 
@@ -3859,8 +3918,8 @@ impl Server {
         // written); the source no longer exists so it won't be walked.
         let mut skip: HashSet<PathBuf> = HashSet::new();
         skip.insert(dst.clone());
-        if let Ok(c) = dst.canonicalize() {
-            skip.insert(c);
+        if let Ok(c) = vault.canonicalize(&dst_path) {
+            skip.insert(vault.key(&c));
         }
 
         // A4-A: rewrite inbound links across the whole repo.
@@ -3947,6 +4006,46 @@ impl Server {
             wikilinks_rewritten: to_urls(&wiki_paths),
             created_dirs,
         })
+    }
+
+    /// The move's write on a local filesystem: the rewritten content goes to a
+    /// temp file beside the destination carrying the **source's** permissions
+    /// (as a rename would keep them), then lands with a rename, and the source
+    /// is removed — old-cased name first for a case-only rename, so the new
+    /// case is preserved. Not `Vault::write_atomic`, which would take the
+    /// permissions of a destination that does not exist yet.
+    fn replace_moved_file_locally(
+        src: &Path,
+        dst: &Path,
+        moved_content: &str,
+        case_only: bool,
+    ) -> Result<(), FileOpError> {
+        let parent_dir = dst.parent().unwrap_or_else(|| Path::new("."));
+        let dst_name = dst
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.md");
+        let (tmp, mut tmp_file) =
+            create_unique_temp_file(parent_dir, dst_name).map_err(FileOpError::Io)?;
+        // The moved note keeps the source's permissions, as a rename would.
+        let written = std::io::Write::write_all(&mut tmp_file, moved_content.as_bytes())
+            .and_then(|()| std::fs::metadata(src))
+            .and_then(|meta| tmp_file.set_permissions(meta.permissions()));
+        drop(tmp_file);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FileOpError::Io(e));
+        }
+        let rename_result = if case_only {
+            std::fs::remove_file(src).and_then(|()| std::fs::rename(&tmp, dst))
+        } else {
+            std::fs::rename(&tmp, dst).and_then(|()| std::fs::remove_file(src))
+        };
+        if let Err(e) = rename_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FileOpError::Io(e));
+        }
+        Ok(())
     }
 
     /// Computes the old resolvable names that no longer resolve to the file
@@ -4503,7 +4602,18 @@ impl Server {
                     return Ok(response);
                 }
                 tracing::debug!("serving static file: {:?}", &file_path);
-                Self::serve_static_file(file_path, req).await
+                // `ServeFile` needs a real file (Range, ETag, Last-Modified,
+                // content type), so static files are served from the vault's
+                // `local_path`. A vault without one has no streaming body path
+                // yet and answers 404 rather than opening the key as a path.
+                let Some(local) = config
+                    .repo
+                    .locate(&file_path)
+                    .and_then(|(vault, path)| vault.local_path(&path))
+                else {
+                    return Err(StatusCode::NOT_FOUND);
+                };
+                Self::serve_static_file(local, req).await
             }
             ResolvedPath::MarkdownFile(md_path) => {
                 // A markdown page has exactly one URL — the directory-style one
@@ -6370,6 +6480,21 @@ impl Server {
 
     /// `edit_enabled` is the per-request value from [`Self::page_edit_enabled`],
     /// not `config.edit_enabled`.
+    /// The modification time (Unix seconds) of the file behind an index key,
+    /// stat'ed through the vault on a blocking thread.
+    async fn modified_secs(config: &ServerState, path: &Path) -> Option<u64> {
+        let vault = Arc::clone(config.repo.vault());
+        let source = vault.vault_path(path).ok()?;
+        tokio::task::spawn_blocking(move || vault.stat(&source))
+            .await
+            .ok()?
+            .ok()??
+            .modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    }
+
     async fn markdown_to_html(
         md_path: &Path,
         config: &ServerState,
@@ -6507,13 +6632,10 @@ impl Server {
                 .insert(current_url.clone(), resolved_links);
         }
 
-        // Get modified date from file metadata (blocking fs work stays async here)
-        let modified_secs = tokio::fs::metadata(md_path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
+        // Get modified date from file metadata, through the vault on a
+        // blocking thread (blocking fs work stays off the executor). Also the
+        // page's Last-Modified below.
+        let modified_secs = Self::modified_secs(config, md_path).await;
 
         // Compute prev/next sibling pages for navigation (reuses `current_url`
         // computed above).
@@ -6582,13 +6704,8 @@ impl Server {
         // Generate ETag from rendered content
         let etag = generate_etag(full_html_output.as_bytes());
 
-        // Get Last-Modified from markdown file
-        let last_modified = tokio::fs::metadata(md_path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|d| generate_last_modified(d.as_secs()));
+        // Last-Modified from the same stat as `modified_secs`.
+        let last_modified = modified_secs.and_then(generate_last_modified);
 
         let mut builder = Response::builder()
             .status(StatusCode::OK)
@@ -6614,11 +6731,9 @@ impl Server {
     /// runs on a blocking thread. All captured data is owned/`Send`.
     async fn scan_directory_children(
         dir_path: &Path,
-        root_path: &Path,
         relative_path: &Path,
         config: &ServerState,
     ) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), MbrError> {
-        let root_path = root_path.to_path_buf();
         let dir_path = dir_path.to_path_buf();
         let relative_path = relative_path.to_path_buf();
         let static_folder = config.static_folder.clone();
@@ -6630,21 +6745,32 @@ impl Server {
         let relationship_types = config.relationship_types.clone();
         let sort = config.sort.clone();
 
+        let vault = Arc::clone(config.repo.vault());
+        let static_vault = config.repo.static_vault().cloned();
+
         let scan_result = tokio::task::spawn_blocking(move || {
-            // Create a temporary repo instance to scan this directory
-            let temp_repo = Repo::init(
-                &root_path,
-                &static_folder,
+            // Create a temporary repo instance, over the server's own vault, to
+            // scan this directory
+            let temp_repo = Repo::init_with_vault(
+                Arc::clone(&vault),
+                static_folder,
                 &markdown_extensions,
                 &ignore_dirs,
                 &ignore_globs,
-                &index_file,
+                index_file.clone(),
                 &tag_sources,
                 &relationship_types,
-            );
+            )
+            .with_static_vault(static_vault);
 
-            // Scan this directory only (non-recursive)
-            temp_repo.scan_folder(&relative_path).inspect_err(|e| {
+            // Scan this directory only (non-recursive). `dir_path` is the
+            // resolver's key, so its vault path needs no relativizing against a
+            // possibly non-canonical configured root.
+            let folder = match vault.vault_path(&dir_path) {
+                Ok(folder) => folder,
+                Err(_) => VaultPath::from_relative_native(&relative_path).unwrap_or_default(),
+            };
+            temp_repo.scan_vault_folder(&folder).inspect_err(|e| {
                 tracing::error!("Error scanning directory: {e}");
             })?;
 
@@ -6679,9 +6805,14 @@ impl Server {
                         if !url_path.ends_with('/') {
                             url_path.push('/');
                         }
-                        let index_fm = Some(abs_path.join(&index_file))
-                            .filter(|p| p.is_file())
-                            .and_then(|p| markdown::extract_metadata_from_file(p).ok())
+                        let index_fm = queued
+                            .path
+                            .join(&index_file)
+                            .ok()
+                            .filter(|p| vault.is_file(p))
+                            .and_then(|p| {
+                                markdown::extract_metadata_from_vault(vault.as_ref(), &p).ok()
+                            })
                             .map(|m| m.metadata);
                         Some(mbr_core::sorting::folder_entry(
                             &name,
@@ -6738,7 +6869,7 @@ impl Server {
                     .clone(),
             )
         } else {
-            Self::scan_directory_children(dir_path, root_path, &relative_path, config).await?
+            Self::scan_directory_children(dir_path, &relative_path, config).await?
         };
 
         // Use helper functions for navigation elements
@@ -8656,15 +8787,64 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().canonicalize().unwrap();
         assert!(matches!(
-            resolve_new_target_path(&base, "../escape.md"),
+            resolve_new_target_path(&mbr_core::vault::LocalVault::new(&base), "../escape.md"),
             Err(FileOpError::Traversal)
         ));
         assert!(matches!(
-            resolve_new_target_path(&base, "docs/../../escape.md"),
+            resolve_new_target_path(
+                &mbr_core::vault::LocalVault::new(&base),
+                "docs/../../escape.md"
+            ),
             Err(FileOpError::Traversal)
         ));
         // Nothing was written outside the root.
         assert!(!base.join("../escape.md").exists());
+    }
+
+    /// The same refusal for `..` spelled with backslashes, which `VaultPath`
+    /// treats as separators on every platform.
+    #[test]
+    fn test_resolve_new_target_rejects_backslash_traversal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = mbr_core::vault::LocalVault::new(dir.path());
+        for rel in ["docs\\..\\..\\escape.md", "..\\escape.md", "docs\\..\\x.md"] {
+            assert!(
+                matches!(
+                    resolve_new_target_path(&vault, rel),
+                    Err(FileOpError::Traversal)
+                ),
+                "{rel:?}"
+            );
+        }
+    }
+
+    /// A symlink in the existing part of the path that leads out of the
+    /// repository is a traversal, even though the target does not exist yet.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_new_target_rejects_symlinked_ancestor_outside_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("leak")).unwrap();
+        let vault = mbr_core::vault::LocalVault::new(dir.path());
+        assert!(matches!(
+            resolve_new_target_path(&vault, "leak/new.md"),
+            Err(FileOpError::Traversal)
+        ));
+        assert!(!outside.path().join("new.md").exists());
+    }
+
+    /// Through a vault with no filesystem: valid targets resolve under the
+    /// root, escapes are refused.
+    #[test]
+    fn test_resolve_new_target_through_a_mem_vault() {
+        let vault = mbr_core::vault::MemVault::new().with_dir("docs");
+        let resolved = resolve_new_target_path(&vault, "docs/sub/new.md").expect("valid path");
+        assert_eq!(resolved.as_str(), "docs/sub/new.md");
+        assert!(matches!(
+            resolve_new_target_path(&vault, "../x.md"),
+            Err(FileOpError::Traversal)
+        ));
     }
 
     #[test]
@@ -8672,11 +8852,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().canonicalize().unwrap();
         assert!(matches!(
-            resolve_new_target_path(&base, ""),
+            resolve_new_target_path(&mbr_core::vault::LocalVault::new(&base), ""),
             Err(FileOpError::Traversal)
         ));
         assert!(matches!(
-            resolve_new_target_path(&base, "/"),
+            resolve_new_target_path(&mbr_core::vault::LocalVault::new(&base), "/"),
             Err(FileOpError::Traversal)
         ));
     }
@@ -8685,8 +8865,9 @@ mod tests {
     fn test_resolve_new_target_accepts_valid_new_path() {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().canonicalize().unwrap();
-        let resolved = resolve_new_target_path(&base, "docs/new.md").expect("valid path");
-        assert_eq!(resolved, base.join("docs/new.md"));
+        let vault = mbr_core::vault::LocalVault::new(&base);
+        let resolved = resolve_new_target_path(&vault, "docs/new.md").expect("valid path");
+        assert_eq!(vault.key(&resolved), base.join("docs/new.md"));
     }
 
     #[test]
@@ -8694,8 +8875,9 @@ mod tests {
         // A leading slash is treated as repo-root-relative, never an escape.
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().canonicalize().unwrap();
-        let resolved = resolve_new_target_path(&base, "/docs/new.md").expect("valid path");
-        assert_eq!(resolved, base.join("docs/new.md"));
+        let vault = mbr_core::vault::LocalVault::new(&base);
+        let resolved = resolve_new_target_path(&vault, "/docs/new.md").expect("valid path");
+        assert_eq!(vault.key(&resolved), base.join("docs/new.md"));
     }
 
     // ===== sanitize_upload_name (upload filename validation) =====

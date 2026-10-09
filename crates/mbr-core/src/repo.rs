@@ -875,6 +875,11 @@ impl Repo {
         }
     }
 
+    /// [`Self::scan_folder`] for a folder given as a vault path.
+    pub fn scan_vault_folder(&self, folder: &VaultPath) -> Result<(), RepoError> {
+        self.scan_dir(ScanLocation::WithinRoot, folder)
+    }
+
     /// Scans one folder of the vault at `location`.
     fn scan_dir(&self, location: ScanLocation, folder: &VaultPath) -> Result<(), RepoError> {
         let Some(vault) = self.vault_at(location) else {
