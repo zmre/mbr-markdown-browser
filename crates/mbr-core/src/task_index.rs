@@ -24,6 +24,8 @@
 //! scanner owns the rayon pool; request-path work stays off it.
 
 use std::fs::File;
+
+use crate::vault::{Vault, VaultPath};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -292,18 +294,13 @@ impl TaskIndex {
     ///
     /// Individual unreadable files (permissions, invalid UTF-8, oversized) are
     /// skipped with a debug log; only a panic in the build task is an error.
-    pub async fn ensure_built(
-        self: &Arc<Self>,
-        repo: &Arc<Repo>,
-        root_dir: &Path,
-    ) -> Result<(), TaskIndexError> {
+    pub async fn ensure_built(self: &Arc<Self>, repo: &Arc<Repo>) -> Result<(), TaskIndexError> {
         let index = Arc::clone(self);
         let repo = Arc::clone(repo);
-        let root_dir = root_dir.to_path_buf();
 
         self.built
             .get_or_try_init(|| async move {
-                tokio::task::spawn_blocking(move || index.build_blocking(&repo, &root_dir))
+                tokio::task::spawn_blocking(move || index.build_blocking(&repo))
                     .await
                     .map_err(|e| TaskIndexError::BuildFailed {
                         reason: e.to_string(),
@@ -330,13 +327,7 @@ impl TaskIndex {
     ///
     /// Call this *after* [`Repo::invalidate_file`] for the same event: the
     /// url/title of a created or modified file are read back out of the repo.
-    pub fn invalidate_file(
-        &self,
-        abs_path: &Path,
-        event: &ChangeEventType,
-        repo: &Repo,
-        root_dir: &Path,
-    ) {
+    pub fn invalidate_file(&self, abs_path: &Path, event: &ChangeEventType, repo: &Repo) {
         if !self.is_built() {
             return;
         }
@@ -370,7 +361,11 @@ impl TaskIndex {
 
                 let mut buffer = String::new();
                 // Borrowed, not cloned: one compiled rule serves every scan.
-                match target.scan(root_dir, &mut buffer, self.marker_rule.as_ref()) {
+                match target.scan(
+                    repo.vault().as_ref(),
+                    &mut buffer,
+                    self.marker_rule.as_ref(),
+                ) {
                     // A file that lost its last task must leave the index, or
                     // it lingers as an empty group forever.
                     Some(file_tasks) => {
@@ -396,12 +391,12 @@ impl TaskIndex {
     /// Entries are replaced and stale ones pruned in a single pass at the end,
     /// so a concurrent query never observes a half-empty index — only the old
     /// contents or the new ones.
-    pub fn rebuild_if_built(&self, repo: &Repo, root_dir: &Path) {
+    pub fn rebuild_if_built(&self, repo: &Repo) {
         if !self.is_built() {
             return;
         }
 
-        let fresh = self.scan_all(repo, root_dir);
+        let fresh = self.scan_all(repo);
         let files = self.files.pin();
         // Set membership, not a nested scan: a linear search per key would be
         // quadratic in the number of task-bearing files.
@@ -424,16 +419,16 @@ impl TaskIndex {
     }
 
     /// Fills an empty index. See the module docs for why this is not parallel.
-    fn build_blocking(&self, repo: &Repo, root_dir: &Path) {
+    fn build_blocking(&self, repo: &Repo) {
         let files = self.files.pin();
-        for (path, file_tasks) in self.scan_all(repo, root_dir) {
+        for (path, file_tasks) in self.scan_all(repo) {
             files.insert(path, file_tasks);
         }
     }
 
     /// The one sequential read pass: every markdown file the repo knows about,
     /// read once, keeping only those that contain tasks.
-    fn scan_all(&self, repo: &Repo, root_dir: &Path) -> Vec<(PathBuf, Arc<FileTasks>)> {
+    fn scan_all(&self, repo: &Repo) -> Vec<(PathBuf, Arc<FileTasks>)> {
         let start = std::time::Instant::now();
 
         // Snapshot the file list before touching the filesystem: holding the
@@ -451,6 +446,7 @@ impl TaskIndex {
             .collect();
 
         let total = targets.len();
+        let vault = repo.vault().as_ref();
         // One buffer reused across every file; `scan` clears it per read.
         let mut buffer = String::new();
         let mut found = Vec::new();
@@ -458,7 +454,7 @@ impl TaskIndex {
         for target in targets {
             // Bound before the `if let` so the borrow of `target` has ended by
             // the time its `abs_path` is moved out.
-            let scanned = target.scan(root_dir, &mut buffer, self.marker_rule.as_ref());
+            let scanned = target.scan(vault, &mut buffer, self.marker_rule.as_ref());
             if let Some(file_tasks) = scanned {
                 found.push((target.abs_path, Arc::new(file_tasks)));
             }
@@ -503,18 +499,18 @@ impl ScanTarget {
     /// cloned so a repository-wide pass compiles nothing per file.
     fn scan(
         &self,
-        root_dir: &Path,
+        vault: &dyn Vault,
         buffer: &mut String,
         markers: Option<&MarkerRule>,
     ) -> Option<FileTasks> {
-        // `raw_path` is repo-relative, so rejoin the root before touching the
-        // filesystem — the same rejoin `SearchEngine::search_file_content`
-        // makes. The map key would also work, but going through `raw_path`
-        // keeps this identical to the rest of the codebase's file access.
-        let path = root_dir.join(&self.raw_path);
+        // `raw_path` is repo-relative: it names the file inside the vault —
+        // the same addressing `SearchEngine::search_file_content` uses. The
+        // map key would also work, but going through `raw_path` keeps this
+        // identical to the rest of the codebase's file access.
+        let path = VaultPath::from_relative_native(&self.raw_path).ok()?;
 
-        if let Err(e) = read_capped(&path, buffer) {
-            tracing::debug!("Task scan skipped {}: {e}", path.display());
+        if let Err(e) = read_capped_from(vault, &path, buffer) {
+            tracing::debug!("Task scan skipped {path}: {e}");
             return None;
         }
 
@@ -550,6 +546,39 @@ fn compile_ignore_globs(patterns: &[String]) -> Vec<glob::Pattern> {
         .collect()
 }
 
+/// [`read_capped`] for a file in a vault.
+///
+/// The fast path is the local file itself, read into the reused buffer as
+/// before. Otherwise the size is checked from a `stat` (so an oversized file
+/// is refused without being fetched) and the bytes come through the vault.
+fn read_capped_from(
+    vault: &dyn Vault,
+    path: &VaultPath,
+    buffer: &mut String,
+) -> std::io::Result<()> {
+    if let Some(local) = vault.local_path(path) {
+        return read_capped(&local, buffer);
+    }
+    let entry = vault
+        .stat(path)?
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    if entry.size > MAX_SCAN_BYTES {
+        return Err(oversized(entry.size));
+    }
+    let text = String::from_utf8(vault.read(path)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    buffer.clear();
+    buffer.push_str(&text);
+    Ok(())
+}
+
+/// The error for a file over [`MAX_SCAN_BYTES`].
+fn oversized(len: u64) -> std::io::Error {
+    std::io::Error::other(format!(
+        "file is {len} bytes, over the {MAX_SCAN_BYTES}-byte task-scan limit"
+    ))
+}
+
 /// Reads a whole file into `buffer`, refusing anything over [`MAX_SCAN_BYTES`].
 ///
 /// The size check uses the already-open handle's metadata, so it costs no extra
@@ -559,9 +588,7 @@ fn read_capped(path: &Path, buffer: &mut String) -> std::io::Result<()> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     if len > MAX_SCAN_BYTES {
-        return Err(std::io::Error::other(format!(
-            "file is {len} bytes, over the {MAX_SCAN_BYTES}-byte task-scan limit"
-        )));
+        return Err(oversized(len));
     }
 
     buffer.clear();
@@ -700,6 +727,73 @@ mod tests {
         assert_eq!(titled.display_title(), "The Guide");
     }
 
+    // ---- non-local vaults ----------------------------------------------------
+
+    /// A scanned repository in a `MemVault`, which has no `local_path`.
+    fn mem_repo(vault: crate::vault::MemVault) -> (Arc<Repo>, Arc<crate::vault::MemVault>) {
+        let vault = Arc::new(vault);
+        let repo = Repo::init_with_vault(
+            vault.clone(),
+            "static",
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+            &[],
+            &[],
+        );
+        repo.scan_all().expect("scan repo");
+        (Arc::new(repo), vault)
+    }
+
+    /// Build, invalidation and the size cap all work through the vault when
+    /// there is no file to open.
+    #[tokio::test]
+    async fn builds_and_invalidates_through_a_vault_without_local_paths() {
+        let (repo, vault) = mem_repo(
+            crate::vault::MemVault::new()
+                .with_file(
+                    "todo.md",
+                    "# Todo\n\n- [ ] write the vault\n- [x] read the plan\n",
+                )
+                .with_file("prose.md", "# Prose\n\nNo tasks here.\n"),
+        );
+        let index = Arc::new(TaskIndex::new(&[]));
+        index.ensure_built(&repo).await.expect("build");
+
+        let key = repo.vault().key(&VaultPath::new("todo.md").unwrap());
+        let tasks = index.get(&key).expect("todo.md indexed");
+        assert_eq!(tasks.tasks.len(), 2);
+        assert_eq!(index.len(), 1, "prose.md has no tasks");
+
+        vault.insert_file("todo.md", "# Todo\n\n- [x] write the vault\n");
+        repo.invalidate_file(&key, &ChangeEventType::Modified);
+        index.invalidate_file(&key, &ChangeEventType::Modified, &repo);
+        assert_eq!(index.get(&key).expect("still indexed").tasks.len(), 1);
+
+        // Oversized files are refused from the `stat`, before any read.
+        let huge = "- [ ] x\n".repeat(usize::try_from(MAX_SCAN_BYTES).unwrap_or(0) / 8 + 1);
+        vault.insert_file("huge.md", &huge);
+        let huge_key = repo.vault().key(&VaultPath::new("huge.md").unwrap());
+        repo.invalidate_file(&huge_key, &ChangeEventType::Created);
+        index.invalidate_file(&huge_key, &ChangeEventType::Created, &repo);
+        assert!(index.get(&huge_key).is_none());
+    }
+
+    /// A note that is not downloaded is skipped, not an error, and the rest of
+    /// the build completes.
+    #[tokio::test]
+    async fn skips_files_that_are_not_downloaded() {
+        let vault = crate::vault::MemVault::new()
+            .with_file("local.md", "- [ ] here\n")
+            .with_file("cloud.md", "- [ ] there\n");
+        vault.set_availability("cloud.md", crate::vault::Availability::NotDownloaded);
+        let (repo, _vault) = mem_repo(vault);
+        let index = Arc::new(TaskIndex::new(&[]));
+        index.ensure_built(&repo).await.expect("build");
+        assert_eq!(index.len(), 1);
+    }
+
     // ---- read_capped ---------------------------------------------------------
 
     #[test]
@@ -754,18 +848,17 @@ mod tests {
             &fixture.path("notes.md"),
             &ChangeEventType::Modified,
             &fixture.repo,
-            &fixture.root,
         );
         assert!(!index.is_built());
         assert!(index.is_empty());
 
         // Nor does a full-rescan notification.
-        index.rebuild_if_built(&fixture.repo, &fixture.root);
+        index.rebuild_if_built(&fixture.repo);
         assert!(!index.is_built());
         assert!(index.is_empty());
 
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
         assert!(index.is_built());
@@ -781,7 +874,7 @@ mod tests {
         ]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
@@ -801,7 +894,7 @@ mod tests {
         )]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
@@ -823,8 +916,7 @@ mod tests {
         let calls = (0..8).map(|_| {
             let index = Arc::clone(&index);
             let repo = Arc::clone(&fixture.repo);
-            let root = fixture.root.clone();
-            async move { index.ensure_built(&repo, &root).await }
+            async move { index.ensure_built(&repo).await }
         });
         for result in futures::future::join_all(calls).await {
             result.expect("build succeeds");
@@ -846,17 +938,12 @@ mod tests {
         let fixture = repo_over(&[("notes.md", "- [ ] before\n")]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
         let path = fixture.write("notes.md", "- [x] after\n- [ ] and more\n");
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Modified,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Modified, &fixture.repo);
 
         let stored = index.get(&path).expect("still indexed");
         assert_eq!(stored.tasks.len(), 2);
@@ -869,18 +956,13 @@ mod tests {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
         assert_eq!(index.len(), 1);
 
         let path = fixture.write("notes.md", "just prose now\n");
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Modified,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Modified, &fixture.repo);
 
         assert!(
             index.get(&path).is_none(),
@@ -894,7 +976,7 @@ mod tests {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
@@ -903,12 +985,7 @@ mod tests {
         fixture
             .repo
             .invalidate_file(&path, &ChangeEventType::Deleted);
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Deleted,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Deleted, &fixture.repo);
 
         assert!(index.is_empty());
     }
@@ -918,7 +995,7 @@ mod tests {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
@@ -927,12 +1004,7 @@ mod tests {
         fixture
             .repo
             .invalidate_file(&path, &ChangeEventType::Created);
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Created,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Created, &fixture.repo);
 
         let stored = index.get(&path).expect("indexed");
         assert_eq!(stored.tasks[0].text, "brand new");
@@ -944,19 +1016,14 @@ mod tests {
         let fixture = repo_over(&[("notes.md", "- [ ] a task\n")]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
         // The watcher forwards create/delete for assets too; those must not
         // land in a *task* index.
         let asset = fixture.write("photo.png", "not markdown");
-        index.invalidate_file(
-            &asset,
-            &ChangeEventType::Created,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&asset, &ChangeEventType::Created, &fixture.repo);
 
         assert_eq!(index.len(), 1);
         assert!(index.get(&asset).is_none());
@@ -973,7 +1040,7 @@ mod tests {
         ]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
         assert_eq!(index.len(), 3);
@@ -984,7 +1051,7 @@ mod tests {
         std::fs::remove_file(fixture.path("gone.md")).expect("delete");
         fixture.write("added.md", "- [ ] newcomer\n");
         fixture.repo.full_rescan();
-        index.rebuild_if_built(&fixture.repo, &fixture.root);
+        index.rebuild_if_built(&fixture.repo);
 
         assert_eq!(index.len(), 3);
         assert!(index.get(&fixture.path("gone.md")).is_none(), "pruned");
@@ -1033,7 +1100,7 @@ mod tests {
         let globs: Vec<String> = globs.iter().map(|g| (*g).to_string()).collect();
         let index = Arc::new(TaskIndex::new(&globs));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
         index
@@ -1161,12 +1228,7 @@ mod tests {
         fixture
             .repo
             .invalidate_file(&path, &ChangeEventType::Modified);
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Modified,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Modified, &fixture.repo);
 
         assert!(
             index.get(&path).is_none(),
@@ -1186,12 +1248,7 @@ mod tests {
         fixture
             .repo
             .invalidate_file(&path, &ChangeEventType::Created);
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Created,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Created, &fixture.repo);
 
         assert!(index.get(&path).is_none());
         assert_eq!(index.len(), 2);
@@ -1205,7 +1262,7 @@ mod tests {
 
         fixture.write("templates/added.md", "- [ ] another template step\n");
         fixture.repo.full_rescan();
-        index.rebuild_if_built(&fixture.repo, &fixture.root);
+        index.rebuild_if_built(&fixture.repo);
 
         assert_eq!(
             indexed_paths(&index),
@@ -1222,7 +1279,7 @@ mod tests {
         ]);
         let index = Arc::new(TaskIndex::new(&[]));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
 
@@ -1249,7 +1306,7 @@ mod tests {
     async fn index_with_markers(fixture: &TestRepo, markers: &[String]) -> Arc<TaskIndex> {
         let index = Arc::new(TaskIndex::with_markers(&[], markers));
         index
-            .ensure_built(&fixture.repo, &fixture.root)
+            .ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
         index
@@ -1271,7 +1328,7 @@ mod tests {
         // `new` — and therefore the `Default` impl — leaves marker scanning off,
         // which is what keeps every existing caller on the old behaviour.
         let off = Arc::new(TaskIndex::new(&[]));
-        off.ensure_built(&fixture.repo, &fixture.root)
+        off.ensure_built(&fixture.repo)
             .await
             .expect("build succeeds");
         assert_eq!(entries(&off, &path), vec![(1, TaskKind::Task)]);
@@ -1332,12 +1389,7 @@ mod tests {
         assert_eq!(index.len(), 1);
 
         let path = fixture.write("prose.md", "the source is Smith 2024\n");
-        index.invalidate_file(
-            &path,
-            &ChangeEventType::Modified,
-            &fixture.repo,
-            &fixture.root,
-        );
+        index.invalidate_file(&path, &ChangeEventType::Modified, &fixture.repo);
 
         assert!(
             index.get(&path).is_none(),

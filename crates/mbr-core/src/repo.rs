@@ -11,22 +11,27 @@ use std::{
 use papaya::{HashMap, HashSet};
 use rayon::prelude::*;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
-use walkdir::WalkDir;
 
 use crate::Config;
 use crate::config::{RelationType, TagSource};
 use crate::errors::RepoError;
 use crate::relationships::{NoteRelInput, RawRelationship, RelationshipIndex};
 use crate::tag_index::{TagIndex, TaggedPage};
+use crate::vault::{LocalVault, Vault, VaultError, VaultPath};
 use crate::wikilink_index::WikilinkIndex;
 
 #[derive(Clone, Serialize)]
 pub struct Repo {
-    /// Repository root, **always canonicalized** (see [`canonicalize_root`]).
+    /// Where the repository is stored. Every read the scan makes goes through
+    /// it; see [`crate::vault`].
+    #[serde(skip)]
+    vault: Arc<dyn Vault>,
+    /// Repository root, **always canonicalized**: it is [`Vault::root`] of
+    /// [`Self::vault`], which a [`LocalVault`] canonicalizes at construction.
     ///
-    /// This must stay canonical. `scan_folder` walks from
-    /// `canonical_root.join(rel).canonicalize()`, and every path that WalkDir
-    /// yields is relativized back against this same value. If the two were
+    /// This must stay canonical. `scan_folder` walks from the vault's
+    /// canonicalization of each folder, and every path it lists is relativized
+    /// back against this same value. If the two were
     /// allowed to differ — a raw root here and a canonicalized one there —
     /// `pathdiff::diff_paths` would find no common prefix and hand back an
     /// effectively absolute path, so every `url_path` would embed the whole
@@ -45,20 +50,23 @@ pub struct Repo {
     canonical_root: PathBuf,
     #[serde(skip)]
     static_folder: String,
-    /// The static overlay's own directory, when it legitimately resolves
-    /// *outside* `canonical_root` — `static_folder = "../static"` for the
-    /// `repo/content` + `repo/static` layout, or `"../../static"` for a
+    /// The static overlay, as a vault of its own, when it legitimately
+    /// resolves *outside* `canonical_root` — `static_folder = "../static"` for
+    /// the `repo/content` + `repo/static` layout, or `"../../static"` for a
     /// framework layout whose markdown root is pinned two levels down
-    /// (SvelteKit's `<project>/src/routes` alongside `<project>/static`).
+    /// (SvelteKit's `<project>/src/routes` alongside `<project>/static`). Its
+    /// [`Vault::root`] is the overlay's canonical directory.
     ///
-    /// `None` when the overlay is disabled, resolves inside the root, or was
-    /// refused by the policy — so this is the only directory besides
-    /// `canonical_root` that the scanner may descend into. Computed once, from
+    /// A separate vault because a [`VaultPath`] cannot leave its vault: the
+    /// overlay is a second root, not a path under the first. `None` when the
+    /// overlay is disabled, resolves inside the root, or was refused by the
+    /// policy — so this is the only storage besides [`Self::vault`] that the
+    /// scanner may descend into. Decided once, by
     /// [`crate::config::resolve_static_overlay`], which is the same call
     /// `Config::validate` makes: the scanner must never accept a root the
     /// validator would have refused.
     #[serde(skip)]
-    canonical_static_root: Option<PathBuf>,
+    static_vault: Option<Arc<dyn Vault>>,
     #[serde(skip)]
     markdown_extensions: Vec<String>,
     /// The configured index file name (e.g., "index.md" or "_index.md").
@@ -75,13 +83,18 @@ pub struct Repo {
     /// paths under `canonical_root`. Rebased once in
     /// [`Repo::with_explicit_hidden_dirs`] from the root-relative form
     /// `Config` carries, so the per-entry check is a plain path comparison
-    /// against what `WalkDir` already hands it. Empty for almost every run.
+    /// against the keys the scan already builds. Empty for almost every run.
     #[serde(skip)]
     exempt_hidden_dirs: Vec<PathBuf>,
+    /// Every folder walked so far, by its **canonical** key, so a directory
+    /// reached twice (a symlink to a folder that is also walked directly) is
+    /// listed once.
     #[serde(skip)]
     pub scanned_folders: HashSet<PathBuf>,
+    /// Folders found but not walked yet, by key (the folder's path as listed,
+    /// *not* canonicalized — the next hop canonicalizes it).
     #[serde(skip)]
-    pub queued_folders: HashMap<PathBuf, PathBuf>,
+    pub queued_folders: HashMap<PathBuf, QueuedFolder>,
     pub markdown_files: MarkdownFiles,
     pub other_files: OtherFiles,
     /// Thread-safe index of tagged pages.
@@ -265,7 +278,10 @@ impl OtherFileInfo {
 
     /// Extract text content from the file if it's a searchable type.
     /// Respects file size limit for performance.
-    fn extract_text(&self) -> Option<String> {
+    ///
+    /// `vault`/`path` locate the file ([`Repo::locate`]); `raw_path` is only
+    /// used to name it in logs.
+    fn extract_text(&self, vault: &dyn Vault, path: &VaultPath) -> Option<String> {
         // Check file size first
         if let Some(size) = self.metadata.file_size_bytes
             && size > MAX_TEXT_EXTRACTION_SIZE
@@ -279,15 +295,28 @@ impl OtherFileInfo {
         }
 
         match &self.metadata.kind {
-            StaticFileKind::Pdf { .. } => self.extract_pdf_text(),
-            StaticFileKind::Text => self.extract_plain_text(),
+            StaticFileKind::Pdf { .. } => self.extract_pdf_text(vault, path),
+            StaticFileKind::Text => self.extract_plain_text(vault, path),
             _ => None,
         }
     }
 
     /// Extract text from a PDF file using lopdf.
-    fn extract_pdf_text(&self) -> Option<String> {
-        let doc = match lopdf::Document::load(&self.raw_path) {
+    ///
+    /// Loaded from its local path when there is one (lopdf reads it lazily);
+    /// otherwise from bytes read through the vault.
+    fn extract_pdf_text(&self, vault: &dyn Vault, path: &VaultPath) -> Option<String> {
+        let loaded = match vault.local_path(path) {
+            Some(local) => lopdf::Document::load(local),
+            None => match vault.read(path) {
+                Ok(bytes) => lopdf::Document::load_mem(&bytes),
+                Err(e) => {
+                    tracing::debug!("Failed to read PDF {:?}: {}", self.raw_path, e);
+                    return None;
+                }
+            },
+        };
+        let doc = match loaded {
             Ok(doc) => doc,
             Err(e) => {
                 tracing::debug!("Failed to load PDF {:?}: {}", self.raw_path, e);
@@ -313,8 +342,8 @@ impl OtherFileInfo {
     }
 
     /// Extract text from a plain text file.
-    fn extract_plain_text(&self) -> Option<String> {
-        match std::fs::read_to_string(&self.raw_path) {
+    fn extract_plain_text(&self, vault: &dyn Vault, path: &VaultPath) -> Option<String> {
+        match vault.read_to_string(path) {
             Ok(text) => {
                 let text = text.trim().to_string();
                 if text.is_empty() { None } else { Some(text) }
@@ -471,22 +500,31 @@ impl StaticFileMetadata {
     }
 
     /// Populate basic file metadata (size, timestamps) without expensive media extraction.
+    ///
+    /// Reads `path` from the local filesystem. The repository's own pass,
+    /// [`Repo::populate_basic_metadata`], reads through its vault instead.
     pub fn populate_basic(self) -> Self {
-        let mut me = self;
         let file_details_start = Instant::now();
-        let (filesize, created, modified) = match file_details_from_path(&me.path).ok() {
-            Some((fs, c, m)) => (Some(fs), Some(c), Some(m)),
-            _ => (None, None, None),
-        };
+        let details = file_details_from_path(&self.path).ok();
         tracing::debug!(
             "populate file_details for {:?}: {:?}",
-            me.path,
+            self.path,
             file_details_start.elapsed()
         );
-        me.file_size_bytes = filesize;
-        me.created = created;
-        me.modified = modified;
-        me
+        self.with_details(details)
+    }
+
+    /// Sets `(size, created, modified)`; `None` clears all three, which is
+    /// what a failed `stat` has always recorded.
+    fn with_details(mut self, details: Option<(u64, u64, u64)>) -> Self {
+        let (size, created, modified) = match details {
+            Some((size, created, modified)) => (Some(size), Some(created), Some(modified)),
+            None => (None, None, None),
+        };
+        self.file_size_bytes = size;
+        self.created = created;
+        self.modified = modified;
+        self
     }
 
     /// Populate media-specific metadata (ffmpeg, lopdf) - expensive operation.
@@ -584,16 +622,6 @@ impl StaticFileMetadata {
     }
 }
 
-/// Canonicalizes a repository root for use as [`Repo::canonical_root`].
-///
-/// Falls back to the path as given when canonicalization fails (a root that
-/// does not exist yet). That is safe: `scan_folder` canonicalizes the same path
-/// and surfaces the real error, and with both sides raw the relativization
-/// invariant still holds.
-fn canonicalize_root(root_dir: PathBuf) -> PathBuf {
-    root_dir.canonicalize().unwrap_or(root_dir)
-}
-
 impl Repo {
     pub fn init_from_config(c: &Config) -> Self {
         Self::init(
@@ -617,7 +645,7 @@ impl Repo {
     /// points wants the default of "no exemptions".
     ///
     /// Rebasing happens here, once, and onto `canonical_root` rather than the
-    /// configured root — `WalkDir` descends from the canonicalized root, so an
+    /// configured root — the scan descends from the canonicalized root, so an
     /// exemption built from the *configured* spelling would silently never match
     /// wherever the two differ (`/tmp` vs `/private/tmp` on macOS).
     #[must_use]
@@ -630,9 +658,61 @@ impl Repo {
         self
     }
 
+    /// A repository on the local filesystem at `root_dir`, stored through a
+    /// [`LocalVault`] (plus a second one for an external static overlay).
     #[allow(clippy::too_many_arguments)]
     pub fn init<S: Into<String>, P: Into<std::path::PathBuf>>(
         root_dir: P,
+        static_folder: S,
+        markdown_extensions: &[String],
+        ignore_dirs: &[String],
+        ignore_globs: &[String],
+        index_file: S,
+        tag_sources: &[TagSource],
+        relationship_types: &[RelationType],
+    ) -> Self {
+        let vault: Arc<dyn Vault> = Arc::new(LocalVault::new(root_dir.into()));
+        let static_folder = static_folder.into();
+        // Ask the config policy, rather than re-deriving containment here, so a
+        // refused overlay is never scannable. A policy error is not re-reported:
+        // `Config::validate` already aborted startup on it, and the only callers
+        // that reach here with a bad value are tests constructing a `Repo`
+        // directly.
+        let static_vault: Option<Arc<dyn Vault>> =
+            match crate::config::resolve_static_overlay(vault.root(), &static_folder) {
+                Ok(crate::config::StaticOverlay::External(dir)) => {
+                    Some(Arc::new(LocalVault::new(dir)))
+                }
+                Ok(crate::config::StaticOverlay::WithinRoot) => None,
+                Err(e) => {
+                    tracing::warn!("Not indexing static_folder {static_folder:?}: {e}");
+                    None
+                }
+            };
+
+        Self::init_with_vault(
+            vault,
+            static_folder,
+            markdown_extensions,
+            ignore_dirs,
+            ignore_globs,
+            index_file.into(),
+            tag_sources,
+            relationship_types,
+        )
+        .with_static_vault(static_vault)
+    }
+
+    /// A repository stored in `vault`, which may be anything — the desktop's
+    /// [`LocalVault`], a test's [`crate::vault::MemVault`], a platform vault.
+    ///
+    /// `static_folder` is honoured when it names a folder *inside* the vault;
+    /// an external overlay is a second vault, given with
+    /// [`Self::with_static_vault`] ([`Self::init`] does both for a local
+    /// repository).
+    #[allow(clippy::too_many_arguments)]
+    pub fn init_with_vault<S: Into<String>>(
+        vault: Arc<dyn Vault>,
         static_folder: S,
         markdown_extensions: &[String],
         ignore_dirs: &[String],
@@ -651,27 +731,13 @@ impl Repo {
             })
             .collect();
 
-        let canonical_root = canonicalize_root(root_dir.into());
-        let static_folder = static_folder.into();
-        // Ask the config policy, rather than re-deriving containment here, so a
-        // refused overlay is never scannable. A policy error is not re-reported:
-        // `Config::validate` already aborted startup on it, and the only callers
-        // that reach here with a bad value are tests constructing a `Repo`
-        // directly.
-        let canonical_static_root =
-            match crate::config::resolve_static_overlay(&canonical_root, &static_folder) {
-                Ok(crate::config::StaticOverlay::External(dir)) => Some(dir),
-                Ok(crate::config::StaticOverlay::WithinRoot) => None,
-                Err(e) => {
-                    tracing::warn!("Not indexing static_folder {static_folder:?}: {e}");
-                    None
-                }
-            };
+        let canonical_root = vault.root().to_path_buf();
 
         Self {
+            vault,
             canonical_root,
-            static_folder,
-            canonical_static_root,
+            static_folder: static_folder.into(),
+            static_vault: None,
             markdown_extensions: markdown_extensions.to_vec(),
             ignore_dirs: ignore_dirs.to_vec(),
             ignore_globs: ignore_globs.to_vec(),
@@ -697,6 +763,59 @@ impl Repo {
         }
     }
 
+    /// Sets the vault of an *external* static overlay (see the field docs).
+    /// Its assets are indexed with the overlay prefix stripped from their
+    /// URLs, and markdown inside it is skipped.
+    #[must_use]
+    pub fn with_static_vault(mut self, static_vault: Option<Arc<dyn Vault>>) -> Self {
+        self.static_vault = static_vault;
+        self
+    }
+
+    /// The repository's storage.
+    pub fn vault(&self) -> &Arc<dyn Vault> {
+        &self.vault
+    }
+
+    /// The external static overlay's storage, when there is one.
+    pub fn static_vault(&self) -> Option<&Arc<dyn Vault>> {
+        self.static_vault.as_ref()
+    }
+
+    /// The external static overlay's canonical directory, when there is one.
+    pub fn canonical_static_root(&self) -> Option<&Path> {
+        self.static_vault.as_deref().map(|vault| vault.root())
+    }
+
+    /// Which vault holds the file behind an index key, and where in it.
+    ///
+    /// `None` for a key under neither — which no scan produces, but the watcher
+    /// can report (a configured template folder outside the root).
+    pub fn locate(&self, key: &Path) -> Option<(&dyn Vault, VaultPath)> {
+        if let Ok(path) = self.vault.vault_path(key) {
+            return Some((self.vault.as_ref(), path));
+        }
+        let overlay = self.static_vault.as_deref()?;
+        overlay.vault_path(key).ok().map(|path| (overlay, path))
+    }
+
+    /// Size and `(created, modified)` seconds for the file behind `key`, read
+    /// through its vault; `None` when it cannot be stat'ed or located.
+    fn basic_details(&self, key: &Path) -> Option<(u64, u64, u64)> {
+        let (vault, path) = self.locate(key)?;
+        let entry = vault.stat(&path).ok()??;
+        let (created, modified) = entry.epoch_secs()?;
+        Some((entry.size, created, modified))
+    }
+
+    /// The vault a queued folder belongs to.
+    fn vault_at(&self, location: ScanLocation) -> Option<&Arc<dyn Vault>> {
+        match location {
+            ScanLocation::WithinRoot => Some(&self.vault),
+            ScanLocation::StaticOverlay => self.static_vault.as_ref(),
+        }
+    }
+
     /// Converts an absolute file path into the repo-relative form stored in
     /// [`MarkdownInfo::raw_path`].
     ///
@@ -710,107 +829,130 @@ impl Repo {
             .unwrap_or_else(|| abs_path.to_path_buf())
     }
 
-    /// Decides whether the scanner may descend into `abs_path`, and says which
-    /// of the two legitimate roots it belongs to.
-    ///
-    /// Returns the path's *root-relative* form alongside, because that is what
-    /// `scan_folder` re-joins onto `canonical_root` on the next hop. For the
-    /// overlay that form keeps its `../static/…` shape, which round-trips
-    /// through `join` correctly and which `build_static_url_path` strips back
-    /// off when it builds the URL.
-    ///
-    /// `None` means "outside everything the scanner may walk" — the escaping
-    /// directory symlink case, which must stay refused.
-    fn scannable(&self, abs_path: &Path) -> Option<(ScanLocation, PathBuf)> {
-        if let Some(relative) = repo_relative_within_root(&self.canonical_root, abs_path) {
-            return Some((ScanLocation::WithinRoot, relative));
-        }
-
-        let overlay = self.canonical_static_root.as_deref()?;
-        if !abs_path.starts_with(overlay) {
-            return None;
-        }
-        let relative = pathdiff::diff_paths(abs_path, &self.canonical_root)?;
-        Some((ScanLocation::StaticOverlay, relative))
+    /// The static folder as a path inside the root vault, when it is one
+    /// (see [`crate::vault::configured_folder`]).
+    fn static_folder_path(&self) -> Option<VaultPath> {
+        crate::vault::configured_folder(self.vault.as_ref(), &self.static_folder)
     }
 
-    pub fn scan_folder<P: AsRef<Path>>(&self, relative_folder_path: &P) -> Result<(), RepoError> {
-        let relative_folder_path_ref = relative_folder_path.as_ref();
-        let joined = self.canonical_root.join(relative_folder_path_ref);
-        let start_folder =
-            joined
-                .canonicalize()
-                .map_err(|source| RepoError::CanonicalizeFailed {
-                    path: joined.clone(),
-                    source,
-                })?;
+    /// The canonical key of the static folder, wherever it lives.
+    fn static_folder_key(&self) -> Option<PathBuf> {
+        match &self.static_vault {
+            Some(overlay) => overlay
+                .canonicalize(&VaultPath::root())
+                .ok()
+                .map(|root| overlay.key(&root)),
+            None => {
+                let path = self.static_folder_path()?;
+                let canonical = self.vault.canonicalize(&path).ok()?;
+                Some(self.vault.key(&canonical))
+            }
+        }
+    }
 
-        // A directory symlink can resolve outside the repository root, and the
-        // `canonicalize` above re-roots the walk at its target. Every file found
-        // below it would then relativize to `../…`, which `url_path::path_to_url`
-        // deliberately preserves — so the URL escapes the site and, in build
-        // mode, `output_dir.join(url_path)` writes pages outside `--output`.
-        // Refuse to descend instead.
-        //
-        // The validated static overlay is the one exception, and a narrow one:
-        // it is a specific directory the config policy already approved, not a
-        // general loosening. Every other out-of-root path is still refused.
-        let Some((location, _)) = self.scannable(&start_folder) else {
-            tracing::warn!(
-                "Skipping {:?}: it resolves to {}, outside the repository root {}",
-                relative_folder_path_ref,
-                start_folder.display(),
-                self.canonical_root.display()
-            );
+    /// Scans one folder of the root vault (non-recursively: subfolders are
+    /// queued in [`Self::queued_folders`], not walked).
+    ///
+    /// `relative_folder_path` is relative to the root. One that climbs out of
+    /// it is skipped with a warning, as a folder that *resolves* out of it is.
+    pub fn scan_folder<P: AsRef<Path>>(&self, relative_folder_path: &P) -> Result<(), RepoError> {
+        let relative = relative_folder_path.as_ref();
+        match VaultPath::from_relative_native(relative) {
+            Ok(folder) => self.scan_dir(ScanLocation::WithinRoot, &folder),
+            Err(e) => {
+                tracing::warn!("Skipping {relative:?}: {e}");
+                Ok(())
+            }
+        }
+    }
+
+    /// [`Self::scan_folder`] for a folder given as a vault path.
+    pub fn scan_vault_folder(&self, folder: &VaultPath) -> Result<(), RepoError> {
+        self.scan_dir(ScanLocation::WithinRoot, folder)
+    }
+
+    /// Scans one folder of the vault at `location`.
+    fn scan_dir(&self, location: ScanLocation, folder: &VaultPath) -> Result<(), RepoError> {
+        let Some(vault) = self.vault_at(location) else {
             return Ok(());
         };
 
+        // A directory symlink can resolve outside the vault, and canonicalizing
+        // re-roots the walk at its target. Every file found below it would then
+        // relativize to `../…`, which `url_path::path_to_url` deliberately
+        // preserves — so the URL escapes the site and, in build mode,
+        // `output_dir.join(url_path)` writes pages outside `--output`. Refuse to
+        // descend instead.
+        //
+        // The validated static overlay is the one exception, and a narrow one:
+        // it is a specific directory the config policy already approved, scanned
+        // through a vault of its own — not a general loosening. A link out of
+        // the overlay is refused by that vault the same way.
+        let start = match vault.canonicalize(folder) {
+            Ok(start) => start,
+            Err(VaultError::OutsideRoot { path }) => {
+                tracing::warn!(
+                    "Skipping {:?}: it resolves to {}, outside the repository root {}",
+                    folder.as_str(),
+                    path,
+                    vault.root().display()
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(RepoError::CanonicalizeFailed {
+                    path: vault.key(folder),
+                    source: e.into(),
+                });
+            }
+        };
+        let start_key = vault.key(&start);
+
         // Skip if already scanned
-        if self.scanned_folders.pin().contains(&start_folder) {
+        if self.scanned_folders.pin().contains(&start_key) {
             return Ok(());
         }
-        tracing::debug!("Scanning folder: {:?}", relative_folder_path_ref);
-        self.scanned_folders.pin().insert(start_folder.clone());
+        tracing::debug!("Scanning folder: {:?}", folder.as_str());
+        self.scanned_folders.pin().insert(start_key.clone());
 
-        // Walk directory with filtering (using pre-compiled patterns for efficiency)
-        let walkdir_start = Instant::now();
-        let dir_walker = WalkDir::new(start_folder.clone())
-            .follow_links(true)
-            .min_depth(1)
-            .max_depth(1)
-            .into_iter()
-            .filter_entry(|e| {
-                !should_ignore_compiled(
-                    e.path(),
-                    &self.ignore_dirs,
-                    &self.compiled_ignore_globs,
-                    &self.exempt_hidden_dirs,
-                )
-            });
+        // One listing per folder, every child already stat'ed (kind, size,
+        // times). A folder that cannot be listed contributes nothing, as the
+        // old `WalkDir` loop's error entries did.
+        let list_start = Instant::now();
+        let entries = vault.list_dir(&start).unwrap_or_else(|e| {
+            tracing::debug!("Could not list {}: {e}", start_key.display());
+            Vec::new()
+        });
 
-        let mut markdown = std::collections::HashMap::new();
-        let mut other = std::collections::HashMap::new();
+        let mut markdown: Vec<(PathBuf, VaultPath, MarkdownInfo)> = Vec::new();
+        let mut other: Vec<(PathBuf, OtherFileInfo)> = Vec::new();
 
-        for entry in dir_walker.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        for entry in entries {
+            // The key is the path the old walk produced: the canonical folder
+            // plus the child's own name, so a symlinked *file* keeps its own
+            // name, and ignore globs keep matching the same absolute paths.
+            let key = vault.key(&entry.path);
+            if should_ignore_compiled(
+                &key,
+                entry.is_dir(),
+                &self.ignore_dirs,
+                &self.compiled_ignore_globs,
+                &self.exempt_hidden_dirs,
+            ) {
+                continue;
+            }
+            let extension = entry.path.extension().unwrap_or("");
 
-            if path.is_dir() {
-                // Queue subdirectory for later scanning. Anything outside both
-                // the root and the validated static overlay must not be walked
-                // (the recursive call would re-root the walk there).
-                match self.scannable(path) {
-                    Some((_, relative_entry)) => {
-                        self.queued_folders
-                            .pin()
-                            .insert(path.to_path_buf(), relative_entry);
-                    }
-                    None => tracing::debug!(
-                        "Not queueing {}: outside the repository root {}",
-                        path.display(),
-                        self.canonical_root.display()
-                    ),
-                }
+            if entry.is_dir() {
+                // Queue subdirectory for later scanning. Whether it may be
+                // walked is decided on the next hop, when it is canonicalized.
+                self.queued_folders.pin().insert(
+                    key,
+                    QueuedFolder {
+                        location,
+                        path: entry.path,
+                    },
+                );
             } else if location == ScanLocation::StaticOverlay
                 && is_markdown_extension(extension, &self.markdown_extensions)
             {
@@ -821,70 +963,77 @@ impl Repo {
                 // writing the page outside `--output`. That escape is exactly
                 // what this pass fixed in `build.rs`, so the file is skipped
                 // rather than indexed with a broken URL. Static assets are
-                // unaffected: `build_static_url_path` strips the overlay prefix.
+                // unaffected: their URL strips the overlay prefix.
                 tracing::warn!(
                     "Skipping markdown file {} in the external static folder {:?}: \
                      markdown outside the repository root has no valid URL",
-                    path.display(),
+                    key.display(),
                     self.static_folder
                 );
             } else if is_markdown_extension(extension, &self.markdown_extensions) {
                 // Process markdown file
-                if let Ok((_filesize, created, modified)) = file_details_from_path(path) {
-                    let url = build_markdown_url_path(path, &self.canonical_root, &self.index_file);
+                if let Some((created, modified)) = entry.epoch_secs() {
+                    let url = build_markdown_url_path(&key, &self.canonical_root, &self.index_file);
                     let mdfile = MarkdownInfo {
-                        raw_path: self.relative_to_root(path),
+                        raw_path: self.relative_to_root(&key),
                         url_path: url,
                         created,
                         modified,
                         frontmatter: None,
                         relationships: Vec::new(),
                     };
-                    markdown.insert(path.to_path_buf(), mdfile);
+                    markdown.push((key, entry.path, mdfile));
                 } else {
-                    tracing::warn!("Couldn't process markdown file at {:?}", path);
+                    tracing::warn!("Couldn't process markdown file at {:?}", key);
                 }
             } else {
                 // Process static file
                 //
-                // Inside the overlay, strip the *resolved* directory rather than
-                // the configured string. `build_static_url_path` strips the raw
+                // Inside the overlay the URL is the path within the overlay
+                // vault — the *resolved* directory stripped, never the
+                // configured string. `build_static_url_path` strips the raw
                 // value with a component-wise `strip_prefix`, so `../../static`
                 // and the equivalent `./../../static` — both accepted by the
                 // config policy — do not both match, and the second would leave
-                // a `..` in the URL. `path` is canonical here: `scan_folder`
-                // canonicalizes the walk root and `WalkDir` prefixes every entry
-                // with it.
-                let url = match (location, self.canonical_static_root.as_deref()) {
-                    (ScanLocation::StaticOverlay, Some(overlay)) => format!(
+                // a `..` in the URL.
+                let url = match location {
+                    ScanLocation::StaticOverlay => format!(
                         "/{}",
-                        crate::url_path::path_to_url(path.strip_prefix(overlay).unwrap_or(path))
+                        crate::url_path::path_to_url(
+                            key.strip_prefix(vault.root()).unwrap_or(&key)
+                        )
                     ),
-                    _ => build_static_url_path(path, &self.canonical_root, &self.static_folder),
+                    ScanLocation::WithinRoot => {
+                        build_static_url_path(&key, &self.canonical_root, &self.static_folder)
+                    }
                 };
+                // Basic metadata (size, timestamps) stays deferred to
+                // `populate_basic_metadata()`, as it always was: the static
+                // build never runs that pass, so recording the listing's
+                // numbers here would change its `media.json`.
                 let other_file = OtherFileInfo {
-                    raw_path: path.to_path_buf(),
+                    raw_path: key.clone(),
                     url_path: url,
-                    metadata: StaticFileMetadata::empty(path),
+                    metadata: StaticFileMetadata::empty(&key),
                     extracted_text: None,
                 };
-                other.insert(path.to_path_buf(), other_file);
+                other.push((key, other_file));
             }
         }
         tracing::debug!(
-            "scan_folder WalkDir for {:?}: {} markdown, {} other files in {:?}",
-            relative_folder_path_ref,
+            "scan_folder listing for {:?}: {} markdown, {} other files in {:?}",
+            folder.as_str(),
             markdown.len(),
             other.len(),
-            walkdir_start.elapsed()
+            list_start.elapsed()
         );
 
         // Parallel processing: extract frontmatter from markdown files and build tag index
         let frontmatter_start = Instant::now();
-        markdown
-            .into_par_iter()
-            .for_each(|(mdfile, mddetails): (PathBuf, MarkdownInfo)| {
-                let file_meta = crate::markdown::extract_metadata_from_file(&mdfile).ok();
+        markdown.into_par_iter().for_each(
+            |(key, path, mddetails): (PathBuf, VaultPath, MarkdownInfo)| {
+                let file_meta =
+                    crate::markdown::extract_metadata_from_vault(vault.as_ref(), &path).ok();
                 let details = if let Some(file_meta) = file_meta {
                     let frontmatter = file_meta.metadata;
                     let relationships = file_meta.relationships;
@@ -923,27 +1072,48 @@ impl Repo {
                 } else {
                     mddetails
                 };
-                self.markdown_files.pin().insert(mdfile, details);
-            });
+                self.markdown_files.pin().insert(key, details);
+            },
+        );
         tracing::debug!(
             "scan_folder frontmatter extraction for {:?}: {:?}",
-            relative_folder_path_ref,
+            folder.as_str(),
             frontmatter_start.elapsed()
         );
 
-        // Register other files without stat calls — basic metadata (size, timestamps)
-        // is deferred to populate_basic_metadata() to avoid blocking scan_all() completion.
         let static_insert_start = Instant::now();
         for (file, other_file) in other {
             self.other_files.pin().insert(file, other_file);
         }
         tracing::debug!(
             "scan_folder static file registration for {:?}: {:?}",
-            relative_folder_path_ref,
+            folder.as_str(),
             static_insert_start.elapsed()
         );
 
         Ok(())
+    }
+
+    /// Walks every queued folder, one parallel batch per directory level,
+    /// until nothing is queued.
+    fn drain_queued_folders(&self) {
+        while !self.queued_folders.is_empty() {
+            // TODO: make sure this doesn't deadlock
+            let batch: Vec<QueuedFolder> = self
+                .queued_folders
+                .pin()
+                .iter()
+                .map(|(_, queued)| queued.clone())
+                .collect();
+            self.queued_folders.pin().clear();
+            tracing::debug!("Parallel batch: {:?}", &batch);
+            batch.into_par_iter().for_each(|queued| {
+                self.scan_dir(queued.location, &queued.path)
+                    .unwrap_or_else(|e| {
+                        tracing::error!("Failed to scan folder {:?}: {e}", queued.path.as_str())
+                    }) // ignores errors
+            });
+        }
     }
 
     pub fn scan_all(&self) -> Result<(), RepoError> {
@@ -952,33 +1122,12 @@ impl Repo {
         // Pre-mark static folder as scanned to skip it during content scan.
         // This defers static file registration to scan_static_folder() so
         // mark_scan_complete() fires faster (search only needs markdown).
-        let static_deferred = self
-            .canonical_root
-            .join(&self.static_folder)
-            .canonicalize()
-            .ok()
-            .inspect(|p| {
-                self.scanned_folders.pin().insert(p.clone());
-            });
+        let static_deferred = self.static_folder_key().inspect(|key| {
+            self.scanned_folders.pin().insert(key.clone());
+        });
 
-        self.scan_folder(&PathBuf::from("."))?; // the . is relative to the root_dir, so this scans the root dir
-
-        while !self.queued_folders.is_empty() {
-            // TODO: make sure this doesn't deadlock
-            let vec_folders: Vec<_> = self
-                .queued_folders
-                .pin()
-                .iter()
-                .map(|(_, relative)| relative.clone())
-                .collect();
-            self.queued_folders.pin().clear();
-            tracing::debug!("Parallel batch: {:?}", &vec_folders);
-            vec_folders.into_par_iter().for_each(|rel_path| {
-                self.scan_folder(&rel_path).unwrap_or_else(|e| {
-                    tracing::error!("Failed to scan folder {:?}: {e}", &rel_path)
-                }) // ignores errors
-            });
-        }
+        self.scan_dir(ScanLocation::WithinRoot, &VaultPath::root())?;
+        self.drain_queued_folders();
 
         // Un-mark static folder so scan_static_folder() can scan it later
         if let Some(ref sp) = static_deferred {
@@ -1026,27 +1175,25 @@ impl Repo {
     /// Deferred from scan_all() so mark_scan_complete() fires faster.
     pub fn scan_static_folder(&self) -> Result<(), RepoError> {
         let start = Instant::now();
-        let static_path = self.canonical_root.join(&self.static_folder);
-        if !static_path.is_dir() {
+        // An external overlay is its own vault, scanned from its root; an
+        // in-root static folder is a folder of the root vault.
+        let (location, folder) = if self.static_vault.is_some() {
+            (ScanLocation::StaticOverlay, VaultPath::root())
+        } else {
+            match self.static_folder_path() {
+                Some(folder) => (ScanLocation::WithinRoot, folder),
+                None => return Ok(()),
+            }
+        };
+        if !self
+            .vault_at(location)
+            .is_some_and(|vault| vault.is_dir(&folder))
+        {
             return Ok(());
         }
 
-        self.scan_folder(&PathBuf::from(&self.static_folder))?;
-
-        while !self.queued_folders.is_empty() {
-            let vec_folders: Vec<_> = self
-                .queued_folders
-                .pin()
-                .iter()
-                .map(|(_, relative)| relative.clone())
-                .collect();
-            self.queued_folders.pin().clear();
-            vec_folders.into_par_iter().for_each(|rel_path| {
-                self.scan_folder(&rel_path).unwrap_or_else(|e| {
-                    tracing::error!("Failed to scan folder {:?}: {e}", &rel_path)
-                })
-            });
-        }
+        self.scan_dir(location, &folder)?;
+        self.drain_queued_folders();
 
         let other_count = self.other_files.len();
         tracing::info!(
@@ -1108,7 +1255,7 @@ impl Repo {
             let pin = self.other_files.pin();
             if let Some(info) = pin.get(&key) {
                 let updated = OtherFileInfo {
-                    metadata: info.metadata.clone().populate_basic(),
+                    metadata: info.metadata.clone().with_details(self.basic_details(&key)),
                     ..info.clone()
                 };
                 drop(pin);
@@ -1194,11 +1341,23 @@ impl Repo {
         let entries: Vec<_> = pin.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         drop(pin);
 
+        // ffmpeg and pdfium open files by path, so only files with a
+        // `local_path` can be probed; the rest keep their basic metadata.
         #[cfg(feature = "media-metadata")]
         {
             entries.into_par_iter().for_each(|(key, info)| {
+                let Some(local) = self
+                    .locate(&key)
+                    .and_then(|(vault, path)| vault.local_path(&path))
+                else {
+                    return;
+                };
                 let updated = OtherFileInfo {
-                    metadata: info.metadata.populate_media(),
+                    metadata: StaticFileMetadata {
+                        path: local,
+                        ..info.metadata
+                    }
+                    .populate_media(),
                     ..info
                 };
                 self.other_files.pin().insert(key, updated);
@@ -1232,7 +1391,9 @@ impl Repo {
         drop(pin);
 
         entries.into_par_iter().for_each(|(key, mut info)| {
-            info.extracted_text = info.extract_text();
+            info.extracted_text = self
+                .locate(&key)
+                .and_then(|(vault, path)| info.extract_text(vault, &path));
             self.other_files.pin().insert(key, info);
         });
 
@@ -1261,6 +1422,16 @@ impl Repo {
         // scan finished. After clear(), scan_all() will re-scan synchronously in handlers.
     }
 
+    /// The vault, vault path and `(created, modified)` seconds of the markdown
+    /// file behind `key`, when it can be located and stat'ed — the
+    /// `file_details_from_path` check `invalidate_file` used to make.
+    fn markdown_source(&self, key: &Path) -> Option<(&dyn Vault, VaultPath, u64, u64)> {
+        let (vault, path) = self.locate(key)?;
+        let entry = vault.stat(&path).ok()??;
+        let (created, modified) = entry.epoch_secs()?;
+        Some((vault, path, created, modified))
+    }
+
     /// Surgically invalidate a single file, updating only the affected cache entries.
     ///
     /// Much cheaper than `clear()` + `scan_all()` for small batches of file changes.
@@ -1278,13 +1449,14 @@ impl Repo {
             }
             crate::change_event::ChangeEventType::Created => {
                 if is_markdown {
-                    if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
+                    if let Some((vault, path, created, modified)) = self.markdown_source(abs_path) {
                         let url = build_markdown_url_path(
                             abs_path,
                             &self.canonical_root,
                             &self.index_file,
                         );
-                        let file_meta = crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let file_meta =
+                            crate::markdown::extract_metadata_from_vault(vault, &path).ok();
                         let (frontmatter, relationships) = match file_meta {
                             Some(fm) => (Some(fm.metadata), fm.relationships),
                             None => (None, Vec::new()),
@@ -1335,7 +1507,8 @@ impl Repo {
                     let info = OtherFileInfo {
                         raw_path: abs_path.to_path_buf(),
                         url_path: url,
-                        metadata: StaticFileMetadata::empty(abs_path).populate_basic(),
+                        metadata: StaticFileMetadata::empty(abs_path)
+                            .with_details(self.basic_details(abs_path)),
                         extracted_text: None,
                     };
                     self.other_files.pin().insert(abs_path.to_path_buf(), info);
@@ -1344,13 +1517,14 @@ impl Repo {
             crate::change_event::ChangeEventType::Modified => {
                 if is_markdown {
                     // Re-extract frontmatter and update
-                    if let Ok((_filesize, created, modified)) = file_details_from_path(abs_path) {
+                    if let Some((vault, path, created, modified)) = self.markdown_source(abs_path) {
                         let url = build_markdown_url_path(
                             abs_path,
                             &self.canonical_root,
                             &self.index_file,
                         );
-                        let file_meta = crate::markdown::extract_metadata_from_file(abs_path).ok();
+                        let file_meta =
+                            crate::markdown::extract_metadata_from_vault(vault, &path).ok();
                         let (frontmatter, relationships) = match file_meta {
                             Some(fm) => (Some(fm.metadata), fm.relationships),
                             None => (None, Vec::new()),
@@ -1374,7 +1548,8 @@ impl Repo {
                     let info = OtherFileInfo {
                         raw_path: abs_path.to_path_buf(),
                         url_path: url,
-                        metadata: StaticFileMetadata::empty(abs_path).populate_basic(),
+                        metadata: StaticFileMetadata::empty(abs_path)
+                            .with_details(self.basic_details(abs_path)),
                         extracted_text: None,
                     };
                     self.other_files.pin().insert(abs_path.to_path_buf(), info);
@@ -1566,9 +1741,19 @@ pub fn file_details_from_path<P: AsRef<Path>>(path: P) -> Result<(u64, u64, u64)
 /// overlay. Anything else is not scannable at all, so this enum has no third
 /// variant by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScanLocation {
+pub enum ScanLocation {
+    /// The repository's own vault.
     WithinRoot,
+    /// The external static overlay's vault.
     StaticOverlay,
+}
+
+/// A folder found by a scan but not walked yet: which vault it is in, and
+/// where. See [`Repo::queued_folders`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedFolder {
+    pub location: ScanLocation,
+    pub path: VaultPath,
 }
 
 pub fn repo_relative_within_root(root: &Path, abs_path: &Path) -> Option<PathBuf> {
@@ -1647,8 +1832,12 @@ pub fn should_ignore(
 
 /// Checks if a path should be ignored using pre-compiled glob patterns.
 /// This is more efficient than `should_ignore` when processing many files.
+///
+/// `is_dir` comes from the listing that produced `path` (the target's kind,
+/// symlinks followed), so the check costs no `stat` of its own.
 fn should_ignore_compiled(
     path: &Path,
+    is_dir: bool,
     ignore_dirs: &[String],
     compiled_patterns: &[glob::Pattern],
     exempt_hidden_dirs: &[PathBuf],
@@ -1661,7 +1850,7 @@ fn should_ignore_compiled(
     }
 
     // Directory matching ignore list
-    if path.is_dir() && ignore_dirs.iter().any(|x| x.as_str() == file_name) {
+    if is_dir && ignore_dirs.iter().any(|x| x.as_str() == file_name) {
         return true;
     }
 
@@ -1790,7 +1979,7 @@ mod tests {
     use super::*;
 
     /// `Repo` must canonicalize the root it is handed, so that the base used to
-    /// relativize scanned paths is identical to the one `WalkDir` starts from.
+    /// relativize scanned paths is identical to the one the scan starts from.
     /// If these drift, `diff_paths` returns an effectively absolute path and
     /// every `url_path` embeds the whole filesystem path.
     #[test]
@@ -1820,7 +2009,8 @@ mod tests {
     #[test]
     fn test_canonicalize_root_falls_back_when_missing() {
         let missing = PathBuf::from("/definitely/does/not/exist/anywhere");
-        assert_eq!(canonicalize_root(missing.clone()), missing);
+        assert_eq!(LocalVault::new(missing.clone()).root(), missing);
+        assert_eq!(test_repo(&missing).canonical_root, missing);
     }
 
     #[test]
@@ -2237,7 +2427,7 @@ mod tests {
 
     /// A directory symlinked out of the repository must contribute nothing.
     ///
-    /// `scan_folder` canonicalizes each queued directory and `WalkDir` follows
+    /// `scan_folder` canonicalizes each queued directory and the listing follows
     /// links, so the walk used to be re-rooted at the symlink target: every file
     /// underneath relativized to `../…`, `path_to_url` preserved that, and the
     /// static builder joined it onto `--output` — writing pages outside the
@@ -2457,7 +2647,8 @@ mod tests {
             );
 
             assert_eq!(
-                repo.canonical_static_root, None,
+                repo.canonical_static_root(),
+                None,
                 "a static_folder the validator refuses must not be a scan root: {value:?}"
             );
         }
@@ -2497,7 +2688,7 @@ mod tests {
         let (_tmp, project, repo) = two_deep_overlay_repo("../../static");
 
         assert_eq!(
-            repo.canonical_static_root,
+            repo.canonical_static_root().map(Path::to_path_buf),
             Some(project.join("static").canonicalize().expect("canonicalize")),
             "a two-level overlay the validator accepts must be a scan root"
         );
@@ -2534,6 +2725,257 @@ mod tests {
             urls,
             vec!["/pic.png".to_string(), "/videos/demo.mp4".to_string()],
             "URLs must come from the resolved overlay, not the configured spelling"
+        );
+    }
+
+    // ==================== Non-local vaults ====================
+
+    /// A repository in a `MemVault`: no `local_path`, so every read the scan
+    /// makes has to go through the vault.
+    fn mem_repo(vault: crate::vault::MemVault, tag_sources: &[TagSource]) -> Repo {
+        Repo::init_with_vault(
+            Arc::new(vault),
+            "static".to_string(),
+            &["md".to_string()],
+            &["node_modules".to_string()],
+            &["*.tmp".to_string()],
+            "index.md".to_string(),
+            tag_sources,
+            &[],
+        )
+    }
+
+    fn sample_mem_vault() -> crate::vault::MemVault {
+        crate::vault::MemVault::new()
+            .with_file("index.md", "---\ntitle: Home\ntags: [start]\n---\n# Home\n")
+            .with_file("docs/guide.md", "# The Guide\n\nBody.\n")
+            .with_file("docs/index.md", "---\ntitle: Docs\n---\n")
+            .with_file("docs/notes.txt", "plain text body")
+            .with_file("docs/scratch.tmp", "ignored by glob")
+            .with_file(".hidden/secret.md", "# Secret")
+            .with_file("node_modules/pkg/readme.md", "# Dependency")
+            .with_file("static/img.png", "PNG bytes")
+            .with_file("static/css/site.css", "body{}")
+    }
+
+    #[test]
+    fn test_scan_through_a_mem_vault_indexes_everything_a_disk_scan_would() {
+        let tags = [TagSource {
+            field: "tags".to_string(),
+            label: None,
+            label_plural: None,
+        }];
+        let repo = mem_repo(sample_mem_vault(), &tags);
+        let root = PathBuf::from(crate::vault::MemVault::DEFAULT_ROOT);
+        assert_eq!(repo.canonical_root, root);
+
+        repo.scan_all().expect("scan");
+        let markdown_urls: Vec<String> = sorted(
+            repo.markdown_files
+                .pin()
+                .iter()
+                .map(|(_, info)| info.url_path.clone())
+                .collect(),
+        );
+        assert_eq!(markdown_urls, vec!["/", "/docs/", "/docs/guide/"]);
+
+        let pin = repo.markdown_files.pin();
+        let home = pin
+            .get(&root.join("index.md"))
+            .expect("keyed under the vault root");
+        assert_eq!(home.raw_path, PathBuf::from("index.md"));
+        let fm = home
+            .frontmatter
+            .as_ref()
+            .expect("frontmatter read via the vault");
+        assert_eq!(fm.get("title").and_then(|v| v.as_str()), Some("Home"));
+        let guide = pin
+            .get(&root.join("docs").join("guide.md"))
+            .expect("nested file");
+        assert_eq!(
+            guide
+                .frontmatter
+                .as_ref()
+                .and_then(|fm| fm.get("title"))
+                .and_then(|v| v.as_str()),
+            Some("The Guide"),
+            "the first-H1 fallback works off vault bytes too"
+        );
+        assert!(guide.modified > 0 && guide.created > 0);
+        assert_eq!(repo.tag_index.get_pages("tags", "start").len(), 1);
+        drop(pin);
+
+        // The static folder is deferred to its own pass, as on disk.
+        assert!(
+            repo.other_files
+                .pin()
+                .iter()
+                .all(|(_, info)| !info.url_path.starts_with("/img")),
+            "static assets wait for scan_static_folder"
+        );
+        repo.scan_static_folder().expect("static scan");
+        let other_urls: Vec<String> = sorted(
+            repo.other_files
+                .pin()
+                .iter()
+                .map(|(_, info)| info.url_path.clone())
+                .collect(),
+        );
+        assert_eq!(
+            other_urls,
+            vec!["/css/site.css", "/docs/notes.txt", "/img.png"]
+        );
+    }
+
+    /// Basic metadata stays deferred, as on disk, and the deferred pass reads
+    /// it through the vault — there is no file to `stat`.
+    #[test]
+    fn test_mem_vault_basic_metadata_is_populated_through_the_vault() {
+        let repo = mem_repo(sample_mem_vault(), &[]);
+        repo.scan_all().expect("scan");
+        repo.scan_static_folder().expect("static scan");
+        let key = repo.canonical_root.join("static").join("img.png");
+        let size = |repo: &Repo| {
+            repo.other_files
+                .pin()
+                .get(&key)
+                .and_then(|info| info.metadata.file_size_bytes)
+        };
+        assert_eq!(size(&repo), None, "deferred, exactly as before the vault");
+        repo.populate_basic_metadata();
+        assert_eq!(size(&repo), Some(9));
+    }
+
+    #[test]
+    fn test_mem_vault_text_extraction_reads_through_the_vault() {
+        let repo = mem_repo(sample_mem_vault(), &[]);
+        repo.scan_all().expect("scan");
+        repo.ensure_text_extracted();
+        let key = repo.canonical_root.join("docs").join("notes.txt");
+        let text = repo
+            .other_files
+            .pin()
+            .get(&key)
+            .and_then(|info| info.extracted_text.clone());
+        assert_eq!(text.as_deref(), Some("plain text body"));
+    }
+
+    /// Watcher-driven invalidation reads the changed file through the vault.
+    #[test]
+    fn test_mem_vault_invalidate_file_reads_through_the_vault() {
+        use crate::change_event::ChangeEventType;
+        let vault = Arc::new(sample_mem_vault());
+        let repo = Repo::init_with_vault(
+            vault.clone(),
+            "static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        );
+        repo.scan_all().expect("scan");
+        let key = repo.canonical_root.join("docs").join("new.md");
+        let title = |repo: &Repo| {
+            repo.markdown_files.pin().get(&key).and_then(|info| {
+                info.frontmatter
+                    .as_ref()?
+                    .get("title")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+        };
+
+        vault.insert_file("docs/new.md", "---\ntitle: Fresh\n---\n");
+        repo.invalidate_file(&key, &ChangeEventType::Created);
+        assert_eq!(title(&repo).as_deref(), Some("Fresh"));
+
+        vault.insert_file("docs/new.md", "---\ntitle: Edited\n---\n");
+        repo.invalidate_file(&key, &ChangeEventType::Modified);
+        assert_eq!(title(&repo).as_deref(), Some("Edited"));
+
+        repo.invalidate_file(&key, &ChangeEventType::Deleted);
+        assert!(repo.markdown_files.pin().get(&key).is_none());
+
+        // A key outside the vault cannot be read through it and is not indexed.
+        let outside = PathBuf::from("/somewhere/else/x.md");
+        repo.invalidate_file(&outside, &ChangeEventType::Created);
+        assert!(repo.markdown_files.pin().get(&outside).is_none());
+    }
+
+    /// A listed-but-not-downloaded note is still indexed (its URL and times
+    /// come from the listing); only its frontmatter is missing until it is
+    /// readable.
+    #[test]
+    fn test_not_downloaded_markdown_is_indexed_without_frontmatter() {
+        let vault = sample_mem_vault();
+        vault.set_availability("docs/guide.md", crate::vault::Availability::NotDownloaded);
+        let repo = mem_repo(vault, &[]);
+        repo.scan_all().expect("scan");
+        let key = repo.canonical_root.join("docs").join("guide.md");
+        let pin = repo.markdown_files.pin();
+        let info = pin.get(&key).expect("indexed from the listing");
+        assert_eq!(info.url_path, "/docs/guide/");
+        assert!(info.frontmatter.is_none());
+    }
+
+    /// The server's non-recursive directory scan queues subfolders with their
+    /// vault paths.
+    #[test]
+    fn test_scan_folder_queues_subfolders_with_vault_paths() {
+        let repo = mem_repo(sample_mem_vault(), &[]);
+        repo.scan_folder(&PathBuf::from("docs")).expect("scan");
+        assert!(repo.queued_folders.is_empty(), "docs has no subfolders");
+        repo.scan_folder(&PathBuf::from(".")).expect("scan root");
+        let queued: Vec<String> = sorted(
+            repo.queued_folders
+                .pin()
+                .iter()
+                .map(|(_, queued)| queued.path.to_string())
+                .collect(),
+        );
+        // `.hidden` and `node_modules` are ignored; `docs` is already scanned
+        // but still listed as a child.
+        assert_eq!(queued, vec!["docs", "static"]);
+        assert!(
+            repo.scan_folder(&PathBuf::from("../escape")).is_ok(),
+            "a folder climbing out of the root is skipped, not an error"
+        );
+    }
+
+    /// On disk, the scan itself leaves other files' basic metadata unset — the
+    /// static build, which never runs `populate_basic_metadata`, publishes
+    /// exactly that in `media.json` — and the deferred pass fills it in.
+    #[test]
+    fn test_local_scan_defers_static_file_details() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join("static")).unwrap();
+        std::fs::write(dir.path().join("static/a.png"), b"12345").unwrap();
+        std::fs::write(dir.path().join("b.pdf"), b"123").unwrap();
+        let repo = test_repo(dir.path());
+        repo.scan_all().expect("scan");
+        repo.scan_static_folder().expect("static scan");
+        let sizes = |repo: &Repo| -> Vec<(String, Option<u64>)> {
+            let pin = repo.other_files.pin();
+            let mut v: Vec<_> = pin
+                .iter()
+                .map(|(_, i)| (i.url_path.clone(), i.metadata.file_size_bytes))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            sizes(&repo),
+            vec![("/a.png".to_string(), None), ("/b.pdf".to_string(), None)]
+        );
+        repo.populate_basic_metadata();
+        assert_eq!(
+            sizes(&repo),
+            vec![
+                ("/a.png".to_string(), Some(5)),
+                ("/b.pdf".to_string(), Some(3))
+            ]
         );
     }
 

@@ -1451,7 +1451,7 @@ fn is_rooted(path: &Path) -> bool {
 
 /// Canonicalizes `path`, falling back to lexical normalization when it does not
 /// exist. Never fails, so a not-yet-created path still gets a comparable form.
-fn resolve_existing_or_lexical(path: &Path) -> PathBuf {
+pub(crate) fn resolve_existing_or_lexical(path: &Path) -> PathBuf {
     path.canonicalize()
         .unwrap_or_else(|_| lexically_normalize(path))
 }

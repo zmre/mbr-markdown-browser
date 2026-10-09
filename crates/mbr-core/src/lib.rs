@@ -78,6 +78,7 @@ pub mod templates;
 mod test_support;
 pub mod url_helpers;
 pub mod url_path;
+pub mod vault;
 pub mod vid;
 #[cfg(feature = "media-metadata")]
 pub mod video_metadata;

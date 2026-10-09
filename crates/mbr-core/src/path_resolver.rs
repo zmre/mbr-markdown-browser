@@ -2,64 +2,36 @@
 //!
 //! This module contains pure functions for determining what resource to serve
 //! based on a URL path. By keeping this logic separate from I/O, it becomes
-//! easily testable.
+//! easily testable. Every filesystem question it asks goes through a
+//! [`Vault`]: `stat` for the probes, [`resolve_under`] for containment.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// Safely joins a base directory with a request path, preventing path traversal.
+use crate::vault::{EntryKind, Vault, VaultPath, resolve_under};
+
+/// Safely resolves a request path inside the vault, preventing path traversal.
 ///
-/// Returns `None` if the resulting path would escape the base directory.
-/// The path is canonicalized to resolve symlinks and `..` components.
+/// Returns `None` if the path is not a valid [`VaultPath`] (it climbs above
+/// the root, or is absolute) or resolves outside the vault once symlinks are
+/// followed. See [`resolve_under`] for the exact answers.
 ///
 /// # Security
 ///
 /// This function guards against path traversal attacks by:
-/// 1. Canonicalizing both the base directory and the joined path
-/// 2. Verifying the resolved path starts with the base directory
-fn safe_join(
-    base_dir: &Path,
-    canonical_base_dir: Option<&Path>,
-    request_path: &str,
-) -> Option<PathBuf> {
-    // Use pre-computed canonical base if available, otherwise canonicalize per-call
-    let owned_canonical;
-    let canonical_base = match canonical_base_dir {
-        Some(cached) => cached,
-        None => {
-            owned_canonical = base_dir.canonicalize().ok()?;
-            &owned_canonical
-        }
-    };
-
-    // Build candidate from canonical_base (not base_dir) to ensure all path
-    // construction happens in canonical space. This prevents subtle issues
-    // if base_dir itself contains symlinks.
-    let candidate = canonical_base.join(request_path);
-
-    // Canonicalizing resolves ".." and symlinks, so its *result* is the only
-    // trustworthy answer for a path that exists.
-    match candidate.canonicalize() {
-        // The path exists. It is safe only if it resolves inside the base.
-        // Returning `None` here is load-bearing: falling through to the
-        // "doesn't exist yet" branch below would validate only the parent and
-        // then hand back the *unresolved* path, so a final component that is a
-        // symlink out of the repo (`passwd -> /etc/passwd`) would be served.
-        Ok(canonical) => canonical.starts_with(canonical_base).then_some(canonical),
-
-        // The path does not exist yet (e.g. probing markdown extensions for
-        // `/foo/` -> `foo.md`). Verify the parent is inside the base and
-        // rebuild the full path from the canonical parent.
-        Err(_) => {
-            let canonical_parent = candidate.parent()?.canonicalize().ok()?;
-            if !canonical_parent.starts_with(canonical_base) {
-                return None;
-            }
-            Some(canonical_parent.join(candidate.file_name()?))
-        }
-    }
+/// 1. Normalizing the request lexically, refusing any `..` that would climb
+///    above the root
+/// 2. Canonicalizing the joined path inside the vault
+/// 3. Verifying the resolved path is still inside the vault
+fn safe_join(vault: &dyn Vault, request_path: &str) -> Option<VaultPath> {
+    let request = VaultPath::new(request_path).ok()?;
+    resolve_under(vault, &VaultPath::root(), &request)
 }
 
 /// The result of resolving a URL path to a resource.
+///
+/// Paths are index keys ([`Vault::key`]) — for a [`crate::vault::LocalVault`],
+/// canonical filesystem paths, as they have always been.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedPath {
     /// Serve a static file directly (non-markdown)
@@ -87,12 +59,17 @@ pub enum ResolvedPath {
 }
 
 /// Configuration for path resolution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PathResolverConfig<'a> {
-    pub base_dir: &'a Path,
-    /// Pre-computed canonical base directory. Avoids calling `canonicalize()` on every request.
-    /// If `None`, `safe_join` will canonicalize on each call (backward-compatible fallback).
-    pub canonical_base_dir: Option<&'a Path>,
+    /// The repository ([`crate::repo::Repo::vault`]).
+    pub vault: &'a dyn Vault,
+    /// The external static overlay ([`crate::repo::Repo::static_vault`]), when
+    /// `static_folder` resolves outside the repository. Takes precedence over
+    /// `static_folder`, which then only names it.
+    pub static_vault: Option<&'a dyn Vault>,
+    /// The configured static folder. Without a `static_vault`, it is placed
+    /// inside `vault` ([`crate::vault::configured_folder`]); a value that lands
+    /// nowhere in the vault disables the overlay.
     pub static_folder: &'a str,
     pub markdown_extensions: &'a [String],
     pub index_file: &'a str,
@@ -107,12 +84,12 @@ pub struct PathResolverConfig<'a> {
 /// handler but impossible for anything that must outlive the borrow — notably
 /// the `'static` closure [`crate::link_transform::LinkTransformConfig`] carries
 /// to answer "does this link target resolve to a markdown page?". Owning the
-/// values costs a handful of small clones per page render and keeps a single
-/// definition of the resolution inputs.
+/// values costs a handful of small clones (and two `Arc` bumps) per page render
+/// and keeps a single definition of the resolution inputs.
 #[derive(Debug, Clone)]
 pub struct OwnedPathResolverConfig {
-    pub base_dir: PathBuf,
-    pub canonical_base_dir: Option<PathBuf>,
+    pub vault: Arc<dyn Vault>,
+    pub static_vault: Option<Arc<dyn Vault>>,
     pub static_folder: String,
     pub markdown_extensions: Vec<String>,
     pub index_file: String,
@@ -123,26 +100,31 @@ impl OwnedPathResolverConfig {
     /// Borrows this configuration as the form [`resolve_request_path`] takes.
     pub fn as_config(&self) -> PathResolverConfig<'_> {
         PathResolverConfig {
-            base_dir: &self.base_dir,
-            canonical_base_dir: self.canonical_base_dir.as_deref(),
+            vault: self.vault.as_ref(),
+            static_vault: self.static_vault.as_deref(),
             static_folder: &self.static_folder,
             markdown_extensions: &self.markdown_extensions,
             index_file: &self.index_file,
             tag_sources: &self.tag_sources,
         }
     }
-}
 
-impl PathResolverConfig<'_> {
-    /// Clones this configuration into its owned form.
-    pub fn to_owned_config(&self) -> OwnedPathResolverConfig {
-        OwnedPathResolverConfig {
-            base_dir: self.base_dir.to_path_buf(),
-            canonical_base_dir: self.canonical_base_dir.map(Path::to_path_buf),
-            static_folder: self.static_folder.to_string(),
-            markdown_extensions: self.markdown_extensions.to_vec(),
-            index_file: self.index_file.to_string(),
-            tag_sources: self.tag_sources.to_vec(),
+    /// The configuration for `repo`'s storage — its vault and static overlay —
+    /// with the given resolution settings.
+    pub fn for_repo(
+        repo: &crate::repo::Repo,
+        static_folder: &str,
+        markdown_extensions: &[String],
+        index_file: &str,
+        tag_sources: Vec<String>,
+    ) -> Self {
+        Self {
+            vault: Arc::clone(repo.vault()),
+            static_vault: repo.static_vault().cloned(),
+            static_folder: static_folder.to_string(),
+            markdown_extensions: markdown_extensions.to_vec(),
+            index_file: index_file.to_string(),
+            tag_sources,
         }
     }
 }
@@ -199,8 +181,9 @@ pub fn normalize_link_target(href: &str) -> String {
 
 /// Resolves a URL path to determine what resource should be served.
 ///
-/// This is a pure function that performs filesystem checks but no I/O operations
-/// like reading file contents. It determines the type of resource to serve.
+/// This is a pure function that performs filesystem checks (through
+/// `config.vault`) but no I/O operations like reading file contents. It
+/// determines the type of resource to serve.
 ///
 /// # Resolution Order
 ///
@@ -222,30 +205,38 @@ pub fn normalize_link_target(href: &str) -> String {
 /// Path traversal attacks (e.g., `../../../etc/passwd`) are blocked by validating
 /// that all resolved paths remain within the configured base directory.
 pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> ResolvedPath {
+    let vault = config.vault;
+    // Step 4 and step 4b ask the same question; answer it at most once.
+    let mut static_checked = false;
+
     // Use safe_join to prevent path traversal attacks
     // If the path would escape base_dir, skip to tag resolution or NotFound
-    if let Some(candidate_path) =
-        safe_join(config.base_dir, config.canonical_base_dir, request_path)
-    {
+    if let Some(candidate) = safe_join(vault, request_path) {
+        // One `stat` answers both "is it a file" and "is it a directory".
+        let kind = vault
+            .stat(&candidate)
+            .ok()
+            .flatten()
+            .map(|entry| entry.kind);
+
         // 1. Direct file match
-        if candidate_path.is_file() {
-            return if is_markdown_file(&candidate_path, config.markdown_extensions) {
-                ResolvedPath::MarkdownFile(candidate_path)
+        if kind == Some(EntryKind::File) {
+            let name = Path::new(candidate.file_name().unwrap_or_default());
+            let key = vault.key(&candidate);
+            return if is_markdown_file(name, config.markdown_extensions) {
+                ResolvedPath::MarkdownFile(key)
             } else {
-                ResolvedPath::StaticFile(candidate_path)
+                ResolvedPath::StaticFile(key)
             };
         }
 
         // 2. Directory with configured index file
-        if candidate_path.is_dir() {
-            let index_path = candidate_path.join(config.index_file);
-            if index_path.is_file() {
-                return ResolvedPath::MarkdownFile(index_path);
-            }
+        if kind == Some(EntryKind::Dir)
+            && let Ok(index_path) = candidate.join(config.index_file)
+            && vault.is_file(&index_path)
+        {
+            return ResolvedPath::MarkdownFile(vault.key(&index_path));
         }
-
-        // 3. Try markdown extensions on base path (for /foo/ → foo.md)
-        let candidate_base = strip_trailing_separator(&candidate_path);
 
         // 3a. Check for non-canonical index URL (e.g., /x/index/ should redirect to /x/)
         // This must come before step 3 to catch URLs like /docs/index/ before they resolve
@@ -254,67 +245,50 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
             .and_then(|s| s.to_str())
             .unwrap_or("index");
 
-        if let Some(file_name) = candidate_base.file_name().and_then(|f| f.to_str())
-            && file_name == index_stem
+        if candidate.file_name() == Some(index_stem)
+            && let Some(parent) = candidate.parent()
+            && let Ok(index_path) = parent.join(config.index_file)
+            && vault.is_file(&index_path)
         {
-            // Check if parent directory contains the actual index file
-            if let Some(parent) = candidate_base.parent() {
-                let index_path = parent.join(config.index_file);
-                if index_path.is_file() {
-                    // Build canonical URL: /x/index/ → /x/
-                    // Use pre-computed canonical base if available
-                    let owned_base;
-                    let canonical_base = match config.canonical_base_dir {
-                        Some(cached) => Some(cached),
-                        None => {
-                            owned_base = config.base_dir.canonicalize().ok();
-                            owned_base.as_deref()
-                        }
-                    };
-                    let canonical = canonical_base
-                        .and_then(|base| pathdiff::diff_paths(parent, base))
-                        .map(|p| {
-                            // `path_to_url`, not `to_string_lossy`: this value is
-                            // a redirect target, so it must stay `/`-separated
-                            // rather than becoming `/a\b\c/` on Windows.
-                            let s = crate::url_path::path_to_url(&p);
-                            if s.is_empty() {
-                                "/".to_string()
-                            } else {
-                                format!("/{}/", s)
-                            }
-                        })
-                        .unwrap_or_else(|| "/".to_string());
-                    return ResolvedPath::Redirect(canonical);
-                }
-            }
+            // Build canonical URL: /x/index/ → /x/. The parent is already the
+            // canonical vault path, which is `/`-separated on every platform.
+            let canonical = if parent.is_root() {
+                "/".to_string()
+            } else {
+                format!("/{parent}/")
+            };
+            return ResolvedPath::Redirect(canonical);
         }
 
-        if let Some(md_path) = find_markdown_file(&candidate_base, config.markdown_extensions) {
-            return ResolvedPath::MarkdownFile(md_path);
+        // 3. Try markdown extensions on base path (for /foo/ → foo.md)
+        if let Some(md_path) = find_markdown_file(vault, &candidate, config.markdown_extensions) {
+            return ResolvedPath::MarkdownFile(vault.key(&md_path));
         }
 
         // 4. Check static folder (has its own path traversal protection)
+        static_checked = true;
         if let Some(static_path) = find_in_static_folder(config, request_path) {
             return ResolvedPath::StaticFile(static_path);
         }
 
         // 5. Directory with index.{markdown_ext}
-        if candidate_base.is_dir() {
-            let index_base = candidate_base.join("index");
-            if let Some(md_path) = find_markdown_file(&index_base, config.markdown_extensions) {
-                return ResolvedPath::MarkdownFile(md_path);
+        if kind == Some(EntryKind::Dir) {
+            if let Ok(index_base) = candidate.join("index")
+                && let Some(md_path) =
+                    find_markdown_file(vault, &index_base, config.markdown_extensions)
+            {
+                return ResolvedPath::MarkdownFile(vault.key(&md_path));
             }
 
             // 6. Directory without index → listing
-            return ResolvedPath::DirectoryListing(candidate_base);
+            return ResolvedPath::DirectoryListing(vault.key(&candidate));
         }
     }
 
     // 4b. Static folder check - ALSO check here for paths not in base_dir
     // This handles the case where the path doesn't exist in base_dir but exists in static folder
     // (e.g., /images/blog/photo.png where images/ only exists under static/)
-    if let Some(static_path) = find_in_static_folder(config, request_path) {
+    if !static_checked && let Some(static_path) = find_in_static_folder(config, request_path) {
         return ResolvedPath::StaticFile(static_path);
     }
 
@@ -342,7 +316,11 @@ fn is_markdown_file(path: &Path, extensions: &[String]) -> bool {
 /// from a request URL, where the separator is *always* `/` regardless of
 /// platform — trimming only `std::path::MAIN_SEPARATOR` silently did nothing on
 /// Windows, leaving a trailing slash on the candidate path.
-fn strip_trailing_separator(path: &Path) -> PathBuf {
+///
+/// The resolver itself no longer needs this — a [`VaultPath`] never carries a
+/// trailing separator — but it remains the one definition for callers that
+/// still hold native paths.
+pub fn strip_trailing_separator(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     let trimmed = s.trim_end_matches(['/', std::path::MAIN_SEPARATOR]);
     PathBuf::from(trimmed)
@@ -355,12 +333,20 @@ fn strip_trailing_separator(path: &Path) -> PathBuf {
 /// We therefore reverse that by *appending* the extension to the full stem;
 /// `Path::set_extension` would instead replace the trailing dotted segment
 /// (`a.b.c` -> `a.b.md`) and 404 on any file whose name contains a dot.
-fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf> {
-    let file_name = base_path.file_name()?.to_str()?;
+///
+/// The vault root has no name, so it never probes for a sibling of the
+/// repository (`<parent>/<repo>.md`), which the path-based version did.
+fn find_markdown_file(
+    vault: &dyn Vault,
+    base_path: &VaultPath,
+    extensions: &[String],
+) -> Option<VaultPath> {
+    let file_name = base_path.file_name()?;
+    let parent = base_path.parent()?;
     extensions
         .iter()
-        .map(|ext| base_path.with_file_name(format!("{file_name}.{ext}")))
-        .find(|path| path.is_file())
+        .filter_map(|ext| parent.child(&format!("{file_name}.{ext}")).ok())
+        .find(|path| vault.is_file(path))
 }
 
 /// Finds a file in the static folder.
@@ -372,6 +358,8 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 /// allowed to live outside the repository root (`static_folder = "../static"`
 /// for the common `repo/content` + `repo/static` layout), so requiring every
 /// served file to sit under the repository root would 404 the entire overlay.
+/// An overlay outside the root is a vault of its own (`config.static_vault`);
+/// one inside it is a folder of `config.vault`.
 ///
 /// *How far* the overlay may reach is decided once, at load time, by
 /// `Config::validate_static_folder`: inside the root, or under a directory at
@@ -380,34 +368,24 @@ fn find_markdown_file(base_path: &Path, extensions: &[String]) -> Option<PathBuf
 /// still guarantee — and does — is that a *request path* cannot walk out of
 /// whatever directory that policy settled on, including through a symlink inside
 /// the overlay pointing at, say, `/etc/passwd`: the candidate is canonicalized
-/// before the `starts_with` check, so the symlink's target is what gets judged.
+/// before the containment check, so the symlink's target is what gets judged.
 fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Option<PathBuf> {
-    // Use the pre-computed canonical base if available, otherwise canonicalize.
-    let owned_root;
-    let canonical_root = match config.canonical_base_dir {
-        Some(cached) => cached,
-        None => {
-            owned_root = config.base_dir.canonicalize().ok()?;
-            &owned_root
-        }
+    let request = VaultPath::new(request_path).ok()?;
+    let (vault, static_dir) = match config.static_vault {
+        Some(overlay) => (overlay, VaultPath::root()),
+        None => (
+            config.vault,
+            crate::vault::configured_folder(config.vault, config.static_folder)?,
+        ),
     };
 
-    // `join` handles a rooted `static_folder` (absolute paths replace the base),
-    // and `canonicalize` both resolves `..`/symlinks and verifies existence.
-    let static_dir = canonical_root
-        .join(config.static_folder)
-        .canonicalize()
-        .ok()?;
-
-    let candidate = static_dir.join(request_path);
-
-    // Canonicalize to resolve any ".." or symlinks, then verify containment
-    let canonical = candidate.canonicalize().ok()?;
-    if canonical.starts_with(&static_dir) && canonical.is_file() {
-        Some(canonical)
-    } else {
-        None
-    }
+    // Canonicalize the static directory (it must exist) and the candidate
+    // (which must exist too — unlike `resolve_under`, there is no "probe a
+    // name that is not there yet" here, so a miss costs no second lookup),
+    // then require the candidate to still be inside the former.
+    let static_dir = vault.canonicalize(&static_dir).ok()?;
+    let canonical = vault.canonicalize(&static_dir.join_path(&request)).ok()?;
+    (canonical.starts_with(&static_dir) && vault.is_file(&canonical)).then(|| vault.key(&canonical))
 }
 
 /// Attempts to resolve a URL path as a tag URL.
@@ -469,13 +447,31 @@ fn try_resolve_tag_url(request_path: &str, tag_sources: &[String]) -> Option<Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::LocalVault;
     use std::fs;
     use tempfile::TempDir;
+
+    /// `safe_join` on a local vault rooted at `base`, answered as the key
+    /// (canonical path) it resolves to — the shape the path-based `safe_join`
+    /// returned, so the security tests below assert exactly what they did.
+    fn safe_join_local(base: &Path, request: &str) -> Option<PathBuf> {
+        let vault = LocalVault::new(base);
+        safe_join(&vault, request).map(|p| vault.key(&p))
+    }
+
+    /// The overlay vault the repository would build for `static_folder`, using
+    /// the same policy call `Repo::init` makes.
+    fn overlay_vault(root: &Path, static_folder: &str) -> Option<LocalVault> {
+        match crate::config::resolve_static_overlay(root, static_folder) {
+            Ok(crate::config::StaticOverlay::External(dir)) => Some(LocalVault::new(dir)),
+            _ => None,
+        }
+    }
 
     /// Test fixture that owns the extensions and tag_sources vectors
     struct TestFixture {
         dir: TempDir,
-        canonical: PathBuf,
+        vault: LocalVault,
         extensions: Vec<String>,
         tag_sources: Vec<String>,
     }
@@ -484,10 +480,10 @@ mod tests {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
-            let canonical = dir.path().canonicalize().unwrap();
+            let vault = LocalVault::new(dir.path());
             Self {
                 dir,
-                canonical,
+                vault,
                 extensions: vec![String::from("md")],
                 tag_sources: vec![],
             }
@@ -496,10 +492,10 @@ mod tests {
         fn with_extensions(extensions: Vec<String>) -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
-            let canonical = dir.path().canonicalize().unwrap();
+            let vault = LocalVault::new(dir.path());
             Self {
                 dir,
-                canonical,
+                vault,
                 extensions,
                 tag_sources: vec![],
             }
@@ -508,10 +504,10 @@ mod tests {
         fn with_tag_sources(tag_sources: Vec<String>) -> Self {
             let dir = TempDir::new().unwrap();
             fs::create_dir(dir.path().join("static")).unwrap();
-            let canonical = dir.path().canonicalize().unwrap();
+            let vault = LocalVault::new(dir.path());
             Self {
                 dir,
-                canonical,
+                vault,
                 extensions: vec![String::from("md")],
                 tag_sources,
             }
@@ -519,8 +515,8 @@ mod tests {
 
         fn config(&self) -> PathResolverConfig<'_> {
             PathResolverConfig {
-                base_dir: self.dir.path(),
-                canonical_base_dir: Some(&self.canonical),
+                vault: &self.vault,
+                static_vault: None,
                 static_folder: "static",
                 markdown_extensions: &self.extensions,
                 index_file: "index.md",
@@ -1209,16 +1205,16 @@ mod tests {
         fs::write(base.join("inside.txt"), "inside").unwrap();
 
         // Valid path should work
-        let valid = safe_join(base, None, "inside.txt");
+        let valid = safe_join_local(base, "inside.txt");
         assert!(valid.is_some(), "Valid path should work");
         assert!(valid.unwrap().ends_with("inside.txt"));
 
         // Path traversal should be blocked
-        let attack = safe_join(base, None, "../../../etc/passwd");
+        let attack = safe_join_local(base, "../../../etc/passwd");
         assert!(attack.is_none(), "Path traversal should be blocked");
 
         // Complex traversal should be blocked
-        let attack2 = safe_join(base, None, "foo/../../../etc/passwd");
+        let attack2 = safe_join_local(base, "foo/../../../etc/passwd");
         assert!(
             attack2.is_none(),
             "Complex path traversal should be blocked"
@@ -1235,7 +1231,7 @@ mod tests {
         fs::write(base.join("foo/sibling.txt"), "sibling").unwrap();
 
         // Going up and back down within base_dir should work
-        let valid = safe_join(base, None, "foo/bar/../sibling.txt");
+        let valid = safe_join_local(base, "foo/bar/../sibling.txt");
         assert!(valid.is_some(), "Internal navigation should work");
         let resolved = valid.unwrap();
         assert!(
@@ -1273,9 +1269,10 @@ mod tests {
             if symlink("/tmp", &link_path).is_ok() {
                 let extensions = vec![String::from("md")];
                 let tag_sources: Vec<String> = vec![];
+                let vault = LocalVault::new(base);
                 let config = PathResolverConfig {
-                    base_dir: base,
-                    canonical_base_dir: None,
+                    vault: &vault,
+                    static_vault: None,
                     static_folder: "static",
                     markdown_extensions: &extensions,
                     index_file: "index.md",
@@ -1308,7 +1305,7 @@ mod tests {
         symlink(&secret, base.join("passwd")).unwrap();
 
         assert_eq!(
-            safe_join(base, None, "passwd"),
+            safe_join_local(base, "passwd"),
             None,
             "a symlink resolving outside the base must not be joined"
         );
@@ -1328,7 +1325,7 @@ mod tests {
         symlink("../../outside.txt", base.join("escape.txt")).unwrap();
 
         assert_eq!(
-            safe_join(&base, None, "escape.txt"),
+            safe_join_local(&base, "escape.txt"),
             None,
             "a relative symlink resolving outside the base must not be joined"
         );
@@ -1345,7 +1342,7 @@ mod tests {
         fs::write(base.join("real.txt"), "inside").unwrap();
         symlink("real.txt", base.join("alias.txt")).unwrap();
 
-        let joined = safe_join(base, None, "alias.txt").expect("in-base symlink should resolve");
+        let joined = safe_join_local(base, "alias.txt").expect("in-base symlink should resolve");
         assert_eq!(joined, base.canonicalize().unwrap().join("real.txt"));
     }
 
@@ -1361,12 +1358,12 @@ mod tests {
         fs::write(base.join("docs/guide.md"), "# Guide").unwrap();
 
         assert_eq!(
-            safe_join(base, None, "docs/guide.md"),
+            safe_join_local(base, "docs/guide.md"),
             Some(canonical.join("docs/guide.md")),
             "an existing in-base file must resolve"
         );
         assert_eq!(
-            safe_join(base, None, "docs/guide"),
+            safe_join_local(base, "docs/guide"),
             Some(canonical.join("docs/guide")),
             "a not-yet-existing name under an in-base parent must resolve"
         );
@@ -1394,9 +1391,11 @@ mod tests {
         let extensions = vec![String::from("md")];
         let tag_sources: Vec<String> = vec![];
 
+        let vault = LocalVault::new(&base);
+        let peer_vault = overlay_vault(&canonical, "../static").expect("peer overlay accepted");
         let peer_overlay = PathResolverConfig {
-            base_dir: &base,
-            canonical_base_dir: Some(&canonical),
+            vault: &vault,
+            static_vault: Some(&peer_vault),
             static_folder: "../static",
             markdown_extensions: &extensions,
             index_file: "index.md",
@@ -1428,8 +1427,10 @@ mod tests {
         // An absolute overlay (only reachable via MBR_STATIC_FOLDER) behaves the
         // same way: it serves its own contents and contains request paths.
         let absolute = peer.to_string_lossy().into_owned();
+        let absolute_vault = overlay_vault(&canonical, &absolute).expect("absolute overlay");
         let absolute_overlay = PathResolverConfig {
             static_folder: &absolute,
+            static_vault: Some(&absolute_vault),
             ..peer_overlay
         };
         assert_eq!(
@@ -1469,9 +1470,11 @@ mod tests {
 
         let extensions = vec![String::from("md")];
         let tag_sources: Vec<String> = vec![];
+        let vault = LocalVault::new(&base);
+        let peer_vault = overlay_vault(&canonical, "../static").expect("peer overlay accepted");
         let config = PathResolverConfig {
-            base_dir: &base,
-            canonical_base_dir: Some(&canonical),
+            vault: &vault,
+            static_vault: Some(&peer_vault),
             static_folder: "../static",
             markdown_extensions: &extensions,
             index_file: "index.md",
@@ -1553,9 +1556,10 @@ mod tests {
 
         let extensions = vec![String::from("md")];
         let tag_sources: Vec<String> = vec![];
+        let vault = LocalVault::new(dir.path());
         let config = PathResolverConfig {
-            base_dir: dir.path(),
-            canonical_base_dir: None,
+            vault: &vault,
+            static_vault: None,
             static_folder: "", // Empty!
             markdown_extensions: &extensions,
             index_file: "index.md",
@@ -1583,38 +1587,27 @@ mod tests {
         assert_eq!(result, ResolvedPath::StaticFile(expected));
     }
 
-    // Only the macOS and Linux canonicalize() behaviors are asserted below, so
-    // the test is gated to those platforms rather than silently passing
-    // elsewhere.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    /// A trailing slash on a static file request. This used to depend on the
+    /// platform's `canonicalize()`: macOS tolerated `photo.png/` and served the
+    /// file, Linux rejected it with `ENOTDIR` and 404'd. A request path is now
+    /// normalized into a `VaultPath` before the filesystem sees it, so a
+    /// trailing separator means nothing anywhere and every platform answers as
+    /// macOS did — which is also what the root-folder half of the resolver
+    /// already answered on Linux, through `safe_join`'s missing-file branch.
     #[test]
     fn test_static_folder_with_trailing_slash_request() {
-        // Request "images/photo.png/" with trailing slash
-        // Behavior is platform-dependent:
-        // - macOS: canonicalize() tolerates trailing slashes on file paths
-        // - Linux: canonicalize() rejects trailing slashes on file paths
         let fixture = TestFixture::new();
         fs::create_dir_all(fixture.path().join("static/images")).unwrap();
         fs::write(fixture.path().join("static/images/photo.png"), "img").unwrap();
 
         let result = resolve_request_path(&fixture.config(), "images/photo.png/");
 
-        #[cfg(target_os = "macos")]
-        {
-            // macOS tolerates trailing slash on file paths
-            let expected = fixture
-                .path()
-                .join("static/images/photo.png")
-                .canonicalize()
-                .unwrap();
-            assert_eq!(result, ResolvedPath::StaticFile(expected));
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux rejects trailing slash on file paths (stricter behavior)
-            assert_eq!(result, ResolvedPath::NotFound);
-        }
+        let expected = fixture
+            .path()
+            .join("static/images/photo.png")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(result, ResolvedPath::StaticFile(expected));
     }
 
     #[test]
@@ -1638,11 +1631,145 @@ mod tests {
             .unwrap();
         assert_eq!(result, ResolvedPath::StaticFile(expected));
     }
+
+    // ==================== Non-local vaults ====================
+
+    fn mem_fixture() -> crate::vault::MemVault {
+        crate::vault::MemVault::new()
+            .with_file("readme.md", "# R")
+            .with_file("docs/index.md", "# D")
+            .with_file("docs/guide.md", "# G")
+            .with_file("notes/a.b.md", "# AB")
+            .with_file("img.png", "png")
+            .with_file("static/images/photo.png", "img")
+            .with_file("static/readme.md", "# shadowed")
+            .with_dir("empty")
+    }
+
+    /// Every resolution step answers the same through a vault that has no
+    /// filesystem at all.
+    #[test]
+    fn test_mem_vault_resolves_every_kind() {
+        let vault = mem_fixture();
+        let extensions = vec![String::from("md")];
+        let tag_sources = vec![String::from("tags")];
+        let config = PathResolverConfig {
+            vault: &vault,
+            static_vault: None,
+            static_folder: "static",
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+        };
+        let root = PathBuf::from(crate::vault::MemVault::DEFAULT_ROOT);
+        let key = |rel: &str| VaultPath::new(rel).unwrap().to_native(&root);
+        let cases = [
+            ("readme.md", ResolvedPath::MarkdownFile(key("readme.md"))),
+            ("readme/", ResolvedPath::MarkdownFile(key("readme.md"))),
+            ("readme", ResolvedPath::MarkdownFile(key("readme.md"))),
+            ("docs", ResolvedPath::MarkdownFile(key("docs/index.md"))),
+            ("docs/", ResolvedPath::MarkdownFile(key("docs/index.md"))),
+            ("docs/index/", ResolvedPath::Redirect("/docs/".to_string())),
+            (
+                "docs/guide/",
+                ResolvedPath::MarkdownFile(key("docs/guide.md")),
+            ),
+            (
+                "notes/a.b/",
+                ResolvedPath::MarkdownFile(key("notes/a.b.md")),
+            ),
+            ("img.png", ResolvedPath::StaticFile(key("img.png"))),
+            (
+                "images/photo.png",
+                ResolvedPath::StaticFile(key("static/images/photo.png")),
+            ),
+            ("empty/", ResolvedPath::DirectoryListing(key("empty"))),
+            ("notes", ResolvedPath::DirectoryListing(key("notes"))),
+            ("", ResolvedPath::DirectoryListing(root.clone())),
+            ("missing/", ResolvedPath::NotFound),
+            ("../readme.md", ResolvedPath::NotFound),
+            ("/readme.md", ResolvedPath::NotFound),
+            (
+                "tags/rust/",
+                ResolvedPath::TagPage {
+                    source: "tags".to_string(),
+                    value: "rust".to_string(),
+                },
+            ),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(
+                resolve_request_path(&config, request),
+                expected,
+                "{request:?}"
+            );
+        }
+    }
+
+    /// An external overlay is a vault of its own, whatever it is backed by.
+    #[test]
+    fn test_mem_vault_external_overlay() {
+        let vault = mem_fixture();
+        let overlay = crate::vault::MemVault::with_root("/mbr-mem-overlay")
+            .with_file("logo.png", "PNG")
+            .with_file("css/site.css", "body{}");
+        let extensions = vec![String::from("md")];
+        let tag_sources: Vec<String> = vec![];
+        let config = PathResolverConfig {
+            vault: &vault,
+            static_vault: Some(&overlay),
+            static_folder: "../static",
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+        };
+        assert_eq!(
+            resolve_request_path(&config, "css/site.css"),
+            ResolvedPath::StaticFile(
+                PathBuf::from("/mbr-mem-overlay")
+                    .join("css")
+                    .join("site.css")
+            )
+        );
+        // The in-vault `static/` folder is not consulted once an overlay is set.
+        assert_eq!(
+            resolve_request_path(&config, "images/photo.png"),
+            ResolvedPath::NotFound
+        );
+        assert_eq!(find_in_static_folder(&config, "../logo.png"), None);
+    }
+
+    /// The vault root has no name, so resolving `/` in a repository without an
+    /// index never probes `<parent>/<repo>.md` — a file *outside* the
+    /// repository the path-based resolver would have served at `/`.
+    #[test]
+    fn test_root_request_never_probes_a_sibling_of_the_repository() {
+        let outer = TempDir::new().unwrap();
+        let repo = outer.path().join("notes");
+        fs::create_dir(&repo).unwrap();
+        fs::write(outer.path().join("notes.md"), "# Outside the repository").unwrap();
+        let vault = LocalVault::new(&repo);
+        let extensions = vec![String::from("md")];
+        let tag_sources: Vec<String> = vec![];
+        let config = PathResolverConfig {
+            vault: &vault,
+            static_vault: None,
+            static_folder: "static",
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+        };
+        assert_eq!(
+            resolve_request_path(&config, ""),
+            ResolvedPath::DirectoryListing(vault.root().to_path_buf())
+        );
+    }
 }
 
 #[cfg(test)]
 mod proptests {
     use super::*;
+    use crate::vault::LocalVault;
     use proptest::prelude::*;
     use std::fs;
     use tempfile::TempDir;
@@ -1737,9 +1864,10 @@ mod proptests {
 
             let extensions = vec![String::from("md")];
             let tag_sources: Vec<String> = vec![];
+            let vault = LocalVault::new(dir.path());
             let config = PathResolverConfig {
-                base_dir: dir.path(),
-                canonical_base_dir: None,
+                vault: &vault,
+                static_vault: None,
                 static_folder: "static",
                 markdown_extensions: &extensions,
                 index_file: "index.md",
@@ -1767,9 +1895,10 @@ mod proptests {
 
             let extensions = vec![String::from("md")];
             let tag_sources: Vec<String> = vec![];
+            let vault = LocalVault::new(base_dir);
             let config = PathResolverConfig {
-                base_dir,
-                canonical_base_dir: None,
+                vault: &vault,
+                static_vault: None,
                 static_folder: "static",
                 markdown_extensions: &extensions,
                 index_file: "index.md",
@@ -1788,6 +1917,42 @@ mod proptests {
                 let result1 = resolve_request_path(&config, &attack_path);
                 let result2 = resolve_request_path(&config, &attack_path);
                 prop_assert_eq!(result1, result2, "Results should be deterministic for {:?}", attack_path);
+            }
+        }
+
+        /// Whatever the request — separators, dots, encodings, drive letters —
+        /// anything resolved is inside the vault.
+        #[test]
+        fn prop_resolved_paths_stay_inside_the_vault(
+            request in "[a-z./\\\\%:C]{0,24}"
+        ) {
+            let vault = crate::vault::MemVault::new()
+                .with_file("a/b.md", "# B")
+                .with_file("static/c.png", "c")
+                .with_file("d.md", "# D");
+            let extensions = vec![String::from("md")];
+            let tag_sources: Vec<String> = vec![];
+            let config = PathResolverConfig {
+                vault: &vault,
+                static_vault: None,
+                static_folder: "static",
+                markdown_extensions: &extensions,
+                index_file: "index.md",
+                tag_sources: &tag_sources,
+            };
+            match resolve_request_path(&config, &request) {
+                ResolvedPath::StaticFile(p)
+                | ResolvedPath::MarkdownFile(p)
+                | ResolvedPath::DirectoryListing(p) => {
+                    prop_assert!(
+                        p.starts_with(crate::vault::MemVault::DEFAULT_ROOT),
+                        "{:?} resolved to {:?}", request, p
+                    );
+                }
+                ResolvedPath::Redirect(url) => {
+                    prop_assert!(url.starts_with('/') && !url.contains(".."), "{:?}", url);
+                }
+                _ => {}
             }
         }
     }

@@ -123,6 +123,99 @@ pub fn assert_html_not_contains(html: &str, unexpected: &str) {
     );
 }
 
+/// Bytes of the overlay's `images/logo.png` in [`PeerStaticSite`].
+#[allow(dead_code)]
+pub const PEER_LOGO_BYTES: &[u8] = b"\x89PNG\r\n\x1a\npeer-overlay logo";
+/// Bytes of the overlay's `pdfs/doc.pdf` in [`PeerStaticSite`].
+#[allow(dead_code)]
+pub const PEER_PDF_BYTES: &[u8] = b"%PDF-1.4\npeer-overlay document\n%%EOF\n";
+
+/// A content root with a **peer** static folder, the layout the static-overlay
+/// regressions keep coming back to:
+///
+/// ```text
+/// site/
+///   content/            <- repository root; .mbr/config.toml: static_folder = "../static"
+///     index.md          links /images/logo.png and notes/guide.md
+///     notes/guide.md    links ../images/logo.png and /pdfs/doc.pdf
+///   static/
+///     images/logo.png
+///     pdfs/doc.pdf
+/// ```
+///
+/// The paths are canonical (the temp dir is canonicalized first), so they can
+/// be compared with what the scanner and resolver produce.
+#[allow(dead_code)]
+pub struct PeerStaticSite {
+    _dir: TempDir,
+    /// `site/`.
+    pub site: PathBuf,
+    /// `site/content/`, the repository root.
+    pub content: PathBuf,
+    /// `site/static/`, the overlay.
+    pub static_dir: PathBuf,
+}
+
+#[allow(dead_code)]
+impl PeerStaticSite {
+    pub fn new() -> Self {
+        let dir = TempDir::new().expect("Failed to create temp directory");
+        let site = dir
+            .path()
+            .canonicalize()
+            .expect("Failed to canonicalize temp directory")
+            .join("site");
+        let content = site.join("content");
+        let static_dir = site.join("static");
+        let write = |path: PathBuf, bytes: &[u8]| {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, bytes).expect("write fixture file");
+        };
+        write(
+            content.join(".mbr/config.toml"),
+            b"static_folder = \"../static\"\n",
+        );
+        write(
+            content.join("index.md"),
+            b"# Home\n\n![logo](/images/logo.png)\n\n[guide](notes/guide.md)\n",
+        );
+        write(
+            content.join("notes/guide.md"),
+            b"# Guide\n\n![logo](../images/logo.png)\n\n[pdf](/pdfs/doc.pdf)\n",
+        );
+        write(static_dir.join("images/logo.png"), PEER_LOGO_BYTES);
+        write(static_dir.join("pdfs/doc.pdf"), PEER_PDF_BYTES);
+        Self {
+            _dir: dir,
+            site,
+            content,
+            static_dir,
+        }
+    }
+
+    /// The configuration `mbr` would load for this site, read through the real
+    /// `.mbr/config.toml` (so `static_folder = "../static"` comes from the file,
+    /// not from the test).
+    pub fn config(&self) -> mbr::Config {
+        let config = mbr::Config::read(&self.content).expect("read site config");
+        assert_eq!(
+            config.root_dir, self.content,
+            "the site config is rooted at content/"
+        );
+        assert_eq!(
+            config.static_folder, "../static",
+            "the fixture's config.toml must be what sets the peer static folder"
+        );
+        config
+    }
+}
+
+impl Default for PeerStaticSite {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

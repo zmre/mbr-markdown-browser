@@ -24,16 +24,17 @@
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use regex::{Captures, Regex};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
+use std::path::PathBuf;
 
-use crate::file_write::{FileWriteLocks, atomic_write};
+use crate::file_write::FileWriteLocks;
 use crate::link_grep::{
-    compute_patterns_for_folder, compute_relative_path, get_folder_url_path, page_and_folder_urls,
+    LinkScanFile, compute_patterns_for_folder, compute_relative_path, get_folder_url_path,
+    link_scan_files,
 };
 use mbr_core::link_index::{is_internal_link, normalize_url_path, resolve_relative_url};
 use mbr_core::relationships::normalize_name;
-use mbr_core::repo::{is_markdown_extension, should_ignore};
+use mbr_core::repo::is_markdown_extension;
+use mbr_core::vault::{Vault, VaultPath};
 use mbr_core::wikilink_index::WikilinkIndex;
 
 /// The bare link "bases" that could reference `old_url` from `source_folder`:
@@ -392,7 +393,8 @@ pub fn rewrite_bare_wikilink(content: &str, old_name: &str, new_stem: &str) -> S
 /// walker's read is kept rather than overwritten. With `locks` `None` there is
 /// no other writer to exclude and `observed` is used as is.
 fn rewrite_in_place(
-    path: &Path,
+    vault: &dyn Vault,
+    path: &VaultPath,
     observed: &str,
     locks: Option<&FileWriteLocks>,
     rewrite: impl Fn(&str) -> String,
@@ -401,76 +403,52 @@ fn rewrite_in_place(
         return Ok(false);
     }
     let Some(locks) = locks else {
-        atomic_write(path, rewrite(observed).as_bytes())?;
+        vault.write_atomic(path, rewrite(observed).as_bytes())?;
         return Ok(true);
     };
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let key = vault
+        .canonicalize(path)
+        .map(|canonical| vault.key(&canonical))
+        .unwrap_or_else(|_| vault.key(path));
     let _guard = locks.lock_blocking(&key);
-    let current = std::fs::read_to_string(path)?;
+    let current = vault.read_to_string(path)?;
     let rewritten = rewrite(&current);
     if rewritten == current {
         return Ok(false);
     }
-    atomic_write(path, rewritten.as_bytes())?;
+    vault.write_atomic(path, rewritten.as_bytes())?;
     Ok(true)
 }
 
-/// Iterates markdown files under `root_dir`, skipping ignored directories and
-/// the paths in `skip_abs`. Yields `(path, page_url, folder_url)` for each, as
-/// computed by [`page_and_folder_urls`] — so with `index_file` supplied the
-/// page URL is the canonical one (`docs/index.md` → `/docs/`) while the folder
-/// URL stays the one relative links resolve against (`/docs/`).
-fn markdown_files<'a>(
-    root_dir: &'a Path,
-    markdown_extensions: &'a [String],
-    ignore_dirs: &'a [String],
-    ignore_globs: &'a [String],
-    index_file: Option<&'a str>,
-    skip_abs: &'a HashSet<PathBuf>,
-) -> impl Iterator<Item = (PathBuf, String, String)> + 'a {
-    WalkDir::new(root_dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_entry(move |e| {
-            let path = e.path();
-            if path.is_dir()
-                && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            {
-                return !ignore_dirs.contains(&name.to_string());
-            }
-            true
-        })
-        .filter_map(|e| e.ok())
-        .filter_map(move |entry| {
-            let path = entry.path();
-            if !path.is_file() || skip_abs.contains(path) {
-                return None;
-            }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if !markdown_extensions.contains(&ext) {
-                return None;
-            }
-            // Empty exemptions for the same reason as `link_grep`: the `is_file`
-            // guard above leaves the leading-dot rule looking only at file
-            // basenames, and this walker's `filter_entry` never applies the rule
-            // to a directory, so files under a hidden directory are already
-            // reached.
-            if should_ignore(path, ignore_dirs, ignore_globs, &[]) {
-                return None;
-            }
-            let (page_url, folder_url) =
-                page_and_folder_urls(path, root_dir, markdown_extensions, index_file);
-            Some((path.to_path_buf(), page_url, folder_url))
-        })
+/// The markdown files under the vault ([`link_scan_files`]) minus the keys in
+/// `skip_abs`. Each carries its page URL, as computed by
+/// [`page_and_folder_urls`] — so with `index_file` supplied the page URL is the
+/// canonical one (`docs/index.md` → `/docs/`) while the folder URL stays the one
+/// relative links resolve against (`/docs/`).
+fn markdown_files(
+    vault: &dyn Vault,
+    markdown_extensions: &[String],
+    ignore_dirs: &[String],
+    ignore_globs: &[String],
+    index_file: Option<&str>,
+    skip_abs: &HashSet<PathBuf>,
+) -> Vec<LinkScanFile> {
+    link_scan_files(
+        vault,
+        markdown_extensions,
+        ignore_dirs,
+        ignore_globs,
+        index_file,
+    )
+    .into_iter()
+    .filter(|file| !skip_abs.contains(&file.key))
+    .collect()
 }
 
 /// Walks the repo and rewrites every page that links to the moved file
-/// (`old_url` → `new_url`), returning the absolute paths that were changed
-/// (A4-A).
+/// (`old_url` → `new_url`), returning the keys ([`Vault::key`]) of the files
+/// that were changed (A4-A). Only files inside the vault are reached, so a
+/// link out of the repository is never followed into a write.
 ///
 /// Files are bucketed by folder URL and gated by a case-insensitive
 /// Aho-Corasick automaton (mirroring [`crate::link_grep::find_inbound_links`]);
@@ -484,7 +462,7 @@ fn markdown_files<'a>(
 pub fn rewrite_inbound_links_for_move(
     old_url: &str,
     new_url: &str,
-    root_dir: &Path,
+    vault: &dyn Vault,
     markdown_extensions: &[String],
     ignore_dirs: &[String],
     ignore_globs: &[String],
@@ -497,12 +475,12 @@ pub fn rewrite_inbound_links_for_move(
     let new_norm = new_url.trim_end_matches('/');
 
     // Bucket files by folder URL so per-folder patterns are computed once.
-    let mut folder_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut folder_files: HashMap<String, Vec<LinkScanFile>> = HashMap::new();
     // No index file here: this walker's caller does not carry one, and the
     // moved file itself is already excluded by `skip_abs`, so the positional
     // page URL below is only a defensive second check.
-    for (path, source_url, folder) in markdown_files(
-        root_dir,
+    for file in markdown_files(
+        vault,
         markdown_extensions,
         ignore_dirs,
         ignore_globs,
@@ -510,10 +488,13 @@ pub fn rewrite_inbound_links_for_move(
         skip_abs,
     ) {
         // Defensive: never rewrite the moved file itself.
-        if source_url.trim_end_matches('/') == new_norm {
+        if file.page_url.trim_end_matches('/') == new_norm {
             continue;
         }
-        folder_files.entry(folder).or_default().push(path);
+        folder_files
+            .entry(file.folder_url.clone())
+            .or_default()
+            .push(file);
     }
 
     let mut changed = Vec::new();
@@ -530,16 +511,16 @@ pub fn rewrite_inbound_links_for_move(
             continue;
         };
 
-        for path in files {
-            let Ok(content) = std::fs::read_to_string(path) else {
+        for file in files {
+            let Ok(content) = vault.read_to_string(&file.path) else {
                 continue;
             };
             if !ac.is_match(&content) {
                 continue;
             }
             let rewrite = |text: &str| rewrite_links_for_move(old_url, new_url, folder, text);
-            if rewrite_in_place(path, &content, locks, rewrite)? {
-                changed.push(path.clone());
+            if rewrite_in_place(vault, &file.path, &content, locks, rewrite)? {
+                changed.push(file.key.clone());
             }
         }
     }
@@ -551,14 +532,14 @@ pub fn rewrite_inbound_links_for_move(
 /// when the **pre-move** wikilink index resolves that name (from that file) to
 /// `old_url`, so links pointing at a *different* note are left intact.
 ///
-/// Returns the absolute paths that were changed. `delta` is a list of
+/// Returns the keys of the files that were changed. `delta` is a list of
 /// `(old_name, new_stem)` pairs; typically just the changed filename stem.
 /// `locks` as for [`rewrite_inbound_links_for_move`].
 #[allow(clippy::too_many_arguments)]
 pub fn rewrite_bare_wikilinks_for_rename(
     delta: &[(String, String)],
     old_url: &str,
-    root_dir: &Path,
+    vault: &dyn Vault,
     markdown_extensions: &[String],
     ignore_dirs: &[String],
     ignore_globs: &[String],
@@ -575,21 +556,19 @@ pub fn rewrite_bare_wikilinks_for_rename(
 
     // Index-aware page URLs for the resolution guard (the wikilink index is
     // keyed on index-stripped URLs).
-    for (path, file_url, _folder) in markdown_files(
-        root_dir,
+    for file in markdown_files(
+        vault,
         markdown_extensions,
         ignore_dirs,
         ignore_globs,
         Some(index_file),
         skip_abs,
     ) {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Ok(content) = vault.read_to_string(&file.path) else {
             continue;
         };
-        let file_is_index = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == index_file);
+        let file_url = &file.page_url;
+        let file_is_index = file.path.file_name().is_some_and(|n| n == index_file);
 
         // Guard: only rewrite names that (pre-move) resolved to old_url.
         let names: Vec<&(String, String)> = delta
@@ -597,7 +576,7 @@ pub fn rewrite_bare_wikilinks_for_rename(
             .filter(|(name, new_stem)| normalize_name(name) != normalize_name(new_stem))
             .filter(|(name, _)| {
                 wikilink_index
-                    .resolve_wikilink(name, &file_url, file_is_index)
+                    .resolve_wikilink(name, file_url, file_is_index)
                     .is_some_and(|u| normalize_url_path(&u) == old_norm)
             })
             .collect();
@@ -611,8 +590,8 @@ pub fn rewrite_bare_wikilinks_for_rename(
                     rewrite_bare_wikilink(&acc, name, new_stem)
                 })
         };
-        if rewrite_in_place(&path, &content, locks, rewrite)? {
-            changed.push(path);
+        if rewrite_in_place(vault, &file.path, &content, locks, rewrite)? {
+            changed.push(file.key);
         }
     }
     Ok(changed)
@@ -634,13 +613,16 @@ mod tests {
         let observed = "- [ ] task\n\nSee [g](/guide/).\n";
         std::fs::write(&path, observed).expect("seed");
         let key = path.canonicalize().expect("canonical");
+        let vault = mbr_core::vault::LocalVault::new(temp.path());
+        let note = VaultPath::new("note.md").unwrap();
         let locks = FileWriteLocks::default();
         let rewrite = |text: &str| rewrite_links_for_move("/guide/", "/manual/", "/", text);
 
         std::thread::scope(|scope| {
             // Another writer holds the file while it toggles the task.
             let guard = locks.lock_blocking(&key);
-            let walker = scope.spawn(|| rewrite_in_place(&path, observed, Some(&locks), rewrite));
+            let walker =
+                scope.spawn(|| rewrite_in_place(&vault, &note, observed, Some(&locks), rewrite));
             std::thread::sleep(std::time::Duration::from_millis(30));
             assert!(!walker.is_finished(), "the walker must wait for the lock");
             std::fs::write(&path, observed.replace("[ ]", "[x]")).expect("toggle");
@@ -659,17 +641,84 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("note.md");
         std::fs::write(&path, "No links here.\n").expect("seed");
+        let vault = mbr_core::vault::LocalVault::new(temp.path());
+        let note = VaultPath::new("note.md").unwrap();
         let locks = FileWriteLocks::default();
         let rewrite = |text: &str| rewrite_links_for_move("/guide/", "/manual/", "/", text);
-        assert!(!rewrite_in_place(&path, "No links here.\n", Some(&locks), rewrite).unwrap());
+        assert!(
+            !rewrite_in_place(&vault, &note, "No links here.\n", Some(&locks), rewrite).unwrap()
+        );
         // Without a lock table (no concurrent writers) the observed text is used.
         let observed = "See [g](/guide/).\n";
         std::fs::write(&path, observed).expect("seed");
-        assert!(rewrite_in_place(&path, observed, None, rewrite).unwrap());
+        assert!(rewrite_in_place(&vault, &note, observed, None, rewrite).unwrap());
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "See [g](/manual/).\n"
         );
+    }
+
+    /// A move rewrites links in every note *inside* the repository, and in
+    /// nothing outside it: a directory symlinked out of the repo used to be
+    /// walked (and written) like any other.
+    #[cfg(unix)]
+    #[test]
+    fn inbound_rewrite_never_writes_through_a_link_out_of_the_repository() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("outside");
+        let root = temp.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("inside.md"), "See [g](/guide/).\n").expect("seed");
+        std::fs::write(outside.path().join("foreign.md"), "See [g](/guide/).\n").expect("seed");
+        std::os::unix::fs::symlink(outside.path(), root.join("elsewhere")).expect("link");
+        let changed = rewrite_inbound_links_for_move(
+            "/guide/",
+            "/manual/",
+            &mbr_core::vault::LocalVault::new(&root),
+            &["md".to_string()],
+            &[],
+            &[],
+            &HashSet::new(),
+            None,
+        )
+        .expect("walk");
+        assert_eq!(changed, vec![root.join("inside.md")]);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("foreign.md")).unwrap(),
+            "See [g](/guide/).\n",
+            "a note outside the repository must not be rewritten"
+        );
+    }
+
+    /// The same pass over a vault with no filesystem behind it.
+    #[test]
+    fn inbound_rewrite_through_a_mem_vault() {
+        let vault = mbr_core::vault::MemVault::new()
+            .with_file("refs/abs.md", "See [g](/guide/).\n")
+            .with_file("refs/rel.md", "See [g](../guide/).\n")
+            .with_file("other.md", "Unrelated.\n");
+        let mut changed = rewrite_inbound_links_for_move(
+            "/guide/",
+            "/manual/",
+            &vault,
+            &["md".to_string()],
+            &[],
+            &[],
+            &HashSet::new(),
+            None,
+        )
+        .expect("walk");
+        changed.sort();
+        let key = |rel: &str| vault.key(&VaultPath::new(rel).unwrap());
+        assert_eq!(changed, vec![key("refs/abs.md"), key("refs/rel.md")]);
+        assert_eq!(
+            vault.contents("refs/abs.md").unwrap(),
+            b"See [g](/manual/).\n"
+        );
+        assert_eq!(
+            vault.contents("refs/rel.md").unwrap(),
+            b"See [g](../manual/).\n"
+        );
+        assert_eq!(vault.contents("other.md").unwrap(), b"Unrelated.\n");
     }
 
     #[cfg(unix)]
@@ -686,7 +735,7 @@ mod tests {
         let changed = rewrite_inbound_links_for_move(
             "/guide/",
             "/manual/",
-            &root,
+            &mbr_core::vault::LocalVault::new(&root),
             &["md".to_string()],
             &[],
             &[],

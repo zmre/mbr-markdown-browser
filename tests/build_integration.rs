@@ -3251,3 +3251,98 @@ async fn test_build_renders_chat_blocks() {
         "relative link in a bubble is transformed: {html}"
     );
 }
+
+// ============================================================================
+// Peer static folder: `site/content` + `site/static` (regression suite)
+// ============================================================================
+
+/// Builds [`common::PeerStaticSite`] with the configuration its own
+/// `.mbr/config.toml` produces, into `site/out`.
+async fn build_peer_site(site: &common::PeerStaticSite) -> (std::path::PathBuf, mbr::BuildStats) {
+    let output_dir = site.site.join("out");
+    let builder = mbr::build::Builder::new(site.config(), output_dir.clone())
+        .expect("Failed to create builder");
+    let stats = builder.build().await.expect("Build failed");
+    (output_dir, stats)
+}
+
+/// What `--fail-on-broken-links` checks: `main.rs` exits non-zero exactly when
+/// `stats.broken_links > 0`.
+fn assert_no_broken_links(stats: &mbr::BuildStats) {
+    assert_eq!(
+        stats.broken_links, 0,
+        "--fail-on-broken-links would fail this build: {} broken link(s)",
+        stats.broken_links
+    );
+}
+
+/// The static build of a content root with a peer static folder: it succeeds
+/// with no broken links (the pages link the overlay's image and PDF), writes
+/// both pages, and places the overlay's files at their served URLs with their
+/// contents — as a symlink or a copy, per `AssetPlacement`.
+#[tokio::test]
+async fn test_build_peer_static_site_places_overlay_assets() {
+    let site = common::PeerStaticSite::new();
+    let (output, stats) = build_peer_site(&site).await;
+    assert_no_broken_links(&stats);
+
+    for page in ["index.html", "notes/guide/index.html"] {
+        assert!(output.join(page).is_file(), "{page} was not generated");
+    }
+
+    let placement = mbr::build::AssetPlacement::for_current_platform();
+    for (rel, bytes) in [
+        ("images/logo.png", common::PEER_LOGO_BYTES),
+        ("pdfs/doc.pdf", common::PEER_PDF_BYTES),
+    ] {
+        let placed = output.join(rel);
+        assert_eq!(
+            fs::read(&placed).unwrap_or_else(|e| panic!("{rel}: {e}")),
+            bytes,
+            "{rel} must resolve to the overlay's bytes"
+        );
+        let is_link = fs::symlink_metadata(&placed)
+            .expect("lstat placed asset")
+            .file_type()
+            .is_symlink();
+        assert_eq!(
+            is_link,
+            placement == mbr::build::AssetPlacement::Symlink,
+            "{rel} placed contrary to {placement:?}"
+        );
+    }
+}
+
+/// **Pinned current behaviour, not the design goal.** A directory symlinked
+/// out of the site (`static/videos -> <elsewhere>`) *is* placed by the static
+/// build, while the server refuses it (see
+/// `test_peer_static_site_symlink_out_of_the_site_is_not_served` in
+/// server_integration.rs), so today server and build disagree.
+///
+/// A follow-up PR introduces read-only "symlink mounts": a directory link out
+/// of the site becomes its own read-only vault (`..` and nested links cannot
+/// escape it; targets `/`, `$HOME` itself and ancestors of the root are
+/// refused; hidden files are never served; mounts are logged at startup), and
+/// server and build agree. That PR deliberately flips the *server*
+/// assertions; this one is expected to keep holding.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_peer_static_site_places_a_symlink_out_of_the_site() {
+    let site = common::PeerStaticSite::new();
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    fs::write(elsewhere.path().join("clip.mp4"), b"outside clip").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), site.static_dir.join("videos")).unwrap();
+
+    let (output, stats) = build_peer_site(&site).await;
+    assert_no_broken_links(&stats);
+
+    let clip = output.join("videos/clip.mp4");
+    assert_eq!(
+        fs::read(&clip).expect("videos/clip.mp4 is placed in the output today"),
+        b"outside clip"
+    );
+    assert_eq!(
+        fs::read(output.join("images/logo.png")).unwrap(),
+        common::PEER_LOGO_BYTES
+    );
+}

@@ -427,15 +427,15 @@ impl Builder {
 
         // Built once, not per file: every rendered page shares it and the
         // closure only holds a few small owned strings.
-        let markdown_page_probe =
-            mbr_core::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
-                base_dir: config.root_dir.clone(),
-                canonical_base_dir: config.root_dir.canonicalize().ok(),
-                static_folder: config.static_folder.clone(),
-                markdown_extensions: config.markdown_extensions.clone(),
-                index_file: config.index_file.clone(),
-                tag_sources: mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
-            });
+        let markdown_page_probe = mbr_core::link_transform::filesystem_markdown_page_probe(
+            OwnedPathResolverConfig::for_repo(
+                &repo,
+                &config.static_folder,
+                &config.markdown_extensions,
+                &config.index_file,
+                mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
+            ),
+        );
 
         Ok(Builder {
             config,
@@ -1099,7 +1099,8 @@ impl Builder {
         // Build mode defaults `mark_incomplete=false` (off unless config/CLI override).
         let valid_tag_sources = mbr_core::config::tag_sources_to_set(&self.config.tag_sources);
         let mark_incomplete = self.config.mark_incomplete.unwrap_or(false);
-        let render_result = markdown::render_sync(
+        let render_result = markdown::render_sync_from_vault(
+            self.repo.vault().as_ref(),
             path.to_path_buf(),
             &self.config.root_dir,
             self.config.oembed_timeout_ms,
@@ -2995,15 +2996,15 @@ mod tests {
         let build_link_index = Arc::new(ConcurrentHashMap::new());
         let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
 
-        let markdown_page_probe =
-            mbr_core::link_transform::filesystem_markdown_page_probe(OwnedPathResolverConfig {
-                base_dir: config.root_dir.clone(),
-                canonical_base_dir: config.root_dir.canonicalize().ok(),
-                static_folder: config.static_folder.clone(),
-                markdown_extensions: config.markdown_extensions.clone(),
-                index_file: config.index_file.clone(),
-                tag_sources: mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
-            });
+        let markdown_page_probe = mbr_core::link_transform::filesystem_markdown_page_probe(
+            OwnedPathResolverConfig::for_repo(
+                &repo,
+                &config.static_folder,
+                &config.markdown_extensions,
+                &config.index_file,
+                mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
+            ),
+        );
 
         Builder {
             config,
