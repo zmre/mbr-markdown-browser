@@ -133,7 +133,7 @@ muda = "0.21"
 # (`STATUS_ENTRYPOINT_NOT_FOUND`), for every invocation, not just the ones
 # that show the dialog. See `open_picker.rs`'s module doc comment.
 rfd = "0.17"
-gio = "0.18"
+gio = "0.22"
 gtk = "0.18"
 windows-sys = "0.61.2"
 objc2-app-kit = { version = "0.3.2", default-features = false }
