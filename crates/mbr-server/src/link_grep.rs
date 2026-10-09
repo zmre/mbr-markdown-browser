@@ -28,14 +28,13 @@ use papaya::HashMap as ConcurrentHashMap;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use walkdir::WalkDir;
 
 use mbr_core::link_index::{InboundLink, sort_inbound_links};
 use mbr_core::repo::{build_markdown_url_path, should_ignore};
+use mbr_core::vault::{Vault, VaultPath, walk_files};
 
 /// Result of scanning for inbound links to a page.
 #[derive(Clone)]
@@ -466,7 +465,8 @@ fn build_ref_extraction_regex(patterns: &[String]) -> Option<Regex> {
 ///
 /// # Arguments
 /// * `target_url_path` - The URL path being linked to (e.g., "/docs/guide/")
-/// * `root_dir` - Root directory of the markdown repository
+/// * `vault` - The repository's storage ([`mbr_core::repo::Repo::vault`]),
+///   walked with [`link_scan_files`]
 /// * `markdown_extensions` - List of valid markdown file extensions
 /// * `ignore_dirs` - Directories to skip during scanning
 /// * `ignore_globs` - Glob patterns for files to ignore
@@ -477,7 +477,7 @@ fn build_ref_extraction_regex(patterns: &[String]) -> Option<Regex> {
 /// A vector of `InboundLink` structs representing pages that link to the target.
 pub fn find_inbound_links(
     target_url_path: &str,
-    root_dir: &Path,
+    vault: &dyn Vault,
     markdown_extensions: &[String],
     ignore_dirs: &[String],
     ignore_globs: &[String],
@@ -495,68 +495,28 @@ pub fn find_inbound_links(
     }
 
     // First pass: collect all unique folder paths and their files
-    let mut folder_files: HashMap<String, Vec<(PathBuf, String)>> = HashMap::new();
+    let mut folder_files: HashMap<String, Vec<(VaultPath, String)>> = HashMap::new();
     // The target's own file, located during the walk so its wiki names
     // (title/aliases/stem) can be read without a second directory scan.
-    let mut target_file: Option<PathBuf> = None;
+    let mut target_file: Option<VaultPath> = None;
 
-    for entry in WalkDir::new(root_dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_entry(|e| {
-            let path = e.path();
-            // Skip ignored directories
-            if path.is_dir()
-                && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            {
-                return !ignore_dirs.contains(&name.to_string());
-            }
-            true
-        })
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-
-        // Skip non-files
-        if !path.is_file() {
-            continue;
-        }
-
-        // Check if it's a markdown file
-        let extension = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if !markdown_extensions.contains(&extension) {
-            continue;
-        }
-
-        // Skip ignored files. No hidden-directory exemptions are threaded in
-        // here, and none are needed: the `is_file` guard above means the only
-        // thing the leading-dot rule ever sees is a *file* basename, while an
-        // exemption names a directory on the CLI target's chain. The walker
-        // reaches files under a hidden directory either way, since its
-        // `filter_entry` prunes on `ignore_dirs` alone and never applies the
-        // dot rule to directories.
-        if should_ignore(path, ignore_dirs, ignore_globs, &[]) {
-            continue;
-        }
-
-        // Compute folder URL path and source URL path
-        let (source_url_path, folder_url_path) =
-            page_and_folder_urls(path, root_dir, markdown_extensions, Some(index_file));
-
+    for file in link_scan_files(
+        vault,
+        markdown_extensions,
+        ignore_dirs,
+        ignore_globs,
+        Some(index_file),
+    ) {
         // Skip if this is the target page itself
-        if source_url_path.trim_end_matches('/') == target_normalized {
-            target_file = Some(path.to_path_buf());
+        if file.page_url.trim_end_matches('/') == target_normalized {
+            target_file = Some(file.path);
             continue;
         }
 
         folder_files
-            .entry(folder_url_path)
+            .entry(file.folder_url)
             .or_default()
-            .push((path.to_path_buf(), source_url_path));
+            .push((file.path, file.page_url));
     }
 
     // Collect all unique folders
@@ -568,8 +528,8 @@ pub fn find_inbound_links(
     // The bare `[[Name]]` forms that resolve to this target. Folder-independent,
     // so they are computed once and reused by every folder's gate/wiki regex.
     let target_names = target_file
-        .as_deref()
-        .map(wikilink_names_for_target)
+        .as_ref()
+        .map(|path| wikilink_names_for_target(vault, path))
         .unwrap_or_default();
 
     // Build Aho-Corasick automatons for each folder (case-insensitive for wiki links)
@@ -630,7 +590,7 @@ pub fn find_inbound_links(
             files_scanned += 1;
 
             // Read file content
-            let content = match fs::read_to_string(path) {
+            let content = match vault.read_to_string(path) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -755,6 +715,63 @@ pub fn find_inbound_links(
     deduplicated_links
 }
 
+/// One markdown file of a repository-wide link pass.
+pub(crate) struct LinkScanFile {
+    /// Where the file is in the vault — under its canonical directory.
+    pub(crate) path: VaultPath,
+    /// Its index key ([`Vault::key`]): what the repository indexes it by and
+    /// the server's other writers lock it under.
+    pub(crate) key: PathBuf,
+    /// See [`page_and_folder_urls`].
+    pub(crate) page_url: String,
+    pub(crate) folder_url: String,
+}
+
+/// The markdown files a link pass reads (backlink grep, move rewrites).
+///
+/// Every file [`walk_files`] reaches — links followed, each directory once by
+/// its canonical path, nothing outside the vault — under directories not named
+/// in `ignore_dirs`, with a markdown extension (case-insensitive), and not
+/// excluded by [`should_ignore`]. URLs are computed against the vault root,
+/// which is what the keys are relative to.
+///
+/// No hidden-directory exemptions are threaded in here, and none are needed:
+/// the leading-dot rule only ever sees *file* basenames, because directories
+/// are pruned on `ignore_dirs` alone and never by the dot rule, so files under
+/// a hidden directory are reached either way.
+pub(crate) fn link_scan_files(
+    vault: &dyn Vault,
+    markdown_extensions: &[String],
+    ignore_dirs: &[String],
+    ignore_globs: &[String],
+    index_file: Option<&str>,
+) -> Vec<LinkScanFile> {
+    let root = vault.root();
+    walk_files(vault, |dir| {
+        !ignore_dirs.iter().any(|name| name == dir.name())
+    })
+    .into_iter()
+    .filter(|entry| {
+        let ext = entry.path.extension().unwrap_or("").to_lowercase();
+        markdown_extensions.contains(&ext)
+    })
+    .filter_map(|entry| {
+        let key = vault.key(&entry.path);
+        if should_ignore(&key, ignore_dirs, ignore_globs, &[]) {
+            return None;
+        }
+        let (page_url, folder_url) =
+            page_and_folder_urls(&key, root, markdown_extensions, index_file);
+        Some(LinkScanFile {
+            path: entry.path,
+            key,
+            page_url,
+            folder_url,
+        })
+    })
+    .collect()
+}
+
 /// Gets the folder URL path from a file URL path.
 /// `/a/b/c/` -> `/a/b/`
 /// `/a/` -> `/`
@@ -844,13 +861,13 @@ fn compute_url_path(file_path: &Path, root_dir: &Path, markdown_extensions: &[St
 /// names the renderer resolves. Names carrying wiki-link syntax (`/`, `[`, `]`,
 /// `|`, `#`) are dropped: path forms are already covered by the path patterns,
 /// and the rest could never appear inside a `[[…]]` target.
-fn wikilink_names_for_target(path: &Path) -> Vec<String> {
-    let stem = path
+fn wikilink_names_for_target(vault: &dyn Vault, path: &VaultPath) -> Vec<String> {
+    let stem = Path::new(path.file_name().unwrap_or_default())
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string();
-    let metadata = mbr_core::markdown::extract_metadata_from_file(path)
+    let metadata = mbr_core::markdown::extract_metadata_from_vault(vault, path)
         .map(|m| m.metadata)
         .unwrap_or_default();
     let title = metadata
@@ -976,6 +993,8 @@ fn find_backtick_run(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mbr_core::vault::LocalVault;
+    use std::fs;
     use tempfile::TempDir;
 
     // ========== compute_relative_path tests ==========
@@ -1301,7 +1320,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &extensions,
             &ignore_dirs,
             &ignore_globs,
@@ -1329,7 +1348,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1348,7 +1367,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/Japan/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1371,7 +1390,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/Japan/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1389,7 +1408,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/Japan/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1411,7 +1430,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/Japan/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1434,7 +1453,7 @@ mod tests {
         // we deduplicate by source file - only one inbound link per source page
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1457,7 +1476,7 @@ mod tests {
         // Two different source files linking to the same target = two inbound links
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1487,7 +1506,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/coins/tricks/3-fly/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1520,7 +1539,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/coins/tricks/3-fly/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1553,7 +1572,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/coins/tricks/3-fly/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1585,7 +1604,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/a/b/c/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1613,7 +1632,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/coins/tricks/3-fly/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1644,7 +1663,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/coins/tricks/3-fly/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1670,7 +1689,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1698,7 +1717,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/docs/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1719,7 +1738,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1755,7 +1774,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/people/pw/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1787,7 +1806,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/people/mary/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1810,7 +1829,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/people/pw/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1836,7 +1855,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/people/pw/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1880,7 +1899,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -1903,7 +1922,7 @@ mod tests {
 
         let links = find_inbound_links(
             "/target/",
-            temp_dir.path(),
+            &LocalVault::new(temp_dir.path()),
             &["md".to_string()],
             &[],
             &[],
@@ -2030,7 +2049,7 @@ mod tests {
         let grep: Vec<(String, String)> = {
             let mut v: Vec<(String, String)> = find_inbound_links(
                 "/docs/guide/",
-                root,
+                &LocalVault::new(root),
                 &["md".to_string()],
                 &[],
                 &[],

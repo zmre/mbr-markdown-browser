@@ -381,6 +381,47 @@ pub fn resolve_under(
     }
 }
 
+/// Every file in the vault, recursively, for a repository-wide pass that is
+/// not the scanner (backlink grep, link rewriting on a move).
+///
+/// Follows symlinks the way the scanner does: each directory is listed once,
+/// under its **canonical** path, so one reached twice (a link to a folder that
+/// is also walked directly) contributes its files once, and a link cycle ends;
+/// a directory that resolves outside the vault is not entered at all — so a
+/// repository-wide *write* can never land outside the repository through a
+/// link. `enter` prunes directories (it sees each directory's entry before it
+/// is listed); every file below an entered directory is returned, with its
+/// path under the canonical directory.
+///
+/// Sequential and one [`Vault::list_dir`] per directory. Directories that
+/// cannot be listed are skipped, as `WalkDir`'s error entries were.
+pub fn walk_files(vault: &dyn Vault, enter: impl Fn(&Entry) -> bool) -> Vec<Entry> {
+    let mut files = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut pending = vec![VaultPath::root()];
+    while let Some(dir) = pending.pop() {
+        let Ok(canonical) = vault.canonicalize(&dir) else {
+            continue;
+        };
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        let Ok(entries) = vault.list_dir(&canonical) else {
+            continue;
+        };
+        for entry in entries {
+            if entry.is_dir() {
+                if enter(&entry) {
+                    pending.push(entry.path);
+                }
+            } else {
+                files.push(entry);
+            }
+        }
+    }
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +485,47 @@ mod tests {
             ..entry
         };
         assert_eq!(pre_epoch.epoch_secs(), None);
+    }
+
+    #[test]
+    fn walk_files_lists_every_file_and_prunes_directories() {
+        let vault = MemVault::new()
+            .with_file("a.md", "a")
+            .with_file("docs/b.md", "b")
+            .with_file("docs/deep/c.md", "c")
+            .with_file("node_modules/x.md", "x")
+            .with_dir("empty");
+        let mut found: Vec<String> = walk_files(&vault, |dir| dir.name() != "node_modules")
+            .into_iter()
+            .map(|e| e.path.to_string())
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["a.md", "docs/b.md", "docs/deep/c.md"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_files_follows_links_inside_once_and_never_leaves_the_vault() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/note.md"), "n").unwrap();
+        std::fs::write(outside.path().join("secret.md"), "s").unwrap();
+        // A second route to `real`, a cycle, and a link out of the vault.
+        symlink(dir.path().join("real"), dir.path().join("alias")).unwrap();
+        symlink(dir.path(), dir.path().join("real/loop")).unwrap();
+        symlink(outside.path(), dir.path().join("leak")).unwrap();
+        let vault = LocalVault::new(dir.path());
+        let found: Vec<String> = walk_files(&vault, |_| true)
+            .into_iter()
+            .map(|e| e.path.to_string())
+            .collect();
+        assert_eq!(
+            found,
+            vec!["real/note.md"],
+            "listed once, canonically, nothing outside"
+        );
     }
 
     #[test]

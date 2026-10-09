@@ -3926,7 +3926,7 @@ impl Server {
         let rewritten_paths = crate::link_rewrite::rewrite_inbound_links_for_move(
             &old_url,
             &new_url,
-            &config.base_dir,
+            vault,
             &config.markdown_extensions,
             &config.ignore_dirs,
             &config.ignore_globs,
@@ -3939,7 +3939,7 @@ impl Server {
         let wiki_paths = crate::link_rewrite::rewrite_bare_wikilinks_for_rename(
             &delta,
             &old_url,
-            &config.base_dir,
+            vault,
             &config.markdown_extensions,
             &config.ignore_dirs,
             &config.ignore_globs,
@@ -5437,7 +5437,7 @@ impl Server {
         // filesystem + CPU work), so run it on a blocking thread to avoid
         // stalling the async worker. All captured data is owned/`Send`.
         let target = page_url_path.to_string();
-        let base_dir = config.base_dir.clone();
+        let vault = Arc::clone(config.repo.vault());
         let markdown_extensions = config.markdown_extensions.clone();
         let ignore_dirs = config.ignore_dirs.clone();
         let ignore_globs = config.ignore_globs.clone();
@@ -5445,7 +5445,7 @@ impl Server {
         let links = tokio::task::spawn_blocking(move || {
             find_inbound_links(
                 &target,
-                &base_dir,
+                vault.as_ref(),
                 &markdown_extensions,
                 &ignore_dirs,
                 &ignore_globs,
@@ -8127,7 +8127,7 @@ mod tests {
 
             let mut grepped = crate::link_grep::find_inbound_links(
                 page,
-                &root,
+                repo.vault().as_ref(),
                 &["md".to_string()],
                 &[],
                 &[],
