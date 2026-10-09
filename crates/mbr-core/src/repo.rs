@@ -17,7 +17,7 @@ use crate::config::{RelationType, TagSource};
 use crate::errors::RepoError;
 use crate::relationships::{NoteRelInput, RawRelationship, RelationshipIndex};
 use crate::tag_index::{TagIndex, TaggedPage};
-use crate::vault::{Entry, LocalVault, Vault, VaultError, VaultPath};
+use crate::vault::{LocalVault, Vault, VaultError, VaultPath};
 use crate::wikilink_index::WikilinkIndex;
 
 #[derive(Clone, Serialize)]
@@ -501,8 +501,8 @@ impl StaticFileMetadata {
 
     /// Populate basic file metadata (size, timestamps) without expensive media extraction.
     ///
-    /// Reads `path` from the local filesystem. The scanner does not call this:
-    /// its listings already carry the same numbers ([`Self::with_entry`]).
+    /// Reads `path` from the local filesystem. The repository's own pass,
+    /// [`Repo::populate_basic_metadata`], reads through its vault instead.
     pub fn populate_basic(self) -> Self {
         let file_details_start = Instant::now();
         let details = file_details_from_path(&self.path).ok();
@@ -511,15 +511,6 @@ impl StaticFileMetadata {
             self.path,
             file_details_start.elapsed()
         );
-        self.with_details(details)
-    }
-
-    /// Basic metadata from a listing [`Entry`] — the numbers
-    /// [`Self::populate_basic`] would read with a `stat` of its own.
-    pub fn with_entry(self, entry: &Entry) -> Self {
-        let details = entry
-            .epoch_secs()
-            .map(|(created, modified)| (entry.size, created, modified));
         self.with_details(details)
     }
 
@@ -1016,12 +1007,14 @@ impl Repo {
                         build_static_url_path(&key, &self.canonical_root, &self.static_folder)
                     }
                 };
-                // The listing already stat'ed the file, so its size and times
-                // are recorded now instead of in a second `stat` pass.
+                // Basic metadata (size, timestamps) stays deferred to
+                // `populate_basic_metadata()`, as it always was: the static
+                // build never runs that pass, so recording the listing's
+                // numbers here would change its `media.json`.
                 let other_file = OtherFileInfo {
                     raw_path: key.clone(),
                     url_path: url,
-                    metadata: StaticFileMetadata::empty(&key).with_entry(&entry),
+                    metadata: StaticFileMetadata::empty(&key),
                     extracted_text: None,
                 };
                 other.push((key, other_file));
@@ -2834,10 +2827,10 @@ mod tests {
         );
     }
 
-    /// The listing's stat is recorded, so basic metadata needs no second pass
-    /// — and the deferred pass, when it does run, reads through the vault.
+    /// Basic metadata stays deferred, as on disk, and the deferred pass reads
+    /// it through the vault — there is no file to `stat`.
     #[test]
-    fn test_mem_vault_static_files_carry_basic_metadata_from_the_listing() {
+    fn test_mem_vault_basic_metadata_is_populated_through_the_vault() {
         let repo = mem_repo(sample_mem_vault(), &[]);
         repo.scan_all().expect("scan");
         repo.scan_static_folder().expect("static scan");
@@ -2848,21 +2841,7 @@ mod tests {
                 .get(&key)
                 .and_then(|info| info.metadata.file_size_bytes)
         };
-        assert_eq!(size(&repo), Some(9));
-
-        // Simulate an entry whose details were lost, then let the deferred
-        // pass recover them through the vault.
-        let pin = repo.other_files.pin();
-        let info = pin.get(&key).unwrap().clone();
-        drop(pin);
-        repo.other_files.pin().insert(
-            key.clone(),
-            OtherFileInfo {
-                metadata: info.metadata.clone().with_details(None),
-                ..info
-            },
-        );
-        assert_eq!(size(&repo), None);
+        assert_eq!(size(&repo), None, "deferred, exactly as before the vault");
         repo.populate_basic_metadata();
         assert_eq!(size(&repo), Some(9));
     }
@@ -2965,10 +2944,11 @@ mod tests {
         );
     }
 
-    /// On disk, the same: other files carry their size straight after
-    /// `scan_static_folder`, with no `populate_basic_metadata` pass.
+    /// On disk, the scan itself leaves other files' basic metadata unset — the
+    /// static build, which never runs `populate_basic_metadata`, publishes
+    /// exactly that in `media.json` — and the deferred pass fills it in.
     #[test]
-    fn test_local_scan_records_static_file_details_from_the_listing() {
+    fn test_local_scan_defers_static_file_details() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir(dir.path().join("static")).unwrap();
         std::fs::write(dir.path().join("static/a.png"), b"12345").unwrap();
@@ -2976,7 +2956,7 @@ mod tests {
         let repo = test_repo(dir.path());
         repo.scan_all().expect("scan");
         repo.scan_static_folder().expect("static scan");
-        let sizes: Vec<(String, Option<u64>)> = {
+        let sizes = |repo: &Repo| -> Vec<(String, Option<u64>)> {
             let pin = repo.other_files.pin();
             let mut v: Vec<_> = pin
                 .iter()
@@ -2986,7 +2966,12 @@ mod tests {
             v
         };
         assert_eq!(
-            sizes,
+            sizes(&repo),
+            vec![("/a.png".to_string(), None), ("/b.pdf".to_string(), None)]
+        );
+        repo.populate_basic_metadata();
+        assert_eq!(
+            sizes(&repo),
             vec![
                 ("/a.png".to_string(), Some(5)),
                 ("/b.pdf".to_string(), Some(3))
