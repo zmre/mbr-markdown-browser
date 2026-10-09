@@ -8,13 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::vault::{EntryKind, Vault, VaultPath, resolve_under};
+use crate::vault::{EntryKind, Vault, VaultPath, has_hidden_segment, resolve_under};
 
 /// Safely resolves a request path inside the vault, preventing path traversal.
 ///
 /// Returns `None` if the path is not a valid [`VaultPath`] (it climbs above
-/// the root, or is absolute) or resolves outside the vault once symlinks are
-/// followed. See [`resolve_under`] for the exact answers.
+/// the root, or is absolute), resolves outside the vault once symlinks are
+/// followed, or is **hidden** — see [`visible`]. See [`resolve_under`] for
+/// the exact containment answers.
 ///
 /// # Security
 ///
@@ -23,9 +24,23 @@ use crate::vault::{EntryKind, Vault, VaultPath, resolve_under};
 ///    above the root
 /// 2. Canonicalizing the joined path inside the vault
 /// 3. Verifying the resolved path is still inside the vault
-fn safe_join(vault: &dyn Vault, request_path: &str) -> Option<VaultPath> {
-    let request = VaultPath::new(request_path).ok()?;
-    resolve_under(vault, &VaultPath::root(), &request)
+/// 4. Refusing a hidden request *and* a hidden resolution
+fn safe_join(vault: &dyn Vault, request_path: &str, exempt: &[VaultPath]) -> Option<VaultPath> {
+    let request = visible(VaultPath::new(request_path).ok()?, exempt)?;
+    visible(resolve_under(vault, &VaultPath::root(), &request)?, exempt)
+}
+
+/// `path`, unless it has a hidden segment the user did not name
+/// ([`has_hidden_segment`]).
+///
+/// Hidden files are never served — not from the repository, the static
+/// overlay or a symlink mount — because dot paths are where a repository keeps
+/// credentials and tooling state (`.env`, `.git/config`). Checked on the
+/// request (`/.env`) and again on what it resolved to, so a link that is not
+/// itself hidden cannot reach a hidden target (`notes -> .git`). `/.mbr/*` never
+/// gets here: those are routes, matched before the page handler.
+fn visible(path: VaultPath, exempt: &[VaultPath]) -> Option<VaultPath> {
+    (!has_hidden_segment(&path, exempt)).then_some(path)
 }
 
 /// The result of resolving a URL path to a resource.
@@ -76,6 +91,10 @@ pub struct PathResolverConfig<'a> {
     /// Valid tag source URL identifiers (e.g., ["tags", "performers", "taxonomy.tags"])
     /// Used to detect tag page URLs like /tags/rust/
     pub tag_sources: &'a [String],
+    /// Hidden directories that may be served anyway, as vault paths: the ones
+    /// the user named on the command line (`Config::explicit_hidden_dirs`,
+    /// [`crate::repo::Repo::exempt_hidden_dirs`]). Empty almost always.
+    pub exempt_hidden_dirs: &'a [VaultPath],
 }
 
 /// Owned counterpart of [`PathResolverConfig`].
@@ -94,6 +113,7 @@ pub struct OwnedPathResolverConfig {
     pub markdown_extensions: Vec<String>,
     pub index_file: String,
     pub tag_sources: Vec<String>,
+    pub exempt_hidden_dirs: Vec<VaultPath>,
 }
 
 impl OwnedPathResolverConfig {
@@ -106,6 +126,7 @@ impl OwnedPathResolverConfig {
             markdown_extensions: &self.markdown_extensions,
             index_file: &self.index_file,
             tag_sources: &self.tag_sources,
+            exempt_hidden_dirs: &self.exempt_hidden_dirs,
         }
     }
 
@@ -125,6 +146,7 @@ impl OwnedPathResolverConfig {
             markdown_extensions: markdown_extensions.to_vec(),
             index_file: index_file.to_string(),
             tag_sources,
+            exempt_hidden_dirs: repo.exempt_hidden_dirs().to_vec(),
         }
     }
 }
@@ -211,7 +233,7 @@ pub fn resolve_request_path(config: &PathResolverConfig, request_path: &str) -> 
 
     // Use safe_join to prevent path traversal attacks
     // If the path would escape base_dir, skip to tag resolution or NotFound
-    if let Some(candidate) = safe_join(vault, request_path) {
+    if let Some(candidate) = safe_join(vault, request_path, config.exempt_hidden_dirs) {
         // One `stat` answers both "is it a file" and "is it a directory".
         let kind = vault
             .stat(&candidate)
@@ -370,7 +392,7 @@ fn find_markdown_file(
 /// the overlay pointing at, say, `/etc/passwd`: the candidate is canonicalized
 /// before the containment check, so the symlink's target is what gets judged.
 fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Option<PathBuf> {
-    let request = VaultPath::new(request_path).ok()?;
+    let request = visible(VaultPath::new(request_path).ok()?, &[])?;
     let (vault, static_dir) = match config.static_vault {
         Some(overlay) => (overlay, VaultPath::root()),
         None => (
@@ -385,7 +407,23 @@ fn find_in_static_folder(config: &PathResolverConfig, request_path: &str) -> Opt
     // then require the candidate to still be inside the former.
     let static_dir = vault.canonicalize(&static_dir).ok()?;
     let canonical = vault.canonicalize(&static_dir.join_path(&request)).ok()?;
-    (canonical.starts_with(&static_dir) && vault.is_file(&canonical)).then(|| vault.key(&canonical))
+    (canonical.starts_with(&static_dir)
+        && !hidden_below(&canonical, &static_dir)
+        && vault.is_file(&canonical))
+    .then(|| vault.key(&canonical))
+}
+
+/// Whether `path` has a hidden segment below `base` (which it starts with).
+///
+/// The static folder is judged from *inside*: the folder itself is whatever
+/// the configuration named — an in-root `.vuepress/public` is a real layout —
+/// while everything served out of it answers to the hidden-file rule. (An
+/// *external* overlay that is itself hidden is refused when the configuration
+/// is validated, by [`crate::config::external_folder_refusal`].)
+fn hidden_below(path: &VaultPath, base: &VaultPath) -> bool {
+    path.segments()
+        .skip(base.segments().count())
+        .any(crate::vault::is_hidden_segment)
 }
 
 /// Attempts to resolve a URL path as a tag URL.
@@ -456,7 +494,7 @@ mod tests {
     /// returned, so the security tests below assert exactly what they did.
     fn safe_join_local(base: &Path, request: &str) -> Option<PathBuf> {
         let vault = LocalVault::new(base);
-        safe_join(&vault, request).map(|p| vault.key(&p))
+        safe_join(&vault, request, &[]).map(|p| vault.key(&p))
     }
 
     /// The overlay vault the repository would build for `static_folder`, using
@@ -521,6 +559,7 @@ mod tests {
                 markdown_extensions: &self.extensions,
                 index_file: "index.md",
                 tag_sources: &self.tag_sources,
+                exempt_hidden_dirs: &[],
             }
         }
 
@@ -1277,6 +1316,7 @@ mod tests {
                     markdown_extensions: &extensions,
                     index_file: "index.md",
                     tag_sources: &tag_sources,
+                    exempt_hidden_dirs: &[],
                 };
 
                 // Following the symlink should be blocked
@@ -1400,6 +1440,7 @@ mod tests {
             markdown_extensions: &extensions,
             index_file: "index.md",
             tag_sources: &tag_sources,
+            exempt_hidden_dirs: &[],
         };
         assert_eq!(
             find_in_static_folder(&peer_overlay, "logo.png"),
@@ -1479,6 +1520,7 @@ mod tests {
             markdown_extensions: &extensions,
             index_file: "index.md",
             tag_sources: &tag_sources,
+            exempt_hidden_dirs: &[],
         };
 
         for attack in ["passwd", "leak/passwd"] {
@@ -1564,6 +1606,7 @@ mod tests {
             markdown_extensions: &extensions,
             index_file: "index.md",
             tag_sources: &tag_sources,
+            exempt_hidden_dirs: &[],
         };
 
         let result = resolve_request_path(&config, "file.txt");
@@ -1660,6 +1703,7 @@ mod tests {
             markdown_extensions: &extensions,
             index_file: "index.md",
             tag_sources: &tag_sources,
+            exempt_hidden_dirs: &[],
         };
         let root = PathBuf::from(crate::vault::MemVault::DEFAULT_ROOT);
         let key = |rel: &str| VaultPath::new(rel).unwrap().to_native(&root);
@@ -1722,6 +1766,7 @@ mod tests {
             markdown_extensions: &extensions,
             index_file: "index.md",
             tag_sources: &tag_sources,
+            exempt_hidden_dirs: &[],
         };
         assert_eq!(
             resolve_request_path(&config, "css/site.css"),
@@ -1758,6 +1803,7 @@ mod tests {
             markdown_extensions: &extensions,
             index_file: "index.md",
             tag_sources: &tag_sources,
+            exempt_hidden_dirs: &[],
         };
         assert_eq!(
             resolve_request_path(&config, ""),
@@ -1872,6 +1918,7 @@ mod proptests {
                 markdown_extensions: &extensions,
                 index_file: "index.md",
                 tag_sources: &tag_sources,
+                exempt_hidden_dirs: &[],
             };
 
             let path_str = request_path.join("/");
@@ -1903,6 +1950,7 @@ mod proptests {
                 markdown_extensions: &extensions,
                 index_file: "index.md",
                 tag_sources: &tag_sources,
+                exempt_hidden_dirs: &[],
             };
 
             // Try various path traversal patterns
@@ -1939,6 +1987,7 @@ mod proptests {
                 markdown_extensions: &extensions,
                 index_file: "index.md",
                 tag_sources: &tag_sources,
+                exempt_hidden_dirs: &[],
             };
             match resolve_request_path(&config, &request) {
                 ResolvedPath::StaticFile(p)
@@ -1953,6 +2002,383 @@ mod proptests {
                     prop_assert!(url.starts_with('/') && !url.contains(".."), "{:?}", url);
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+/// The hidden-file rule and symlink mounts, end to end through the resolver.
+///
+/// Unix only where real symlinks are needed. Temp dirs get a visible prefix:
+/// `tempfile`'s default `.tmpXXXX` is itself hidden, so a mount target under
+/// one would be refused by the very rule under test.
+#[cfg(test)]
+mod hidden_and_mount_tests {
+    use super::*;
+    use crate::vault::{LocalVault, MountPolicy};
+    use std::fs;
+
+    fn visible_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("mbr-resolver-test-")
+            .tempdir()
+            .unwrap()
+    }
+
+    fn resolve(
+        vault: &dyn Vault,
+        static_vault: Option<&dyn Vault>,
+        exempt: &[VaultPath],
+        request: &str,
+    ) -> ResolvedPath {
+        let extensions = vec![String::from("md")];
+        let tag_sources = vec![String::from("tags")];
+        let config = PathResolverConfig {
+            vault,
+            static_vault,
+            static_folder: if static_vault.is_some() {
+                "../static"
+            } else {
+                "static"
+            },
+            markdown_extensions: &extensions,
+            index_file: "index.md",
+            tag_sources: &tag_sources,
+            exempt_hidden_dirs: exempt,
+        };
+        resolve_request_path(&config, request)
+    }
+
+    #[test]
+    fn hidden_files_and_directories_are_never_resolved() {
+        let dir = visible_tempdir();
+        let root = dir.path().canonicalize().unwrap();
+        for (path, body) in [
+            (".env", "SECRET=1"),
+            (".git/config", "[remote]"),
+            (".git/notes.md", "# in git"),
+            ("docs/.private/plan.md", "# plan"),
+            ("docs/.hidden.png", "png"),
+            ("docs/visible.md", "# ok"),
+            ("static/.htpasswd", "user:hash"),
+            ("static/images/.DS_Store", "junk"),
+            ("static/images/logo.png", "png"),
+            ("static/.well-known/security.txt", "Contact: x"),
+            (".mbr/config.toml", "edit_token_hash = 'x'"),
+        ] {
+            let file = root.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, body).unwrap();
+        }
+        let vault = LocalVault::new(&root);
+        for request in [
+            ".env",
+            ".git/config",
+            ".git",
+            ".git/",
+            ".git/notes/",
+            "docs/.private/plan/",
+            "docs/.private/plan.md",
+            "docs/.hidden.png",
+            ".htpasswd",
+            "static/.htpasswd",
+            "images/.DS_Store",
+            ".mbr/config.toml",
+            "docs/../.env",
+        ] {
+            assert_eq!(
+                resolve(&vault, None, &[], request),
+                ResolvedPath::NotFound,
+                "{request} must not resolve"
+            );
+        }
+        assert!(matches!(
+            resolve(&vault, None, &[], "docs/visible/"),
+            ResolvedPath::MarkdownFile(_)
+        ));
+        assert!(matches!(
+            resolve(&vault, None, &[], "images/logo.png"),
+            ResolvedPath::StaticFile(_)
+        ));
+        // RFC 8615 site metadata is the one dot path that is published.
+        assert!(matches!(
+            resolve(&vault, None, &[], ".well-known/security.txt"),
+            ResolvedPath::StaticFile(_)
+        ));
+        // Tag pages are not files: a tag value may start with a dot.
+        assert!(matches!(
+            resolve(&vault, None, &[], "tags/.net/"),
+            ResolvedPath::TagPage { .. }
+        ));
+    }
+
+    /// The one exemption: hidden directories the user named on the command
+    /// line — and only the named chain, not dot directories inside it.
+    #[test]
+    fn an_explicitly_named_hidden_directory_is_served() {
+        let dir = visible_tempdir();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join(".scratch/.git")).unwrap();
+        fs::write(root.join(".scratch/alpha.md"), "# Alpha").unwrap();
+        fs::write(root.join(".scratch/.git/config"), "x").unwrap();
+        let vault = LocalVault::new(&root);
+        let exempt = [VaultPath::new(".scratch").unwrap()];
+        assert!(matches!(
+            resolve(&vault, None, &exempt, ".scratch/alpha/"),
+            ResolvedPath::MarkdownFile(_)
+        ));
+        assert_eq!(
+            resolve(&vault, None, &exempt, ".scratch/.git/config"),
+            ResolvedPath::NotFound
+        );
+        assert_eq!(
+            resolve(&vault, None, &[], ".scratch/alpha/"),
+            ResolvedPath::NotFound
+        );
+    }
+
+    /// A link that is not itself hidden cannot reach a hidden target.
+    #[cfg(unix)]
+    #[test]
+    fn a_visible_link_to_a_hidden_directory_is_not_resolved() {
+        let dir = visible_tempdir();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join(".git"), root.join("notes")).unwrap();
+        let vault = LocalVault::new(&root);
+        assert_eq!(
+            resolve(&vault, None, &[], "notes/config"),
+            ResolvedPath::NotFound
+        );
+    }
+
+    /// `site/{content, static}` with `static/videos -> <base>/movies`, and a
+    /// set of links that must never serve anything: to `/`, to `$HOME`, to an
+    /// ancestor of the root, to a hidden directory. `$HOME` is a fake.
+    #[cfg(unix)]
+    struct MountSite {
+        _dir: tempfile::TempDir,
+        base: PathBuf,
+        content: PathBuf,
+        overlay: PathBuf,
+        movies: PathBuf,
+        extra: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl MountSite {
+        fn new() -> Self {
+            use std::os::unix::fs::symlink;
+            let dir = visible_tempdir();
+            let base = dir.path().canonicalize().unwrap();
+            let content = base.join("site/content");
+            let overlay = base.join("site/static");
+            let movies = base.join("movies");
+            let extra = base.join("extra");
+            for (path, body) in [
+                ("site/content/index.md", "# Home"),
+                ("site/content/notes/a.md", "# A"),
+                ("site/content/.env", "SECRET=1"),
+                ("site/static/images/logo.png", "png"),
+                ("movies/clip.mp4", "clip"),
+                ("movies/notes.md", "# Mounted"),
+                ("movies/sub/deep.mp4", "deep"),
+                ("movies/.secret/key", "key"),
+                ("movies/.dotfile", "dot"),
+                ("extra/x.mp4", "x"),
+                ("home/diary.md", "diary"),
+                (".hidden/key", "key"),
+                ("secret.txt", "secret"),
+            ] {
+                let file = base.join(path);
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, body).unwrap();
+            }
+            // Accepted: the user's case, plus a nested mount inside it, a link
+            // back into the repository and a cycle.
+            symlink(&movies, overlay.join("videos")).unwrap();
+            symlink(&movies, content.join("media")).unwrap();
+            symlink(&extra, movies.join("more")).unwrap();
+            symlink(content.join("notes"), movies.join("back")).unwrap();
+            symlink(&movies, movies.join("loop")).unwrap();
+            // Refused, every one of them.
+            symlink("/", overlay.join("fsroot")).unwrap();
+            symlink(base.join("home"), overlay.join("home")).unwrap();
+            symlink(&base, content.join("up")).unwrap();
+            symlink("../..", movies.join("climb")).unwrap();
+            symlink(base.join(".hidden"), overlay.join("hidden")).unwrap();
+            Self {
+                _dir: dir,
+                base,
+                content,
+                overlay,
+                movies,
+                extra,
+            }
+        }
+
+        fn policy(&self, other: &Path) -> MountPolicy {
+            MountPolicy::default()
+                .with_home(Some(self.base.join("home")))
+                .with_other_root(other)
+        }
+
+        fn vaults(&self) -> (LocalVault, LocalVault) {
+            (
+                LocalVault::with_mounts(&self.content, self.policy(&self.overlay)),
+                LocalVault::with_mounts(&self.overlay, self.policy(&self.content)),
+            )
+        }
+
+        /// Where a served key really is, if it is somewhere it may be.
+        fn allowed(&self, key: &Path) -> bool {
+            let Ok(real) = key.canonicalize() else {
+                return false;
+            };
+            [&self.content, &self.overlay, &self.movies, &self.extra]
+                .iter()
+                .any(|root| {
+                    real.strip_prefix(root).is_ok_and(|below| {
+                        !below.components().any(|c| {
+                            c.as_os_str()
+                                .to_str()
+                                .is_none_or(crate::vault::is_hidden_segment)
+                        })
+                    })
+                })
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mounts_are_served_and_refused_targets_are_not() {
+        let site = MountSite::new();
+        let (vault, overlay) = site.vaults();
+        let served = |request: &str| match resolve(&vault, Some(&overlay), &[], request) {
+            ResolvedPath::StaticFile(key) | ResolvedPath::MarkdownFile(key) => {
+                Some(fs::read_to_string(key).unwrap())
+            }
+            _ => None,
+        };
+        assert_eq!(served("videos/clip.mp4").as_deref(), Some("clip"));
+        assert_eq!(served("videos/sub/deep.mp4").as_deref(), Some("deep"));
+        assert_eq!(served("videos/more/x.mp4").as_deref(), Some("x"));
+        assert_eq!(served("media/clip.mp4").as_deref(), Some("clip"));
+        assert_eq!(served("media/notes/").as_deref(), Some("# Mounted"));
+        assert_eq!(served("media/back/a/").as_deref(), Some("# A"));
+        assert_eq!(served("media/loop/loop/clip.mp4").as_deref(), Some("clip"));
+        for refused in [
+            "videos/.secret/key",
+            "videos/.dotfile",
+            "media/.secret/key",
+            "fsroot/etc/hosts",
+            "home/diary.md",
+            "up/secret.txt",
+            "up/home/diary.md",
+            "media/climb/secret.txt",
+            "hidden/key",
+            "videos/../../secret.txt",
+            "videos/%2e%2e/%2e%2e/secret.txt",
+            ".env",
+        ] {
+            assert_eq!(served(refused), None, "{refused} must not be served");
+        }
+        let mut targets: Vec<PathBuf> = vault
+            .mounts()
+            .into_iter()
+            .chain(overlay.mounts())
+            .map(|m| m.target)
+            .collect();
+        targets.sort();
+        targets.dedup();
+        let mut expected = vec![site.movies.clone(), site.extra.clone()];
+        expected.sort();
+        assert_eq!(
+            targets, expected,
+            "only the two legitimate targets are mounted"
+        );
+    }
+
+    #[cfg(unix)]
+    mod prop {
+        use super::*;
+        use proptest::prelude::*;
+
+        const SEGMENTS: &[&str] = &[
+            "videos",
+            "media",
+            "more",
+            "back",
+            "loop",
+            "climb",
+            "up",
+            "fsroot",
+            "home",
+            "hidden",
+            "sub",
+            "notes",
+            "images",
+            "etc",
+            "clip.mp4",
+            "deep.mp4",
+            "x.mp4",
+            "logo.png",
+            "a",
+            "a.md",
+            "index",
+            "secret.txt",
+            "diary.md",
+            "key",
+            ".secret",
+            ".dotfile",
+            ".env",
+            ".hidden",
+            "..",
+            ".",
+            "%2e%2e",
+            "static",
+            "site",
+            "content",
+            "movies",
+            "extra",
+        ];
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// No request path resolves to anything outside the repository,
+            /// the overlay and the accepted mount targets — or to anything
+            /// hidden in them — and only the legitimate targets get mounted.
+            #[test]
+            fn prop_nothing_outside_the_served_roots_resolves(
+                requests in proptest::collection::vec(
+                    (proptest::collection::vec(proptest::sample::select(SEGMENTS), 0..7), any::<bool>()),
+                    1..12,
+                )
+            ) {
+                let site = MountSite::new();
+                let (vault, overlay) = site.vaults();
+                for (segments, trailing) in requests {
+                    let mut request = segments.join("/");
+                    if trailing {
+                        request.push('/');
+                    }
+                    match resolve(&vault, Some(&overlay), &[], &request) {
+                        ResolvedPath::StaticFile(key)
+                        | ResolvedPath::MarkdownFile(key)
+                        | ResolvedPath::DirectoryListing(key) => {
+                            prop_assert!(site.allowed(&key), "{request:?} served {key:?}");
+                        }
+                        _ => {}
+                    }
+                }
+                for mount in vault.mounts().into_iter().chain(overlay.mounts()) {
+                    prop_assert!(
+                        mount.target == site.movies || mount.target == site.extra,
+                        "unexpected mount {mount:?}"
+                    );
+                }
             }
         }
     }

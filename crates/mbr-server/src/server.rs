@@ -585,6 +585,19 @@ pub fn validate_media_path(
     repo_root: &Path,
     static_folder: &str,
 ) -> Result<PathBuf, MbrError> {
+    validate_media_path_with_mounts(path, repo_root, static_folder, &[])
+}
+
+/// [`validate_media_path`], also accepting a file inside one of the accepted
+/// symlink mounts' targets (`mount_targets`, canonical — see
+/// [`mbr_core::vault::Mount`]). A path with a hidden segment is refused
+/// wherever it would resolve.
+pub fn validate_media_path_with_mounts(
+    path: &str,
+    repo_root: &Path,
+    static_folder: &str,
+    mount_targets: &[PathBuf],
+) -> Result<PathBuf, MbrError> {
     // URL-decode the path
     let decoded = percent_decode_str(path)
         .decode_utf8()
@@ -598,6 +611,17 @@ pub fn validate_media_path(
     // Remove leading slash if present for path joining
     let clean_path = decoded.trim_start_matches('/');
 
+    // Hidden files are never served (`.env`, `.git/config`).
+    if clean_path
+        .split(['/', '\\'])
+        .any(mbr_core::vault::is_hidden_segment)
+    {
+        return Err(MbrError::InvalidMediaPath(format!(
+            "Path does not exist: {}",
+            decoded
+        )));
+    }
+
     // Try repo_root first
     let full_path = repo_root.join(clean_path);
 
@@ -606,9 +630,10 @@ pub fn validate_media_path(
         .canonicalize()
         .map_err(|_| MbrError::InvalidMediaPath("Repository root not found".to_string()))?;
 
-    // Try to resolve within repo_root
+    // Try to resolve within repo_root (or a mount reached through it)
     if let Ok(canonical_path) = full_path.canonicalize()
-        && canonical_path.starts_with(&canonical_root)
+        && (canonical_path.starts_with(&canonical_root)
+            || within_mount_targets(&canonical_path, mount_targets))
     {
         return Ok(canonical_path);
     }
@@ -622,7 +647,8 @@ pub fn validate_media_path(
             let static_full_path = static_root.join(clean_path);
 
             if let Ok(canonical_path) = static_full_path.canonicalize()
-                && canonical_path.starts_with(&canonical_static_root)
+                && (canonical_path.starts_with(&canonical_static_root)
+                    || within_mount_targets(&canonical_path, mount_targets))
             {
                 return Ok(canonical_path);
             }
@@ -711,18 +737,52 @@ fn validate_path_containment(file_path: &Path, base_dir: &Path) -> Option<PathBu
 ///
 /// Returns the canonical path of the resolved file, or `None` if the file
 /// doesn't exist in either location or the path escapes containment.
+///
+/// A file inside an accepted symlink mount (`mount_targets`, canonical) is
+/// found too, through the link; a path with a hidden segment never is.
 #[cfg(feature = "media-metadata")]
 fn resolve_media_source_file(
     url_path: &str,
     base_dir: &Path,
     static_folder: &str,
+    mount_targets: &[PathBuf],
 ) -> Option<PathBuf> {
+    if url_path
+        .split(['/', '\\'])
+        .any(mbr_core::vault::is_hidden_segment)
+    {
+        return None;
+    }
+    let in_mount = |candidate: PathBuf| {
+        let canonical = candidate.canonicalize().ok()?;
+        (within_mount_targets(&canonical, mount_targets) && canonical.is_file())
+            .then_some(canonical)
+    };
     let direct = base_dir.join(url_path);
+    let static_dir = base_dir.join(static_folder);
+    let in_static = static_dir.join(url_path);
     // Validate path stays within base_dir (defense in depth)
-    validate_path_containment(&direct, base_dir).or_else(|| {
+    validate_path_containment(&direct, base_dir)
         // Validate path stays within static folder
-        let static_dir = base_dir.join(static_folder);
-        validate_path_containment(&static_dir.join(url_path), &static_dir)
+        .or_else(|| validate_path_containment(&in_static, &static_dir))
+        .or_else(|| in_mount(direct))
+        .or_else(|| in_mount(in_static))
+}
+
+/// Whether `canonical` is inside one of `mount_targets` (canonical symlink
+/// mount targets) with no hidden segment below the target — the served-files
+/// rule for a mount, for the path-based checks that do not go through the
+/// vault.
+fn within_mount_targets(canonical: &Path, mount_targets: &[PathBuf]) -> bool {
+    mount_targets.iter().any(|target| {
+        canonical.strip_prefix(target).is_ok_and(|below| {
+            !below.components().any(|component| match component {
+                std::path::Component::Normal(name) => {
+                    name.to_str().is_none_or(mbr_core::vault::is_hidden_segment)
+                }
+                _ => true,
+            })
+        })
     })
 }
 
@@ -895,11 +955,16 @@ fn host_header_is_allowed(headers: &HeaderMap, bind_ip: [u8; 4]) -> bool {
 /// `is_file()` and `ServeFile` follow symlinks. Every resolver in this crate is
 /// supposed to reject that, so this is a second, independent gate rather than
 /// the primary one.
+///
+/// A file inside an accepted symlink mount's target (`mount_targets`) is
+/// served too: that is what a mount is. The targets come from the vault's own
+/// table, so this stays independent of the resolver that produced `path`.
 fn is_within_served_roots(
     path: &Path,
     base_dir: &Path,
     canonical_base_dir: Option<&Path>,
     static_folder: &str,
+    mount_targets: impl FnOnce() -> Vec<PathBuf>,
 ) -> bool {
     let Ok(canonical) = path.canonicalize() else {
         return false;
@@ -920,6 +985,7 @@ fn is_within_served_roots(
         .join(static_folder)
         .canonicalize()
         .is_ok_and(|static_root| canonical.starts_with(static_root))
+        || within_mount_targets(&canonical, &mount_targets())
 }
 
 pub struct Server {
@@ -946,8 +1012,18 @@ type WatcherHandle = Arc<std::sync::Mutex<Option<crate::watcher::FileWatcher>>>;
 ///
 /// Without the `watcher` feature none of this exists and `tx` carries only
 /// the server's own writes (task toggles, edits, uploads, renames).
+///
+/// The watcher also follows the repository's symlink mounts
+/// ([`crate::watcher::FileWatcher::watch_mounts`]). Mounts are discovered by
+/// the scan, which races this thread, so both sides sync under the handle's
+/// lock: this thread when it parks the watcher, the scan
+/// ([`sync_watched_mounts`]) when it finishes. Whichever runs second sees
+/// what the other produced.
 #[cfg(feature = "watcher")]
+#[allow(clippy::too_many_arguments)]
 fn spawn_file_watcher(
+    watcher_handle: WatcherHandle,
+    repo: Arc<Repo>,
     base_dir: PathBuf,
     template_folder: Option<PathBuf>,
     ignore_dirs: Vec<String>,
@@ -955,7 +1031,6 @@ fn spawn_file_watcher(
     explicit_hidden_dirs: Vec<PathBuf>,
     tx: broadcast::Sender<mbr_core::change_event::FileChangeEvent>,
 ) -> WatcherHandle {
-    let watcher_handle: WatcherHandle = Arc::new(std::sync::Mutex::new(None));
     let watcher_handle_for_thread = Arc::clone(&watcher_handle);
 
     std::thread::spawn(move || {
@@ -972,6 +1047,7 @@ fn spawn_file_watcher(
                 // Store the watcher in the shared handle so it stays alive
                 // and can be properly dropped when Server is dropped
                 if let Ok(mut guard) = watcher_handle_for_thread.lock() {
+                    watcher.watch_mounts(&repo.mounts());
                     *guard = Some(watcher);
                 }
             }
@@ -985,6 +1061,17 @@ fn spawn_file_watcher(
     });
 
     watcher_handle
+}
+
+/// Has the running file watcher (if it has started) follow every symlink
+/// mount the repository has discovered so far. See [`spawn_file_watcher`].
+#[cfg(feature = "watcher")]
+fn sync_watched_mounts(watcher_handle: &WatcherHandle, repo: &Repo) {
+    if let Ok(guard) = watcher_handle.lock()
+        && let Some(watcher) = guard.as_ref()
+    {
+        watcher.watch_mounts(&repo.mounts());
+    }
 }
 
 /// Configuration for initializing a Server instance.
@@ -1143,6 +1230,32 @@ impl From<&mbr_core::config::Config> for ServerConfig {
 }
 
 impl ServerState {
+    /// The canonical targets of every symlink mount accepted so far, for the
+    /// path-based serving checks ([`is_within_served_roots`],
+    /// [`validate_media_path_with_mounts`]).
+    fn mount_targets(&self) -> Vec<PathBuf> {
+        self.repo
+            .mounts()
+            .into_iter()
+            .map(|(_, mount)| mount.target)
+            .collect()
+    }
+
+    /// Refuses a write into a read-only symlink mount (`403`), before any lock
+    /// is taken or byte read. The vault refuses it again at the write itself.
+    fn refuse_read_only(&self, key: &Path) -> Result<(), FileOpError> {
+        let path = self.vault_path(key)?;
+        let vault = self.vault();
+        let canonical = path
+            .ancestors()
+            .find(|ancestor| matches!(vault.stat(ancestor), Ok(Some(_))))
+            .and_then(|existing| vault.canonicalize(&existing).ok());
+        if vault.is_read_only(&path) || canonical.is_some_and(|c| vault.is_read_only(&c)) {
+            return Err(FileOpError::ReadOnly);
+        }
+        Ok(())
+    }
+
     /// The repository's storage. Every read and write a handler makes on the
     /// user's files goes through it ([`mbr_core::vault`]).
     fn vault(&self) -> &dyn Vault {
@@ -1180,6 +1293,7 @@ impl ServerState {
             markdown_extensions: &self.markdown_extensions,
             index_file: &self.index_file,
             tag_sources: tag_url_sources,
+            exempt_hidden_dirs: self.repo.exempt_hidden_dirs(),
         }
     }
 }
@@ -1504,6 +1618,10 @@ enum FileOpError {
     SourceNotFound,
     /// The path escaped the repository root (traversal/symlink) → `400`.
     Traversal,
+    /// The path is inside a read-only symlink mount → `403`, the status every
+    /// other refusal to write answers with (`check_edit_access`), which the
+    /// clients already report as "refused".
+    ReadOnly,
     /// A filesystem error occurred → `500`.
     Io(std::io::Error),
 }
@@ -1512,6 +1630,7 @@ impl From<VaultError> for FileOpError {
     fn from(error: VaultError) -> Self {
         match error {
             VaultError::OutsideRoot { .. } | VaultError::InvalidPath(_) => Self::Traversal,
+            VaultError::ReadOnly { .. } => Self::ReadOnly,
             other => Self::Io(other.into()),
         }
     }
@@ -1541,6 +1660,10 @@ impl IntoResponse for FileOpError {
                 (StatusCode::NOT_FOUND, "Source markdown file not found")
             }
             FileOpError::Traversal => (StatusCode::BAD_REQUEST, "Invalid path"),
+            FileOpError::ReadOnly => (
+                StatusCode::FORBIDDEN,
+                "This folder is read-only: it is an external folder mounted through a symlink",
+            ),
             FileOpError::Io(e) => {
                 tracing::error!("file operation I/O error: {e}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "I/O error")
@@ -1835,6 +1958,12 @@ impl Server {
 
         // Spawn background repo scan so site.json is ready before first request.
         // Phase 1: basic scan (file listing + frontmatter). Phase 2: media metadata (ffmpeg/lopdf).
+        // Created before the scan so the scan can hand the watcher the symlink
+        // mounts it discovers; the watcher itself starts further down.
+        #[cfg(feature = "watcher")]
+        let watcher_handle: WatcherHandle = Arc::new(std::sync::Mutex::new(None));
+        #[cfg(feature = "watcher")]
+        let watcher_handle_for_scan = Arc::clone(&watcher_handle);
         let repo_for_scan = Arc::clone(&repo);
         tokio::task::spawn_blocking(move || {
             if let Err(e) = repo_for_scan.scan_all() {
@@ -1851,6 +1980,9 @@ impl Server {
             if let Err(e) = repo_for_scan.scan_static_folder() {
                 tracing::error!("Background static scan failed: {e}");
             }
+            // Every mount is known now (the scan discovers them as it descends).
+            #[cfg(feature = "watcher")]
+            sync_watched_mounts(&watcher_handle_for_scan, &repo_for_scan);
 
             // Phase 2: populate basic file metadata (stat calls for size/timestamps)
             repo_for_scan.populate_basic_metadata();
@@ -1870,6 +2002,8 @@ impl Server {
 
         #[cfg(feature = "watcher")]
         let watcher_handle = spawn_file_watcher(
+            watcher_handle,
+            Arc::clone(&repo),
             base_dir.clone(),
             template_folder.clone(),
             watcher_ignore_dirs,
@@ -1999,6 +2133,8 @@ impl Server {
         let link_index_config_for_invalidation = link_index_config.clone();
         let index_lock_for_invalidation = Arc::clone(&index_lock);
         let task_index_for_invalidation = Arc::clone(&task_index);
+        #[cfg(feature = "watcher")]
+        let watcher_handle_for_invalidation = Arc::clone(&watcher_handle);
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
             const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
@@ -2070,6 +2206,8 @@ impl Server {
                 let link_index_cfg = link_index_config_for_invalidation.clone();
                 let index_lock = Arc::clone(&index_lock_for_invalidation);
                 let task_index = Arc::clone(&task_index_for_invalidation);
+                #[cfg(feature = "watcher")]
+                let watcher_handle = Arc::clone(&watcher_handle_for_invalidation);
 
                 if relevant_events.len() <= SURGICAL_THRESHOLD {
                     // Surgical invalidation: update individual files
@@ -2194,6 +2332,9 @@ impl Server {
                     );
                     tokio::task::spawn_blocking(move || {
                         repo.full_rescan();
+                        // A rescan can discover links created since startup.
+                        #[cfg(feature = "watcher")]
+                        sync_watched_mounts(&watcher_handle, &repo);
                         // Every page may have changed, so rebuild rather than
                         // patch. `populate_inbound_index` re-marks it ready; the
                         // stale index stays queryable in the meantime, which is
@@ -3169,6 +3310,9 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        if let Err(err) = config.refuse_read_only(&md_path) {
+            return err.into_response();
+        }
         // Held across the hash check and the write, so no other write can
         // land in between and be overwritten unseen.
         let _write_guard = config.file_write_locks.lock(&md_path).await;
@@ -3192,9 +3336,13 @@ impl Server {
         let new_bytes = req.content.into_bytes();
         let new_hash = mbr_core::edit_auth::content_hash(&new_bytes);
 
-        if let Err(e) = Self::atomic_write_file_async(&config, &md_path, new_bytes).await {
-            tracing::error!("Failed to save markdown: {e:?}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
+        match Self::atomic_write_file_async(&config, &md_path, new_bytes).await {
+            Ok(()) => {}
+            Err(e @ FileOpError::ReadOnly) => return e.into_response(),
+            Err(e) => {
+                tracing::error!("Failed to save markdown: {e:?}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Write failed").into_response();
+            }
         }
 
         // Trigger live-reload for connected clients.
@@ -3262,6 +3410,9 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        if let Err(err) = config.refuse_read_only(&md_path) {
+            return err.into_response();
+        }
         let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         let source = match Self::read_markdown_source(&config, &md_path, "task toggle").await {
@@ -3389,6 +3540,9 @@ impl Server {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
+        if let Err(err) = config.refuse_read_only(&md_path) {
+            return err.into_response();
+        }
         let reviewed_at = match mbr_core::flashcards::parse_review_time(
             &req.at,
             chrono::Utc::now().naive_utc(),
@@ -3556,6 +3710,7 @@ impl Server {
         req: CreateRequest,
     ) -> Result<CreateResponse, FileOpError> {
         let dst = Self::resolve_new_target(config, rel)?;
+        config.refuse_read_only(&dst)?;
         if !Self::path_has_markdown_extension(&dst, &config.markdown_extensions) {
             return Err(FileOpError::NotMarkdown);
         }
@@ -3623,6 +3778,7 @@ impl Server {
     /// Blocking body of [`Self::mkdir_handler`].
     fn do_mkdir(config: &ServerState, rel: &str) -> Result<MkdirResponse, FileOpError> {
         let target = Self::resolve_new_target(config, rel)?;
+        config.refuse_read_only(&target)?;
         let rel_path = Self::rel_path_string(&target, &config.base_dir);
         if config.key_is_dir(&target) {
             // Idempotent: pre-creating an existing folder is retry-safe.
@@ -3691,6 +3847,7 @@ impl Server {
             format!("{dir_clean}/{safe_name}")
         };
         let target = Self::resolve_new_target(config, &rel)?;
+        config.refuse_read_only(&target)?;
 
         // `.mbr` is an ordinary path component to the resolver, so without this
         // the uploader could drop a file into the template folder — where the
@@ -3808,7 +3965,11 @@ impl Server {
                 FileOpError::Traversal
             }
         })?;
+        // A note in a mount can be neither moved out (its source would have to
+        // be deleted) nor moved in.
+        config.refuse_read_only(&src)?;
         let dst = Self::resolve_new_target(config, &req.to)?;
+        config.refuse_read_only(&dst)?;
         if !Self::path_has_markdown_extension(&dst, &config.markdown_extensions) {
             return Err(FileOpError::NotMarkdown);
         }
@@ -4156,58 +4317,62 @@ impl Server {
         };
 
         // Validate the media path
-        let validated_path =
-            match validate_media_path(media_path, &config.base_dir, &config.static_folder) {
-                Ok(p) => p,
-                Err(MbrError::DirectoryTraversal) => {
-                    tracing::warn!("Directory traversal attempt: {}", media_path);
-                    return Self::render_error_page(
-                        &config.templates,
-                        StatusCode::FORBIDDEN,
-                        "Forbidden",
-                        Some("Access denied: Invalid path"),
-                        route_path,
-                        config.gui_mode,
-                        &config.sidebar_style,
-                        config.sidebar_max_items,
-                        config.graph_depth,
-                        config.tasks_enabled,
-                        config.tasks_default_include,
-                    );
-                }
-                Err(MbrError::InvalidMediaPath(msg)) => {
-                    tracing::warn!("Invalid media path: {} - {}", media_path, msg);
-                    return Self::render_error_page(
-                        &config.templates,
-                        StatusCode::NOT_FOUND,
-                        "Not Found",
-                        Some(&format!("Media file not found: {}", msg)),
-                        route_path,
-                        config.gui_mode,
-                        &config.sidebar_style,
-                        config.sidebar_max_items,
-                        config.graph_depth,
-                        config.tasks_enabled,
-                        config.tasks_default_include,
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("Unexpected error validating media path: {}", e);
-                    return Self::render_error_page(
-                        &config.templates,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Internal Server Error",
-                        Some("Failed to validate media path"),
-                        route_path,
-                        config.gui_mode,
-                        &config.sidebar_style,
-                        config.sidebar_max_items,
-                        config.graph_depth,
-                        config.tasks_enabled,
-                        config.tasks_default_include,
-                    );
-                }
-            };
+        let validated_path = match validate_media_path_with_mounts(
+            media_path,
+            &config.base_dir,
+            &config.static_folder,
+            &config.mount_targets(),
+        ) {
+            Ok(p) => p,
+            Err(MbrError::DirectoryTraversal) => {
+                tracing::warn!("Directory traversal attempt: {}", media_path);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::FORBIDDEN,
+                    "Forbidden",
+                    Some("Access denied: Invalid path"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                    config.graph_depth,
+                    config.tasks_enabled,
+                    config.tasks_default_include,
+                );
+            }
+            Err(MbrError::InvalidMediaPath(msg)) => {
+                tracing::warn!("Invalid media path: {} - {}", media_path, msg);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::NOT_FOUND,
+                    "Not Found",
+                    Some(&format!("Media file not found: {}", msg)),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                    config.graph_depth,
+                    config.tasks_enabled,
+                    config.tasks_default_include,
+                );
+            }
+            Err(e) => {
+                tracing::error!("Unexpected error validating media path: {}", e);
+                return Self::render_error_page(
+                    &config.templates,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    Some("Failed to validate media path"),
+                    route_path,
+                    config.gui_mode,
+                    &config.sidebar_style,
+                    config.sidebar_max_items,
+                    config.graph_depth,
+                    config.tasks_enabled,
+                    config.tasks_default_include,
+                );
+            }
+        };
 
         // Extract title from filename
         let title = validated_path
@@ -4581,6 +4746,7 @@ impl Server {
                     config.base_dir.as_path(),
                     config.canonical_base_dir.as_deref(),
                     &config.static_folder,
+                    || config.mount_targets(),
                 ) =>
             {
                 tracing::warn!(
@@ -4852,9 +5018,12 @@ impl Server {
         // Resolve the video file path (with path-traversal protection) *before*
         // computing the cache key so the key can be scoped to the file's mtime
         // (finding #13). If the file no longer exists, fall through to 404.
-        let Some(video_file) =
-            resolve_media_source_file(video_url_path, &config.base_dir, &config.static_folder)
-        else {
+        let Some(video_file) = resolve_media_source_file(
+            video_url_path,
+            &config.base_dir,
+            &config.static_folder,
+            &config.mount_targets(),
+        ) else {
             tracing::debug!(
                 "Video file not found for metadata generation: {}",
                 video_url_path
@@ -5050,9 +5219,12 @@ impl Server {
         // Resolve the PDF file path (with path-traversal protection) *before*
         // computing the cache key so the key can be scoped to the file's mtime
         // (finding #13). First try the direct path, then the static_folder prefix.
-        let Some(pdf_file) =
-            resolve_media_source_file(pdf_url_path, &config.base_dir, &config.static_folder)
-        else {
+        let Some(pdf_file) = resolve_media_source_file(
+            pdf_url_path,
+            &config.base_dir,
+            &config.static_folder,
+            &config.mount_targets(),
+        ) else {
             tracing::debug!("PDF file not found for cover generation: {}", pdf_url_path);
             return None;
         };
@@ -6062,9 +6234,12 @@ impl Server {
 
         // Path-traversal protection, and the source of the mtime the cache key
         // is scoped to.
-        let Some(video_file) =
-            resolve_media_source_file(request.video_path, &config.base_dir, &config.static_folder)
-        else {
+        let Some(video_file) = resolve_media_source_file(
+            request.video_path,
+            &config.base_dir,
+            &config.static_folder,
+            &config.mount_targets(),
+        ) else {
             tracing::debug!("no video file for remux request: {}", request.video_path);
             return None;
         };
@@ -6191,9 +6366,12 @@ impl Server {
         tracing::debug!("HLS request: {:?}", hls_request);
 
         // Resolve the original video file path with path traversal protection
-        let Some(video_file) =
-            resolve_media_source_file(&video_path, &config.base_dir, &config.static_folder)
-        else {
+        let Some(video_file) = resolve_media_source_file(
+            &video_path,
+            &config.base_dir,
+            &config.static_folder,
+            &config.mount_targets(),
+        ) else {
             tracing::debug!("Original video file not found for HLS: {}", video_path);
             return None;
         };
@@ -7774,7 +7952,7 @@ mod tests {
         // Secret file OUTSIDE base - unvalidated join + is_file() would have found it
         std::fs::write(temp_dir.path().join("secret.mp4"), b"secret").unwrap();
 
-        let result = resolve_media_source_file("../secret.mp4", &base, "static");
+        let result = resolve_media_source_file("../secret.mp4", &base, "static", &[]);
         assert!(
             result.is_none(),
             "path traversal outside base_dir must be rejected"
@@ -7788,7 +7966,7 @@ mod tests {
         let video_file = temp_dir.path().join("demo.mp4");
         std::fs::write(&video_file, b"video content").unwrap();
 
-        let result = resolve_media_source_file("demo.mp4", temp_dir.path(), "static");
+        let result = resolve_media_source_file("demo.mp4", temp_dir.path(), "static", &[]);
         assert_eq!(result, Some(video_file.canonicalize().unwrap()));
     }
 
@@ -7801,7 +7979,7 @@ mod tests {
         let video_file = static_dir.join("demo.mp4");
         std::fs::write(&video_file, b"video content").unwrap();
 
-        let result = resolve_media_source_file("demo.mp4", temp_dir.path(), "static");
+        let result = resolve_media_source_file("demo.mp4", temp_dir.path(), "static", &[]);
         assert_eq!(result, Some(video_file.canonicalize().unwrap()));
     }
 
@@ -9126,20 +9304,23 @@ mod tests {
             &inside,
             &repo,
             Some(&canonical_repo),
-            "static"
+            "static",
+            Vec::new
         ));
         assert!(is_within_served_roots(
             &repo,
             &repo,
             Some(&canonical_repo),
-            ""
+            "",
+            Vec::new
         ));
         // The static_folder overlay may legitimately live outside the root.
         assert!(is_within_served_roots(
             &overlay,
             &repo,
             Some(&canonical_repo),
-            "../static"
+            "../static",
+            Vec::new
         ));
     }
 
@@ -9165,7 +9346,8 @@ mod tests {
                 &link,
                 &repo,
                 Some(&canonical_repo),
-                "static"
+                "static",
+                Vec::new
             ));
         }
         // A path that does not exist at all is never servable.
@@ -9173,7 +9355,63 @@ mod tests {
             &repo.join("missing.txt"),
             &repo,
             Some(&canonical_repo),
-            "static"
+            "static",
+            Vec::new
+        ));
+    }
+
+    /// The path-based serving checks — the media viewers' `?path=` and the
+    /// serving gate — accept a file reached through an accepted mount and
+    /// refuse hidden files anywhere.
+    #[cfg(unix)]
+    #[test]
+    fn test_path_checks_follow_mounts_and_refuse_hidden_files() {
+        let outside = tempfile::Builder::new()
+            .prefix("mbr-server-test-")
+            .tempdir()
+            .unwrap();
+        let target = outside.path().canonicalize().unwrap();
+        std::fs::create_dir(target.join(".secret")).unwrap();
+        std::fs::write(target.join("clip.mp4"), b"clip").unwrap();
+        std::fs::write(target.join(".secret/key"), b"key").unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        std::fs::write(root.join(".env"), b"SECRET=1").unwrap();
+        std::os::unix::fs::symlink(&target, root.join("videos")).unwrap();
+        let mounts = [target.clone()];
+
+        assert!(matches!(
+            validate_media_path(".env", &root, ""),
+            Err(MbrError::InvalidMediaPath(_))
+        ));
+        assert!(validate_media_path("videos/clip.mp4", &root, "").is_err());
+        assert_eq!(
+            validate_media_path_with_mounts("videos/clip.mp4", &root, "", &mounts).unwrap(),
+            target.join("clip.mp4")
+        );
+        assert!(validate_media_path_with_mounts("videos/.secret/key", &root, "", &mounts).is_err());
+
+        let link = root.join("videos/clip.mp4");
+        assert!(!is_within_served_roots(
+            &link,
+            &root,
+            Some(&root),
+            "",
+            Vec::new
+        ));
+        assert!(is_within_served_roots(
+            &link,
+            &root,
+            Some(&root),
+            "",
+            || { mounts.to_vec() }
+        ));
+        assert!(!is_within_served_roots(
+            &root.join("videos/.secret/key"),
+            &root,
+            Some(&root),
+            "",
+            || mounts.to_vec()
         ));
     }
 

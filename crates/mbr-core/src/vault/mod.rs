@@ -40,6 +40,7 @@
 
 mod local;
 mod mem;
+mod mount;
 mod path;
 
 use std::fmt;
@@ -49,6 +50,7 @@ use std::time::SystemTime;
 
 pub use local::{LocalVault, atomic_write, create_unique_temp_file, read_prefix_native};
 pub use mem::MemVault;
+pub use mount::{Mount, MountPolicy};
 pub use path::{VaultPath, VaultPathError};
 
 /// What an [`Entry`] is. Symlinks are followed, as the desktop scanner always
@@ -145,6 +147,11 @@ pub enum VaultError {
     #[error("outside the vault root: {path}")]
     OutsideRoot { path: String },
 
+    /// The path is inside a read-only part of the vault — a symlink mount
+    /// ([`Vault::is_read_only`]) — and the operation would write there.
+    #[error("read-only (an external folder mounted through a symlink): {path}")]
+    ReadOnly { path: String },
+
     #[error(transparent)]
     InvalidPath(#[from] VaultPathError),
 
@@ -191,9 +198,9 @@ impl From<VaultError> for io::Error {
     fn from(error: VaultError) -> Self {
         let kind = match &error {
             VaultError::NotFound { .. } => io::ErrorKind::NotFound,
-            VaultError::PermissionDenied { .. } | VaultError::OutsideRoot { .. } => {
-                io::ErrorKind::PermissionDenied
-            }
+            VaultError::PermissionDenied { .. }
+            | VaultError::OutsideRoot { .. }
+            | VaultError::ReadOnly { .. } => io::ErrorKind::PermissionDenied,
             VaultError::NotDownloaded { .. } => io::ErrorKind::WouldBlock,
             VaultError::InvalidPath(_) => io::ErrorKind::InvalidInput,
             VaultError::Io { .. } => {
@@ -312,6 +319,49 @@ pub trait Vault: Send + Sync + fmt::Debug {
     fn is_dir(&self, path: &VaultPath) -> bool {
         matches!(self.stat(path), Ok(Some(entry)) if entry.is_dir())
     }
+
+    /// Whether `path` lies in a read-only part of the vault — a symlink
+    /// mount's location or anything under it. Lexical: callers pass resolved
+    /// (canonical) paths, and the vault's own write methods re-check the
+    /// canonical form. `false` for vaults without mounts.
+    fn is_read_only(&self, _path: &VaultPath) -> bool {
+        false
+    }
+
+    /// The symlink mounts accepted so far (see [`Mount`]). They are discovered
+    /// as paths through them are first resolved, so the list grows during the
+    /// first scan. Empty for vaults without mounts.
+    fn mounts(&self) -> Vec<Mount> {
+        Vec::new()
+    }
+}
+
+/// Whether a path segment is **hidden** for serving: it starts with a dot.
+///
+/// The one exception is `.well-known` (RFC 8615): the registered prefix for
+/// site metadata — `security.txt`, ACME challenges, app-site associations —
+/// which a static site has to be able to publish. It holds no secrets by
+/// definition, unlike `.git`, `.env` or `.ssh`.
+pub fn is_hidden_segment(segment: &str) -> bool {
+    segment.starts_with('.') && segment != ".well-known"
+}
+
+/// Whether `path` has a hidden segment ([`is_hidden_segment`]) that is not
+/// covered by `exempt` — the hidden directories the user named on the command
+/// line (`Config::explicit_hidden_dirs`, as vault paths). A hidden segment is
+/// exempt when the path up to and including it is one of them, so naming
+/// `.scratch` admits `.scratch/a.md` but not `.scratch/.git/config`.
+///
+/// Hidden files are never served: they are where repositories keep
+/// credentials and tooling state (`.env`, `.git/config`, `.mbr/config.toml`
+/// with its token hash). Allocation-free.
+pub fn has_hidden_segment(path: &VaultPath, exempt: &[VaultPath]) -> bool {
+    let full = path.as_str();
+    let mut end = 0;
+    path.segments().any(|segment| {
+        end += segment.len() + usize::from(end != 0);
+        is_hidden_segment(segment) && !exempt.iter().any(|dir| dir.as_str() == &full[..end])
+    })
 }
 
 /// Places a configured folder (`static_folder`) inside `vault`, or `None`
@@ -396,9 +446,21 @@ pub fn resolve_under(
 /// Sequential and one [`Vault::list_dir`] per directory. Directories that
 /// cannot be listed are skipped, as `WalkDir`'s error entries were.
 pub fn walk_files(vault: &dyn Vault, enter: impl Fn(&Entry) -> bool) -> Vec<Entry> {
+    walk_files_under(vault, &VaultPath::root(), enter)
+}
+
+/// [`walk_files`] from `base` rather than the root: every file below it, each
+/// directory once by canonical path, nothing outside the vault. A directory
+/// below `base` that canonicalizes elsewhere in the vault is walked under its
+/// canonical path, as [`walk_files`] walks it.
+pub fn walk_files_under(
+    vault: &dyn Vault,
+    base: &VaultPath,
+    enter: impl Fn(&Entry) -> bool,
+) -> Vec<Entry> {
     let mut files = Vec::new();
     let mut visited = std::collections::HashSet::new();
-    let mut pending = vec![VaultPath::root()];
+    let mut pending = vec![base.clone()];
     while let Some(dir) = pending.pop() {
         let Ok(canonical) = vault.canonicalize(&dir) else {
             continue;
@@ -526,6 +588,27 @@ mod tests {
             vec!["real/note.md"],
             "listed once, canonically, nothing outside"
         );
+    }
+
+    #[test]
+    fn hidden_segments_and_their_exemptions() {
+        let p = |s: &str| VaultPath::new(s).unwrap();
+        assert!(!has_hidden_segment(&VaultPath::root(), &[]));
+        assert!(!has_hidden_segment(&p("docs/a.md"), &[]));
+        assert!(!has_hidden_segment(&p("docs/a.b.md"), &[]));
+        assert!(has_hidden_segment(&p(".env"), &[]));
+        assert!(has_hidden_segment(&p(".git/config"), &[]));
+        assert!(has_hidden_segment(&p("docs/.private/a.md"), &[]));
+        assert!(has_hidden_segment(&p("docs/.hidden.png"), &[]));
+        assert!(!has_hidden_segment(&p(".well-known/security.txt"), &[]));
+        assert!(has_hidden_segment(&p(".well-known/.secret"), &[]));
+        // Exempt: exactly the named chain.
+        let exempt = [p(".scratch"), p(".scratch/b/.deep")];
+        assert!(!has_hidden_segment(&p(".scratch/a.md"), &exempt));
+        assert!(!has_hidden_segment(&p(".scratch/b/.deep/c.md"), &exempt));
+        assert!(has_hidden_segment(&p(".scratch/.git/config"), &exempt));
+        assert!(has_hidden_segment(&p("x/.scratch/a.md"), &exempt));
+        assert!(has_hidden_segment(&p(".scratchy/a.md"), &exempt));
     }
 
     #[test]

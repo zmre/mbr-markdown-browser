@@ -8,9 +8,11 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
+use super::mount::{Mount, MountPolicy, MountTable};
 use super::{Availability, Entry, EntryKind, Vault, VaultError, VaultPath};
 
 /// A repository directory on the local filesystem.
@@ -18,6 +20,10 @@ use super::{Availability, Entry, EntryKind, Vault, VaultError, VaultPath};
 pub struct LocalVault {
     /// Canonicalized at construction — see [`LocalVault::new`].
     root: PathBuf,
+    /// Read-only symlink mounts ([`super::mount`]), when enabled with
+    /// [`LocalVault::with_mounts`]. `None` keeps the original rule: a link
+    /// out of the root is [`VaultError::OutsideRoot`], full stop.
+    mounts: Option<Arc<MountTable>>,
 }
 
 impl LocalVault {
@@ -34,7 +40,49 @@ impl LocalVault {
         let root = root.into();
         Self {
             root: root.canonicalize().unwrap_or(root),
+            mounts: None,
         }
+    }
+
+    /// A vault rooted at `root` (canonicalized, as [`Self::new`]) that serves
+    /// links out of it as read-only **mounts** under `policy` — see
+    /// [`super::mount`]. This is what the repository and its external static
+    /// overlay are built with ([`crate::repo::Repo::init`]).
+    pub fn with_mounts(root: impl Into<PathBuf>, policy: MountPolicy) -> Self {
+        Self {
+            mounts: Some(Arc::new(MountTable::new(policy))),
+            ..Self::new(root)
+        }
+    }
+
+    /// Refuses a write to `path` that would land in a mount or outside the
+    /// vault.
+    ///
+    /// Judged on the deepest **existing** ancestor's canonical path as well as
+    /// on `path` as spelled: a write reaching a mount through some other link
+    /// (`alias/videos/x` with `alias -> static`) is caught too, and so is one
+    /// through a link the vault has not discovered yet (canonicalizing is what
+    /// discovers it). Callers already resolve their targets this way; this is
+    /// the vault's own guarantee rather than theirs. One `canonicalize` per
+    /// write — writes are rare, reads never pay it.
+    fn check_writable(&self, path: &VaultPath) -> Result<(), VaultError> {
+        let existing = path
+            .ancestors()
+            .find(|ancestor| fs::symlink_metadata(self.native(ancestor)).is_ok())
+            .unwrap_or_default();
+        let canonical = match self.canonicalize(&existing) {
+            Ok(canonical) => canonical,
+            // A dangling link, or a race with a delete: the write itself
+            // reports whatever it hits.
+            Err(VaultError::NotFound { .. }) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if self.is_read_only(path) || self.is_read_only(&canonical) {
+            return Err(VaultError::ReadOnly {
+                path: path.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// The native path for `path`.
@@ -103,9 +151,21 @@ impl Vault for LocalVault {
             .native(path)
             .canonicalize()
             .map_err(|e| VaultError::from_io(path, e))?;
-        VaultPath::from_absolute(&self.root, &canonical).map_err(|_| VaultError::OutsideRoot {
-            path: canonical.display().to_string(),
-        })
+        // The common case, and the only one a vault without links out ever
+        // takes: one `realpath`, no lock, no table.
+        if canonical.starts_with(&self.root) {
+            return VaultPath::from_absolute(&self.root, &canonical).map_err(|_| {
+                VaultError::OutsideRoot {
+                    path: canonical.display().to_string(),
+                }
+            });
+        }
+        match &self.mounts {
+            Some(table) => table.resolve(&self.root, |p| self.native(p), path, canonical),
+            None => Err(VaultError::OutsideRoot {
+                path: canonical.display().to_string(),
+            }),
+        }
     }
 
     fn read(&self, path: &VaultPath) -> Result<Vec<u8>, VaultError> {
@@ -117,23 +177,41 @@ impl Vault for LocalVault {
     }
 
     fn write_atomic(&self, path: &VaultPath, bytes: &[u8]) -> Result<(), VaultError> {
+        self.check_writable(path)?;
         atomic_write(&self.native(path), bytes).map_err(|e| VaultError::from_io(path, e))
     }
 
     fn create_dir_all(&self, path: &VaultPath) -> Result<(), VaultError> {
+        self.check_writable(path)?;
         fs::create_dir_all(self.native(path)).map_err(|e| VaultError::from_io(path, e))
     }
 
     fn remove_file(&self, path: &VaultPath) -> Result<(), VaultError> {
+        self.check_writable(path)?;
         fs::remove_file(self.native(path)).map_err(|e| VaultError::from_io(path, e))
     }
 
     fn rename(&self, from: &VaultPath, to: &VaultPath) -> Result<(), VaultError> {
+        self.check_writable(from)?;
+        self.check_writable(to)?;
         fs::rename(self.native(from), self.native(to)).map_err(|e| VaultError::from_io(from, e))
     }
 
     fn local_path(&self, path: &VaultPath) -> Option<PathBuf> {
         Some(self.native(path))
+    }
+
+    fn is_read_only(&self, path: &VaultPath) -> bool {
+        self.mounts
+            .as_ref()
+            .is_some_and(|table| table.contains(path))
+    }
+
+    fn mounts(&self) -> Vec<Mount> {
+        self.mounts
+            .as_ref()
+            .map(|table| table.snapshot())
+            .unwrap_or_default()
     }
 }
 
