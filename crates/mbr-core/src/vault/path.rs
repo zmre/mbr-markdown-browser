@@ -98,22 +98,24 @@ impl VaultPath {
             return Err(VaultPathError::Absolute(path.to_string()));
         }
 
-        let mut segments: Vec<&str> = Vec::new();
+        // Built in place: this runs per request and per resolved path, so it
+        // allocates once and never per segment.
+        let mut normalized = String::with_capacity(path.len());
         for segment in path.split(['/', '\\']) {
             match segment {
                 "" | "." => {}
                 ".." => {
-                    if segments.pop().is_none() {
+                    if !pop_segment(&mut normalized) {
                         return Err(VaultPathError::Escapes(path.to_string()));
                     }
                 }
                 _ => {
-                    validate_segment(path, segment)?;
-                    segments.push(segment);
+                    check_segment(segment).map_err(|problem| problem.error(path, segment))?;
+                    push_segment(&mut normalized, segment);
                 }
             }
         }
-        Ok(Self(segments.join("/")))
+        Ok(Self(normalized))
     }
 
     /// Converts a repo-relative **native** path (such as
@@ -122,12 +124,12 @@ impl VaultPath {
     /// `.` is dropped and `..` pops, as in [`Self::new`]; a root or prefix
     /// component, or a non-UTF-8 component, is refused.
     pub fn from_relative_native(path: &Path) -> Result<Self, VaultPathError> {
-        let mut segments: Vec<String> = Vec::new();
+        let mut normalized = String::with_capacity(path.as_os_str().len());
         for component in path.components() {
             match component {
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    if segments.pop().is_none() {
+                    if !pop_segment(&mut normalized) {
                         return Err(VaultPathError::Escapes(path.display().to_string()));
                     }
                 }
@@ -137,22 +139,22 @@ impl VaultPath {
                         .ok_or_else(|| VaultPathError::NotUtf8(path.to_path_buf()))?;
                     // A native component can still hold a `\` on Unix, which
                     // would become a separator on the way back out.
-                    let joined = path.display().to_string();
                     if name.contains('\\') {
                         return Err(VaultPathError::InvalidSegment {
-                            path: joined,
+                            path: path.display().to_string(),
                             segment: name.to_string(),
                         });
                     }
-                    validate_segment(&joined, name)?;
-                    segments.push(name.to_string());
+                    check_segment(name)
+                        .map_err(|problem| problem.error(&path.display().to_string(), name))?;
+                    push_segment(&mut normalized, name);
                 }
                 Component::RootDir | Component::Prefix(_) => {
                     return Err(VaultPathError::Absolute(path.display().to_string()));
                 }
             }
         }
-        Ok(Self(segments.join("/")))
+        Ok(Self(normalized))
     }
 
     /// Converts an absolute native path under `root` into a vault path.
@@ -260,7 +262,7 @@ impl VaultPath {
                 segment: name.to_string(),
             });
         }
-        validate_segment(&full, name)?;
+        check_segment(name).map_err(|problem| problem.error(&full, name))?;
         Ok(Self(full))
     }
 
@@ -279,7 +281,8 @@ impl VaultPath {
     /// always `root` itself or a descendant of it: no segment can be a root,
     /// a prefix or a `..` (see the type's invariants).
     pub fn to_native(&self, root: &Path) -> PathBuf {
-        let mut native = root.to_path_buf();
+        let mut native = PathBuf::with_capacity(root.as_os_str().len() + self.0.len() + 1);
+        native.push(root);
         for segment in self.segments() {
             native.push(segment);
         }
@@ -287,20 +290,54 @@ impl VaultPath {
     }
 }
 
+/// Appends one segment to a normalized path under construction.
+fn push_segment(normalized: &mut String, segment: &str) {
+    if !normalized.is_empty() {
+        normalized.push('/');
+    }
+    normalized.push_str(segment);
+}
+
+/// Drops the last segment of a normalized path under construction; `false`
+/// when there was none (a `..` at the root).
+fn pop_segment(normalized: &mut String) -> bool {
+    if normalized.is_empty() {
+        return false;
+    }
+    let cut = normalized.rfind('/').unwrap_or(0);
+    normalized.truncate(cut);
+    true
+}
+
+/// What is wrong with a segment, before the error naming it is built — so the
+/// hot path never formats a message it does not need.
+enum SegmentProblem {
+    Invalid,
+    BareDrive,
+}
+
+impl SegmentProblem {
+    fn error(self, path: &str, segment: &str) -> VaultPathError {
+        match self {
+            Self::Invalid => VaultPathError::InvalidSegment {
+                path: path.to_string(),
+                segment: segment.to_string(),
+            },
+            Self::BareDrive => VaultPathError::Absolute(path.to_string()),
+        }
+    }
+}
+
 /// Validates one non-empty, non-`.`/`..` segment.
-fn validate_segment(path: &str, segment: &str) -> Result<(), VaultPathError> {
-    let invalid = || VaultPathError::InvalidSegment {
-        path: path.to_string(),
-        segment: segment.to_string(),
-    };
+fn check_segment(segment: &str) -> Result<(), SegmentProblem> {
     if segment.is_empty() || segment == "." || segment == ".." {
-        return Err(invalid());
+        return Err(SegmentProblem::Invalid);
     }
     // A bare drive designator is refused on every platform, so `C:/Windows`
     // means the same thing (nothing) everywhere. Only the *bare* form: a Unix
     // note called `Q: what next.md` is an ordinary file name there.
     if is_bare_drive(segment) {
-        return Err(VaultPathError::Absolute(path.to_string()));
+        return Err(SegmentProblem::BareDrive);
     }
     // What the host itself would parse the segment as. On Windows `Q:x` is a
     // drive-relative prefix and `PathBuf::push` would *replace* the root with
@@ -309,7 +346,7 @@ fn validate_segment(path: &str, segment: &str) -> Result<(), VaultPathError> {
     let mut components = Path::new(segment).components();
     match (components.next(), components.next()) {
         (Some(Component::Normal(name)), None) if name == segment => Ok(()),
-        _ => Err(invalid()),
+        _ => Err(SegmentProblem::Invalid),
     }
 }
 

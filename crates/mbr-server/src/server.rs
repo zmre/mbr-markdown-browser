@@ -212,14 +212,13 @@ fn invalidate_derived_caches(
 /// link transform carries into the renderer. Built per page render; the clones
 /// are a handful of short strings.
 fn owned_resolver_config(config: &ServerState) -> mbr_core::path_resolver::OwnedPathResolverConfig {
-    mbr_core::path_resolver::OwnedPathResolverConfig {
-        base_dir: config.base_dir.clone(),
-        canonical_base_dir: config.canonical_base_dir.clone(),
-        static_folder: config.static_folder.clone(),
-        markdown_extensions: config.markdown_extensions.clone(),
-        index_file: config.index_file.clone(),
-        tag_sources: mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
-    }
+    mbr_core::path_resolver::OwnedPathResolverConfig::for_repo(
+        &config.repo,
+        &config.static_folder,
+        &config.markdown_extensions,
+        &config.index_file,
+        mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
+    )
 }
 
 /// Everything [`index_page_links`] needs to reproduce the renderer's link
@@ -1137,6 +1136,23 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             upload_max_bytes: config.upload_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
+        }
+    }
+}
+
+impl ServerState {
+    /// The path-resolver inputs for this server's repository: its vault and
+    /// static overlay ([`Repo::vault`], [`Repo::static_vault`]) plus the
+    /// configured resolution settings. One definition, so every handler
+    /// resolves a URL against the same storage the index was scanned from.
+    fn resolver_config<'a>(&'a self, tag_url_sources: &'a [String]) -> PathResolverConfig<'a> {
+        PathResolverConfig {
+            vault: self.repo.vault().as_ref(),
+            static_vault: self.repo.static_vault().map(|vault| vault.as_ref()),
+            static_folder: &self.static_folder,
+            markdown_extensions: &self.markdown_extensions,
+            index_file: &self.index_file,
+            tag_sources: tag_url_sources,
         }
     }
 }
@@ -3056,14 +3072,7 @@ impl Server {
         path: &str,
     ) -> Result<PathBuf, (StatusCode, &'static str)> {
         let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
-        let resolver_config = PathResolverConfig {
-            base_dir: config.base_dir.as_path(),
-            canonical_base_dir: config.canonical_base_dir.as_deref(),
-            static_folder: &config.static_folder,
-            markdown_extensions: &config.markdown_extensions,
-            index_file: &config.index_file,
-            tag_sources: &tag_url_sources,
-        };
+        let resolver_config = config.resolver_config(&tag_url_sources);
 
         match resolve_request_path(&resolver_config, path) {
             ResolvedPath::MarkdownFile(md_path) => {
@@ -4468,14 +4477,7 @@ impl Server {
         tracing::debug!("handle: {}", &path);
 
         let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
-        let resolver_config = PathResolverConfig {
-            base_dir: config.base_dir.as_path(),
-            canonical_base_dir: config.canonical_base_dir.as_deref(),
-            static_folder: &config.static_folder,
-            markdown_extensions: &config.markdown_extensions,
-            index_file: &config.index_file,
-            tag_sources: &tag_url_sources,
-        };
+        let resolver_config = config.resolver_config(&tag_url_sources);
 
         // Defense in depth: never serve a resolved filesystem path that escapes
         // the repository root (or the static-folder overlay). A symlink inside
@@ -5135,14 +5137,7 @@ impl Server {
         } else {
             // Resolve the path to find the markdown file
             let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
-            let resolver_config = PathResolverConfig {
-                base_dir: &config.base_dir,
-                canonical_base_dir: config.canonical_base_dir.as_deref(),
-                static_folder: &config.static_folder,
-                markdown_extensions: &config.markdown_extensions,
-                index_file: &config.index_file,
-                tag_sources: &tag_url_sources,
-            };
+            let resolver_config = config.resolver_config(&tag_url_sources);
 
             // Convert page_url_path to a request path for the resolver
             // "/docs/guide/" -> "docs/guide"
@@ -5417,14 +5412,7 @@ impl Server {
         tracing::debug!("errors.json request for page: {}", page_url_path);
 
         let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
-        let resolver_config = PathResolverConfig {
-            base_dir: &config.base_dir,
-            canonical_base_dir: config.canonical_base_dir.as_deref(),
-            static_folder: &config.static_folder,
-            markdown_extensions: &config.markdown_extensions,
-            index_file: &config.index_file,
-            tag_sources: &tag_url_sources,
-        };
+        let resolver_config = config.resolver_config(&tag_url_sources);
 
         let request_path = page_url_path.trim_matches('/');
 
@@ -6968,14 +6956,7 @@ impl Server {
         tracing::debug!("home_page handler");
 
         let tag_url_sources = mbr_core::config::tag_sources_to_url_sources(&config.tag_sources);
-        let resolver_config = PathResolverConfig {
-            base_dir: config.base_dir.as_path(),
-            canonical_base_dir: config.canonical_base_dir.as_deref(),
-            static_folder: &config.static_folder,
-            markdown_extensions: &config.markdown_extensions,
-            index_file: &config.index_file,
-            tag_sources: &tag_url_sources,
-        };
+        let resolver_config = config.resolver_config(&tag_url_sources);
 
         // Resolve empty path (root)
         match resolve_request_path(&resolver_config, "") {

@@ -838,20 +838,10 @@ impl Repo {
             .unwrap_or_else(|| abs_path.to_path_buf())
     }
 
-    /// The static folder as a path inside the root vault, when it is one.
-    ///
-    /// The configured value is usually a plain relative path (`static`), which
-    /// parses directly. An absolute or `..`-climbing spelling that still lands
-    /// inside the root (`/abs/root/static`, `../root/static`) can only be
-    /// placed by resolving it on disk, so that half needs a local vault —
-    /// exactly as the old `canonical_root.join(static_folder)` did.
+    /// The static folder as a path inside the root vault, when it is one
+    /// (see [`crate::vault::configured_folder`]).
     fn static_folder_path(&self) -> Option<VaultPath> {
-        VaultPath::new(&self.static_folder).ok().or_else(|| {
-            let local_root = self.vault.local_path(&VaultPath::root())?;
-            let resolved =
-                crate::config::resolve_existing_or_lexical(&local_root.join(&self.static_folder));
-            self.vault.vault_path(&resolved).ok()
-        })
+        crate::vault::configured_folder(self.vault.as_ref(), &self.static_folder)
     }
 
     /// The canonical key of the static folder, wherever it lives.

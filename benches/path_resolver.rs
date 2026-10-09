@@ -17,9 +17,10 @@ fn bench_resolve_request_path(c: &mut Criterion) {
     let md_extensions = vec!["md".to_string()];
     let tag_sources = vec!["tags".to_string()];
 
+    let vault = mbr::vault::LocalVault::new(&root);
     let config = PathResolverConfig {
-        base_dir: &root,
-        canonical_base_dir: Some(&root),
+        vault: &vault,
+        static_vault: None,
         static_folder: "static",
         markdown_extensions: &md_extensions,
         index_file: "index.md",

@@ -658,9 +658,13 @@ mod tests {
         index_file: &'a str,
         tag_sources: &'a [String],
     ) -> PathResolverConfig<'a> {
+        // Leaked so the borrowed config can name it for the test's lifetime;
+        // a few bytes per test.
+        let vault: &'a crate::vault::LocalVault =
+            Box::leak(Box::new(crate::vault::LocalVault::new(base_dir)));
         PathResolverConfig {
-            base_dir,
-            canonical_base_dir: None,
+            vault,
+            static_vault: None,
             static_folder: "static",
             markdown_extensions: exts,
             index_file,

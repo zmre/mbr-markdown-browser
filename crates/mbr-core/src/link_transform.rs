@@ -1144,8 +1144,8 @@ mod browser_resolution_tests {
             url_depth: None,
             current_page_url: crate::repo::build_markdown_url_path(&source, root, "index.md"),
             markdown_page_probe: Some(filesystem_markdown_page_probe(OwnedPathResolverConfig {
-                base_dir: root.to_path_buf(),
-                canonical_base_dir: root.canonicalize().ok(),
+                vault: std::sync::Arc::new(crate::vault::LocalVault::new(root)),
+                static_vault: None,
                 static_folder: "static".to_string(),
                 markdown_extensions: vec!["md".to_string()],
                 index_file: "index.md".to_string(),

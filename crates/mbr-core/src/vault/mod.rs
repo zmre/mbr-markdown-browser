@@ -314,6 +314,25 @@ pub trait Vault: Send + Sync + fmt::Debug {
     }
 }
 
+/// Places a configured folder (`static_folder`) inside `vault`, or `None`
+/// when it lands nowhere in it.
+///
+/// The usual value is a plain relative path (`static`, `./assets/static`),
+/// which is parsed lexically and needs no storage access. An absolute or
+/// `..`-climbing spelling that still lands inside the root (`/abs/root/static`,
+/// `../root/static`) can only be placed by resolving it on disk, so that half
+/// needs a [`Vault::local_path`] — exactly as the old
+/// `canonical_root.join(static_folder)` did. A value resolving *outside* the
+/// root is an external overlay, which is a vault of its own and not this
+/// function's business.
+pub fn configured_folder(vault: &dyn Vault, configured: &str) -> Option<VaultPath> {
+    VaultPath::new(configured).ok().or_else(|| {
+        let local_root = vault.local_path(&VaultPath::root())?;
+        let resolved = crate::config::resolve_existing_or_lexical(&local_root.join(configured));
+        vault.vault_path(&resolved).ok()
+    })
+}
+
 /// Resolves `relative` beneath `base`, refusing anything that ends up outside
 /// `base` once symlinks are followed.
 ///
@@ -321,7 +340,7 @@ pub trait Vault: Send + Sync + fmt::Debug {
 /// answers:
 ///
 /// - `base` is canonicalized first; a `base` that does not exist resolves
-///   nothing.
+///   nothing. The vault root is taken as canonical without asking.
 /// - When `base/relative` exists, the answer is its **canonical** path, and
 ///   only if that is still under the canonical `base`. A final component that
 ///   is a symlink out of `base` is refused here rather than falling through to
@@ -339,7 +358,14 @@ pub fn resolve_under(
     base: &VaultPath,
     relative: &VaultPath,
 ) -> Option<VaultPath> {
-    let canonical_base = vault.canonicalize(base).ok()?;
+    // The root is canonical by construction (nothing a `VaultPath` can name is
+    // above it), so the common case costs no `canonicalize` for the base —
+    // the resolver used to cache the canonical root for the same reason.
+    let canonical_base = if base.is_root() {
+        VaultPath::root()
+    } else {
+        vault.canonicalize(base).ok()?
+    };
     let candidate = canonical_base.join_path(relative);
     match vault.canonicalize(&candidate) {
         Ok(canonical) => canonical.starts_with(&canonical_base).then_some(canonical),
