@@ -2090,12 +2090,7 @@ impl Server {
                             // back out of the repository's own map, which the
                             // call above is what populates. A no-op until the
                             // task index has actually been built.
-                            task_index.invalidate_file(
-                                &abs_path,
-                                &event.event,
-                                &repo,
-                                &link_index_cfg.base_dir,
-                            );
+                            task_index.invalidate_file(&abs_path, &event.event, &repo);
                         }
                         // Rebuild tag index if any files were deleted or modified
                         // (created files add tags inline in invalidate_file)
@@ -2175,7 +2170,7 @@ impl Server {
                         // Same reasoning for tasks: too many files moved for a
                         // per-file patch to be cheaper than one read pass. Still
                         // a no-op unless somebody has actually used tasks.
-                        task_index.rebuild_if_built(&repo, &link_index_cfg.base_dir);
+                        task_index.rebuild_if_built(&repo);
                         let _ = base_dir; // keep alive for potential future use
                     })
                     .await
@@ -2856,11 +2851,7 @@ impl Server {
 
         let scan_in_progress = !config.repo.is_scan_complete();
 
-        if let Err(e) = config
-            .task_index
-            .ensure_built(&config.repo, &config.base_dir)
-            .await
-        {
+        if let Err(e) = config.task_index.ensure_built(&config.repo).await {
             tracing::error!("Task index build failed: {e}");
             return Self::tasks_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3309,7 +3300,6 @@ impl Server {
             md_path,
             &mbr_core::change_event::ChangeEventType::Modified,
             &config.repo,
-            &config.base_dir,
         );
     }
 
