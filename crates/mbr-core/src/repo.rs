@@ -17,7 +17,7 @@ use crate::config::{RelationType, TagSource};
 use crate::errors::RepoError;
 use crate::relationships::{NoteRelInput, RawRelationship, RelationshipIndex};
 use crate::tag_index::{TagIndex, TaggedPage};
-use crate::vault::{LocalVault, Vault, VaultError, VaultPath};
+use crate::vault::{LocalVault, MountPolicy, Vault, VaultError, VaultPath};
 use crate::wikilink_index::WikilinkIndex;
 
 #[derive(Clone, Serialize)]
@@ -86,6 +86,10 @@ pub struct Repo {
     /// against the keys the scan already builds. Empty for almost every run.
     #[serde(skip)]
     exempt_hidden_dirs: Vec<PathBuf>,
+    /// [`Self::exempt_hidden_dirs`] as vault paths, for the path resolver's
+    /// hidden-file rule ([`crate::vault::has_hidden_segment`]).
+    #[serde(skip)]
+    exempt_hidden_vault_paths: Vec<VaultPath>,
     /// Every folder walked so far, by its **canonical** key, so a directory
     /// reached twice (a symlink to a folder that is also walked directly) is
     /// listed once.
@@ -655,11 +659,27 @@ impl Repo {
             .map(|relative| self.canonical_root.join(relative))
             .collect();
         self.exempt_hidden_dirs = absolute;
+        self.exempt_hidden_vault_paths = explicit_hidden_dirs
+            .iter()
+            .filter_map(|relative| VaultPath::from_relative_native(relative).ok())
+            .collect();
         self
+    }
+
+    /// The hidden directories the user named on the command line, as vault
+    /// paths of [`Self::vault`] — the exemption to "hidden files are never
+    /// served" (see [`crate::vault::has_hidden_segment`]).
+    pub fn exempt_hidden_dirs(&self) -> &[VaultPath] {
+        &self.exempt_hidden_vault_paths
     }
 
     /// A repository on the local filesystem at `root_dir`, stored through a
     /// [`LocalVault`] (plus a second one for an external static overlay).
+    ///
+    /// Both vaults serve symlinks out of them as read-only **mounts**
+    /// ([`crate::vault::MountPolicy`]), each protecting the other's root, so
+    /// the server and the static build — which both start here — mount
+    /// exactly the same folders and refuse exactly the same targets.
     #[allow(clippy::too_many_arguments)]
     pub fn init<S: Into<String>, P: Into<std::path::PathBuf>>(
         root_dir: P,
@@ -671,24 +691,33 @@ impl Repo {
         tag_sources: &[TagSource],
         relationship_types: &[RelationType],
     ) -> Self {
-        let vault: Arc<dyn Vault> = Arc::new(LocalVault::new(root_dir.into()));
+        let root_dir: PathBuf = root_dir.into();
+        let canonical_root = root_dir.canonicalize().unwrap_or_else(|_| root_dir.clone());
         let static_folder = static_folder.into();
         // Ask the config policy, rather than re-deriving containment here, so a
         // refused overlay is never scannable. A policy error is not re-reported:
         // `Config::validate` already aborted startup on it, and the only callers
         // that reach here with a bad value are tests constructing a `Repo`
         // directly.
-        let static_vault: Option<Arc<dyn Vault>> =
-            match crate::config::resolve_static_overlay(vault.root(), &static_folder) {
-                Ok(crate::config::StaticOverlay::External(dir)) => {
-                    Some(Arc::new(LocalVault::new(dir)))
-                }
+        let overlay_dir =
+            match crate::config::resolve_static_overlay(&canonical_root, &static_folder) {
+                Ok(crate::config::StaticOverlay::External(dir)) => Some(dir),
                 Ok(crate::config::StaticOverlay::WithinRoot) => None,
                 Err(e) => {
                     tracing::warn!("Not indexing static_folder {static_folder:?}: {e}");
                     None
                 }
             };
+        let vault: Arc<dyn Vault> = Arc::new(LocalVault::with_mounts(
+            root_dir,
+            MountPolicy::new(overlay_dir.iter().cloned().collect()),
+        ));
+        let static_vault: Option<Arc<dyn Vault>> = overlay_dir.map(|dir| {
+            Arc::new(LocalVault::with_mounts(
+                dir,
+                MountPolicy::new(vec![canonical_root.clone()]),
+            )) as Arc<dyn Vault>
+        });
 
         Self::init_with_vault(
             vault,
@@ -743,6 +772,7 @@ impl Repo {
             ignore_globs: ignore_globs.to_vec(),
             compiled_ignore_globs,
             exempt_hidden_dirs: Vec::new(),
+            exempt_hidden_vault_paths: Vec::new(),
             index_file: index_file.into(),
             scanned_folders: HashSet::new(),
             queued_folders: HashMap::new(),
@@ -799,6 +829,36 @@ impl Repo {
         overlay.vault_path(key).ok().map(|path| (overlay, path))
     }
 
+    /// The symlink mounts both vaults have accepted so far, each with the index
+    /// key of its location (where the link is). Grows as the first scan
+    /// discovers links; see [`crate::vault::Mount`].
+    pub fn mounts(&self) -> Vec<(PathBuf, crate::vault::Mount)> {
+        std::iter::once(&self.vault)
+            .chain(self.static_vault.as_ref())
+            .flat_map(|vault| {
+                vault
+                    .mounts()
+                    .into_iter()
+                    .map(|mount| (vault.key(&mount.location), mount))
+            })
+            .collect()
+    }
+
+    /// The URL of the static file behind an index key: inside an external
+    /// overlay, its path in the overlay vault; anywhere else,
+    /// [`build_static_url_path`] against the root.
+    fn static_url_for_key(&self, key: &Path) -> String {
+        match self.static_vault.as_deref() {
+            Some(overlay) if !key.starts_with(&self.canonical_root) => {
+                match overlay.vault_path(key) {
+                    Ok(path) => format!("/{path}"),
+                    Err(_) => build_static_url_path(key, &self.canonical_root, &self.static_folder),
+                }
+            }
+            _ => build_static_url_path(key, &self.canonical_root, &self.static_folder),
+        }
+    }
+
     /// Size and `(created, modified)` seconds for the file behind `key`, read
     /// through its vault; `None` when it cannot be stat'ed or located.
     fn basic_details(&self, key: &Path) -> Option<(u64, u64, u64)> {
@@ -833,6 +893,16 @@ impl Repo {
     /// (see [`crate::vault::configured_folder`]).
     fn static_folder_path(&self) -> Option<VaultPath> {
         crate::vault::configured_folder(self.vault.as_ref(), &self.static_folder)
+    }
+
+    /// The vault holding the static folder and the folder's path in it: the
+    /// external overlay from its root, or the configured folder inside the
+    /// repository. `None` when there is no static folder.
+    pub fn static_folder_vault(&self) -> Option<(&Arc<dyn Vault>, VaultPath)> {
+        match &self.static_vault {
+            Some(overlay) => Some((overlay, VaultPath::root())),
+            None => Some((&self.vault, self.static_folder_path()?)),
+        }
     }
 
     /// The canonical key of the static folder, wherever it lives.
@@ -888,10 +958,15 @@ impl Repo {
         // it is a specific directory the config policy already approved, scanned
         // through a vault of its own — not a general loosening. A link out of
         // the overlay is refused by that vault the same way.
+        //
+        // A link out of a vault built with mounts (every production vault) was
+        // judged by the vault itself as it canonicalized: accepted, it comes
+        // back as a path inside the vault and is walked like any folder;
+        // refused, the vault has already logged why, once per link.
         let start = match vault.canonicalize(folder) {
             Ok(start) => start,
             Err(VaultError::OutsideRoot { path }) => {
-                tracing::warn!(
+                tracing::debug!(
                     "Skipping {:?}: it resolves to {}, outside the repository root {}",
                     folder.as_str(),
                     path,
@@ -1438,6 +1513,16 @@ impl Repo {
     pub fn invalidate_file(&self, abs_path: &Path, event: &crate::change_event::ChangeEventType) {
         let extension = abs_path.extension().and_then(|x| x.to_str()).unwrap_or("");
         let is_markdown = is_markdown_extension(extension, &self.markdown_extensions);
+        // Markdown outside the root (in an external overlay, or a mount inside
+        // one) has no page URL, so the scanner never indexes it; neither may an
+        // event. The same goes for any hidden path.
+        if (is_markdown && !abs_path.starts_with(&self.canonical_root))
+            || self.locate(abs_path).is_some_and(|(_, path)| {
+                crate::vault::has_hidden_segment(&path, self.exempt_hidden_dirs())
+            })
+        {
+            return;
+        }
 
         match event {
             crate::change_event::ChangeEventType::Deleted => {
@@ -1502,8 +1587,7 @@ impl Repo {
                             .insert(abs_path.to_path_buf(), info);
                     }
                 } else {
-                    let url =
-                        build_static_url_path(abs_path, &self.canonical_root, &self.static_folder);
+                    let url = self.static_url_for_key(abs_path);
                     let info = OtherFileInfo {
                         raw_path: abs_path.to_path_buf(),
                         url_path: url,
@@ -1543,8 +1627,7 @@ impl Repo {
                     }
                 } else {
                     // Update basic metadata for modified static files
-                    let url =
-                        build_static_url_path(abs_path, &self.canonical_root, &self.static_folder);
+                    let url = self.static_url_for_key(abs_path);
                     let info = OtherFileInfo {
                         raw_path: abs_path.to_path_buf(),
                         url_path: url,
@@ -2425,21 +2508,35 @@ mod tests {
         );
     }
 
-    /// A directory symlinked out of the repository must contribute nothing.
+    /// A visible temp dir: `tempfile`'s default `.tmpXXXX` name is hidden, and
+    /// a symlink target under a hidden directory is refused as a mount.
+    #[cfg(unix)]
+    fn visible_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("mbr-repo-test-")
+            .tempdir()
+            .expect("temp dir")
+    }
+
+    /// A directory symlinked out of the repository is a read-only **mount**:
+    /// indexed at the link's location, with in-root URLs and raw paths.
     ///
-    /// `scan_folder` canonicalizes each queued directory and the listing follows
-    /// links, so the walk used to be re-rooted at the symlink target: every file
-    /// underneath relativized to `../…`, `path_to_url` preserved that, and the
-    /// static builder joined it onto `--output` — writing pages outside the
-    /// requested output directory.
+    /// The escape this used to guard against still cannot happen. The walk was
+    /// once re-rooted at the symlink target, so every file underneath
+    /// relativized to `../…`, `path_to_url` preserved that, and the static
+    /// builder joined it onto `--output` — writing pages outside the requested
+    /// output directory. A mount's paths are the link's, so nothing climbs.
+    /// (Until mounts, the link was skipped outright.)
     #[cfg(unix)]
     #[test]
-    fn test_scan_folder_skips_directory_symlinked_outside_root() {
-        let outside = tempfile::tempdir().expect("temp dir");
+    fn test_scan_indexes_a_directory_symlinked_outside_root_as_a_mount() {
+        let outside = visible_tempdir();
         let outside_docs = outside.path().join("docs");
-        std::fs::create_dir_all(&outside_docs).expect("create outside dir");
-        std::fs::write(outside_docs.join("secret.md"), "# Secret").expect("write secret");
+        std::fs::create_dir_all(outside_docs.join(".private")).expect("create outside dir");
+        std::fs::write(outside_docs.join("secret.md"), "# Linked").expect("write note");
         std::fs::write(outside_docs.join("secret.png"), b"not really a png").expect("write asset");
+        std::fs::write(outside_docs.join(".private/plan.md"), "# Hidden").expect("write hidden");
+        std::fs::write(outside_docs.join(".env"), "SECRET=1").expect("write dotfile");
 
         let root = tempfile::tempdir().expect("temp dir");
         std::fs::write(root.path().join("index.md"), "# Home").expect("write index");
@@ -2464,27 +2561,51 @@ mod tests {
                 info.raw_path.display()
             );
         }
+        let linked = markdown
+            .iter()
+            .find(|(_, i)| i.url_path == "/work/secret/")
+            .map(|(_, i)| i.raw_path.clone());
+        assert_eq!(linked, Some(PathBuf::from("work/secret.md")));
         assert!(
-            markdown.iter().all(|(_, i)| !i.url_path.contains("secret")),
-            "a file outside the root must not be indexed at all"
+            markdown.iter().all(|(_, i)| !i.url_path.contains("plan")),
+            "hidden directories inside a mount are not indexed"
         );
-        assert!(
-            markdown.iter().any(|(_, i)| i.url_path == "/"),
-            "the in-root index.md must still be scanned"
-        );
+        assert!(markdown.iter().any(|(_, i)| i.url_path == "/"));
 
         let other = repo.other_files.pin();
-        for (_, info) in other.iter() {
-            assert!(
-                !info.url_path.contains(".."),
-                "static url_path escaped the root: {}",
-                info.url_path
-            );
-        }
+        let urls: Vec<&str> = other.iter().map(|(_, i)| i.url_path.as_str()).collect();
+        assert_eq!(urls, vec!["/work/secret.png"], "{urls:?}");
+        assert_eq!(repo.mounts().len(), 1);
         assert!(
-            other.iter().all(|(_, i)| !i.url_path.contains("secret")),
-            "a static file outside the root must not be indexed at all"
+            repo.vault()
+                .is_read_only(&VaultPath::new("work/secret.md").unwrap())
         );
+    }
+
+    /// A link to a refused target (here: a hidden directory) still
+    /// contributes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_skips_a_directory_symlinked_to_a_refused_target() {
+        let outside = visible_tempdir();
+        let hidden = outside.path().join(".config/app");
+        std::fs::create_dir_all(&hidden).expect("create");
+        std::fs::write(hidden.join("secret.md"), "# Secret").expect("write");
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::write(root.path().join("index.md"), "# Home").expect("write index");
+        std::os::unix::fs::symlink(&hidden, root.path().join("work")).expect("symlink");
+        std::os::unix::fs::symlink(root.path(), root.path().join("self")).expect("symlink");
+
+        let repo = test_repo(root.path());
+        repo.scan_all().expect("scan must succeed");
+        let urls: Vec<String> = repo
+            .markdown_files
+            .pin()
+            .iter()
+            .map(|(_, i)| i.url_path.clone())
+            .collect();
+        assert_eq!(urls, vec!["/".to_string()]);
+        assert!(repo.mounts().is_empty());
     }
 
     // ==================== External static overlay ====================
@@ -2513,6 +2634,77 @@ mod tests {
             &[],
         );
         (tmp, project, repo)
+    }
+
+    /// The user's layout: `static_folder = "../static"` with
+    /// `static/videos -> <elsewhere>`. The link is a mount of the *overlay*
+    /// vault, so its files are indexed at overlay URLs (`/videos/clip.mp4`),
+    /// hidden files in it are not, and a watcher event for one keeps its URL.
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_indexes_a_mount_inside_the_external_overlay() {
+        let (_tmp, project, repo) = peer_overlay_repo();
+        let movies = visible_tempdir();
+        std::fs::create_dir(movies.path().join(".secret")).unwrap();
+        std::fs::write(movies.path().join("clip.mp4"), b"clip").unwrap();
+        std::fs::write(movies.path().join(".dotfile"), b"x").unwrap();
+        std::fs::write(movies.path().join(".secret/key"), b"k").unwrap();
+        std::fs::write(movies.path().join("notes.md"), b"# skipped").unwrap();
+        std::os::unix::fs::symlink(movies.path(), project.join("static/films")).unwrap();
+
+        repo.scan_all().expect("scan");
+        repo.scan_static_folder().expect("static scan");
+
+        let urls = |repo: &Repo| {
+            let mut urls: Vec<String> = repo
+                .other_files
+                .pin()
+                .iter()
+                .map(|(_, i)| i.url_path.clone())
+                .collect();
+            urls.sort();
+            urls
+        };
+        assert_eq!(
+            urls(&repo),
+            vec!["/films/clip.mp4", "/pic.png", "/videos/demo.mp4"]
+        );
+        assert!(
+            repo.markdown_files
+                .pin()
+                .iter()
+                .all(|(_, i)| !i.url_path.contains("notes")),
+            "markdown in an external overlay (or a mount in one) has no page URL"
+        );
+        let mounts = repo.mounts();
+        assert_eq!(mounts.len(), 1);
+        let (location_key, mount) = &mounts[0];
+        assert_eq!(
+            *location_key,
+            repo.canonical_static_root().unwrap().join("films")
+        );
+        assert_eq!(mount.target, movies.path().canonicalize().unwrap());
+
+        // A file appearing in the target, reported at the link's location (as
+        // the watcher translates it), is indexed at the overlay URL.
+        std::fs::write(movies.path().join("new.mp4"), b"new").unwrap();
+        repo.invalidate_file(
+            &location_key.join("new.mp4"),
+            &crate::change_event::ChangeEventType::Created,
+        );
+        repo.invalidate_file(
+            &location_key.join(".secret").join("later"),
+            &crate::change_event::ChangeEventType::Created,
+        );
+        assert_eq!(
+            urls(&repo),
+            vec![
+                "/films/clip.mp4",
+                "/films/new.mp4",
+                "/pic.png",
+                "/videos/demo.mp4"
+            ]
+        );
     }
 
     /// The regression: a peer static folder serves over HTTP but used to index

@@ -11,6 +11,7 @@ use mbr_core::repo::should_ignore;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, trace};
@@ -35,10 +36,49 @@ pub enum WatcherError {
     BroadcastFailed,
 }
 
+/// The most symlink mounts the watcher follows.
+///
+/// Each mount is one more recursive watch: one FSEvents stream path on macOS
+/// (cheap), but one inotify watch per *directory* on Linux, counted against
+/// `fs.inotify.max_user_watches`, and one file descriptor per file under
+/// kqueue (BSD). A mount to a huge tree is the user's choice and is served
+/// regardless; past this many mounts, further ones are served without live
+/// reload rather than risk exhausting the host's watches for the root itself.
+pub const MAX_WATCHED_MOUNTS: usize = 32;
+
+/// One watched mount: events under `target` are reported at `location`.
+#[derive(Debug, Clone)]
+struct WatchedMount {
+    /// The mount's canonical target, as notify reports its events.
+    target: PathBuf,
+    /// The index key of the link — where the scanner indexed the target's
+    /// files (`<root>/static/videos`).
+    location: PathBuf,
+}
+
 /// File watcher that monitors the repository for changes.
 pub struct FileWatcher {
-    _watcher: notify::RecommendedWatcher,
+    watcher: Mutex<notify::RecommendedWatcher>,
+    /// Watched symlink mounts, shared with the event callback, which reports a
+    /// change in a mount's target at the link's location instead.
+    mounts: Arc<RwLock<Vec<WatchedMount>>>,
     pub sender: broadcast::Sender<FileChangeEvent>,
+}
+
+/// `path` as the index knows it: an event under a watched mount's target is
+/// moved to the link's location (the longest target wins, so a nested mount
+/// beats an enclosing one). Paths elsewhere are returned unchanged.
+fn translate_mount_path(path: PathBuf, mounts: &[WatchedMount]) -> PathBuf {
+    mounts
+        .iter()
+        .filter(|mount| path.starts_with(&mount.target))
+        .max_by_key(|mount| mount.target.components().count())
+        .and_then(|mount| {
+            path.strip_prefix(&mount.target)
+                .ok()
+                .map(|below| mount.location.join(below))
+        })
+        .unwrap_or(path)
 }
 
 impl FileWatcher {
@@ -130,6 +170,8 @@ impl FileWatcher {
 
         let tx_clone = tx.clone();
         let base_dir_clone = base_dir.clone();
+        let mounts: Arc<RwLock<Vec<WatchedMount>>> = Arc::new(RwLock::new(Vec::new()));
+        let mounts_for_callback = Arc::clone(&mounts);
 
         // Create RecommendedWatcher (FSEvents on macOS, inotify on Linux)
         // Kernel-level: no polling, no CPU overhead for large directories
@@ -170,8 +212,13 @@ impl FileWatcher {
                             }
                         };
 
+                        let watched = mounts_for_callback
+                            .read()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
                         // Process each path in the event
                         for path in event.paths {
+                            let path = translate_mount_path(path, &watched);
                             // Skip ignored directories and ignore-glob matches
                             if is_ignored(&path) {
                                 debug!("Ignoring change in: {}", path.to_string_lossy());
@@ -238,9 +285,64 @@ impl FileWatcher {
         }
 
         Ok(FileWatcher {
-            _watcher: watcher,
+            watcher: Mutex::new(watcher),
+            mounts,
             sender: tx,
         })
+    }
+
+    /// Also watches every directory mount in `mounts` (as
+    /// [`mbr_core::repo::Repo::mounts`] lists them: the link's index key and
+    /// the mount) that is not watched yet, so a change inside an external
+    /// folder reloads like a change in the repository. Idempotent; call it
+    /// whenever the repository may have discovered new mounts (after a scan).
+    ///
+    /// File mounts are not watched — a watch on a single file outside any
+    /// watched directory is not portable across notify's backends — and at
+    /// most [`MAX_WATCHED_MOUNTS`] mounts are. A mount that cannot be watched
+    /// is still served; only live reload is missing for it.
+    pub fn watch_mounts(&self, mounts: &[(PathBuf, mbr_core::vault::Mount)]) {
+        let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
+        for (location, mount) in mounts.iter().filter(|(_, mount)| mount.is_dir) {
+            // The mapping goes in *before* the watch and comes out again if
+            // the watch fails: an event arriving in between must already be
+            // translated, or it would be broadcast with the target's absolute
+            // path. The lock is never held across `watch`, which on some
+            // backends waits for the thread that runs the callback.
+            {
+                let mut watched = self.mounts.write().unwrap_or_else(PoisonError::into_inner);
+                if watched.iter().any(|w| w.target == mount.target) {
+                    continue;
+                }
+                if watched.len() >= MAX_WATCHED_MOUNTS {
+                    tracing::warn!(
+                        "Not watching {} for changes: already watching {MAX_WATCHED_MOUNTS} external folders",
+                        mount.target.display()
+                    );
+                    continue;
+                }
+                watched.push(WatchedMount {
+                    target: mount.target.clone(),
+                    location: location.clone(),
+                });
+            }
+            match watcher.watch(&mount.target, RecursiveMode::Recursive) {
+                Ok(()) => info!(
+                    "File watcher also watching external folder {:?} (via {:?})",
+                    mount.target, location
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        "Not watching external folder {} for changes: {e}",
+                        mount.target.display()
+                    );
+                    self.mounts
+                        .write()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .retain(|w| w.target != mount.target);
+                }
+            }
+        }
     }
 
     /// Subscribes to file change events.

@@ -669,6 +669,7 @@ mod tests {
             markdown_extensions: exts,
             index_file,
             tag_sources,
+            exempt_hidden_dirs: &[],
         }
     }
 

@@ -9724,55 +9724,413 @@ async fn test_peer_static_site_serves_pages_assets_and_media_index() {
     );
 }
 
-/// **Pinned current behaviour, not the design goal.** A directory symlinked
-/// out of the site (`static/videos -> <elsewhere>`) is refused by the server:
-/// the overlay is its own vault and a link out of it does not resolve, so the
-/// file 404s and is not indexed. The static build *does* place it (see
-/// `test_build_peer_static_site_places_a_symlink_out_of_the_site` in
-/// build_integration.rs), so today server and build disagree.
+// ============================================================================
+// Symlink mounts and the hidden-file rule
+// ============================================================================
+
+/// The user's layout: `static_folder = "../static"` and
+/// `static/videos -> <elsewhere>`. The link is a read-only **mount**: its
+/// files are served at the link's URLs and listed in `media.json`, while the
+/// hidden files inside it are not served.
 ///
-/// A follow-up PR introduces read-only "symlink mounts": a directory link out
-/// of the site becomes its own read-only vault (`..` and nested links cannot
-/// escape it; targets `/`, `$HOME` itself and ancestors of the root are
-/// refused; hidden files are never served; mounts are logged at startup), and
-/// server and build agree. That PR deliberately flips these assertions.
+/// Flipped by the symlink-mounts change: this was
+/// `test_peer_static_site_symlink_out_of_the_site_is_not_served`, pinning the
+/// old 404 while the static build placed the file anyway.
 #[cfg(unix)]
 #[tokio::test]
-async fn test_peer_static_site_symlink_out_of_the_site_is_not_served() {
+async fn test_peer_static_site_serves_a_symlink_mount() {
     let site = common::PeerStaticSite::new();
-    let elsewhere = tempfile::tempdir().unwrap();
+    let elsewhere = common::visible_tempdir();
+    std::fs::create_dir(elsewhere.path().join(".secret")).unwrap();
     std::fs::write(elsewhere.path().join("clip.mp4"), b"outside clip").unwrap();
+    std::fs::write(elsewhere.path().join(".secret/key"), b"key").unwrap();
+    std::fs::write(elsewhere.path().join(".dotfile"), b"dot").unwrap();
     std::os::unix::fs::symlink(elsewhere.path(), site.static_dir.join("videos")).unwrap();
 
     let server = start_peer_site(&site).await;
     server.wait_for_scan().await;
 
-    assert_eq!(server.get("/videos/clip.mp4").await.status(), 404);
-    assert_eq!(server.get("/videos/").await.status(), 404);
+    let clip = server.get("/videos/clip.mp4").await;
+    assert_eq!(clip.status(), 200);
+    assert_eq!(clip.bytes().await.unwrap().as_ref(), b"outside clip");
+    for hidden in [
+        "/videos/.secret/key",
+        "/videos/.dotfile",
+        "/videos/.secret/",
+    ] {
+        assert_eq!(server.get(hidden).await.status(), 404, "{hidden}");
+    }
     let media = server.get_text("/.mbr/media.json").await;
     assert!(
-        !media.contains("clip.mp4"),
-        "a file behind a link out of the site is not indexed today: {media}"
+        media.contains("/videos/clip.mp4"),
+        "the mount's file is indexed at its served URL: {media}"
+    );
+    assert!(
+        !media.contains(".secret") && !media.contains(".dotfile"),
+        "{media}"
     );
 
     // The rest of the overlay is unaffected.
     assert_eq!(server.get("/images/logo.png").await.status(), 200);
 }
 
-/// **Known security issue, tracked rather than asserted.** Today the server
-/// serves an in-repository hidden file: `GET /.env` answers 200 on main and on
-/// this branch. Hidden files must never be served; the read-only "symlink
-/// mounts" PR fixes it and un-ignores this test. Kept as an ignored 404 test
-/// rather than a passing 200 one so the suite never states the bug as intended
-/// behaviour; run it with `--ignored` to see it fail.
+/// Hidden files are never served: not from the repository, the static
+/// overlay or a mount. `/.mbr/*` assets are routes, not vault files, and keep
+/// working — including the repository's own overrides — while arbitrary files
+/// in `.mbr/` (its `config.toml` holds the edit-token hash) stay 404.
+///
+/// Was `#[ignore]`d as a known issue (`GET /.env` answered 200).
 #[tokio::test]
-#[ignore = "known issue: hidden files are served (GET /.env is 200); fixed by the symlink-mounts PR"]
 async fn test_hidden_files_are_never_served() {
     let repo = TestRepo::new();
     repo.create_markdown("readme.md", "# Readme");
     repo.create_static_file(".env", b"SECRET=1\n");
+    repo.create_static_file(".git/config", b"[remote \"origin\"]\n");
+    repo.create_markdown(".git/notes.md", "# In git");
+    repo.create_markdown(".obsidian/plan.md", "# Plan");
+    repo.create_static_file("docs/.hidden.png", b"png");
+    repo.create_markdown("docs/.private/secret.md", "# Secret");
+    repo.create_markdown("docs/visible.md", "# Visible");
+    repo.create_static_file("static/.htpasswd", b"user:hash");
+    repo.create_static_file("static/images/.DS_Store", b"junk");
+    repo.create_static_file("static/images/logo.png", b"png");
+    repo.create_static_file("static/.well-known/security.txt", b"Contact: x");
+    repo.create_static_file(".mbr/config.toml", b"edit_token_hash = \"x\"\n");
+    repo.create_static_file(".mbr/user.css", b"body { color: red }");
 
     let server = TestServer::start(&repo).await;
     assert_eq!(server.get("/readme/").await.status(), 200);
-    assert_eq!(server.get("/.env").await.status(), 404);
+    server.wait_for_scan().await;
+    for hidden in [
+        "/.env",
+        "/.git/config",
+        "/.git/",
+        "/.git/notes/",
+        "/.obsidian/plan/",
+        "/.obsidian/",
+        "/docs/.hidden.png",
+        "/docs/.private/secret/",
+        "/docs/.private/",
+        "/.htpasswd",
+        "/static/.htpasswd",
+        "/images/.DS_Store",
+        "/.mbr/config.toml",
+        "/.env/links.json",
+        "/.git/notes/errors.json",
+    ] {
+        assert_eq!(server.get(hidden).await.status(), 404, "{hidden}");
+    }
+    assert_eq!(server.get("/docs/visible/").await.status(), 200);
+    assert_eq!(server.get("/images/logo.png").await.status(), 200);
+    // RFC 8615 site metadata is the one dot path that is published.
+    assert_eq!(
+        server.get_text("/.well-known/security.txt").await,
+        "Contact: x"
+    );
+    // `/.mbr/*` is routes: compiled-in assets and the repo's overrides.
+    assert_eq!(server.get("/.mbr/theme.css").await.status(), 200);
+    assert_eq!(
+        server.get_text("/.mbr/user.css").await,
+        "body { color: red }"
+    );
+    // Not indexed either.
+    let site = server.get_text("/.mbr/site.json").await;
+    for name in ["notes", "plan", "secret", ".env", ".hidden.png", "DS_Store"] {
+        assert!(!site.contains(name), "site.json mentions {name}: {site}");
+    }
+}
+
+/// Sends `GET <raw_path>` byte for byte — no client-side `..` or `%2e%2e`
+/// normalization, which every URL library applies — and returns the status.
+async fn raw_get_status(port: u16, raw_path: &str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let request =
+        format!("GET {raw_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.expect("read");
+    let head = String::from_utf8_lossy(&response);
+    head.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in {head:?}"))
+}
+
+/// A peer site with a mount and every way out of it we could think of: `..`
+/// (raw and percent-encoded), a link inside the mount climbing to its parent
+/// (which contains the site), a nested link to a second external folder (a
+/// mount of its own), a cycle, and links to refused targets — `/`, an ancestor
+/// of the root, a hidden directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_symlink_mount_cannot_be_escaped() {
+    use std::os::unix::fs::symlink;
+    let site = common::PeerStaticSite::new();
+    std::fs::write(site.site.join("secret.txt"), b"site secret").unwrap();
+    let outside = common::visible_tempdir();
+    let movies = outside.path().join("movies");
+    let extra = outside.path().join("extra");
+    std::fs::create_dir_all(&movies).unwrap();
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::create_dir_all(outside.path().join(".hidden")).unwrap();
+    std::fs::write(movies.join("clip.mp4"), b"clip").unwrap();
+    std::fs::write(extra.join("x.mp4"), b"extra").unwrap();
+    std::fs::write(outside.path().join("beside.txt"), b"beside").unwrap();
+    std::fs::write(outside.path().join(".hidden/key"), b"key").unwrap();
+    symlink(&movies, site.static_dir.join("videos")).unwrap();
+    symlink(&extra, movies.join("more")).unwrap();
+    symlink(&movies, movies.join("loop")).unwrap();
+    symlink("..", movies.join("up")).unwrap();
+    symlink("/", site.static_dir.join("fsroot")).unwrap();
+    symlink(&site.site, site.static_dir.join("ancestor")).unwrap();
+    symlink(
+        outside.path().join(".hidden"),
+        site.static_dir.join("hidden"),
+    )
+    .unwrap();
+
+    let server = start_peer_site(&site).await;
+    server.wait_for_scan().await;
+
+    // Allowed: the mount, a nested mount, and the cycle (which maps back).
+    for (path, bytes) in [
+        ("/videos/clip.mp4", &b"clip"[..]),
+        ("/videos/more/x.mp4", b"extra"),
+        ("/videos/loop/loop/clip.mp4", b"clip"),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert_eq!(response.bytes().await.unwrap().as_ref(), bytes, "{path}");
+    }
+    // `up -> ..` is the target's parent: it is not the site, so it is a mount
+    // of its own (and serves its visible file) — but nothing hidden in it, and
+    // nothing above it.
+    assert_eq!(server.get_text("/videos/up/beside.txt").await, "beside");
+    for path in [
+        "/videos/up/.hidden/key",
+        "/fsroot/etc/hosts",
+        "/ancestor/secret.txt",
+        "/ancestor/content/index.md",
+        "/hidden/key",
+    ] {
+        assert_eq!(server.get(path).await.status(), 404, "{path}");
+    }
+    for raw in [
+        "/videos/../../secret.txt",
+        "/videos/%2e%2e/%2e%2e/secret.txt",
+        "/videos/..%2f..%2fsecret.txt",
+        "/videos/%2E%2E%2F%2E%2E%2Fsecret.txt",
+        "/videos/up/%2e%2e/%2e%2e/secret.txt",
+        "/videos/more/..%2f..%2f..%2fsecret.txt",
+    ] {
+        let status = raw_get_status(server.port, raw).await;
+        assert!(status == 404 || status == 400, "{raw} answered {status}");
+    }
+}
+
+/// A repository with `ext -> <elsewhere>` holding a note with a task, a
+/// sibling note in the repo that links to it, and editing enabled.
+#[cfg(unix)]
+struct MountedNoteRepo {
+    repo: TestRepo,
+    _outside: tempfile::TempDir,
+    target: PathBuf,
+}
+
+#[cfg(unix)]
+const MOUNTED_NOTE: &str = "# Mounted\n\n- [ ] mounted task\n\nSee [guide](/guide/).\n";
+
+#[cfg(unix)]
+impl MountedNoteRepo {
+    fn new() -> Self {
+        let repo = TestRepo::new();
+        repo.create_markdown("guide.md", "# Guide\n\n- [ ] local task\n");
+        repo.create_markdown("linker.md", "# Linker\n\nSee [guide](/guide/).\n");
+        let outside = common::visible_tempdir();
+        let target = outside.path().canonicalize().unwrap();
+        std::fs::write(target.join("notes.md"), MOUNTED_NOTE).unwrap();
+        std::os::unix::fs::symlink(&target, repo.path().join("ext")).unwrap();
+        Self {
+            repo,
+            _outside: outside,
+            target,
+        }
+    }
+
+    fn mounted_note(&self) -> String {
+        std::fs::read_to_string(self.target.join("notes.md")).unwrap()
+    }
+}
+
+/// Markdown inside a mount is a page like any other — rendered, indexed,
+/// readable through `/.mbr/raw` — but every write into the mount is refused
+/// with 403, the status the clients already report as "refused".
+#[cfg(unix)]
+#[tokio::test]
+async fn test_writes_into_a_symlink_mount_are_refused() {
+    let fx = MountedNoteRepo::new();
+    let server = TestServer::start_with_config_fn(&fx.repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    assert_eq!(server.get("/ext/notes/").await.status(), 200);
+    let site = server.get_text("/.mbr/site.json").await;
+    assert!(site.contains("/ext/notes/"), "{site}");
+
+    // Toggle: refused in the mount, fine elsewhere.
+    let toggle = |path: &str, expected: &str| serde_json::json!({ "path": path, "line": 3, "expected": expected, "to": "done" });
+    let refused = edit_post(
+        &server,
+        "/.mbr/task",
+        toggle("ext/notes.md", "- [ ] mounted task"),
+    )
+    .await;
+    assert_eq!(refused.status(), 403);
+    let local = edit_post(
+        &server,
+        "/.mbr/task",
+        toggle("guide.md", "- [ ] local task"),
+    )
+    .await;
+    assert_eq!(local.status(), 200);
+
+    // Edit: the raw read is allowed (it is how a client learns the hash), the
+    // save is not.
+    let raw = server
+        .client
+        .get(server.url("/.mbr/raw/ext/notes.md"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 200);
+    let hash = raw.headers()["x-mbr-content-hash"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let save = edit_post(
+        &server,
+        "/.mbr/edit/ext/notes.md",
+        serde_json::json!({ "content": "# Overwritten", "base_hash": hash }),
+    )
+    .await;
+    assert_eq!(save.status(), 403);
+
+    let created = edit_post(
+        &server,
+        "/.mbr/create/ext/new.md",
+        serde_json::json!({ "content": "# New" }),
+    )
+    .await;
+    assert_eq!(created.status(), 403);
+    let mkdir = server
+        .client
+        .post(server.url("/.mbr/mkdir/ext/sub"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mkdir.status(), 403);
+    let upload = upload_post(&server, "ext", "pic.png", b"png".to_vec()).await;
+    assert_eq!(upload.status(), 403);
+    let move_out = edit_post(
+        &server,
+        "/.mbr/move/ext/notes.md",
+        serde_json::json!({ "to": "moved.md" }),
+    )
+    .await;
+    assert_eq!(move_out.status(), 403);
+    let move_in = edit_post(
+        &server,
+        "/.mbr/move/guide.md",
+        serde_json::json!({ "to": "ext/guide.md" }),
+    )
+    .await;
+    assert_eq!(move_in.status(), 403);
+    let review = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        // Refused before the card or the time is even looked at.
+        serde_json::json!({
+            "path": "ext/notes.md", "line": 1, "expected": "Mounted",
+            "rating": "good", "at": "2026-10-09 10:00",
+        }),
+    )
+    .await;
+    assert_eq!(review.status(), 403);
+
+    assert_eq!(
+        fx.mounted_note(),
+        MOUNTED_NOTE,
+        "the mounted note is untouched"
+    );
+    let entries: Vec<String> = std::fs::read_dir(&fx.target)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        vec!["notes.md"],
+        "nothing was created in the mount"
+    );
+}
+
+/// A move rewrites inbound links across the repository, and a note in a
+/// mount links to the moved page too — but it is read-only, so the rewrite
+/// skips it rather than failing the move or writing into the mount.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_move_skips_link_rewrites_inside_a_symlink_mount() {
+    let fx = MountedNoteRepo::new();
+    let server = TestServer::start_with_config_fn(&fx.repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let moved = edit_post(
+        &server,
+        "/.mbr/move/guide.md",
+        serde_json::json!({ "to": "handbook.md" }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200, "{}", moved.text().await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(fx.repo.path().join("linker.md")).unwrap(),
+        "# Linker\n\nSee [guide](/handbook/).\n",
+        "an in-repository linker is rewritten"
+    );
+    assert_eq!(fx.mounted_note(), MOUNTED_NOTE, "the mounted linker is not");
+}
+
+/// A file appearing in a mount's target is picked up by the watcher and
+/// indexed at the link's URL. The watcher starts in the background and
+/// FSEvents delivers late under load, so the test keeps creating fresh files
+/// until one shows up rather than betting on the first event.
+#[cfg(all(unix, feature = "watcher"))]
+#[tokio::test]
+async fn test_watcher_indexes_new_files_in_a_symlink_mount() {
+    let fx = MountedNoteRepo::new();
+    let server = TestServer::start(&fx.repo).await;
+    server.wait_for_scan().await;
+    let _ = server.get("/.mbr/media.json").await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        std::fs::write(fx.target.join(format!("new-{attempt}.png")), b"png").unwrap();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let media = server.get_text("/.mbr/media.json").await;
+        if media.contains("/ext/new-") {
+            assert!(
+                !media.contains(&fx.target.display().to_string()),
+                "indexed at the link's URL, not the target's path: {media}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no watcher event from the mount after {attempt} files: {media}"
+        );
+    }
 }

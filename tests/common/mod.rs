@@ -123,6 +123,19 @@ pub fn assert_html_not_contains(html: &str, unexpected: &str) {
     );
 }
 
+/// A temp dir whose name is **not** hidden.
+///
+/// `TempDir::new()` names directories `.tmpXXXX`, and a symlink mount whose
+/// target sits under a hidden directory is refused (hidden files are never
+/// served). Tests that need a mount target that *is* accepted use this.
+#[allow(dead_code)]
+pub fn visible_tempdir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("mbr-it-")
+        .tempdir()
+        .expect("Failed to create temp directory")
+}
+
 /// Bytes of the overlay's `images/logo.png` in [`PeerStaticSite`].
 #[allow(dead_code)]
 pub const PEER_LOGO_BYTES: &[u8] = b"\x89PNG\r\n\x1a\npeer-overlay logo";

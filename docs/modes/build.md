@@ -58,6 +58,15 @@ Static assets (images, PDFs, videos) are symlinked rather than copied:
 build/images/ → ../images/
 ```
 
+A folder symlinked in from outside the repository (`static/videos -> ~/Movies`)
+is a read-only mount: its files are placed exactly like the repository's own
+assets, so links to them pass `--fail-on-broken-links`, and links to refused
+targets (`/`, `$HOME`, a directory containing the repository, a hidden
+directory) are skipped with a warning. Hidden files are never published, from
+the repository, the static folder or a mount; `.well-known` is the one
+exception. See
+[Symlinked folders](../reference/configuration.md#read-only-symlink-mounts).
+
 > **Note**: Symlinking is used on macOS and Linux. On Windows, assets are
 > **copied** instead, because creating symlinks there requires Developer Mode or
 > an elevated process. Builds work the same either way, but on Windows the
