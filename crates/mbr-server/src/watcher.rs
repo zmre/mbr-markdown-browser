@@ -437,6 +437,19 @@ mod tests {
             change.relative_path
         );
         assert_eq!(change.relative_path, "test.md");
+
+        // And the absolute path is an index key of the vault over the same
+        // root: both canonicalize it, so the server's `Repo::invalidate_file`
+        // finds the entry the scan made instead of keying a second one.
+        use mbr_core::vault::Vault;
+        let vault = mbr_core::vault::LocalVault::new(&link_notes);
+        assert_eq!(
+            vault
+                .vault_path(Path::new(&change.path))
+                .expect("event path is inside the vault")
+                .as_str(),
+            "test.md"
+        );
     }
 
     #[tokio::test]
