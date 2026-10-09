@@ -1,11 +1,11 @@
 name: MBRQuickLook
 options:
   bundleIdPrefix: com.zmre.mbr
-  # Must match what libmbr.a is built for. The Rust staticlib this project
+  # Must match what libmbr_ffi.a is built for. The Rust staticlib this project
   # links against is compiled against the nixpkgs apple-sdk and carries
   # LC_BUILD_VERSION minos 14.0, and flake.nix's swiftTarget is likewise
   # {arm64,x86_64}-apple-macos14.0. Linking at 12.0 made ld emit
-  #   "Object file (.../libmbr.a[N]) was built for newer 'macOS' version
+  #   "Object file (.../libmbr_ffi.a[N]) was built for newer 'macOS' version
   #    (14.0) than being linked (12.0)"
   # once per object file in the archive - ~1300 warnings that buried anything
   # real in the build log. Nothing in the project supported 12.0: the
@@ -23,7 +23,7 @@ settings:
     # Build only for arm64 (matching Rust library)
     ARCHS: arm64
     VALID_ARCHS: arm64
-    # ld keeps every libmbr.a member it pulls in whole; let it drop what the
+    # ld keeps every libmbr_ffi.a member it pulls in whole; let it drop what the
     # extension never reaches (unused embedded assets included). Same as
     # `-dead_strip` in flake.nix's mbr-quicklook link, so the dev build
     # matches what ships.
@@ -83,7 +83,7 @@ targets:
         LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../target/release
         # Link to Rust static library and required macOS frameworks
         # Note: GUI deps (wry/tao) and ffmpeg excluded via --no-default-features to avoid SDL dependency
-        OTHER_LDFLAGS: $(inherited) -lmbr -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
+        OTHER_LDFLAGS: $(inherited) -lmbr_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
         # Header search path for FFI
         HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
         SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated
@@ -115,7 +115,7 @@ targets:
         LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
         # Inherit search paths from MBRPreview target
         LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../target/release
-        OTHER_LDFLAGS: $(inherited) -lmbr -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
+        OTHER_LDFLAGS: $(inherited) -lmbr_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
         HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
         SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated
         OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/mbrFFI.modulemap

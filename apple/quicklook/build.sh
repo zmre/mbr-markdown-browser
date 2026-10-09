@@ -11,13 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$SCRIPT_DIR"
 
-# Build the Rust core alone: no server, watcher, static site generator, CLI,
-# GUI or media-metadata (see Cargo.toml [features]). QuickLook extensions run
-# sandboxed without GUI access or ffmpeg, and none of the rest is reachable
-# from a preview. The `ffi` feature enables the UniFFI exports Swift calls.
-# Same command as flake.nix's mbr-quicklook-staticlib.
-echo "Building Rust library (minimal features for QuickLook)..."
-cargo build --release --lib --no-default-features --features ffi --manifest-path "$PROJECT_ROOT/Cargo.toml"
+# Build the `mbr-ffi` crate alone: the UniFFI exports Swift calls, over the
+# render core (`mbr-core`), with no server, watcher, static site generator,
+# CLI, GUI or media-metadata. QuickLook extensions run sandboxed without GUI
+# access or ffmpeg, and none of the rest is reachable from a preview. Produces
+# target/release/libmbr_ffi.a. Same command as flake.nix's
+# mbr-quicklook-staticlib.
+echo "Building Rust library (mbr-ffi, for QuickLook)..."
+cargo build --release -p mbr-ffi --lib --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
 # Regenerate Xcode project
 echo "Generating Xcode project..."

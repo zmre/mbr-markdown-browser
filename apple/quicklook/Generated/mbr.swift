@@ -25,13 +25,13 @@ fileprivate extension RustBuffer {
     }
 
     static func from(_ ptr: UnsafeBufferPointer<UInt8>) -> RustBuffer {
-        try! rustCall { ffi_mbr_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
+        try! rustCall { ffi_mbr_ffi_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
     }
 
     // Frees the buffer in place.
     // The buffer must not be used after this is called.
     func deallocate() {
-        try! rustCall { ffi_mbr_rustbuffer_free(self, $0) }
+        try! rustCall { ffi_mbr_ffi_rustbuffer_free(self, $0) }
     }
 }
 
@@ -281,7 +281,7 @@ private func makeRustCall<T, E: Swift.Error>(
     _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T,
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
-    uniffiEnsureMbrInitialized()
+    uniffiEnsureMbrFfiInitialized()
     var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
@@ -808,14 +808,14 @@ fileprivate struct FfiConverterSequenceTypePreviewAttachment: FfiConverterRustBu
 }
 public func findConfigRoot(filePath: String) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_mbr_fn_func_find_config_root(
+    uniffi_mbr_ffi_fn_func_find_config_root(
         FfiConverterString.lower(filePath),$0
     )
 })
 }
 public func renderPreview(filePath: String, configRoot: String?)throws  -> PreviewDocument  {
     return try  FfiConverterTypePreviewDocument_lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
-    uniffi_mbr_fn_func_render_preview(
+    uniffi_mbr_ffi_fn_func_render_preview(
         FfiConverterString.lower(filePath),
         FfiConverterOptionString.lower(configRoot),$0
     )
@@ -823,7 +823,7 @@ public func renderPreview(filePath: String, configRoot: String?)throws  -> Previ
 }
 public func renderPreviewWithConfig(filePath: String, configRoot: String?, config: QuickLookConfig)throws  -> PreviewDocument  {
     return try  FfiConverterTypePreviewDocument_lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
-    uniffi_mbr_fn_func_render_preview_with_config(
+    uniffi_mbr_ffi_fn_func_render_preview_with_config(
         FfiConverterString.lower(filePath),
         FfiConverterOptionString.lower(configRoot),
         FfiConverterTypeQuickLookConfig_lower(config),$0
@@ -842,17 +842,17 @@ private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
     let bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
-    let scaffolding_contract_version = ffi_mbr_uniffi_contract_version()
+    let scaffolding_contract_version = ffi_mbr_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_mbr_checksum_func_find_config_root() != 14695) {
+    if (uniffi_mbr_ffi_checksum_func_find_config_root() != 55018) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mbr_checksum_func_render_preview() != 10926) {
+    if (uniffi_mbr_ffi_checksum_func_render_preview() != 46609) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mbr_checksum_func_render_preview_with_config() != 25596) {
+    if (uniffi_mbr_ffi_checksum_func_render_preview_with_config() != 51139) {
         return InitializationResult.apiChecksumMismatch
     }
 
@@ -861,7 +861,7 @@ private let initializationResult: InitializationResult = {
 
 // Make the ensure init function public so that other modules which have external type references to
 // our types can call it.
-public func uniffiEnsureMbrInitialized() {
+public func uniffiEnsureMbrFfiInitialized() {
     switch initializationResult {
     case .ok:
         break
