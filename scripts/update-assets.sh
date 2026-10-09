@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update the vendored front-end assets under templates/.
+# Update the vendored front-end assets under crates/mbr-core/templates/.
 #
 # Usage:
 #   ./scripts/update-assets.sh                    # report vendored vs. latest upstream versions
@@ -10,8 +10,8 @@
 # Assets covered: highlight.js, mermaid, KaTeX (+ fonts), reveal.js, Pico CSS.
 #
 # Most of these files carry their version in the filename and are named by
-# `include_bytes!` in src/, so a version bump renames files the Rust code
-# references. Every downloader therefore rewrites those paths in src/*.rs
+# `include_bytes!` in crates/mbr-core/src/, so a version bump renames files the Rust code
+# references. Every downloader therefore rewrites those paths in crates/mbr-core/src/*.rs
 # itself: the old two-step (download here, hand-edit include_bytes! there) is
 # how you end up with a build that fails or, worse, one that still embeds the
 # old bytes because only some of the paths got updated.
@@ -20,8 +20,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-TEMPLATES_DIR="$PROJECT_DIR/templates"
-SRC_DIR="$PROJECT_DIR/src"
+TEMPLATES_DIR="$PROJECT_DIR/crates/mbr-core/templates"
+SRC_DIR="$PROJECT_DIR/crates/mbr-core/src"
 HLJS_COMPONENT="$PROJECT_DIR/components/src/mbr-hljs.ts"
 
 # highlight.js language modules to download
@@ -232,7 +232,7 @@ download_hljs() {
 
     info "highlight.js v${version} installed; src/ and mbr-hljs.ts references updated."
     warn "components/src/mbr-hljs.ts changed — rerun 'cd components && bun run build'"
-    warn "to regenerate templates/components-js/, which embeds the version string."
+    warn "to regenerate crates/mbr-core/templates/components-js/, which embeds the version string."
     echo
 }
 
@@ -479,8 +479,8 @@ if [[ -n "$PICO_VERSION" ]];    then download_pico    "$(resolve @picocss/pico "
 report_versions false
 
 info "Done! Now:"
-echo "  1. Review the src/*.rs diff this script produced"
-echo "  2. git add templates/   # REQUIRED before 'nix build'"
+echo "  1. Review the crates/mbr-core/src/*.rs diff this script produced"
+echo "  2. git add crates/mbr-core/templates/   # REQUIRED before 'nix build'"
 echo "  3. cargo build   # confirms every include_bytes! path still resolves"
 echo "  4. cargo test"
 echo
@@ -491,4 +491,4 @@ echo
 # ../templates/hljs.lang.<x>.<new>.js" errors from include_bytes!, after the
 # whole dependency tree has rebuilt.
 warn "New asset files are untracked. 'nix build' will fail with include_bytes!"
-warn "errors until you 'git add templates/' — cargo build will pass either way."
+warn "errors until you 'git add crates/mbr-core/templates/' — cargo build will pass either way."

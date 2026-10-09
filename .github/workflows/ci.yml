@@ -83,25 +83,25 @@ jobs:
           nix build -L .#mbr-components
           echo "=== Nix build output ==="
           ls -la result/
-          mkdir -p templates/components-js
-          cp -v result/* templates/components-js/
+          mkdir -p crates/mbr-core/templates/components-js
+          cp -v result/* crates/mbr-core/templates/components-js/
           echo "=== Copied components ==="
-          ls -la templates/components-js/
-          test -f templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-tasks.min.js || { echo "FATAL: mbr-tasks.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-review.min.js || { echo "FATAL: mbr-review.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-search-extras.min.js || { echo "FATAL: mbr-search-extras.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-flashcards.min.js || { echo "FATAL: mbr-flashcards.min.js not created!"; exit 1; }
-          test -f templates/components-js/mbr-flashcards-reading.min.js || { echo "FATAL: mbr-flashcards-reading.min.js not created!"; exit 1; }
+          ls -la crates/mbr-core/templates/components-js/
+          test -f crates/mbr-core/templates/components-js/mbr-components.min.js || { echo "FATAL: mbr-components.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-editor.min.js || { echo "FATAL: mbr-editor.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-graph.min.js || { echo "FATAL: mbr-graph.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-genealogy.min.js || { echo "FATAL: mbr-genealogy.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-tasks.min.js || { echo "FATAL: mbr-tasks.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-review.min.js || { echo "FATAL: mbr-review.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-search-extras.min.js || { echo "FATAL: mbr-search-extras.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-flashcards.min.js || { echo "FATAL: mbr-flashcards.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-flashcards-reading.min.js || { echo "FATAL: mbr-flashcards-reading.min.js not created!"; exit 1; }
 
       - name: Upload components
         uses: actions/upload-artifact@v7
         with:
           name: components
-          path: templates/components-js/
+          path: crates/mbr-core/templates/components-js/
           retention-days: 1
           if-no-files-found: error
 
@@ -112,10 +112,10 @@ jobs:
   #
   # `nix build .#clippy` supplies the components itself: the flake's `clippy`
   # attr has a preBuild that copies `${packages.mbr-components}` into
-  # templates/components-js (flake.nix ~583-586). Downloading the artifact would
+  # crates/mbr-core/templates/components-js (flake.nix ~583-586). Downloading the artifact would
   # at best be redundant -- the preBuild overwrites it either way.
   #
-  # More to the point, the artifact is *invisible* to Nix. templates/components-js
+  # More to the point, the artifact is *invisible* to Nix. crates/mbr-core/templates/components-js
   # is gitignored (.gitignore:15) and `.#` resolves as a git-tree flake ref, so
   # those files are stripped from the flake source before the `src` filter in
   # flake.nix ever sees them (the filter's `.*templates.*` rule would otherwise
@@ -126,7 +126,7 @@ jobs:
   #
   # HAZARD: this holds only for the bare `.#` ref. `path:.#` copies untracked
   # files into the store and DOES hash differently (confirmed: different drvPath).
-  # If anyone un-gitignores templates/components-js, or switches these
+  # If anyone un-gitignores crates/mbr-core/templates/components-js, or switches these
   # invocations to `path:.`, this decoupling silently becomes wrong and these
   # jobs need their `needs` + download restored.
   lint:
@@ -385,7 +385,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: components
-          path: templates/components-js/
+          path: crates/mbr-core/templates/components-js/
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
@@ -403,13 +403,13 @@ jobs:
           rustflags: ""
 
       - name: Clippy lint
-        run: cargo clippy --all-targets --no-default-features --features ${{ env.MBR_FEATURES }} -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-default-features --features ${{ env.MBR_FEATURES }} -- -D warnings
 
       - name: Run tests
-        run: cargo test --no-default-features --features ${{ env.MBR_FEATURES }}
+        run: cargo test --workspace --no-default-features --features ${{ env.MBR_FEATURES }}
 
       - name: Build release binary
-        run: cargo build --release --no-default-features --features ${{ env.MBR_FEATURES }}
+        run: cargo build --release -p mbr-markdown-browser --no-default-features --features ${{ env.MBR_FEATURES }}
 
       # The runners ship Visual Studio and therefore the Visual C++
       # Redistributable, so a dynamically-linked CRT loads fine here and every
