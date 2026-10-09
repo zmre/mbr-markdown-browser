@@ -83,7 +83,7 @@ pub struct Repo {
     /// paths under `canonical_root`. Rebased once in
     /// [`Repo::with_explicit_hidden_dirs`] from the root-relative form
     /// `Config` carries, so the per-entry check is a plain path comparison
-    /// against what `WalkDir` already hands it. Empty for almost every run.
+    /// against the keys the scan already builds. Empty for almost every run.
     #[serde(skip)]
     exempt_hidden_dirs: Vec<PathBuf>,
     /// Every folder walked so far, by its **canonical** key, so a directory
@@ -1986,7 +1986,7 @@ mod tests {
     use super::*;
 
     /// `Repo` must canonicalize the root it is handed, so that the base used to
-    /// relativize scanned paths is identical to the one `WalkDir` starts from.
+    /// relativize scanned paths is identical to the one the scan starts from.
     /// If these drift, `diff_paths` returns an effectively absolute path and
     /// every `url_path` embeds the whole filesystem path.
     #[test]
@@ -2434,7 +2434,7 @@ mod tests {
 
     /// A directory symlinked out of the repository must contribute nothing.
     ///
-    /// `scan_folder` canonicalizes each queued directory and `WalkDir` follows
+    /// `scan_folder` canonicalizes each queued directory and the listing follows
     /// links, so the walk used to be re-rooted at the symlink target: every file
     /// underneath relativized to `../…`, `path_to_url` preserved that, and the
     /// static builder joined it onto `--output` — writing pages outside the

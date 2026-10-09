@@ -277,16 +277,31 @@ impl VaultPath {
 
     /// The native path for this vault path under `root`.
     ///
-    /// Built by pushing one validated segment at a time, so the result is
-    /// always `root` itself or a descendant of it: no segment can be a root,
-    /// a prefix or a `..` (see the type's invariants).
+    /// Always `root` itself or a descendant of it: no segment can be a root, a
+    /// prefix or a `..` (see the type's invariants), so appending the segments
+    /// with the platform separator is exactly what pushing them one at a time
+    /// would produce — built in one allocation, because every index key and
+    /// every vault I/O goes through here.
     pub fn to_native(&self, root: &Path) -> PathBuf {
-        let mut native = PathBuf::with_capacity(root.as_os_str().len() + self.0.len() + 1);
-        native.push(root);
-        for segment in self.segments() {
-            native.push(segment);
+        if self.is_root() {
+            return root.to_path_buf();
         }
-        native
+        let root = root.as_os_str();
+        let mut native = std::ffi::OsString::with_capacity(root.len() + 1 + self.0.len());
+        native.push(root);
+        let ends_with_separator = root
+            .as_encoded_bytes()
+            .last()
+            .is_some_and(|&b| b == b'/' || b == std::path::MAIN_SEPARATOR as u8);
+        if !root.is_empty() && !ends_with_separator {
+            native.push(std::path::MAIN_SEPARATOR_STR);
+        }
+        if std::path::MAIN_SEPARATOR == '/' {
+            native.push(&self.0);
+        } else {
+            native.push(self.0.replace('/', std::path::MAIN_SEPARATOR_STR));
+        }
+        PathBuf::from(native)
     }
 }
 
@@ -342,12 +357,18 @@ fn check_segment(segment: &str) -> Result<(), SegmentProblem> {
     // What the host itself would parse the segment as. On Windows `Q:x` is a
     // drive-relative prefix and `PathBuf::push` would *replace* the root with
     // it; on Unix it is a plain name. Either way only a single `Normal`
-    // component can be pushed under a root without leaving it.
-    let mut components = Path::new(segment).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(name)), None) if name == segment => Ok(()),
-        _ => Err(SegmentProblem::Invalid),
+    // component can be pushed under a root without leaving it. Once
+    // separators, `.` and `..` are excluded, a drive letter is the only shape
+    // any host parses as anything else, so the parse runs for those alone.
+    let bytes = segment.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        let mut components = Path::new(segment).components();
+        return match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) if name == segment => Ok(()),
+            _ => Err(SegmentProblem::Invalid),
+        };
     }
+    Ok(())
 }
 
 /// `C:` — an ASCII letter followed by a colon, and nothing else.
@@ -628,6 +649,25 @@ mod tests {
                 prop_assert!(!p.as_str().starts_with('/'));
                 prop_assert!(!p.as_str().contains('\\'));
                 prop_assert!(p.segments().all(|s| s != ".." && s != "." && !s.is_empty()));
+            }
+        }
+
+        /// `to_native` equals pushing the segments one at a time, under a root
+        /// with and without a trailing separator.
+        #[test]
+        fn prop_to_native_matches_segment_pushes(input in pathish(), trailing in any::<bool>()) {
+            let base = std::env::temp_dir().join("vault-prop-root");
+            let root = if trailing {
+                PathBuf::from(format!("{}{}", base.display(), std::path::MAIN_SEPARATOR))
+            } else {
+                base
+            };
+            if let Ok(p) = VaultPath::new(&input) {
+                let mut pushed = root.clone();
+                for segment in p.segments() {
+                    pushed.push(segment);
+                }
+                prop_assert_eq!(p.to_native(&root), pushed);
             }
         }
 
