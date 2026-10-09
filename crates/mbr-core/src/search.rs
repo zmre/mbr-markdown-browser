@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::TagSource;
 use crate::errors::SearchError;
 use crate::repo::{MarkdownInfo, OtherFileInfo, Repo};
+use crate::vault::VaultPath;
 
 /// Maximum number of search results to return by default.
 pub const DEFAULT_RESULT_LIMIT: usize = 50;
@@ -309,17 +310,17 @@ pub struct SearchResponse {
 }
 
 /// Search engine that combines metadata and content search.
+///
+/// Content search reads files through the repository's vault
+/// ([`Repo::vault`]); see [`SearchEngine::search_file_content`].
 pub struct SearchEngine {
     repo: Arc<Repo>,
-    /// Repo root used to rejoin the repo-relative `MarkdownInfo::raw_path`
-    /// before any filesystem access (see [`SearchEngine::search_file_content`]).
-    root_dir: std::path::PathBuf,
 }
 
 impl SearchEngine {
     /// Create a new search engine with access to the repository.
-    pub fn new(repo: Arc<Repo>, root_dir: std::path::PathBuf) -> Self {
-        Self { repo, root_dir }
+    pub fn new(repo: Arc<Repo>) -> Self {
+        Self { repo }
     }
 
     /// Execute a search query and return results.
@@ -719,36 +720,48 @@ impl SearchEngine {
         matcher: &grep_regex::RegexMatcher,
         info: &MarkdownInfo,
     ) -> Result<Option<SearchResult>, SearchError> {
-        // `raw_path` is repo-relative, so rejoin the root before touching the
-        // filesystem. Reading it directly would resolve against the process
-        // working directory, which is not the repo root.
-        let path = self.root_dir.join(&info.raw_path);
-        let path = path.as_path();
-
-        // Skip if file doesn't exist
-        if !path.exists() {
+        // `raw_path` is repo-relative: it names the file inside the
+        // repository's vault. Reading it as a native path would resolve against
+        // the process working directory, which is not the repo root.
+        let vault = self.repo.vault();
+        let Ok(path) = VaultPath::from_relative_native(&info.raw_path) else {
             return Ok(None);
-        }
+        };
 
         let mut matches: Vec<(u64, String)> = Vec::new();
         let mut match_count = 0u32;
+        let sink = UTF8(|line_num, line| {
+            match_count += 1;
+            if matches.len() < 3 {
+                // Keep first few matches for snippet
+                matches.push((line_num, line.trim().to_string()));
+            }
+            Ok(true)
+        });
 
-        // Search the file
-        let search_result = searcher.search_path(
-            matcher,
-            path,
-            UTF8(|line_num, line| {
-                match_count += 1;
-                if matches.len() < 3 {
-                    // Keep first few matches for snippet
-                    matches.push((line_num, line.trim().to_string()));
+        // Search the file. Where it has a real path, grep reads it itself
+        // (its own buffering or mmap strategy, exactly as before the vault);
+        // otherwise its bytes come through the vault and grep searches the
+        // slice. A file that is not downloaded yet is skipped, like one that
+        // has vanished since the scan.
+        let search_result = match vault.local_path(&path) {
+            Some(local) => {
+                if !local.exists() {
+                    return Ok(None);
                 }
-                Ok(true)
-            }),
-        );
+                searcher.search_path(matcher, &local, sink)
+            }
+            None => match vault.read(&path) {
+                Ok(bytes) => searcher.search_slice(matcher, &bytes, sink),
+                Err(e) => {
+                    tracing::debug!("Search skipped {path}: {e}");
+                    return Ok(None);
+                }
+            },
+        };
 
         if let Err(e) = search_result {
-            tracing::debug!("Search error in {:?}: {}", path, e);
+            tracing::debug!("Search error in {}: {}", path, e);
             return Ok(None);
         }
 
@@ -1576,8 +1589,68 @@ mod tests {
         );
         repo.scan_all().expect("scan repo");
 
-        let engine = SearchEngine::new(Arc::new(repo), dir.path().to_path_buf());
+        let engine = SearchEngine::new(Arc::new(repo));
         (engine, dir)
+    }
+
+    /// [`engine_over`] for a repository in a `MemVault`: no `local_path`, so
+    /// every content search goes through `search_slice` on vault bytes.
+    fn engine_over_mem(vault: crate::vault::MemVault) -> SearchEngine {
+        let repo = Repo::init_with_vault(
+            Arc::new(vault),
+            "static",
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+            &[],
+            &[],
+        );
+        repo.scan_all().expect("scan repo");
+        SearchEngine::new(Arc::new(repo))
+    }
+
+    /// The same body-only hit as on disk, through a vault with no filesystem.
+    #[test]
+    fn test_search_content_through_a_vault_without_local_paths() {
+        let vault = crate::vault::MemVault::new()
+            .with_file(
+                "docs/notes.md",
+                "---\ntitle: Ordinary\n---\n\n# Heading\n\nA distinctive brownfox appears here.\n",
+            )
+            .with_file("other.md", "# Unrelated\n\nNothing to see.\n");
+        let engine = engine_over_mem(vault);
+
+        let response = engine.search(&content_query("brownfox")).expect("search");
+
+        assert_eq!(response.results.len(), 1, "{:?}", response.results);
+        let hit = &response.results[0];
+        assert_eq!(hit.url_path, "/docs/notes/");
+        assert!(hit.is_content_match);
+        assert_eq!(hit.title.as_deref(), Some("Ordinary"));
+        let snippet = hit.snippet.as_deref().expect("snippet");
+        assert!(snippet.starts_with("Line 7: "), "{snippet:?}");
+    }
+
+    /// A note that is listed but not downloaded is skipped by content search
+    /// (its metadata, from the listing, is still searchable) — never a hang or
+    /// an error.
+    #[test]
+    fn test_search_content_skips_files_that_are_not_downloaded() {
+        let vault = crate::vault::MemVault::new()
+            .with_file("local.md", "# Local\n\nzebrafish here\n")
+            .with_file("cloud.md", "# Cloud\n\nzebrafish there\n");
+        vault.set_availability("cloud.md", crate::vault::Availability::NotDownloaded);
+        let engine = engine_over_mem(vault);
+
+        let response = engine.search(&content_query("zebrafish")).expect("search");
+
+        let urls: Vec<&str> = response
+            .results
+            .iter()
+            .map(|r| r.url_path.as_str())
+            .collect();
+        assert_eq!(urls, vec!["/local/"]);
     }
 
     fn content_query(q: &str) -> SearchQuery {

@@ -2732,14 +2732,13 @@ impl Server {
         }
 
         let repo = config.repo.clone();
-        let base_dir = config.base_dir.clone();
 
         // Clone query string for error handling (query is moved into closure)
         let query_str = query.q.clone();
 
         // Run search on blocking thread pool (grep does synchronous I/O)
         let search_result = tokio::task::spawn_blocking(move || {
-            let engine = SearchEngine::new(repo.clone(), base_dir);
+            let engine = SearchEngine::new(repo.clone());
             let mut response = engine.search(&query)?;
 
             // If searching all filetypes or non-markdown, also search other files

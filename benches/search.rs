@@ -1,6 +1,7 @@
 //! Benchmarks for search functionality.
 //!
-//! Measures parse_query micro-benchmark and full search against a 500-file repo.
+//! Measures parse_query micro-benchmark and full search (metadata, faceted
+//! and content) against a 500-file repo.
 
 mod fixtures;
 
@@ -45,7 +46,7 @@ fn bench_search_metadata(c: &mut Criterion) {
     );
     repo.scan_all().expect("scan failed");
 
-    let engine = SearchEngine::new(Arc::new(repo), root);
+    let engine = SearchEngine::new(Arc::new(repo));
 
     let query = SearchQuery {
         q: "Document".to_string(),
@@ -71,6 +72,20 @@ fn bench_search_metadata(c: &mut Criterion) {
 
     group.bench_function("faceted_500_files", |b| {
         b.iter(|| engine.search(&faceted_query).unwrap());
+    });
+
+    // Content search reads every markdown file (grep over 500 files).
+    let content_query = SearchQuery {
+        q: "benchmark document".to_string(),
+        limit: 50,
+        scope: SearchScope::Content,
+        filetype: None,
+        folder_scope: Default::default(),
+        folder: None,
+    };
+
+    group.bench_function("content_500_files", |b| {
+        b.iter(|| engine.search(&content_query).unwrap());
     });
 
     group.finish();
