@@ -731,14 +731,13 @@ async fn test_two_deep_static_folder_serves_assets() {
     }
 }
 
-// Only the macOS and Linux canonicalize() behaviors are asserted below, so the
-// test is gated to those platforms rather than silently passing elsewhere.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// A trailing slash on a static file request used to depend on the platform's
+/// `canonicalize()`: macOS tolerated it (200), Linux returned `ENOTDIR` (404).
+/// Request paths are now normalized into a `VaultPath` before the filesystem
+/// sees them, so the trailing separator means nothing on any platform and every
+/// platform serves the file, as macOS did. (Name kept for history.)
 #[tokio::test]
 async fn test_static_folder_trailing_slash_platform_behavior() {
-    // Behavior is platform-dependent:
-    // - macOS: canonicalize() tolerates trailing slashes on file paths (200)
-    // - Linux: canonicalize() rejects trailing slashes on file paths (404)
     let repo = TestRepo::new();
     repo.create_dir("static/images");
     repo.create_static_file("static/images/photo.png", b"image");
@@ -746,25 +745,13 @@ async fn test_static_folder_trailing_slash_platform_behavior() {
     let server = TestServer::start(&repo).await;
     let response = server.get("/images/photo.png/").await;
 
-    #[cfg(target_os = "macos")]
-    {
-        assert_eq!(
-            response.status(),
-            200,
-            "macOS: trailing slash on file path should serve file"
-        );
-        let bytes = response.bytes().await.unwrap();
-        assert_eq!(bytes.as_ref(), b"image");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        assert_eq!(
-            response.status(),
-            404,
-            "Linux: trailing slash on file path should return 404"
-        );
-    }
+    assert_eq!(
+        response.status(),
+        200,
+        "a trailing slash on a static file path serves the file on every platform"
+    );
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), b"image");
 }
 
 #[tokio::test]
@@ -9656,4 +9643,136 @@ async fn test_flashcard_review_rejects_bad_ratings_and_paths() {
         );
     }
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+// ============================================================================
+// Peer static folder: `site/content` + `site/static` (regression suite)
+// ============================================================================
+
+/// Starts a server over [`common::PeerStaticSite`], with `static_folder` taken
+/// from the site's own `.mbr/config.toml`.
+async fn start_peer_site(site: &common::PeerStaticSite) -> TestServer {
+    let static_folder = site.config().static_folder;
+    TestServer::start_at_path_with(site.content.clone(), move |config| {
+        config.static_folder = static_folder;
+    })
+    .await
+}
+
+/// The `src` of the first `<img>` in `html`.
+fn first_img_src(html: &str) -> &str {
+    let img = html.find("<img").expect("page has an <img>");
+    let rest = &html[img..];
+    let start = rest.find("src=\"").expect("<img> has a src") + "src=\"".len();
+    let end = rest[start..].find('"').expect("closing quote");
+    &rest[start..start + end]
+}
+
+/// Pages, assets and the media index for a content root whose static folder is
+/// a peer directory (`static_folder = "../static"` in `.mbr/config.toml`).
+#[tokio::test]
+async fn test_peer_static_site_serves_pages_assets_and_media_index() {
+    let site = common::PeerStaticSite::new();
+    let server = start_peer_site(&site).await;
+    server.wait_for_scan().await;
+
+    assert_eq!(server.get("/").await.status(), 200);
+    assert_eq!(server.get("/notes/guide/").await.status(), 200);
+
+    for (path, bytes) in [
+        ("/images/logo.png", common::PEER_LOGO_BYTES),
+        ("/pdfs/doc.pdf", common::PEER_PDF_BYTES),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status(), 200, "{path} from the peer static folder");
+        assert_eq!(response.bytes().await.unwrap().as_ref(), bytes, "{path}");
+    }
+    assert_eq!(server.get("/images/missing.png").await.status(), 404);
+
+    // The overlay's files are indexed as other files, at their served URLs.
+    let media: serde_json::Value = server
+        .get("/.mbr/media.json")
+        .await
+        .json()
+        .await
+        .expect("media.json");
+    let urls: Vec<&str> = media["other_files"]
+        .as_array()
+        .expect("other_files")
+        .iter()
+        .filter_map(|f| f["url_path"].as_str())
+        .collect();
+    for url in ["/images/logo.png", "/pdfs/doc.pdf"] {
+        assert!(
+            urls.contains(&url),
+            "{url} missing from media.json: {urls:?}"
+        );
+    }
+
+    // The guide's relative image is rewritten for the trailing-slash URL; the
+    // browser's resolution of it, from the page's own URL, is the overlay file.
+    let html = server.get_text("/notes/guide/").await;
+    let src = first_img_src(&html);
+    let page = reqwest::Url::parse(&server.url("/notes/guide/")).unwrap();
+    let resolved = page.join(src).expect("img src resolves");
+    assert_eq!(resolved.path(), "/images/logo.png", "img src was {src:?}");
+    let response = server.get(resolved.path()).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        common::PEER_LOGO_BYTES
+    );
+}
+
+/// **Pinned current behaviour, not the design goal.** A directory symlinked
+/// out of the site (`static/videos -> <elsewhere>`) is refused by the server:
+/// the overlay is its own vault and a link out of it does not resolve, so the
+/// file 404s and is not indexed. The static build *does* place it (see
+/// `test_build_peer_static_site_places_a_symlink_out_of_the_site` in
+/// build_integration.rs), so today server and build disagree.
+///
+/// A follow-up PR introduces read-only "symlink mounts": a directory link out
+/// of the site becomes its own read-only vault (`..` and nested links cannot
+/// escape it; targets `/`, `$HOME` itself and ancestors of the root are
+/// refused; hidden files are never served; mounts are logged at startup), and
+/// server and build agree. That PR deliberately flips these assertions.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_peer_static_site_symlink_out_of_the_site_is_not_served() {
+    let site = common::PeerStaticSite::new();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("clip.mp4"), b"outside clip").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), site.static_dir.join("videos")).unwrap();
+
+    let server = start_peer_site(&site).await;
+    server.wait_for_scan().await;
+
+    assert_eq!(server.get("/videos/clip.mp4").await.status(), 404);
+    assert_eq!(server.get("/videos/").await.status(), 404);
+    let media = server.get_text("/.mbr/media.json").await;
+    assert!(
+        !media.contains("clip.mp4"),
+        "a file behind a link out of the site is not indexed today: {media}"
+    );
+
+    // The rest of the overlay is unaffected.
+    assert_eq!(server.get("/images/logo.png").await.status(), 200);
+}
+
+/// **Known security issue, tracked rather than asserted.** Today the server
+/// serves an in-repository hidden file: `GET /.env` answers 200 on main and on
+/// this branch. Hidden files must never be served; the read-only "symlink
+/// mounts" PR fixes it and un-ignores this test. Kept as an ignored 404 test
+/// rather than a passing 200 one so the suite never states the bug as intended
+/// behaviour; run it with `--ignored` to see it fail.
+#[tokio::test]
+#[ignore = "known issue: hidden files are served (GET /.env is 200); fixed by the symlink-mounts PR"]
+async fn test_hidden_files_are_never_served() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Readme");
+    repo.create_static_file(".env", b"SECRET=1\n");
+
+    let server = TestServer::start(&repo).await;
+    assert_eq!(server.get("/readme/").await.status(), 200);
+    assert_eq!(server.get("/.env").await.status(), 404);
 }
