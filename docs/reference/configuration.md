@@ -121,7 +121,8 @@ target, result, build, node_modules, ci, templates, .git, .github, dist, out, co
 
 **Hidden files and directories** (names beginning with `.`) are skipped in
 addition to the lists above, and this is not configurable — there is no option
-that re-admits them in general.
+that re-admits them in general. They are not served either, even when asked for
+by name; see [Hidden files](#hidden-files).
 
 There is one exception, and it is derived from the invocation rather than from
 configuration: the hidden directories on the path from the repository root down
@@ -1399,14 +1400,25 @@ as raw files. Concretely:
 | `../static` | `~/notes` | **Refused** — the next directory up is `$HOME` |
 | `../../static` | `~/project/content` | **Refused** — the climb stops below `$HOME` |
 | `..`, `../..` | anywhere | **Refused** — contains the markdown root |
+| `../.git`, `../../.cache/x` | anywhere | **Refused** — a hidden directory |
 | `../../..`, `../../../assets` | anywhere | **Refused** — past the two-level limit |
 | `/etc` (from `.mbr/config.toml`) | anywhere | **Refused** — see below |
 
 Reaching two levels up is wider than a peer: the anchor is the root's
-grandparent, so the value could have named anything under it — `project/.git`
-and the credentials in its config, `project/node_modules`. mbr logs a `WARN` at
-startup naming the directory it settled on whenever an overlay reaches that far,
-so it is never quietly in effect. Serve untrusted repositories accordingly.
+grandparent, so the value could have named anything under it —
+`project/node_modules`, say. A *hidden* directory there (`project/.git` and the
+credentials in its config) is refused, the same as every hidden path (see
+[Hidden files](#hidden-files)). mbr logs a `WARN` at startup naming the
+directory it settled on whenever an overlay reaches that far, so it is never
+quietly in effect. Serve untrusted repositories accordingly.
+
+The external-overlay rules above — never the filesystem root, never `$HOME` or a
+directory containing it, never a directory containing the markdown root, never
+a hidden directory — are one policy, shared with
+[symlinked folders](#read-only-symlink-mounts), so the two cannot
+drift apart. An in-root static folder is the configuration's own choice and may
+itself be hidden (VuePress keeps assets in `.vuepress/public`); the files served
+*out of* it still answer to the hidden-file rule.
 
 A symlink is judged by where it actually lands, not by how it is spelled: a
 `static` symlink pointing at an allowed directory is accepted, one pointing past
@@ -1456,10 +1468,109 @@ markdown under the markdown root; the static folder is for assets. This applies
 only to an *external* static folder — markdown in a `static/` directory inside
 the root is indexed normally.
 
-No other directory gets this treatment. A directory *symlink* that points out of
-the markdown root is still skipped, whether or not an external static folder is
-configured: the overlay is one specific directory the policy above approved, not
-a general permission to index outside the root.
+A directory *symlink* that points out of the markdown root (or out of an
+external static folder) is not part of this: it is a
+[read-only mount](#read-only-symlink-mounts), judged link by link.
+
+### Read-only symlink mounts
+
+A symlink inside the markdown root or the static folder whose target lies
+**outside** it is served as a **read-only mount**: a folder of its own, reached
+at the link's location. The typical case keeps large media where it already
+lives:
+
+```
+site/
+├── content/                  # markdown root; static_folder = "../static"
+│   └── index.md              # ![clip](/videos/clip.mp4)
+└── static/
+    ├── images/logo.png
+    └── videos -> ~/Movies    # a mount: ~/Movies/clip.mp4 is /videos/clip.mp4
+```
+
+Everything under the target behaves as if it were a folder at the link's place:
+
+- **Served and indexed.** Files are served at the link's URLs, appear in
+  `site.json` and `/.mbr/media.json`, get media metadata, and are searchable.
+  Markdown in a mount of the markdown root is a page like any other (markdown in
+  a mount of an *external* static folder is skipped, for the reason given
+  above). The static build places a mount's files exactly like other assets —
+  symlinked on macOS/Linux, copied on Windows — so links to them pass
+  `--fail-on-broken-links`. The server and the build mount the same folders and
+  refuse the same targets.
+- **Read-only.** Nothing mbr writes ever lands in a mount: saving, task toggles,
+  flashcard reviews, creating notes or folders, uploads, and moves into or out of
+  a mount all answer `403`. When a move rewrites links across the repository,
+  notes inside mounts are skipped (they keep their old link) rather than edited.
+- **No way out.** Inside a mount, `..` and further symlinks cannot leave it. A
+  nested link that points somewhere else is judged as a mount of its own, by the
+  same rules; one that points back into the repository is just a path inside it;
+  a link cycle (a mount containing a link to itself or an ancestor) is walked
+  once.
+- **Each target once.** Two links to the same folder share one mount: the
+  scanner walks it once, under the first link it reached. Both links still serve
+  the files.
+- **Hidden files stay hidden** inside mounts too (see [Hidden files](#hidden-files)).
+
+A link is **refused** — logged at `WARN` with the reason, then treated as if it
+were not there (404 on the server, not placed by the build), never fatal — when
+its target is:
+
+| Target | Why |
+|--------|-----|
+| `/` (or a drive root) | exposes the whole machine |
+| `$HOME` (`%USERPROFILE%`), or a directory containing it (`/Users`) | exposes everything the user owns |
+| a directory containing the markdown root or the static folder | exposes the root's siblings and its sources |
+| anything with a hidden component — `~/.ssh`, `~/.config/app` | hidden files are never served |
+| unreadable — permission denied, or missing (a dangling link) | nothing to serve; on iOS, a folder the app was not granted |
+
+The hidden-component rule only counts components below the directory the target
+shares with the root, so a repository that itself lives inside a hidden
+directory (`~/.local/share/notes`) can still mount a sibling there.
+
+Accepted mounts are logged at `INFO` (run with `-v`) as
+`Serving external folder <target> via <link> (read-only)`, once per link, as the
+first scan reaches them. A link to a single *file* outside the root
+(`static/demo.mp4 -> ~/Movies/demo.mp4`) is accepted under the same rules, as a
+read-only mount of that one file.
+
+**Live reload.** With the file watcher (the desktop app and `mbr -s`), each
+directory mount's target is watched as well, and a change inside it is reported
+at the link's location, so a new video in `~/Movies` appears without a restart.
+Up to 32 mounts are watched; further ones are served without live reload. On
+macOS the watch is an FSEvents stream (cheap at any size); on Linux inotify
+needs one watch per directory, counted against `fs.inotify.max_user_watches`, so
+a mount of a very large tree can exhaust it — mbr then logs a warning and serves
+the mount without live reload. Links created while the server runs are found by
+the next full rescan.
+
+**Untrusted repositories.** A repository can contain symlinks, and a git clone
+recreates them. A mount of anything the refusal rules allow — `/etc`, another
+project — is served to whoever can reach the server, and published by a build.
+Review the symlinks in a repository you did not create before serving or
+building it (`find . -type l`).
+
+### Hidden files
+
+A file or folder whose name starts with a dot is **never served and never
+published** — from the markdown root, the static folder, or a mount. `GET /.env`,
+`/.git/config` and `/docs/.private/x/` are all 404, a link that is not itself
+hidden cannot reach a hidden target (`notes -> .git`), and the static build
+places no hidden files. Hidden directories are where repositories keep
+credentials and tooling state, and the scanner never indexed them; the server
+used to serve them anyway when asked by name.
+
+Exceptions:
+
+- `/.mbr/*` is not a file path but mbr's own routes: compiled-in assets plus the
+  repository's overrides (`.mbr/user.css`, templates, components). Only asset
+  types are served from there; `.mbr/config.toml` (which can hold the edit-token
+  hash) is 404.
+- `.well-known` (RFC 8615 site metadata: `security.txt`, ACME challenges, app
+  associations) is served and published.
+- A hidden directory named on the command line (`mbr -s .scratch`) is served,
+  along with everything under it except further hidden names. See
+  [Ignore Settings](#ignore-settings) for why the scan admits it.
 
 In `guide.md`:
 ```markdown
