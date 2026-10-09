@@ -4,9 +4,10 @@
 //! toggles, flashcard reviews, moves and the link rewriting a move triggers —
 //! goes through here, so they agree on two things:
 //!
-//! * **Atomic replacement** ([`atomic_write`]): a temp file with a name of its
-//!   own, beside the target, renamed over it, carrying the target's
-//!   permissions.
+//! * **Atomic replacement** ([`atomic_write`], implemented by
+//!   [`mbr_core::vault::LocalVault`] and re-exported here): a temp file with a
+//!   name of its own, beside the target, renamed over it, carrying the
+//!   target's permissions.
 //! * **Serialization** ([`FileWriteLocks`]): a read-patch-write cycle on one
 //!   file excludes every other one on the same file, so no write is silently
 //!   overwritten by a second writer that read the older text.
@@ -14,10 +15,7 @@
 //! Knows nothing about HTTP; callers map `std::io::Error` themselves.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -93,68 +91,10 @@ impl FileWriteLocks {
     }
 }
 
-/// Creates a fresh temp file beside a write target, for a write-then-rename.
-///
-/// The name is hidden (leading dot, so the scanner and watcher skip it),
-/// derived from the target's, and unique per process and call — `create_new`
-/// guarantees no two writers ever share one, which a fixed `.{name}.mbr-tmp`
-/// did not: concurrent writers truncated each other's temp file and the loser's
-/// rename failed with `ENOENT`.
-pub fn create_unique_temp_file(dir: &Path, file_name: &str) -> std::io::Result<(PathBuf, File)> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    // A leftover from a crashed process can only collide on a reused pid;
-    // move past it rather than fail.
-    const ATTEMPTS: u32 = 16;
-    let pid = std::process::id();
-    let mut last_error = None;
-    for _ in 0..ATTEMPTS {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = dir.join(format!(".{file_name}.{pid}-{n}.mbr-tmp"));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| std::io::Error::other("no free temp file name")))
-}
-
-/// Atomically writes `bytes` to `path` (temp file in the same dir + rename).
-///
-/// The temp file has a name of its own (see [`create_unique_temp_file`]), and
-/// when `path` already exists it takes over that file's permissions — a rename
-/// replaces the inode, and a note that was `0600` must not come back `0644`.
-/// The temp file is removed on any failure. Blocking.
-///
-/// Does not lock: callers that read before writing hold a [`FileWriteLocks`]
-/// guard across both.
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file.md");
-    let (tmp, mut file) = create_unique_temp_file(parent, file_name)?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| match std::fs::metadata(path) {
-            Ok(existing) => file.set_permissions(existing.permissions()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        })
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&tmp, path)
-        });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
-}
+// The atomic-replacement primitives live with the local vault, which is the
+// one implementation of `Vault::write_atomic` on disk; re-exported here so the
+// rest of the server keeps a single import for "how files are written".
+pub use mbr_core::vault::{atomic_write, create_unique_temp_file};
 
 #[cfg(test)]
 mod tests {
