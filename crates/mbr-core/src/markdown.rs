@@ -16,8 +16,7 @@ use pulldown_cmark::{
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
-    fs::{self, File},
-    io::Read,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -2789,19 +2788,45 @@ pub struct FileMetadata {
 pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadata, MarkdownError> {
     let path = path.as_ref();
     // Only read the first 8KB - frontmatter is always at the top
-    let mut file = File::open(path).map_err(|e| MarkdownError::ReadFailed {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
-    let read_len = file_len.min(FRONTMATTER_MAX_BYTES);
-    let mut buffer = vec![0u8; read_len];
-    file.read_exact(&mut buffer)
-        .map_err(|e| MarkdownError::ReadFailed {
+    let buffer = crate::vault::read_prefix_native(path, FRONTMATTER_MAX_BYTES).map_err(|e| {
+        MarkdownError::ReadFailed {
             path: path.to_path_buf(),
             source: e,
+        }
+    })?;
+    Ok(extract_metadata_from_bytes(path, &buffer))
+}
+
+/// [`extract_metadata_from_file`] for a file in a vault: the same 8 KB read,
+/// through [`crate::vault::Vault::read_prefix`].
+///
+/// Errors (and the YAML warning) name the file by its [`Vault::key`], which for
+/// a [`crate::vault::LocalVault`] is the path the old file-based call printed.
+///
+/// [`Vault::key`]: crate::vault::Vault::key
+pub fn extract_metadata_from_vault(
+    vault: &dyn crate::vault::Vault,
+    path: &crate::vault::VaultPath,
+) -> Result<FileMetadata, MarkdownError> {
+    let key = vault.key(path);
+    let buffer = vault
+        .read_prefix(path, FRONTMATTER_MAX_BYTES)
+        .map_err(|e| MarkdownError::ReadFailed {
+            path: key.clone(),
+            source: e.into(),
         })?;
-    let decoded = String::from_utf8_lossy(&buffer);
+    Ok(extract_metadata_from_bytes(&key, &buffer))
+}
+
+/// Frontmatter (and the first-H1 title fallback) from the **first bytes** of a
+/// markdown file — [`FRONTMATTER_MAX_BYTES`] of them is always enough, since
+/// frontmatter is at the top. `path` is only used to name the file in the
+/// warning a malformed YAML block logs.
+///
+/// Invalid UTF-8 is decoded lossily: a prefix can end mid-character, and a
+/// stray byte in the body must not cost the note its metadata.
+pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
+    let decoded = String::from_utf8_lossy(buffer);
     let markdown_input = strip_bom(&decoded);
     let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = TextMergeStream::new(parser);
@@ -2854,10 +2879,10 @@ pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadat
         hm.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
-    Ok(FileMetadata {
+    FileMetadata {
         metadata: hm,
         relationships,
-    })
+    }
 }
 
 /// Lowercases `text` and reduces it to alphanumerics and `-`.

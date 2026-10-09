@@ -47,7 +47,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub use local::{LocalVault, atomic_write, create_unique_temp_file};
+pub use local::{LocalVault, atomic_write, create_unique_temp_file, read_prefix_native};
 pub use mem::MemVault;
 pub use path::{VaultPath, VaultPathError};
 

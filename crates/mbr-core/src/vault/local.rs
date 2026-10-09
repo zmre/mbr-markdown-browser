@@ -113,13 +113,7 @@ impl Vault for LocalVault {
     }
 
     fn read_prefix(&self, path: &VaultPath, max_len: usize) -> Result<Vec<u8>, VaultError> {
-        let io_err = |e| VaultError::from_io(path, e);
-        let mut file = File::open(self.native(path)).map_err(io_err)?;
-        // Sized from the open handle, so a short file costs one exact read.
-        let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
-        let mut buffer = vec![0u8; len.min(max_len)];
-        file.read_exact(&mut buffer).map_err(io_err)?;
-        Ok(buffer)
+        read_prefix_native(&self.native(path), max_len).map_err(|e| VaultError::from_io(path, e))
     }
 
     fn write_atomic(&self, path: &VaultPath, bytes: &[u8]) -> Result<(), VaultError> {
@@ -141,6 +135,19 @@ impl Vault for LocalVault {
     fn local_path(&self, path: &VaultPath) -> Option<PathBuf> {
         Some(self.native(path))
     }
+}
+
+/// At most the first `max_len` bytes of the file at `path`.
+///
+/// Sized from the open handle's metadata, so a short file costs one exact read
+/// and no second path lookup — the frontmatter scan does this for every
+/// markdown file in the repository.
+pub fn read_prefix_native(path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+    let mut buffer = vec![0u8; len.min(max_len)];
+    file.read_exact(&mut buffer)?;
+    Ok(buffer)
 }
 
 /// Creates a fresh temp file beside a write target, for a write-then-rename.

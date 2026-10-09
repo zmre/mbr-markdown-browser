@@ -6686,12 +6686,12 @@ impl Server {
                 .queued_folders
                 .pin()
                 .iter()
-                .filter_map(|(abs_path, rel_path)| {
+                .filter_map(|(abs_path, queued)| {
                     // Only include immediate children
                     let parent = abs_path.parent()?;
                     if parent == dir_path.as_path() {
                         let name = abs_path.file_name()?.to_str()?.to_string();
-                        let mut url_path = mbr_core::url_path::path_to_url(rel_path);
+                        let mut url_path = queued.path.as_str().to_string();
                         if !url_path.starts_with('/') {
                             url_path = "/".to_string() + &url_path;
                         }
