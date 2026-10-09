@@ -264,3 +264,59 @@ fn test_template_folder_that_is_a_file_is_rejected() {
         stderr_of(&output)
     );
 }
+
+/// A symlink to `$HOME` is refused as a mount — it would publish everything
+/// the user owns — and the build says why. `HOME` is a fake, set only on the
+/// child process; a sibling link to a folder *inside* it is still a mount, and
+/// the build logs it.
+#[cfg(unix)]
+#[test]
+fn test_build_refuses_a_symlink_to_home_and_mounts_a_folder_in_it() {
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home\n");
+    let home = common::visible_tempdir();
+    std::fs::create_dir(home.path().join("Movies")).unwrap();
+    std::fs::write(home.path().join("diary.png"), b"private").unwrap();
+    std::fs::write(home.path().join("Movies/clip.mp4"), b"clip").unwrap();
+    std::fs::create_dir(repo.path().join("static")).unwrap();
+    std::os::unix::fs::symlink(home.path(), repo.path().join("static/home")).unwrap();
+    std::os::unix::fs::symlink(
+        home.path().join("Movies"),
+        repo.path().join("static/videos"),
+    )
+    .unwrap();
+    let out = TempDir::new().expect("temp output dir");
+
+    let output = mbr_command()
+        .env("HOME", home.path())
+        .env("RUST_LOG", "mbr=info")
+        .arg("-b")
+        .arg("--output")
+        .arg(out.path())
+        .arg(repo.path())
+        .output()
+        .expect("failed to run the mbr binary");
+    // `tracing`'s fmt layer writes to stdout; take both streams.
+    let stderr = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+    assert!(output.status.success(), "build failed:\n{stderr}");
+    assert!(
+        out.path().join("home").symlink_metadata().is_err(),
+        "a link to $HOME must not be built"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("videos/clip.mp4")).unwrap(),
+        b"clip"
+    );
+    assert!(
+        stderr.contains("home directory") && stderr.contains("Not serving"),
+        "the refusal is logged with its reason:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Serving external folder"),
+        "the accepted mount is logged:\n{stderr}"
+    );
+}

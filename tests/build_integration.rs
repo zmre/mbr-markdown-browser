@@ -3313,36 +3313,148 @@ async fn test_build_peer_static_site_places_overlay_assets() {
     }
 }
 
-/// **Pinned current behaviour, not the design goal.** A directory symlinked
-/// out of the site (`static/videos -> <elsewhere>`) *is* placed by the static
-/// build, while the server refuses it (see
-/// `test_peer_static_site_symlink_out_of_the_site_is_not_served` in
-/// server_integration.rs), so today server and build disagree.
+/// The user's layout built statically: `static/videos -> <elsewhere>` is a
+/// read-only mount, placed in the output exactly like the overlay's own files
+/// (a symlink or a copy, per `AssetPlacement`) — and the hidden files inside
+/// it are not. Server and build agree (see
+/// `test_peer_static_site_serves_a_symlink_mount` in server_integration.rs).
 ///
-/// A follow-up PR introduces read-only "symlink mounts": a directory link out
-/// of the site becomes its own read-only vault (`..` and nested links cannot
-/// escape it; targets `/`, `$HOME` itself and ancestors of the root are
-/// refused; hidden files are never served; mounts are logged at startup), and
-/// server and build agree. That PR deliberately flips the *server*
-/// assertions; this one is expected to keep holding.
+/// Was pinned as "places a symlink out of the site" while the server refused
+/// it; the build kept placing it, and now does so because it is a mount.
 #[cfg(unix)]
 #[tokio::test]
-async fn test_build_peer_static_site_places_a_symlink_out_of_the_site() {
+async fn test_build_peer_static_site_places_a_symlink_mount() {
     let site = common::PeerStaticSite::new();
-    let elsewhere = tempfile::TempDir::new().unwrap();
+    let elsewhere = common::visible_tempdir();
+    fs::create_dir(elsewhere.path().join(".secret")).unwrap();
     fs::write(elsewhere.path().join("clip.mp4"), b"outside clip").unwrap();
+    fs::write(elsewhere.path().join(".secret/key"), b"key").unwrap();
+    fs::write(elsewhere.path().join(".dotfile"), b"dot").unwrap();
     std::os::unix::fs::symlink(elsewhere.path(), site.static_dir.join("videos")).unwrap();
+    fs::write(
+        site.content.join("index.md"),
+        "# Home\n\n![logo](/images/logo.png)\n\n![clip](/videos/clip.mp4)\n\n[guide](notes/guide.md)\n",
+    )
+    .unwrap();
 
     let (output, stats) = build_peer_site(&site).await;
     assert_no_broken_links(&stats);
 
-    let clip = output.join("videos/clip.mp4");
     assert_eq!(
-        fs::read(&clip).expect("videos/clip.mp4 is placed in the output today"),
+        fs::read(output.join("videos/clip.mp4")).expect("videos/clip.mp4 is placed"),
         b"outside clip"
     );
+    for hidden in ["videos/.secret", "videos/.secret/key", "videos/.dotfile"] {
+        assert!(
+            output.join(hidden).symlink_metadata().is_err(),
+            "{hidden} must not be published"
+        );
+    }
     assert_eq!(
         fs::read(output.join("images/logo.png")).unwrap(),
         common::PEER_LOGO_BYTES
+    );
+}
+
+/// Links to refused targets — `/`, an ancestor of the root, a hidden
+/// directory — are skipped by the build exactly as the server 404s them.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_skips_symlinks_to_refused_targets() {
+    use std::os::unix::fs::symlink;
+    let site = common::PeerStaticSite::new();
+    let outside = common::visible_tempdir();
+    fs::create_dir(outside.path().join(".hidden")).unwrap();
+    fs::write(outside.path().join(".hidden/key"), b"key").unwrap();
+    symlink("/", site.static_dir.join("fsroot")).unwrap();
+    symlink(&site.site, site.static_dir.join("ancestor")).unwrap();
+    symlink(
+        outside.path().join(".hidden"),
+        site.static_dir.join("hidden"),
+    )
+    .unwrap();
+    symlink(&site.site, site.content.join("up")).unwrap();
+
+    let (output, stats) = build_peer_site(&site).await;
+    assert_no_broken_links(&stats);
+    for refused in ["fsroot", "ancestor", "hidden", "up"] {
+        assert!(
+            output.join(refused).symlink_metadata().is_err(),
+            "{refused} must not be built"
+        );
+    }
+    assert!(output.join("images/logo.png").exists());
+}
+
+/// Hidden files are never published by a build, from the root or the static
+/// folder, with RFC 8615's `.well-known` as the one exception. The old
+/// static-folder pass walked the raw filesystem and published `static/.env`.
+#[tokio::test]
+async fn test_build_never_publishes_hidden_files() {
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home");
+    repo.create_static_file(".env", b"SECRET=1");
+    repo.create_markdown(".obsidian/plan.md", "# Plan");
+    repo.create_static_file("static/.env", b"SECRET=2");
+    repo.create_static_file("static/.git/config", b"[core]");
+    repo.create_static_file("static/images/.DS_Store", b"junk");
+    repo.create_static_file("static/images/logo.png", b"png");
+    repo.create_static_file("static/.well-known/security.txt", b"Contact: x");
+
+    let output = build_site(&repo).await;
+    for hidden in [
+        ".env",
+        ".git",
+        "images/.DS_Store",
+        ".obsidian",
+        "static/.env",
+    ] {
+        assert!(
+            output.join(hidden).symlink_metadata().is_err(),
+            "{hidden} must not be published"
+        );
+    }
+    assert_eq!(fs::read(output.join("images/logo.png")).unwrap(), b"png");
+    assert_eq!(
+        fs::read(output.join(".well-known/security.txt")).unwrap(),
+        b"Contact: x"
+    );
+}
+
+/// Markdown in a mount of the repository itself is a page: rendered at the
+/// link's URL, linkable, and counted by the link check.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_renders_markdown_inside_a_symlink_mount() {
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home\n\n[shared](ext/shared.md)\n");
+    let outside = common::visible_tempdir();
+    fs::write(
+        outside.path().join("shared.md"),
+        "# Shared\n\n[home](../index.md)\n",
+    )
+    .unwrap();
+    fs::write(outside.path().join(".private.md"), "# Private").unwrap();
+    std::os::unix::fs::symlink(outside.path(), repo.path().join("ext")).unwrap();
+
+    let output_dir = repo.path().join("build");
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    let stats = mbr::build::Builder::new(config, output_dir.clone())
+        .expect("builder")
+        .build()
+        .await
+        .expect("build");
+    assert_no_broken_links(&stats);
+    let page = fs::read_to_string(output_dir.join("ext/shared/index.html"))
+        .expect("the mounted note is rendered at the link's URL");
+    assert!(page.contains("Shared"));
+    assert!(
+        output_dir
+            .join("ext/.private/index.html")
+            .symlink_metadata()
+            .is_err()
     );
 }
