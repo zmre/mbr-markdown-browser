@@ -49,6 +49,7 @@ flowchart TD
 | `server.rs` | HTTP server (axum) |
 | `build.rs` | Static site generator |
 | `browser.rs` | Native GUI window (wry/tao) |
+| `vault/` | Storage seam: every repository read and write goes through a `Vault` (`LocalVault` on the desktop) |
 | `path_resolver.rs` | URL to file path resolution |
 | `markdown.rs` | Markdown parsing (pulldown-cmark) |
 | `templates.rs` | Template rendering (tera) |
@@ -232,6 +233,23 @@ files.par_iter().for_each(|file| {
 - Near-linear scaling with CPU cores
 - Fast initial load for large repos
 - Non-blocking server startup
+
+### Storage Through a Vault
+
+The core never assumes `std::fs` for the repository. Scanning, URL
+resolution, content search, the task index, page rendering and every write
+the server makes go through a `Vault` — on the desktop a `LocalVault`, which
+is plain `std::fs` with the repository root canonicalized once. Listing is
+one call per directory (with sizes and times already attached), so the
+desktop pays one `stat` per entry, and a mobile or sync-library backend is
+called per directory rather than per file. Where a real path exists, the hot
+paths (grep, static file serving, media probes) use it directly.
+
+Paths inside a vault are `VaultPath`s: relative, `/`-separated and normalized,
+so a request can never name anything above the repository root, on any
+platform. Symlinks are followed like they always were, but a link that
+leads out of the repository is refused wherever untrusted input is resolved
+(requests, write targets, folders the scanner descends into).
 
 ### Template Fallback Chain
 
