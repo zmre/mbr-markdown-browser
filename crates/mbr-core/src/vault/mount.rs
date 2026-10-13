@@ -59,6 +59,13 @@ pub struct MountPolicy {
     pub other_roots: Vec<PathBuf>,
     /// `$HOME`, canonical. A mount may be neither it nor an ancestor of it.
     pub home: Option<PathBuf>,
+    /// The markdown root, canonical, for a vault that is *not* it (the
+    /// external static overlay). A mount may not point into it: the overlay
+    /// serves files raw, so a link from the overlay into the root would serve
+    /// markdown *sources* — frontmatter included, which `site.json` filters
+    /// (contact emails and phones) — beside the rendered pages. In the
+    /// repository's own vault a link into the root is simply a path inside it.
+    pub markdown_root: Option<PathBuf>,
 }
 
 impl MountPolicy {
@@ -68,6 +75,7 @@ impl MountPolicy {
         Self {
             other_roots,
             home: crate::config::home_dir().map(|home| home.canonicalize().unwrap_or(home)),
+            markdown_root: None,
         }
     }
 
@@ -75,6 +83,13 @@ impl MountPolicy {
     #[must_use]
     pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
         self.home = home;
+        self
+    }
+
+    /// Sets the markdown root a mount may not point into (see the field).
+    #[must_use]
+    pub fn with_markdown_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.markdown_root = Some(root.into());
         self
     }
 
@@ -258,6 +273,15 @@ impl MountTable {
             .chain(self.policy.other_roots.iter().map(PathBuf::as_path))
             .collect();
         let metadata = fs::metadata(target).map_err(|e| format!("it cannot be read: {e}"))?;
+        if let Some(markdown_root) = &self.policy.markdown_root
+            && target.starts_with(markdown_root)
+        {
+            return Err(
+                "it is inside the markdown root, whose files are served as pages, not as raw \
+                 static files"
+                    .to_string(),
+            );
+        }
         // One policy for both kinds: a *file* target can contain nothing, so
         // of the rules only the hidden-name one can ever refuse it.
         if let Some(refusal) =

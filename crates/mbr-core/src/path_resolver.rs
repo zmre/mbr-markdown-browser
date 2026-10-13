@@ -2227,7 +2227,10 @@ mod hidden_and_mount_tests {
         fn vaults(&self) -> (LocalVault, LocalVault) {
             (
                 LocalVault::with_mounts(&self.content, self.policy(&self.overlay)),
-                LocalVault::with_mounts(&self.overlay, self.policy(&self.content)),
+                LocalVault::with_mounts(
+                    &self.overlay,
+                    self.policy(&self.content).with_markdown_root(&self.content),
+                ),
             )
         }
 
@@ -2277,6 +2280,9 @@ mod hidden_and_mount_tests {
             "up/secret.txt",
             "up/home/diary.md",
             "media/climb/secret.txt",
+            // A link from an overlay mount back into the markdown root: the
+            // overlay would serve the note's raw source. (Found by the proptest.)
+            "videos/back/a.md",
             "hidden/key",
             "videos/../../secret.txt",
             "videos/%2e%2e/%2e%2e/secret.txt",

@@ -715,7 +715,8 @@ impl Repo {
         let static_vault: Option<Arc<dyn Vault>> = overlay_dir.map(|dir| {
             Arc::new(LocalVault::with_mounts(
                 dir,
-                MountPolicy::new(vec![canonical_root.clone()]),
+                MountPolicy::new(vec![canonical_root.clone()])
+                    .with_markdown_root(canonical_root.clone()),
             )) as Arc<dyn Vault>
         });
 

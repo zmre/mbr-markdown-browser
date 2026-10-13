@@ -1504,7 +1504,9 @@ Everything under the target behaves as if it were a folder at the link's place:
   notes inside mounts are skipped (they keep their old link) rather than edited.
 - **No way out.** Inside a mount, `..` and further symlinks cannot leave it. A
   nested link that points somewhere else is judged as a mount of its own, by the
-  same rules; one that points back into the repository is just a path inside it;
+  same rules; one that points back into the repository is just a path inside it
+  (from the static folder, a link into the markdown root is refused instead: the
+  static folder serves files raw, and a note's raw source is not published);
   a link cycle (a mount containing a link to itself or an ancestor) is walked
   once.
 - **Each target once.** Two links to the same folder share one mount: the
