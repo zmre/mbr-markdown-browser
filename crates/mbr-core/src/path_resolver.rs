@@ -2015,7 +2015,10 @@ mod proptests {
 #[cfg(test)]
 mod hidden_and_mount_tests {
     use super::*;
-    use crate::vault::{LocalVault, MountPolicy};
+    use crate::vault::LocalVault;
+    // Only the symlink fixtures below use it, and they are Unix-only.
+    #[cfg(unix)]
+    use crate::vault::MountPolicy;
     use std::fs;
 
     fn visible_tempdir() -> tempfile::TempDir {

@@ -9843,6 +9843,9 @@ async fn test_hidden_files_are_never_served() {
 
 /// Sends `GET <raw_path>` byte for byte — no client-side `..` or `%2e%2e`
 /// normalization, which every URL library applies — and returns the status.
+///
+/// Unix-only because its one caller builds a symlink fixture.
+#[cfg(unix)]
 async fn raw_get_status(port: u16, raw_path: &str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
