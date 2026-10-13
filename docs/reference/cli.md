@@ -73,6 +73,7 @@ Supported media types are detected by file extension:
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
 | `--no-relationship-tracking` | Disable typed relationship tracking | `false` |
 | `--no-tasks` | Disable the task browser. The `/.mbr/tasks` endpoint returns `404` and no task index is ever built. Server/GUI only — static builds never include tasks either way. | `false` |
+| `--no-symlink-mounts` | Disable [read-only symlink mounts](configuration.md#read-only-symlink-mounts): a symlink to a folder or file outside the repository (or the static folder) is not served (`404`) and not built, exactly as before mounts existed. Hidden files stay blocked either way. Applies to `-s`, `-g` (including folders opened later from the GUI) and `-b`. Also `MBR_NO_SYMLINK_MOUNTS=1`. Operator-only: a repository's `.mbr/config.toml` cannot set it, in either direction. QuickLook and mobile do not use mounts and are unaffected. Use it when serving or building a repository you did not create. | `false` (mounts on) |
 | `--no-review` | Disable `data-mbr-line` source-line attributes on block elements. Server/GUI only — static builds, the CLI and QuickLook never emit them either way. With editing on, definition-list terms (`<dt>`) keep theirs, since a [flashcard](../markdown/flashcards.md) review addresses its card by that line. | `false` |
 | `--mark-incomplete` | Highlight TK/TODO/FIXME/XXX anywhere in a line | server/GUI: on, build: off |
 | `--no-mark-incomplete` | Disable incomplete-marker highlighting | server/GUI: off, build: on (no effect) |

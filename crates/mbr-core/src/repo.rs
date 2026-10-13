@@ -639,6 +639,31 @@ impl Repo {
             &c.relationship_types[..],
         )
         .with_explicit_hidden_dirs(&c.explicit_hidden_dirs)
+        .with_symlink_mounts(!c.no_symlink_mounts)
+    }
+
+    /// Turns read-only symlink mounts off (`enabled == false`): the
+    /// operator's `--no-symlink-mounts` / `MBR_NO_SYMLINK_MOUNTS`. The vaults
+    /// are rebuilt as plain [`LocalVault`]s on the same (canonical) roots, so a
+    /// link out of the repository or the overlay is `OutsideRoot` — 404 on the
+    /// server, not placed by a build — exactly as before mounts. Hidden-file
+    /// blocking is unaffected. Logs one line when it disables anything.
+    ///
+    /// Call before scanning: it replaces the storage the scan reads through.
+    #[must_use]
+    pub fn with_symlink_mounts(mut self, enabled: bool) -> Self {
+        if !enabled {
+            tracing::info!(
+                "Symlink mounts are disabled (--no-symlink-mounts / {}): links out of the \
+                 repository are not served or built",
+                crate::config::NO_SYMLINK_MOUNTS_ENV
+            );
+            self.vault = Arc::new(LocalVault::new(self.vault.root()));
+            self.static_vault = self
+                .static_vault
+                .map(|overlay| Arc::new(LocalVault::new(overlay.root())) as Arc<dyn Vault>);
+        }
+        self
     }
 
     /// Re-admits the hidden directories the user named on the command line

@@ -1549,8 +1549,29 @@ the next full rescan.
 **Untrusted repositories.** A repository can contain symlinks, and a git clone
 recreates them. A mount of anything the refusal rules allow — `/etc`, another
 project — is served to whoever can reach the server, and published by a build.
-Review the symlinks in a repository you did not create before serving or
-building it (`find . -type l`).
+Before serving or building a repository you did not create, either run with
+`--no-symlink-mounts` or review its symlinks first (`find . -type l`).
+
+**Turning mounts off.** Mounts are on by default. The operator can switch them
+off with the `--no-symlink-mounts` flag or the environment variable:
+
+```bash
+mbr -s --no-symlink-mounts ~/untrusted-repo
+MBR_NO_SYMLINK_MOUNTS=1 mbr -b ~/untrusted-repo
+```
+
+Off, a link out of the repository or the static folder is refused exactly as it
+was before mounts existed (`404`, not built), and one `INFO` line at startup
+says so (`Symlink mounts are disabled …`). Hidden-file blocking is unaffected.
+Any value of `MBR_NO_SYMLINK_MOUNTS` other than `0`, `false`, `no`, `off` or
+empty turns mounts off. The switch covers the server, the GUI (including folders
+opened later from its folder picker) and the static build. QuickLook previews
+and the mobile apps never use mounts, so it does not apply to them.
+
+This is **operator-only**, unlike most `MBR_*` settings: there is no
+`config.toml` key. A `no_symlink_mounts` or `symlink_mounts` line in a
+repository's `.mbr/config.toml` is ignored, so a repository can neither switch
+mounts back on for itself nor turn them off.
 
 ### Hidden files
 

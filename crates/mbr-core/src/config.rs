@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize, Serializer};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     net::IpAddr,
     path::{Path, PathBuf},
@@ -566,6 +567,22 @@ pub struct Config {
     /// which is the config file asserting a fact about the command line.
     #[serde(skip)]
     pub explicit_hidden_dirs: Vec<PathBuf>,
+    /// The operator's kill switch for read-only symlink mounts
+    /// ([`crate::vault::MountPolicy`]): `--no-symlink-mounts` or
+    /// `MBR_NO_SYMLINK_MOUNTS`. When set, a link out of the repository is
+    /// refused exactly as before mounts existed.
+    ///
+    /// `serde(skip)` for the reason `explicit_hidden_dirs` is: the switch
+    /// protects the operator *from* the repository, so the repository's own
+    /// `.mbr/config.toml` must not be able to turn mounts back on. Skipping it
+    /// also keeps figment's `MBR_*` layer from reading it (that layer cannot be
+    /// told apart from the file by the time `Config` is extracted), so
+    /// [`Config::read`] reads the environment variable itself
+    /// ([`no_symlink_mounts_from_env`]) and the CLI sets it afterwards. Negative
+    /// on purpose: a skipped field deserializes to `false`, which must mean
+    /// "mounts on" — the default.
+    #[serde(skip)]
+    pub no_symlink_mounts: bool,
     pub host: IpArray,
     pub port: u16,
     pub static_folder: String,
@@ -830,6 +847,7 @@ impl Default for Config {
         Config {
             root_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             explicit_hidden_dirs: Vec::new(),
+            no_symlink_mounts: false,
             host: IpArray([127, 0, 0, 1]),
             port: DEFAULT_PORT,
             static_folder: "static".to_string(),
@@ -963,6 +981,44 @@ fn contains_home_dir(path: &Path) -> bool {
     }
 }
 
+/// The environment variable that disables symlink mounts.
+pub const NO_SYMLINK_MOUNTS_ENV: &str = "MBR_NO_SYMLINK_MOUNTS";
+
+/// Set once by the binary when it was started with `--no-symlink-mounts`
+/// ([`disable_symlink_mounts_for_process`]).
+static NO_SYMLINK_MOUNTS_FOR_PROCESS: AtomicBool = AtomicBool::new(false);
+
+/// Records `--no-symlink-mounts` for every later [`Config::read`] in this
+/// process.
+///
+/// Process-wide rather than only applied to the first `Config`, because the
+/// GUI reads configuration again when the user opens another folder (the
+/// folder picker, `Open…`, Finder's "Open With") and those reads never see the
+/// command line. An environment variable reaches them by construction; this is
+/// the same guarantee for the flag. It can only ever turn mounts off.
+pub fn disable_symlink_mounts_for_process() {
+    NO_SYMLINK_MOUNTS_FOR_PROCESS.store(true, Ordering::Relaxed);
+}
+
+/// Whether [`NO_SYMLINK_MOUNTS_ENV`] asks for symlink mounts to be disabled.
+///
+/// Any value other than an explicit "off" (`0`, `false`, `no`, `off`, empty —
+/// case-insensitive) counts as set: a kill switch should fail closed on a
+/// spelling it does not recognize.
+pub fn no_symlink_mounts_from_env() -> bool {
+    std::env::var_os(NO_SYMLINK_MOUNTS_ENV).is_some_and(|value| env_flag_is_set(&value))
+}
+
+/// The truthiness rule of [`no_symlink_mounts_from_env`], separated so it is
+/// testable without touching the process environment.
+fn env_flag_is_set(value: &std::ffi::OsStr) -> bool {
+    let value = value.to_string_lossy();
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
+}
+
 /// The hidden (leading-dot) directories on the chain from `root_dir` down to
 /// `target`, as root-relative paths, in root-to-target order.
 ///
@@ -1089,6 +1145,10 @@ impl Config {
         // the path the user actually named. Doing it in `main` would leave every
         // other entry point (QuickLook) silently blind to its own argument.
         config.explicit_hidden_dirs = explicit_hidden_dirs(&config.root_dir, search_config_from);
+        // Operator-only, like the line above: read from the process environment
+        // here, never from the repository's config file (see the field docs).
+        config.no_symlink_mounts =
+            no_symlink_mounts_from_env() || NO_SYMLINK_MOUNTS_FOR_PROCESS.load(Ordering::Relaxed);
         config.reject_repo_supplied_absolute_static_folder(&figment)?;
         config.validate()?;
         config.log_external_static_folder();
@@ -3204,6 +3264,41 @@ mod tests {
             matches!(err, crate::MbrError::Config(ConfigError::ParseFailed(_))),
             "expected ConfigError::ParseFailed, got: {err:?}"
         );
+    }
+
+    /// The symlink-mount kill switch is the operator's alone: a repository's
+    /// own `.mbr/config.toml` can neither turn mounts back on against
+    /// `MBR_NO_SYMLINK_MOUNTS` nor flip the switch itself, whatever it calls
+    /// the key.
+    #[test]
+    fn test_config_toml_cannot_set_the_symlink_mount_switch() {
+        let _guard = env_lock();
+        let toml = "no_symlink_mounts = false\nsymlink_mounts = true\n\
+                    MBR_NO_SYMLINK_MOUNTS = false\n";
+        let repo = repo_with_mbr_dir(Some(toml));
+        {
+            let _env = EnvVars::set(&[(NO_SYMLINK_MOUNTS_ENV, "1")]);
+            assert!(
+                Config::read(repo.path()).unwrap().no_symlink_mounts,
+                "the operator's env var wins over anything in config.toml"
+            );
+        }
+        let repo = repo_with_mbr_dir(Some("no_symlink_mounts = true\nsymlink_mounts = false\n"));
+        let _env = EnvVars::set(&[(NO_SYMLINK_MOUNTS_ENV, "0")]);
+        assert!(
+            !Config::read(repo.path()).unwrap().no_symlink_mounts,
+            "config.toml cannot disable mounts either: the key is simply not read"
+        );
+    }
+
+    #[test]
+    fn test_no_symlink_mounts_env_values() {
+        for on in ["1", "true", "TRUE", "yes", "on", "anything"] {
+            assert!(env_flag_is_set(std::ffi::OsStr::new(on)), "{on}");
+        }
+        for off in ["", " ", "0", "false", "False", "no", "off"] {
+            assert!(!env_flag_is_set(std::ffi::OsStr::new(off)), "{off:?}");
+        }
     }
 
     #[test]

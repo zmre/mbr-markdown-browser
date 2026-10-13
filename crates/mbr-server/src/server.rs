@@ -1105,6 +1105,9 @@ pub struct ServerConfig {
     /// the scanner's and watcher's leading-dot rule. See
     /// [`mbr_core::config::explicit_hidden_dirs`].
     pub explicit_hidden_dirs: Vec<std::path::PathBuf>,
+    /// Read-only symlink mounts on (the default) or off
+    /// (`Config::no_symlink_mounts`, the operator's kill switch).
+    pub symlink_mounts: bool,
     pub index_file: String,
     pub oembed_timeout_ms: u64,
     pub oembed_cache_size: usize,
@@ -1190,6 +1193,7 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             ignore_globs: config.ignore_globs.clone(),
             watcher_ignore_dirs: config.watcher_ignore_dirs.clone(),
             explicit_hidden_dirs: config.explicit_hidden_dirs.clone(),
+            symlink_mounts: !config.no_symlink_mounts,
             index_file: config.index_file.clone(),
             oembed_timeout_ms: config.oembed_timeout_ms,
             oembed_cache_size: config.oembed_cache_size,
@@ -1858,6 +1862,7 @@ impl Server {
             ignore_globs,
             watcher_ignore_dirs,
             explicit_hidden_dirs,
+            symlink_mounts,
             index_file,
             oembed_timeout_ms,
             oembed_cache_size,
@@ -1953,7 +1958,8 @@ impl Server {
                 &tag_sources,
                 &relationship_types,
             )
-            .with_explicit_hidden_dirs(&explicit_hidden_dirs),
+            .with_explicit_hidden_dirs(&explicit_hidden_dirs)
+            .with_symlink_mounts(symlink_mounts),
         );
 
         // Spawn background repo scan so site.json is ready before first request.

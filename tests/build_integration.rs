@@ -3458,3 +3458,29 @@ async fn test_build_renders_markdown_inside_a_symlink_mount() {
             .is_err()
     );
 }
+
+/// With the kill switch on (`Config::no_symlink_mounts`, set by
+/// `--no-symlink-mounts` / `MBR_NO_SYMLINK_MOUNTS`), the build refuses the
+/// mount exactly as the server does.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_with_symlink_mounts_switched_off_skips_the_link() {
+    let site = common::PeerStaticSite::new();
+    let elsewhere = common::visible_tempdir();
+    fs::write(elsewhere.path().join("clip.mp4"), b"outside clip").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), site.static_dir.join("videos")).unwrap();
+
+    let output_dir = site.site.join("out");
+    let config = mbr::Config {
+        no_symlink_mounts: true,
+        ..site.config()
+    };
+    let stats = mbr::build::Builder::new(config, output_dir.clone())
+        .expect("builder")
+        .build()
+        .await
+        .expect("build");
+    assert_no_broken_links(&stats);
+    assert!(output_dir.join("videos").symlink_metadata().is_err());
+    assert!(output_dir.join("images/logo.png").exists());
+}

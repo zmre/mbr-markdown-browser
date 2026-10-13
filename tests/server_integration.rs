@@ -18,6 +18,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         ignore_dirs: vec!["target".to_string(), "node_modules".to_string()],
         ignore_globs: vec!["*.log".to_string()],
         explicit_hidden_dirs: Vec::new(),
+        symlink_mounts: true,
         watcher_ignore_dirs: vec![
             ".direnv".to_string(),
             ".git".to_string(),
@@ -10133,4 +10134,32 @@ async fn test_watcher_indexes_new_files_in_a_symlink_mount() {
             "no watcher event from the mount after {attempt} files: {media}"
         );
     }
+}
+
+/// The operator's kill switch (`--no-symlink-mounts`, carried here as
+/// `ServerConfig::symlink_mounts`): the peer site's `static/videos -> outside`
+/// is refused exactly as before mounts — 404, not indexed — while the rest of
+/// the site, and hidden-file blocking, are unaffected.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_symlink_mounts_can_be_switched_off() {
+    let site = common::PeerStaticSite::new();
+    let elsewhere = common::visible_tempdir();
+    std::fs::write(elsewhere.path().join("clip.mp4"), b"outside clip").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), site.static_dir.join("videos")).unwrap();
+    std::fs::write(site.content.join(".env"), b"SECRET=1").unwrap();
+
+    let static_folder = site.config().static_folder;
+    let server = TestServer::start_at_path_with(site.content.clone(), move |config| {
+        config.static_folder = static_folder;
+        config.symlink_mounts = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    assert_eq!(server.get("/videos/clip.mp4").await.status(), 404);
+    assert_eq!(server.get("/images/logo.png").await.status(), 200);
+    assert_eq!(server.get("/.env").await.status(), 404);
+    let media = server.get_text("/.mbr/media.json").await;
+    assert!(!media.contains("clip.mp4"), "{media}");
 }
