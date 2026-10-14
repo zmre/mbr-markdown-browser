@@ -405,8 +405,11 @@ jobs:
       - name: Clippy lint
         run: cargo clippy --workspace --all-targets --no-default-features --features ${{ env.MBR_FEATURES }} -- -D warnings
 
+      # --no-fail-fast: without it cargo stops at the first failing test binary,
+      # so one Windows-only failure hides every later suite (seen on #341, where
+      # only mbr_core ran).
       - name: Run tests
-        run: cargo test --workspace --no-default-features --features ${{ env.MBR_FEATURES }}
+        run: cargo test --workspace --no-fail-fast --no-default-features --features ${{ env.MBR_FEATURES }}
 
       - name: Build release binary
         run: cargo build --release -p mbr-markdown-browser --no-default-features --features ${{ env.MBR_FEATURES }}
