@@ -6,9 +6,14 @@
 //! alone — no server, watcher, static site generator, CLI, GUI or ffmpeg, none
 //! of which a sandboxed preview can use.
 //!
-//! Apple targets only. On every other platform this crate compiles to nothing,
-//! so `cargo build --workspace` works everywhere without building the Swift
-//! bindings generator.
+//! With the `mobile` feature it is also the iOS app's core ([`mobile`]): the
+//! in-process server behind the app's `mbr://` scheme handler, the coordinated
+//! vault, the persistent index. That surface uses UniFFI proc-macros beside the
+//! QuickLook UDL; one Swift module carries both.
+//!
+//! The UniFFI exports are Apple targets only. Elsewhere QuickLook compiles to
+//! nothing and `mobile` compiles as plain Rust (so its tests run anywhere),
+//! and `cargo build --workspace` works without the Swift bindings generator.
 
 // UniFFI's generated UDL scaffolding (`OUT_DIR/mbr.uniffi.rs`) holds its
 // interface metadata in one large `const` byte array
@@ -26,6 +31,9 @@ uniffi::include_scaffolding!("mbr");
 
 #[cfg(target_vendor = "apple")]
 pub mod quicklook;
+
+#[cfg(feature = "mobile")]
+pub mod mobile;
 
 #[cfg(target_vendor = "apple")]
 pub use quicklook::{

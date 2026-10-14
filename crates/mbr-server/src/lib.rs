@@ -15,8 +15,9 @@ pub mod file_write;
 pub mod link_grep;
 pub mod link_rewrite;
 pub mod server;
+mod vault_body;
 #[cfg(feature = "watcher")]
 pub mod watcher;
 
 pub use errors::ServerError;
-pub use server::{Server, ServerConfig};
+pub use server::{EmbeddedStorage, Server, ServerConfig};

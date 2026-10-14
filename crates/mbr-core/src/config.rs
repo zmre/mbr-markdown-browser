@@ -1126,8 +1126,26 @@ impl Config {
     /// ships inside the markdown repository, so an operator serving a repo they
     /// did not author must be able to override it from the outside.
     pub fn read(search_config_from: &Path) -> Result<Self, crate::MbrError> {
+        Self::read_with_root(find_root_dir(search_config_from), search_config_from)
+    }
+
+    /// [`Config::read`] for a repository whose root is already known: no
+    /// upward search, so no ancestor's marker can become the root and no
+    /// ancestor's `.mbr/config.toml` is ever opened.
+    ///
+    /// For an embedder whose access grant *is* the repository — the iOS app,
+    /// where a picked folder is the whole sandbox grant and its ancestors are
+    /// outside it. Everything else (environment overrides, validation) is
+    /// exactly [`Config::read`]'s.
+    pub fn read_at_root(root_dir: &Path) -> Result<Self, crate::MbrError> {
+        Self::read_with_root(root_dir.to_path_buf(), root_dir)
+    }
+
+    fn read_with_root(
+        root_dir: PathBuf,
+        search_config_from: &Path,
+    ) -> Result<Self, crate::MbrError> {
         let default_config = Config::default();
-        let root_dir = find_root_dir(search_config_from);
         // Kept rather than discarded: figment is the only thing that knows which
         // layer supplied each key, and `static_folder` is trusted differently
         // depending on that (see `reject_repo_supplied_absolute_static_folder`).
@@ -2966,6 +2984,25 @@ mod tests {
 
         assert_eq!(config.root_dir, repo.path());
         assert_eq!(config.explicit_hidden_dirs, vec![PathBuf::from(".scratch")]);
+    }
+
+    /// `read_at_root` never climbs: a subfolder of a repository is its own
+    /// root, and the enclosing repository's config file is not read.
+    #[test]
+    fn test_config_read_at_root_ignores_enclosing_repositories() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("index_file = \"home.md\"\n"));
+        let sub = repo.path().join("notes");
+        std::fs::create_dir(&sub).unwrap();
+
+        let climbed = Config::read(&sub).expect("config must load");
+        assert_eq!(climbed.root_dir, repo.path());
+        assert_eq!(climbed.index_file, "home.md");
+
+        let pinned = Config::read_at_root(&sub).expect("config must load");
+        assert_eq!(pinned.root_dir, sub);
+        assert_eq!(pinned.index_file, Config::default().index_file);
+        assert!(pinned.explicit_hidden_dirs.is_empty());
     }
 
     #[test]

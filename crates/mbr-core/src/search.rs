@@ -307,6 +307,23 @@ pub struct SearchResponse {
     /// True when the background scan is still in progress (results may be incomplete).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub scan_in_progress: bool,
+
+    /// Notes content search had to skip because their bytes are not on this
+    /// device (a cloud file provider's dataless files). Omitted when zero,
+    /// which is always on the desktop.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub not_downloaded: usize,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+/// What content search found, plus the files it could not read because they
+/// are not downloaded.
+struct ContentHits {
+    results: Vec<SearchResult>,
+    not_downloaded: usize,
 }
 
 /// Search engine that combines metadata and content search.
@@ -338,10 +355,12 @@ impl SearchEngine {
                 results: Vec::new(),
                 duration_ms: 0,
                 scan_in_progress: false,
+                not_downloaded: 0,
             });
         }
 
         let mut all_results = Vec::new();
+        let mut not_downloaded = 0;
 
         // Metadata search (always fast, data in memory)
         if query.scope != SearchScope::Content {
@@ -351,7 +370,9 @@ impl SearchEngine {
 
         // Content search (requires file I/O) - only if we have search terms
         if query.scope != SearchScope::Metadata && !parsed.terms.is_empty() {
-            all_results.extend(self.search_content(query, &parsed)?);
+            let content = self.search_content(query, &parsed)?;
+            not_downloaded = content.not_downloaded;
+            all_results.extend(content.results);
         }
 
         // Search other files (PDFs, text files) when filetype is "all"
@@ -378,6 +399,7 @@ impl SearchEngine {
             results: all_results,
             duration_ms,
             scan_in_progress: false,
+            not_downloaded,
         })
     }
 
@@ -652,7 +674,7 @@ impl SearchEngine {
         &self,
         query: &SearchQuery,
         parsed: &ParsedQuery,
-    ) -> Result<Vec<SearchResult>, SearchError> {
+    ) -> Result<ContentHits, SearchError> {
         // Build regex pattern from terms (escape special characters for literal search)
         let search_terms = parsed.terms.join(" ");
         let regex_pattern = regex::escape(&search_terms);
@@ -698,16 +720,20 @@ impl SearchEngine {
         // Same rationale as metadata: concurrent par_iter calls from rapid
         // keystroke searches cause 30s rayon thread pool contention. Sequential
         // grep over 276 files takes ~13ms.
+        let mut not_downloaded = 0;
         let results: Vec<SearchResult> = files
             .into_iter()
             .filter_map(|info| {
-                self.search_file_content(&mut searcher, &matcher, &info)
+                self.search_file_content(&mut searcher, &matcher, &info, &mut not_downloaded)
                     .ok()
                     .flatten()
             })
             .collect();
 
-        Ok(results)
+        Ok(ContentHits {
+            results,
+            not_downloaded,
+        })
     }
 
     /// Search a single file's content.
@@ -719,6 +745,7 @@ impl SearchEngine {
         searcher: &mut grep_searcher::Searcher,
         matcher: &grep_regex::RegexMatcher,
         info: &MarkdownInfo,
+        not_downloaded: &mut usize,
     ) -> Result<Option<SearchResult>, SearchError> {
         // `raw_path` is repo-relative: it names the file inside the
         // repository's vault. Reading it as a native path would resolve against
@@ -743,7 +770,9 @@ impl SearchEngine {
         // (its own buffering or mmap strategy, exactly as before the vault);
         // otherwise its bytes come through the vault and grep searches the
         // slice. A file that is not downloaded yet is skipped, like one that
-        // has vanished since the scan.
+        // has vanished since the scan, and counted: a dataless file read with
+        // the fail-fast I/O policy fails with `EDEADLK` (`ErrorKind::Deadlock`,
+        // see `VaultError::from_io`), through either route.
         let search_result = match vault.local_path(&path) {
             Some(local) => {
                 if !local.exists() {
@@ -754,6 +783,9 @@ impl SearchEngine {
             None => match vault.read(&path) {
                 Ok(bytes) => searcher.search_slice(matcher, &bytes, sink),
                 Err(e) => {
+                    if matches!(e, crate::vault::VaultError::NotDownloaded { .. }) {
+                        *not_downloaded += 1;
+                    }
                     tracing::debug!("Search skipped {path}: {e}");
                     return Ok(None);
                 }
@@ -761,6 +793,9 @@ impl SearchEngine {
         };
 
         if let Err(e) = search_result {
+            if e.kind() == std::io::ErrorKind::Deadlock {
+                *not_downloaded += 1;
+            }
             tracing::debug!("Search error in {}: {}", path, e);
             return Ok(None);
         }
@@ -1651,6 +1686,9 @@ mod tests {
             .map(|r| r.url_path.as_str())
             .collect();
         assert_eq!(urls, vec!["/local/"]);
+        assert_eq!(response.not_downloaded, 1, "the skip is reported");
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["not_downloaded"], 1);
     }
 
     fn content_query(q: &str) -> SearchQuery {
@@ -1798,9 +1836,11 @@ mod tests {
             results: vec![],
             duration_ms: 0,
             scan_in_progress: false,
+            not_downloaded: 0,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("scan_in_progress"));
+        assert!(!json.contains("not_downloaded"), "omitted when zero");
 
         // Verify scan_in_progress is present when true
         let response2 = SearchResponse {

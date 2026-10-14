@@ -58,8 +58,18 @@
       # rust-toolchain.toml also dragged in rust-docs (695 MB) and llvm-tools
       # (404 MB) — 1.2 GB per system of a 5 GB cache, for an HTML manual and a
       # profiler nothing in this repo invokes.
+      #
+      # The iOS targets live here for the same reason: each std is ~100 MB per
+      # system and only the hand-run iOS staticlib build (`cargo build -p
+      # mbr-ffi --features mobile --target aarch64-apple-ios[-sim]`, never a
+      # cached derivation) needs them. On non-Darwin systems they're harmless to
+      # fetch but useless, so they're added on Darwin only.
       rustToolchainDev = rustToolchain.override {
         extensions = ["rust-analyzer" "rust-src"];
+        targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          "aarch64-apple-ios"
+          "aarch64-apple-ios-sim"
+        ];
       };
 
       # Create crane lib with our toolchain
@@ -518,6 +528,17 @@
         "gui,media-metadata,ffmpeg-static"
         + pkgs.lib.optionalString pkgs.stdenv.isDarwin ",ffi";
 
+      # The iOS app's core (`mbr-ffi`'s `mobile` feature) is tested by both test
+      # attrs, on every system: it is plain Rust off Apple platforms (only its
+      # UniFFI attributes and dataless-file handling are Apple-gated), and
+      # `cargo test --workspace` alone never enables it. Named on the deps-only
+      # builds too, so the test step can never compile a dependency uncached.
+      # It adds no crate and changes no dependency's features — `cargo tree
+      # -e features` is identical with and without it, on Darwin and Linux,
+      # for both feature sets — so the cached dependency artifacts are the
+      # same either way.
+      mobileFeature = "mbr-ffi/mobile";
+
       # Common arguments shared between builds
       commonArgs =
         commonEnvVars
@@ -535,7 +556,7 @@
         // {
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
-          cargoExtraArgs = "--locked --workspace --features ${cliFeatures}";
+          cargoExtraArgs = "--locked --workspace --features ${cliFeatures},${mobileFeature}";
 
           # crane defaults to `zstd -3`; -19 takes this artifact from 942 MB to
           # 582 MB (measured) for byte-identical contents. Worth it because this
@@ -606,7 +627,7 @@
         // {
           src = craneLib.cleanCargoSource ./.;
           pname = "mbr-minimal";
-          cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures}";
+          cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures},${mobileFeature}";
 
           # Same reasoning as cargoArtifacts above. This one is 747 MB at crane's
           # default, and the two together were 1.69 GB per system — over the 5 GB
@@ -1004,7 +1025,7 @@
           tests = craneLib.cargoTest (commonArgs
             // {
               inherit cargoArtifacts;
-              cargoTestExtraArgs = "--workspace --features ${cliFeatures}";
+              cargoTestExtraArgs = "--workspace --features ${cliFeatures},${mobileFeature}";
 
               preBuild = ''
                 mkdir -p crates/mbr-core/templates/components-js
@@ -1052,7 +1073,13 @@
               # fails the build. The sibling `tests` attr above puts them in
               # cargoTestExtraArgs instead, which is fine there only because it
               # passes `--features` alone.
-              cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures}";
+              #
+              # The mobile tests run here too, and this is the closer of the two
+              # to what the iOS app ships: the app's server has no
+              # `media-metadata`, and in `tests` the root's `media-metadata`
+              # feature unifies it on for mbr-server, so only this run exercises
+              # the mobile core against the server without its media routes.
+              cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures},${mobileFeature}";
 
               preBuild = ''
                 mkdir -p crates/mbr-core/templates/components-js

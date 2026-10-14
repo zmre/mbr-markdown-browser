@@ -63,6 +63,10 @@ glob = "0.3.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 html-escape = "0.2.13"
+# `Range` parsing for files served through a vault (mbr-server's vault_body),
+# identical to what tower-http's ServeFile accepts. Already in the tree at this
+# version via tower-http, so naming it adds no crate.
+http-range-header = "0.4"
 # `MbrError::Http`'s `From<http::Error>`. Already in the tree via reqwest and
 # axum at this major version, so naming it adds no crate.
 http = "1"
@@ -72,6 +76,9 @@ itertools = "0.15.0"
 lopdf = { version = "0.45", default-features = false, features = ["rayon"] }
 lru = "0.18"
 metadata = "0.1.10" # Requires ffmpeg for video/audio metadata extraction
+# Content types for files served through a vault, as ServeFile guesses them.
+# Already in the tree at this version via tower-http.
+mime_guess = "2"
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 nucleo-matcher = "0.3"
 # default-features = false drops the "serve" feature (actix-web + actix-files +

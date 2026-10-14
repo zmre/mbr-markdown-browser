@@ -39,6 +39,17 @@ interface FrontmatterParseError {
   message: string;
 }
 
+/**
+ * The repository's `.mbr/config.toml` could not be loaded, so the whole site
+ * renders with the default configuration. Repository-wide, so the server
+ * reports it on every page. Only the iOS app falls back like this; the
+ * desktop refuses to start instead.
+ */
+interface ConfigParseError {
+  type: 'config_parse_error';
+  message: string;
+}
+
 /** An unreadable entry in a contact field; the card skipped it. */
 interface ContactDataProblem {
   type: 'contact_data_problem';
@@ -89,6 +100,7 @@ type AmbiguousNameError =
 
 /** Variants that can appear in `errors.json`. */
 type ServerPageError =
+  | ConfigParseError
   | BrokenInternalLinkError
   | BrokenMediaReferenceError
   | UnresolvedWikilinkError
@@ -117,6 +129,7 @@ interface PageErrorsResponse {
 const ERROR_LABELS: ReadonlyArray<
   readonly [PageErrorEntry['type'], string, string]
 > = [
+  ['config_parse_error', 'configuration error', 'configuration errors'],
   ['broken_internal_link', 'broken link', 'broken links'],
   [
     'broken_media_reference',
@@ -376,6 +389,28 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
+  private _renderConfigGroup(): TemplateResult | typeof nothing {
+    const items = this._allErrors.filter(
+      (e): e is ConfigParseError => e.type === 'config_parse_error'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Configuration ignored (${items.length})</h3>
+        <p>
+          <code>.mbr/config.toml</code> could not be loaded, so every page uses
+          the default settings until it is fixed.
+        </p>
+        <ul>
+          ${items.map(
+            (e) => html`<li><code class="target">${e.message}</code></li>`
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
   private _renderFrontmatterGroup(): TemplateResult | typeof nothing {
     const items = this._allErrors.filter(
       (e): e is FrontmatterParseError => e.type === 'frontmatter_parse_error'
@@ -597,6 +632,7 @@ export class MbrPageErrorsElement extends LitElement {
                unplayable-media hints stay hidden until playback actually fails,
                so summarizing _errors would name a problem the panel never shows. -->
           <p class="summary">${summarizePageErrors(this._allErrors)}</p>
+          ${this._renderConfigGroup()}
           ${this._renderLinkGroup()}
           ${this._renderMediaGroup()}
           ${this._renderUnplayableMediaGroup()}

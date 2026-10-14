@@ -31,7 +31,7 @@ use mbr_core::sorting::sort_files;
 use mbr_core::task_query::IncludeFilter;
 use mbr_core::templates;
 use mbr_core::url_helpers::{generate_breadcrumbs, get_current_dir_name, get_parent_path};
-use mbr_core::vault::{Vault, VaultError, VaultPath};
+use mbr_core::vault::{Availability, Vault, VaultError, VaultPath};
 #[cfg(feature = "media-metadata")]
 use mbr_core::video_metadata_cache::VideoMetadataCache;
 #[cfg(feature = "media-metadata")]
@@ -944,6 +944,53 @@ fn host_header_is_allowed(headers: &HeaderMap, bind_ip: [u8; 4]) -> bool {
     }
 }
 
+/// Seconds a client is asked to wait before retrying a not-downloaded file.
+const NOT_DOWNLOADED_RETRY_SECS: &str = "2";
+
+/// `Retry-After` plus the de-facto `Refresh`, so a browser that honours it
+/// reloads the page by itself once the file had time to arrive.
+fn add_retry_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        header::RETRY_AFTER,
+        HeaderValue::from_static(NOT_DOWNLOADED_RETRY_SECS),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("refresh"),
+        HeaderValue::from_static(NOT_DOWNLOADED_RETRY_SECS),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CACHE_CONTROL_NO_STORE),
+    );
+}
+
+/// `503` for a non-page file (image, PDF, video) that is not downloaded.
+fn not_downloaded_response(message: Option<&'static str>) -> Response<Body> {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        message.unwrap_or("Not downloaded yet; retry shortly"),
+    )
+        .into_response();
+    add_retry_headers(response.headers_mut());
+    response
+}
+
+/// Whether a render failed because the note's bytes are not on this device
+/// ([`VaultError::NotDownloaded`], which crosses `io::Error` as
+/// `WouldBlock`). No desktop read produces it.
+fn is_not_downloaded(error: &MbrError) -> bool {
+    match error {
+        MbrError::Markdown(mbr_core::errors::MarkdownError::ReadFailed { source, .. }) => {
+            source.kind() == std::io::ErrorKind::WouldBlock
+                || source
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<VaultError>())
+                    .is_some_and(|e| matches!(e, VaultError::NotDownloaded { .. }))
+        }
+        _ => false,
+    }
+}
+
 /// Defense-in-depth containment check for a path the router is about to serve.
 ///
 /// Returns `true` only when `path` **canonicalizes** inside the repository root
@@ -999,6 +1046,13 @@ pub struct Server {
     /// When Server is dropped, this is dropped, stopping the watcher.
     #[cfg(feature = "watcher")]
     _watcher_handle: WatcherHandle,
+    /// The repository index the router serves from.
+    repo: Arc<Repo>,
+    /// How [`Server::refresh`] applies what it finds, shared with the
+    /// file-change task.
+    changes: ChangeApplier,
+    /// Files restored from [`EmbeddedStorage::snapshot`], when it was used.
+    restored_files: Option<usize>,
 }
 
 /// Where the background thread parks the file watcher once it is running.
@@ -1071,6 +1125,243 @@ fn sync_watched_mounts(watcher_handle: &WatcherHandle, repo: &Repo) {
         && let Some(watcher) = guard.as_ref()
     {
         watcher.watch_mounts(&repo.mounts());
+    }
+}
+
+/// Most file changes in one batch that are applied file by file; a larger
+/// batch is a full rescan.
+const SURGICAL_THRESHOLD: usize = 50;
+
+/// How long the change task gathers events before applying them.
+const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Everything a batch of file changes has to update: the repository index and
+/// every index and cache derived from it. See [`ChangeApplier::apply`].
+#[derive(Clone)]
+struct ChangeApplier {
+    repo: Arc<Repo>,
+    base_dir: PathBuf,
+    markdown_extensions: Vec<String>,
+    listing_caches: ListingCaches,
+    link_cache: Arc<LinkCache>,
+    inbound_link_cache: Arc<InboundLinkCache>,
+    inbound_index: Arc<InboundIndex>,
+    link_index_config: LinkIndexConfig,
+    index_lock: Arc<tokio::sync::Mutex<()>>,
+    task_index: Arc<mbr_core::task_index::TaskIndex>,
+    #[cfg(feature = "watcher")]
+    watcher_handle: WatcherHandle,
+}
+
+/// Where a batch of change events came from, which decides how much of it is
+/// trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeSource {
+    /// The watcher and the server's own writes: noisy (editors touch files,
+    /// a checkout moves thousands), so modified non-markdown files are
+    /// dropped and a large batch is a full rescan.
+    Events,
+    /// [`Server::refresh`]'s stat-diff: exact, one event per real change, so
+    /// every event is applied, file by file, however many there are. A
+    /// rescan would also re-read every note and drop the frontmatter the
+    /// index kept for files that are listed but no longer downloaded.
+    Diff,
+}
+
+impl ChangeApplier {
+    /// Applies one batch of change events.
+    ///
+    /// For [`ChangeSource::Events`], small batches (<= [`SURGICAL_THRESHOLD`]
+    /// files) are applied file by file and larger ones rescan, and modified
+    /// non-markdown files are dropped (only a markdown file's contents feed an
+    /// index). Every derived cache is dropped afterwards, since none of them
+    /// re-checks mtimes.
+    async fn apply(
+        &self,
+        pending_events: Vec<mbr_core::change_event::FileChangeEvent>,
+        source: ChangeSource,
+    ) {
+        // Filter to only relevant events
+        let relevant_events: Vec<_> = pending_events
+            .into_iter()
+            .filter(|event| match event.event {
+                mbr_core::change_event::ChangeEventType::Created
+                | mbr_core::change_event::ChangeEventType::Deleted => true,
+                mbr_core::change_event::ChangeEventType::Modified => {
+                    source == ChangeSource::Diff
+                        || self
+                            .markdown_extensions
+                            .iter()
+                            .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
+                }
+            })
+            .collect();
+
+        if relevant_events.is_empty() {
+            return;
+        }
+
+        let repo = Arc::clone(&self.repo);
+        let base_dir = self.base_dir.clone();
+        let inbound_index = Arc::clone(&self.inbound_index);
+        let link_index_cfg = self.link_index_config.clone();
+        let index_lock = Arc::clone(&self.index_lock);
+        let task_index = Arc::clone(&self.task_index);
+        #[cfg(feature = "watcher")]
+        let watcher_handle = Arc::clone(&self.watcher_handle);
+
+        if source == ChangeSource::Diff || relevant_events.len() <= SURGICAL_THRESHOLD {
+            // Surgical invalidation: update individual files
+            tracing::debug!(
+                "Surgical invalidation for {} file(s)",
+                relevant_events.len()
+            );
+            let has_tag_changes = relevant_events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    mbr_core::change_event::ChangeEventType::Deleted
+                        | mbr_core::change_event::ChangeEventType::Modified
+                )
+            });
+
+            // Serialized against the initial index build; see the
+            // `is_ready()` comment below.
+            let _index_guard = index_lock.lock().await;
+            tokio::task::spawn_blocking(move || {
+                let mut index_targets: Vec<(PathBuf, Option<String>, bool)> = Vec::new();
+                for event in &relevant_events {
+                    let abs_path = if event.path.is_empty() {
+                        continue;
+                    } else {
+                        PathBuf::from(&event.path)
+                    };
+                    index_targets.push((
+                        abs_path.clone(),
+                        // Take the URL from the repository's own map
+                        // rather than recomputing it. `base_dir` is the
+                        // path as configured, while the scanner keys
+                        // everything by the *canonical* root, and on
+                        // macOS a temp dir differs (`/var` vs
+                        // `/private/var`). A recomputed URL would not
+                        // match the key the initial build inserted
+                        // under, so the edit would write a second entry
+                        // and never withdraw the stale one. Captured
+                        // before `invalidate_file` because a deletion
+                        // removes the entry it is read from.
+                        repo.markdown_files
+                            .pin()
+                            .get(&abs_path)
+                            .map(|info| info.url_path.clone()),
+                        matches!(
+                            event.event,
+                            mbr_core::change_event::ChangeEventType::Deleted
+                        ),
+                    ));
+                    repo.invalidate_file(&abs_path, &event.event);
+                    // After `repo.invalidate_file`, never before: a
+                    // created or modified file's url/title are read
+                    // back out of the repository's own map, which the
+                    // call above is what populates. A no-op until the
+                    // task index has actually been built.
+                    task_index.invalidate_file(&abs_path, &event.event, &repo);
+                }
+                // Rebuild tag index if any files were deleted or modified
+                // (created files add tags inline in invalidate_file)
+                if has_tag_changes {
+                    repo.rebuild_tag_index();
+                }
+                // Relationships may have changed on any create/modify/delete;
+                // rebuild the index so endpoint resolution stays consistent.
+                repo.build_relationship_index();
+                // The global wikilink index must track the same changes.
+                repo.build_wikilink_index();
+
+                // Re-index only the pages that changed. This runs after
+                // build_wikilink_index() on purpose: `[[Name]]` links
+                // resolve through that index, so re-extracting first
+                // would record links against the pre-edit name table.
+                //
+                // `is_ready()` gates it because the initial build is
+                // still filling the index otherwise. That is safe only
+                // because the caller holds `index_lock` across this
+                // whole task: without it, an edit arriving mid-build
+                // would be skipped here and then overwritten by the
+                // build's pre-edit contents, leaving links.json stale
+                // until the next full rescan.
+                if inbound_index.is_ready() {
+                    for (abs_path, known_url, is_delete) in &index_targets {
+                        if !link_index_cfg.markdown_extensions.iter().any(|ext| {
+                            abs_path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+                        }) {
+                            continue;
+                        }
+                        let url_path = match known_url {
+                            Some(url) => url.clone(),
+                            // Only reachable for a file the scan never
+                            // saw (created inside this batch, or
+                            // deleted before it was ever indexed).
+                            None => mbr_core::repo::build_markdown_url_path(
+                                abs_path,
+                                &link_index_cfg.base_dir,
+                                &link_index_cfg.index_file,
+                            ),
+                        };
+                        if *is_delete {
+                            inbound_index.remove_page(&url_path);
+                        } else {
+                            index_page_links(
+                                &repo,
+                                &inbound_index,
+                                &link_index_cfg,
+                                abs_path,
+                                &url_path,
+                            );
+                        }
+                    }
+                }
+            })
+            .await
+            .ok();
+        } else {
+            // Too many changes — full rescan
+            tracing::info!(
+                "Full rescan triggered: {} file changes exceed threshold",
+                relevant_events.len()
+            );
+            tokio::task::spawn_blocking(move || {
+                repo.full_rescan();
+                // A rescan can discover links created since startup.
+                #[cfg(feature = "watcher")]
+                sync_watched_mounts(&watcher_handle, &repo);
+                // Every page may have changed, so rebuild rather than
+                // patch. `populate_inbound_index` re-marks it ready; the
+                // stale index stays queryable in the meantime, which is
+                // better than falling back to a full-repo grep per page.
+                if inbound_index.is_ready() {
+                    populate_inbound_index(&repo, &inbound_index, &link_index_cfg);
+                }
+                // Same reasoning for tasks: too many files moved for a
+                // per-file patch to be cheaper than one read pass. Still
+                // a no-op unless somebody has actually used tasks.
+                task_index.rebuild_if_built(&repo);
+                let _ = base_dir; // keep alive for potential future use
+            })
+            .await
+            .ok();
+        }
+
+        // The repository changed, so every cache derived from file
+        // contents may be stale. Drop them all; they are rebuilt lazily
+        // on the next render/links.json from the freshly invalidated
+        // repo.
+        invalidate_derived_caches(
+            &self.listing_caches,
+            &self.link_cache,
+            &self.inbound_link_cache,
+        );
     }
 }
 
@@ -1163,6 +1454,39 @@ pub struct ServerConfig {
     pub upload_max_bytes: usize,
     #[cfg(feature = "media-metadata")]
     pub transcode_enabled: bool,
+    /// Storage (and optionally a saved index) supplied by an app that embeds
+    /// the server, instead of the directory scan of `base_dir` the desktop
+    /// does. `None` everywhere but the iOS app (`mbr_ffi::mobile`); see
+    /// [`EmbeddedStorage`].
+    pub embedded: Option<EmbeddedStorage>,
+    /// Why the repository's configuration could not be loaded, when the
+    /// embedder fell back to the defaults instead of failing (the iOS app).
+    /// Reported on every page's `errors.json` as `config_parse_error`.
+    /// Always `None` on the desktop, which refuses to start instead.
+    pub config_problem: Option<String>,
+}
+
+/// The repository storage an embedding app hands the server.
+///
+/// With one, the server:
+///
+/// - reads and writes the repository only through `vault` (it still renders
+///   templates and serves `.mbr/` assets from `base_dir` when that is a real
+///   directory, and from the compiled-in defaults otherwise);
+/// - starts no filesystem watcher — an embedding platform without change
+///   events (iOS) calls [`Server::refresh`] instead, which needs the
+///   per-file stamps the repository then records
+///   ([`Repo::with_change_tracking`]);
+/// - restores `snapshot`, when given and still valid, instead of scanning:
+///   navigation, `site.json` and metadata search are answered from it
+///   immediately, and a [`Server::refresh`] brings it up to date.
+///
+/// Symlink mounts and an external static overlay are whatever `vault` itself
+/// provides; `ServerConfig::symlink_mounts` does not apply.
+#[derive(Clone)]
+pub struct EmbeddedStorage {
+    pub vault: Arc<dyn Vault>,
+    pub snapshot: Option<mbr_core::repo::RepoSnapshot>,
 }
 
 impl ServerConfig {
@@ -1229,6 +1553,8 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             upload_max_bytes: config.upload_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
+            embedded: None,
+            config_problem: None,
         }
     }
 }
@@ -1258,6 +1584,38 @@ impl ServerState {
             return Err(FileOpError::ReadOnly);
         }
         Ok(())
+    }
+
+    /// The defense-in-depth containment check for a resolved key, before it
+    /// is served: [`is_within_served_roots`] wherever the key is a real file.
+    ///
+    /// A key with no [`Vault::local_path`] names nothing on disk, so there is
+    /// no symlink to escape through: it was produced from a [`VaultPath`],
+    /// which cannot leave its vault, and the vault itself resolved it. That
+    /// key is served. The desktop's vault always has local paths, so it
+    /// always takes the filesystem check.
+    ///
+    /// A file the vault reports not downloaded may have nothing on disk under
+    /// its own name (an iCloud `.name.icloud` placeholder), so the filesystem
+    /// check cannot see it. It is still answered — with "downloading" — since
+    /// the resolver only produces such a key under a parent the vault itself
+    /// canonicalized inside the repository. Asked only when the check failed,
+    /// so the desktop (whose vault answers `Local` with no I/O) pays nothing.
+    fn is_served(&self, key: &Path) -> bool {
+        match self.repo.locate(key) {
+            Some((vault, path)) if vault.local_path(&path).is_none() => true,
+            located => {
+                is_within_served_roots(
+                    key,
+                    self.base_dir.as_path(),
+                    self.canonical_base_dir.as_deref(),
+                    &self.static_folder,
+                    || self.mount_targets(),
+                ) || located.is_some_and(|(vault, path)| {
+                    vault.availability(&path) == Availability::NotDownloaded
+                })
+            }
+        }
     }
 
     /// The repository's storage. Every read and write a handler makes on the
@@ -1439,6 +1797,8 @@ pub struct ServerState {
     pub edit_token_hash: Option<String>,
     /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
     pub upload_max_bytes: usize,
+    /// See [`ServerConfig::config_problem`].
+    pub config_problem: Option<String>,
     /// Serializes read-patch-write cycles on one file across the in-place
     /// write endpoints (`/.mbr/edit`, `/.mbr/task`, `/.mbr/flashcard-review`).
     pub file_write_locks: Arc<FileWriteLocks>,
@@ -1897,6 +2257,8 @@ impl Server {
             upload_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
+            embedded,
+            config_problem,
         } = config;
 
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
@@ -1947,20 +2309,53 @@ impl Server {
         let templates = templates::Templates::new(base_dir.as_path(), template_folder.as_deref())
             .map_err(ServerError::TemplateInit)?;
 
-        let repo = Arc::new(
-            Repo::init(
-                &base_dir,
-                &static_folder,
-                &markdown_extensions,
-                &ignore_dirs,
-                &ignore_globs,
-                &index_file,
-                &tag_sources,
-                &relationship_types,
-            )
-            .with_explicit_hidden_dirs(&explicit_hidden_dirs)
-            .with_symlink_mounts(symlink_mounts),
-        );
+        let is_embedded = embedded.is_some();
+        let (repo, snapshot) = match embedded {
+            None => (
+                Repo::init(
+                    &base_dir,
+                    &static_folder,
+                    &markdown_extensions,
+                    &ignore_dirs,
+                    &ignore_globs,
+                    &index_file,
+                    &tag_sources,
+                    &relationship_types,
+                )
+                .with_explicit_hidden_dirs(&explicit_hidden_dirs)
+                .with_symlink_mounts(symlink_mounts),
+                None,
+            ),
+            Some(EmbeddedStorage { vault, snapshot }) => (
+                Repo::init_with_vault(
+                    vault,
+                    static_folder.as_str(),
+                    &markdown_extensions,
+                    &ignore_dirs,
+                    &ignore_globs,
+                    index_file.as_str(),
+                    &tag_sources,
+                    &relationship_types,
+                )
+                .with_explicit_hidden_dirs(&explicit_hidden_dirs)
+                .with_change_tracking(),
+                snapshot,
+            ),
+        };
+        let repo = Arc::new(repo);
+        // Synchronous: restoring is in-memory work (no storage reads), and
+        // doing it before the first request is what makes the snapshot's
+        // navigation available the moment `init` returns.
+        let restored_files = snapshot.and_then(|snapshot| match repo.restore_snapshot(snapshot) {
+            Ok(count) => {
+                tracing::info!("Restored {count} files from the saved index");
+                Some(count)
+            }
+            Err(e) => {
+                tracing::info!("Saved index not used ({e}); scanning");
+                None
+            }
+        });
 
         // Spawn background repo scan so site.json is ready before first request.
         // Phase 1: basic scan (file listing + frontmatter). Phase 2: media metadata (ffmpeg/lopdf).
@@ -1971,8 +2366,11 @@ impl Server {
         #[cfg(feature = "watcher")]
         let watcher_handle_for_scan = Arc::clone(&watcher_handle);
         let repo_for_scan = Arc::clone(&repo);
+        let restored = restored_files.is_some();
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = repo_for_scan.scan_all() {
+            // A restored index already holds every file; what changed since
+            // it was saved is the embedding app's `Server::refresh`.
+            if !restored && let Err(e) = repo_for_scan.scan_all() {
                 tracing::error!("Background scan failed: {e}");
             }
             // Build the relationship index once all note titles are known.
@@ -1983,7 +2381,7 @@ impl Server {
             repo_for_scan.mark_scan_complete();
 
             // Phase 1.5: scan static folder (deferred from scan_all for faster search)
-            if let Err(e) = repo_for_scan.scan_static_folder() {
+            if !restored && let Err(e) = repo_for_scan.scan_static_folder() {
                 tracing::error!("Background static scan failed: {e}");
             }
             // Every mount is known now (the scan discovers them as it descends).
@@ -2006,17 +2404,26 @@ impl Server {
             mbr_core::change_event::FileChangeEvent,
         >(mbr_core::change_event::BROADCAST_CAPACITY);
 
+        // Embedded storage has no watcher: its vault need not be a directory
+        // at all, and the platform that embeds it (iOS) has no change events
+        // worth the descriptors. `Server::refresh` replaces it.
         #[cfg(feature = "watcher")]
-        let watcher_handle = spawn_file_watcher(
-            watcher_handle,
-            Arc::clone(&repo),
-            base_dir.clone(),
-            template_folder.clone(),
-            watcher_ignore_dirs,
-            ignore_globs.clone(),
-            explicit_hidden_dirs.clone(),
-            file_change_tx.clone(),
-        );
+        let watcher_handle = if is_embedded {
+            watcher_handle
+        } else {
+            spawn_file_watcher(
+                watcher_handle,
+                Arc::clone(&repo),
+                base_dir.clone(),
+                template_folder.clone(),
+                watcher_ignore_dirs,
+                ignore_globs.clone(),
+                explicit_hidden_dirs.clone(),
+                file_change_tx.clone(),
+            )
+        };
+        #[cfg(not(feature = "watcher"))]
+        let _ = is_embedded;
         // Only the watcher reads this setting.
         #[cfg(not(feature = "watcher"))]
         let _ = watcher_ignore_dirs;
@@ -2125,27 +2532,33 @@ impl Server {
             },
         ));
 
+        // Applies file-change batches to the repository and every index and
+        // cache derived from it. One definition, used by the debounced task
+        // below (watcher events and the server's own writes) and by
+        // `Server::refresh` (an embedding app's stat-diff, which has no
+        // watcher).
+        let change_applier = ChangeApplier {
+            repo: Arc::clone(&repo),
+            base_dir: base_dir.clone(),
+            markdown_extensions: markdown_extensions.clone(),
+            listing_caches: listing_caches.clone(),
+            link_cache: Arc::clone(&link_cache),
+            inbound_link_cache: Arc::clone(&inbound_link_cache),
+            inbound_index: Arc::clone(&inbound_index),
+            link_index_config: link_index_config.clone(),
+            index_lock: Arc::clone(&index_lock),
+            task_index: Arc::clone(&task_index),
+            #[cfg(feature = "watcher")]
+            watcher_handle: Arc::clone(&watcher_handle),
+        };
+
         // Spawn background task to invalidate repo cache when files change.
         // Uses debouncing: accumulate events for 2 seconds, then apply changes.
         // For small batches (<=50 files): surgical per-file invalidation.
         // For large batches: full clear + rescan.
-        let repo_for_invalidation = Arc::clone(&repo);
-        let base_dir_for_invalidation = base_dir.clone();
-        let markdown_extensions_for_invalidation = markdown_extensions.clone();
-        let listing_caches_for_invalidation = listing_caches.clone();
-        let link_cache_for_invalidation = Arc::clone(&link_cache);
-        let inbound_link_cache_for_invalidation = Arc::clone(&inbound_link_cache);
-        let inbound_index_for_invalidation = Arc::clone(&inbound_index);
-        let link_index_config_for_invalidation = link_index_config.clone();
-        let index_lock_for_invalidation = Arc::clone(&index_lock);
-        let task_index_for_invalidation = Arc::clone(&task_index);
-        #[cfg(feature = "watcher")]
-        let watcher_handle_for_invalidation = Arc::clone(&watcher_handle);
+        let applier_for_task = change_applier.clone();
         let mut repo_change_rx = file_change_tx.subscribe();
         tokio::spawn(async move {
-            const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
-            const SURGICAL_THRESHOLD: usize = 50;
-
             loop {
                 // Wait for the first event
                 let first_event = match repo_change_rx.recv().await {
@@ -2188,185 +2601,9 @@ impl Server {
                     }
                 }
 
-                // Filter to only relevant events
-                let relevant_events: Vec<_> = pending_events
-                    .into_iter()
-                    .filter(|event| match event.event {
-                        mbr_core::change_event::ChangeEventType::Created
-                        | mbr_core::change_event::ChangeEventType::Deleted => true,
-                        mbr_core::change_event::ChangeEventType::Modified => {
-                            markdown_extensions_for_invalidation
-                                .iter()
-                                .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
-                        }
-                    })
-                    .collect();
-
-                if relevant_events.is_empty() {
-                    continue;
-                }
-
-                let repo = Arc::clone(&repo_for_invalidation);
-                let base_dir = base_dir_for_invalidation.clone();
-                let inbound_index = Arc::clone(&inbound_index_for_invalidation);
-                let link_index_cfg = link_index_config_for_invalidation.clone();
-                let index_lock = Arc::clone(&index_lock_for_invalidation);
-                let task_index = Arc::clone(&task_index_for_invalidation);
-                #[cfg(feature = "watcher")]
-                let watcher_handle = Arc::clone(&watcher_handle_for_invalidation);
-
-                if relevant_events.len() <= SURGICAL_THRESHOLD {
-                    // Surgical invalidation: update individual files
-                    tracing::debug!(
-                        "Surgical invalidation for {} file(s)",
-                        relevant_events.len()
-                    );
-                    let has_tag_changes = relevant_events.iter().any(|e| {
-                        matches!(
-                            e.event,
-                            mbr_core::change_event::ChangeEventType::Deleted
-                                | mbr_core::change_event::ChangeEventType::Modified
-                        )
-                    });
-
-                    // Serialized against the initial index build; see the
-                    // `is_ready()` comment below.
-                    let _index_guard = index_lock.lock().await;
-                    tokio::task::spawn_blocking(move || {
-                        let mut index_targets: Vec<(PathBuf, Option<String>, bool)> = Vec::new();
-                        for event in &relevant_events {
-                            let abs_path = if event.path.is_empty() {
-                                continue;
-                            } else {
-                                PathBuf::from(&event.path)
-                            };
-                            index_targets.push((
-                                abs_path.clone(),
-                                // Take the URL from the repository's own map
-                                // rather than recomputing it. `base_dir` is the
-                                // path as configured, while the scanner keys
-                                // everything by the *canonical* root, and on
-                                // macOS a temp dir differs (`/var` vs
-                                // `/private/var`). A recomputed URL would not
-                                // match the key the initial build inserted
-                                // under, so the edit would write a second entry
-                                // and never withdraw the stale one. Captured
-                                // before `invalidate_file` because a deletion
-                                // removes the entry it is read from.
-                                repo.markdown_files
-                                    .pin()
-                                    .get(&abs_path)
-                                    .map(|info| info.url_path.clone()),
-                                matches!(
-                                    event.event,
-                                    mbr_core::change_event::ChangeEventType::Deleted
-                                ),
-                            ));
-                            repo.invalidate_file(&abs_path, &event.event);
-                            // After `repo.invalidate_file`, never before: a
-                            // created or modified file's url/title are read
-                            // back out of the repository's own map, which the
-                            // call above is what populates. A no-op until the
-                            // task index has actually been built.
-                            task_index.invalidate_file(&abs_path, &event.event, &repo);
-                        }
-                        // Rebuild tag index if any files were deleted or modified
-                        // (created files add tags inline in invalidate_file)
-                        if has_tag_changes {
-                            repo.rebuild_tag_index();
-                        }
-                        // Relationships may have changed on any create/modify/delete;
-                        // rebuild the index so endpoint resolution stays consistent.
-                        repo.build_relationship_index();
-                        // The global wikilink index must track the same changes.
-                        repo.build_wikilink_index();
-
-                        // Re-index only the pages that changed. This runs after
-                        // build_wikilink_index() on purpose: `[[Name]]` links
-                        // resolve through that index, so re-extracting first
-                        // would record links against the pre-edit name table.
-                        //
-                        // `is_ready()` gates it because the initial build is
-                        // still filling the index otherwise. That is safe only
-                        // because the caller holds `index_lock` across this
-                        // whole task: without it, an edit arriving mid-build
-                        // would be skipped here and then overwritten by the
-                        // build's pre-edit contents, leaving links.json stale
-                        // until the next full rescan.
-                        if inbound_index.is_ready() {
-                            for (abs_path, known_url, is_delete) in &index_targets {
-                                if !link_index_cfg.markdown_extensions.iter().any(|ext| {
-                                    abs_path
-                                        .extension()
-                                        .and_then(|e| e.to_str())
-                                        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-                                }) {
-                                    continue;
-                                }
-                                let url_path = match known_url {
-                                    Some(url) => url.clone(),
-                                    // Only reachable for a file the scan never
-                                    // saw (created inside this batch, or
-                                    // deleted before it was ever indexed).
-                                    None => mbr_core::repo::build_markdown_url_path(
-                                        abs_path,
-                                        &link_index_cfg.base_dir,
-                                        &link_index_cfg.index_file,
-                                    ),
-                                };
-                                if *is_delete {
-                                    inbound_index.remove_page(&url_path);
-                                } else {
-                                    index_page_links(
-                                        &repo,
-                                        &inbound_index,
-                                        &link_index_cfg,
-                                        abs_path,
-                                        &url_path,
-                                    );
-                                }
-                            }
-                        }
-                    })
-                    .await
-                    .ok();
-                } else {
-                    // Too many changes — full rescan
-                    tracing::info!(
-                        "Full rescan triggered: {} file changes exceed threshold",
-                        relevant_events.len()
-                    );
-                    tokio::task::spawn_blocking(move || {
-                        repo.full_rescan();
-                        // A rescan can discover links created since startup.
-                        #[cfg(feature = "watcher")]
-                        sync_watched_mounts(&watcher_handle, &repo);
-                        // Every page may have changed, so rebuild rather than
-                        // patch. `populate_inbound_index` re-marks it ready; the
-                        // stale index stays queryable in the meantime, which is
-                        // better than falling back to a full-repo grep per page.
-                        if inbound_index.is_ready() {
-                            populate_inbound_index(&repo, &inbound_index, &link_index_cfg);
-                        }
-                        // Same reasoning for tasks: too many files moved for a
-                        // per-file patch to be cheaper than one read pass. Still
-                        // a no-op unless somebody has actually used tasks.
-                        task_index.rebuild_if_built(&repo);
-                        let _ = base_dir; // keep alive for potential future use
-                    })
-                    .await
-                    .ok();
-                }
-
-                // The repository changed, so every cache derived from file
-                // contents may be stale. Drop them all; they are rebuilt lazily
-                // on the next render/links.json from the freshly invalidated
-                // repo.
-                invalidate_derived_caches(
-                    &listing_caches_for_invalidation,
-                    &link_cache_for_invalidation,
-                    &inbound_link_cache_for_invalidation,
-                );
+                applier_for_task
+                    .apply(pending_events, ChangeSource::Events)
+                    .await;
             }
         });
 
@@ -2376,6 +2613,7 @@ impl Server {
             Arc::new(papaya::HashMap::new());
 
         let canonical_base_dir = base_dir.canonicalize().ok();
+        let repo_for_server = Arc::clone(&repo);
         let state = ServerState {
             bind_ip: ip,
             base_dir,
@@ -2437,6 +2675,7 @@ impl Server {
             edit_require_token_on_loopback,
             edit_token_hash,
             upload_max_bytes,
+            config_problem,
         };
 
         let router = Router::new()
@@ -2499,7 +2738,47 @@ impl Server {
             gui_mode,
             #[cfg(feature = "watcher")]
             _watcher_handle: watcher_handle,
+            repo: repo_for_server,
+            changes: change_applier,
+            restored_files,
         })
+    }
+
+    /// The repository index this server serves.
+    pub fn repo(&self) -> &Arc<Repo> {
+        &self.repo
+    }
+
+    /// How many files [`Server::init`] restored from
+    /// [`EmbeddedStorage::snapshot`]; `None` when it scanned instead (no
+    /// snapshot, or one taken by another build or configuration).
+    pub fn restored_files(&self) -> Option<usize> {
+        self.restored_files
+    }
+
+    /// Brings the index up to date with the repository's storage when there
+    /// is no watcher to do it: re-lists the vault, compares every file with
+    /// what the index recorded ([`Repo::diff_vault`]), and applies the
+    /// differences exactly as a batch of watcher events would be applied —
+    /// the same invalidation, index updates and cache drops. Returns what it
+    /// found; an empty diff touches nothing.
+    ///
+    /// Needs [`EmbeddedStorage`] (only then does the repository record the
+    /// stamps the diff compares against). Call after the initial scan, which
+    /// [`Repo::wait_for_media`] signals.
+    pub async fn refresh(&self) -> mbr_core::repo::RepoDiff {
+        let repo = Arc::clone(&self.repo);
+        let diff = tokio::task::spawn_blocking(move || repo.diff_vault())
+            .await
+            .unwrap_or_default();
+        if !diff.is_empty() {
+            let root = self.repo.vault().root().to_path_buf();
+            self.changes
+                .apply(diff.events(&root), ChangeSource::Diff)
+                .await;
+        }
+        self.repo.record_diff(&diff);
+        diff
     }
 
     /// Announces the bound address once the listener is up.
@@ -4747,13 +5026,7 @@ impl Server {
             ResolvedPath::StaticFile(resolved_path)
             | ResolvedPath::MarkdownFile(resolved_path)
             | ResolvedPath::DirectoryListing(resolved_path)
-                if !is_within_served_roots(
-                    &resolved_path,
-                    config.base_dir.as_path(),
-                    config.canonical_base_dir.as_deref(),
-                    &config.static_folder,
-                    || config.mount_targets(),
-                ) =>
+                if !config.is_served(&resolved_path) =>
             {
                 tracing::warn!(
                     "Blocked request for a path outside the repository root: {}",
@@ -4774,18 +5047,24 @@ impl Server {
                     return Ok(response);
                 }
                 tracing::debug!("serving static file: {:?}", &file_path);
-                // `ServeFile` needs a real file (Range, ETag, Last-Modified,
-                // content type), so static files are served from the vault's
-                // `local_path`. A vault without one has no streaming body path
-                // yet and answers 404 rather than opening the key as a path.
-                let Some(local) = config
-                    .repo
-                    .locate(&file_path)
-                    .and_then(|(vault, path)| vault.local_path(&path))
-                else {
+                let Some((vault, vault_path)) = config.repo.locate_shared(&file_path) else {
                     return Err(StatusCode::NOT_FOUND);
                 };
-                Self::serve_static_file(local, req).await
+                // A file a cloud provider has not downloaded would stall (or,
+                // with the mobile app's fail-fast I/O policy, break) half-way
+                // through the body. Free on the desktop, whose vault answers
+                // `Local` without a system call.
+                if vault.availability(&vault_path) == Availability::NotDownloaded {
+                    vault.request_download(std::slice::from_ref(&vault_path));
+                    return Ok(not_downloaded_response(None));
+                }
+                // `ServeFile` (Range, ETag, Last-Modified, content type) for a
+                // real file — every file on the desktop. Anything else streams
+                // through the vault, with the same Range handling.
+                match vault.local_path(&vault_path) {
+                    Some(local) => Self::serve_static_file(local, req).await,
+                    None => Self::serve_vault_file(vault, vault_path, req).await,
+                }
             }
             ResolvedPath::MarkdownFile(md_path) => {
                 // A markdown page has exactly one URL — the directory-style one
@@ -4815,12 +5094,21 @@ impl Server {
                 }
                 tracing::debug!("rendering markdown: {:?}", &md_path);
                 let edit_enabled = Self::page_edit_enabled(&config, req.headers());
-                Self::markdown_to_html(&md_path, &config, edit_enabled)
-                    .await
-                    .map_err(|e| {
+                match Self::markdown_to_html(&md_path, &config, edit_enabled).await {
+                    Ok(response) => Ok(response),
+                    // Listed by the provider, but its bytes are in the cloud:
+                    // ask for them and say so, rather than a 500.
+                    Err(e) if is_not_downloaded(&e) => {
+                        if let Some((vault, path)) = config.repo.locate(&md_path) {
+                            vault.request_download(std::slice::from_ref(&path));
+                        }
+                        Ok(Self::not_downloaded_page(&config, &path))
+                    }
+                    Err(e) => {
                         tracing::error!("Error rendering markdown: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("generating directory listing: {:?}", &dir_path);
@@ -4916,6 +5204,74 @@ impl Server {
                 ))
             }
         }
+    }
+
+    /// Serves a static file that has no local path, through its vault, with
+    /// `Range` support ([`crate::vault_body`]). The counterpart of
+    /// [`Self::serve_static_file`] for vaults whose bytes are not files.
+    async fn serve_vault_file(
+        vault: Arc<dyn Vault>,
+        path: VaultPath,
+        req: extract::Request<Body>,
+    ) -> Result<Response, StatusCode> {
+        let stat_vault = Arc::clone(&vault);
+        let stat_path = path.clone();
+        let entry = tokio::task::spawn_blocking(move || stat_vault.stat(&stat_path))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let entry = match entry {
+            Ok(Some(entry)) if entry.is_file() => entry,
+            Ok(_) => return Err(StatusCode::NOT_FOUND),
+            Err(e) => {
+                tracing::error!("Error serving {path}: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+        let content_type = mime_guess::from_path(path.as_str())
+            .first_raw()
+            .unwrap_or("application/octet-stream");
+        let last_modified = entry
+            .epoch_secs()
+            .and_then(|(_, modified)| generate_last_modified(modified));
+        let mut response = crate::vault_body::vault_file_response(
+            vault,
+            path,
+            entry.size,
+            content_type,
+            last_modified,
+            req.headers(),
+            req.method() == axum::http::Method::HEAD,
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(CACHE_CONTROL_NO_CACHE),
+        );
+        Ok(response)
+    }
+
+    /// The page for a note whose bytes are not on this device yet (a cloud
+    /// provider's dataless file). The download has been requested; the page
+    /// asks to be fetched again shortly (`Retry-After`, and `Refresh` for the
+    /// browsers that honour it).
+    fn not_downloaded_page(config: &ServerState, path: &str) -> Response<Body> {
+        let mut response = Self::render_error_page(
+            &config.templates,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Downloading",
+            Some(
+                "This note is stored in the cloud and is not on this device yet. \
+                 It is downloading now and will open as soon as it arrives.",
+            ),
+            &format!("/{path}"),
+            config.gui_mode,
+            &config.sidebar_style,
+            config.sidebar_max_items,
+            config.graph_depth,
+            config.tasks_enabled,
+            config.tasks_default_include,
+        );
+        add_retry_headers(response.headers_mut());
+        response
     }
 
     /// Serves a static file using tower's ServeFile service with cache headers.
@@ -5807,6 +6163,11 @@ impl Server {
         };
 
         let mut errors = Vec::new();
+        if let Some(message) = &config.config_problem {
+            errors.push(mbr_core::page_errors::PageError::ConfigParseError {
+                message: message.clone(),
+            });
+        }
         errors.extend(frontmatter_parse_errors(&frontmatter_error));
         errors.extend(contact_problem_errors(&contact_problems));
         if html_for_scan.is_empty() {
@@ -7271,12 +7632,19 @@ impl Server {
             ResolvedPath::MarkdownFile(md_path) => {
                 tracing::debug!("home: rendering index markdown: {:?}", &md_path);
                 let edit_enabled = Self::page_edit_enabled(&config, &headers);
-                Self::markdown_to_html(&md_path, &config, edit_enabled)
-                    .await
-                    .map_err(|e| {
+                match Self::markdown_to_html(&md_path, &config, edit_enabled).await {
+                    Ok(response) => Ok(response),
+                    Err(e) if is_not_downloaded(&e) => {
+                        if let Some((vault, path)) = config.repo.locate(&md_path) {
+                            vault.request_download(std::slice::from_ref(&path));
+                        }
+                        Ok(Self::not_downloaded_page(&config, ""))
+                    }
+                    Err(e) => {
                         tracing::error!("Error rendering home markdown: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("home: generating directory listing: {:?}", &dir_path);

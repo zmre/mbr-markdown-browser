@@ -294,6 +294,27 @@ This enables wiki-style bidirectional link navigation without requiring any spec
 | `/.mbr/ws/changes` | WS | WebSocket for live reload |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
 
+### Static Files and Byte Ranges
+
+Files that are not markdown (images, PDFs, video, audio) are served as they
+are, with `Accept-Ranges: bytes`. A `Range` request gets `206 Partial Content`
+and a `Content-Range` header, which is what lets a `<video>` element seek
+without downloading the whole file:
+
+```
+GET /videos/demo.mp4  Range: bytes=0-99    → 206 Content-Range: bytes 0-99/52428800
+GET /videos/demo.mp4  Range: bytes=1000-   → 206 (from byte 1000 to the end)
+GET /videos/demo.mp4  Range: bytes=-500    → 206 (the last 500 bytes)
+GET /videos/demo.mp4  Range: bytes=99999999999-  → 416 Content-Range: bytes */52428800
+```
+
+A range that cannot be satisfied, does not parse, or asks for several parts at
+once is answered `416 Range Not Satisfiable`.
+
+When mbr runs inside the iOS app, a file the cloud provider has listed but not
+downloaded yet is answered `503 Service Unavailable` with a `Retry-After`
+header (a note shows a "Downloading" page), and its download is requested.
+
 ### Canonical URL Redirects
 
 Markdown pages have exactly one URL: the directory-style one with a trailing
@@ -348,6 +369,12 @@ Response:
   "duration_ms": 15
 }
 ```
+
+Two fields appear only when they apply: `scan_in_progress: true` while the
+initial repository scan is still running (results may be incomplete), and
+`not_downloaded: N` when content search had to skip `N` notes whose contents
+are not on the device yet (the iOS app with a cloud provider; never on the
+desktop).
 
 ## Configuration
 
