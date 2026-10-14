@@ -60,6 +60,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         upload_max_bytes: 25 * 1024 * 1024,
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
+        embedded: None,
     }
 }
 
@@ -500,6 +501,50 @@ async fn test_static_file_serving() {
     assert_eq!(response.status(), 200);
     let text = response.text().await.unwrap();
     assert_eq!(text, "Hello from static file");
+}
+
+/// Byte ranges on a file served from disk (`ServeFile`): the closed, open-ended
+/// and suffix forms a `<video>` element seeks with, and `416` for one that
+/// cannot be satisfied or does not parse. The vault-streamed path
+/// (`mbr_server`'s `vault_body`) is held to the same answers.
+#[tokio::test]
+async fn test_static_file_range_requests() {
+    let repo = TestRepo::new();
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+    repo.create_static_file("clip.mp4", &bytes);
+    let server = TestServer::start(&repo).await;
+    let ranged = |range: &'static str| {
+        server
+            .client
+            .get(server.url("/clip.mp4"))
+            .header("Range", range)
+            .send()
+    };
+
+    let whole = server.get("/clip.mp4").await;
+    assert_eq!(whole.status(), 200);
+    assert_eq!(whole.headers()["accept-ranges"], "bytes");
+
+    let first = ranged("bytes=0-99").await.unwrap();
+    assert_eq!(first.status(), 206);
+    assert_eq!(first.headers()["content-range"], "bytes 0-99/1000");
+    assert_eq!(first.bytes().await.unwrap().as_ref(), &bytes[..100]);
+
+    let open = ranged("bytes=900-").await.unwrap();
+    assert_eq!(open.status(), 206);
+    assert_eq!(open.headers()["content-range"], "bytes 900-999/1000");
+    assert_eq!(open.bytes().await.unwrap().as_ref(), &bytes[900..]);
+
+    let suffix = ranged("bytes=-10").await.unwrap();
+    assert_eq!(suffix.status(), 206);
+    assert_eq!(suffix.headers()["content-range"], "bytes 990-999/1000");
+    assert_eq!(suffix.bytes().await.unwrap().as_ref(), &bytes[990..]);
+
+    for bad in ["bytes=1000-", "bytes=abc"] {
+        let refused = ranged(bad).await.unwrap();
+        assert_eq!(refused.status(), 416, "{bad}");
+        assert_eq!(refused.headers()["content-range"], "bytes */1000");
+    }
 }
 
 // ============================================================================
