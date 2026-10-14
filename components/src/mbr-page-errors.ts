@@ -120,6 +120,14 @@ export type PageErrorEntry = ServerPageError | RuntimeMediaError;
 interface PageErrorsResponse {
   page_url: string;
   errors: ServerPageError[];
+  /**
+   * The note's bytes are not on this device yet (a cloud provider's dataless
+   * file; the iOS app). `errors` then holds only page-independent problems
+   * (an ignored configuration). Nothing reads it: the page retries itself
+   * until the note arrives, and the next load gets the full list. Absent on
+   * every other answer.
+   */
+  not_downloaded?: boolean;
 }
 
 /**

@@ -208,6 +208,42 @@ describe('<mbr-page-errors>', () => {
     expect(el.shadowRoot?.querySelector('.errors-trigger')).toBeNull()
   })
 
+  // The server's answer for a note a cloud provider has not downloaded yet
+  // (mobile): 200, `not_downloaded: true`, and only the page-independent
+  // problems. The page is retried every couple of seconds, so this must be
+  // silent — no badge, no console warning — unless there is something real.
+  it('treats a not-downloaded answer as an ordinary, quiet payload', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ page_url: '/cloud/', errors: [], not_downloaded: true }),
+    }) as unknown as typeof fetch
+    el = document.createElement('mbr-page-errors')
+    document.body.appendChild(el)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    await el.updateComplete
+
+    expect(el.shadowRoot?.querySelector('.errors-trigger')).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('still shows an ignored configuration on a not-downloaded note', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({ page_url: '/cloud/', errors: [configError], not_downloaded: true }),
+    }) as unknown as typeof fetch
+    el = document.createElement('mbr-page-errors')
+    document.body.appendChild(el)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    await el.updateComplete
+
+    expect(count()).toBe(1)
+  })
+
   it('shows an ignored repository configuration with its message', async () => {
     await mount([configError])
     expect(count()).toBe(1)

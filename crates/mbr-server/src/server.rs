@@ -318,7 +318,13 @@ fn index_page_links(
             // A file that cannot be parsed contributes no backlinks. Withdraw
             // whatever it contributed before so a file that became unreadable
             // does not leave stale backlinks behind.
-            tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
+            // A not-downloaded note (a cloud provider evicted it) is an
+            // expected state on mobile, not something to warn about.
+            if is_not_downloaded_markdown(&e) {
+                tracing::debug!("Backlink index: {} not downloaded yet: {e}", path.display());
+            } else {
+                tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
+            }
             index.remove_page(url_path);
         }
     }
@@ -944,6 +950,31 @@ fn host_header_is_allowed(headers: &HeaderMap, bind_ip: [u8; 4]) -> bool {
     }
 }
 
+/// tower-http's `on_failure`, minus the noise.
+///
+/// Its default logs every 5xx at ERROR. mbr answers `503` only to say "retry
+/// shortly", always with `Retry-After`: a note a cloud provider has not
+/// downloaded yet, a video still being remuxed. Clients do retry, every second
+/// or two, so each one would log an ERROR for an expected, transient state.
+/// Those are DEBUG; every other failure keeps tower-http's ERROR line.
+fn on_request_failure(
+    class: tower_http::classify::ServerErrorsFailureClass,
+    latency: std::time::Duration,
+    span: &tracing::Span,
+) {
+    let latency_ms = latency.as_millis();
+    match class {
+        tower_http::classify::ServerErrorsFailureClass::StatusCode(
+            StatusCode::SERVICE_UNAVAILABLE,
+        ) => {
+            tracing::debug!(parent: span, latency_ms, "response asks for a retry (503)");
+        }
+        class => {
+            tracing::error!(parent: span, classification = %class, latency_ms, "response failed");
+        }
+    }
+}
+
 /// Seconds a client is asked to wait before retrying a not-downloaded file.
 const NOT_DOWNLOADED_RETRY_SECS: &str = "2";
 
@@ -980,7 +1011,15 @@ fn not_downloaded_response(message: Option<&'static str>) -> Response<Body> {
 /// `WouldBlock`). No desktop read produces it.
 fn is_not_downloaded(error: &MbrError) -> bool {
     match error {
-        MbrError::Markdown(mbr_core::errors::MarkdownError::ReadFailed { source, .. }) => {
+        MbrError::Markdown(markdown) => is_not_downloaded_markdown(markdown),
+        _ => false,
+    }
+}
+
+/// [`is_not_downloaded`] for the markdown layer's own error type.
+fn is_not_downloaded_markdown(error: &mbr_core::errors::MarkdownError) -> bool {
+    match error {
+        mbr_core::errors::MarkdownError::ReadFailed { source, .. } => {
             source.kind() == std::io::ErrorKind::WouldBlock
                 || source
                     .get_ref()
@@ -988,6 +1027,20 @@ fn is_not_downloaded(error: &MbrError) -> bool {
                     .is_some_and(|e| matches!(e, VaultError::NotDownloaded { .. }))
         }
         _ => false,
+    }
+}
+
+/// Logs a failed render under `context`.
+///
+/// A note that is not downloaded yet is an expected, transient state: its page
+/// answers 503 "Downloading" with `Refresh: 2`, so the browser asks again every
+/// couple of seconds until the provider delivers it, and each of those asks
+/// would otherwise log an ERROR. That is DEBUG. Every other failure keeps ERROR.
+fn log_render_failure(context: &str, error: &dyn std::fmt::Display, not_downloaded: bool) {
+    if not_downloaded {
+        tracing::debug!("{context}: not downloaded yet: {error}");
+    } else {
+        tracing::error!("{context}: {error}");
     }
 }
 
@@ -2728,7 +2781,7 @@ impl Server {
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
             .layer(CompressionLayer::new().compress_when(compression_predicate()))
-            .layer(TraceLayer::new_for_http())
+            .layer(TraceLayer::new_for_http().on_failure(on_request_failure))
             .with_state(state);
 
         Ok(Server {
@@ -6134,6 +6187,14 @@ impl Server {
                                 .unwrap_or_default(),
                         )
                     }
+                    // The page itself answers 503 "Downloading" and is
+                    // retried every couple of seconds; its errors.json is
+                    // fetched on each of those loads. Answer cleanly, with
+                    // the problems that do not depend on the note's body.
+                    Err(e) if is_not_downloaded_markdown(&e) => {
+                        log_render_failure("errors.json", &e, true);
+                        return Some(Self::not_downloaded_errors_json(config, page_url_path));
+                    }
                     Err(e) => {
                         tracing::error!("errors.json: failed to render page: {}", e);
                         return None;
@@ -6220,6 +6281,7 @@ impl Server {
         let payload = PageErrors {
             page_url: page_url_path,
             errors,
+            not_downloaded: false,
         };
 
         let json = match serde_json::to_string(&payload) {
@@ -6237,6 +6299,42 @@ impl Server {
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .body(Body::from(json)),
         ))
+    }
+
+    /// `errors.json` for a note whose bytes are not on this device yet: `200`
+    /// with only the problems that do not depend on the note's body (an
+    /// ignored configuration) and `not_downloaded: true`, never cached, so the
+    /// load after the download completes gets the real list.
+    /// `mbr-page-errors.ts` treats it like any other answer: no indicator
+    /// unless there is a problem to show, and nothing in the console.
+    fn not_downloaded_errors_json(config: &ServerState, page_url: String) -> Response<Body> {
+        let errors = config
+            .config_problem
+            .iter()
+            .map(
+                |message| mbr_core::page_errors::PageError::ConfigParseError {
+                    message: message.clone(),
+                },
+            )
+            .collect();
+        let payload = mbr_core::page_errors::PageErrors {
+            page_url,
+            errors,
+            not_downloaded: true,
+        };
+        match serde_json::to_string(&payload) {
+            Ok(json) => build_response_or_500(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+                    .body(Body::from(json)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to serialize errors.json: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
     }
 
     /// Probes a media file for tracks that break browser playback, memoized by
@@ -7097,7 +7195,9 @@ impl Server {
             Some(config.repo.wikilink_index.clone()),
         )
         .await
-        .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
+        .inspect_err(|e| {
+            log_render_failure("Error rendering markdown", e, is_not_downloaded_markdown(e))
+        })?;
         let mut frontmatter = render_result.frontmatter;
         let headings = render_result.headings;
         let inner_html_output = render_result.html;
