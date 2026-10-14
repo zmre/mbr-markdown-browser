@@ -1998,47 +1998,61 @@ impl Builder {
     }
 
     /// Handles static folder overlay.
+    ///
+    /// Places every file of the static folder that `place_assets` did not
+    /// (markdown, ignored names), walking it **through its vault** — so
+    /// exactly what the server serves: links are followed only inside the
+    /// vault or into an accepted read-only symlink mount, never anywhere else,
+    /// and hidden files and directories are never published (`.well-known`
+    /// excepted; see [`mbr_core::vault::is_hidden_segment`]). This used to be
+    /// a raw `WalkDir` with links followed, which published `static/.env` and
+    /// anything behind a link to anywhere.
     fn handle_static_folder(&self) -> Result<(), BuildError> {
-        let static_path = self.config.root_dir.join(&self.config.static_folder);
+        use mbr_core::vault::is_hidden_segment;
 
-        if !static_path.exists() || !static_path.is_dir() {
+        let Some((vault, static_dir)) = self.repo.static_folder_vault() else {
+            return Ok(());
+        };
+        let Ok(static_dir) = vault.canonicalize(&static_dir) else {
+            return Ok(());
+        };
+        if !vault.is_dir(&static_dir) {
             return Ok(());
         }
 
         let placement = AssetPlacement::for_current_platform();
+        let depth = static_dir.segments().count();
 
-        for entry in WalkDir::new(&static_path)
-            .follow_links(true)
-            .min_depth(1)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file() {
-                let relative = entry.path().strip_prefix(&static_path).map_err(|_| {
-                    BuildError::CreateDirFailed {
-                        path: entry.path().to_path_buf(),
-                        source: std::io::Error::other("strip prefix failed"),
-                    }
-                })?;
+        let files = mbr_core::vault::walk_files_under(vault.as_ref(), &static_dir, |dir| {
+            !is_hidden_segment(dir.name())
+        });
+        for entry in files {
+            // A folder that canonicalized elsewhere in the vault (a link out of
+            // the static folder, or a second link to a mount's target) is not
+            // part of the static folder's URL space.
+            if !entry.path.starts_with(&static_dir) || is_hidden_segment(entry.name()) {
+                continue;
+            }
+            let relative: PathBuf = entry.path.segments().skip(depth).collect();
+            let Some(source) = vault.local_path(&entry.path) else {
+                continue;
+            };
+            let output_path = self.output_dir.join(&relative);
 
-                let output_path = self.output_dir.join(relative);
-
-                // Only place if path doesn't already exist (asset wins over static).
-                //
-                // This pass and `place_assets` now overlap for an external
-                // static overlay: its files are indexed in `other_files`, so
-                // `place_assets` has already placed them and this walk finds
-                // the same paths again.
-                if !Self::path_entry_exists(&output_path) {
-                    if let Some(parent) = output_path.parent() {
-                        fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
-                            path: parent.to_path_buf(),
-                            source: e,
-                        })?;
-                    }
-
-                    self.place_asset(entry.path(), &output_path, placement)?;
+            // Only place if path doesn't already exist (asset wins over static).
+            //
+            // This pass and `place_assets` overlap: static-folder files are
+            // indexed in `other_files`, so `place_assets` has already placed
+            // most of them and this walk finds the same paths again.
+            if !Self::path_entry_exists(&output_path) {
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
                 }
+
+                self.place_asset(&source, &output_path, placement)?;
             }
         }
 

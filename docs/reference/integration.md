@@ -407,3 +407,8 @@ For tools that expect assets in specific locations:
 # Symlink your assets folder
 ln -s /path/to/actual/assets ./static
 ```
+
+A folder linked in from outside the repository is served (and built) as a
+read-only mount — see
+[Symlinked folders](configuration.md#read-only-symlink-mounts) for
+which targets are refused.

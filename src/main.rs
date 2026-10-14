@@ -40,6 +40,11 @@ async fn main() -> Result<(), MbrError> {
     ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Fatal);
 
     let args = cli::Args::parse();
+    // Before any `Config::read`: the GUI reads configuration again for every
+    // folder it opens, and none of those reads sees the command line.
+    if args.no_symlink_mounts {
+        mbr::config::disable_symlink_mounts_for_process();
+    }
 
     // Initialize tracing/logging based on verbosity flags
     // Use try_init to allow server to re-configure if needed (it uses tower_http logging)

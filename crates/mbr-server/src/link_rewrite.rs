@@ -441,7 +441,10 @@ fn markdown_files(
         index_file,
     )
     .into_iter()
-    .filter(|file| !skip_abs.contains(&file.key))
+    // A note inside a read-only symlink mount links to the moved page like
+    // any other, but it can never be rewritten: the rewrite would be a write
+    // into the external folder. It keeps its (now stale) link.
+    .filter(|file| !skip_abs.contains(&file.key) && !vault.is_read_only(&file.path))
     .collect()
 }
 

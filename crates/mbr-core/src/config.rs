@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize, Serializer};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     net::IpAddr,
     path::{Path, PathBuf},
@@ -566,6 +567,22 @@ pub struct Config {
     /// which is the config file asserting a fact about the command line.
     #[serde(skip)]
     pub explicit_hidden_dirs: Vec<PathBuf>,
+    /// The operator's kill switch for read-only symlink mounts
+    /// ([`crate::vault::MountPolicy`]): `--no-symlink-mounts` or
+    /// `MBR_NO_SYMLINK_MOUNTS`. When set, a link out of the repository is
+    /// refused exactly as before mounts existed.
+    ///
+    /// `serde(skip)` for the reason `explicit_hidden_dirs` is: the switch
+    /// protects the operator *from* the repository, so the repository's own
+    /// `.mbr/config.toml` must not be able to turn mounts back on. Skipping it
+    /// also keeps figment's `MBR_*` layer from reading it (that layer cannot be
+    /// told apart from the file by the time `Config` is extracted), so
+    /// [`Config::read`] reads the environment variable itself
+    /// ([`no_symlink_mounts_from_env`]) and the CLI sets it afterwards. Negative
+    /// on purpose: a skipped field deserializes to `false`, which must mean
+    /// "mounts on" — the default.
+    #[serde(skip)]
+    pub no_symlink_mounts: bool,
     pub host: IpArray,
     pub port: u16,
     pub static_folder: String,
@@ -830,6 +847,7 @@ impl Default for Config {
         Config {
             root_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             explicit_hidden_dirs: Vec::new(),
+            no_symlink_mounts: false,
             host: IpArray([127, 0, 0, 1]),
             port: DEFAULT_PORT,
             static_folder: "static".to_string(),
@@ -904,7 +922,7 @@ impl Default for Config {
 /// the guards below never fire there, so a stray `C:\Users\you\.git` or
 /// `.obsidian` would silently make the entire home directory the repo root and
 /// trigger a scan of everything the user owns.
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(home_var).map(PathBuf::from)
 }
@@ -961,6 +979,44 @@ fn contains_home_dir(path: &Path) -> bool {
         (Ok(path), Ok(home)) => home.starts_with(path),
         _ => false,
     }
+}
+
+/// The environment variable that disables symlink mounts.
+pub const NO_SYMLINK_MOUNTS_ENV: &str = "MBR_NO_SYMLINK_MOUNTS";
+
+/// Set once by the binary when it was started with `--no-symlink-mounts`
+/// ([`disable_symlink_mounts_for_process`]).
+static NO_SYMLINK_MOUNTS_FOR_PROCESS: AtomicBool = AtomicBool::new(false);
+
+/// Records `--no-symlink-mounts` for every later [`Config::read`] in this
+/// process.
+///
+/// Process-wide rather than only applied to the first `Config`, because the
+/// GUI reads configuration again when the user opens another folder (the
+/// folder picker, `Open…`, Finder's "Open With") and those reads never see the
+/// command line. An environment variable reaches them by construction; this is
+/// the same guarantee for the flag. It can only ever turn mounts off.
+pub fn disable_symlink_mounts_for_process() {
+    NO_SYMLINK_MOUNTS_FOR_PROCESS.store(true, Ordering::Relaxed);
+}
+
+/// Whether [`NO_SYMLINK_MOUNTS_ENV`] asks for symlink mounts to be disabled.
+///
+/// Any value other than an explicit "off" (`0`, `false`, `no`, `off`, empty —
+/// case-insensitive) counts as set: a kill switch should fail closed on a
+/// spelling it does not recognize.
+pub fn no_symlink_mounts_from_env() -> bool {
+    std::env::var_os(NO_SYMLINK_MOUNTS_ENV).is_some_and(|value| env_flag_is_set(&value))
+}
+
+/// The truthiness rule of [`no_symlink_mounts_from_env`], separated so it is
+/// testable without touching the process environment.
+fn env_flag_is_set(value: &std::ffi::OsStr) -> bool {
+    let value = value.to_string_lossy();
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 /// The hidden (leading-dot) directories on the chain from `root_dir` down to
@@ -1089,6 +1145,10 @@ impl Config {
         // the path the user actually named. Doing it in `main` would leave every
         // other entry point (QuickLook) silently blind to its own argument.
         config.explicit_hidden_dirs = explicit_hidden_dirs(&config.root_dir, search_config_from);
+        // Operator-only, like the line above: read from the process environment
+        // here, never from the repository's config file (see the field docs).
+        config.no_symlink_mounts =
+            no_symlink_mounts_from_env() || NO_SYMLINK_MOUNTS_FOR_PROCESS.load(Ordering::Relaxed);
         config.reject_repo_supplied_absolute_static_folder(&figment)?;
         config.validate()?;
         config.log_external_static_folder();
@@ -1336,16 +1396,123 @@ pub fn resolve_static_overlay(
     // `dir == anchor` is implied by the ancestor test, since the anchor is an
     // ancestor of the root by construction, but it is spelled out so the rule
     // reads as "a strict descendant" without relying on that proof.
-    if dir == anchor || root.starts_with(&dir) {
+    if dir == anchor {
         return Err(invalid_static_folder(
             static_folder,
-            "resolves to a directory that contains the markdown root, which would expose every \
-             sibling of the root — and the markdown source itself; name a specific directory \
-             instead",
+            &ExternalFolderRefusal::ContainsRoot(root.clone()).to_string(),
         ));
+    }
+    // The rest is the policy every external folder answers to — symlink mounts
+    // ask the same function — so the two cannot drift. Inside the anchor the
+    // filesystem-root and `$HOME` arms cannot fire (the anchor never climbs
+    // into either); what this adds over the anchor is "never a directory
+    // containing the root" and "never a hidden directory" (`../.git`).
+    if let Some(refusal) = external_folder_refusal(&dir, &[&root]) {
+        return Err(invalid_static_folder(static_folder, &refusal.to_string()));
     }
 
     Ok(StaticOverlay::External(dir))
+}
+
+/// Why a directory outside the markdown root may not be exposed.
+///
+/// See [`external_folder_refusal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalFolderRefusal {
+    /// The filesystem root (`/`, `C:\`).
+    FilesystemRoot,
+    /// `$HOME` itself, or a directory containing it (`/Users`).
+    HomeDir,
+    /// A directory containing a served root (the markdown root or the static
+    /// overlay) — it would expose every sibling of that root and, for the
+    /// markdown root, the markdown source with its hidden files.
+    ContainsRoot(PathBuf),
+    /// A hidden (leading-dot) directory on the way to it, below the point it
+    /// shares with the root: `~/.ssh`, `~/.config/app`, `<project>/.git`.
+    Hidden(String),
+}
+
+impl std::fmt::Display for ExternalFolderRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FilesystemRoot => write!(f, "it is the filesystem root"),
+            Self::HomeDir => write!(f, "it is the home directory, or contains it"),
+            Self::ContainsRoot(root) => write!(
+                f,
+                "resolves to a directory that contains the markdown root ({}), which would \
+                 expose every sibling of the root — and the markdown source itself; name a \
+                 specific directory instead",
+                root.display()
+            ),
+            Self::Hidden(name) => write!(
+                f,
+                "it is inside the hidden directory {name:?}; hidden files are never served"
+            ),
+        }
+    }
+}
+
+/// The policy for exposing a directory that lives **outside** the markdown
+/// root: the static overlay ([`resolve_static_overlay`]) and read-only symlink
+/// mounts ([`crate::vault::MountPolicy`]) both ask this one function, so they
+/// cannot drift.
+///
+/// `dir` must be canonical. `protected_roots` are the canonical directories
+/// already being served, the one the folder is being exposed *from* first
+/// (the markdown root, or the static overlay for a link inside it). Refused,
+/// in order:
+///
+/// - the filesystem root;
+/// - `$HOME`, or any directory containing it (`/home`, `/Users`): a link to
+///   the home directory exposes everything the user owns;
+/// - any directory containing a protected root (`content -> ..`);
+/// - any directory with a hidden component **below the point it shares with
+///   `protected_roots[0]`** — `~/.ssh` for a repository in `~/notes`, or
+///   `<project>/.git` for `<project>/content`. Only the part below the shared
+///   ancestor counts, so a repository that itself lives inside a hidden
+///   directory (`~/.local/share/notes`) can still reach a sibling there.
+///
+/// What this deliberately does *not* refuse: anything else. A directory
+/// symlink is an explicit act by whoever created it; the policy only rules out
+/// targets that are never a sensible thing to publish.
+pub fn external_folder_refusal(
+    dir: &Path,
+    protected_roots: &[&Path],
+) -> Option<ExternalFolderRefusal> {
+    let home = home_dir().map(|home| home.canonicalize().unwrap_or(home));
+    external_folder_refusal_with_home(dir, protected_roots, home.as_deref())
+}
+
+/// [`external_folder_refusal`] with `$HOME` supplied, so the policy is testable
+/// without touching the process environment. `home` must be canonical.
+pub fn external_folder_refusal_with_home(
+    dir: &Path,
+    protected_roots: &[&Path],
+    home: Option<&Path>,
+) -> Option<ExternalFolderRefusal> {
+    if dir.parent().is_none() {
+        return Some(ExternalFolderRefusal::FilesystemRoot);
+    }
+    if home.is_some_and(|home| home.starts_with(dir)) {
+        return Some(ExternalFolderRefusal::HomeDir);
+    }
+    if let Some(root) = protected_roots.iter().find(|root| root.starts_with(dir)) {
+        return Some(ExternalFolderRefusal::ContainsRoot(root.to_path_buf()));
+    }
+    let shared = protected_roots.first().map_or(0, |root| {
+        dir.components()
+            .zip(root.components())
+            .take_while(|(a, b)| a == b)
+            .count()
+    });
+    dir.components()
+        .skip(shared)
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .find(|name| name.starts_with('.'))
+        .map(|name| ExternalFolderRefusal::Hidden(name.to_string()))
 }
 
 /// How far above the markdown root an outside-the-root `static_folder` may reach.
@@ -3097,6 +3264,41 @@ mod tests {
             matches!(err, crate::MbrError::Config(ConfigError::ParseFailed(_))),
             "expected ConfigError::ParseFailed, got: {err:?}"
         );
+    }
+
+    /// The symlink-mount kill switch is the operator's alone: a repository's
+    /// own `.mbr/config.toml` can neither turn mounts back on against
+    /// `MBR_NO_SYMLINK_MOUNTS` nor flip the switch itself, whatever it calls
+    /// the key.
+    #[test]
+    fn test_config_toml_cannot_set_the_symlink_mount_switch() {
+        let _guard = env_lock();
+        let toml = "no_symlink_mounts = false\nsymlink_mounts = true\n\
+                    MBR_NO_SYMLINK_MOUNTS = false\n";
+        let repo = repo_with_mbr_dir(Some(toml));
+        {
+            let _env = EnvVars::set(&[(NO_SYMLINK_MOUNTS_ENV, "1")]);
+            assert!(
+                Config::read(repo.path()).unwrap().no_symlink_mounts,
+                "the operator's env var wins over anything in config.toml"
+            );
+        }
+        let repo = repo_with_mbr_dir(Some("no_symlink_mounts = true\nsymlink_mounts = false\n"));
+        let _env = EnvVars::set(&[(NO_SYMLINK_MOUNTS_ENV, "0")]);
+        assert!(
+            !Config::read(repo.path()).unwrap().no_symlink_mounts,
+            "config.toml cannot disable mounts either: the key is simply not read"
+        );
+    }
+
+    #[test]
+    fn test_no_symlink_mounts_env_values() {
+        for on in ["1", "true", "TRUE", "yes", "on", "anything"] {
+            assert!(env_flag_is_set(std::ffi::OsStr::new(on)), "{on}");
+        }
+        for off in ["", " ", "0", "false", "False", "no", "off"] {
+            assert!(!env_flag_is_set(std::ffi::OsStr::new(off)), "{off:?}");
+        }
     }
 
     #[test]

@@ -138,6 +138,13 @@ pub struct Args {
     #[arg(long)]
     pub no_tasks: bool,
 
+    /// Disable read-only symlink mounts: a symlink to a folder (or file)
+    /// outside the repository is not served or built. Operator-only — a
+    /// repository's `.mbr/config.toml` cannot set it. Also
+    /// `MBR_NO_SYMLINK_MOUNTS=1`.
+    #[arg(long)]
+    pub no_symlink_mounts: bool,
+
     /// Disable `data-mbr-line` source-line attributes on block elements
     /// (server/GUI only). Static builds, the CLI and QuickLook never emit them
     /// either way.
@@ -290,6 +297,11 @@ pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, Config
     if args.no_tasks {
         config.tasks_enabled = false;
     }
+    // Only ever turns mounts *off*: the env var may already have, and a CLI
+    // without the flag must not undo it.
+    if args.no_symlink_mounts {
+        config.no_symlink_mounts = true;
+    }
     // Apply no_review from CLI
     if args.no_review {
         config.review_enabled = false;
@@ -349,6 +361,7 @@ mod tests {
             no_link_tracking: false,
             no_relationship_tracking: false,
             no_tasks: false,
+            no_symlink_mounts: false,
             no_review: false,
             mark_incomplete: false,
             no_mark_incomplete: false,
@@ -547,6 +560,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_no_symlink_mounts() {
+        assert!(!Args::parse_from(["mbr", "-s"]).no_symlink_mounts);
+        for mode in ["-s", "-g", "-b"] {
+            let args = Args::parse_from(["mbr", mode, "--no-symlink-mounts"]);
+            assert!(args.no_symlink_mounts, "{mode}");
+        }
+    }
+
+    #[test]
     fn test_parse_no_relationship_tracking() {
         let args = Args::parse_from(["mbr", "--no-relationship-tracking"]);
         assert!(args.no_relationship_tracking);
@@ -738,6 +760,23 @@ mod tests {
         assert_eq!(config.edit_enabled, base.edit_enabled);
         assert_eq!(config.tasks_enabled, base.tasks_enabled);
         assert_eq!(config.review_enabled, base.review_enabled);
+        assert!(!config.no_symlink_mounts, "mounts are on by default");
+    }
+
+    /// The flag only ever turns mounts off: without it, a value the
+    /// environment already set (`MBR_NO_SYMLINK_MOUNTS`, read by
+    /// `Config::read`) survives.
+    #[test]
+    fn test_apply_overrides_no_symlink_mounts() {
+        for mode in ["-s", "-g", "-b"] {
+            assert!(overridden(&["mbr", mode, "--no-symlink-mounts"]).no_symlink_mounts);
+        }
+        let from_env = Config {
+            no_symlink_mounts: true,
+            ..Config::default()
+        };
+        let config = apply_overrides(from_env, &Args::parse_from(["mbr", "-s"])).unwrap();
+        assert!(config.no_symlink_mounts);
     }
 
     #[test]

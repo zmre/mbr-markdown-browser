@@ -247,9 +247,19 @@ paths (grep, static file serving, media probes) use it directly.
 
 Paths inside a vault are `VaultPath`s: relative, `/`-separated and normalized,
 so a request can never name anything above the repository root, on any
-platform. Symlinks are followed like they always were, but a link that
-leads out of the repository is refused wherever untrusted input is resolved
-(requests, write targets, folders the scanner descends into).
+platform. Symlinks are followed like they always were. A link that leads out
+of the repository (or out of an external static folder) is judged where it is
+first resolved — a request, a write target, a folder the scanner descends
+into: either it is accepted as a **read-only mount**, addressed at the link's
+own location so every index key and URL is the one a real folder there would
+have, or it is refused and stays outside, exactly as before. Inside a mount,
+`..` and nested links can only reach the mount, the repository, or another
+accepted mount; every write into one is refused by the vault itself. The rules
+are in [Symlinked folders](configuration.md#read-only-symlink-mounts).
+
+Hidden paths (a segment starting with `.`, other than `.well-known`) are never
+resolved, from the repository, the static folder or a mount, and the static
+build never places them — see [Hidden files](configuration.md#hidden-files).
 
 ### Template Fallback Chain
 

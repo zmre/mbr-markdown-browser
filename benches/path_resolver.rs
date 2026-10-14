@@ -25,6 +25,7 @@ fn bench_resolve_request_path(c: &mut Criterion) {
         markdown_extensions: &md_extensions,
         index_file: "index.md",
         tag_sources: &tag_sources,
+        exempt_hidden_dirs: &[],
     };
 
     // Direct markdown file

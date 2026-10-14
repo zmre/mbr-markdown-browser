@@ -264,3 +264,211 @@ fn test_template_folder_that_is_a_file_is_rejected() {
         stderr_of(&output)
     );
 }
+
+/// A symlink to `$HOME` is refused as a mount — it would publish everything
+/// the user owns — and the build says why. `HOME` is a fake, set only on the
+/// child process; a sibling link to a folder *inside* it is still a mount, and
+/// the build logs it.
+#[cfg(unix)]
+#[test]
+fn test_build_refuses_a_symlink_to_home_and_mounts_a_folder_in_it() {
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home\n");
+    let home = common::visible_tempdir();
+    std::fs::create_dir(home.path().join("Movies")).unwrap();
+    std::fs::write(home.path().join("diary.png"), b"private").unwrap();
+    std::fs::write(home.path().join("Movies/clip.mp4"), b"clip").unwrap();
+    std::fs::create_dir(repo.path().join("static")).unwrap();
+    std::os::unix::fs::symlink(home.path(), repo.path().join("static/home")).unwrap();
+    std::os::unix::fs::symlink(
+        home.path().join("Movies"),
+        repo.path().join("static/videos"),
+    )
+    .unwrap();
+    let out = TempDir::new().expect("temp output dir");
+
+    let output = mbr_command()
+        .env("HOME", home.path())
+        .env("RUST_LOG", "mbr=info")
+        .arg("-b")
+        .arg("--output")
+        .arg(out.path())
+        .arg(repo.path())
+        .output()
+        .expect("failed to run the mbr binary");
+    // `tracing`'s fmt layer writes to stdout; take both streams.
+    let stderr = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+    assert!(output.status.success(), "build failed:\n{stderr}");
+    assert!(
+        out.path().join("home").symlink_metadata().is_err(),
+        "a link to $HOME must not be built"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("videos/clip.mp4")).unwrap(),
+        b"clip"
+    );
+    assert!(
+        stderr.contains("home directory") && stderr.contains("Not serving"),
+        "the refusal is logged with its reason:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Serving external folder"),
+        "the accepted mount is logged:\n{stderr}"
+    );
+}
+
+/// The peer-site layout with `static/videos -> <elsewhere>`; returns the
+/// content root and the temp dirs keeping it alive.
+#[cfg(unix)]
+fn mounted_peer_site() -> (std::path::PathBuf, TempDir, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let content = dir.path().join("site/content");
+    let static_dir = dir.path().join("site/static");
+    std::fs::create_dir_all(content.join(".mbr")).unwrap();
+    std::fs::create_dir_all(static_dir.join("images")).unwrap();
+    std::fs::write(
+        content.join(".mbr/config.toml"),
+        "static_folder = \"../static\"\n",
+    )
+    .unwrap();
+    std::fs::write(content.join("index.md"), "# Home\n").unwrap();
+    std::fs::write(static_dir.join("images/logo.png"), b"png").unwrap();
+    let elsewhere = common::visible_tempdir();
+    std::fs::write(elsewhere.path().join("clip.mp4"), b"clip").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), static_dir.join("videos")).unwrap();
+    (content, dir, elsewhere)
+}
+
+/// Builds `content` with `extra` arguments and environment; returns the
+/// output dir and the combined log.
+#[cfg(unix)]
+fn build_with(content: &Path, args: &[&str], env: &[(&str, &str)]) -> (TempDir, String) {
+    let out = TempDir::new().expect("temp output dir");
+    let output = mbr_command()
+        .envs(env.iter().copied())
+        .env("RUST_LOG", "mbr=info")
+        .arg("-b")
+        .args(args)
+        .arg("--output")
+        .arg(out.path())
+        .arg(content)
+        .output()
+        .expect("failed to run the mbr binary");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+    assert!(output.status.success(), "build failed:\n{log}");
+    (out, log)
+}
+
+/// `-b --no-symlink-mounts`: the mount is not built, and the build says the
+/// switch is on. Without it, the same site places the file.
+#[cfg(unix)]
+#[test]
+fn test_no_symlink_mounts_flag_skips_the_mount_in_a_build() {
+    let (content, _dir, _elsewhere) = mounted_peer_site();
+    let (out, _) = build_with(&content, &[], &[]);
+    assert_eq!(
+        std::fs::read(out.path().join("videos/clip.mp4")).unwrap(),
+        b"clip"
+    );
+
+    let (out, log) = build_with(&content, &["--no-symlink-mounts"], &[]);
+    assert!(out.path().join("videos").symlink_metadata().is_err());
+    assert!(out.path().join("images/logo.png").exists());
+    assert!(log.contains("Symlink mounts are disabled"), "{log}");
+}
+
+/// `MBR_NO_SYMLINK_MOUNTS=1` does the same — and the repository cannot undo
+/// it: its own `.mbr/config.toml` asks for mounts in every spelling, and is
+/// ignored.
+#[cfg(unix)]
+#[test]
+fn test_no_symlink_mounts_env_var_wins_over_the_repository_config() {
+    let (content, _dir, _elsewhere) = mounted_peer_site();
+    std::fs::write(
+        content.join(".mbr/config.toml"),
+        "static_folder = \"../static\"\nno_symlink_mounts = false\nsymlink_mounts = true\n",
+    )
+    .unwrap();
+    let (out, log) = build_with(&content, &[], &[("MBR_NO_SYMLINK_MOUNTS", "1")]);
+    assert!(out.path().join("videos").symlink_metadata().is_err());
+    assert!(log.contains("Symlink mounts are disabled"), "{log}");
+    // And the same config.toml cannot switch mounts *off* either.
+    std::fs::write(
+        content.join(".mbr/config.toml"),
+        "static_folder = \"../static\"\nno_symlink_mounts = true\nsymlink_mounts = false\n",
+    )
+    .unwrap();
+    let (out, _) = build_with(&content, &[], &[]);
+    assert_eq!(
+        std::fs::read(out.path().join("videos/clip.mp4")).unwrap(),
+        b"clip"
+    );
+}
+
+/// `mbr -s`: the mounted file is served by default, and a 404 with
+/// `--no-symlink-mounts` or with `MBR_NO_SYMLINK_MOUNTS=1`.
+#[cfg(unix)]
+#[test]
+fn test_no_symlink_mounts_applies_to_the_server() {
+    use std::io::{Read, Write};
+    let (content, _dir, _elsewhere) = mounted_peer_site();
+    let status = |port: u16, path: &str| -> Option<u16> {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .ok()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).ok()?;
+        response.split_whitespace().nth(1)?.parse().ok()
+    };
+    for (env, flag, expected) in [
+        (None, false, 200),
+        (Some("1"), false, 404),
+        (None, true, 404),
+    ] {
+        let port = common::find_available_port();
+        let mut cmd = mbr_command();
+        if let Some(value) = env {
+            cmd.env("MBR_NO_SYMLINK_MOUNTS", value);
+        }
+        if flag {
+            cmd.arg("--no-symlink-mounts");
+        }
+        let mut child = cmd
+            .arg("-s")
+            .arg("-q")
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(&content)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn mbr -s");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut answer = None;
+        while std::time::Instant::now() < deadline {
+            if status(port, "/images/logo.png") == Some(200) {
+                answer = status(port, "/videos/clip.mp4");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            answer,
+            Some(expected),
+            "MBR_NO_SYMLINK_MOUNTS={env:?}, --no-symlink-mounts: {flag}"
+        );
+    }
+}

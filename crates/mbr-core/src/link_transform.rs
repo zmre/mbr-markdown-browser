@@ -1150,6 +1150,7 @@ mod browser_resolution_tests {
                 markdown_extensions: vec!["md".to_string()],
                 index_file: "index.md".to_string(),
                 tag_sources: Vec::new(),
+                exempt_hidden_dirs: Vec::new(),
             })),
         }
     }
