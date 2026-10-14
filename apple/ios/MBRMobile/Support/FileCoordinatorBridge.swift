@@ -170,6 +170,8 @@ final class FileCoordinatorBridge: FileCoordinator, @unchecked Sendable {
         }
         if let coordinationError {
             Log.info("coordinator: coordinated read of \(path) failed: \(coordinationError.localizedDescription)")
+        } else if bytes < 0 {
+            Log.info("coordinator: coordinated read of \(path) could not read the file")
         } else {
             Log.info("coordinator: coordinated read of \(path) (\(bytes)B) in \(millis(since: start))ms")
         }
