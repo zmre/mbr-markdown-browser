@@ -502,9 +502,11 @@ mod tests {
         repo
     }
 
+    /// Root-relative and `/`-separated on every platform, as the vault paths
+    /// the assertions spell them.
     fn keys(diff: &[PathBuf], root: &Path) -> Vec<String> {
         diff.iter()
-            .map(|k| k.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .map(|k| crate::url_path::path_to_url(k.strip_prefix(root).unwrap()))
             .collect()
     }
 
