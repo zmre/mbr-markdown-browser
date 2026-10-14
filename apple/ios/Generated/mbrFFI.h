@@ -311,6 +311,11 @@ uint64_t uniffi_mbr_ffi_fn_constructor_mbrapp_open(RustBuffer root_path, RustBuf
 uint64_t uniffi_mbr_ffi_fn_constructor_mbrapp_open_file(RustBuffer file_path, RustBuffer coordinator, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_FN_METHOD_MBRAPP_CONFIG_ERROR
+#define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_FN_METHOD_MBRAPP_CONFIG_ERROR
+RustBuffer uniffi_mbr_ffi_fn_method_mbrapp_config_error(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_FN_METHOD_MBRAPP_FLUSH_INDEX
 #define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_FN_METHOD_MBRAPP_FLUSH_INDEX
 uint64_t uniffi_mbr_ffi_fn_method_mbrapp_flush_index(uint64_t ptr
@@ -734,6 +739,12 @@ uint16_t uniffi_mbr_ffi_checksum_func_materializes_dataless_files(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_FUNC_SET_MATERIALIZE_DATALESS_FILES
 #define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_FUNC_SET_MATERIALIZE_DATALESS_FILES
 uint16_t uniffi_mbr_ffi_checksum_func_set_materialize_dataless_files(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_METHOD_MBRAPP_CONFIG_ERROR
+#define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_METHOD_MBRAPP_CONFIG_ERROR
+uint16_t uniffi_mbr_ffi_checksum_method_mbrapp_config_error(void
     
 );
 #endif

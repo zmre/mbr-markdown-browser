@@ -978,6 +978,12 @@ public func FfiConverterTypeFileCoordinator_lower(_ value: FileCoordinator) -> U
 public protocol MbrAppProtocol: AnyObject, Sendable {
     
     /**
+     * Why the vault's `.mbr/config.toml` was not used (it opened with the
+     * default configuration), or `None` when it loaded or there is none.
+     */
+    func configError()  -> String?
+    
+    /**
      * Writes the index snapshot now (for instance as the app goes to the
      * background). A no-op without a cache directory.
      */
@@ -1128,6 +1134,18 @@ public static func openFile(filePath: String, coordinator: FileCoordinator?)thro
 }
     
 
+    
+    /**
+     * Why the vault's `.mbr/config.toml` was not used (it opened with the
+     * default configuration), or `None` when it loaded or there is none.
+     */
+open func configError() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_mbr_ffi_fn_method_mbrapp_config_error(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
     
     /**
      * Writes the index snapshot now (for instance as the app goes to the
@@ -1593,6 +1611,12 @@ public struct OpenReport: Equatable, Hashable {
      * What the stat-diff after a restore found (empty after a scan).
      */
     public var refresh: RefreshSummary
+    /**
+     * Why the vault's `.mbr/config.toml` was not used, when it could not be
+     * loaded: the vault opened with the default configuration instead (see
+     * [`MbrApp::config_error`]).
+     */
+    public var configError: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1614,13 +1638,19 @@ public struct OpenReport: Equatable, Hashable {
          */readyMs: UInt64, 
         /**
          * What the stat-diff after a restore found (empty after a scan).
-         */refresh: RefreshSummary) {
+         */refresh: RefreshSummary, 
+        /**
+         * Why the vault's `.mbr/config.toml` was not used, when it could not be
+         * loaded: the vault opened with the default configuration instead (see
+         * [`MbrApp::config_error`]).
+         */configError: String?) {
         self.fromCache = fromCache
         self.restoredFiles = restoredFiles
         self.indexedFiles = indexedFiles
         self.scanMs = scanMs
         self.readyMs = readyMs
         self.refresh = refresh
+        self.configError = configError
     }
 
     
@@ -1644,7 +1674,8 @@ public struct FfiConverterTypeOpenReport: FfiConverterRustBuffer {
                 indexedFiles: FfiConverterUInt64.read(from: &buf), 
                 scanMs: FfiConverterUInt64.read(from: &buf), 
                 readyMs: FfiConverterUInt64.read(from: &buf), 
-                refresh: FfiConverterTypeRefreshSummary.read(from: &buf)
+                refresh: FfiConverterTypeRefreshSummary.read(from: &buf), 
+                configError: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1655,6 +1686,7 @@ public struct FfiConverterTypeOpenReport: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.scanMs, into: &buf)
         FfiConverterUInt64.write(value.readyMs, into: &buf)
         FfiConverterTypeRefreshSummary.write(value.refresh, into: &buf)
+        FfiConverterOptionString.write(value.configError, into: &buf)
     }
 }
 
@@ -2526,6 +2558,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_ffi_checksum_func_set_materialize_dataless_files() != 63913) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mbr_ffi_checksum_method_mbrapp_config_error() != 10525) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_ffi_checksum_method_mbrapp_flush_index() != 26126) {
