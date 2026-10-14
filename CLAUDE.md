@@ -407,7 +407,7 @@ Through the vault: `repo` (scan, invalidation, basic metadata, text extraction),
 
 ### Mobile core (`mbr-ffi` `mobile`)
 
-`crates/mbr-ffi/src/mobile/` is the iOS app's Rust half; the Swift app (`apple/ios`, next PR) is a SwiftUI shell whose WebKit view sends every `mbr://localhost/…` request to `MbrApp::handle`, which runs it through the desktop router in-process. UniFFI **proc-macros** (`#[uniffi::export]`, `Object`, `Record`, `Error`, `export(with_foreign)`) sit beside the QuickLook UDL in the same crate (UniFFI 0.31 mixes them); one generated Swift module carries both surfaces.
+`crates/mbr-ffi/src/mobile/` is the iOS app's Rust half; the Swift app ([`apple/ios`](#ios-app-appleios)) is a SwiftUI shell whose WebKit view sends every `mbr://localhost/…` request to `MbrApp::handle`, which runs it through the desktop router in-process. UniFFI **proc-macros** (`#[uniffi::export]`, `Object`, `Record`, `Error`, `export(with_foreign)`) sit beside the QuickLook UDL in the same crate (UniFFI 0.31 mixes them); one generated Swift module carries both surfaces.
 
 | Piece | What |
 |-------|------|
@@ -421,6 +421,21 @@ Through the vault: `repo` (scan, invalidation, basic metadata, text extraction),
 | Not downloaded | Listed with listing metadata (or the snapshot's frontmatter when only evicted); a page answers 503 "Downloading" with `Retry-After`/`Refresh` and issues `request_download`; content search skips and counts (`SearchResponse::not_downloaded`) |
 
 Bindings for the app: build the staticlib for `aarch64-apple-ios` (see the iOS check in [Cargo Features](#cargo-features)), then `cargo run --no-default-features --features ffi --bin uniffi-bindgen -- generate --library target/aarch64-apple-ios/release/libmbr_ffi.a --language swift --out-dir apple/ios/Generated`. The generated `.swift` must be `git add -f`'d: the global gitignore's `*.sw*` matches it. The QuickLook staticlib and `apple/quicklook/Generated` are unaffected (no `mobile` feature).
+
+### iOS app (`apple/ios`)
+
+SwiftUI, iOS/iPadOS 26, team QR9P58E333, `com.zmre.mbr.ios`; XcodeGen `project.yml` (the `.xcodeproj` and the `Info.plist` it writes are git-ignored). **Build: `cd apple/ios && ./build.sh`** (simulator app; `run` installs and launches on "iPhone 17", `device` builds Release for a phone, `rust` stops after the xcframework, `MBR_IOS_NO_SIGN=1 ./build.sh device` compiles and links unsigned). It builds `-p mbr-ffi --features mobile` for both iOS targets with the target-side-only Xcode redirect described under [Cargo Features](#cargo-features), regenerates `Generated/` from the device lib (rewriting a file only when it changed), makes `MbrFFI.xcframework`, and runs `xcodebuild` with the nix env scrubbed and a fixed `target/ios-derived-data/`. Not a nix derivation (needs Xcode's iOS SDKs); `nix build .#swiftfmt .#swiftlint-check` cover its Swift beside QuickLook's (each dir has its own `.swiftformat`/`.swiftlint.yml`; swiftlint runs `--no-cache` and the check fails if it never reports `Done linting!`, because a second run in the sandbox used to trip over the first's cache and lint nothing). User docs: `apple/ios/README.md` (layout, API use, simulator self-test), `apple/ios/TESTING.md` (device checklist; results go to `ios-architecture-research.md` §12.4).
+
+| Piece | What |
+|-------|------|
+| `Web/MbrSchemeHandler.swift` | **Pull-based** `URLSchemeHandler`: `MbrReply` is a custom `AsyncSequence` whose iterator calls `MbrResponse.nextChunk()` once per `next()`, so WebKit's demand is the backpressure and a video never sits in memory (an `AsyncThrowingStream` would buffer every chunk Rust produces). Forwards method, URL, headers and `httpBody` (or `httpBodyStream`; `Blob` bodies arrive in neither). One log line per request. Holds a `SchemeTarget` box, not the `MbrApp`, so the page can exist before the vault opens |
+| `Web/WebPagePool.swift` | `MbrWebPage` (scheme handler + `LinkPolicy` + `DialogModel`) and the prewarmed page, loaded with `load(html:baseURL: mbr://localhost/)` — not `about:blank` — so the vault's first load is same-site and WebKit has no reason to swap processes. `LinkPolicy` sends main-frame non-`mbr:` navigations to `UIApplication.open` and allows subframes (YouTube embeds); `target=_blank` `mbr:` links load in place. `DialogModel` backs `alert`/`confirm` (review-note delete, task-write errors) |
+| `Model/VaultSession.swift` | `MbrApp.open(root, Caches/vaults/<vault UUID>/, vaultId: <vault UUID>, coordinator)` off the main thread; the UUID is created with the bookmark and survives refresh/re-pick, so the snapshot identity is stable. `refresh()` reloads with the **native `page.reload()`, awaited** — `location.reload()` from script returns at once and anything that follows races the navigation (it aborted a lazy `import()` in the self-test). WebContent death (`WebPage.NavigationError.webContentProcessTerminated` from `page.navigations`) reloads the last finished URL (the page's own `url` is gone by then). **WebKit honours `Refresh` from a scheme handler** (simulator, iOS 27): a 503 Downloading page re-requests itself every 2 s; the Swift watchdog only reloads when no new request arrived after `Retry-After` + 1.5 s, and logs which happened |
+| `Support/FileCoordinatorBridge.swift` | `FileCoordinator`: `.forReplacing` write → staged file in `itemReplacementDirectory` → `replaceItemAt` (a missing file is created directly); any failure in there falls back to a coordinated in-place write (SMB). mkdir/move/remove coordinated; `requestDownload` returns at once and works on a utility queue (`startDownloadingUbiquitousItem` when `isUbiquitousItem`, else a coordinated read). Accessor blocks cannot throw, so each method parks the error in a local and rethrows; `NSError` → `CoordinatorError` by Cocoa/POSIX code |
+| `Model/VaultStore.swift` | Vaults in `UserDefaults` (`mbr.vaults.v1`; the spike's key had another shape): `.bookmark(Data)` (plain `bookmarkData()`) or `.container(path)` (sample vault, self-test). Resolve + `startAccessingSecurityScopedResource` off main; `FolderAccess` stops the scope on deinit and is held by the session |
+| `Model/AppModel.swift` | One session at a time; `.background` → `flushIndex()` inside `beginBackgroundTask`; `.active` after a background → `refresh()`. Applies `setMaterializeDatalessFiles` from Settings (default off = Rust's default) at launch |
+| Front end | The only change is `<mbr-live-reload>` opening no socket on a non-http(s) page (`isSocketReachable`); the app is the reload channel. No mobile-UX CSS changes were needed for the simulator checks |
+| `SelfTest*.swift` | `-mbrSelfTest full\|single\|config\|refresh\|download\|screens` (table in the README). Scenario code that leaves the vault screen runs in an **unstructured** `Task`: the screen's `.task` is cancelled on pop, after which every `Task.sleep` returns at once |
 
 ### Request Flow
 
@@ -722,7 +737,7 @@ The project includes a native macOS app bundle in `macos/`:
 
 The app uses **muda** crate for native menubar with standard macOS keyboard shortcuts (Cmd+Q quit, Cmd+W close window). Platform-specific code is gated with `#[cfg(target_os = "macos")]`.
 
-The Swift shells live under `apple/`: `apple/quicklook/` is the QuickLook preview extension that ships inside `MBR.app` (built by flake.nix's `mbr-quicklook`, or by hand with `apple/quicklook/build.sh`, which needs Xcode via `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`).
+The Swift shells live under `apple/`: `apple/quicklook/` is the QuickLook preview extension that ships inside `MBR.app` (built by flake.nix's `mbr-quicklook`, or by hand with `apple/quicklook/build.sh`, which needs Xcode via `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`). `apple/ios/` is the iOS/iPadOS app (`apple/ios/build.sh`; see [iOS app](#ios-app-appleios)).
 
 ## Nix Packaging
 
