@@ -7,7 +7,7 @@ request in-process: a `URLSchemeHandler` hands each one to `MbrApp.handle`,
 which runs it through mbr's own axum router. There is no socket and no port.
 The front end is the desktop's, unchanged.
 
-Architecture and the reasoning behind it are in `ios-architecture-research.md`
+Architecture and the reasoning behind it are in `design/ios-architecture-research.md`
 at the repository root. The device checklist is in [TESTING.md](TESTING.md).
 
 ## Build

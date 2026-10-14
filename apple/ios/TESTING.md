@@ -4,7 +4,7 @@ What the simulator cannot show: real file providers, dataless files, iCloud
 sync, a phone's speed, and a phone's memory. This supersedes the PR0 spike's
 `SPIKE.md`. The simulator results are in [README.md](README.md#simulator-self-test).
 
-**Where results go:** paste the numbers into `ios-architecture-research.md`
+**Where results go:** paste the numbers into `design/ios-architecture-research.md`
 §12.4 (the "Device, `~/Notes` on iCloud" line and its table). Note anything
 that failed under §12.5, or open an issue.
 

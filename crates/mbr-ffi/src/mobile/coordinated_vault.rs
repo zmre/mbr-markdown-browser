@@ -15,7 +15,7 @@ use super::coordinator::FileCoordinator;
 ///
 /// **Reads** are the desktop's: a [`LocalVault`] on the real path the folder
 /// picker handed over, so the scan, rendering and grep run on plain `std::fs`
-/// with no call into Swift per file (`ios-architecture-research.md` §5.3).
+/// with no call into Swift per file (`design/ios-architecture-research.md` §5.3).
 ///
 /// **Writes** — `write_atomic`, `create_dir_all`, `rename`, `remove_file` — and
 /// [`Vault::request_download`] go through the [`FileCoordinator`], because a
