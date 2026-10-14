@@ -58,8 +58,18 @@
       # rust-toolchain.toml also dragged in rust-docs (695 MB) and llvm-tools
       # (404 MB) — 1.2 GB per system of a 5 GB cache, for an HTML manual and a
       # profiler nothing in this repo invokes.
+      #
+      # The iOS targets live here for the same reason: each std is ~100 MB per
+      # system and only the hand-run iOS staticlib build (`cargo build -p
+      # mbr-ffi --features mobile --target aarch64-apple-ios[-sim]`, never a
+      # cached derivation) needs them. On non-Darwin systems they're harmless to
+      # fetch but useless, so they're added on Darwin only.
       rustToolchainDev = rustToolchain.override {
         extensions = ["rust-analyzer" "rust-src"];
+        targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          "aarch64-apple-ios"
+          "aarch64-apple-ios-sim"
+        ];
       };
 
       # Create crane lib with our toolchain
