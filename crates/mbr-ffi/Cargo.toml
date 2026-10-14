@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "UniFFI surface of mbr, the markdown browser, for its Apple shells (QuickLook). Internal crate of mbr-markdown-browser, versioned in lockstep with it; no API stability guarantees"
+description = "UniFFI surface of mbr, the markdown browser, for its Apple shells (QuickLook, and the iOS app with the mobile feature). Internal crate of mbr-markdown-browser, versioned in lockstep with it; no API stability guarantees"
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
@@ -19,6 +19,22 @@ crate-type = ["lib", "staticlib"]
 name = "mbr_ffi"
 bench = false
 
+[features]
+# The iOS app's surface (`mobile`): the in-process HTTP server behind the
+# `mbr://` scheme handler, the coordinated vault, the persistent index and the
+# fail-fast I/O policy. Pulls in mbr-server without its `watcher` (iOS has no
+# change events worth the descriptors) or `media-metadata` (no ffmpeg/pdfium on
+# iOS). Off by default, so the QuickLook staticlib links none of it.
+mobile = [
+    "dep:mbr-server",
+    "dep:axum",
+    "dep:futures",
+    "dep:rayon",
+    "dep:sha2",
+    "dep:tower",
+    "dep:tracing",
+]
+
 [dependencies]
 mbr-core.workspace = true
 
@@ -28,6 +44,15 @@ serde_json.workspace = true
 tera.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+# mobile
+axum = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+mbr-server = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 # UniFFI is only used by the Apple Swift shells: the macOS QuickLook extension
 # and the iOS app. Target-gate it to Apple platforms so Linux/Windows builds
@@ -45,4 +70,5 @@ uniffi.workspace = true
 uniffi = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true
