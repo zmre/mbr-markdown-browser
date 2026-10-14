@@ -2,6 +2,11 @@ import { LitElement, css, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { isOwnWriteEcho, mayBeOwnWriteEcho, wasSelfWrite } from './task-toggle.js';
 
+/** Whether a page served under `protocol` has a WebSocket endpoint at all. */
+export function isSocketReachable(protocol: string): boolean {
+  return protocol === 'http:' || protocol === 'https:';
+}
+
 interface FileChangeEvent {
   path: string;
   relative_path: string;
@@ -103,6 +108,16 @@ export class MbrLiveReloadElement extends LitElement {
     const config = (window as any).__MBR_CONFIG__;
     if (!config?.serverMode) {
       console.log('[mbr-live-reload] Disabled (static mode)');
+      return;
+    }
+
+    // A WebSocket can only reach an http(s) origin. The iOS app serves pages
+    // from `mbr://localhost/` through a scheme handler, which a socket cannot
+    // cross: `ws://localhost/` there would dial a real port on the phone and
+    // retry five times for nothing. The app reloads the page itself after a
+    // refresh finds a change.
+    if (!isSocketReachable(window.location.protocol)) {
+      console.log(`[mbr-live-reload] Disabled (${window.location.protocol} page)`);
       return;
     }
 

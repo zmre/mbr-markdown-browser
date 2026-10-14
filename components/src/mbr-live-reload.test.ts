@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-live-reload.ts'
-import type { MbrLiveReloadElement } from './mbr-live-reload.ts'
+import { isSocketReachable, type MbrLiveReloadElement } from './mbr-live-reload.ts'
 import { resetTaskToggleState, toggleTask } from './task-toggle.ts'
 import { setFlashcardsChunkImporter, type MbrFlashcardsElement } from './mbr-flashcards.ts'
 import { installDeckPage } from './flashcards/test-fixtures.ts'
@@ -219,6 +219,24 @@ describe('MbrLiveReloadElement connection', () => {
 
     expect(sockets).toHaveLength(0)
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('opens no socket on a custom-scheme page (the iOS app)', async () => {
+    // The app serves mbr://localhost/ through a scheme handler; a socket
+    // cannot cross it, and ws://localhost would dial a real port on the phone.
+    setLocation({ protocol: 'mbr:', host: 'localhost' })
+
+    await mount()
+
+    expect(sockets).toHaveLength(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('treats only http(s) origins as having a socket endpoint', () => {
+    expect(isSocketReachable('http:')).toBe(true)
+    expect(isSocketReachable('https:')).toBe(true)
+    expect(isSocketReachable('mbr:')).toBe(false)
+    expect(isSocketReachable('file:')).toBe(false)
   })
 
   it('opens no socket when the page carries no config', async () => {
