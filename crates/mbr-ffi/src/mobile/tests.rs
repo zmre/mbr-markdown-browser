@@ -433,6 +433,7 @@ fn the_index_is_saved_restored_and_diffed() {
     assert_eq!(report.restored_files, 3);
     assert!(report.refresh.is_empty(), "{report:?}");
     assert_eq!(get(&warm, "/.mbr/site.json").body, scanned);
+    let saved_at = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
     drop(warm);
 
     // Changed while closed: the diff after the restore catches it.
@@ -459,6 +460,16 @@ fn the_index_is_saved_restored_and_diffed() {
     let site = get(&warm, "/.mbr/site.json").text();
     assert!(site.contains("Alpha Two") && site.contains("Newcomer"));
     assert!(!site.contains("/docs/gone/"));
+    assert!(
+        std::fs::metadata(&cache_file).unwrap().modified().unwrap() >= saved_at,
+        "the changed index was saved again"
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cache_file).unwrap()).unwrap();
+    assert!(
+        saved.to_string().contains("Newcomer"),
+        "snapshot has the new note"
+    );
 }
 
 #[test]

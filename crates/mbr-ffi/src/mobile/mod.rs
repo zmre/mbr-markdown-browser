@@ -405,15 +405,19 @@ async fn initial_indexing(
     // Static files and their basic metadata come after the scan; the diff
     // and the snapshot need them.
     repo.wait_for_media().await;
-    let refresh = match restored {
+    let (refresh, unchanged) = match restored {
         Some(_) => {
             let diff_started = Instant::now();
             let diff = server.refresh().await;
-            pages.summarize(&diff, diff_started)
+            let unchanged = diff.is_empty() && diff.evicted.is_empty();
+            (pages.summarize(&diff, diff_started), unchanged)
         }
-        None => RefreshSummary::default(),
+        None => (RefreshSummary::default(), false),
     };
-    save_snapshot(&server, cache.as_ref()).await;
+    // A restored index that nothing changed is the snapshot already on disk.
+    if !unchanged {
+        save_snapshot(&server, cache.as_ref()).await;
+    }
     let report = OpenReport {
         from_cache: restored.is_some(),
         restored_files: restored.unwrap_or(0) as u64,
