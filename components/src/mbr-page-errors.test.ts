@@ -37,7 +37,19 @@ const ambiguousWikilink = {
   candidates: ['/people/z-john/'],
 };
 
+const configError = {
+  type: 'config_parse_error' as const,
+  message: 'Configuration error: Invalid graph_depth: 99. Must be between 1 and 5',
+};
+
 describe('UNIT summarizePageErrors', () => {
+  it('names a repository configuration error first', () => {
+    expect(summarizePageErrors([configError])).toBe('Detected 1 configuration error.');
+    expect(summarizePageErrors([brokenLink, configError])).toBe(
+      'Detected 1 configuration error and 1 broken link.'
+    );
+  });
+
   it('names only the problem types that are present', () => {
     const summary = summarizePageErrors([frontmatterError]);
     expect(summary).toBe('Detected 1 frontmatter parse error.');
@@ -194,6 +206,15 @@ describe('<mbr-page-errors>', () => {
   it('stays hidden when the page has no problems', async () => {
     await mount([])
     expect(el.shadowRoot?.querySelector('.errors-trigger')).toBeNull()
+  })
+
+  it('shows an ignored repository configuration with its message', async () => {
+    await mount([configError])
+    expect(count()).toBe(1)
+    const text = await openPanel()
+    expect(text).toContain('Configuration ignored (1)')
+    expect(text).toContain('.mbr/config.toml could not be loaded')
+    expect(text).toContain('Invalid graph_depth: 99')
   })
 
   // The server predicate is a heuristic with a known false positive (a

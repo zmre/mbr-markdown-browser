@@ -61,6 +61,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
         embedded: None,
+        config_problem: None,
     }
 }
 

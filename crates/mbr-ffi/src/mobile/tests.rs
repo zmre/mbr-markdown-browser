@@ -360,6 +360,66 @@ fn the_root_is_the_picked_folder_even_inside_a_repository() {
 }
 
 #[test]
+fn a_broken_config_file_falls_back_to_the_defaults_and_is_reported() {
+    for (label, toml) in [
+        (
+            "unparseable",
+            "index_file = \"home.md\"\nthis is [not toml\n",
+        ),
+        (
+            "invalid value",
+            "index_file = \"home.md\"\ngraph_depth = 99\n",
+        ),
+        ("wrong type", "index_file = 7\n"),
+    ] {
+        let dir = vault();
+        std::fs::write(dir.path().join(".mbr/config.toml"), toml).unwrap();
+        // The desktop still refuses it.
+        assert!(
+            mbr_core::config::Config::read(dir.path()).is_err(),
+            "{label}: desktop must fail fast"
+        );
+
+        let app = open(dir.path());
+        let report = block_on(app.wait_until_ready()).unwrap();
+        assert_eq!(app.pages.index_file, "index.md", "{label}: defaults used");
+        let error = report.config_error.clone().expect("reported");
+        let expected = match label {
+            "unparseable" => "config.toml",
+            "invalid value" => "graph_depth",
+            _ => "index_file",
+        };
+        assert!(error.contains(expected), "{label}: {error}");
+        assert_eq!(app.config_error(), Some(error.clone()));
+        assert_eq!(site_urls(&app), vec!["/note/"], "{label}: still serves");
+
+        let errors: serde_json::Value =
+            serde_json::from_slice(&get(&app, "/note/errors.json").body).unwrap();
+        let entries = errors["errors"].as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["type"] == "config_parse_error" && e["message"] == error.as_str()),
+            "{label}: {errors}"
+        );
+    }
+
+    // A valid config is used, and nothing is reported.
+    let dir = vault();
+    std::fs::write(
+        dir.path().join(".mbr/config.toml"),
+        "index_file = \"home.md\"\n",
+    )
+    .unwrap();
+    let app = open(dir.path());
+    let report = block_on(app.wait_until_ready()).unwrap();
+    assert_eq!(app.pages.index_file, "home.md");
+    assert_eq!(report.config_error, None);
+    let errors = get(&app, "/note/errors.json").text();
+    assert!(!errors.contains("config_parse_error"), "{errors}");
+}
+
+#[test]
 fn open_rejects_a_missing_folder_and_a_file() {
     let result = MbrApp::open("/definitely/not/a/vault".into(), None, None, None);
     assert!(matches!(result, Err(MobileError::Open { .. })));

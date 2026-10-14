@@ -1459,6 +1459,11 @@ pub struct ServerConfig {
     /// does. `None` everywhere but the iOS app (`mbr_ffi::mobile`); see
     /// [`EmbeddedStorage`].
     pub embedded: Option<EmbeddedStorage>,
+    /// Why the repository's configuration could not be loaded, when the
+    /// embedder fell back to the defaults instead of failing (the iOS app).
+    /// Reported on every page's `errors.json` as `config_parse_error`.
+    /// Always `None` on the desktop, which refuses to start instead.
+    pub config_problem: Option<String>,
 }
 
 /// The repository storage an embedding app hands the server.
@@ -1549,6 +1554,7 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
             embedded: None,
+            config_problem: None,
         }
     }
 }
@@ -1791,6 +1797,8 @@ pub struct ServerState {
     pub edit_token_hash: Option<String>,
     /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
     pub upload_max_bytes: usize,
+    /// See [`ServerConfig::config_problem`].
+    pub config_problem: Option<String>,
     /// Serializes read-patch-write cycles on one file across the in-place
     /// write endpoints (`/.mbr/edit`, `/.mbr/task`, `/.mbr/flashcard-review`).
     pub file_write_locks: Arc<FileWriteLocks>,
@@ -2250,6 +2258,7 @@ impl Server {
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
             embedded,
+            config_problem,
         } = config;
 
         let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
@@ -2666,6 +2675,7 @@ impl Server {
             edit_require_token_on_loopback,
             edit_token_hash,
             upload_max_bytes,
+            config_problem,
         };
 
         let router = Router::new()
@@ -6153,6 +6163,11 @@ impl Server {
         };
 
         let mut errors = Vec::new();
+        if let Some(message) = &config.config_problem {
+            errors.push(mbr_core::page_errors::PageError::ConfigParseError {
+                message: message.clone(),
+            });
+        }
         errors.extend(frontmatter_parse_errors(&frontmatter_error));
         errors.extend(contact_problem_errors(&contact_problems));
         if html_for_scan.is_empty() {

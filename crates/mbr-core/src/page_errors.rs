@@ -68,6 +68,11 @@ pub enum PageError {
     /// The YAML frontmatter block failed to parse, so the entire frontmatter
     /// (including otherwise-valid fields) was discarded.
     FrontmatterParseError { message: String },
+    /// The repository's `.mbr/config.toml` could not be loaded, so every page
+    /// is rendered with the default configuration. Repository-wide, so it is
+    /// reported on every page. Only an embedder that falls back rather than
+    /// failing (the iOS app) produces it; the desktop refuses to start.
+    ConfigParseError { message: String },
     /// Two or more notes form a parent/child cycle, which is impossible in a real
     /// family tree and makes the genealogy chart unrenderable.
     RelationshipCycle {
@@ -1788,6 +1793,17 @@ mod tests {
     // `mbr-page-errors.ts`. The assertions spell out the exact JSON on purpose:
     // renaming a field here silently breaks the frontend, and a full-string
     // comparison is what makes that impossible to miss.
+
+    #[test]
+    fn config_parse_error_serializes_to_the_pinned_shape() {
+        let err = PageError::ConfigParseError {
+            message: "bad toml".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"type":"config_parse_error","message":"bad toml"}"#
+        );
+    }
 
     #[test]
     fn relationship_cycle_serializes_to_the_pinned_shape() {

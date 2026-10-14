@@ -124,6 +124,10 @@ pub struct OpenReport {
     pub ready_ms: u64,
     /// What the stat-diff after a restore found (empty after a scan).
     pub refresh: RefreshSummary,
+    /// Why the vault's `.mbr/config.toml` was not used, when it could not be
+    /// loaded: the vault opened with the default configuration instead (see
+    /// [`MbrApp::config_error`]).
+    pub config_error: Option<String>,
 }
 
 /// An open vault. See the [module docs](self).
@@ -141,6 +145,74 @@ pub struct MbrApp {
     ready: tokio::sync::watch::Receiver<Option<OpenReport>>,
     /// Serializes refreshes, snapshot saves and the initial indexing.
     index_lock: Arc<tokio::sync::Mutex<()>>,
+    config_error: Option<String>,
+}
+
+/// The configuration a vault opens with, and why the repository's own was
+/// not used, when it was not.
+struct LoadedConfig {
+    config: Config,
+    error: Option<String>,
+}
+
+impl LoadedConfig {
+    /// The repository's configuration, read at `root` (never above it).
+    ///
+    /// Unlike the desktop, which refuses to start on a broken
+    /// `.mbr/config.toml`, the app falls back to the defaults: a phone has no
+    /// editor to fix the file with, and refusing would lock the reader out of
+    /// their notes. The problem is logged at WARN, returned on
+    /// [`OpenReport::config_error`] and [`MbrApp::config_error`], and shown on
+    /// every page's error panel (`errors.json`'s `config_parse_error`).
+    fn read(root: &Path) -> Self {
+        match Config::read_at_root(root) {
+            Ok(config) => Self {
+                config,
+                error: None,
+            },
+            Err(e) => {
+                let message = config_error_message(&e);
+                tracing::warn!(
+                    "{} not used, opening with the default configuration: {message}",
+                    root.join(".mbr/config.toml").display()
+                );
+                Self {
+                    config: Config::default(),
+                    error: Some(message),
+                }
+            }
+        }
+    }
+}
+
+/// What went wrong with the configuration, in one line a reader can act on.
+///
+/// A parse failure's useful part — the file, key and line figment reports —
+/// is not in `ConfigError::ParseFailed`'s `Display` and not exposed as its
+/// `source`, so it is unwrapped here rather than changing the desktop's
+/// error text.
+fn config_error_message(error: &mbr_core::MbrError) -> String {
+    match error {
+        mbr_core::MbrError::Config(mbr_core::errors::ConfigError::ParseFailed(figment)) => {
+            format!("{error}: {figment}")
+        }
+        other => error_chain(other),
+    }
+}
+
+/// An error and its sources, one line.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
 }
 
 #[cfg_attr(target_vendor = "apple", uniffi::export)]
@@ -168,13 +240,13 @@ impl MbrApp {
     ) -> Result<Arc<Self>, MobileError> {
         let started = Instant::now();
         let root = canonical_dir(Path::new(&root_path))?;
-        let mut config = Config::read_at_root(&root).map_err(open_error)?;
-        apply_mobile_overrides(&mut config, &root);
+        let mut loaded = LoadedConfig::read(&root);
+        apply_mobile_overrides(&mut loaded.config, &root);
         let vault: Arc<dyn Vault> = Arc::new(CoordinatedVault::new(&root, coordinator));
         let identity = vault_id.unwrap_or_else(|| root.to_string_lossy().into_owned());
         let cache = cache_dir.map(|dir| IndexCache::new(Path::new(&dir), &identity));
         let snapshot = cache.as_ref().and_then(IndexCache::load);
-        Self::start(root, config, vault, cache, snapshot, None, started)
+        Self::start(root, loaded, vault, cache, snapshot, None, started)
     }
 
     /// Opens one file in place — what iOS grants for a file opened from
@@ -211,7 +283,11 @@ impl MbrApp {
         let page =
             build_markdown_url_path(&vault.key(vault.file()), vault.root(), &config.index_file);
         let home = (page != "/").then_some(page);
-        Self::start(parent, config, Arc::new(vault), None, None, home, started)
+        let loaded = LoadedConfig {
+            config,
+            error: None,
+        };
+        Self::start(parent, loaded, Arc::new(vault), None, None, home, started)
     }
 
     /// The vault's root folder (canonical).
@@ -227,6 +303,12 @@ impl MbrApp {
     /// The URL path to load first: `/`, or a single file's page.
     pub fn home_url(&self) -> String {
         self.home.clone().unwrap_or_else(|| "/".to_owned())
+    }
+
+    /// Why the vault's `.mbr/config.toml` was not used (it opened with the
+    /// default configuration), or `None` when it loaded or there is none.
+    pub fn config_error(&self) -> Option<String> {
+        self.config_error.clone()
     }
 
     /// The index snapshot's file, when the vault keeps one.
@@ -321,17 +403,22 @@ impl MbrApp {
 impl MbrApp {
     fn start(
         root: PathBuf,
-        config: Config,
+        loaded: LoadedConfig,
         vault: Arc<dyn Vault>,
         cache: Option<IndexCache>,
         snapshot: Option<mbr_core::repo::RepoSnapshot>,
         home: Option<String>,
         started: Instant,
     ) -> Result<Arc<Self>, MobileError> {
+        let LoadedConfig {
+            config,
+            error: config_error,
+        } = loaded;
         let runtime = runtime::build().map_err(|e| open_error(format!("tokio runtime: {e}")))?;
         let server_config = ServerConfig {
             base_dir: root.clone(),
             embedded: Some(EmbeddedStorage { vault, snapshot }),
+            config_problem: config_error.clone(),
             ..ServerConfig::from(&config).with_log_filter(Some(LOG_FILTER))
         };
         // `Server::init` spawns its scan and index tasks, so it runs inside
@@ -358,6 +445,7 @@ impl MbrApp {
             cache.clone(),
             pages.clone(),
             started,
+            config_error.clone(),
             guard,
             ready_tx,
         ));
@@ -371,6 +459,7 @@ impl MbrApp {
             cache,
             ready,
             index_lock,
+            config_error,
         }))
     }
 
@@ -395,6 +484,7 @@ async fn initial_indexing(
     cache: Option<IndexCache>,
     pages: PageUrls,
     started: Instant,
+    config_error: Option<String>,
     guard: tokio::sync::OwnedMutexGuard<()>,
     ready: tokio::sync::watch::Sender<Option<OpenReport>>,
 ) {
@@ -425,6 +515,7 @@ async fn initial_indexing(
         scan_ms,
         ready_ms: millis(started),
         refresh,
+        config_error,
     };
     tracing::info!("Vault ready: {report:?}");
     drop(guard);
