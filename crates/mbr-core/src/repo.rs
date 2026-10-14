@@ -20,6 +20,9 @@ use crate::tag_index::{TagIndex, TaggedPage};
 use crate::vault::{LocalVault, MountPolicy, Vault, VaultError, VaultPath};
 use crate::wikilink_index::WikilinkIndex;
 
+mod snapshot;
+pub use snapshot::{FileStamp, RepoDiff, RepoSnapshot, SNAPSHOT_FORMAT, SnapshotError};
+
 #[derive(Clone, Serialize)]
 pub struct Repo {
     /// Where the repository is stored. Every read the scan makes goes through
@@ -141,6 +144,12 @@ pub struct Repo {
     /// Notifier for media metadata population (signals waiters when populate_media_metadata finishes).
     #[serde(skip)]
     media_notify: Arc<tokio::sync::Notify>,
+    /// Per-file [`FileStamp`]s, recorded by the scan only with
+    /// [`Repo::with_change_tracking`] (the mobile app, which has no watcher
+    /// and diffs on foreground instead). `None` on the desktop, which then
+    /// pays one branch per listed file and nothing else.
+    #[serde(skip)]
+    stamps: Option<Arc<HashMap<PathBuf, FileStamp>>>,
 }
 
 #[derive(Clone)]
@@ -816,6 +825,7 @@ impl Repo {
             scan_complete: Arc::new(AtomicBool::new(false)),
             scan_notify: Arc::new(tokio::sync::Notify::new()),
             media_notify: Arc::new(tokio::sync::Notify::new()),
+            stamps: None,
         }
     }
 
@@ -853,6 +863,19 @@ impl Repo {
         }
         let overlay = self.static_vault.as_deref()?;
         overlay.vault_path(key).ok().map(|path| (overlay, path))
+    }
+
+    /// [`Self::locate`], with the vault shared rather than borrowed — for a
+    /// caller that reads it from another task (a streamed response body).
+    pub fn locate_shared(&self, key: &Path) -> Option<(Arc<dyn Vault>, VaultPath)> {
+        if let Ok(path) = self.vault.vault_path(key) {
+            return Some((Arc::clone(&self.vault), path));
+        }
+        let overlay = self.static_vault.as_ref()?;
+        overlay
+            .vault_path(key)
+            .ok()
+            .map(|path| (Arc::clone(overlay), path))
     }
 
     /// The symlink mounts both vaults have accepted so far, each with the index
@@ -1073,6 +1096,7 @@ impl Repo {
                 );
             } else if is_markdown_extension(extension, &self.markdown_extensions) {
                 // Process markdown file
+                self.record_stamp(&key, &entry);
                 if let Some((created, modified)) = entry.epoch_secs() {
                     let url = build_markdown_url_path(&key, &self.canonical_root, &self.index_file);
                     let mdfile = MarkdownInfo {
@@ -1112,6 +1136,7 @@ impl Repo {
                 // `populate_basic_metadata()`, as it always was: the static
                 // build never runs that pass, so recording the listing's
                 // numbers here would change its `media.json`.
+                self.record_stamp(&key, &entry);
                 let other_file = OtherFileInfo {
                     raw_path: key.clone(),
                     url_path: url,
@@ -1513,6 +1538,9 @@ impl Repo {
         self.tag_index.clear();
         self.relationship_index.clear();
         self.wikilink_index.clear();
+        if let Some(stamps) = &self.stamps {
+            stamps.pin().clear();
+        }
         self.text_extracted.store(false, Ordering::SeqCst);
         self.media_populated.store(false, Ordering::SeqCst);
         // Must be reset too, or the run-once guard would make the rescan's

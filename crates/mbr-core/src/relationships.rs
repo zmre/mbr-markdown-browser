@@ -65,7 +65,9 @@ pub enum Direction {
 /// Parsed by [`parse_relationships`] straight from the raw YAML — this is the
 /// dedicated typed path that avoids the lossy generic frontmatter converter
 /// (which drops non-string array elements).
-#[derive(Debug, Clone, PartialEq)]
+/// Serializable so a repository snapshot (`crate::repo::RepoSnapshot`) can
+/// carry it; nothing serializes it to a client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawRelationship {
     /// The relation predicate (e.g. "parent", "spouse"). Required.
     pub rel_type: String,
