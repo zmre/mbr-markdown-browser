@@ -145,6 +145,11 @@ extension SelfTest {
         await self.log("download.page", self.js(session, """
         return `title=${JSON.stringify(document.title)} h1=${JSON.stringify(document.querySelector('h1')?.textContent ?? null)}`;
         """))
+        // What `<mbr-page-errors>` gets on each of those loads.
+        await self.log("download.errorsJson", self.js(session, """
+        const r = await fetch('/\(self.fixtureFolder)/pending/errors.json');
+        return `HTTP ${r.status} ${r.headers.get('content-type')} ${await r.text()}`;
+        """))
         try? await Task.sleep(for: .seconds(9))
         self.log(
             "download.refresh",
