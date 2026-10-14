@@ -666,6 +666,30 @@ mod tests {
     }
 
     #[test]
+    fn applied_changes_restamp_without_a_diff() {
+        // The server's own write reaches the index as a Modified event; the
+        // next diff must not report it again.
+        let vault = vault();
+        let repo = scanned(Arc::clone(&vault));
+        let root = vault.root().to_path_buf();
+        vault.insert_file("a.md", "---\ntitle: Written by mbr\n---\n");
+        vault.set_modified(
+            "a.md",
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_100_000_000),
+        );
+        repo.invalidate_file(&root.join("a.md"), &ChangeEventType::Modified);
+        assert!(repo.diff_vault().is_empty());
+        // And a delete drops the stamp, so it is not "deleted" again either.
+        vault.remove_file(&VaultPath::new("a.md").unwrap()).unwrap();
+        repo.invalidate_file(&root.join("a.md"), &ChangeEventType::Deleted);
+        assert!(repo.diff_vault().is_empty());
+        // Ignored or hidden paths never gain one.
+        vault.insert_file(".hidden2.md", "x");
+        repo.invalidate_file(&root.join(".hidden2.md"), &ChangeEventType::Created);
+        assert!(repo.diff_vault().is_empty());
+    }
+
+    #[test]
     fn untracked_repositories_record_nothing() {
         let vault = vault();
         let untracked = Repo::init_with_vault(

@@ -1153,24 +1153,47 @@ struct ChangeApplier {
     watcher_handle: WatcherHandle,
 }
 
+/// Where a batch of change events came from, which decides how much of it is
+/// trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeSource {
+    /// The watcher and the server's own writes: noisy (editors touch files,
+    /// a checkout moves thousands), so modified non-markdown files are
+    /// dropped and a large batch is a full rescan.
+    Events,
+    /// [`Server::refresh`]'s stat-diff: exact, one event per real change, so
+    /// every event is applied, file by file, however many there are. A
+    /// rescan would also re-read every note and drop the frontmatter the
+    /// index kept for files that are listed but no longer downloaded.
+    Diff,
+}
+
 impl ChangeApplier {
     /// Applies one batch of change events.
     ///
-    /// Small batches (<= [`SURGICAL_THRESHOLD`] files) are applied file by
-    /// file; larger ones rescan. Modified non-markdown files are dropped (only
-    /// a markdown file's contents feed an index). Every derived cache is
-    /// dropped afterwards, since none of them re-checks mtimes.
-    async fn apply(&self, pending_events: Vec<mbr_core::change_event::FileChangeEvent>) {
+    /// For [`ChangeSource::Events`], small batches (<= [`SURGICAL_THRESHOLD`]
+    /// files) are applied file by file and larger ones rescan, and modified
+    /// non-markdown files are dropped (only a markdown file's contents feed an
+    /// index). Every derived cache is dropped afterwards, since none of them
+    /// re-checks mtimes.
+    async fn apply(
+        &self,
+        pending_events: Vec<mbr_core::change_event::FileChangeEvent>,
+        source: ChangeSource,
+    ) {
         // Filter to only relevant events
         let relevant_events: Vec<_> = pending_events
             .into_iter()
             .filter(|event| match event.event {
                 mbr_core::change_event::ChangeEventType::Created
                 | mbr_core::change_event::ChangeEventType::Deleted => true,
-                mbr_core::change_event::ChangeEventType::Modified => self
-                    .markdown_extensions
-                    .iter()
-                    .any(|ext| event.relative_path.ends_with(&format!(".{}", ext))),
+                mbr_core::change_event::ChangeEventType::Modified => {
+                    source == ChangeSource::Diff
+                        || self
+                            .markdown_extensions
+                            .iter()
+                            .any(|ext| event.relative_path.ends_with(&format!(".{}", ext)))
+                }
             })
             .collect();
 
@@ -1187,7 +1210,7 @@ impl ChangeApplier {
         #[cfg(feature = "watcher")]
         let watcher_handle = Arc::clone(&self.watcher_handle);
 
-        if relevant_events.len() <= SURGICAL_THRESHOLD {
+        if source == ChangeSource::Diff || relevant_events.len() <= SURGICAL_THRESHOLD {
             // Surgical invalidation: update individual files
             tracing::debug!(
                 "Surgical invalidation for {} file(s)",
@@ -2569,7 +2592,9 @@ impl Server {
                     }
                 }
 
-                applier_for_task.apply(pending_events).await;
+                applier_for_task
+                    .apply(pending_events, ChangeSource::Events)
+                    .await;
             }
         });
 
@@ -2738,7 +2763,9 @@ impl Server {
             .unwrap_or_default();
         if !diff.is_empty() {
             let root = self.repo.vault().root().to_path_buf();
-            self.changes.apply(diff.events(&root)).await;
+            self.changes
+                .apply(diff.events(&root), ChangeSource::Diff)
+                .await;
         }
         self.repo.record_diff(&diff);
         diff

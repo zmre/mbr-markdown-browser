@@ -252,3 +252,32 @@ async fn a_snapshot_restores_without_reading_and_a_stale_one_is_ignored() {
     let (_, _, body) = send(&rescanned, get("/.mbr/site.json")).await;
     assert!(String::from_utf8(body).unwrap().contains("/note/"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_refresh_is_applied_file_by_file_and_keeps_evicted_metadata() {
+    let vault = vault();
+    let server = server(&vault).await;
+    // Evicted after it was indexed: still listed, frontmatter kept.
+    vault.set_availability("note.md", Availability::NotDownloaded);
+    // More changes than the watcher's full-rescan threshold.
+    for i in 0..80 {
+        vault.insert_file(
+            &format!("batch/n{i:02}.md"),
+            format!("---\ntitle: Batch {i}\n---\n"),
+        );
+    }
+    vault.insert_file("media/new.png", "png");
+    let diff = server.refresh().await;
+    assert_eq!(diff.created.len(), 81, "{diff:?}");
+    assert_eq!(diff.evicted.len(), 1);
+    let (_, _, body) = send(&server, get("/.mbr/site.json")).await;
+    let site = String::from_utf8(body).unwrap();
+    assert!(site.contains("Batch 79"));
+    assert!(
+        site.contains("Kumquat Note"),
+        "a rescan would have dropped the evicted note's title"
+    );
+    let (status, _, _) = send(&server, get("/media/new.png")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(server.refresh().await.is_empty());
+}

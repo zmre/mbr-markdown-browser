@@ -17,7 +17,7 @@ use crate::config::{RelationType, TagSource};
 use crate::errors::RepoError;
 use crate::relationships::{NoteRelInput, RawRelationship, RelationshipIndex};
 use crate::tag_index::{TagIndex, TaggedPage};
-use crate::vault::{LocalVault, MountPolicy, Vault, VaultError, VaultPath};
+use crate::vault::{Entry, LocalVault, MountPolicy, Vault, VaultError, VaultPath};
 use crate::wikilink_index::WikilinkIndex;
 
 mod snapshot;
@@ -1565,6 +1565,41 @@ impl Repo {
     ///
     /// Much cheaper than `clear()` + `scan_all()` for small batches of file changes.
     pub fn invalidate_file(&self, abs_path: &Path, event: &crate::change_event::ChangeEventType) {
+        self.invalidate_file_entry(abs_path, event);
+        self.restamp(abs_path, event);
+    }
+
+    /// Keeps a change-tracked file's stamp in step with an applied change —
+    /// a watcher event, the server's own write, a refresh — so the next
+    /// [`Self::diff_vault`] does not report it again. One `stat`, and only
+    /// with change tracking.
+    fn restamp(&self, key: &Path, event: &crate::change_event::ChangeEventType) {
+        let Some(stamps) = &self.stamps else {
+            return;
+        };
+        let entry = match event {
+            crate::change_event::ChangeEventType::Deleted => None,
+            _ => self
+                .locate(key)
+                .and_then(|(vault, path)| vault.stat(&path).ok().flatten())
+                .filter(Entry::is_file),
+        };
+        match entry {
+            Some(entry)
+                if self.markdown_files.pin().contains_key(key)
+                    || self.other_files.pin().contains_key(key) =>
+            {
+                stamps
+                    .pin()
+                    .insert(key.to_path_buf(), FileStamp::of(&entry));
+            }
+            _ => {
+                stamps.pin().remove(key);
+            }
+        }
+    }
+
+    fn invalidate_file_entry(&self, abs_path: &Path, event: &crate::change_event::ChangeEventType) {
         let extension = abs_path.extension().and_then(|x| x.to_str()).unwrap_or("");
         let is_markdown = is_markdown_extension(extension, &self.markdown_extensions);
         // Markdown outside the root (in an external overlay, or a mount inside
