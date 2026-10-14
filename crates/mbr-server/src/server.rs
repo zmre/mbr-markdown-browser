@@ -1565,16 +1565,27 @@ impl ServerState {
     /// which cannot leave its vault, and the vault itself resolved it. That
     /// key is served. The desktop's vault always has local paths, so it
     /// always takes the filesystem check.
+    ///
+    /// A file the vault reports not downloaded may have nothing on disk under
+    /// its own name (an iCloud `.name.icloud` placeholder), so the filesystem
+    /// check cannot see it. It is still answered — with "downloading" — since
+    /// the resolver only produces such a key under a parent the vault itself
+    /// canonicalized inside the repository. Asked only when the check failed,
+    /// so the desktop (whose vault answers `Local` with no I/O) pays nothing.
     fn is_served(&self, key: &Path) -> bool {
         match self.repo.locate(key) {
             Some((vault, path)) if vault.local_path(&path).is_none() => true,
-            _ => is_within_served_roots(
-                key,
-                self.base_dir.as_path(),
-                self.canonical_base_dir.as_deref(),
-                &self.static_folder,
-                || self.mount_targets(),
-            ),
+            located => {
+                is_within_served_roots(
+                    key,
+                    self.base_dir.as_path(),
+                    self.canonical_base_dir.as_deref(),
+                    &self.static_folder,
+                    || self.mount_targets(),
+                ) || located.is_some_and(|(vault, path)| {
+                    vault.availability(&path) == Availability::NotDownloaded
+                })
+            }
         }
     }
 
@@ -7579,12 +7590,19 @@ impl Server {
             ResolvedPath::MarkdownFile(md_path) => {
                 tracing::debug!("home: rendering index markdown: {:?}", &md_path);
                 let edit_enabled = Self::page_edit_enabled(&config, &headers);
-                Self::markdown_to_html(&md_path, &config, edit_enabled)
-                    .await
-                    .map_err(|e| {
+                match Self::markdown_to_html(&md_path, &config, edit_enabled).await {
+                    Ok(response) => Ok(response),
+                    Err(e) if is_not_downloaded(&e) => {
+                        if let Some((vault, path)) = config.repo.locate(&md_path) {
+                            vault.request_download(std::slice::from_ref(&path));
+                        }
+                        Ok(Self::not_downloaded_page(&config, ""))
+                    }
+                    Err(e) => {
                         tracing::error!("Error rendering home markdown: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("home: generating directory listing: {:?}", &dir_path);
