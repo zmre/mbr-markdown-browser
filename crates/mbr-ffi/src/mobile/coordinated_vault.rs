@@ -217,7 +217,14 @@ impl Vault for CoordinatedVault {
 
     fn availability(&self, path: &VaultPath) -> Availability {
         match self.local.availability(path) {
-            Availability::Unknown if self.placeholder_for(path).is_some() => {
+            // A missing file answers `Unknown` with the dataless probe but
+            // `Local` without one (no I/O), so consult the placeholder in both
+            // cases — `stat` and `list_dir` already do, and the three must agree.
+            Availability::Local | Availability::Unknown
+                if self.icloud_placeholders
+                    && !matches!(self.local.stat(path), Ok(Some(_)))
+                    && self.placeholder_for(path).is_some() =>
+            {
                 Availability::NotDownloaded
             }
             availability => availability,
