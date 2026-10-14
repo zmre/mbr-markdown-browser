@@ -382,7 +382,7 @@ the QuickLook staticlib cannot link the GUI.
 | `mbr-core` | `crates/mbr-core` | markdown, templates (and the `templates/` assets they embed), config, repository scan, search, task/link/tag indexes, path resolution; `media-metadata` feature for ffmpeg/pdfium probes and HLS | — |
 | `mbr-server` | `crates/mbr-server` | the axum server, edit/move endpoints, `file_write`, `link_grep`, `link_rewrite`; `watcher` feature (notify) | `mbr-core` |
 | `mbr-ssg` | `crates/mbr-ssg` | the static site generator and pagefind | `mbr-core` |
-| `mbr-ffi` | `crates/mbr-ffi` | UniFFI exports (`quicklook.rs`, `mbr.udl`) → `libmbr_ffi.a`; empty on non-Apple targets | `mbr-core` |
+| `mbr-ffi` | `crates/mbr-ffi` | UniFFI exports (`quicklook.rs`, `mbr.udl`) → `libmbr_ffi.a`; empty on non-Apple targets. The `mobile` feature adds the iOS app's core (`mobile/`) | `mbr-core`; `mbr-server` with `mobile` |
 | `mbr-markdown-browser` | `.` (root) | the `mbr` binary (CLI, GUI window, OS integrations), the `uniffi-bindgen` binary, and the `mbr` library re-exporting everything for the integration tests and benches | all of the above |
 
 The version and shared metadata live once, in the root `Cargo.toml`'s
@@ -415,6 +415,38 @@ cargo build --release -p mbr-markdown-browser --no-default-features --features g
 
 # QuickLook staticlib: the mbr-ffi crate (UniFFI over the render core)
 cargo build --release -p mbr-ffi --lib
+
+# The iOS app's core, tested on the desktop
+cargo test -p mbr-ffi --features mobile
+cargo clippy -p mbr-ffi --features mobile --all-targets -- -D warnings
+```
+
+### iOS staticlib and Swift bindings
+
+The iOS app links `libmbr_ffi.a` built with the `mobile` feature: the in-process
+server behind its `mbr://` scheme handler, the coordinated vault (writes through
+`NSFileCoordinator`), not-downloaded file handling and the index snapshot the
+app keeps in its `Caches/` directory.
+
+```bash
+# Inside `nix develop` (its dev toolchain carries the iOS std), with the
+# target side pointed at Xcode (see CLAUDE.md, "iOS check"):
+cargo build --release -p mbr-ffi --features mobile --lib --target aarch64-apple-ios
+cargo build --release -p mbr-ffi --features mobile --lib --target aarch64-apple-ios-sim
+
+# Swift bindings for the app (QuickLook's surface is included, unused)
+cargo run --no-default-features --features ffi --bin uniffi-bindgen -- generate \
+  --library target/aarch64-apple-ios/release/libmbr_ffi.a \
+  --language swift --out-dir apple/ios/Generated
+git add -f apple/ios/Generated   # a global `*.sw*` ignore would hide mbr.swift
+```
+
+To time cold (no snapshot) against warm (snapshot) opens of a large
+repository on the desktop:
+
+```bash
+MBR_TIMING_REPO=~/Notes cargo test --release -p mbr-ffi --features mobile \
+  -- --ignored --nocapture index_timings
 ```
 
 The server works without `watcher`: live reload still announces the server's
