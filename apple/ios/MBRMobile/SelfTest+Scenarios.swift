@@ -1,0 +1,217 @@
+import Foundation
+import WebKit
+
+/// The self-test's individual scenarios. See `SelfTest`.
+extension SelfTest {
+    /// The task-test page, toggled through its real checkbox (task-toggle.ts:
+    /// `GET /.mbr/raw`, then `POST /.mbr/task`), checked on disk.
+    static func taskToggle(_ session: VaultSession) async -> String {
+        let file = session.access.url.appending(path: "\(self.fixtureFolder)/tasks.md")
+        let writesBefore = session.coordinator.count(of: "write")
+        await session.load(URL(string: "mbr://localhost/\(self.fixtureFolder)/tasks/")!, label: "task page")
+        let clicked = await js(session, """
+        const box = document.querySelector('input.mbr-task-check');
+        if (!box) return 'no checkbox on page';
+        box.click();
+        return `clicked (editEnabled=${window.__MBR_CONFIG__?.editEnabled})`;
+        """)
+        let onDisk = await poll(file) { $0.contains("- [x]") }
+        let writes = session.coordinator.count(of: "write") - writesBefore
+        let line = onDisk.split(separator: "\n").first { $0.contains("toggle me") }.map(String.init) ?? ""
+        let pass = onDisk.contains("- [x]") && writes > 0
+        return "\(pass ? "PASS" : "FAIL") \(clicked); coordinator writes=\(writes); file: \(line)"
+    }
+
+    /// Opens the deck on the card page, flips the card and rates it Good;
+    /// the deck's writer appends to the card's review history.
+    static func flashcardReview(_ session: VaultSession) async -> String {
+        let file = session.access.url.appending(path: "\(self.fixtureFolder)/cards.md")
+        let writesBefore = session.coordinator.count(of: "write")
+        await session.load(URL(string: "mbr://localhost/\(self.fixtureFolder)/cards/")!, label: "card page")
+        let driven = await js(session, """
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        for (let i = 0; i < 50 && !customElements.get('mbr-flashcards'); i++) await sleep(100);
+        const trigger = document.querySelector('mbr-flashcards');
+        if (!trigger) return 'no <mbr-flashcards> on page';
+        trigger.open();
+        let deck = null;
+        for (let i = 0; i < 50 && !(deck = document.querySelector('mbr-flashcard-deck')); i++) await sleep(100);
+        if (!deck) return 'deck did not open';
+        await sleep(600);
+        document.activeElement?.blur?.();
+        const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+        key('Enter');
+        await sleep(400);
+        const good = [...deck.querySelectorAll('button')].find(b => /good/i.test(b.textContent ?? ''));
+        if (good) { good.click(); } else { key('3'); }
+        await sleep(300);
+        return `deck open, rated Good via ${good ? 'button' : 'key 3'}`;
+        """)
+        let onDisk = await poll(file) { $0.contains("- Good") }
+        let writes = session.coordinator.count(of: "write") - writesBefore
+        let entry = onDisk.split(separator: "\n").last { $0.contains("Good") }.map(String.init) ?? ""
+        let pass = onDisk.contains("- Good") && writes > 0
+        return "\(pass ? "PASS" : "FAIL") \(driven); coordinator writes=\(writes); history: \(entry)"
+    }
+
+    /// A `<video>` over `mbr://` must load metadata and seek (Range/206).
+    static func videoSeek(_ session: VaultSession) async -> String {
+        await session.load(URL(string: "mbr://localhost/\(self.fixtureFolder)/media/")!, label: "media page")
+        return await self.js(session, """
+        const v = document.querySelector('video');
+        if (!v) return 'FAIL no <video> on page';
+        v.muted = true;
+        const wait = (event, ms) => new Promise((resolve, reject) => {
+          v.addEventListener(event, resolve, { once: true });
+          v.addEventListener('error', () => reject(`media error ${v.error?.code} ${v.error?.message ?? ''}`), { once: true });
+          setTimeout(() => reject(`timeout waiting for ${event}`), ms);
+        });
+        try {
+          if (v.readyState < 1) { v.preload = 'auto'; if (v.networkState === 3 || v.networkState === 0) v.load(); await wait('loadedmetadata', 15000); }
+          const target = Math.min(3, v.duration / 2);
+          const seeked = wait('seeked', 15000);
+          v.currentTime = target;
+          await seeked;
+          return `PASS duration=${v.duration.toFixed(2)}s seeked to ${v.currentTime.toFixed(2)}s readyState=${v.readyState} src=${v.currentSrc}`;
+        } catch (e) {
+          return `FAIL ${e} readyState=${v.readyState} src=${v.currentSrc}`;
+        }
+        """)
+    }
+
+    // MARK: single
+
+    static func runSingle(_ session: VaultSession) async {
+        guard session.isSingleFile else {
+            self.log("single", "FAIL session is not a single file")
+            return
+        }
+        let home = session.app.homeUrl()
+        await self.log("single.render", self.js(session, """
+        const h1 = document.querySelector('h1')?.textContent ?? null;
+        return `${h1 ? 'PASS' : 'FAIL'} location=${location.pathname} h1=${JSON.stringify(h1)}`;
+        """) + " home=\(home)")
+        await session.load(MbrSchemeHandler.origin, label: "single root")
+        try? await Task.sleep(for: .milliseconds(500))
+        await self.log("single.root", self.js(session, """
+        return `location=${location.pathname}`;
+        """) + " (expected \(home))")
+        self.log("single.grant", "Grant Folder Access offered=\(session.isSingleFile) root=\(session.app.rootPath())")
+        self.log("done", "single")
+    }
+
+    // MARK: config
+
+    static func writeBrokenConfigVault(_ folder: String) async {
+        let root = AppPaths.documents.appending(path: folder, directoryHint: .isDirectory)
+        await Task.detached {
+            let fileManager = FileManager.default
+            try? fileManager.createDirectory(at: root.appending(path: ".mbr"), withIntermediateDirectories: true)
+            try? "theme = \"amber\"\nthis is = = not toml\n".write(
+                to: root.appending(path: ".mbr/config.toml"), atomically: true, encoding: .utf8
+            )
+            try? "# Broken config\n\nThe vault still opens.\n".write(
+                to: root.appending(path: "index.md"), atomically: true, encoding: .utf8
+            )
+        }.value
+    }
+
+    static func runConfig(_ session: VaultSession) async {
+        self.log("config.error", session.configError.map { "PASS \($0)" } ?? "FAIL no config error reported")
+        await self.log("config.page", self.js(session, """
+        const r = await fetch('/errors.json');
+        const text = await r.text();
+        return `errors.json HTTP ${r.status} config_parse_error=${text.includes('config_parse_error')} h1=${JSON.stringify(document.querySelector('h1')?.textContent ?? null)}`;
+        """))
+        self.log("done", "config")
+    }
+
+    // MARK: download
+
+    /// A legacy iCloud placeholder (`.pending.md.icloud`) with no real file:
+    /// the vault lists `pending.md` as not downloaded, and its page answers
+    /// 503 "Downloading" with `Retry-After`/`Refresh`. After a while the
+    /// "download" completes (the real file appears) and the page must render.
+    static func runDownload(_ session: VaultSession) async {
+        let folder = session.access.url.appending(path: self.fixtureFolder, directoryHint: .isDirectory)
+        await Task.detached {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: folder.appending(path: "pending.md"))
+            try? Data("bplist00 placeholder".utf8).write(to: folder.appending(path: ".pending.md.icloud"))
+        }.value
+        await session.refresh(reason: "selftest download")
+        let url = URL(string: "mbr://localhost/\(fixtureFolder)/pending/")!
+        await session.load(url, label: "downloading page")
+        await self.log("download.page", self.js(session, """
+        return `title=${JSON.stringify(document.title)} h1=${JSON.stringify(document.querySelector('h1')?.textContent ?? null)}`;
+        """))
+        try? await Task.sleep(for: .seconds(9))
+        self.log(
+            "download.refresh",
+            "WebKit honours Refresh: "
+                + (session.webKitHonoursRefresh.map { $0 ? "yes" : "no (Swift retried)" } ?? "undetermined")
+        )
+        await Task.detached {
+            try? "# Arrived\n\nThe download finished.\n".write(
+                to: folder.appending(path: "pending.md"), atomically: true, encoding: .utf8
+            )
+            try? FileManager.default.removeItem(at: folder.appending(path: ".pending.md.icloud"))
+        }.value
+        self.log("download", "real file written, placeholder removed; waiting for the page")
+        var result = ""
+        for _ in 0 ..< 20 {
+            try? await Task.sleep(for: .milliseconds(500))
+            result = await self.js(session, "return document.querySelector('h1')?.textContent ?? ''")
+            if result.contains("Arrived") { break }
+        }
+        self.log("download.arrived", "\(result.contains("Arrived") ? "PASS" : "FAIL") h1=\(result)")
+        self.log("done", "download")
+    }
+
+    // MARK: screens
+
+    static func runScreens(_ session: VaultSession, model: AppModel) async {
+        func screen(_ name: String, hold seconds: Double = 4) async {
+            log("screen", name)
+            FileHandle.standardError.write(Data("SCREEN \(name)\n".utf8))
+            try? await Task.sleep(for: .seconds(seconds))
+        }
+        try? await Task.sleep(for: .seconds(2))
+        await screen("page")
+        _ = await self.js(session, """
+        const s = document.querySelector('mbr-search');
+        s.open();
+        await new Promise(r => setTimeout(r, 600));
+        const input = s.shadowRoot?.querySelector('input') ?? s.querySelector('input');
+        if (input) { input.value = 'flashcards'; input.dispatchEvent(new Event('input', { bubbles: true, composed: true })); }
+        await new Promise(r => setTimeout(r, 1200));
+        return 'ok';
+        """)
+        await screen("search")
+        _ = await self.js(session, """
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return 'ok';
+        """)
+        await session.load(URL(string: "mbr://localhost/markdown/flashcards/")!, label: "deck page")
+        _ = await self.js(session, """
+        for (let i = 0; i < 50 && !customElements.get('mbr-flashcards'); i++) await new Promise(r => setTimeout(r, 100));
+        document.querySelector('mbr-flashcards')?.open();
+        await new Promise(r => setTimeout(r, 1500));
+        return 'ok';
+        """)
+        await screen("deck")
+        _ = await self.js(session, """
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return 'ok';
+        """)
+        await session.load(MbrSchemeHandler.origin, label: "home")
+        model.path = []
+        try? await Task.sleep(for: .seconds(1))
+        await screen("list")
+        model.showSettings = true
+        try? await Task.sleep(for: .seconds(2))
+        await screen("settings")
+        model.showSettings = false
+        self.log("done", "screens")
+    }
+}
