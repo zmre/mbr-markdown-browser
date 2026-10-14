@@ -48,7 +48,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub use local::{LocalVault, atomic_write, create_unique_temp_file, read_prefix_native};
+pub use local::{
+    AvailabilityProbe, LocalVault, atomic_write, create_unique_temp_file, read_prefix_native,
+    read_range_native,
+};
 pub use mem::MemVault;
 pub use mount::{Mount, MountPolicy};
 pub use path::{VaultPath, VaultPathError};
@@ -252,6 +255,34 @@ pub trait Vault: Send + Sync + fmt::Debug {
 
     /// At most the first `max_len` bytes (frontmatter extraction reads 8 KB).
     fn read_prefix(&self, path: &VaultPath, max_len: usize) -> Result<Vec<u8>, VaultError>;
+
+    /// At most `len` bytes starting at byte `offset`: fewer at the end of the
+    /// file, none past it. The streaming and `Range` path for files a vault
+    /// has no [`Vault::local_path`] for (`mbr_server` serves those in chunks).
+    ///
+    /// The default reads the whole file and slices it, which is right for an
+    /// in-memory vault and wrong for anything large; a vault with real
+    /// random access overrides it.
+    fn read_range(&self, path: &VaultPath, offset: u64, len: usize) -> Result<Vec<u8>, VaultError> {
+        let bytes = self.read(path)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let end = start.saturating_add(len).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
+    }
+
+    /// Whether the file at `path` is on this device, decided without reading
+    /// it — the check a server makes before handing a file to a reader that
+    /// would block on (or fail half-way through) a not-downloaded one.
+    ///
+    /// The default answers [`Availability::Local`] and does no I/O, which is
+    /// the truth for any vault whose files are always local (the desktop's
+    /// [`LocalVault`]). [`Availability::Unknown`] means the vault could not
+    /// tell (the file vanished, say); callers treat it as "try the read".
+    fn availability(&self, _path: &VaultPath) -> Availability {
+        Availability::Local
+    }
 
     /// Replaces (or creates) `path` with `bytes` atomically: readers see the
     /// old content or the new, never a mix, and a failure leaves the old file.

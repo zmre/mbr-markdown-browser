@@ -6,7 +6,7 @@
 //! writes are temp-file-plus-rename ([`atomic_write`]).
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +14,15 @@ use std::time::SystemTime;
 
 use super::mount::{Mount, MountPolicy, MountTable};
 use super::{Availability, Entry, EntryKind, Vault, VaultError, VaultPath};
+
+/// Decides a file's [`Availability`] from the metadata a listing or `stat`
+/// already fetched, so knowing it costs no extra system call.
+///
+/// The hook that lets a platform crate teach a [`LocalVault`] about files that
+/// are listed but not downloaded (Apple's dataless files, `SF_DATALESS` in
+/// `st_flags`) without a platform `cfg` in this crate. See
+/// [`LocalVault::with_availability_probe`].
+pub type AvailabilityProbe = fn(&fs::Metadata) -> Availability;
 
 /// A repository directory on the local filesystem.
 #[derive(Debug, Clone)]
@@ -24,6 +33,10 @@ pub struct LocalVault {
     /// [`LocalVault::with_mounts`]. `None` keeps the original rule: a link
     /// out of the root is [`VaultError::OutsideRoot`], full stop.
     mounts: Option<Arc<MountTable>>,
+    /// Classifies each listed or stat'ed file; `None` (the desktop) reports
+    /// every file [`Availability::Local`], and [`Vault::availability`] does no
+    /// I/O at all.
+    availability_probe: Option<AvailabilityProbe>,
 }
 
 impl LocalVault {
@@ -41,7 +54,16 @@ impl LocalVault {
         Self {
             root: root.canonicalize().unwrap_or(root),
             mounts: None,
+            availability_probe: None,
         }
+    }
+
+    /// Classifies files with `probe` (see [`AvailabilityProbe`]) in every
+    /// [`Entry`] this vault produces and in [`Vault::availability`].
+    #[must_use]
+    pub fn with_availability_probe(mut self, probe: AvailabilityProbe) -> Self {
+        self.availability_probe = Some(probe);
+        self
     }
 
     /// A vault rooted at `root` (canonicalized, as [`Self::new`]) that serves
@@ -90,7 +112,11 @@ impl LocalVault {
         path.to_native(&self.root)
     }
 
-    fn entry(path: VaultPath, metadata: &fs::Metadata) -> Entry {
+    fn entry(&self, path: VaultPath, metadata: &fs::Metadata) -> Entry {
+        let availability = match self.availability_probe {
+            Some(probe) if !metadata.is_dir() => probe(metadata),
+            _ => Availability::Local,
+        };
         Entry {
             path,
             kind: if metadata.is_dir() {
@@ -101,7 +127,7 @@ impl LocalVault {
             size: metadata.len(),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             created: metadata.created().ok(),
-            availability: Availability::Local,
+            availability,
         }
     }
 }
@@ -113,7 +139,7 @@ impl Vault for LocalVault {
 
     fn stat(&self, path: &VaultPath) -> Result<Option<Entry>, VaultError> {
         match fs::metadata(self.native(path)) {
-            Ok(metadata) => Ok(Some(Self::entry(path.clone(), &metadata))),
+            Ok(metadata) => Ok(Some(self.entry(path.clone(), &metadata))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(VaultError::from_io(path, e)),
         }
@@ -141,7 +167,7 @@ impl Vault for LocalVault {
                 // did. A broken link fails here and is skipped, as `WalkDir`'s
                 // error entries were.
                 let metadata = fs::metadata(entry.path()).ok()?;
-                Some(Self::entry(path, &metadata))
+                Some(self.entry(path, &metadata))
             })
             .collect())
     }
@@ -174,6 +200,21 @@ impl Vault for LocalVault {
 
     fn read_prefix(&self, path: &VaultPath, max_len: usize) -> Result<Vec<u8>, VaultError> {
         read_prefix_native(&self.native(path), max_len).map_err(|e| VaultError::from_io(path, e))
+    }
+
+    fn read_range(&self, path: &VaultPath, offset: u64, len: usize) -> Result<Vec<u8>, VaultError> {
+        read_range_native(&self.native(path), offset, len).map_err(|e| VaultError::from_io(path, e))
+    }
+
+    fn availability(&self, path: &VaultPath) -> Availability {
+        match self.availability_probe {
+            None => Availability::Local,
+            Some(probe) => match fs::metadata(self.native(path)) {
+                Ok(metadata) if metadata.is_dir() => Availability::Local,
+                Ok(metadata) => probe(&metadata),
+                Err(_) => Availability::Unknown,
+            },
+        }
     }
 
     fn write_atomic(&self, path: &VaultPath, bytes: &[u8]) -> Result<(), VaultError> {
@@ -225,6 +266,16 @@ pub fn read_prefix_native(path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
     let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
     let mut buffer = vec![0u8; len.min(max_len)];
     file.read_exact(&mut buffer)?;
+    Ok(buffer)
+}
+
+/// At most `len` bytes of the file at `path`, starting at `offset`; fewer at
+/// the end of the file, none past it.
+pub fn read_range_native(path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buffer = Vec::with_capacity(len.min(1 << 20));
+    file.take(len as u64).read_to_end(&mut buffer)?;
     Ok(buffer)
 }
 
@@ -358,6 +409,48 @@ mod tests {
         assert_eq!(vault.read_prefix(&vp("docs/a.md"), 2).unwrap(), b"# ");
         assert_eq!(vault.read_prefix(&vp("docs/a.md"), 100).unwrap(), b"# A\n");
         assert!(vault.read(&vp("missing")).unwrap_err().is_not_found());
+    }
+
+    #[test]
+    fn read_range_reads_a_window_and_stops_at_the_end() {
+        let (_dir, vault) = fixture();
+        let path = vp("top.txt");
+        assert_eq!(vault.read_range(&path, 1, 2).unwrap(), b"op");
+        assert_eq!(vault.read_range(&path, 2, 100).unwrap(), b"p");
+        assert!(vault.read_range(&path, 10, 5).unwrap().is_empty());
+        assert!(
+            vault
+                .read_range(&vp("nope"), 0, 1)
+                .unwrap_err()
+                .is_not_found()
+        );
+    }
+
+    #[test]
+    fn availability_is_local_without_a_probe_and_probed_with_one() {
+        let (dir, vault) = fixture();
+        assert_eq!(vault.availability(&vp("top.txt")), Availability::Local);
+        let probed = LocalVault::new(dir.path()).with_availability_probe(|metadata| {
+            if metadata.len() == 3 {
+                Availability::NotDownloaded
+            } else {
+                Availability::Local
+            }
+        });
+        assert_eq!(
+            probed.availability(&vp("top.txt")),
+            Availability::NotDownloaded
+        );
+        assert_eq!(probed.availability(&vp("docs/a.md")), Availability::Local);
+        assert_eq!(probed.availability(&vp("docs")), Availability::Local);
+        assert_eq!(probed.availability(&vp("missing")), Availability::Unknown);
+        let listed = probed.list_dir(&VaultPath::root()).unwrap();
+        let top = listed.iter().find(|e| e.name() == "top.txt").unwrap();
+        assert_eq!(top.availability, Availability::NotDownloaded);
+        assert_eq!(
+            probed.stat(&vp("top.txt")).unwrap().unwrap().availability,
+            Availability::NotDownloaded
+        );
     }
 
     #[test]

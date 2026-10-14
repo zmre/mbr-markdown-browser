@@ -280,6 +280,15 @@ impl Vault for MemVault {
             .map(|bytes| bytes[..bytes.len().min(max_len)].to_vec())
     }
 
+    fn availability(&self, path: &VaultPath) -> Availability {
+        let state = self.state.read();
+        match state.files.get(path) {
+            Some(file) => file.availability,
+            None if state.dirs.contains(path) => Availability::Local,
+            None => Availability::Unknown,
+        }
+    }
+
     fn write_atomic(&self, path: &VaultPath, bytes: &[u8]) -> Result<(), VaultError> {
         let mut state = self.state.write();
         let parent = path.parent().ok_or_else(|| VaultError::Io {
