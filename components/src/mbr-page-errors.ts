@@ -716,6 +716,7 @@ export class MbrPageErrorsElement extends LitElement {
       left: 0;
       width: 100vw;
       height: 100vh;
+      height: 100dvh;
       background-color: rgba(0, 0, 0, 0.5);
       z-index: 1000;
       animation: fadeIn 0.2s ease;
@@ -735,8 +736,12 @@ export class MbrPageErrorsElement extends LitElement {
       top: 0;
       right: 0;
       height: 100vh;
+      height: 100dvh;
       width: 100%;
       max-width: 500px;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      box-sizing: border-box;
       background-color: var(--pico-background-color, #fff);
       border-left: 1px solid var(--pico-muted-border-color, #e0e0e0);
       box-shadow: -4px 0 12px rgba(0, 0, 0, 0.2);

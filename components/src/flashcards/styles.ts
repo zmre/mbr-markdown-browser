@@ -17,6 +17,11 @@ export const DECK_CSS = `
 .mbr-fc-overlay {
   position: fixed;
   inset: 0;
+  /* Under viewport-fit=cover the overlay spans the notch, the bars and the
+     home indicator; its controls stay clear of all of them. */
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+    env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  box-sizing: border-box;
   z-index: 1100;
   display: flex;
   flex-direction: column;

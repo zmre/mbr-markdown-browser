@@ -17,6 +17,8 @@ export * from './mbr-heading-enhancer.ts';
 // Ellipsis + tooltip for the header title (no custom element; it enhances
 // server-rendered markup in place).
 export * from './nav-title.ts';
+// The "…" that expands collapsed breadcrumbs on narrow screens (same idea).
+export * from './breadcrumbs.ts';
 export * from './mbr-footnote-preview.ts';
 export * from './mbr-genealogy.ts';
 // Contact card "Linked from N notes" chip (light DOM, no Lit).

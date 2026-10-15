@@ -1269,6 +1269,11 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
       left: 0;
       top: 0;
       height: 100%;
+      /* Clear of the notch (landscape) and the home indicator. */
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      box-sizing: border-box;
       display: flex;
       animation: slideIn 0.25s ease;
     }

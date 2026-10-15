@@ -208,6 +208,8 @@ export class MbrTasksPanelElement extends LitElement {
   // === Query state ===
   @state() private _q = ''
   @state() private _folder: string | null = null
+  /** Narrow screens only: the folder pane, shown as a drawer over the results. */
+  @state() private _foldersOpen = false
   @state() private _statuses: TaskStatus[] = ['open']
   @state() private _priorities: TaskPriority[] = []
   @state() private _due: DueFilter = 'any'
@@ -549,6 +551,7 @@ export class MbrTasksPanelElement extends LitElement {
 
   private _selectFolder(path: string | null) {
     this._folder = path
+    this._foldersOpen = false
     this._focusRow = -1
     void this._runQuery()
   }
@@ -955,7 +958,9 @@ export class MbrTasksPanelElement extends LitElement {
 
   private _renderFolderPane(): TemplateResult {
     return html`
-      <aside class="folder-pane ${this._activePaneIndex === 0 ? 'active' : ''}">
+      <aside
+        class="folder-pane ${this._activePaneIndex === 0 ? 'active' : ''} ${this._foldersOpen ? 'drawer-open' : ''}"
+      >
         <div class="pane-header">
           <h2>Folders</h2>
         </div>
@@ -1008,6 +1013,15 @@ export class MbrTasksPanelElement extends LitElement {
     return html`
       <div class="results-pane ${this._activePaneIndex === 1 ? 'active' : ''}">
         <div class="filter-bar">
+          <button
+            class="folders-button ${this._foldersOpen ? 'open' : ''}"
+            @click=${() => (this._foldersOpen = !this._foldersOpen)}
+            aria-expanded=${this._foldersOpen}
+            aria-label="Folders"
+            title="Folders"
+          >
+            📁
+          </button>
           <input
             id="tasks-filter"
             type="search"
@@ -1335,6 +1349,12 @@ export class MbrTasksPanelElement extends LitElement {
       top: 0;
       height: 100%;
       max-width: 100vw;
+      /* Under viewport-fit=cover (and the iOS app's navigation bar) the
+         overlay starts at the very top of the screen. */
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      box-sizing: border-box;
       display: flex;
       z-index: 1001;
       animation: slideIn 0.25s ease;
@@ -1507,6 +1527,7 @@ export class MbrTasksPanelElement extends LitElement {
       color: var(--pico-color, #333);
     }
 
+    .folders-button,
     .filter-button,
     .close-button {
       background: transparent;
@@ -1519,6 +1540,8 @@ export class MbrTasksPanelElement extends LitElement {
       color: var(--pico-muted-color, #999);
     }
 
+    .folders-button:hover,
+    .folders-button.open,
     .filter-button:hover,
     .close-button:hover,
     .filter-button.open {
@@ -1913,6 +1936,12 @@ export class MbrTasksPanelElement extends LitElement {
 
     /* ---- Responsive ---- */
 
+    /* Wide screens show the folder pane beside the results; the toggle is for
+       the narrow layout below. */
+    .folders-button {
+      display: none;
+    }
+
     @media (max-width: 900px) {
       .folder-pane {
         width: 180px;
@@ -1930,6 +1959,75 @@ export class MbrTasksPanelElement extends LitElement {
 
       .results-pane {
         width: 620px;
+      }
+    }
+
+    /*
+     * Phones (under 600px): one full-screen column. Two panes side by side left
+     * the cards about 210px on a 390px screen. The folder pane becomes a drawer
+     * over the results, opened from the filter bar's folder button and closed
+     * by picking a folder. Height follows the visible viewport (dvh: toolbars,
+     * keyboard), the content stays clear of the notch and home indicator, and
+     * the bar's buttons are 44px targets.
+     */
+    @media (max-width: 600px) {
+      .tasks-container {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+          env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        box-sizing: border-box;
+        background: var(--pico-card-background-color, #f8f9fa);
+      }
+
+      .results-pane {
+        width: 100%;
+        max-width: none;
+        border-right: none;
+      }
+
+      .folder-pane {
+        display: none;
+      }
+
+      .folder-pane.drawer-open {
+        display: flex;
+        position: absolute;
+        top: calc(env(safe-area-inset-top, 0px) + 3.6rem);
+        left: 0;
+        right: 0;
+        width: auto;
+        height: auto;
+        max-height: 60%;
+        z-index: 2;
+        border-right: none;
+        border-bottom: 1px solid var(--pico-muted-border-color, #eee);
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+      }
+
+      .folders-button {
+        display: inline-flex;
+      }
+
+      .folders-button,
+      .filter-button,
+      .close-button {
+        align-items: center;
+        justify-content: center;
+        min-width: 44px;
+        min-height: 44px;
+        font-size: 1.1rem;
+      }
+
+      .filter-bar input[type='search'] {
+        min-height: 44px;
+        font-size: 16px; /* under 16px, iOS zooms the page on focus */
+      }
+
+      .filter-popover {
+        max-height: 50dvh;
+        overflow-y: auto;
       }
     }
   `

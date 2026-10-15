@@ -954,6 +954,11 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       left: 0;
       top: 0;
       height: 100%;
+      /* Clear of the notch (landscape) and the home indicator. */
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      box-sizing: border-box;
       width: min(85vw, 320px);
       background: var(--pico-background-color, #fff);
       box-shadow: 4px 0 12px rgba(0, 0, 0, 0.15);
@@ -982,6 +987,9 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       top: 0;
       align-self: start;
       max-height: 100vh;
+      max-height: 100dvh;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      box-sizing: border-box;
     }
 
     .sidebar:focus {

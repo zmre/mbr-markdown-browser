@@ -21,9 +21,18 @@ const themeCss = readFileSync(
   'utf8'
 )
 
+/**
+ * More files outside `components/`, read the same way (Vite's `?raw` is denied
+ * outside its root): `_head.html`, whose viewport tag the narrow-screen tests
+ * check.
+ */
+const readRepoFile = (relative: string): string =>
+  readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
+
 export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
+    __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
   },
   test: {
     environment: 'happy-dom',
