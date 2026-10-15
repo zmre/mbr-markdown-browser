@@ -3595,6 +3595,35 @@ impl Server {
         }
     }
 
+    /// [`Self::resolve_editable_markdown`], asked again after a short pause
+    /// while it fails.
+    ///
+    /// Resolution runs before the per-file write lock (the lock is keyed by
+    /// what it returns), so it can `stat` a note while another request's
+    /// atomic write is renaming over it. On Windows that open can fail for a
+    /// moment (the replaced file is delete-pending, which surfaces as
+    /// `PermissionDenied`), and the resolver reads any stat error as "absent":
+    /// a spurious 404 (or, from the canonicalize check, 400) for a file that is
+    /// plainly there. Seen on CI as `test_concurrent_task_toggles_on_one_file_both_land`
+    /// failing on Windows aarch64. A real miss costs three 20 ms pauses, on an
+    /// edit endpoint only.
+    async fn resolve_editable_markdown_settled(
+        config: &ServerState,
+        path: &str,
+    ) -> Result<PathBuf, (StatusCode, &'static str)> {
+        const RETRIES: usize = 3;
+        const PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+        let mut result = Self::resolve_editable_markdown(config, path);
+        for _ in 0..RETRIES {
+            if result.is_ok() {
+                break;
+            }
+            tokio::time::sleep(PAUSE).await;
+            result = Self::resolve_editable_markdown(config, path);
+        }
+        result
+    }
+
     /// GET /.mbr/raw/{*path} — returns the raw markdown source of an existing
     /// file plus an `X-MBR-Content-Hash` header for optimistic concurrency.
     pub async fn raw_markdown_handler(
@@ -3606,7 +3635,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -3644,7 +3673,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -3744,7 +3773,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &req.path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -3874,7 +3903,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &req.path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
