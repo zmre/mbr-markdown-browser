@@ -93,7 +93,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `configError()` | The "Configuration ignored" notice above the page |
 | `handle(...)` → `MbrResponse` (`status`, `headers`, `nextChunk`) | `MbrReplyIterator` |
 | `waitUntilReady()` → `OpenReport` | The `ready:` log line and the timings in the subtitle |
-| `refresh()` → `RefreshSummary` | Foreground and the Refresh menu item. The page reloads when it is in `changedPages` or anything was added or removed |
+| `refresh()` → `RefreshSummary` | Foreground and the Refresh menu item. The page reloads when it is in `changedPages`, when anything was added or removed, or when `.mbr/` changed (`configReloaded`, `templatesReloaded`, `assetsChanged`). `configError` updates the notice |
 | `flushIndex()` | Background, inside `beginBackgroundTask` |
 | `indexCachePath()` | Settings and the `ready:` line |
 | `setMaterializeDatalessFiles(_:)` | Settings → "Download files on read" (off by default, matching Rust) |
@@ -101,6 +101,20 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 
 Pages must be loaded from `mbr://localhost/`. Rust derives `Host` from the URL
 authority, and the edit endpoints require `localhost`.
+
+## Refresh and `.mbr/`
+
+There is no file watcher on iOS. Foregrounding the app (and ⋯ → Refresh)
+re-lists the vault, and also looks at the vault's `.mbr/` folder. The check is
+stat-only: nothing is read unless something changed.
+
+| Change | Result |
+|--------|--------|
+| `config.toml` | The vault reopens with it inside the app, keeping its index. A file that no longer parses gives the defaults plus the "Configuration ignored" notice, and fixing it clears the notice |
+| a template (`*.html`) | The templates reload in place |
+| `theme.css`, `user.css`, `components/*.js`, … | Nothing to reload: they are read on every request |
+
+In every case the page on screen reloads.
 
 ## The native bar and the bridge
 
@@ -148,6 +162,7 @@ xcrun simctl launch --console-pty --terminate-running-process "iPhone 17" com.zm
 | `refresh` | Opens the sample vault and waits. Background the app, edit a file in its container, then bring it back: `refresh (foreground)` reports the change and the page reloads |
 | `download` | A legacy `.pending.md.icloud` placeholder: the Downloading page (a 503 underneath, drawn as a progress bar and the note's name), whether WebKit honours `Refresh`, and the page once the real file appears |
 | `screens` | Steps through page, search, deck, the editor and the tasks overlay (both opened through the bridge), list and settings, writing `SCREEN <name>` to stderr for screenshots |
+| `mbr-reload` | Opens the sample vault and waits. Background the app, edit `.mbr/user.css` and `.mbr/config.toml` in its container, then bring it back: the refresh reports a config reload and the page shows both changes (`mbr-reload.after: PASS …`) |
 | `deep` | Writes and opens a page four folders down with a long title, and logs what the native bar got (`deep.bar`) and that the web header is collapsed (`deep.page`). The UI tests use it |
 
 Run twice: the second `full` launch should report `localStorage: previous launch …`

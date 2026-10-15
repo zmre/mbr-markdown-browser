@@ -77,7 +77,8 @@ In Files, long-press Notes → **Remove Download**. Then reopen the vault in MBR
 - [ ] Open a note: a **Downloading** page appears, then the note itself once it
       arrives. Time to the note: ______ s
 - [ ] It reads as a normal state, not an error: a moving progress bar,
-      "Downloading from iCloud…" and the note's name, no "503": ______
+      "Downloading from iCloud…" and the note's name, no "503"; the bar
+      title is the note's name: ______
 - [ ] Log shows `coordinator: iCloud download started for …`: ______
 - [ ] WebKit re-requests the page by itself every ~2 s (repeated
       `GET … -> 503 … [Retry-After 2s, Refresh 2]` lines). It did on the
@@ -170,6 +171,15 @@ With Notes kept downloaded, turn on airplane mode and force-quit.
 
 ## 13. Lifecycle and memory
 
+- [ ] **`.mbr/` on refresh:** with a note open, on the Mac edit the vault's
+      `.mbr/user.css` (e.g. `main h1 { color: red }`) and `.mbr/config.toml`
+      (e.g. `title_prefix`), let it sync, then bring MBR back (or ⋯ →
+      Refresh). The log shows `.mbr: config=true … assets=true` and
+      `Reopened with the changed configuration in N ms (index carried over…)`;
+      the page shows both changes: ______
+- [ ] Break `config.toml` on the Mac: the "Configuration ignored" notice
+      appears after a refresh; fix it and refresh again: the notice goes: ______
+
 - [ ] Background the app while a note is open, edit that note on the Mac and let
       it sync, then return. `refresh (foreground): … ~1` and
       `refresh: reloading …` appear, and the page shows the edit: ______
@@ -209,6 +219,9 @@ On a note a few folders deep with a long title:
       folder list and picking one closes it; the filter field, ⚙ and ✕ are
       easy to hit: ______
 - [ ] The search modal with the keyboard up: results stay visible above it: ______
+- [ ] No keyboard-shortcut footers on the phone (tasks overlay, search
+      modal, flashcard deck); Browse Media still shows in search. With an iPad
+      keyboard/trackpad attached they may reappear: ______
 
 ## 16. Home screen
 
