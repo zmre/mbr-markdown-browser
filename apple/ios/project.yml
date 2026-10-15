@@ -21,7 +21,7 @@ settings:
     # Swift 5 mode: UniFFI's generated bindings and the WebKit SwiftUI API
     # would otherwise need Sendable annotations throughout.
     SWIFT_VERSION: "5.0"
-    DEVELOPMENT_TEAM: QR9P58E333
+    DEVELOPMENT_TEAM: X2SAY6ACE6
     CODE_SIGN_STYLE: Automatic
     # Only arm64 slices exist in MbrFFI.xcframework (device and Apple-silicon
     # simulator); a generic simulator build would otherwise add x86_64.

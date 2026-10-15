@@ -25,8 +25,9 @@ Requirements:
 cd apple/ios
 ./build.sh          # staticlibs (release) + bindings + xcframework + simulator app
 ./build.sh run      # ...then boot "iPhone 17", install, and launch with console output
-./build.sh device   # Release build for a device (signs with team QR9P58E333)
+./build.sh device   # Release build for a device (signs with team X2SAY6ACE6)
 ./build.sh rust     # Rust side only (then open MBRMobile.xcodeproj in Xcode)
+MBR_IOS_DEVICE=<udid> ./build.sh device   # build for that phone and register it with the team (needed once)
 MBR_IOS_NO_SIGN=1 ./build.sh device   # device build that compiles and links, unsigned
 ```
 
@@ -65,7 +66,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 
 | Path | What |
 |------|------|
-| `project.yml` | XcodeGen project: iOS 26, team QR9P58E333, `com.zmre.mbr.ios`, a markdown document type for opening files in place, and the repository's `docs/` bundled as the sample vault |
+| `project.yml` | XcodeGen project: iOS 26, team X2SAY6ACE6, `com.zmre.mbr.ios`, a markdown document type for opening files in place, and the repository's `docs/` bundled as the sample vault |
 | `MBRMobile/MBRMobileApp.swift` | App entry. Scene-phase hooks (refresh on foreground, flush on background), `onOpenURL` for documents, and the web view prewarm |
 | `MBRMobile/Model/AppModel.swift` | Navigation, the open session (one at a time), lifecycle, and the dataless-files toggle |
 | `MBRMobile/Model/VaultStore.swift` | Vault list in `UserDefaults`: add, rename, remove, re-pick. Plain `bookmarkData()`, resolved off the main thread and re-saved when stale. `FolderAccess` holds the security scope; `AppPaths` has the per-vault cache folders |

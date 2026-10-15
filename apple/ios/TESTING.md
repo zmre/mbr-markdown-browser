@@ -10,8 +10,12 @@ that failed under §12.5, or open an issue.
 
 ## Setup
 
-1. `./build.sh device`, then install:
-   `xcrun devicectl device install app --device <id> ../../target/ios-derived-data/Build/Products/Release-iphoneos/MBR.app`.
+1. Find the phone's UDID with `xcrun devicectl list devices`. Then run
+   `MBR_IOS_DEVICE=<udid> ./build.sh device`. Naming the phone lets Xcode
+   register it with the team; the first signed build fails with "Your team has
+   no devices" until one is registered. Then install and launch:
+   `xcrun devicectl device install app --device <udid> ../../target/ios-derived-data/Build/Products/Release-iphoneos/MBR.app`,
+   then `xcrun devicectl device process launch --device <udid> com.zmre.mbr.ios`.
    You can also run `./build.sh rust`, open `MBRMobile.xcodeproj` in Xcode, and
    run it on the phone.
 2. Logs: in Console.app, select the phone and filter on **subsystem

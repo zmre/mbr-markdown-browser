@@ -5,7 +5,7 @@
 #   ./build.sh          - Rust staticlibs + bindings + xcframework + simulator app
 #   ./build.sh run      - ...then boot a simulator, install and launch the app
 #   ./build.sh device   - ...build for a device instead (signs with team
-#                         QR9P58E333; needs your Apple account in Xcode)
+#                         X2SAY6ACE6; needs your Apple account in Xcode)
 #   ./build.sh rust     - Rust staticlibs + bindings + xcframework only
 #
 # Environment:
@@ -201,8 +201,17 @@ if [[ "$MODE" == "device" ]]; then
     if [[ -n "${MBR_IOS_NO_SIGN:-}" ]]; then
         signing=(CODE_SIGNING_ALLOWED=NO)
     fi
+    # MBR_IOS_DEVICE=<udid> (from `xcrun devicectl list devices`) builds for
+    # that phone and lets Xcode register it with the team: a development
+    # profile needs at least one registered device, and the generic
+    # destination never registers one.
+    destination='generic/platform=iOS'
+    if [[ -n "${MBR_IOS_DEVICE:-}" ]]; then
+        destination="id=$MBR_IOS_DEVICE"
+        [[ -z "${MBR_IOS_NO_SIGN:-}" ]] && signing+=(-allowProvisioningDeviceRegistration)
+    fi
     xcodebuild_clean -project MBRMobile.xcodeproj -scheme MBRMobile \
-        -configuration Release -destination 'generic/platform=iOS' \
+        -configuration Release -destination "$destination" \
         -derivedDataPath "$DERIVED" "${signing[@]}" \
         MARKETING_VERSION="$VERSION" build
     echo "App: $DERIVED/Build/Products/Release-iphoneos/MBR.app"
