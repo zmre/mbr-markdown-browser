@@ -107,6 +107,43 @@ final class NativeBarUITests: XCTestCase {
         self.shot("native-search-opened")
     }
 
+    /// A swipe in from the left edge opens Browse and one from the right opens
+    /// Info (WebKit's back/forward swipes are off), in portrait and in
+    /// landscape, where the edges are the screen's, beside the notch.
+    func testEdgeSwipesOpenBrowseAndInfo() {
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            let suffix = orientation == .portrait ? "" : "-landscape"
+            XCUIDevice.shared.orientation = orientation
+            let app = XCUIApplication()
+            app.launchArguments += ["-mbrSelfTest", "deep"]
+            app.launch()
+            // The actions (and so the swipes) arrive with the page's bridge post.
+            let title = app.navigationBars.buttons
+                .matching(NSPredicate(format: "label CONTAINS 'Roadmap'"))
+                .firstMatch
+            XCTAssertTrue(title.waitForExistence(timeout: 60), "the page has loaded\(suffix)")
+            sleep(1)
+
+            self.edgeSwipe(app, fromRight: false)
+            // theme.css draws the heading uppercased, and WebKit reports it so.
+            let navigate = app.webViews.staticTexts
+                .matching(NSPredicate(format: "label ==[c] 'Navigate'"))
+                .firstMatch
+            XCTAssertTrue(navigate.waitForExistence(timeout: 5), "a left-edge swipe opened Browse\(suffix)")
+            XCTAssertTrue(title.exists, "and did not go back a page\(suffix)")
+            self.shot("swipe-browse\(suffix)")
+            app.webViews.buttons["Close"].firstMatch.tap()
+            XCTAssertTrue(navigate.waitForNonExistence(timeout: 5), "Browse closed\(suffix)")
+
+            self.edgeSwipe(app, fromRight: true)
+            let info = app.webViews.buttons["Close info panel"]
+            XCTAssertTrue(info.waitForExistence(timeout: 5), "a right-edge swipe opened Info\(suffix)")
+            self.shot("swipe-info\(suffix)")
+            app.terminate()
+        }
+        XCUIDevice.shared.orientation = .portrait
+    }
+
     /// The app icon on the home screen.
     func testHomeScreenIcon() {
         let app = XCUIApplication()
@@ -134,6 +171,14 @@ final class NativeBarUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         self.add(attachment)
         sleep(4)
+    }
+
+    /// A drag in from 2pt inside one screen edge, half way down.
+    private func edgeSwipe(_ app: XCUIApplication, fromRight: Bool) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: fromRight ? 1 : 0, dy: 0.5))
+            .withOffset(CGVector(dx: fromRight ? -2 : 2, dy: 0))
+        let end = start.withOffset(CGVector(dx: fromRight ? -180 : 180, dy: 0))
+        start.press(forDuration: 0.05, thenDragTo: end)
     }
 
     /// A tap low on the page, which the deep page leaves empty. (The status

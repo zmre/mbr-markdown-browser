@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import WebKit
 
@@ -13,6 +14,8 @@ struct VaultScreen: View {
     @State private var picking = false
     @State private var configNoticeDismissed = false
     @State private var searching = false
+    /// Counts edge swipes that opened something, to drive their haptic.
+    @State private var edgeSwipes = 0
 
     var body: some View {
         self.content
@@ -56,11 +59,18 @@ struct VaultScreen: View {
     private var content: some View {
         if let session {
             WebView(session.page)
-                // The edge swipes are web history; off while editing, like
-                // the bar, so a stray swipe cannot leave unsaved edits. Off
-                // while slides play too: Reveal changes slides on a
-                // horizontal swipe, and an edge swipe would leave the deck.
-                .webViewBackForwardNavigationGestures(self.editorOpen || self.slidesPlaying ? .disabled : .enabled)
+                // The screen edges open Browse (left) and Info (right), so
+                // WebKit's back/forward swipes, which own the same edges, are
+                // off for good: both would fire. Back is the bar's button and
+                // its long-press history.
+                .webViewBackForwardNavigationGestures(.disabled)
+                .gesture(EdgeSwipe(edge: .left, isEnabled: self.swipeEnabled(.browse, in: session)) {
+                    self.edgeSwiped(.browse, from: "left", in: session)
+                })
+                .gesture(EdgeSwipe(edge: .right, isEnabled: self.swipeEnabled(.info, in: session)) {
+                    self.edgeSwiped(.info, from: "right", in: session)
+                })
+                .sensoryFeedback(.impact(weight: .light), trigger: self.edgeSwipes)
                 // A page no wider than the screen does not rubber-band sideways.
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                 .ignoresSafeArea(edges: .bottom)
@@ -190,7 +200,22 @@ struct VaultScreen: View {
         Binding(get: { dialogs.pending != nil }, set: { if !$0 { dialogs.answer(false) } })
     }
 
+    /// An edge swipe is a shortcut for a ⋯ action: live only where the page
+    /// offers it, and never over the editor, a playing deck (Reveal swipes
+    /// between slides) or the search sheet.
+    private func swipeEnabled(_ action: AppAction, in session: VaultSession) -> Bool {
+        session.web.info.actions.contains(action) && !self.editorOpen && !self.slidesPlaying && !self.searching
+    }
+
     // MARK: Actions
+
+    private func edgeSwiped(_ action: AppAction, from edge: String, in session: VaultSession) {
+        self.edgeSwipes += 1
+        Task {
+            let opened = await AppBridge.open(action, in: session.page)
+            Log.info("swipe: \(edge) edge -> open \(action.rawValue) -> \(opened)")
+        }
+    }
 
     private func open() async {
         guard self.session == nil else { return }
@@ -263,5 +288,83 @@ private struct ConfigNotice: View {
         .padding(10)
         .background(.yellow.opacity(0.15))
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A swipe in from one screen edge: UIKit's `UIScreenEdgePanGestureRecognizer`,
+/// so it begins only at the edge (in landscape too, where the edge is the
+/// screen's, not the safe area's) and is judged by the system's own edge rules.
+/// Attached to the web view as an extra recognizer, not drawn over it: a
+/// touch that does not start at the edge, a tap and a vertical scroll all
+/// reach the page untouched, which an overlay strip could not promise.
+///
+/// It fires once per swipe, as soon as the drag is clearly inward and
+/// horizontal (or on a short, fast flick at the end); once it fires, UIKit
+/// cancels the page's touches, so the page never sees the drag as its own.
+private struct EdgeSwipe: UIGestureRecognizerRepresentable {
+    /// `.left` or `.right`.
+    let edge: UIRectEdge
+    let isEnabled: Bool
+    let action: () -> Void
+
+    /// Inward distance, in points, at which a drag counts.
+    private static let distance: CGFloat = 40
+    /// A flick: this inward speed (pt/s) at the end, over at least `flickDistance`.
+    private static let flickSpeed: CGFloat = 400
+    private static let flickDistance: CGFloat = 16
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var fired = false
+
+        /// Alongside the web view's own recognizers, so it never waits on
+        /// (or blocks) scrolling and selection.
+        func gestureRecognizer(
+            _: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+
+    func makeCoordinator(converter _: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UIScreenEdgePanGestureRecognizer {
+        let recognizer = UIScreenEdgePanGestureRecognizer()
+        recognizer.edges = self.edge
+        recognizer.delegate = context.coordinator
+        recognizer.isEnabled = self.isEnabled
+        return recognizer
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UIScreenEdgePanGestureRecognizer, context _: Context) {
+        recognizer.isEnabled = self.isEnabled
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIScreenEdgePanGestureRecognizer, context: Context) {
+        let view = recognizer.view
+        // Inward is +x from the left edge, -x from the right.
+        let sign: CGFloat = self.edge == .right ? -1 : 1
+        let inward = recognizer.translation(in: view).x * sign
+        let across = abs(recognizer.translation(in: view).y)
+        let horizontal = inward > across * 1.5
+        switch recognizer.state {
+        case .began:
+            context.coordinator.fired = false
+        case .changed:
+            if !context.coordinator.fired, horizontal, inward >= Self.distance {
+                context.coordinator.fired = true
+                self.action()
+            }
+        case .ended:
+            let speed = recognizer.velocity(in: view).x * sign
+            if !context.coordinator.fired, horizontal, inward >= Self.flickDistance, speed >= Self.flickSpeed {
+                context.coordinator.fired = true
+                self.action()
+            }
+        default:
+            break
+        }
     }
 }

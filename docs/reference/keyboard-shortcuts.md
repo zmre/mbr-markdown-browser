@@ -48,6 +48,8 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `F` | Open links in (backlinks to current page) |
 | `T` | Open table of contents (headings) |
 
+Without a keyboard, the iOS app's ⋯ menu offers the same three panels as Contents, Links Out and Links In. On a phone the panel fills the screen and closes with its ✕.
+
 ## Search Panel (when open)
 
 | Key | Action |

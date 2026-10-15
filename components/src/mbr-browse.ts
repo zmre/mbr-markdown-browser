@@ -1133,7 +1133,11 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
         <div class="pane-content file-list">
           ${this._selectedFiles.length === 0 ? html`
-            <div class="no-results">No files found</div>
+            <div class="no-results">${this._currentSelection?.type === 'folder'
+              // The tree's count includes subfolders, so "no files" beside
+              // a non-zero count needs saying where they are.
+              ? 'No notes directly in this folder. Its subfolders are in the folder tree (▶).'
+              : 'No files found'}</div>
           ` : pagedFiles.map(file => this._renderFileCard(file))}
           ${hasMore ? html`
             <button class="show-more" @click=${() => this._showMore(MIDDLE_PANE_KEY)}>
@@ -1274,6 +1278,9 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
       padding-bottom: env(safe-area-inset-bottom, 0px);
       padding-left: env(safe-area-inset-left, 0px);
       box-sizing: border-box;
+      /* The padded strips (status bar, home indicator) belong to the drawer,
+         not to the dimmed page behind it. */
+      background: var(--pico-background-color, #fff);
       display: flex;
       animation: slideIn 0.25s ease;
     }
@@ -1714,6 +1721,12 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         max-width: 100vw;
       }
 
+      /* Full-screen over the folder tree. Being fixed, it escapes the
+         container's safe-area padding, so it takes the insets itself: under
+         viewport-fit=cover (the iOS app lays pages out beneath its status and
+         navigation bars) a pane at top: 0 put its header — the only way back —
+         and its first cards under the native bar, and a folder holding only
+         subfolders ("No files found") looked like a blank screen. */
       .middle-pane {
         position: fixed;
         left: 0;
@@ -1721,6 +1734,11 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         width: 100%;
         max-width: 100vw;
         z-index: 1001;
+        box-sizing: border-box;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        padding-left: env(safe-area-inset-left, 0px);
+        padding-right: env(safe-area-inset-right, 0px);
       }
     }
 

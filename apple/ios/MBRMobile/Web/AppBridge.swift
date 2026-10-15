@@ -5,7 +5,8 @@ import WebKit
 // The explicit, formally redundant raw values below are the literals
 // `app-bridge.test.ts` looks for; swiftformat would otherwise strip them.
 // (swiftlint's redundant_string_enum_value fires only when every value is
-// redundant, and `newNote = "new"` is not, so it needs no fence.)
+// redundant, and `newNote = "new"` / `linksOut = "links-out"` are not, so it
+// needs no fence.)
 // swiftformat:disable redundantRawValues
 
 /// An action the page can perform, as `components/src/app-bridge.ts` names
@@ -17,6 +18,9 @@ enum AppAction: String, CaseIterable, Identifiable {
     case search = "search"
     case edit = "edit"
     case info = "info"
+    case toc = "toc"
+    case linksOut = "links-out"
+    case linksIn = "links-in"
     case tasks = "tasks"
     case flashcards = "flashcards"
     case slides = "slides"
@@ -33,6 +37,9 @@ enum AppAction: String, CaseIterable, Identifiable {
         case .search: "Search"
         case .edit: "Edit"
         case .info: "Info"
+        case .toc: "Contents"
+        case .linksOut: "Links Out"
+        case .linksIn: "Links In"
         case .tasks: "Tasks"
         case .flashcards: "Flashcards"
         case .slides: "Slides"
@@ -46,6 +53,9 @@ enum AppAction: String, CaseIterable, Identifiable {
         case .search: "magnifyingglass"
         case .edit: "pencil"
         case .info: "info.circle"
+        case .toc: "list.bullet.indent"
+        case .linksOut: "arrow.up.right"
+        case .linksIn: "arrow.down.left"
         case .tasks: "checklist"
         case .flashcards: "rectangle.on.rectangle.angled"
         case .slides: "play.rectangle"
@@ -73,12 +83,12 @@ final class PageInfo {
     private(set) var breadcrumbs: [Crumb] = []
     private(set) var actions: [AppAction] = []
     /// The page's full-screen editor is open: the app hides its bar and turns
-    /// off the back/forward swipe, so neither can throw away unsaved edits.
+    /// off the edge swipes, so neither can throw away unsaved edits.
     /// Every page message sets it again (a page load ends any editor; the
     /// page's `load` re-post carries an editor that opened with the page).
     private(set) var editorOpen = false
     /// A slide presentation is playing: the app hides its bar (a landscape
-    /// deck is squashed under it) and turns off the back/forward swipe, which
+    /// deck is squashed under it) and turns off the edge swipes, which
     /// Reveal's own slide swipes would trip. Reset by every page message, like
     /// `editorOpen`; leaving a deck (✕) reloads the page.
     private(set) var slidesPlaying = false

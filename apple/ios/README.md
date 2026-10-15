@@ -143,14 +143,15 @@ navigation bar takes over:
   Grant Folder Access… gets a capsule of its own).
 - **⋯ menu:** the page's own actions, then the app's (Refresh, Home, Settings,
   Open Other Vault…). The page's actions are Browse, Search, Edit, Info,
-  Tasks, Flashcards and Slides, each listed only where it works: Edit with
-  editing on, Tasks with the task browser enabled, Flashcards and Slides only
-  on a deck.
+  Contents, Links Out, Links In, Tasks, Flashcards and Slides, each listed
+  only where it works: Edit with editing on, Contents on a page with
+  headings, Links Out/In on a note page, Tasks with the task browser enabled,
+  Flashcards and Slides only on a deck.
 - **Search (⋯ → Search):** a native sheet, not the page's modal (see
   [Native search](#native-search)).
-- **While the editor is open** the bar is hidden and the back/forward swipes
-  are off: the editor has its own Cancel/Save header, and Back or a stray
-  edge swipe would only throw away unsaved edits.
+- **While the editor is open** the bar is hidden and the edge swipes are
+  off: the editor has its own Cancel/Save header, and Back would only throw
+  away unsaved edits.
 
 The page's actions:
 
@@ -160,16 +161,28 @@ The page's actions:
 | `search` | `<mbr-search>` `open()` (the ⋯ menu opens the native sheet instead) | always |
 | `edit` | `<mbr-editor>` `open()` | `canEdit` (editing on, a source file) |
 | `info` | `<mbr-info>` `open()` | always |
+| `toc` | `<mbr-fuzzy-nav>` `open('toc')` | `hasHeadings` (the page has headings) |
+| `links-out` | `<mbr-fuzzy-nav>` `open('links-out')` | `hasPageLinks` (a note page; with link tracking off the tab is just empty) |
+| `links-in` | `<mbr-fuzzy-nav>` `open('links-in')` | `hasPageLinks` |
 | `tasks` | `<mbr-tasks>` `open()` | the task browser is enabled |
 | `flashcards` | `<mbr-flashcards>` `open()` | a deck page |
 | `slides` | `<mbr-slides>` `open()` | a slide document |
 | `new` | `<mbr-editor>` `openNew()` | `canCreate` (editing on); the `+` button, not a ⋯ item |
 
-No edge-swipe gestures for Browse or Info: WebKit's back/forward swipes own
-both edges (a left-edge swipe is the main way back), a page's touch handlers
-cannot win against the system gesture, and they would fight reveal.js swipes,
-the flashcard deck's pointer handling, horizontally scrolling tables and text
-selection. Browse and Info stay one tap away in ⋯.
+**Edge swipes:** a swipe in from the left screen edge opens Browse, one from
+the right edge opens Info, each only where the page offers that action and
+never while the editor is open, slides are playing (Reveal changes slides on a
+horizontal swipe) or the search sheet is up; a light haptic marks it. They are
+a shortcut: both stay in ⋯. The trade-off is Back: WebKit's back/forward
+swipes own the same edges, so they are off for good (both would fire), and
+Back is the bar's button and its long-press history. The gesture is UIKit's
+`UIScreenEdgePanGestureRecognizer` (`EdgeSwipe` in `VaultScreen.swift`),
+attached to the web view beside its own recognizers rather than drawn over it:
+it begins only at the screen's edge (in landscape too, beside the notch), it
+fires once a drag is clearly horizontal and inward (40pt, or a fast 16pt
+flick), and a tap, a vertical scroll or a selection handle that does not start
+at the very edge reaches the page untouched, which an overlay strip could not
+promise. Once it fires, UIKit cancels the page's touches.
 
 The two halves:
 

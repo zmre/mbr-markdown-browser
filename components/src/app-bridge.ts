@@ -20,7 +20,8 @@
  *   turn off the back/forward swipe, which Reveal's slide swipes would trip.
  * - **App → page:** `window.mbrApp.open(name)` opens one of
  *   {@link APP_ACTIONS} through the same public method its own button and
- *   shortcut use (`open()`, or `openNew()` for `new`), so the app never
+ *   shortcut use (`open()`, `openNew()` for `new`, `<mbr-fuzzy-nav>`'s
+ *   `open(tab)` for `toc`/`links-out`/`links-in`), so the app never
  *   re-implements a feature.
  *
  * The app marks the page as embedded with a user script injected at document
@@ -33,7 +34,8 @@
  * Gating mirrors what the page itself offers: an action is listed only when
  * its element is on the page *and* usable (edit only with editing on and a
  * source file, new only with editing on, tasks only with the task browser enabled, flashcards and slides
- * only on a deck), so the app's menu shows exactly what works.
+ * only on a deck, contents only with headings, links only on a note page), so
+ * the app's menu shows exactly what works.
  */
 import { isTasksEnabled } from './shared.js';
 import { isDeckPage } from './mbr-flashcards.js';
@@ -45,7 +47,19 @@ import { EDITOR_STATE_EVENT } from './mbr-editor.js';
 import { SLIDES_STATE_EVENT } from './mbr-slides.js';
 
 /** Every action the app can ask for, in the app menu's order. */
-export const APP_ACTIONS = ['browse', 'search', 'edit', 'info', 'tasks', 'flashcards', 'slides', 'new'] as const;
+export const APP_ACTIONS = [
+  'browse',
+  'search',
+  'edit',
+  'info',
+  'toc',
+  'links-out',
+  'links-in',
+  'tasks',
+  'flashcards',
+  'slides',
+  'new',
+] as const;
 
 export type AppAction = (typeof APP_ACTIONS)[number];
 
@@ -111,14 +125,22 @@ export function isEmbedded(): boolean {
 
 type OpenMethod = 'open' | 'openNew';
 
-type Openable = HTMLElement & Record<OpenMethod, (() => void) | undefined>;
+type Openable = HTMLElement & Record<OpenMethod, ((...args: string[]) => void) | undefined>;
 
 interface ActionTarget {
   selector: string;
   usable: (el: HTMLElement) => boolean;
   /** The element's public method that performs the action; `open` when absent. */
   method?: OpenMethod;
+  /** Arguments for that method, when one element serves several actions. */
+  args?: readonly string[];
 }
+
+/** Whether `<mbr-fuzzy-nav>` reports `gate` (its `hasHeadings`/`hasPageLinks`). */
+const fuzzyNav =
+  (gate: 'hasHeadings' | 'hasPageLinks') =>
+  (el: HTMLElement): boolean =>
+    (el as HTMLElement & Partial<Record<typeof gate, boolean>>)[gate] === true;
 
 const always = (): boolean => true;
 
@@ -132,6 +154,10 @@ const ACTION_TARGETS: Record<AppAction, ActionTarget> = {
   search: { selector: 'mbr-search', usable: always },
   edit: { selector: 'mbr-editor', usable: (el) => (el as HTMLElement & { canEdit?: boolean }).canEdit === true },
   info: { selector: 'mbr-info', usable: always },
+  // The f / F / T panel, one element on three tabs.
+  toc: { selector: 'mbr-fuzzy-nav', usable: fuzzyNav('hasHeadings'), args: ['toc'] },
+  'links-out': { selector: 'mbr-fuzzy-nav', usable: fuzzyNav('hasPageLinks'), args: ['links-out'] },
+  'links-in': { selector: 'mbr-fuzzy-nav', usable: fuzzyNav('hasPageLinks'), args: ['links-in'] },
   tasks: { selector: 'mbr-tasks', usable: () => isTasksEnabled() },
   flashcards: { selector: 'mbr-flashcards', usable: () => isDeckPage() },
   slides: {
@@ -147,10 +173,10 @@ const ACTION_TARGETS: Record<AppAction, ActionTarget> = {
 
 /** The action's opener, bound to its element, or `null` when unavailable. */
 function targetFor(action: AppAction, root: ParentNode): (() => void) | null {
-  const { selector, usable, method = 'open' } = ACTION_TARGETS[action];
+  const { selector, usable, method = 'open', args = [] } = ACTION_TARGETS[action];
   const el = root.querySelector<HTMLElement>(selector) as Openable | null;
   if (!el || typeof el[method] !== 'function' || !usable(el)) return null;
-  return () => el[method]?.();
+  return () => el[method]?.(...args);
 }
 
 function isAppAction(name: string): name is AppAction {
@@ -162,7 +188,7 @@ export function availableActions(root: ParentNode = document): AppAction[] {
   return APP_ACTIONS.filter((action) => targetFor(action, root) !== null);
 }
 
-/** Opens `name` through its element's public `open()` (or `openNew()`). */
+/** Opens `name` through its element's public `open()` (or `openNew()`), with its tab where it has one. */
 export function openAppAction(name: string, root: ParentNode = document): boolean {
   if (!isAppAction(name)) return false;
   const open = targetFor(name, root);

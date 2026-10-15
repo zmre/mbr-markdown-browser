@@ -32,7 +32,19 @@ const themeCss = __MBR_THEME_CSS__
  */
 describe('app bridge contract (referenced from Swift)', () => {
   it('keeps the action names and their order', () => {
-    expect(APP_ACTIONS).toEqual(['browse', 'search', 'edit', 'info', 'tasks', 'flashcards', 'slides', 'new'])
+    expect(APP_ACTIONS).toEqual([
+      'browse',
+      'search',
+      'edit',
+      'info',
+      'toc',
+      'links-out',
+      'links-in',
+      'tasks',
+      'flashcards',
+      'slides',
+      'new',
+    ])
     expect(APP_MESSAGE_HANDLER).toBe('mbrApp')
   })
 
@@ -65,7 +77,15 @@ describe('embedded header hiding', () => {
 
 /** A page shaped like `_nav.html` + `_breadcrumbs.html`, with stub elements. */
 function installPage(
-  options: { deck?: boolean; slides?: boolean; canEdit?: boolean; canCreate?: boolean; tasks?: boolean } = {},
+  options: {
+    deck?: boolean
+    slides?: boolean
+    canEdit?: boolean
+    canCreate?: boolean
+    tasks?: boolean
+    headings?: boolean
+    links?: boolean
+  } = {},
 ): {
   opened: string[]
 } {
@@ -104,6 +124,11 @@ function installPage(
   stub('mbr-tasks')
   stub('mbr-flashcards')
   stub('mbr-slides', { isSlideDocument: options.slides ?? false })
+  stub('mbr-fuzzy-nav', {
+    hasHeadings: options.headings ?? false,
+    hasPageLinks: options.links ?? false,
+    open: (tab: string) => opened.push(`mbr-fuzzy-nav:${tab}`),
+  })
   window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: options.tasks ?? false }
   return { opened }
 }
@@ -120,9 +145,33 @@ describe('available actions follow the page', () => {
     expect(availableActions()).toEqual(['browse', 'search', 'info'])
   })
 
-  it('adds edit, tasks, flashcards and slides when the page has them', () => {
-    installPage({ canEdit: true, canCreate: true, tasks: true, deck: true, slides: true })
-    expect(availableActions()).toEqual(['browse', 'search', 'edit', 'info', 'tasks', 'flashcards', 'slides', 'new'])
+  it('adds edit, contents, links, tasks, flashcards and slides when the page has them', () => {
+    installPage({ canEdit: true, canCreate: true, tasks: true, deck: true, slides: true, headings: true, links: true })
+    expect(availableActions()).toEqual([...APP_ACTIONS])
+  })
+
+  it('offers contents only with headings and links only on a note page', () => {
+    installPage({ headings: true })
+    expect(availableActions()).toEqual(['browse', 'search', 'info', 'toc'])
+    document.body.innerHTML = ''
+    installPage({ links: true })
+    expect(availableActions()).toEqual(['browse', 'search', 'info', 'links-out', 'links-in'])
+  })
+
+  it('opens the fuzzy-nav panel on the tab each action names', () => {
+    const { opened } = installPage({ headings: true, links: true })
+    expect(openAppAction('toc')).toBe(true)
+    expect(openAppAction('links-out')).toBe(true)
+    expect(openAppAction('links-in')).toBe(true)
+    expect(opened).toEqual(['mbr-fuzzy-nav:toc', 'mbr-fuzzy-nav:links-out', 'mbr-fuzzy-nav:links-in'])
+  })
+
+  it('refuses contents and links where the page has neither', () => {
+    const { opened } = installPage()
+    expect(openAppAction('toc')).toBe(false)
+    expect(openAppAction('links-out')).toBe(false)
+    expect(openAppAction('links-in')).toBe(false)
+    expect(opened).toEqual([])
   })
 
   it('offers new only when the editor can create, and opens it through openNew', () => {

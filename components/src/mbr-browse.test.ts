@@ -682,3 +682,27 @@ describe('MbrBrowseElement with site data', () => {
     })
   })
 })
+
+/**
+ * Regression: on a phone, tapping a folder slid in a full-screen file pane
+ * fixed at `top: 0`, outside the container's safe-area padding. In the iOS
+ * app (viewport-fit=cover, pages laid out under the status and native
+ * navigation bars) its header — the only way back — and its first cards sat
+ * under the native bar, so a folder with a file or two, or only subfolders
+ * ("No files found"), showed a blank screen with nothing to tap.
+ */
+describe('MbrBrowseElement narrow layout', () => {
+  const css = (customElements.get('mbr-browse') as unknown as { styles: { cssText: string } }).styles.cssText
+  const narrow = css.slice(css.indexOf('@media (max-width: 768px)'))
+  const middlePane = narrow.slice(narrow.indexOf('.middle-pane {'), narrow.indexOf('}', narrow.indexOf('.middle-pane {')))
+
+  it('keeps the full-screen file pane clear of the safe areas', () => {
+    expect(middlePane).toContain('position: fixed')
+    expect(middlePane).toContain('top: 0')
+    expect(middlePane).toContain('box-sizing: border-box')
+    expect(middlePane).toContain('padding-top: env(safe-area-inset-top, 0px)')
+    expect(middlePane).toContain('padding-bottom: env(safe-area-inset-bottom, 0px)')
+    expect(middlePane).toContain('padding-left: env(safe-area-inset-left, 0px)')
+    expect(middlePane).toContain('padding-right: env(safe-area-inset-right, 0px)')
+  })
+})

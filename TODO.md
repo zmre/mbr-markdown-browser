@@ -7,7 +7,8 @@
   * [x] Overlay button to "play" on slides and flashcards in bottom right floating (`fab.ts`; plus an exit ✕ while slides play)
   * [x] Change the ... icon to be a double icon with a + and a ... (like in github) so you can add a new note quickly (`new` bridge action → `<mbr-editor>.openNew()`)
   * [x] Need the buttons from edit mode to be more native, too, I think. They're ugly on mobile now.
-  * [x] Do we want any swipe guestures?  Decided **no**: WebKit's back/forward swipes own both edges in the app (and Safari's), and page-level swipes would fight Reveal, the flashcard deck, scrolling tables and text selection. Browse/Info stay one tap away in ⋯; on iPad a native `sidebar.left` toolbar button is the better idiom if faster access is wanted.
+  * [x] Swipe gestures: in from the left edge opens Browse, from the right edge opens Info (`EdgeSwipe` in `VaultScreen.swift`, a `UIScreenEdgePanGestureRecognizer`; off over the editor, playing slides and the search sheet). WebKit's back/forward swipes are off to make room; Back is the bar's button and its long-press history.
+  * [ ] `panel` browser on phones: a folder holding only subfolders shows an empty file pane (the empty state points back to the tree); list subfolders in the pane. The "current file" card there is dark blue with low-contrast text.
   * [ ] Device check of the above (TESTING.md): FAB vs. review FAB stacking, slides exit ✕, `+`/⋯ capsule, editor with the native bar hidden.
   * [ ] Plain browsers have no visible "New note" control outside the editor (only the editor's ⋯ menu); consider a shortcut or a button on listings.
   * [ ] On a token-protected server a 401 from `/.mbr/raw` while the editor loads shows only text; the token field is never built. And a new note opened via `#mbr-edit` loses the in-memory token (by design of `edit-token.ts`), so the first save asks again.
