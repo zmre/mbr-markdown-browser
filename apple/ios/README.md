@@ -29,6 +29,7 @@ cd apple/ios
 ./build.sh rust     # Rust side only (then open MBRMobile.xcodeproj in Xcode)
 MBR_IOS_DEVICE=<udid> ./build.sh device   # build for that phone and register it with the team (needed once)
 MBR_IOS_NO_SIGN=1 ./build.sh device   # device build that compiles and links, unsigned
+./build.sh uitest   # the UI tests (MBRMobileUITests) on MBR_SIM_DEVICE (default "iPhone 17")
 ```
 
 The Rust side is `cargo build -p mbr-ffi --features mobile --lib` for both iOS
@@ -72,10 +73,14 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `MBRMobile/Model/VaultStore.swift` | Vault list in `UserDefaults`: add, rename, remove, re-pick. Plain `bookmarkData()`, resolved off the main thread and re-saved when stale. `FolderAccess` holds the security scope; `AppPaths` has the per-vault cache folders |
 | `MBRMobile/Model/VaultSession.swift` | One open vault or file: `MbrApp.open`/`openFile`, timings, `refresh()` with reload, `flushIndex()`, WebContent crash recovery, and the Downloading-page watchdog |
 | `MBRMobile/Web/MbrSchemeHandler.swift` | `mbr://` handler. Pull-based: each `next()` is one `MbrResponse.nextChunk()`, so media streams with Rust's bounded buffer. Logs one line per request |
-| `MBRMobile/Web/WebPagePool.swift` | The `WebPage` setup (scheme handler, link policy, JS dialogs) and the prewarmed page |
+| `MBRMobile/Web/WebPagePool.swift` | The `WebPage` setup (scheme handler, link policy, JS dialogs, the app bridge) and the prewarmed page |
+| `MBRMobile/Web/AppBridge.swift` | The native half of the page ↔ app bridge: the document-start user script that marks pages embedded, the `mbrApp` script-message handler feeding `PageInfo` (title, breadcrumbs, actions), and `AppBridge.open` calling `window.mbrApp.open(name)` |
+| `MBRMobile/Views/VaultToolbar.swift` | The native bar: history Back (long press: recent pages, then Vaults), the ⋯ menu (the page's actions, then Refresh, Home, Settings, Open Other Vault…), and the breadcrumb title menu |
+| `MBRMobile/Assets.xcassets` | The app icon: one opaque 1024×1024 PNG, the macOS icon's tree cropped full-bleed |
+| `MBRMobileUITests/` | UI tests for what only a tap opens (the bar's menus, the home-screen icon); each state prints `SHOT <name>` and is kept as an attachment |
 | `MBRMobile/Support/FileCoordinatorBridge.swift` | mbr's `FileCoordinator`: `NSFileCoordinator` writes (`.forReplacing`, item-replacement directory plus `replaceItemAt`, with an in-place fallback), mkdir, move, remove, and download requests |
 | `MBRMobile/Support/Log.swift` | Unified log (subsystem `com.zmre.mbr.ios`) plus stderr |
-| `MBRMobile/Views/` | Vault list, vault screen (web view, config notice, toolbar), settings, onboarding |
+| `MBRMobile/Views/` | Vault list, vault screen (web view, config notice, the native bar), settings, onboarding |
 | `MBRMobile/SelfTest*.swift` | Simulator self-test (below) |
 
 ## How the app uses the mobile API
@@ -97,6 +102,32 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 Pages must be loaded from `mbr://localhost/`. Rust derives `Host` from the URL
 authority, and the edit endpoints require `localhost`.
 
+## The native bar and the bridge
+
+In the app, mbr's own web header and breadcrumbs are hidden and the iOS
+navigation bar takes over:
+
+- **Title:** the page's title. Its menu (tap the title) is the breadcrumb path.
+- **Back:** web history. At the vault's first page it returns to the vault
+  list. A long press lists recent pages, then Vaults.
+- **⋯ menu:** the page's own actions, then the app's (Refresh, Home, Settings,
+  Open Other Vault…). The page's actions are Browse, Search, Edit, Info,
+  Tasks, Flashcards and Slides, each listed only where it works: Edit with
+  editing on, Tasks with the task browser enabled, Flashcards and Slides only
+  on a deck.
+
+The two halves:
+
+| Direction | How |
+|-----------|-----|
+| App → page, at document start | A `WKUserScript` sets `window.__MBR_EMBEDDED__ = true` and `html.mbr-embedded`. theme.css then collapses the header (to zero height, not `display: none`, because its components host the overlays) and hides the breadcrumbs. Nothing server-side changes, so desktop, server and static pages never see it |
+| Page → app, on every load | `components/src/app-bridge.ts` posts `{type: 'page', url, title, breadcrumbs, actions}` to the `mbrApp` script-message handler, which fills `PageInfo` |
+| App → page, on a menu tap | `window.mbrApp.open('<action>')` calls the element's public `open()`, the same path as its button and shortcut |
+
+The action names are Swift string literals (`AppAction` raw values).
+`app-bridge.test.ts` reads `AppBridge.swift` and checks every name, so a rename
+on either side fails a test.
+
 ## Simulator self-test
 
 Launch with `-mbrSelfTest <mode>`. Results are `SELFTEST <name>: ...` lines on
@@ -115,8 +146,15 @@ xcrun simctl launch --console-pty --terminate-running-process "iPhone 17" com.zm
 | `single` | A file from `simctl openurl file://…` (or `-mbrOpenFile <path under Documents>`): it renders, `/` lands on it, and Grant Folder Access is offered |
 | `config` | A vault with a broken `.mbr/config.toml` opens, reports the error, and `errors.json` carries `config_parse_error` |
 | `refresh` | Opens the sample vault and waits. Background the app, edit a file in its container, then bring it back: `refresh (foreground)` reports the change and the page reloads |
-| `download` | A legacy `.pending.md.icloud` placeholder: the 503 Downloading page, whether WebKit honours `Refresh`, and the page once the real file appears |
-| `screens` | Steps through page, search, deck, list and settings, writing `SCREEN <name>` to stderr for screenshots |
+| `download` | A legacy `.pending.md.icloud` placeholder: the Downloading page (a 503 underneath, drawn as a progress bar and the note's name), whether WebKit honours `Refresh`, and the page once the real file appears |
+| `screens` | Steps through page, search, deck, the editor and the tasks overlay (both opened through the bridge), list and settings, writing `SCREEN <name>` to stderr for screenshots |
+| `deep` | Writes and opens a page four folders down with a long title, and logs what the native bar got (`deep.bar`) and that the web header is collapsed (`deep.page`). The UI tests use it |
 
 Run twice: the second `full` launch should report `localStorage: previous launch …`
 and `open: fromCache=true`.
+
+`./build.sh uitest` runs `MBRMobileUITests`. It launches `deep`, opens the title,
+⋯ and Back menus, then goes to the home screen and finds the icon. At each
+state it prints `SHOT <name>` and pauses. A script watching the output can
+take `xcrun simctl io <device> screenshot` then; the same states are kept as
+attachments in the `.xcresult`.

@@ -76,6 +76,8 @@ In Files, long-press Notes → **Remove Download**. Then reopen the vault in MBR
 - [ ] `refresh` / `ready` lines report `evicted=` ______
 - [ ] Open a note: a **Downloading** page appears, then the note itself once it
       arrives. Time to the note: ______ s
+- [ ] It reads as a normal state, not an error: a moving progress bar,
+      "Downloading from iCloud…" and the note's name, no "503": ______
 - [ ] Log shows `coordinator: iCloud download started for …`: ______
 - [ ] WebKit re-requests the page by itself every ~2 s (repeated
       `GET … -> 503 … [Retry-After 2s, Refresh 2]` lines). It did on the
@@ -175,3 +177,40 @@ With Notes kept downloaded, turn on airplane mode and force-quit.
 - [ ] Leave the app in the background for an hour, then return: the page is
       there, or `page: web content process terminated; reloading …`: ______
 - [ ] A large video plays and seeks without the app being killed: ______
+
+## 14. The native bar (header hidden)
+
+On a note a few folders deep with a long title:
+
+- [ ] mbr's own web header and breadcrumbs are gone; the iOS bar shows the
+      page title (ellipsized) and the timings under it: ______
+- [ ] Tap the title: the breadcrumb path, nearest folder first, then Home.
+      Each one opens: ______
+- [ ] ⋯ lists only what works on that page: Browse, Search, Edit, Info, Tasks;
+      Flashcards on a `type: flashcard` note; Slides on a `style: slides` note.
+      Each opens its panel: ______
+- [ ] ⋯ → Refresh, Home, Settings and Open Other Vault… all work: ______
+- [ ] Back goes back through the vault's pages; on the first page it returns
+      to the vault list. A long press lists recent pages: ______
+- [ ] Swipe from the left edge goes back a page: ______
+- [ ] Nothing sits under the notch, the navigation bar or the home indicator
+      (portrait and landscape; the deck, the search modal, the tasks overlay,
+      the info panel): ______
+
+## 15. Narrow screens (the app, and phone Safari over Tailscale)
+
+- [ ] In phone Safari against `mbr -s`, the header stays on one line and the
+      title is readable; breadcrumbs are one line ("… › parent › page") and
+      "…" expands the full path: ______
+- [ ] The editor (⋯ → Edit) fills the screen with readable margins; selecting
+      text shows the formatting toolbar wrapped within the screen, with no
+      sideways scrolling: ______
+- [ ] The tasks overlay (⋯ → Tasks) is one column; the folder button opens the
+      folder list and picking one closes it; the filter field, ⚙ and ✕ are
+      easy to hit: ______
+- [ ] The search modal with the keyboard up: results stay visible above it: ______
+
+## 16. Home screen
+
+- [ ] MBR's icon (the tree) appears on the home screen and in the app
+      switcher: ______
