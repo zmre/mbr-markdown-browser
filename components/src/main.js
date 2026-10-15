@@ -19,6 +19,9 @@ export * from './mbr-heading-enhancer.ts';
 export * from './nav-title.ts';
 // The "…" that expands collapsed breadcrumbs on narrow screens (same idea).
 export * from './breadcrumbs.ts';
+// The iOS app's bridge (title, breadcrumbs and actions to the native bar;
+// window.mbrApp.open back). Inert outside the app.
+export * from './app-bridge.ts';
 export * from './mbr-footnote-preview.ts';
 export * from './mbr-genealogy.ts';
 // Contact card "Linked from N notes" chip (light DOM, no Lit).

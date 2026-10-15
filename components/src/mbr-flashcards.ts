@@ -68,7 +68,8 @@ function deckRoot(): ParentNode {
 }
 
 /** True on a `type: flashcard` page with a definition list to review. */
-function isDeckPage(): boolean {
+/** Whether this page is a flashcard deck (exported for `app-bridge.ts`). */
+export function isDeckPage(): boolean {
   return document.body.classList.contains('flashcard') && !!deckRoot().querySelector('dl > dt')
 }
 

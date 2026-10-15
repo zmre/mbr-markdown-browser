@@ -1118,6 +1118,44 @@ html {
   scroll-padding-top: calc(3em + env(safe-area-inset-top, 0px));
 }
 
+/* ==================== Embedded in the iOS App ==================== */
+
+/*
+ * The app injects `html.mbr-embedded` (and `window.__MBR_EMBEDDED__`) before
+ * any page script runs; desktop, server and static pages never have it. The
+ * native navigation bar shows the title, a breadcrumb menu and every action
+ * (through `app-bridge.ts`), so mbr's own header and breadcrumbs go.
+ *
+ * The header collapses rather than `display: none`: its components host the
+ * overlays the app opens (search, info, tasks, the editor's loading state,
+ * the browse drawer). Those are `position: fixed`, and an `overflow: hidden`
+ * ancestor without a transform does not clip fixed descendants, so they still
+ * show; inside a `display: none` ancestor they would not render at all.
+ */
+html.mbr-embedded body > header {
+  height: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  overflow: hidden;
+}
+
+html.mbr-embedded body > nav.breadcrumbs {
+  display: none;
+}
+
+html.mbr-embedded body {
+  /* The page runs under the native navigation bar (viewport-fit=cover); the
+   * inset is the bar's height. */
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+html.mbr-embedded {
+  /* No sticky header to clear on an anchor jump, only the native bar. */
+  scroll-padding-top: calc(0.5em + env(safe-area-inset-top, 0px));
+}
+
 /* ==================== Downloading (a cloud note not on the device yet) ==================== */
 
 /*

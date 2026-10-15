@@ -22,9 +22,10 @@ const themeCss = readFileSync(
 )
 
 /**
- * More files outside `components/`, read the same way (Vite's `?raw` is denied
- * outside its root): `_head.html`, whose viewport tag the narrow-screen tests
- * check.
+ * Two more files outside `components/`, read the same way (Vite's `?raw` is
+ * denied outside its root): `_head.html`, whose viewport tag the narrow-screen
+ * tests check, and the iOS app's `AppBridge.swift`, whose string literals are
+ * the other half of the bridge contract `app-bridge.test.ts` pins.
  */
 const readRepoFile = (relative: string): string =>
   readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
@@ -33,6 +34,7 @@ export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
     __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
+    __MBR_APP_BRIDGE_SWIFT__: JSON.stringify(readRepoFile('../apple/ios/MBRMobile/Web/AppBridge.swift')),
   },
   test: {
     environment: 'happy-dom',
