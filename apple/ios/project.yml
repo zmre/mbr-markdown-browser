@@ -98,6 +98,22 @@ targets:
         # surface; let the linker drop it.
         DEAD_CODE_STRIPPING: YES
 
+  # UI tests for what only a tap can open (the native bar's menus, the home
+  # screen icon); `./build.sh uitest` runs them and screenshots each state.
+  MBRMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: MBRMobileUITests
+    dependencies:
+      - target: MBRMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: MBRMobile
+
 schemes:
   MBRMobile:
     build:
@@ -105,3 +121,7 @@ schemes:
         MBRMobile: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - MBRMobileUITests

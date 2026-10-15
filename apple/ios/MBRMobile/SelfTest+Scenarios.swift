@@ -143,8 +143,9 @@ extension SelfTest {
         let url = URL(string: "mbr://localhost/\(fixtureFolder)/pending/")!
         await session.load(url, label: "downloading page")
         await self.log("download.page", self.js(session, """
-        return `title=${JSON.stringify(document.title)} h1=${JSON.stringify(document.querySelector('h1')?.textContent ?? null)}`;
+        return `title=${JSON.stringify(document.title)} h1=${JSON.stringify(document.querySelector('h1')?.textContent ?? null)} name=${JSON.stringify(document.querySelector('.mbr-downloading-name')?.textContent ?? null)} progress=${!!document.querySelector('.mbr-downloading progress')}`;
         """))
+        FileHandle.standardError.write(Data("SCREEN downloading\n".utf8))
         // What `<mbr-page-errors>` gets on each of those loads.
         await self.log("download.errorsJson", self.js(session, """
         const r = await fetch('/\(self.fixtureFolder)/pending/errors.json');
@@ -209,7 +210,25 @@ extension SelfTest {
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         return 'ok';
         """)
+        // The editor and the tasks overlay, opened the way the app's ⋯ menu
+        // opens them: through the bridge.
         await session.load(MbrSchemeHandler.origin, label: "home")
+        try? await Task.sleep(for: .seconds(1))
+        await self.log("screen.edit", "bridge open -> \(AppBridge.open(.edit, in: session.page))")
+        try? await Task.sleep(for: .seconds(4))
+        await screen("editor")
+        _ = await self.js(session, """
+        document.querySelector('.mbr-editor-close')?.click();
+        return 'ok';
+        """)
+        try? await Task.sleep(for: .seconds(1))
+        await self.log("screen.tasks", "bridge open -> \(AppBridge.open(.tasks, in: session.page))")
+        try? await Task.sleep(for: .seconds(3))
+        await screen("tasks")
+        _ = await self.js(session, """
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return 'ok';
+        """)
         model.path = []
         try? await Task.sleep(for: .seconds(1))
         await screen("list")
@@ -218,5 +237,46 @@ extension SelfTest {
         await screen("settings")
         model.showSettings = false
         self.log("done", "screens")
+    }
+
+    // MARK: deep
+
+    /// A page four folders down with a long title: what the native bar
+    /// (title, breadcrumb menu, ⋯ menu, Back) is for. Stays open, logging
+    /// `SCREEN deep`, for the UI test that opens the menus.
+    static func runDeep(_ session: VaultSession) async {
+        let folder = session.access.url.appending(
+            path: "Projects/Clients/Acme Corporation/Quarterly Planning", directoryHint: .isDirectory
+        )
+        await Task.detached {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? """
+            ---
+            title: 2026 Q4 Roadmap, Budget Review and Hiring Plan for the Platform Team
+            ---
+
+            # 2026 Q4 Roadmap, Budget Review and Hiring Plan for the Platform Team
+
+            A deep page with a long title.
+
+            - [ ] Draft the budget
+            - [ ] Review the hiring plan
+            """.write(to: folder.appending(path: "Roadmap.md"), atomically: true, encoding: .utf8)
+        }.value
+        await session.refresh(reason: "selftest deep")
+        let page = "mbr://localhost/Projects/Clients/Acme%20Corporation/Quarterly%20Planning/Roadmap/"
+        await session.load(URL(string: page)!, label: "deep page")
+        try? await Task.sleep(for: .seconds(1))
+        let info = session.web.info
+        self.log(
+            "deep.bar",
+            "title=\(info.title) crumbs=\(info.breadcrumbs.map(\.name)) actions=\(info.actions.map(\.rawValue))"
+        )
+        await self.log("deep.page", self.js(session, """
+        const header = document.querySelector('body > header');
+        return `embedded=${window.__MBR_EMBEDDED__ === true} htmlClass=${document.documentElement.className} headerHeight=${header?.getBoundingClientRect().height} breadcrumbsShown=${getComputedStyle(document.querySelector('nav.breadcrumbs')).display !== 'none'}`;
+        """))
+        FileHandle.standardError.write(Data("SCREEN deep\n".utf8))
+        self.log("done", "deep")
     }
 }

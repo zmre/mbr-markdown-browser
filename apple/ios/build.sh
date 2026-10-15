@@ -7,6 +7,8 @@
 #   ./build.sh device   - ...build for a device instead (signs with team
 #                         X2SAY6ACE6; needs your Apple account in Xcode)
 #   ./build.sh rust     - Rust staticlibs + bindings + xcframework only
+#   ./build.sh uitest   - ...then run the UI tests (MBRMobileUITests) on the
+#                         simulator; they print `SHOT <name>` at each state
 #
 # Environment:
 #   MBR_SIM_DEVICE            simulator name for `run` (default: "iPhone 17")
@@ -31,9 +33,9 @@ TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim)
 LIB=libmbr_ffi.a
 
 case "$MODE" in
-    build | run | device | rust) ;;
+    build | run | device | rust | uitest) ;;
     *)
-        echo "usage: $0 [build|run|device|rust]" >&2
+        echo "usage: $0 [build|run|device|rust|uitest]" >&2
         exit 2
         ;;
 esac
@@ -217,6 +219,15 @@ if [[ "$MODE" == "device" ]]; then
     echo "App: $DERIVED/Build/Products/Release-iphoneos/MBR.app"
     echo "Install with: xcrun devicectl device install app --device <id> <that path>"
     exit 0
+fi
+
+if [[ "$MODE" == "uitest" ]]; then
+    SIM="${MBR_SIM_DEVICE:-iPhone 17}"
+    echo "Running the UI tests on $SIM..."
+    xcodebuild_clean -project MBRMobile.xcodeproj -scheme MBRMobile \
+        -configuration Debug -destination "platform=iOS Simulator,name=$SIM" \
+        -derivedDataPath "$DERIVED" MARKETING_VERSION="$VERSION" test
+    exit $?
 fi
 
 echo "Building for simulator..."

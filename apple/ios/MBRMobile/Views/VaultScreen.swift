@@ -15,12 +15,20 @@ struct VaultScreen: View {
 
     var body: some View {
         self.content
-            .navigationTitle(self.title)
+            // The page's own title: mbr's web header is hidden in the app
+            // (app-bridge.ts reports the title, breadcrumbs and actions).
+            .navigationTitle(self.pageTitle)
             // The timings ride in the subtitle: a bottom bar would float over
             // the page's own bottom controls (the deck's Show answer, the
-            // search modal's footer).
-            .navigationSubtitle(self.showTimingBar ? self.session.map(Self.timings) ?? "" : "")
+            // search modal's footer). Without them, the vault's name.
+            .navigationSubtitle(self.subtitle)
             .navigationBarTitleDisplayMode(.inline)
+            // Back is web history (HistoryBackButton); the system one would
+            // leave the vault from any page.
+            .navigationBarBackButtonHidden(self.session != nil)
+            .toolbarTitleMenu {
+                if let session { BreadcrumbMenu(session: session) }
+            }
             .toolbar { self.toolbar }
             .fileImporter(isPresented: self.$picking, allowedContentTypes: [.folder]) { result in
                 guard case let .success(folder) = result else { return }
@@ -75,16 +83,15 @@ struct VaultScreen: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         if let session {
+            ToolbarItem(placement: .topBarLeading) {
+                HistoryBackButton(session: session) { self.model.path = [] }
+            }
             ToolbarItem(placement: .primaryAction) {
-                Menu("More", systemImage: "ellipsis.circle") {
-                    Button("Refresh", systemImage: "arrow.clockwise") {
-                        Task { await session.refresh(reason: "button") }
-                    }
-                    Button("Home", systemImage: "house") {
-                        Task { await session.load(MbrSchemeHandler.url(forPath: session.app.homeUrl()), label: "home") }
-                    }
-                    Button("Settings", systemImage: "gear") { self.model.showSettings = true }
-                }
+                VaultActionsMenu(
+                    session: session,
+                    openSettings: { self.model.showSettings = true },
+                    leave: { self.model.path = [] }
+                )
             }
             if session.isSingleFile {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -102,6 +109,17 @@ struct VaultScreen: View {
         let page = session.firstPageMs.map { "\($0)" } ?? "…"
         // open · scan · ready (c = from the index cache) · first page, in ms.
         return "\(session.openMs) · \(scan) · \(ready) · \(page) ms"
+    }
+
+    /// What the page reported as its title, else the vault's name.
+    private var pageTitle: String {
+        let reported = self.session?.web.info.title ?? ""
+        return reported.isEmpty ? self.title : reported
+    }
+
+    private var subtitle: String {
+        guard let session else { return "" }
+        return self.showTimingBar ? Self.timings(session) : self.title
     }
 
     private var title: String {

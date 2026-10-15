@@ -40,6 +40,8 @@ final class VaultSession {
     private var watchers: [Task<Void, Never>] = []
     /// Whether WebKit was seen to re-request a 503 page by itself (`Refresh`).
     private(set) var webKitHonoursRefresh: Bool?
+    /// Back-list entries that predate this vault's first page.
+    private var historyBase = 0
     private var retries: [URL: Int] = [:]
     private static let maxRetries = 150
 
@@ -150,6 +152,9 @@ final class VaultSession {
         }
         let url = MbrSchemeHandler.url(forPath: start ?? app.homeUrl())
         self.firstPageMs = await self.load(url, label: "first page")
+        // Whatever is behind the first page (the prewarm document) is not
+        // this vault's history: Back from here leaves the vault.
+        self.historyBase = self.page.backForwardList.backList.count
     }
 
     /// Loads `url` and returns the milliseconds until navigation finished.
@@ -166,6 +171,37 @@ final class VaultSession {
             Log.info("\(label): \(url.absoluteString) failed: \(error)")
         }
         return nil
+    }
+
+    // MARK: History
+
+    /// Whether Back goes to an earlier page of this vault (rather than out to
+    /// the vault list).
+    var canGoBack: Bool {
+        self.page.backForwardList.backList.count > self.historyBase
+    }
+
+    /// This vault's earlier pages, most recent first: the Back button's
+    /// long-press menu.
+    var recentPages: [WebPage.BackForwardList.Item] {
+        Array(self.page.backForwardList.backList.dropFirst(self.historyBase).reversed())
+    }
+
+    /// Web-history back one page.
+    func goBack() async {
+        guard self.canGoBack, let item = self.page.backForwardList.backList.last else { return }
+        await self.go(to: item)
+    }
+
+    /// Jumps to an entry of the back list.
+    func go(to item: WebPage.BackForwardList.Item) async {
+        do {
+            for try await event in self.page.load(item) where event == .finished {
+                break
+            }
+        } catch {
+            Log.info("history: \(item.url.absoluteString) failed: \(error)")
+        }
     }
 
     func close() {

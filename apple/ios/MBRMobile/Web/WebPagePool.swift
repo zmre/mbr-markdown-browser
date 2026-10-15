@@ -5,12 +5,14 @@ import WebKit
 
 /// A `WebPage` wired for mbr: the `mbr://` scheme handler (through a
 /// `SchemeTarget` the session fills in once its vault is open), link policy,
-/// and JavaScript dialogs.
+/// JavaScript dialogs, and the app bridge (embedded mode, and the page's
+/// title, breadcrumbs and actions for the navigation bar).
 @MainActor
 final class MbrWebPage {
     let page: WebPage
     let target: SchemeTarget
     let dialogs: DialogModel
+    let info: PageInfo
     private let decider: LinkPolicy
 
     init() {
@@ -19,6 +21,8 @@ final class MbrWebPage {
         let decider = LinkPolicy()
         var configuration = WebPage.Configuration()
         configuration.urlSchemeHandlers[URLScheme(MbrSchemeHandler.scheme)!] = MbrSchemeHandler(target: target)
+        let info = PageInfo()
+        AppBridge.install(in: &configuration, info: info)
         // Videos play in the page rather than jumping to fullscreen.
         configuration.mediaPlaybackBehavior = .allowsInlinePlayback
         self.page = WebPage(configuration: configuration, navigationDecider: decider, dialogPresenter: dialogs)
@@ -29,6 +33,7 @@ final class MbrWebPage {
         self.target = target
         self.dialogs = dialogs
         self.decider = decider
+        self.info = info
     }
 }
 

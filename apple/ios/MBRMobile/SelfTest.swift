@@ -63,6 +63,7 @@ enum SelfTest {
         case "single": await self.runSingle(session)
         case "config": await self.runConfig(session)
         case "download": await self.runDownload(session)
+        case "deep": await self.runDeep(session)
         case "screens":
             // Unstructured: the sequence leaves the vault screen, which
             // cancels the task that called this.
@@ -154,6 +155,15 @@ enum SelfTest {
         for (name, body) in self.pageChecks {
             await record(name, self.js(session, body))
         }
+        let info = session.web.info
+        let bar = "title=\(info.title) crumbs=\(info.breadcrumbs.count) actions=\(info.actions.map(\.rawValue))"
+        record("nativeBar", (info.title.isEmpty ? "FAIL " : "PASS ") + bar)
+        let opened = await AppBridge.open(.search, in: session.page)
+        await record("bridgeOpen", (opened ? "PASS" : "FAIL") + " search -> \(opened); " + self.js(session, """
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const h = document.querySelector('body > header');
+        return `embedded=${window.__MBR_EMBEDDED__ === true} headerHeight=${h?.getBoundingClientRect().height}`;
+        """))
 
         await record("taskToggle", self.taskToggle(session))
         await record("flashcardReview", self.flashcardReview(session))
