@@ -175,7 +175,14 @@ async fn not_downloaded_files_get_a_retry_answer_and_a_download_request() {
     let page = String::from_utf8(body).unwrap();
     // Drawn as the normal first-access state, not an error page: a progress
     // bar and the note's name, never a big "503".
-    assert!(page.contains("<title>Downloading cloud</title>"), "{page}");
+    assert!(
+        page.contains("<title>cloud</title>"),
+        "the note's name: {page}"
+    );
+    assert!(
+        page.contains("<strong>cloud</strong>"),
+        "the header title: {page}"
+    );
     assert!(page.contains("class=\"mbr-downloading\""), "{page}");
     assert!(page.contains("<progress"), "{page}");
     assert!(page.contains("mbr-downloading-name\">cloud<"), "{page}");

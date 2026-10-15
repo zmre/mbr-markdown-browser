@@ -5424,6 +5424,10 @@ impl Server {
             config.tasks_default_include,
             vec![
                 ("downloading", serde_json::Value::Bool(true)),
+                // The page title is the note the reader tapped: mbr's own header
+                // and the iOS bar (app-bridge.ts reads it) show its name, not
+                // "Downloading".
+                ("title", serde_json::Value::String(note_name.clone())),
                 ("note_name", serde_json::Value::String(note_name)),
                 (
                     "download_provider",

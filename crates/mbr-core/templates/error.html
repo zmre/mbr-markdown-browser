@@ -3,7 +3,7 @@
 <html lang="en">
   <head>
 {% include "_head.html" %}
-    {% if downloading %}<title>Downloading {{ note_name }}</title>{% else %}<title>{{ error_code }} - {{ error_title | default(value="Error") }}</title>{% endif %}
+    {% if downloading %}<title>{{ note_name }}</title>{% else %}<title>{{ error_code }} - {{ error_title | default(value="Error") }}</title>{% endif %}
   </head>
   <body>
 {% include "_nav.html" %}
