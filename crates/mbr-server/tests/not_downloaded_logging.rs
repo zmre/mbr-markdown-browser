@@ -216,10 +216,20 @@ async fn a_real_render_failure_still_logs_an_error() {
             && line.contains("uri=/durian-broken/")),
         "{errors:#?}"
     );
-    assert!(
+    // The backlink index is built by a background task, so its WARN can land
+    // after the requests above return (it did on a loaded CI runner). Wait for
+    // it, bounded, rather than reading the log once.
+    let backlink_warned = || {
         at_level(&lines_about("durian-broken"), "WARN")
             .iter()
-            .any(|line| line.contains("Backlink index: failed to read")),
+            .any(|line| line.contains("Backlink index: failed to read"))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !backlink_warned() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        backlink_warned(),
         "the backlink index still warns about a file it cannot read"
     );
 }
