@@ -52,6 +52,12 @@ const DEFAULT_MAX_ITEMS = 100;
 const MIDDLE_PANE_KEY = 'middle-pane';
 
 /**
+ * Section key for the middle pane's subfolder rows, paged separately from the
+ * notes: a folder in a large repository can hold thousands of subfolders.
+ */
+const MIDDLE_PANE_FOLDERS_KEY = 'middle-pane-folders';
+
+/**
  * Percent-decode a stored URL path, falling back to the raw string on a
  * malformed escape sequence (e.g. a lone `%`) so a bad entry never throws.
  */
@@ -109,6 +115,17 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
   @state()
   private _selectedFiles: MarkdownFile[] = [];
+
+  /**
+   * Direct subfolders of the selected folder, sorted like the tree. Listed
+   * above the notes in the middle pane, so a folder that holds only folders
+   * is not a dead end — on a phone the pane covers the tree entirely.
+   */
+  @state()
+  private _selectedSubfolders: FolderNode[] = [];
+
+  /** The selected folder's node, for its recursive note count. */
+  private _selectedFolderNode: FolderNode | null = null;
 
   // === UI State ===
   @state()
@@ -456,6 +473,31 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     this._activePaneIndex = 1;
   }
 
+  /**
+   * Open a subfolder from the middle pane: the same selection a tap on its
+   * tree row makes, plus expanding the tree down to it so the row is visible
+   * (and highlighted) when the reader goes back to the tree.
+   */
+  private _openSubfolder(node: FolderNode) {
+    const expanded = new Set(this._expandedFolders);
+    expanded.add('/');
+    let accumulated = '';
+    const parts = node.path.split('/').filter(p => p.length > 0);
+    // Ancestors only: tapping a tree label selects without expanding it.
+    for (const part of parts.slice(0, -1)) {
+      accumulated += '/' + part;
+      expanded.add(accumulated + '/');
+    }
+    this._expandedFolders = expanded;
+    this._selectFolder(node.path, node.title || node.name);
+    // The pane element is reused, so its scroll position would carry over
+    // into the new folder's list.
+    void this.updateComplete.then(() => {
+      const content = this.shadowRoot?.querySelector('.middle-pane .pane-content');
+      if (content) content.scrollTop = 0;
+    });
+  }
+
   private _selectFrontmatter(field: string, value: string) {
     this._currentSelection = {
       type: 'frontmatter',
@@ -478,6 +520,8 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     this._currentSelection = null;
     this._showMiddlePane = false;
     this._selectedFiles = [];
+    this._selectedSubfolders = [];
+    this._selectedFolderNode = null;
     this._activePaneIndex = 0;
     this._paginationState = new Map();
   }
@@ -485,6 +529,9 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   private _updateSelectedFiles() {
     // A new selection starts back at the first page of file cards.
     this._paginationState = new Map();
+
+    this._selectedSubfolders = [];
+    this._selectedFolderNode = null;
 
     if (!this._currentSelection) {
       this._selectedFiles = [];
@@ -529,6 +576,13 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
           return true;
         });
+        const node = this._folderTree
+          ? this._findFolderNode(this._folderTree, folderPath)
+          : null;
+        this._selectedFolderNode = node;
+        this._selectedSubfolders = node
+          ? sortFolders([...node.children.values()], this._sortConfig)
+          : [];
         break;
       }
 
@@ -1120,25 +1174,47 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     // match thousands of files, and the pane shows ~8 at a time.
     const pagedFiles = this._getPageItems(this._selectedFiles, MIDDLE_PANE_KEY);
     const hasMore = this._hasMoreItems(this._selectedFiles, MIDDLE_PANE_KEY);
+    const folders = this._selectedSubfolders;
+    const pagedFolders = this._getPageItems(folders, MIDDLE_PANE_FOLDERS_KEY);
+    const hasMoreFolders = this._hasMoreItems(folders, MIDDLE_PANE_FOLDERS_KEY);
+    const isFolder = this._currentSelection?.type === 'folder';
+    const isEmpty = this._selectedFiles.length === 0 && folders.length === 0;
+    // A folder reports the tree's recursive count, so the header agrees with
+    // the row that was tapped; the subfolder rows carry the rest.
+    const count = isFolder && this._selectedFolderNode
+      ? this._selectedFolderNode.fileCount
+      : this._selectedFiles.length;
 
     return html`
       <div class="middle-pane">
         <div class="pane-header">
           <h3>${this._currentSelection?.label || 'Files'}</h3>
-          <span class="pane-count">${this._selectedFiles.length}</span>
+          <span class="pane-count">${count}</span>
           <button class="close-button" @click=${() => this._clearSelection()} aria-label="Close">
             ✕
           </button>
         </div>
 
         <div class="pane-content file-list">
-          ${this._selectedFiles.length === 0 ? html`
-            <div class="no-results">${this._currentSelection?.type === 'folder'
-              // The tree's count includes subfolders, so "no files" beside
-              // a non-zero count needs saying where they are.
-              ? 'No notes directly in this folder. Its subfolders are in the folder tree (▶).'
-              : 'No files found'}</div>
-          ` : pagedFiles.map(file => this._renderFileCard(file))}
+          ${isEmpty ? html`
+            <div class="no-results">${isFolder ? 'This folder is empty' : 'No files found'}</div>
+          ` : nothing}
+          ${folders.length > 0 ? html`
+            <div class="pane-group-label">Folders</div>
+            <ul class="subfolder-list" role="list">
+              ${pagedFolders.map(node => this._renderSubfolderRow(node))}
+            </ul>
+            ${hasMoreFolders ? html`
+              <button class="show-more show-more-folders"
+                @click=${() => this._showMore(MIDDLE_PANE_FOLDERS_KEY)}>
+                Show more folders (${pagedFolders.length} of ${folders.length})...
+              </button>
+            ` : nothing}
+            ${this._selectedFiles.length > 0 ? html`
+              <div class="pane-group-label">Notes</div>
+            ` : nothing}
+          ` : nothing}
+          ${pagedFiles.map(file => this._renderFileCard(file))}
           ${hasMore ? html`
             <button class="show-more" @click=${() => this._showMore(MIDDLE_PANE_KEY)}>
               Show more (${pagedFiles.length} of ${this._selectedFiles.length})...
@@ -1146,6 +1222,20 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           ` : nothing}
         </div>
       </div>
+    `;
+  }
+
+  private _renderSubfolderRow(node: FolderNode): TemplateResult {
+    const label = node.title || node.name;
+    return html`
+      <li>
+        <button class="subfolder-row" @click=${() => this._openSubfolder(node)}>
+          <span class="folder-icon" aria-hidden="true">📁</span>
+          <span class="subfolder-name">${label}</span>
+          <span class="subfolder-count">${node.fileCount}</span>
+          <span class="subfolder-chevron" aria-hidden="true">›</span>
+        </button>
+      </li>
     `;
   }
 
@@ -1323,6 +1413,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 0.5rem;
       padding: 0.75rem 1rem;
       border-bottom: 1px solid var(--pico-muted-border-color, #eee);
       flex-shrink: 0;
@@ -1622,9 +1713,110 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
     }
 
+    /* The current page's card. A tint of the primary colour over the card's
+       own background, not --pico-primary-background: that is the solid fill
+       Pico puts behind --pico-primary-inverse text (dark blue in the default
+       theme), and this card keeps the normal text colours, which were
+       unreadable on it. ~12% keeps body and muted text at AA in both
+       schemes; the accent border carries the "you are here". */
     .file-card.current {
-      border-left: 3px solid var(--pico-primary, #0d6efd);
-      background: var(--pico-primary-background, #e3f2fd);
+      border-left: 4px solid var(--pico-primary, #0d6efd);
+      background: color-mix(
+        in srgb,
+        var(--pico-primary, #0d6efd) 12%,
+        var(--pico-background-color, #fff)
+      );
+      color: var(--pico-color, #333);
+    }
+
+    /* Pico's dark muted grey measured 4.0:1 on the tint (light: 4.5:1). Pulled
+       30% toward the body colour it is ~5.2:1 dark and ~5.6:1 light, and still
+       reads as secondary. */
+    .file-card.current .file-filename,
+    .file-card.current .file-meta,
+    .file-card.current .file-description {
+      color: color-mix(
+        in srgb,
+        var(--pico-muted-color, #666) 70%,
+        var(--pico-color, #333)
+      );
+    }
+
+    /* Subfolders of the selected folder, above its notes */
+    .pane-group-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--pico-muted-color, #666);
+      padding: 0.35rem 0.25rem 0.3rem;
+    }
+
+    .subfolder-list {
+      list-style: none;
+      margin: 0 0 0.5rem;
+      padding: 0;
+      background: var(--pico-background-color, #fff);
+      border: 1px solid var(--pico-muted-border-color, #eee);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .subfolder-list li {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .subfolder-list li + li {
+      border-top: 1px solid var(--pico-muted-border-color, #eee);
+    }
+
+    .subfolder-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      width: 100%;
+      min-height: 2.25rem;
+      margin: 0;
+      padding: 0.4rem 0.75rem;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      cursor: pointer;
+      text-align: left;
+      font-size: 0.875rem;
+      color: var(--pico-color, #333);
+    }
+
+    .subfolder-row:hover,
+    .subfolder-row:focus-visible {
+      background: color-mix(
+        in srgb,
+        var(--pico-primary, #0d6efd) 10%,
+        var(--pico-background-color, #fff)
+      );
+      outline: none;
+    }
+
+    .subfolder-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+
+    .subfolder-count {
+      font-size: 0.7rem;
+      color: var(--pico-muted-color, #666);
+    }
+
+    .subfolder-chevron {
+      color: var(--pico-muted-color, #666);
+      font-size: 1.1rem;
+      line-height: 1;
     }
 
     .file-filename {
@@ -1739,6 +1931,13 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         padding-bottom: env(safe-area-inset-bottom, 0px);
         padding-left: env(safe-area-inset-left, 0px);
         padding-right: env(safe-area-inset-right, 0px);
+      }
+
+      /* Touch-sized rows: on a phone this list is how the reader goes down
+         the tree, since the pane covers it. */
+      .subfolder-row {
+        min-height: 44px;
+        font-size: 1rem;
       }
     }
 
