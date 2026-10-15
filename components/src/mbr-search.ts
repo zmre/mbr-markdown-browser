@@ -1428,6 +1428,15 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       gap: 0.5rem;
     }
 
+    /* On a touch screen with no keyboard the shortcut hints only take space.
+       Browse Media stays: it is a button, only its "=" key cap goes. */
+    @media (hover: none) and (pointer: coarse) {
+      .footer-hint,
+      .media-browser-button kbd {
+        display: none;
+      }
+    }
+
     .footer-hint kbd {
       padding: 0.1rem 0.3rem;
       border: 1px solid var(--pico-muted-border-color, #ccc);

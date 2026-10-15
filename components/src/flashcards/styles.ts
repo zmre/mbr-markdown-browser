@@ -409,6 +409,12 @@ export const DECK_CSS = `
   white-space: nowrap;
 }
 
+/* The hint line is keyboard shortcuts only (aria-hidden, nothing in it to
+   tap): a touch screen without a keyboard gains nothing from it. */
+@media (hover: none) and (pointer: coarse) {
+  .mbr-fc-hints { display: none; }
+}
+
 @media (max-width: 576px) {
   .mbr-fc-title { display: none; }
   .mbr-fc-hints { display: none; }

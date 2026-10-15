@@ -1917,6 +1917,14 @@ export class MbrTasksPanelElement extends LitElement {
       flex-shrink: 0;
     }
 
+    /* Keyboard hints, and nothing else: on a touch screen with no keyboard
+       they only take space. */
+    @media (hover: none) and (pointer: coarse) {
+      .tasks-footer {
+        display: none;
+      }
+    }
+
     .footer-hint {
       font-size: 0.7rem;
       color: var(--pico-muted-color, #999);
