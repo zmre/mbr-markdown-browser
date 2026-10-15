@@ -1016,8 +1016,10 @@ public protocol MbrAppProtocol: AnyObject, Sendable {
     /**
      * Re-lists the vault and applies what changed since the last look —
      * on foreground, pull-to-refresh, or after the app wrote a file through
-     * another route. Waits for the initial indexing first. Cheap: no file is
-     * read unless it changed. Saves the snapshot when something changed.
+     * another route — and does the same for `.mbr/` (see the
+     * [module docs](self)). Waits for the initial indexing first. Cheap: no
+     * file is read unless it changed. Saves the snapshot when something
+     * changed.
      */
     func refresh() async throws  -> RefreshSummary
     
@@ -1228,8 +1230,10 @@ open func isSingleFile() -> Bool  {
     /**
      * Re-lists the vault and applies what changed since the last look —
      * on foreground, pull-to-refresh, or after the app wrote a file through
-     * another route. Waits for the initial indexing first. Cheap: no file is
-     * read unless it changed. Saves the snapshot when something changed.
+     * another route — and does the same for `.mbr/` (see the
+     * [module docs](self)). Waits for the initial indexing first. Cheap: no
+     * file is read unless it changed. Saves the snapshot when something
+     * changed.
      */
 open func refresh()async throws  -> RefreshSummary  {
     return
@@ -1897,6 +1901,29 @@ public struct RefreshSummary: Equatable, Hashable {
      */
     public var changedPages: [String]
     public var durationMs: UInt64
+    /**
+     * `.mbr/config.toml` changed and the vault now runs with it (or with the
+     * defaults, when it no longer parses: see `config_error`). Reload the
+     * page.
+     */
+    public var configReloaded: Bool
+    /**
+     * A template in `.mbr/` (or the template folder) changed and the
+     * templates were reloaded. Reload the page.
+     */
+    public var templatesReloaded: Bool
+    /**
+     * Another file in `.mbr/` changed (`theme.css`, `user.css`, a
+     * component). Assets are read per request, so reloading the page shows
+     * it.
+     */
+    public var assetsChanged: Bool
+    /**
+     * The configuration problem after this refresh, as
+     * [`MbrApp::config_error`] reports it: set when a `config.toml` broke,
+     * cleared when it was fixed.
+     */
+    public var configError: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1919,13 +1946,36 @@ public struct RefreshSummary: Equatable, Hashable {
          * URL paths (`/notes/idea/`) of the notes added, changed or removed: if
          * the page on screen is one of them, reload it; if any were added or
          * removed, the navigation changed too.
-         */changedPages: [String], durationMs: UInt64) {
+         */changedPages: [String], durationMs: UInt64, 
+        /**
+         * `.mbr/config.toml` changed and the vault now runs with it (or with the
+         * defaults, when it no longer parses: see `config_error`). Reload the
+         * page.
+         */configReloaded: Bool, 
+        /**
+         * A template in `.mbr/` (or the template folder) changed and the
+         * templates were reloaded. Reload the page.
+         */templatesReloaded: Bool, 
+        /**
+         * Another file in `.mbr/` changed (`theme.css`, `user.css`, a
+         * component). Assets are read per request, so reloading the page shows
+         * it.
+         */assetsChanged: Bool, 
+        /**
+         * The configuration problem after this refresh, as
+         * [`MbrApp::config_error`] reports it: set when a `config.toml` broke,
+         * cleared when it was fixed.
+         */configError: String?) {
         self.added = added
         self.changed = changed
         self.removed = removed
         self.evicted = evicted
         self.changedPages = changedPages
         self.durationMs = durationMs
+        self.configReloaded = configReloaded
+        self.templatesReloaded = templatesReloaded
+        self.assetsChanged = assetsChanged
+        self.configError = configError
     }
 
     
@@ -1949,7 +1999,11 @@ public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
                 removed: FfiConverterUInt32.read(from: &buf), 
                 evicted: FfiConverterUInt32.read(from: &buf), 
                 changedPages: FfiConverterSequenceString.read(from: &buf), 
-                durationMs: FfiConverterUInt64.read(from: &buf)
+                durationMs: FfiConverterUInt64.read(from: &buf), 
+                configReloaded: FfiConverterBool.read(from: &buf), 
+                templatesReloaded: FfiConverterBool.read(from: &buf), 
+                assetsChanged: FfiConverterBool.read(from: &buf), 
+                configError: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1960,6 +2014,10 @@ public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.evicted, into: &buf)
         FfiConverterSequenceString.write(value.changedPages, into: &buf)
         FfiConverterUInt64.write(value.durationMs, into: &buf)
+        FfiConverterBool.write(value.configReloaded, into: &buf)
+        FfiConverterBool.write(value.templatesReloaded, into: &buf)
+        FfiConverterBool.write(value.assetsChanged, into: &buf)
+        FfiConverterOptionString.write(value.configError, into: &buf)
     }
 }
 
@@ -2578,7 +2636,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mbr_ffi_checksum_method_mbrapp_is_single_file() != 53897) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mbr_ffi_checksum_method_mbrapp_refresh() != 58444) {
+    if (uniffi_mbr_ffi_checksum_method_mbrapp_refresh() != 7628) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_ffi_checksum_method_mbrapp_root_path() != 2722) {

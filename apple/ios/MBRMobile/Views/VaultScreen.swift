@@ -52,6 +52,9 @@ struct VaultScreen: View {
                         ConfigNotice(message: configError) { self.configNoticeDismissed = true }
                     }
                 }
+                // A config that broke (or broke differently) on a refresh is
+                // news: show the notice again.
+                .onChange(of: session.configError) { self.configNoticeDismissed = false }
                 .alert(
                     session.web.dialogs.pending?.isConfirm == true ? "Confirm" : "MBR",
                     isPresented: self.dialogBinding(session.web.dialogs),

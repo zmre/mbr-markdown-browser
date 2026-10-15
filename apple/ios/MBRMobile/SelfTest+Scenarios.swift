@@ -279,4 +279,38 @@ extension SelfTest {
         FileHandle.standardError.write(Data("SCREEN deep\n".utf8))
         self.log("done", "deep")
     }
+
+    // MARK: mbr-reload
+
+    /// `.mbr/` edited while the app is in the background (the host script
+    /// does it: a `user.css` rule and a `title_prefix` in `config.toml`).
+    /// Foregrounding refreshes; the page must reload and show both.
+    static func runMbrReload(_ session: VaultSession) async {
+        let probe = """
+        const h1 = document.querySelector('main h1');
+        return `title=${JSON.stringify(document.title)} h1Color=${h1 ? getComputedStyle(h1).color : 'none'}`;
+        """
+        await self.log("mbr-reload.before", self.js(session, probe))
+        self.log("mbr-reload", "waiting; background the app, edit .mbr/user.css and .mbr/config.toml, foreground it")
+        FileHandle.standardError.write(Data("SCREEN mbr-reload-ready\n".utf8))
+        for _ in 0 ..< 360 where session.lastRefresh?.configReloaded != true {
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        guard let summary = session.lastRefresh, summary.configReloaded else {
+            self.log("mbr-reload.after", "FAIL no refresh reported a config reload")
+            return
+        }
+        // The reload runs right after the summary is recorded.
+        try? await Task.sleep(for: .seconds(2))
+        let after = await self.js(session, probe)
+        let pass = after.contains("RELOADED") && after.contains("rgb(1, 2, 3)")
+        self.log(
+            "mbr-reload.after",
+            "\(pass ? "PASS" : "FAIL") \(after); config=\(summary.configReloaded) "
+                + "templates=\(summary.templatesReloaded) assets=\(summary.assetsChanged) "
+                + "configError=\(summary.configError ?? "none")"
+        )
+        self.log("mbr-reload.bar", "title=\(session.web.info.title)")
+        self.log("done", "mbr-reload")
+    }
 }

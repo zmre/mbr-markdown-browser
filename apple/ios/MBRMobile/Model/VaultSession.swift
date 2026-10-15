@@ -27,7 +27,9 @@ final class VaultSession {
     private(set) var report: OpenReport?
     private(set) var firstPageMs: Int?
     private(set) var lastRefresh: RefreshSummary?
-    let configError: String?
+    /// Why `.mbr/config.toml` is not in use, if it is not. Follows refreshes:
+    /// a config broken or fixed mid-session updates it.
+    private(set) var configError: String?
 
     var page: WebPage {
         self.web.page
@@ -173,37 +175,6 @@ final class VaultSession {
         return nil
     }
 
-    // MARK: History
-
-    /// Whether Back goes to an earlier page of this vault (rather than out to
-    /// the vault list).
-    var canGoBack: Bool {
-        self.page.backForwardList.backList.count > self.historyBase
-    }
-
-    /// This vault's earlier pages, most recent first: the Back button's
-    /// long-press menu.
-    var recentPages: [WebPage.BackForwardList.Item] {
-        Array(self.page.backForwardList.backList.dropFirst(self.historyBase).reversed())
-    }
-
-    /// Web-history back one page.
-    func goBack() async {
-        guard self.canGoBack, let item = self.page.backForwardList.backList.last else { return }
-        await self.go(to: item)
-    }
-
-    /// Jumps to an entry of the back list.
-    func go(to item: WebPage.BackForwardList.Item) async {
-        do {
-            for try await event in self.page.load(item) where event == .finished {
-                break
-            }
-        } catch {
-            Log.info("history: \(item.url.absoluteString) failed: \(error)")
-        }
-    }
-
     func close() {
         self.watchers.forEach { $0.cancel() }
         self.watchers.removeAll()
@@ -215,22 +186,28 @@ final class VaultSession {
 
     /// Re-lists the vault (on foreground, or the refresh button) and reloads
     /// the page when what it shows changed: a WebSocket cannot cross a scheme
-    /// handler, so the app is the live-reload channel.
+    /// handler, so the app is the live-reload channel. That includes the
+    /// vault's `.mbr/` (config, templates, CSS and component overrides). After
+    /// the reload the page reports itself again, so the native bar follows.
     func refresh(reason: String) async {
         do {
             let summary = try await app.refresh()
             self.lastRefresh = summary
+            self.configError = summary.configError
             let shown = self.currentPath
             let pageChanged = shown.map { path in
                 summary.changedPages.contains { Self.samePage($0, path) }
             } ?? false
             let navigationChanged = summary.added > 0 || summary.removed > 0
+            let mbrChanged = summary.configReloaded || summary.templatesReloaded || summary.assetsChanged
             Log.info("refresh (\(reason)): +\(summary.added) ~\(summary.changed) -\(summary.removed) "
                 + "evicted=\(summary.evicted) in \(summary.durationMs)ms; changedPages=\(summary.changedPages); "
+                + ".mbr: config=\(summary.configReloaded) templates=\(summary.templatesReloaded) "
+                + "assets=\(summary.assetsChanged) configError=\(summary.configError ?? "none"); "
                 + "shown=\(shown ?? "-")")
-            if pageChanged || navigationChanged {
-                Log.info("refresh: reloading \(shown ?? "page") ("
-                    + (pageChanged ? "page changed" : "files added or removed") + ")")
+            if pageChanged || navigationChanged || mbrChanged {
+                let why = pageChanged ? "page changed" : navigationChanged ? "files added or removed" : ".mbr/ changed"
+                Log.info("refresh: reloading \(shown ?? "page") (\(why))")
                 // The native reload rather than `location.reload()` from
                 // script, so this returns once the page has reloaded and
                 // nothing that follows races the navigation.
@@ -324,5 +301,38 @@ final class VaultSession {
         self.webKitHonoursRefresh = false
         Log.info("downloading: retry \(attempt) of \(url.path())")
         await self.load(url, label: "downloading retry")
+    }
+}
+
+// MARK: History
+
+extension VaultSession {
+    /// Whether Back goes to an earlier page of this vault (rather than out to
+    /// the vault list).
+    var canGoBack: Bool {
+        self.page.backForwardList.backList.count > self.historyBase
+    }
+
+    /// This vault's earlier pages, most recent first: the Back button's
+    /// long-press menu.
+    var recentPages: [WebPage.BackForwardList.Item] {
+        Array(self.page.backForwardList.backList.dropFirst(self.historyBase).reversed())
+    }
+
+    /// Web-history back one page.
+    func goBack() async {
+        guard self.canGoBack, let item = self.page.backForwardList.backList.last else { return }
+        await self.go(to: item)
+    }
+
+    /// Jumps to an entry of the back list.
+    func go(to item: WebPage.BackForwardList.Item) async {
+        do {
+            for try await event in self.page.load(item) where event == .finished {
+                break
+            }
+        } catch {
+            Log.info("history: \(item.url.absoluteString) failed: \(error)")
+        }
     }
 }

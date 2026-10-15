@@ -25,6 +25,12 @@
 //!   the page (with `evaluateJavaScript("location.reload()")`, since a
 //!   WebSocket cannot cross a scheme handler) when the summary says the shown
 //!   page or the navigation changed.
+//! - **`.mbr/`**: the same refresh notices edits to the vault's `.mbr/` folder
+//!   (and a `template_folder`) from a stat-only fingerprint ([`mbr_dir`]):
+//!   templates reload in place, a changed `config.toml` rebuilds the server
+//!   inside this `MbrApp` (same vault, cache, identity and coordinator; the
+//!   index carried over unless the scan configuration changed), and asset
+//!   overrides need nothing but the page reload.
 //!
 //! Everything compiles on every platform with the `mobile` feature; the
 //! UniFFI exports and the dataless-file handling are Apple-only.
@@ -33,12 +39,13 @@ mod coordinated_vault;
 mod coordinator;
 mod index_cache;
 mod iopolicy;
+mod mbr_dir;
 mod runtime;
 mod single_file;
 mod transport;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use axum::Router;
@@ -54,6 +61,7 @@ pub use single_file::SingleFileVault;
 pub use transport::{MOBILE_HOST, MbrResponse, MobileHeader};
 
 use index_cache::IndexCache;
+use mbr_dir::MbrStamp;
 use runtime::BackgroundRuntime;
 
 /// Log filter for the in-process server (stdout ends up in the device log).
@@ -99,12 +107,32 @@ pub struct RefreshSummary {
     /// removed, the navigation changed too.
     pub changed_pages: Vec<String>,
     pub duration_ms: u64,
+    /// `.mbr/config.toml` changed and the vault now runs with it (or with the
+    /// defaults, when it no longer parses: see `config_error`). Reload the
+    /// page.
+    pub config_reloaded: bool,
+    /// A template in `.mbr/` (or the template folder) changed and the
+    /// templates were reloaded. Reload the page.
+    pub templates_reloaded: bool,
+    /// Another file in `.mbr/` changed (`theme.css`, `user.css`, a
+    /// component). Assets are read per request, so reloading the page shows
+    /// it.
+    pub assets_changed: bool,
+    /// The configuration problem after this refresh, as
+    /// [`MbrApp::config_error`] reports it: set when a `config.toml` broke,
+    /// cleared when it was fixed.
+    pub config_error: Option<String>,
 }
 
 impl RefreshSummary {
     /// Whether anything a reader could see changed.
     pub fn is_empty(&self) -> bool {
         self.added == 0 && self.changed == 0 && self.removed == 0
+    }
+
+    /// Whether anything in `.mbr/` changed what pages look like.
+    pub fn mbr_changed(&self) -> bool {
+        self.config_reloaded || self.templates_reloaded || self.assets_changed
     }
 }
 
@@ -135,17 +163,79 @@ pub struct OpenReport {
 pub struct MbrApp {
     /// Declared first so it is dropped last: the server's tasks run on it.
     runtime: BackgroundRuntime,
-    router: Router,
-    server: Arc<Server>,
+    /// The server for the current configuration. Replaced, whole, when a
+    /// refresh finds `.mbr/config.toml` changed; requests already running
+    /// finish on the one they started with.
+    served: Arc<RwLock<Arc<Served>>>,
+    /// The storage every server of this vault reads, kept for a rebuild.
+    vault: Arc<dyn Vault>,
     root: PathBuf,
-    pages: PageUrls,
     /// Where `/` redirects (a single-file vault's page).
     home: Option<String>,
     cache: Option<IndexCache>,
     ready: tokio::sync::watch::Receiver<Option<OpenReport>>,
     /// Serializes refreshes, snapshot saves and the initial indexing.
     index_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// One configuration's server and what was derived with it.
+struct Served {
+    router: Router,
+    server: Arc<Server>,
+    pages: PageUrls,
+    /// The configuration it runs with (mobile overrides applied), to tell a
+    /// `config.toml` that was only touched from one that changed.
+    config: Config,
     config_error: Option<String>,
+    /// `.mbr/` as of the last look. Moves forward on every refresh that
+    /// finds a change, so each change is acted on once.
+    stamp: std::sync::Mutex<MbrStamp>,
+}
+
+impl Served {
+    /// Builds the server for `loaded` over `vault`. Must run inside the
+    /// vault's runtime: `Server::init` spawns its scan and index tasks.
+    fn build(
+        root: &Path,
+        loaded: LoadedConfig,
+        vault: Arc<dyn Vault>,
+        snapshot: Option<mbr_core::repo::RepoSnapshot>,
+        stamp: MbrStamp,
+    ) -> Result<Self, MobileError> {
+        let LoadedConfig {
+            config,
+            error: config_error,
+        } = loaded;
+        let server_config = ServerConfig {
+            base_dir: root.to_path_buf(),
+            embedded: Some(EmbeddedStorage { vault, snapshot }),
+            config_problem: config_error.clone(),
+            ..ServerConfig::from(&config).with_log_filter(Some(LOG_FILTER))
+        };
+        let server = Arc::new(Server::init(server_config).map_err(open_error)?);
+        let pages = PageUrls {
+            root: server.repo().vault().root().to_path_buf(),
+            index_file: config.index_file.clone(),
+            markdown_extensions: config.markdown_extensions.clone(),
+        };
+        Ok(Self {
+            router: server.router.clone(),
+            server,
+            pages,
+            config,
+            config_error,
+            stamp: std::sync::Mutex::new(stamp),
+        })
+    }
+}
+
+/// The server in `slot` now.
+fn current(slot: &RwLock<Arc<Served>>) -> Arc<Served> {
+    Arc::clone(
+        &slot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 /// The configuration a vault opens with, and why the repository's own was
@@ -308,7 +398,7 @@ impl MbrApp {
     /// Why the vault's `.mbr/config.toml` was not used (it opened with the
     /// default configuration), or `None` when it loaded or there is none.
     pub fn config_error(&self) -> Option<String> {
-        self.config_error.clone()
+        current(&self.served).config_error.clone()
     }
 
     /// The index snapshot's file, when the vault keeps one.
@@ -331,7 +421,7 @@ impl MbrApp {
         body: Vec<u8>,
     ) -> Result<Arc<MbrResponse>, MobileError> {
         let request = transport::build_request(&method, &url, &headers, body)?;
-        let router = self.router.clone();
+        let router = current(&self.served).router.clone();
         let home = self.home.clone();
         let runtime = self.runtime.handle().clone();
         // Spawned rather than awaited in place: the caller's executor is
@@ -366,21 +456,35 @@ impl MbrApp {
 
     /// Re-lists the vault and applies what changed since the last look —
     /// on foreground, pull-to-refresh, or after the app wrote a file through
-    /// another route. Waits for the initial indexing first. Cheap: no file is
-    /// read unless it changed. Saves the snapshot when something changed.
+    /// another route — and does the same for `.mbr/` (see the
+    /// [module docs](self)). Waits for the initial indexing first. Cheap: no
+    /// file is read unless it changed. Saves the snapshot when something
+    /// changed.
     pub async fn refresh(&self) -> Result<RefreshSummary, MobileError> {
-        let server = Arc::clone(&self.server);
         let lock = Arc::clone(&self.index_lock);
         let cache = self.cache.clone();
-        let pages = self.pages.clone();
+        let slot = Arc::clone(&self.served);
+        let vault = Arc::clone(&self.vault);
+        let root = self.root.clone();
+        // A file opened in place sees nothing but itself: its folder's
+        // `.mbr/` is outside the grant.
+        let watch_mbr = self.home.is_none();
         self.on_runtime(async move {
             let _guard = lock.lock().await;
             let started = Instant::now();
-            let diff = server.refresh().await;
-            let summary = pages.summarize(&diff, started);
-            if !diff.is_empty() || !diff.evicted.is_empty() {
-                save_snapshot(&server, cache.as_ref()).await;
+            let served = current(&slot);
+            let diff = served.server.refresh().await;
+            let mut summary = served.pages.summarize(&diff, started);
+            let mut save = !diff.is_empty() || !diff.evicted.is_empty();
+            if watch_mbr {
+                save |= refresh_mbr(&slot, &served, &vault, &root, &mut summary).await;
             }
+            let served = current(&slot);
+            summary.config_error = served.config_error.clone();
+            if save {
+                save_snapshot(&served.server, cache.as_ref()).await;
+            }
+            summary.duration_ms = millis(started);
             summary
         })
         .await
@@ -389,7 +493,7 @@ impl MbrApp {
     /// Writes the index snapshot now (for instance as the app goes to the
     /// background). A no-op without a cache directory.
     pub async fn flush_index(&self) -> Result<(), MobileError> {
-        let server = Arc::clone(&self.server);
+        let server = Arc::clone(&current(&self.served).server);
         let lock = Arc::clone(&self.index_lock);
         let cache = self.cache.clone();
         self.on_runtime(async move {
@@ -410,29 +514,23 @@ impl MbrApp {
         home: Option<String>,
         started: Instant,
     ) -> Result<Arc<Self>, MobileError> {
-        let LoadedConfig {
-            config,
-            error: config_error,
-        } = loaded;
         let runtime = runtime::build().map_err(|e| open_error(format!("tokio runtime: {e}")))?;
-        let server_config = ServerConfig {
-            base_dir: root.clone(),
-            embedded: Some(EmbeddedStorage { vault, snapshot }),
-            config_problem: config_error.clone(),
-            ..ServerConfig::from(&config).with_log_filter(Some(LOG_FILTER))
+        // What `.mbr/` looks like now, so a refresh can tell what changed. A
+        // single file opened in place has no `.mbr/` in reach.
+        let stamp = if home.is_none() {
+            MbrStamp::take(&root, loaded.config.template_folder.as_deref())
+        } else {
+            MbrStamp::default()
         };
         // `Server::init` spawns its scan and index tasks, so it runs inside
         // the runtime's context.
-        let server = {
+        let served = {
             let _guard = runtime.enter();
-            Server::init(server_config).map_err(open_error)?
+            Served::build(&root, loaded, Arc::clone(&vault), snapshot, stamp)?
         };
-        let server = Arc::new(server);
-        let pages = PageUrls {
-            root: server.repo().vault().root().to_path_buf(),
-            index_file: config.index_file.clone(),
-            markdown_extensions: config.markdown_extensions.clone(),
-        };
+        let server = Arc::clone(&served.server);
+        let pages = served.pages.clone();
+        let config_error = served.config_error.clone();
         let (ready_tx, ready) = tokio::sync::watch::channel(None);
         let index_lock = Arc::new(tokio::sync::Mutex::new(()));
         // Taken here, not in the task, so a `refresh` that arrives before the
@@ -441,25 +539,23 @@ impl MbrApp {
             .try_lock_owned()
             .map_err(|e| open_error(format!("index lock: {e}")))?;
         runtime.spawn(initial_indexing(
-            Arc::clone(&server),
+            server,
             cache.clone(),
-            pages.clone(),
+            pages,
             started,
-            config_error.clone(),
+            config_error,
             guard,
             ready_tx,
         ));
         Ok(Arc::new(Self {
-            router: server.router.clone(),
-            server,
+            served: Arc::new(RwLock::new(Arc::new(served))),
+            vault,
             runtime: BackgroundRuntime::new(runtime),
             root,
-            pages,
             home,
             cache,
             ready,
             index_lock,
-            config_error,
         }))
     }
 
@@ -504,6 +600,10 @@ async fn initial_indexing(
         }
         None => (RefreshSummary::default(), false),
     };
+    let refresh = RefreshSummary {
+        config_error: config_error.clone(),
+        ..refresh
+    };
     // A restored index that nothing changed is the snapshot already on disk.
     if !unchanged {
         save_snapshot(&server, cache.as_ref()).await;
@@ -520,6 +620,131 @@ async fn initial_indexing(
     tracing::info!("Vault ready: {report:?}");
     drop(guard);
     let _ = ready.send(Some(report));
+}
+
+/// The `.mbr/` half of [`MbrApp::refresh`]: stamps `.mbr/` (stats only) and
+/// acts on what changed since the last look. Fills the summary's `.mbr/`
+/// fields; `true` when the snapshot should be saved (a rebuild).
+///
+/// Which change takes which path:
+///
+/// - **`config.toml`**: every field. The server copies its configuration into
+///   the router's state at `Server::init` and nothing there is mutable, so
+///   there is no field that can be applied in place: theme, sort,
+///   `index_file`, sidebar, tag sources, tasks, ignore globs alike. The vault
+///   is reopened inside this `MbrApp` ([`rebuild`]), carrying the index over.
+///   A `config.toml` that was only touched (same configuration once parsed)
+///   changes nothing.
+/// - **Templates**: reloaded in place, with the desktop watcher's own reload
+///   (`Server::reload_templates`). Skipped when a rebuild already read them.
+/// - **Other files** (`theme.css`, `user.css`, `components/*.js`, …):
+///   nothing to do server-side. `/.mbr/*` assets are read per request with
+///   `no-cache`; the summary tells the app to reload the page.
+async fn refresh_mbr(
+    slot: &RwLock<Arc<Served>>,
+    served: &Arc<Served>,
+    vault: &Arc<dyn Vault>,
+    root: &Path,
+    summary: &mut RefreshSummary,
+) -> bool {
+    let stamp_root = root.to_path_buf();
+    let template_folder = served.config.template_folder.clone();
+    let now = tokio::task::spawn_blocking(move || {
+        MbrStamp::take(&stamp_root, template_folder.as_deref())
+    })
+    .await
+    .unwrap_or_default();
+    let changes = {
+        let mut seen = served
+            .stamp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = now.changes_since(&seen);
+        *seen = now.clone();
+        changes
+    };
+    if !changes.any() {
+        return false;
+    }
+    tracing::info!("{} changed: {changes:?}", root.join(".mbr").display());
+    let mut rebuilt = false;
+    if changes.config {
+        match rebuild(root, vault, served, now).await {
+            Ok(Some(next)) => {
+                *slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+                summary.config_reloaded = true;
+                rebuilt = true;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("Could not reopen with the changed configuration: {e}"),
+        }
+    }
+    if changes.templates && !rebuilt {
+        summary.templates_reloaded = served.server.reload_templates();
+    }
+    summary.assets_changed = changes.assets;
+    rebuilt
+}
+
+/// The server for `.mbr/config.toml` as it is now, when that differs from
+/// what `served` runs with; `None` when the file changed but its
+/// configuration did not.
+///
+/// Same vault, so the same coordinator and grant; the caller keeps the same
+/// cache and identity. The index is handed over as a snapshot, which the new
+/// server restores without a scan unless the scan configuration (ignore
+/// globs, markdown extensions, static folder, …) changed, in which case its
+/// fingerprint no longer matches and it rescans, as it should. Read with the
+/// open's fallback: a `config.toml` that no longer parses gives the defaults
+/// plus its error, and fixing it clears the error.
+async fn rebuild(
+    root: &Path,
+    vault: &Arc<dyn Vault>,
+    served: &Arc<Served>,
+    stamp: MbrStamp,
+) -> Result<Option<Served>, MobileError> {
+    let started = Instant::now();
+    let read_root = root.to_path_buf();
+    let loaded = tokio::task::spawn_blocking(move || {
+        let mut loaded = LoadedConfig::read(&read_root);
+        apply_mobile_overrides(&mut loaded.config, &read_root);
+        loaded
+    })
+    .await
+    .map_err(|e| MobileError::Internal {
+        message: format!("config read: {e}"),
+    })?;
+    if same_config(&loaded.config, &served.config) && loaded.error == served.config_error {
+        tracing::info!("config.toml changed on disk, but not its configuration");
+        return Ok(None);
+    }
+    let repo = Arc::clone(served.server.repo());
+    let snapshot = tokio::task::spawn_blocking(move || repo.snapshot())
+        .await
+        .map_err(|e| MobileError::Internal {
+            message: format!("index snapshot: {e}"),
+        })?;
+    let next = Served::build(root, loaded, Arc::clone(vault), Some(snapshot), stamp)?;
+    next.server.repo().wait_for_media().await;
+    tracing::info!(
+        "Reopened with the changed configuration in {}ms ({})",
+        millis(started),
+        match next.server.restored_files() {
+            Some(files) => format!("index carried over, {files} files"),
+            None => "scan configuration changed, rescanned".to_owned(),
+        }
+    );
+    Ok(Some(next))
+}
+
+/// Whether two configurations are the same, field for field.
+fn same_config(a: &Config, b: &Config) -> bool {
+    match (serde_json::to_value(a), serde_json::to_value(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Writes the repository's snapshot to `cache`, off the async threads.
@@ -576,6 +801,7 @@ impl PageUrls {
             evicted: count(&diff.evicted),
             changed_pages,
             duration_ms: millis(started),
+            ..RefreshSummary::default()
         }
     }
 }

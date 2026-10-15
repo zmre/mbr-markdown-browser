@@ -64,6 +64,7 @@ enum SelfTest {
         case "config": await self.runConfig(session)
         case "download": await self.runDownload(session)
         case "deep": await self.runDeep(session)
+        case "mbr-reload": await self.runMbrReload(session)
         case "screens":
             // Unstructured: the sequence leaves the vault screen, which
             // cancels the task that called this.

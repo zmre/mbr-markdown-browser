@@ -1125,6 +1125,9 @@ pub struct Server {
     changes: ChangeApplier,
     /// Files restored from [`EmbeddedStorage::snapshot`], when it was used.
     restored_files: Option<usize>,
+    /// The templates the router renders with (shared: a reload is seen by
+    /// every request), for [`Server::reload_templates`].
+    templates: mbr_core::templates::Templates,
 }
 
 /// Where the background thread parks the file watcher once it is running.
@@ -2502,6 +2505,7 @@ impl Server {
 
         // Spawn background task to reload templates when .html files change
         let templates_for_reload = templates.clone();
+        let templates_for_server = templates.clone();
         // Canonicalize once here, not per event: the watcher reports canonical
         // paths while the configured folder is stored as written, and this
         // cannot change for the life of the process. Fall back to the path as
@@ -2531,9 +2535,7 @@ impl Server {
                 // Otherwise, only reload for changes in .mbr folder
                 if should_reload_template(&event.path, template_folder_for_reload.as_deref()) {
                     tracing::debug!("Template file changed: {}", event.path);
-                    if let Err(e) = templates_for_reload.reload() {
-                        tracing::error!("Failed to reload templates: {}", e);
-                    }
+                    reload_templates(&templates_for_reload);
                 }
             }
         });
@@ -2813,7 +2815,16 @@ impl Server {
             repo: repo_for_server,
             changes: change_applier,
             restored_files,
+            templates: templates_for_server,
         })
+    }
+
+    /// Re-reads the templates from `.mbr/` (or the template folder), as the
+    /// desktop watcher does when an `.html` file there changes. For an
+    /// embedder without a watcher (the iOS app's refresh). A template that
+    /// does not parse keeps the previous set and is logged; `false` then.
+    pub fn reload_templates(&self) -> bool {
+        reload_templates(&self.templates)
     }
 
     /// The repository index this server serves.
@@ -7910,6 +7921,18 @@ impl Server {
 /// Comparison is component-wise via [`Path::starts_with`], not a string prefix
 /// test: `"/x/tmpl-backup/index.html"` textually starts with `"/x/tmpl"` but is
 /// a sibling directory, not a template.
+/// Reloads `templates`, logging a failure: the watcher's template task and
+/// [`Server::reload_templates`] share it. `false` when the reload failed.
+fn reload_templates(templates: &mbr_core::templates::Templates) -> bool {
+    match templates.reload() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!("Failed to reload templates: {}", e);
+            false
+        }
+    }
+}
+
 fn should_reload_template(event_path: &str, template_folder: Option<&Path>) -> bool {
     match template_folder {
         Some(tf) => Path::new(event_path).starts_with(tf),
