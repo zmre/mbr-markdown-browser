@@ -97,6 +97,10 @@ targets:
         # Most of the (large) Rust staticlib is unreachable from the FFI
         # surface; let the linker drop it.
         DEAD_CODE_STRIPPING: YES
+        # MBRMobile/Assets.xcassets/AppIcon.appiconset: one 1024x1024 opaque
+        # PNG (the macOS icon's tree, cropped full-bleed); Xcode derives the
+        # other sizes.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
   # UI tests for what only a tap can open (the native bar's menus, the home
   # screen icon); `./build.sh uitest` runs them and screenshots each state.
