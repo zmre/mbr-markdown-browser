@@ -43,17 +43,53 @@ included. For remote access, see [Remote editing](#remote-editing).
    editor; any **YAML frontmatter** is shown in a separate raw-text field (open
    the "YAML frontmatter" section to edit it). Frontmatter is preserved
    verbatim — comments and key order are not reformatted.
-3. Click **Save**. On success the file is written and the page live-reloads.
-4. Press `Esc` or click outside the modal to close it.
+3. Click **Save** (top right) or press `Cmd+S` / `Ctrl+S`. On success the file
+   is written and the page reloads to show it.
+4. Click **Cancel** (top left), press `Esc`, or click outside the editor to
+   close it. If you have unsaved changes you are asked whether to **Save**,
+   **Discard** or keep editing (**Cancel**) — nothing is thrown away silently.
+
+The editor is laid out like a native editing sheet at every width: **Cancel**
+on the left, the note's name (with its folder underneath) in the middle, and a
+**⋯** menu plus **Save** on the right. The ⋯ menu holds the file actions —
+**New note…**, **Rename…** and **Move…** (see
+[below](#creating--renaming--and-moving-files)). The bar along the bottom holds
+the formatting tools that are not in Crepe's own menus: **Footnote** and
+**Media**. On a phone the editor fills the screen, and the path pickers open as
+sheets from the bottom.
+
+### Starting a new note
+
+In the editor, ⋯ → **New note…** asks for a path, prefilled with the note's own
+folder, creates the file with an `# Title` heading taken from its name, and
+opens it with the editor already up.
+
+The same flow can also start without an editor open, from any page while
+editing is on — folder listings and the home page included. In a browser there
+is no button for it; the `<mbr-editor>` element exposes it as `openNew()` (with
+`canCreate` saying whether it is available), and the iOS app's menu calls it.
+There the path is prefilled with the folder you are in: the note's folder on a
+note page, the listed folder on a listing, nothing at the root.
+
+Opening the new note with the editor up is the `#mbr-edit` fragment: any
+editable note's URL with `#mbr-edit` on the end opens the editor straight away,
+and the fragment is removed from the address bar so a reload does not reopen
+it.
+
+On a token-protected server the token is held in page memory only (see
+[Entering the token](#entering-the-token)), so it does not survive the move to
+the new note: the new note asks for it again on its first save. A **New note**
+started outside the editor has no token field to offer; if it is refused, open
+the editor on a note, enter the token there, and use ⋯ → **New note…**.
 
 ### Editing media
 
-To embed an image, video, audio clip, or PDF, click **Insert media** in the
-footer and pick a file. To change an embed that's already in the document,
-**double-click it** — the media picker reopens prefilled with its current file
-and caption so you can swap the file or edit the caption. You can also place the
-cursor on (or next to) an embed and use the footer button: when an embed is the
-current target it reads **Edit media** instead of **Insert media**.
+To embed an image, video, audio clip, or PDF, click **Media** in the bar at
+the bottom of the editor and pick a file. To change an embed that's already in
+the document, **double-click it** — the media picker reopens prefilled with its
+current file and caption so you can swap the file or edit the caption. You can
+also place the cursor on (or next to) an embed and use the same button: when an
+embed is the current target it reads **Edit media** instead of **Media**.
 
 ### Error handling
 
@@ -70,11 +106,13 @@ markdown files, create folders, and rename or move files. These operations are
 **server/GUI-mode only** and gated by the same access checks as editing (see
 [Security model](#security-model)); the editor does **not** delete files.
 
-- **New file** — create a markdown file at a chosen destination path. Missing
-  parent folders can be created as part of the request.
+- **New file** — create a markdown file at a chosen destination path (⋯ →
+  **New note…** in the editor; see [Starting a new note](#starting-a-new-note)).
+  Missing parent folders can be created as part of the request. The new note
+  opens in the editor.
 - **New folder** — create an (empty) directory. Creating an existing folder is a
   no-op, so it is safe to retry.
-- **Rename / move** — move a markdown file to a new path (a rename is just a move
+- **Rename / move** — ⋯ → **Rename…** or **Move…** in the editor; moves a markdown file to a new path (a rename is just a move
   to a new filename in the same folder). Moving a file **automatically rewrites
   links across the whole repository** so nothing breaks:
   - Inbound links to the moved page — inline `[text](path)`, reference
@@ -188,10 +226,10 @@ edit_token_hash = "$argon2id$v=19$m=19456,t=2,p=1$...."
 
 ### Entering the token
 
-The editor's footer has a token field. It is hidden until there is a reason for
-it, and revealed automatically when something is refused for want of a token —
-including a task checkbox, so "open the editor and enter it" always leads to a
-visible field.
+The editor's bottom bar has a token field. It is hidden until there is a reason
+for it, and revealed automatically when something is refused for want of a
+token — including a task checkbox or a **New note** started outside the editor,
+so "open the editor and enter it" always leads to a visible field.
 
 The token is held **in memory only, for as long as the page is open**. It is
 never written to `localStorage` or `sessionStorage`: mbr renders arbitrary
@@ -206,7 +244,8 @@ token-protected server:
   toggle on that page.
 - Saving in the editor *does* reload (that is the point — the whole document was
   rewritten), so the next write after a save asks for the token again.
-- Navigating to another page asks again.
+- Navigating to another page asks again — including the jump to a note you have
+  just created.
 
 ## Remote editing
 
@@ -271,4 +310,5 @@ flags.
 | Key | Action |
 |-----|--------|
 | `e` | Open the editor for the current file (when editing is enabled) |
-| `Esc` | Close the editor |
+| `Cmd+S` / `Ctrl+S` | Save |
+| `Esc` | Close the ⋯ menu, else close the editor (asking first about unsaved changes) |

@@ -218,7 +218,7 @@ extension SelfTest {
         try? await Task.sleep(for: .seconds(4))
         await screen("editor")
         _ = await self.js(session, """
-        document.querySelector('.mbr-editor-close')?.click();
+        document.querySelector('.mbr-editor-cancel')?.click();
         return 'ok';
         """)
         try? await Task.sleep(for: .seconds(1))

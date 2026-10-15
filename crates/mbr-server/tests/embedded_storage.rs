@@ -407,3 +407,168 @@ async fn an_edit_survives_a_momentary_stat_failure_on_its_note() {
     let text = String::from_utf8(inner.contents("notes.md").unwrap()).unwrap();
     assert!(text.contains("- [x] one"), "{text}");
 }
+
+/// A real folder whose chosen files a "cloud provider" has not downloaded:
+/// what the iOS app's `CoordinatedVault` reports for a dataless iCloud file.
+/// The bytes are on disk (so a read would succeed); only `availability` says
+/// otherwise, until `request_download` — when `arrive_on_request` — brings
+/// them in.
+#[derive(Debug)]
+struct CloudyVault {
+    local: mbr_core::vault::LocalVault,
+    pending: std::sync::Mutex<std::collections::HashSet<VaultPath>>,
+    arrive_on_request: bool,
+    downloads: std::sync::Mutex<Vec<VaultPath>>,
+}
+
+impl Vault for CloudyVault {
+    fn root(&self) -> &std::path::Path {
+        self.local.root()
+    }
+    fn stat(
+        &self,
+        path: &VaultPath,
+    ) -> Result<Option<mbr_core::vault::Entry>, mbr_core::vault::VaultError> {
+        self.local.stat(path)
+    }
+    fn list_dir(
+        &self,
+        dir: &VaultPath,
+    ) -> Result<Vec<mbr_core::vault::Entry>, mbr_core::vault::VaultError> {
+        self.local.list_dir(dir)
+    }
+    fn canonicalize(&self, path: &VaultPath) -> Result<VaultPath, mbr_core::vault::VaultError> {
+        self.local.canonicalize(path)
+    }
+    fn read(&self, path: &VaultPath) -> Result<Vec<u8>, mbr_core::vault::VaultError> {
+        self.local.read(path)
+    }
+    fn read_prefix(
+        &self,
+        path: &VaultPath,
+        max_len: usize,
+    ) -> Result<Vec<u8>, mbr_core::vault::VaultError> {
+        self.local.read_prefix(path, max_len)
+    }
+    fn availability(&self, path: &VaultPath) -> Availability {
+        if self.pending.lock().unwrap().contains(path) {
+            Availability::NotDownloaded
+        } else {
+            self.local.availability(path)
+        }
+    }
+    fn write_atomic(
+        &self,
+        path: &VaultPath,
+        bytes: &[u8],
+    ) -> Result<(), mbr_core::vault::VaultError> {
+        self.local.write_atomic(path, bytes)
+    }
+    fn create_dir_all(&self, path: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.local.create_dir_all(path)
+    }
+    fn remove_file(&self, path: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.local.remove_file(path)
+    }
+    fn rename(&self, from: &VaultPath, to: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.local.rename(from, to)
+    }
+    fn request_download(&self, paths: &[VaultPath]) {
+        self.downloads.lock().unwrap().extend_from_slice(paths);
+        if self.arrive_on_request {
+            let mut pending = self.pending.lock().unwrap();
+            paths.iter().for_each(|p| {
+                pending.remove(p);
+            });
+        }
+    }
+    fn local_path(&self, path: &VaultPath) -> Option<std::path::PathBuf> {
+        self.local.local_path(path)
+    }
+}
+
+/// A folder with `.mbr/user.css` and a server over `vault_for(folder)`.
+async fn mbr_asset_server(
+    vault_for: impl FnOnce(&std::path::Path) -> Arc<dyn Vault>,
+) -> (tempfile::TempDir, Server) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".mbr")).unwrap();
+    std::fs::write(dir.path().join(".mbr/user.css"), "body { color: teal }").unwrap();
+    std::fs::write(dir.path().join("note.md"), "# Note\n").unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut config = ServerConfig::from(&Config::default());
+    config.base_dir = root.clone();
+    config.oembed_timeout_ms = 0;
+    config.embedded = Some(EmbeddedStorage {
+        vault: vault_for(&root),
+        snapshot: None,
+    });
+    let server = Server::init(config).expect("init");
+    server.repo().wait_for_media().await;
+    (dir, server)
+}
+
+fn cloudy(root: &std::path::Path, arrive_on_request: bool) -> Arc<CloudyVault> {
+    Arc::new(CloudyVault {
+        local: mbr_core::vault::LocalVault::new(root),
+        pending: std::sync::Mutex::new(
+            [VaultPath::new(".mbr/user.css").unwrap()]
+                .into_iter()
+                .collect(),
+        ),
+        arrive_on_request,
+        downloads: std::sync::Mutex::new(Vec::new()),
+    })
+}
+
+/// Regression (iOS, vault in iCloud Drive): a dataless `.mbr/user.css` was
+/// read straight off disk, failed with `EDEADLK` and answered 500 — and,
+/// `.mbr/` being hidden from the scan, nothing ever asked for its download.
+/// Now it is requested and, when it does not arrive in time, a 503 asks the
+/// page to retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_not_downloaded_mbr_asset_is_requested_and_answers_retry() {
+    let vault = std::sync::OnceLock::new();
+    let (_dir, server) = mbr_asset_server(|root| {
+        let cloudy = cloudy(root, false);
+        vault.set(Arc::clone(&cloudy)).unwrap();
+        cloudy
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let (status, headers, _) = send(&server, get("/.mbr/user.css")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers[header::RETRY_AFTER], "2");
+    assert!(
+        started.elapsed() >= Duration::from_millis(2500),
+        "waited for the download first: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        *vault.get().unwrap().downloads.lock().unwrap(),
+        vec![VaultPath::new(".mbr/user.css").unwrap()],
+        "asked for exactly once"
+    );
+}
+
+/// The same asset, arriving while the request waits: served, no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_not_downloaded_mbr_asset_that_arrives_in_time_is_served() {
+    let (_dir, server) = mbr_asset_server(|root| cloudy(root, true)).await;
+    let (status, _, body) = send(&server, get("/.mbr/user.css")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"body { color: teal }");
+}
+
+/// The desktop's own vault: a `.mbr/` asset is read at once, as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_mbr_asset_is_served_without_waiting() {
+    let (_dir, server) =
+        mbr_asset_server(|root| Arc::new(mbr_core::vault::LocalVault::new(root)) as Arc<dyn Vault>)
+            .await;
+    let started = std::time::Instant::now();
+    let (status, _, body) = send(&server, get("/.mbr/user.css")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"body { color: teal }");
+    assert!(started.elapsed() < Duration::from_secs(1));
+}

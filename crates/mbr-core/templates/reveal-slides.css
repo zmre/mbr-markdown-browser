@@ -23,6 +23,38 @@ body.slides-container .reveal {
   width: 100vw;
 }
 
+/* In the iOS app the body keeps its padding for the native bar (theme.css,
+ * `html.mbr-embedded body`), so the deck takes the rest: a full 100vh would
+ * push Reveal's controls and progress bar below the clipped bottom edge. */
+html.mbr-embedded body.slides-container .reveal {
+  height: calc(100vh - env(safe-area-inset-top, 0px));
+  height: calc(100dvh - env(safe-area-inset-top, 0px));
+}
+
+/* While a deck plays the app hides its bar (and the status bar), so the top
+ * inset above shrinks to the sensor housing, or to nothing in landscape, and
+ * the deck runs edge to edge. The slides may: Reveal centres and scales them.
+ * Its chrome may not -- the controls and slide number sit in the bottom-right
+ * corner (under the rounded corner and, in landscape, the notch side) and the
+ * progress bar on the bottom edge (under the home indicator) -- so those move
+ * inside the safe area. `.mbr-slides-exit` (bottom-left) is already inset. */
+html.mbr-embedded body.slides-container .reveal .controls {
+  right: calc(var(--r-controls-spacing, 12px) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--r-controls-spacing, 12px) + env(safe-area-inset-bottom, 0px));
+}
+
+html.mbr-embedded body.slides-container .reveal .progress {
+  left: env(safe-area-inset-left, 0px);
+  right: env(safe-area-inset-right, 0px);
+  bottom: env(safe-area-inset-bottom, 0px);
+  width: auto;
+}
+
+html.mbr-embedded body.slides-container .reveal .slide-number {
+  right: calc(8px + env(safe-area-inset-right, 0px));
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+
 .scrollable-slide {
   overflow-y: auto !important;
 }

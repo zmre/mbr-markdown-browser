@@ -227,7 +227,10 @@ body > footer {
 @media screen and (min-width: 1024px) {
   body.mbr-has-sidebar {
     display: grid;
-    grid-template-columns: var(--mbr-sidebar-width) 1fr;
+    /* `minmax(0, …)`: a bare `1fr` has an `auto` minimum, so the widest
+     * table's min-content width sized the column and the page scrolled
+     * sideways; at 0 the table's `.mbr-table-scroll` scrolls instead. */
+    grid-template-columns: var(--mbr-sidebar-width) minmax(0, 1fr);
     grid-template-rows: auto 1fr auto;
     grid-template-areas:
       "sidebar header"
@@ -1116,6 +1119,121 @@ body > header {
 
 html {
   scroll-padding-top: calc(3em + env(safe-area-inset-top, 0px));
+}
+
+/* ==================== Narrow Screens: Overflow ==================== */
+
+/*
+ * Nothing in a note may widen the page: on a phone that turns every vertical
+ * swipe into a diagonal one. Wide content scrolls inside its own box instead.
+ * Measured at 390px on mbr's docs, ~95% of the overflow was markdown tables.
+ *
+ * Tables: `html.rs` wraps every markdown table in `div.mbr-table-scroll`. A
+ * wrapper, not `display: block` on the table, because WebKit drops a
+ * block-displayed table's row/column semantics for VoiceOver. The table keeps
+ * Pico's `width: 100%`, so a narrow table still fills the column. The block's
+ * bottom margin moves from the table to the wrapper, so the scrollbar sits
+ * under the last row rather than below a gap, and the spacing is not doubled.
+ */
+.mbr-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: var(--pico-typography-spacing-vertical);
+}
+
+.mbr-table-scroll > table {
+  margin-bottom: 0;
+}
+
+/* Pico spaces a heading that follows a table; the wrapper must not lose that. */
+:where(.mbr-table-scroll) ~ :is(h1, h2, h3, h4, h5, h6) {
+  margin-top: var(--pico-typography-spacing-top);
+}
+
+/*
+ * A table written as raw HTML in the note (or injected by its script) has no
+ * wrapper. On a phone it becomes its own scroll box -- the accessibility cost
+ * above, but only there and only for tables the renderer did not produce.
+ * Not in a playing slide deck: Reveal lays every slide out at its own 960px
+ * and scales it, so the phone's width says nothing about room on the slide.
+ */
+@media screen and (max-width: 600px) {
+  main table:not(.mbr-table-scroll > table, .reveal table) {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+}
+
+/*
+ * Long unbreakable runs: inline code (`--oembed-cache-size`, paths) and bare
+ * URLs as link text. `anywhere`, not `break-word`, because only `anywhere`
+ * lowers the min-content width, which is what sizes a flex or grid item (a
+ * figcaption, the sidebar layout's `1fr` column): with `break-word` one long
+ * word still widens such a box past the viewport.
+ *
+ * Inside a table the opposite is wanted: the table scrolls, and `anywhere`
+ * would instead let auto layout squeeze a column until `--flag` breaks into
+ * one character per line.
+ */
+main :not(pre) > code,
+main a {
+  overflow-wrap: anywhere;
+}
+
+main :is(td, th) :is(code, a) {
+  overflow-wrap: normal;
+}
+
+/* Display math wider than the column scrolls; `overflow-y: hidden` would clip
+ * KaTeX's descenders and tall delimiters without the padding. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.15em;
+}
+
+/* Media never wider than the column. Zero specificity beyond `main`, so the
+ * theater figure's own sizing still wins. */
+main :where(img, video, iframe, embed, object) {
+  max-width: 100%;
+}
+
+/*
+ * Marginalia (`>>>`): the † indicator hangs in the right margin (`left:
+ * 100%`), which on a phone is outside the viewport. Below 600px it sits at the
+ * parent quote's right edge instead, and the note opens leftward from it at a
+ * width that fits the screen (the 280px `min-width` alone could not).
+ */
+@media screen and (max-width: 600px) {
+  blockquote blockquote blockquote {
+    left: auto;
+    right: 0;
+  }
+
+  blockquote blockquote blockquote p {
+    min-width: 0;
+    width: min(280px, calc(100vw - 2rem));
+  }
+}
+
+@media print {
+  /* Paper cannot scroll: a scroll box would cut the table at the page edge. */
+  .mbr-table-scroll {
+    overflow: visible;
+  }
+}
+
+/*
+ * The app's safety net for anything the rules above miss: a stray pixel of
+ * width would otherwise make the whole page pan sideways under a finger.
+ * `clip`, never `hidden` -- `hidden` makes body a scroll container, which
+ * breaks `position: sticky` on everything inside it. Only in the app: in a
+ * browser, overflow is a bug these rules should fix, not hide.
+ */
+html.mbr-embedded body {
+  overflow-x: clip;
 }
 
 /* ==================== Embedded in the iOS App ==================== */
@@ -2936,7 +3054,8 @@ main .mbr-fc-pie-unreviewed {
 .outline main ul,
 .outline main ol,
 .outline main dl,
-.outline main table,
+.outline main table:not(.mbr-table-scroll > table),
+.outline main .mbr-table-scroll,
 .outline main pre {
   margin-bottom: 16px;
 }

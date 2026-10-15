@@ -34,7 +34,7 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `=` | Open media browser |
 | `Ctrl+g` | Toggle info panel |
 | `t` | Open the task browser (server and GUI modes only) |
-| `e` | Open the editor for the current file (when [editing](../modes/editing/) is enabled) |
+| `e` | Open the editor for the current note (when [editing](../modes/editing/) is enabled; not on folder listings) |
 | `r` | Add a [review note](../modes/review/), anchored to the selection (server and GUI modes only) |
 | `R` | Open the review panel (server and GUI modes only) |
 | `p` | Play the slides (on a `style: slides` page) or review the [flashcards](../markdown/flashcards/) (on a `type: flashcard` page) |
@@ -147,6 +147,16 @@ clickable.
 |--------|--------|
 | Left click | Complete / reopen the task |
 | Right click | Cancel / reopen the task |
+
+## Editor (when open)
+
+With [editing](../modes/editing/) enabled, `e` opens the editor for the current page.
+
+| Key | Action |
+|-----|--------|
+| `Cmd+S` / `Ctrl+S` | Save |
+| `Esc` | Close the ⋯ menu if it is open, otherwise close the editor (asking first if there are unsaved changes) |
+| `↑` / `↓` | Move through the ⋯ menu |
 
 ## Fuzzy Nav Modal (when open)
 

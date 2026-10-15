@@ -49,6 +49,12 @@ export interface PathPickerOptions {
    * default) selects the filename stem; `folder` selects the directory portion.
    */
   select?: 'basename' | 'folder';
+  /**
+   * `new` mode only: the repo-relative folder to prefill (`notes/2026`, `''`
+   * for the root). Overrides the default of the current file's folder, for a
+   * "New note" started from a page that is not a file (a folder listing).
+   */
+  initialFolder?: string;
   /** Fetches the fresh `markdown_files` array from site.json. */
   fetchSiteFiles: () => Promise<SiteMarkdownFile[]>;
 }
@@ -337,7 +343,10 @@ export function openPathPicker(opts: PathPickerOptions): Promise<PathPickResult 
     if (opts.mode === 'move') {
       input.value = opts.currentFsPath;
     } else {
-      const folder = parentFolder(opts.currentFsPath);
+      const folder = (opts.initialFolder ?? parentFolder(opts.currentFsPath)).replace(
+        /^\/+|\/+$/g,
+        '',
+      );
       input.value = folder ? `${folder}/` : '';
     }
     renderList();

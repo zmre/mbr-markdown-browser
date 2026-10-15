@@ -37,12 +37,18 @@ interface Harness {
 
 async function openPicker(
   files: SiteMarkdownFile[],
-  opts: { mode?: 'new' | 'move'; currentFsPath?: string; markdownExtensions?: string[] } = {},
+  opts: {
+    mode?: 'new' | 'move';
+    currentFsPath?: string;
+    markdownExtensions?: string[];
+    initialFolder?: string;
+  } = {},
 ): Promise<Harness> {
   const result = openPathPicker({
     mode: opts.mode ?? 'new',
     currentFsPath: opts.currentFsPath ?? 'top.md',
     markdownExtensions: opts.markdownExtensions,
+    initialFolder: opts.initialFolder,
     fetchSiteFiles: () => Promise.resolve(files),
   });
   await flush();
@@ -250,5 +256,48 @@ describe('openPathPicker validation', () => {
     expect(h.status.textContent).toBe('');
     h.confirmBtn.click();
     await expect(h.result).resolves.toEqual({ path: 'docs/guide/overview.md', createDirs: false });
+  });
+});
+
+describe('openPathPicker prefill', () => {
+  it("prefills 'new' with the current file's folder by default", async () => {
+    const h = await openPicker(FILES, { currentFsPath: 'docs/guide/index.md' });
+    expect(h.input.value).toBe('docs/guide/');
+    h.cancelBtn.click();
+    await h.result;
+  });
+
+  it("prefills 'new' with initialFolder when given (a folder listing's New note)", async () => {
+    const h = await openPicker(FILES, { currentFsPath: '', initialFolder: 'docs/notes' });
+    expect(h.input.value).toBe('docs/notes/');
+    // Caret at the end, ready for the filename.
+    expect(h.input.selectionStart).toBe('docs/notes/'.length);
+    h.cancelBtn.click();
+    await h.result;
+  });
+
+  it('tolerates stray slashes on initialFolder', async () => {
+    const h = await openPicker(FILES, { currentFsPath: '', initialFolder: '/docs/' });
+    expect(h.input.value).toBe('docs/');
+    h.cancelBtn.click();
+    await h.result;
+  });
+
+  it('prefills nothing at the root (initialFolder empty)', async () => {
+    const h = await openPicker(FILES, { currentFsPath: 'docs/guide/index.md', initialFolder: '' });
+    expect(h.input.value).toBe('');
+    h.cancelBtn.click();
+    await h.result;
+  });
+
+  it('ignores initialFolder in move mode', async () => {
+    const h = await openPicker(FILES, {
+      mode: 'move',
+      currentFsPath: 'docs/notes.markdown',
+      initialFolder: 'elsewhere',
+    });
+    expect(h.input.value).toBe('docs/notes.markdown');
+    h.cancelBtn.click();
+    await h.result;
   });
 });

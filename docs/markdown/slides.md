@@ -51,6 +51,24 @@ First slide content
 Final slide
 ```
 
+## Playing the Slides
+
+Click **Play Slides (P)** in the header, or press `p`. On phones (600px wide or
+less) and in the iOS app, the header button gives way to a floating ▶ button in
+the bottom-right corner that starts the slides. There, a small ✕ button in the
+bottom-left corner leaves the presentation and reloads the page, since a touch
+screen has no `Esc`. While the slides play, the iOS app hides its navigation
+bar and the status bar so the deck gets the whole screen, and turns off its
+back/forward edge swipes so a swipe changes slides instead of leaving the page.
+The ✕ brings the bar back.
+
+A phone shows the same slides as a desktop, scaled down to fit the screen,
+so a deck's own CSS, backgrounds, images and diagrams look the way they do on
+a large display. Turn the phone sideways for bigger slides. (reveal.js would
+otherwise switch narrow screens to a scrolling layout that rearranges the
+slides; mbr turns that off.) If the page has diagrams, Play waits until they
+are drawn before starting.
+
 ## Speaker Notes
 
 Use triple blockquotes (`>>>`) for speaker notes visible only to the presenter (press `s` for speaker view):
@@ -80,6 +98,30 @@ This slide has:
 
 This slide has centered class
 ```
+
+### Slide Backgrounds
+
+Reveal.js background attributes work too, and their paths resolve exactly like
+image links on the same page, relative to the markdown file. You don't have to
+account for the trailing-slash URL a page is served at, and static-folder
+images, nested folders and static builds all behave the same as with `![](...)`:
+
+```markdown
+--- {data-background-image="images/title-bg.jpg" data-background-size="cover"}
+
+--- {data-background-video="media/loop.mp4,media/loop.webm" data-background-video-loop="true"}
+
+--- {data-background="images/texture.png"}
+
+--- {data-background="#336"}
+```
+
+mbr rewrites `data-background-image`, `data-background-iframe`, each entry of
+`data-background-video`'s comma-separated list, and the `data-background`
+shorthand when it is an image URL. Colours and gradients (`#336`, `red`,
+`linear-gradient(...)`) and absolute URLs (`https://...`, `data:...`) are left
+as written. A background image or video that doesn't exist shows up in the
+page's error panel, the same as a broken image.
 
 ## Keyboard Shortcuts
 

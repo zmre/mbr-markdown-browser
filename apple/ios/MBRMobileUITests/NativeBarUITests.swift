@@ -13,7 +13,9 @@ final class NativeBarUITests: XCTestCase {
     }
 
     /// The deep page with a long title (`-mbrSelfTest deep`): mbr's header is
-    /// hidden, the title is in the bar, and the three menus open.
+    /// hidden, the title is in the bar, the three menus open, and `+` (New
+    /// Note, beside ⋯ in one capsule) opens the new-note picker. The sample
+    /// vault edits with no token, so `+` is there.
     func testMenusOnADeepPage() {
         let app = XCUIApplication()
         app.launchArguments += ["-mbrSelfTest", "deep"]
@@ -21,6 +23,8 @@ final class NativeBarUITests: XCTestCase {
 
         let more = app.navigationBars.buttons["More"]
         XCTAssertTrue(more.waitForExistence(timeout: 60), "the ⋯ menu")
+        let newNote = app.navigationBars.buttons["New Note"]
+        XCTAssertTrue(newNote.waitForExistence(timeout: 10), "the + (New Note) beside ⋯")
         let title = app.navigationBars.buttons
             .matching(NSPredicate(format: "label CONTAINS 'Roadmap'"))
             .firstMatch
@@ -37,14 +41,70 @@ final class NativeBarUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Search"].exists, "the page's actions in the ⋯ menu")
         self.shot("more-menu")
         app.buttons["Search"].tap()
+        let searchField = app.searchFields.firstMatch
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), "the native search sheet")
         self.shot("search-from-menu")
-        self.dismissMenu(app)
+        // The active field's own X, which closes the sheet (its Close is under it).
+        app.buttons["Close"].firstMatch.tap()
+        XCTAssertTrue(searchField.waitForNonExistence(timeout: 5), "the search sheet closed")
 
         let back = app.navigationBars.buttons["Back"]
         XCTAssertTrue(back.exists, "history Back")
         back.press(forDuration: 1.2)
         self.shot("back-menu")
         self.dismissMenu(app)
+
+        // Last: the picker it opens is the page's, and the test ends there.
+        newNote.tap()
+        self.shot("new-note")
+    }
+
+    /// ⋯ → Search opens the native search sheet with the keyboard already up
+    /// (the page's own modal could not raise it: WebKit starts no input
+    /// session for a focus made from a native menu action). Typing queries the
+    /// vault as you go; a result opens its page and closes the sheet.
+    func testNativeSearchFromMenu() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-mbrSelfTest", "deep"]
+        app.launch()
+
+        let more = app.navigationBars.buttons["More"]
+        XCTAssertTrue(more.waitForExistence(timeout: 60), "the ⋯ menu")
+        // The bar's actions arrive with the page's first bridge post.
+        XCTAssertTrue(
+            app.navigationBars.buttons.matching(NSPredicate(format: "label CONTAINS 'Roadmap'")).firstMatch
+                .waitForExistence(timeout: 30),
+            "the page has loaded"
+        )
+        more.tap()
+        let search = app.buttons["Search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5), "Search in the ⋯ menu")
+        search.tap()
+
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "the native search field")
+        XCTAssertTrue(
+            app.keyboards.firstMatch.waitForExistence(timeout: 3),
+            "the software keyboard is up at once after ⋯ → Search"
+        )
+        XCTAssertFalse(app.webViews.searchFields.firstMatch.exists, "the page's own modal stayed closed")
+
+        app.typeText("flashcards")
+        let result = app.buttons
+            .matching(identifier: "searchResult")
+            .matching(NSPredicate(format: "label BEGINSWITH 'Flashcards'"))
+            .firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 10), "a result for the sample vault's Flashcards page")
+        self.shot("native-search")
+        guard result.exists else { return }
+
+        result.tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5), "the sheet closed")
+        let title = app.navigationBars.buttons
+            .matching(NSPredicate(format: "label CONTAINS 'Flashcards'"))
+            .firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 15), "the Flashcards page is on screen")
+        self.shot("native-search-opened")
     }
 
     /// The app icon on the home screen.

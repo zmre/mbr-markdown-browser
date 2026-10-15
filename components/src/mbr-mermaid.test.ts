@@ -15,7 +15,7 @@ vi.mock('./dynamic-loader.ts', () => ({
   getMbrAssetBase: () => '/.mbr/',
 }))
 
-import './mbr-mermaid.ts'
+import { mermaidSettled } from './mbr-mermaid.ts'
 
 interface MermaidStub {
   initialize: ReturnType<typeof vi.fn>
@@ -150,7 +150,65 @@ describe('UNIT MbrMermaidElement', () => {
     expect(mermaid.initialize.mock.calls[0][0]).toMatchObject({ theme: 'default' })
   })
 
+  describe('mermaidSettled', () => {
+    it('resolves only once the initial render has finished', async () => {
+      document.body.insertAdjacentHTML('beforeend', '<pre class="mermaid">graph LR;A</pre>')
+      const mermaid = stubMermaid()
+      let finish!: () => void
+      mermaid.run.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve
+          })
+      )
+
+      element = await mount()
+      let settled = false
+      void mermaidSettled().then(() => {
+        settled = true
+      })
+      await flush()
+      expect(settled).toBe(false)
+
+      finish()
+      await flush()
+      expect(settled).toBe(true)
+    })
+
+    it('resolves, not rejects, when rendering fails', async () => {
+      document.body.insertAdjacentHTML('beforeend', '<pre class="mermaid">graph LR;A</pre>')
+      const mermaid = stubMermaid()
+      mermaid.run.mockImplementation(() => Promise.reject(new Error('bad diagram')))
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      element = await mount()
+
+      await expect(mermaidSettled()).resolves.toBeUndefined()
+      expect(error).toHaveBeenCalled()
+    })
+  })
+
   describe('print theme swap', () => {
+    it('re-renders the diagrams on the page, even when they were replaced by clones', async () => {
+      // <mbr-slides> deep-clones the slides and discards the originals.
+      mockPrefersDark(true)
+      document.body.insertAdjacentHTML('beforeend', '<pre class="mermaid">graph LR;A--&gt;B</pre>')
+      const mermaid = stubMermaid()
+
+      element = await mount()
+      const original = mermaid.run.mock.calls[0][0].nodes[0] as HTMLElement
+      const clone = original.cloneNode(true) as HTMLElement
+      original.replaceWith(clone)
+
+      window.dispatchEvent(new Event('beforeprint'))
+
+      const printed = mermaid.run.mock.calls[1][0].nodes as HTMLElement[]
+      expect(printed).toHaveLength(1)
+      expect(printed[0].isConnected).toBe(true)
+      expect(clone.isConnected).toBe(false)
+      expect(printed[0].textContent).toBe(original.textContent)
+    })
+
     it('re-renders in the light theme on beforeprint after a dark render', async () => {
       mockPrefersDark(true)
       document.body.insertAdjacentHTML(

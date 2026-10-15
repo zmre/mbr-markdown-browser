@@ -419,6 +419,11 @@ fn push_task_time(html: &mut String, class: &str, value: NaiveDateTime, has_time
     );
 }
 
+/// Opens the horizontal scroll container every markdown table is wrapped in
+/// (closed after `</table>`). `theme.css` styles `.mbr-table-scroll`; a
+/// repository's own theme can use the same hook.
+const TABLE_SCROLL_OPEN: &str = "<div class=\"mbr-table-scroll\">";
+
 // ============================================================================
 // MBR EXTENSION: Destination scheme filtering
 // ============================================================================
@@ -817,8 +822,16 @@ where
             // cells: every cell in a row shares one source line, so per-cell
             // attributes triple the byte cost of a table-heavy document to say
             // the same thing.
+            //
+            // MBR EXTENSION: every table is wrapped in `div.mbr-table-scroll`,
+            // the horizontal scroll container theme.css styles, so a wide table
+            // scrolls inside itself instead of widening the page on a phone. A
+            // wrapper rather than `display: block` on the table, because WebKit
+            // drops a block-displayed table's semantics for VoiceOver. The line
+            // stays on the `<table>`: it is the block a review note anchors to.
             Tag::Table(alignments) => {
                 self.table_alignments = alignments;
+                self.write(TABLE_SCROLL_OPEN)?;
                 if self.emit_block_lines {
                     self.write("<table")?;
                     self.write_block_line()?;
@@ -1073,7 +1086,7 @@ where
                 self.write(">\n")?;
             }
             TagEnd::Table => {
-                self.write("</tbody></table>\n")?;
+                self.write("</tbody></table></div>\n")?;
             }
             TagEnd::TableHead => {
                 self.write("</tr></thead><tbody>\n")?;
@@ -2224,7 +2237,10 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"<pre data-mbr-line="66"><code>"#), "{html}");
-        assert!(html.contains(r#"<table data-mbr-line="77">"#), "{html}");
+        assert!(
+            html.contains(r#"<div class="mbr-table-scroll"><table data-mbr-line="77">"#),
+            "the line stays on the <table>, inside its scroll wrapper: {html}"
+        );
 
         // The excluded tags stay bare even when the table names them, which is
         // what keeps `markdown::is_review_block_start` the single definition of
@@ -2381,6 +2397,34 @@ mod tests {
         assert!(
             html.contains(r#"<pre data-mbr-line="1"><code class="language-rust">"#),
             "{html}"
+        );
+    }
+
+    #[test]
+    fn table_is_wrapped_in_scroll_container() {
+        let html = render_mbr("| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n");
+        let open = r#"<div class="mbr-table-scroll"><table>"#;
+        assert!(html.contains(open), "{html}");
+        assert!(html.contains("</tbody></table></div>\n"), "{html}");
+        // Exactly one wrapper, closed before the next block starts.
+        assert_eq!(html.matches("mbr-table-scroll").count(), 1, "{html}");
+        let wrapper_end = html.find("</table></div>").expect("closed wrapper");
+        let next_block = html.find("<p>after</p>").expect("following paragraph");
+        assert!(wrapper_end < next_block, "{html}");
+    }
+
+    #[test]
+    fn every_table_gets_its_own_scroll_container() {
+        let html = render_mbr("| a |\n|---|\n| 1 |\n\n> | b |\n> |---|\n> | 2 |\n");
+        assert_eq!(
+            html.matches(r#"<div class="mbr-table-scroll">"#).count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(html.matches("</table></div>").count(), 2, "{html}");
+        assert!(
+            html.contains("<blockquote>\n<div class=\"mbr-table-scroll\"><table>"),
+            "a nested table is wrapped where it stands: {html}"
         );
     }
 }

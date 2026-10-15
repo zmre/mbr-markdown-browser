@@ -5,6 +5,8 @@
  * definition list, this renders a "Review flashcards" button in the nav (where
  * `<mbr-slides>` puts "Play Slides", and styled by that element's own sheet)
  * and claims `p`, with the same guards as slides (`isPlayKey`).
+ * On a phone and in the iOS app it also floats a round play button
+ * (`fab.ts`), as `<mbr-slides>` does, unless the page is slides as well.
  *
  * **Deliberately tiny: it ships on every page, and almost no page is a deck.**
  * Everything else is in two lazy chunks, fetched only on flashcard pages:
@@ -31,6 +33,7 @@ import { getMbrAssetBase, scheduleIdleTask, waitForDom } from './dynamic-loader.
 import { getFlashcardsConcentricThreshold, isEditEnabled, isFlashcardsProgressEnabled } from './shared.js'
 import { isPlayKey } from './mbr-keys.js'
 import { MbrSlidesElement } from './mbr-slides.js'
+import { PlayFabController } from './fab.js'
 import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
 import {
   TOKEN_MESSAGE,
@@ -145,8 +148,9 @@ function reviewServices(): ReviewServices | null {
 @customElement('mbr-flashcards')
 export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
   @state() private _isDeck = false
-  // Not reactive: render() never reads it.
-  private _isOpen = false
+  // Reactive: the floating button hides while the deck is open.
+  @state() private _isOpen = false
+  private _fab = new PlayFabController(this, () => this._showsFab())
   private _deck: DeckElement | null = null
   /** Set when the open deck wrote a review: the indicators need redrawing. */
   private _wrote = false
@@ -233,12 +237,18 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     document.body.append(deck)
   }
 
+  /** The floating button (`fab.ts`): a closed deck, unless slides claim the page. */
+  private _showsFab(): boolean {
+    return this._isDeck && !this._isOpen && !document.body.classList.contains('slides') && this._fab.visible
+  }
+
   override render(): TemplateResult | typeof nothing {
     // No loading state: the chunk is small and local, and a second press while
-    // it loads is already a no-op (`_open` checks `_isOpen`). One line on
+    // it loads is already a no-op (`_open` checks `_isOpen`). One line each on
     // purpose: template whitespace is not minified.
+    const open = () => this.open()
     // prettier-ignore
-    return this._isDeck ? html`<button class="play-slides-btn" @click=${() => this.open()} title="Review flashcards (P)"><span class="play-icon"></span>Review flashcards</button>` : nothing
+    return this._isDeck ? html`<button class="play-slides-btn" @click=${open} title="Review flashcards (P)"><span class="play-icon"></span>Review flashcards</button>${this._showsFab() ? html`<button type="button" class="mbr-fab" @click=${open} aria-label="Review flashcards" title="Review flashcards (P)"><span class="play-icon"></span></button>` : nothing}` : nothing
   }
 
   // <mbr-slides>' own sheet, not a copy: the two buttons share the nav slot

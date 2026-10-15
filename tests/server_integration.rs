@@ -6731,6 +6731,75 @@ async fn test_page_edit_enabled_on_any_host_when_a_token_is_configured() {
 }
 
 #[tokio::test]
+async fn test_listings_advertise_editing_and_carry_the_editor() {
+    // A listing (home without an index note, or a section folder) hosts
+    // `<mbr-editor>` for its "New note" entry point. It used to render without
+    // `edit_enabled` at all, so `editEnabled` was false and the element absent.
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide\n\nbody");
+    repo.create_markdown("top.md", "# Top\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let port = server.port;
+    let local = format!("localhost:{port}");
+    for path in ["/", "/docs/"] {
+        assert!(
+            page_edit_enabled(&server, path, &local).await,
+            "listing {path} at localhost must advertise editing"
+        );
+        let html = server
+            .client
+            .get(server.url(path))
+            .header("Host", &local)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            html.contains("<mbr-editor></mbr-editor>"),
+            "listing {path} must carry the editor element"
+        );
+
+        // A Host the write endpoints refuse gets a read-only listing.
+        assert!(
+            !page_edit_enabled(&server, path, "avalon.example.ts.net:5201").await,
+            "listing {path} at a refused Host must not advertise editing"
+        );
+        let refused = server
+            .client
+            .get(server.url(path))
+            .header("Host", "avalon.example.ts.net:5201")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !refused.contains("<mbr-editor>"),
+            "listing {path} at a refused Host must not carry the editor"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_listing_edit_enabled_false_when_editing_is_off() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide\n\nbody");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let port = server.port;
+    assert!(!page_edit_enabled(&server, "/docs/", &format!("localhost:{port}")).await);
+}
+
+#[tokio::test]
 async fn test_page_edit_enabled_false_when_editing_is_off() {
     let repo = TestRepo::new();
     repo.create_markdown("note.md", "# Note\n\nbody");

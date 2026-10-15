@@ -122,6 +122,11 @@ pub struct RefreshSummary {
     /// [`MbrApp::config_error`] reports it: set when a `config.toml` broke,
     /// cleared when it was fixed.
     pub config_error: Option<String>,
+    /// Files in `.mbr/` (or the template folder) still not downloaded, whose
+    /// download this refresh asked for again. When non-zero, refresh again in
+    /// a few seconds: their arrival shows up as `config_reloaded`,
+    /// `templates_reloaded` or `assets_changed`.
+    pub mbr_downloads_requested: u32,
 }
 
 impl RefreshSummary {
@@ -156,6 +161,13 @@ pub struct OpenReport {
     /// loaded: the vault opened with the default configuration instead (see
     /// [`MbrApp::config_error`]).
     pub config_error: Option<String>,
+    /// Files in `.mbr/` (or the template folder) the provider had not
+    /// downloaded at open, whose download was requested then. Nothing else
+    /// asks for them — the scan skips hidden folders — so until they arrive
+    /// the vault runs without them (default templates, configuration or
+    /// styles). When non-zero, [`MbrApp::refresh`] a few seconds later picks
+    /// them up.
+    pub mbr_downloads_requested: u32,
 }
 
 /// An open vault. See the [module docs](self).
@@ -518,10 +530,11 @@ impl MbrApp {
         // What `.mbr/` looks like now, so a refresh can tell what changed. A
         // single file opened in place has no `.mbr/` in reach.
         let stamp = if home.is_none() {
-            MbrStamp::take(&root, loaded.config.template_folder.as_deref())
+            MbrStamp::take(vault.as_ref(), loaded.config.template_folder.as_deref())
         } else {
             MbrStamp::default()
         };
+        let mbr_downloads_requested = stamp.request_downloads(vault.as_ref());
         // `Server::init` spawns its scan and index tasks, so it runs inside
         // the runtime's context.
         let served = {
@@ -530,7 +543,11 @@ impl MbrApp {
         };
         let server = Arc::clone(&served.server);
         let pages = served.pages.clone();
-        let config_error = served.config_error.clone();
+        let at_open = AtOpen {
+            started,
+            config_error: served.config_error.clone(),
+            mbr_downloads_requested,
+        };
         let (ready_tx, ready) = tokio::sync::watch::channel(None);
         let index_lock = Arc::new(tokio::sync::Mutex::new(()));
         // Taken here, not in the task, so a `refresh` that arrives before the
@@ -542,8 +559,7 @@ impl MbrApp {
             server,
             cache.clone(),
             pages,
-            started,
-            config_error,
+            at_open,
             guard,
             ready_tx,
         ));
@@ -574,16 +590,27 @@ impl MbrApp {
     }
 }
 
+/// What the open itself found, for its [`OpenReport`].
+struct AtOpen {
+    started: Instant,
+    config_error: Option<String>,
+    mbr_downloads_requested: u32,
+}
+
 /// Scan or restore, the stat-diff after a restore, then the snapshot save.
 async fn initial_indexing(
     server: Arc<Server>,
     cache: Option<IndexCache>,
     pages: PageUrls,
-    started: Instant,
-    config_error: Option<String>,
+    at_open: AtOpen,
     guard: tokio::sync::OwnedMutexGuard<()>,
     ready: tokio::sync::watch::Sender<Option<OpenReport>>,
 ) {
+    let AtOpen {
+        started,
+        config_error,
+        mbr_downloads_requested,
+    } = at_open;
     let restored = server.restored_files();
     let repo = Arc::clone(server.repo());
     repo.wait_for_scan().await;
@@ -616,6 +643,7 @@ async fn initial_indexing(
         ready_ms: millis(started),
         refresh,
         config_error,
+        mbr_downloads_requested,
     };
     tracing::info!("Vault ready: {report:?}");
     drop(guard);
@@ -647,13 +675,16 @@ async fn refresh_mbr(
     root: &Path,
     summary: &mut RefreshSummary,
 ) -> bool {
-    let stamp_root = root.to_path_buf();
+    let stamp_vault = Arc::clone(vault);
     let template_folder = served.config.template_folder.clone();
     let now = tokio::task::spawn_blocking(move || {
-        MbrStamp::take(&stamp_root, template_folder.as_deref())
+        MbrStamp::take(stamp_vault.as_ref(), template_folder.as_deref())
     })
     .await
     .unwrap_or_default();
+    // Asked for again on every refresh until they are here: a provider may
+    // drop a request (offline, app suspended), and asking is idempotent.
+    summary.mbr_downloads_requested = now.request_downloads(vault.as_ref());
     let changes = {
         let mut seen = served
             .stamp

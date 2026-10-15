@@ -3,11 +3,15 @@
 ## What's Next
 
 * **Mobile**
-  * Make sure there's no horizontal scrolling on mobile
-  * Overlay button to "play" on slides and flashcards in bottom right floating
-  * Change the ... icon to be a double icon with a + and a ... (like in github) so you can add a new note quickly
-  * Need the buttons from edit mode to be more native, too, I think. They're ugly on mobile now.
-  * Do we want any swipe guestures?  Swipe from right and get info overlay, from left and get browse?
+  * [x] Make sure there's no horizontal scrolling on mobile (tables wrapped in `.mbr-table-scroll`; narrow-screen overflow rules in theme.css)
+  * [x] Overlay button to "play" on slides and flashcards in bottom right floating (`fab.ts`; plus an exit ✕ while slides play)
+  * [x] Change the ... icon to be a double icon with a + and a ... (like in github) so you can add a new note quickly (`new` bridge action → `<mbr-editor>.openNew()`)
+  * [x] Need the buttons from edit mode to be more native, too, I think. They're ugly on mobile now.
+  * [x] Do we want any swipe guestures?  Decided **no**: WebKit's back/forward swipes own both edges in the app (and Safari's), and page-level swipes would fight Reveal, the flashcard deck, scrolling tables and text selection. Browse/Info stay one tap away in ⋯; on iPad a native `sidebar.left` toolbar button is the better idiom if faster access is wanted.
+  * [ ] Device check of the above (TESTING.md): FAB vs. review FAB stacking, slides exit ✕, `+`/⋯ capsule, editor with the native bar hidden.
+  * [ ] Plain browsers have no visible "New note" control outside the editor (only the editor's ⋯ menu); consider a shortcut or a button on listings.
+  * [ ] On a token-protected server a 401 from `/.mbr/raw` while the editor loads shows only text; the token field is never built. And a new note opened via `#mbr-edit` loses the in-memory token (by design of `edit-token.ts`), so the first save asks again.
+  * [ ] Desktop with docked sidebar: pages are 10px too wide (Pico's `margin-right: -10px` on the last header `nav > ul` in an unpadded `header.container`).
 * **Review follow-ups (2026-10-07 review of #323–#329)**
   * [ ] Search modal: typing clears the selection (`mbr-search.ts` `_handleInput` sets `_selectedIndex = -1`) until results land, so a quick Enter is dropped and the highlight blinks; `_setResults` already resets to 0, so delete that line (optionally replay a pending Enter).
   * [ ] Search modal: `_lastPointer` is only recorded by `mousemove` on rows, so a pointer resting outside the rows can still hijack the selection when a longer list renders under it. Track pointer position on the whole `.modal`.

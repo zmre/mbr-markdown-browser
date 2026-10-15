@@ -176,6 +176,66 @@ describe('MbrSearchElement', () => {
     })
   })
 
+  // iOS WebKit shows the software keyboard only for a focus() made inside the
+  // user's gesture (the tap, or the app menu's call into `open()`); a focus
+  // after Lit's microtask render is too late. So `open()` must render and focus
+  // before it returns.
+  describe('focus on open', () => {
+    /** The rendered input when it holds focus, else null. */
+    function focusedInput(host: MbrSearchElement): HTMLInputElement | null {
+      const node = host.shadowRoot?.querySelector<HTMLInputElement>('#search-input') ?? null
+      return node !== null && host.shadowRoot?.activeElement === node ? node : null
+    }
+
+    it('focuses the input synchronously inside open()', async () => {
+      el = document.createElement('mbr-search') as MbrSearchElement
+      document.body.appendChild(el)
+      await el.updateComplete
+      el.open()
+      const node = el.shadowRoot?.querySelector<HTMLInputElement>('#search-input')
+      expect(node).not.toBeNull()
+      expect(el.shadowRoot?.activeElement).toBe(node)
+      expect(document.activeElement).toBe(el)
+    })
+
+    it('focuses synchronously even before the first render', () => {
+      el = document.createElement('mbr-search') as MbrSearchElement
+      document.body.appendChild(el)
+      el.open()
+      const node = el.shadowRoot?.querySelector<HTMLInputElement>('#search-input')
+      expect(node).not.toBeNull()
+      expect(el.shadowRoot?.activeElement).toBe(node)
+    })
+
+    it('focuses synchronously when reopened after closing', async () => {
+      el = document.createElement('mbr-search') as MbrSearchElement
+      document.body.appendChild(el)
+      el.open()
+      el.close()
+      await el.updateComplete
+      expect(el.shadowRoot?.querySelector('#search-input')).toBeNull()
+      el.open()
+      expect(focusedInput(el)).not.toBeNull()
+    })
+
+    it('focuses synchronously from the header trigger click', async () => {
+      el = document.createElement('mbr-search') as MbrSearchElement
+      document.body.appendChild(el)
+      await el.updateComplete
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.search-trigger')!.click()
+      expect(focusedInput(el)).not.toBeNull()
+    })
+
+    it('still focuses (deferred) when opened while disconnected', async () => {
+      el = document.createElement('mbr-search') as MbrSearchElement
+      el.open()
+      document.body.appendChild(el)
+      await el.updateComplete
+      await flush()
+      expect(focusedInput(el)).not.toBeNull()
+    })
+  })
+
   // ==========================================================================
   // Server search request body.
   //

@@ -14,6 +14,10 @@ cards open full screen, one at a time, to flip through in order, at random, in a
 growing [Concentric (FSRS)](#concentric--fsrs) stack, or with
 [spaced repetition](#spaced-repetition--fsrs).
 
+On phones (600px wide or less) and in the iOS app, a floating ▶ button in the
+bottom-right corner starts the deck instead of the header button. On a page that
+is both slides and a deck, it starts the slides, the same as `p`.
+
 **This page is itself a deck.** The [cards at the bottom](#the-demo-deck) are
 real: press `p` to try them.
 

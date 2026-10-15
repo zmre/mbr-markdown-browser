@@ -12,6 +12,7 @@ struct VaultScreen: View {
     @State private var error: String?
     @State private var picking = false
     @State private var configNoticeDismissed = false
+    @State private var searching = false
 
     var body: some View {
         self.content
@@ -30,11 +31,21 @@ struct VaultScreen: View {
                 if let session { BreadcrumbMenu(session: session) }
             }
             .toolbar { self.toolbar }
+            // The full-screen editor has its own Cancel/Save header; the bar
+            // (Back, the breadcrumb menu, Home) would only offer ways to lose
+            // the edits. A playing slide deck wants the whole screen (a
+            // landscape deck is squashed under the bar); its ✕ reloads the
+            // page, whose page message brings the bar back.
+            .toolbar(self.editorOpen || self.slidesPlaying ? .hidden : .automatic, for: .navigationBar)
+            .statusBarHidden(self.slidesPlaying)
             .fileImporter(isPresented: self.$picking, allowedContentTypes: [.folder]) { result in
                 guard case let .success(folder) = result else { return }
                 Task { await self.picked(folder) }
             }
             .fileDialogDefaultDirectory(self.pickerStart)
+            .sheet(isPresented: self.$searching) {
+                if let session { SearchSheet(session: session) }
+            }
             .task(id: self.route) { await self.open() }
             .onDisappear {
                 if let session { self.model.close(session) }
@@ -45,7 +56,13 @@ struct VaultScreen: View {
     private var content: some View {
         if let session {
             WebView(session.page)
-                .webViewBackForwardNavigationGestures(.enabled)
+                // The edge swipes are web history; off while editing, like
+                // the bar, so a stray swipe cannot leave unsaved edits. Off
+                // while slides play too: Reveal changes slides on a
+                // horizontal swipe, and an edge swipe would leave the deck.
+                .webViewBackForwardNavigationGestures(self.editorOpen || self.slidesPlaying ? .disabled : .enabled)
+                // A page no wider than the screen does not rubber-band sideways.
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                 .ignoresSafeArea(edges: .bottom)
                 .safeAreaInset(edge: .top, spacing: 0) {
                     if let configError = session.configError, !configNoticeDismissed {
@@ -89,14 +106,34 @@ struct VaultScreen: View {
             ToolbarItem(placement: .topBarLeading) {
                 HistoryBackButton(session: session) { self.model.path = [] }
             }
-            ToolbarItem(placement: .primaryAction) {
-                VaultActionsMenu(
-                    session: session,
-                    openSettings: { self.model.showSettings = true },
-                    leave: { self.model.path = [] }
-                )
+            // One item holding both, so Liquid Glass draws + and ⋯ in one
+            // capsule. Not a `ToolbarItemGroup`: beside a long title an
+            // iPhone folds a group of two into a single overflow ⋯, which
+            // would hide New Note a menu deep.
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 4) {
+                    if !session.isSingleFile, session.web.info.actions.contains(.newNote) {
+                        Button(AppAction.newNote.label, systemImage: AppAction.newNote.symbol) {
+                            Task {
+                                let opened = await AppBridge.open(.newNote, in: session.page)
+                                Log.info("bridge: open new -> \(opened)")
+                            }
+                        }
+                    }
+                    VaultActionsMenu(
+                        session: session,
+                        openSearch: { self.searching = true },
+                        openSettings: { self.model.showSettings = true },
+                        leave: { self.model.path = [] }
+                    )
+                }
+                // In a toolbar item's own view, labels are not icon-only by
+                // default.
+                .labelStyle(.iconOnly)
             }
             if session.isSingleFile {
+                // A capsule of its own: it is about the file, not the page.
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Grant Folder Access…", systemImage: "folder.badge.plus") { self.picking = true }
                         .help("Open the folder around this file, so its links and images work")
@@ -112,6 +149,16 @@ struct VaultScreen: View {
         let page = session.firstPageMs.map { "\($0)" } ?? "…"
         // open · scan · ready (c = from the index cache) · first page, in ms.
         return "\(session.openMs) · \(scan) · \(ready) · \(page) ms"
+    }
+
+    /// The page's full-screen editor is up (`app-bridge.ts` reports it).
+    private var editorOpen: Bool {
+        self.session?.web.info.editorOpen ?? false
+    }
+
+    /// A slide presentation is playing (`app-bridge.ts` reports it).
+    private var slidesPlaying: Bool {
+        self.session?.web.info.slidesPlaying ?? false
     }
 
     /// What the page reported as its title, else the vault's name.
