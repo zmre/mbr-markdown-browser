@@ -71,6 +71,25 @@ export interface OpenEditorOptions {
   onSaved?: () => void;
 }
 
+/**
+ * The Crepe feature switches the editor runs with.
+ *
+ * CodeMirror (and its dependent LaTeX feature) are disabled. CodeMirror
+ * statically pulls in @codemirror/language-data (≈50 lazy language imports) —
+ * bloating the bundle and, when inlined into a single chunk, breaking module
+ * init order. The LaTeX feature depends on CodeMirror, so it must be disabled
+ * too. Neither is essential here: code blocks still save as fenced code and
+ * math still saves as `$…$` (rendered on the page by the existing katex
+ * component); only the in-editor helpers are dropped.
+ *
+ * Exported so `editor-roundtrip.test.ts` parses and serializes with exactly the
+ * configuration a real save uses.
+ */
+export const CREPE_FEATURES = {
+  [CrepeFeature.CodeMirror]: false,
+  [CrepeFeature.Latex]: false,
+} as const;
+
 let stylesInjected = false;
 
 function injectStyles(): void {
@@ -722,21 +741,12 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       : 'Insert a media embed — double-click an existing embed to edit';
   };
 
-  // Instantiate Crepe with CodeMirror (and its dependent LaTeX feature)
-  // disabled. CodeMirror statically pulls in @codemirror/language-data (≈50
-  // lazy language imports) — bloating the bundle and, when inlined into a single
-  // chunk, breaking module init order. The LaTeX feature depends on CodeMirror,
-  // so it must be disabled too. Neither is essential here: code blocks still
-  // save as fenced code and math still saves as `$…$` (rendered on the page by
-  // the existing katex component); only the in-editor helpers are dropped.
+  // Instantiate Crepe (see CREPE_FEATURES for why CodeMirror/LaTeX are off).
   try {
     crepe = new Crepe({
       root: crepeHost,
       defaultValue: body,
-      features: {
-        [CrepeFeature.CodeMirror]: false,
-        [CrepeFeature.Latex]: false,
-      },
+      features: CREPE_FEATURES,
       // Route the ImageBlock uploader to our server endpoint. Crepe falls back
       // `inlineOnUpload ?? onUpload` and `blockOnUpload ?? onUpload`, and its
       // drop/paste uploader reads the same block `onUpload`, so this single
@@ -824,6 +834,16 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   /** A save the reader asked for: on success, let the trigger refresh the page. */
   const saveAndNotify = async (): Promise<void> => {
     if (saveBtn.hasAttribute('aria-busy')) return;
+    // Nothing changed: write nothing. The baseline is Crepe's *normalized*
+    // markdown, not the file, so posting it would replace the source with
+    // remark's re-serialization of it — which is lossy for everything
+    // CommonMark+GFM cannot represent (definition-list continuations,
+    // `--- {attrs}`, `[-]`/`[>]` tasks; see editor-roundtrip.test.ts). Skipping
+    // the request leaves the file byte-for-byte as it was.
+    if (!isDirty()) {
+      setStatus('No changes to save.');
+      return;
+    }
     if (await doSave()) opts.onSaved?.();
   };
   saveBtn.addEventListener('click', () => void saveAndNotify());
