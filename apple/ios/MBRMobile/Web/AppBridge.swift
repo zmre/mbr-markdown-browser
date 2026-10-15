@@ -1,0 +1,141 @@
+import Foundation
+import Observation
+import WebKit
+
+// The explicit, formally redundant raw values below are the literals
+// `app-bridge.test.ts` looks for; both tools would otherwise strip them.
+// swiftformat:disable redundantRawValues
+// swiftlint:disable redundant_string_enum_value
+
+/// An action the page can perform, as `components/src/app-bridge.ts` names
+/// it. The raw values are the bridge's wire names; `app-bridge.test.ts` reads
+/// this file and checks every one of them, so a rename on either side fails a
+/// test rather than silently emptying the menu.
+enum AppAction: String, CaseIterable, Identifiable {
+    case browse = "browse"
+    case search = "search"
+    case edit = "edit"
+    case info = "info"
+    case tasks = "tasks"
+    case flashcards = "flashcards"
+    case slides = "slides"
+    // swiftlint:enable redundant_string_enum_value
+    // swiftformat:enable redundantRawValues
+
+    var id: String {
+        rawValue
+    }
+
+    var label: String {
+        switch self {
+        case .browse: "Browse"
+        case .search: "Search"
+        case .edit: "Edit"
+        case .info: "Info"
+        case .tasks: "Tasks"
+        case .flashcards: "Flashcards"
+        case .slides: "Slides"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .browse: "sidebar.left"
+        case .search: "magnifyingglass"
+        case .edit: "pencil"
+        case .info: "info.circle"
+        case .tasks: "checklist"
+        case .flashcards: "rectangle.on.rectangle.angled"
+        case .slides: "play.rectangle"
+        }
+    }
+}
+
+/// One step of the breadcrumb path.
+struct Crumb: Identifiable, Hashable {
+    let name: String
+    /// Site-absolute URL path (`/notes/`).
+    let url: String
+    var id: String {
+        self.url
+    }
+}
+
+/// What the page on screen reported about itself (`postPageState`).
+@MainActor
+@Observable
+final class PageInfo {
+    private(set) var title = ""
+    private(set) var breadcrumbs: [Crumb] = []
+    private(set) var actions: [AppAction] = []
+
+    /// Applies one `{type: 'page', ...}` message. Anything malformed is
+    /// ignored: the bar keeps what it had.
+    func apply(_ body: Any) {
+        guard let message = body as? [String: Any], message["type"] as? String == "page" else { return }
+        self.title = (message["title"] as? String) ?? ""
+        self.breadcrumbs = ((message["breadcrumbs"] as? [[String: Any]]) ?? []).compactMap { crumb in
+            guard let name = crumb["name"] as? String, let url = crumb["url"] as? String else { return nil }
+            return Crumb(name: name, url: url)
+        }
+        self.actions = ((message["actions"] as? [String]) ?? []).compactMap(AppAction.init(rawValue:))
+    }
+}
+
+/// Wires a `WebPage.Configuration` for the app shell: marks every page as
+/// embedded before any of its scripts run, and receives the page's reports.
+enum AppBridge {
+    /// The script-message handler name `app-bridge.ts` posts to.
+    static let messageHandler = "mbrApp"
+
+    /// Runs at document start in the main frame: `app-bridge.ts`'s
+    /// `isEmbedded()` reads the global, and theme.css hides mbr's own header
+    /// and breadcrumbs under the class.
+    static let embeddedScript = """
+    window.__MBR_EMBEDDED__ = true;
+    document.documentElement.classList.add('mbr-embedded');
+    """
+
+    @MainActor
+    static func install(in configuration: inout WebPage.Configuration, info: PageInfo) {
+        let controller = configuration.userContentController
+        controller.addUserScript(WKUserScript(
+            source: self.embeddedScript, injectionTime: .atDocumentStart, forMainFrameOnly: true
+        ))
+        controller.add(MessageReceiver(info: info), name: self.messageHandler)
+    }
+
+    /// Asks the page to open `action` through `window.mbrApp.open`, the same
+    /// public method its own button uses. `false` when the page declined (not
+    /// available there) or the call failed.
+    @MainActor
+    static func open(_ action: AppAction, in page: WebPage) async -> Bool {
+        do {
+            let opened = try await page.callJavaScript(
+                "return window.mbrApp ? window.mbrApp.open(name) : false",
+                arguments: ["name": action.rawValue]
+            )
+            return (opened as? Bool) ?? false
+        } catch {
+            Log.info("bridge: open \(action.rawValue) failed: \(error)")
+            return false
+        }
+    }
+
+    /// Receives the page's messages. WebKit holds it strongly; it holds the
+    /// model weakly, so a closed page leaves nothing behind.
+    private final class MessageReceiver: NSObject, WKScriptMessageHandler {
+        private weak var info: PageInfo?
+
+        init(info: PageInfo) {
+            self.info = info
+        }
+
+        func userContentController(_: WKUserContentController, didReceive message: WKScriptMessage) {
+            let body = message.body
+            MainActor.assumeIsolated {
+                self.info?.apply(body)
+            }
+        }
+    }
+}

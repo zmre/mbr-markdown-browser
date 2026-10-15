@@ -1,0 +1,131 @@
+# The MBR iOS app. Generated into MBRMobile.xcodeproj by `xcodegen generate`
+# (build.sh does this). The .xcodeproj and the Info.plist XcodeGen writes are
+# not checked in.
+#
+# Links mbr's Rust core (crates/mbr-ffi, `mobile` feature) as a static-library
+# xcframework (MbrFFI.xcframework, produced by build.sh) and compiles the
+# UniFFI Swift bindings (Generated/mbr.swift) into the app target, the same
+# split apple/quicklook uses.
+name: MBRMobile
+options:
+  bundleIdPrefix: com.zmre.mbr
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "26.0"
+
+settings:
+  base:
+    # build.sh passes the workspace's version (Cargo.toml) on the command line.
+    MARKETING_VERSION: "0.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Swift 5 mode: UniFFI's generated bindings and the WebKit SwiftUI API
+    # would otherwise need Sendable annotations throughout.
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: X2SAY6ACE6
+    CODE_SIGN_STYLE: Automatic
+    # Only arm64 slices exist in MbrFFI.xcframework (device and Apple-silicon
+    # simulator); a generic simulator build would otherwise add x86_64.
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+
+configs:
+  Debug:
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+  Release:
+    SWIFT_OPTIMIZATION_LEVEL: -O
+
+targets:
+  MBRMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: MBRMobile
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+      - path: Generated/mbr.swift
+      # The repo's own docs, bundled as the sample vault. A folder reference,
+      # so it lands in the bundle as `docs/` with its tree intact.
+      - path: ../../docs
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: MbrFFI.xcframework
+        embed: false
+      - sdk: SystemConfiguration.framework
+      - sdk: Security.framework
+    info:
+      path: MBRMobile/Info.plist
+      properties:
+        # Markdown files open in place from Files ("Open in MBR", the share
+        # sheet): the app reads and writes the original, never a copy.
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Markdown document
+            # Editor, not Viewer: ticking a task writes the file.
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - net.daringfireball.markdown
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: net.daringfireball.markdown
+            UTTypeDescription: Markdown document
+            UTTypeConformsTo:
+              - public.plain-text
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - md
+                - markdown
+                - mdown
+                - mkd
+              public.mime-type:
+                - text/markdown
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.ios
+        PRODUCT_NAME: MBR
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: MBR
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        # Show the app's Documents folder (the sample vault) in Files.
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        # Most of the (large) Rust staticlib is unreachable from the FFI
+        # surface; let the linker drop it.
+        DEAD_CODE_STRIPPING: YES
+        # MBRMobile/Assets.xcassets/AppIcon.appiconset: one 1024x1024 opaque
+        # PNG (the macOS icon's tree, cropped full-bleed); Xcode derives the
+        # other sizes.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  # UI tests for what only a tap can open (the native bar's menus, the home
+  # screen icon); `./build.sh uitest` runs them and screenshots each state.
+  MBRMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: MBRMobileUITests
+    dependencies:
+      - target: MBRMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: MBRMobile
+
+schemes:
+  MBRMobile:
+    build:
+      targets:
+        MBRMobile: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MBRMobileUITests

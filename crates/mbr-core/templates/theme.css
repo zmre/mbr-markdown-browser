@@ -1007,6 +1007,188 @@ body
   text-align: center;
 }
 
+/* ==================== Narrow Screens: Header and Breadcrumbs ==================== */
+
+/*
+ * Phones, in mbr's own app and in mobile Safari alike. With seven buttons at
+ * Pico's spacing, a 390px header left the page title one letter ("B…"), and a
+ * deep path's breadcrumbs wrapped onto three or four lines.
+ *
+ * The header keeps one line and gives the title the room: the buttons close up
+ * to half Pico's spacing, which is still a comfortable gap between icons.
+ */
+@media screen and (max-width: 600px) {
+  body > header nav > ul > li {
+    padding-inline: calc(var(--pico-nav-element-spacing-horizontal) * 0.5);
+  }
+
+  body > header nav > ul.mbr-title-group > li.mbr-nav-title > strong {
+    font-size: 0.95rem;
+  }
+}
+
+/*
+ * Breadcrumbs collapse to one line: "… › parent › this page", the current
+ * page's name ellipsized. `breadcrumbs.ts` adds the "…" button (only when
+ * something is hidden) and toggles `.mbr-crumbs-expanded`, which shows the
+ * whole path, wrapped as before.
+ */
+nav.breadcrumbs li.mbr-crumbs-more {
+  display: none;
+}
+
+nav.breadcrumbs .mbr-crumbs-more button {
+  all: unset;
+  cursor: pointer;
+  padding: 0 0.35rem;
+  min-height: 1.5rem;
+  color: var(--pico-primary);
+  font-style: normal;
+}
+
+@media screen and (max-width: 600px) {
+  nav.breadcrumbs:not(.mbr-crumbs-expanded) > ul {
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+
+  nav.breadcrumbs:not(.mbr-crumbs-expanded) > ul > li {
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
+  /* Everything but the "…", the parent and the current page. */
+  nav.breadcrumbs:not(.mbr-crumbs-expanded)
+    > ul
+    > li:not(:nth-last-child(-n + 2)):not(.mbr-crumbs-more) {
+    display: none;
+  }
+
+  nav.breadcrumbs:not(.mbr-crumbs-expanded) > ul > li:last-child {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  nav.breadcrumbs:not(.mbr-crumbs-expanded) > ul > li:nth-last-child(2) {
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  nav.breadcrumbs:not(.mbr-crumbs-expanded) li.mbr-crumbs-more {
+    display: list-item;
+  }
+}
+
+/* ==================== Safe Areas (notch, home indicator) ==================== */
+
+/*
+ * `_head.html` asks for `viewport-fit=cover`, so the page may run under the
+ * notch (landscape) and the home indicator. Content keeps clear of both.
+ *
+ * Only below Pico's 576px container breakpoint: there `.container` is padded
+ * by `--pico-spacing`, and `max()` keeps that unless an inset is larger. From
+ * 576px up Pico centres a narrower container with no padding, whose margins
+ * already clear a landscape notch, and desktop layouts must not change.
+ */
+@media screen and (max-width: 575px) {
+  body > header.container,
+  body > nav.breadcrumbs.container,
+  body > main.container,
+  body > footer.container {
+    padding-left: max(var(--pico-spacing), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--pico-spacing), env(safe-area-inset-right, 0px));
+  }
+}
+
+body {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* The sticky header starts below the status bar (or, in the app, below the
+ * native navigation bar), its background still running up behind it; anchor
+ * jumps clear both. */
+body > header {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+html {
+  scroll-padding-top: calc(3em + env(safe-area-inset-top, 0px));
+}
+
+/* ==================== Embedded in the iOS App ==================== */
+
+/*
+ * The app injects `html.mbr-embedded` (and `window.__MBR_EMBEDDED__`) before
+ * any page script runs; desktop, server and static pages never have it. The
+ * native navigation bar shows the title, a breadcrumb menu and every action
+ * (through `app-bridge.ts`), so mbr's own header and breadcrumbs go.
+ *
+ * The header collapses rather than `display: none`: its components host the
+ * overlays the app opens (search, info, tasks, the editor's loading state,
+ * the browse drawer). Those are `position: fixed`, and an `overflow: hidden`
+ * ancestor without a transform does not clip fixed descendants, so they still
+ * show; inside a `display: none` ancestor they would not render at all.
+ */
+html.mbr-embedded body > header {
+  height: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  overflow: hidden;
+}
+
+html.mbr-embedded body > nav.breadcrumbs {
+  display: none;
+}
+
+html.mbr-embedded body {
+  /* The page runs under the native navigation bar (viewport-fit=cover); the
+   * inset is the bar's height. */
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+html.mbr-embedded {
+  /* No sticky header to clear on an anchor jump, only the native bar. */
+  scroll-padding-top: calc(0.5em + env(safe-area-inset-top, 0px));
+}
+
+/* ==================== Downloading (a cloud note not on the device yet) ==================== */
+
+/*
+ * `error.html`'s `downloading` branch. Still a 503 with Retry-After/Refresh
+ * underneath, but drawn as the ordinary first-access state it is: Pico's
+ * indeterminate `<progress>`, the provider and the note's name.
+ */
+.mbr-downloading {
+  max-width: 28rem;
+  margin: 18vh auto 2rem;
+  margin-top: 18dvh;
+  padding: 0;
+  text-align: center;
+  background: none;
+  box-shadow: none;
+}
+
+.mbr-downloading progress {
+  max-width: 14rem;
+  margin-inline: auto;
+}
+
+.mbr-downloading-title {
+  font-size: 1.35rem;
+  margin-bottom: 0.25rem;
+}
+
+.mbr-downloading-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  margin-bottom: 0.5rem;
+}
+
 /* ==================== Link Enhancement Tooltips (GUI Mode) ==================== */
 
 /*

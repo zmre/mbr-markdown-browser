@@ -83,6 +83,8 @@ function injectStyles(): void {
     HEADER_CSS,
     PICKER_CSS,
     AUTOCOMPLETE_CSS,
+    // Last, so its narrow-screen overrides win over everything above.
+    NARROW_CSS,
   ].join('\n');
   document.head.appendChild(style);
 }
@@ -176,6 +178,42 @@ const MODAL_CSS = `
 .mbr-editor-token.show { display: inline-block; }
 .mbr-editor-footer button { padding: 0.35rem 0.9rem; cursor: pointer; }
 .mbr-editor-loading { padding: 2rem; text-align: center; opacity: 0.7; }
+`;
+
+/**
+ * Phones (and any window under 600px). Crepe pads the document 60px/120px,
+ * which on a 390px screen leaves a sliver of text, and its selection toolbar
+ * is a no-wrap row of 44px items with `overflow: hidden`, so most of it was out
+ * of reach. Here the modal is full-screen (clear of the notch and home
+ * indicator), the document gets phone margins (wider on the left, where
+ * Crepe's block handle sits), the toolbar wraps onto a second row within the
+ * screen, and the header and footer wrap instead of running off the edge.
+ */
+export const NARROW_CSS = `
+@media (max-width: 600px) {
+  .mbr-editor-backdrop { align-items: stretch; }
+  .mbr-editor-modal {
+    width: 100vw; height: 100vh; height: 100dvh; border-radius: 0;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+      env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    box-sizing: border-box;
+  }
+  .milkdown .ProseMirror { padding: 16px 14px 24px 30px; }
+  .mbr-editor-header { flex-wrap: wrap; gap: 0.25rem 0.5rem; padding: 0.5rem 0.75rem; }
+  .mbr-editor-header h2 { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+  .mbr-editor-header .path { display: block; margin-left: 0; }
+  .mbr-editor-fileactions { margin-left: 0; flex-wrap: wrap; }
+  .mbr-editor-close { min-width: 44px; min-height: 44px; }
+  .mbr-editor-footer { flex-wrap: wrap; padding: 0.5rem 0.75rem; }
+  .mbr-editor-footer .status { flex: 1 1 100%; }
+  .mbr-editor-token { min-width: 0; flex: 1 1 100%; }
+  .milkdown .milkdown-toolbar {
+    flex-wrap: wrap;
+    max-width: calc(100vw - 16px);
+  }
+  .milkdown .milkdown-toolbar .toolbar-item { margin: 4px; }
+  .milkdown .milkdown-toolbar .divider { margin: 10px 2px; }
+}
 `;
 
 // Header file actions (New / Rename / Move) and the footer "Insert media"

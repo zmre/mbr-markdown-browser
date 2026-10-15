@@ -355,7 +355,11 @@ fn the_root_is_the_picked_folder_even_inside_a_repository() {
     std::fs::write(inner.join("inner.md"), "# Inner\n").unwrap();
     let app = open(&inner);
     assert_eq!(Path::new(&app.root_path()), inner.canonicalize().unwrap());
-    assert_eq!(app.pages.index_file, "index.md", "outer config not read");
+    assert_eq!(
+        current(&app.served).pages.index_file,
+        "index.md",
+        "outer config not read"
+    );
     assert_eq!(site_urls(&app), vec!["/inner/"]);
 }
 
@@ -382,7 +386,11 @@ fn a_broken_config_file_falls_back_to_the_defaults_and_is_reported() {
 
         let app = open(dir.path());
         let report = block_on(app.wait_until_ready()).unwrap();
-        assert_eq!(app.pages.index_file, "index.md", "{label}: defaults used");
+        assert_eq!(
+            current(&app.served).pages.index_file,
+            "index.md",
+            "{label}: defaults used"
+        );
         let error = report.config_error.clone().expect("reported");
         let expected = match label {
             "unparseable" => "config.toml",
@@ -413,7 +421,7 @@ fn a_broken_config_file_falls_back_to_the_defaults_and_is_reported() {
     .unwrap();
     let app = open(dir.path());
     let report = block_on(app.wait_until_ready()).unwrap();
-    assert_eq!(app.pages.index_file, "home.md");
+    assert_eq!(current(&app.served).pages.index_file, "home.md");
     assert_eq!(report.config_error, None);
     let errors = get(&app, "/note/errors.json").text();
     assert!(!errors.contains("config_parse_error"), "{errors}");
@@ -751,4 +759,193 @@ fn index_timings() {
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum::<u64>();
     println!("TIMING snapshot size {} KB", snapshot / 1024);
+}
+
+// ---- refresh: .mbr/ ----------------------------------------------------------
+
+fn refresh(app: &MbrApp) -> RefreshSummary {
+    block_on(app.refresh()).expect("refresh")
+}
+
+/// Writes `path` so its stamp certainly differs from what was there: a stat
+/// fingerprint compares size and mtime, and two writes in the same instant
+/// with equal sizes would look like nothing happened.
+fn rewrite(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    let later = SystemTime::now() + Duration::from_secs(2);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+}
+
+#[test]
+fn a_refresh_with_nothing_changed_in_mbr_reloads_nothing() {
+    let dir = vault();
+    std::fs::write(dir.path().join(".mbr/user.css"), "body {}").unwrap();
+    let app = open(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    let before = current(&app.served);
+    let summary = refresh(&app);
+    assert!(!summary.mbr_changed(), "{summary:?}");
+    assert!(!summary.config_reloaded && !summary.templates_reloaded && !summary.assets_changed);
+    assert!(Arc::ptr_eq(&before, &current(&app.served)), "no rebuild");
+}
+
+#[test]
+fn a_template_edit_is_picked_up_by_refresh_without_reopening() {
+    let dir = vault();
+    let app = open(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    let before = current(&app.served);
+    assert!(!get(&app, "/note/").text().contains("TEMPLATE-ONE"));
+
+    rewrite(
+        &dir.path().join(".mbr/_footer_custom.html"),
+        "<p>TEMPLATE-ONE</p>",
+    );
+    let summary = refresh(&app);
+    assert!(summary.templates_reloaded, "{summary:?}");
+    assert!(!summary.config_reloaded);
+    assert!(
+        Arc::ptr_eq(&before, &current(&app.served)),
+        "reloaded in place"
+    );
+    assert!(get(&app, "/note/").text().contains("TEMPLATE-ONE"));
+
+    rewrite(
+        &dir.path().join(".mbr/_footer_custom.html"),
+        "<p>TEMPLATE-TWO-EDITED</p>",
+    );
+    assert!(refresh(&app).templates_reloaded);
+    let page = get(&app, "/note/").text();
+    assert!(page.contains("TEMPLATE-TWO-EDITED") && !page.contains("TEMPLATE-ONE"));
+}
+
+#[test]
+fn an_asset_edit_needs_only_a_page_reload() {
+    let dir = vault();
+    std::fs::write(dir.path().join(".mbr/user.css"), "body {}").unwrap();
+    let app = open(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    let before = current(&app.served);
+    rewrite(
+        &dir.path().join(".mbr/user.css"),
+        "body { color: rebeccapurple; }",
+    );
+    let summary = refresh(&app);
+    assert!(summary.assets_changed, "{summary:?}");
+    assert!(!summary.config_reloaded && !summary.templates_reloaded);
+    assert!(Arc::ptr_eq(&before, &current(&app.served)));
+    // Read per request: the next fetch already has it.
+    assert!(get(&app, "/.mbr/user.css").text().contains("rebeccapurple"));
+}
+
+#[test]
+fn a_config_edit_is_picked_up_by_refresh() {
+    let dir = vault();
+    std::fs::write(dir.path().join("home.md"), "# Home page\n").unwrap();
+    let app = open(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    assert_eq!(current(&app.served).pages.index_file, "index.md");
+    assert!(!get(&app, "/note/").text().contains("<title>PFX "));
+
+    rewrite(
+        &dir.path().join(".mbr/config.toml"),
+        "index_file = \"home.md\"\ntitle_prefix = \"PFX \"\n",
+    );
+    let summary = refresh(&app);
+    assert!(summary.config_reloaded, "{summary:?}");
+    assert_eq!(summary.config_error, None);
+    assert_eq!(current(&app.served).pages.index_file, "home.md");
+    let page = get(&app, "/note/").text();
+    assert!(
+        page.contains("<title>PFX "),
+        "the new configuration renders"
+    );
+    // The index came along: the vault's notes are all still there, and the
+    // new index_file makes home.md the root page.
+    assert!(site_urls(&app).contains(&"/note/".to_owned()));
+    assert_eq!(get(&app, "/").status, 200);
+}
+
+#[test]
+fn a_config_touched_but_unchanged_does_not_rebuild() {
+    let dir = vault();
+    std::fs::write(
+        dir.path().join(".mbr/config.toml"),
+        "title_prefix = \"A \"\n",
+    )
+    .unwrap();
+    let app = open(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    let before = current(&app.served);
+    rewrite(
+        &dir.path().join(".mbr/config.toml"),
+        "title_prefix = \"A \"\n",
+    );
+    let summary = refresh(&app);
+    assert!(!summary.config_reloaded, "{summary:?}");
+    assert!(Arc::ptr_eq(&before, &current(&app.served)));
+}
+
+#[test]
+fn a_config_broken_mid_session_falls_back_and_fixing_it_clears_the_error() {
+    let dir = vault();
+    std::fs::write(
+        dir.path().join(".mbr/config.toml"),
+        "title_prefix = \"OK \"\n",
+    )
+    .unwrap();
+    let app = open(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    assert_eq!(app.config_error(), None);
+    assert!(get(&app, "/note/").text().contains("<title>OK "));
+
+    rewrite(
+        &dir.path().join(".mbr/config.toml"),
+        "title_prefix = \"OK \"\nthis is [not toml\n",
+    );
+    let broken = refresh(&app);
+    assert!(broken.config_reloaded, "{broken:?}");
+    let error = broken.config_error.clone().expect("reported");
+    assert!(error.contains("config.toml"), "{error}");
+    assert_eq!(app.config_error(), Some(error.clone()));
+    assert!(
+        !get(&app, "/note/").text().contains("<title>OK "),
+        "the defaults are in use"
+    );
+    let errors = get(&app, "/note/errors.json").text();
+    assert!(errors.contains("config_parse_error"), "{errors}");
+    assert_eq!(get(&app, "/note/").status, 200, "still serves");
+
+    rewrite(
+        &dir.path().join(".mbr/config.toml"),
+        "title_prefix = \"FIXED \"\n",
+    );
+    let fixed = refresh(&app);
+    assert!(fixed.config_reloaded);
+    assert_eq!(fixed.config_error, None);
+    assert_eq!(app.config_error(), None);
+    assert!(get(&app, "/note/").text().contains("<title>FIXED "));
+    assert!(
+        !get(&app, "/note/errors.json")
+            .text()
+            .contains("config_parse_error")
+    );
+}
+
+#[test]
+fn a_file_opened_in_place_does_not_look_at_its_folder_mbr() {
+    let dir = vault();
+    let file = dir.path().join("note.md");
+    let app = MbrApp::open_file(file.to_string_lossy().into_owned(), None).unwrap();
+    block_on(app.wait_until_ready()).unwrap();
+    rewrite(
+        &dir.path().join(".mbr/config.toml"),
+        "title_prefix = \"NO \"\n",
+    );
+    assert!(!refresh(&app).mbr_changed(), "outside the grant");
 }

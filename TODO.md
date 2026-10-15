@@ -2,6 +2,12 @@
 
 ## What's Next
 
+* **Mobile**
+  * Make sure there's no horizontal scrolling on mobile
+  * Overlay button to "play" on slides and flashcards in bottom right floating
+  * Change the ... icon to be a double icon with a + and a ... (like in github) so you can add a new note quickly
+  * Need the buttons from edit mode to be more native, too, I think. They're ugly on mobile now.
+  * Do we want any swipe guestures?  Swipe from right and get info overlay, from left and get browse?
 * **Review follow-ups (2026-10-07 review of #323–#329)**
   * [ ] Search modal: typing clears the selection (`mbr-search.ts` `_handleInput` sets `_selectedIndex = -1`) until results land, so a quick Enter is dropped and the highlight blinks; `_setResults` already resets to 0, so delete that line (optionally replay a pending Enter).
   * [ ] Search modal: `_lastPointer` is only recorded by `mousemove` on rows, so a pointer resting outside the rows can still hijack the selection when a longer list renders under it. Track pointer position on the whole `.modal`.

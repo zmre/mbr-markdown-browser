@@ -1110,6 +1110,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       align-items: flex-start;
       justify-content: center;
       padding-top: 10vh;
+      padding-top: calc(env(safe-area-inset-top, 0px) + 10dvh);
       z-index: 1000;
     }
 
@@ -1118,6 +1119,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       width: 100%;
       max-width: 600px;
       max-height: 70vh;
+      /* dvh: shrinks with the on-screen keyboard, so the results stay above it. */
+      max-height: 70dvh;
       margin: 0 1rem;
       background: var(--pico-background-color, #fff);
       border-radius: 12px;
@@ -1425,6 +1428,15 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       gap: 0.5rem;
     }
 
+    /* On a touch screen with no keyboard the shortcut hints only take space.
+       Browse Media stays: it is a button, only its "=" key cap goes. */
+    @media (hover: none) and (pointer: coarse) {
+      .footer-hint,
+      .media-browser-button kbd {
+        display: none;
+      }
+    }
+
     .footer-hint kbd {
       padding: 0.1rem 0.3rem;
       border: 1px solid var(--pico-muted-border-color, #ccc);
@@ -1457,7 +1469,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       width: 90vw;
       max-width: 90vw;
       height: 90vh;
+      height: 90dvh;
       max-height: 90vh;
+      max-height: 90dvh;
       background: var(--pico-background-color, #fff);
       border-radius: 12px;
       box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
@@ -1522,7 +1536,11 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       .media-browser-popup {
         max-width: 100%;
         height: 100vh;
+        height: 100dvh;
         max-height: 100vh;
+        max-height: 100dvh;
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        box-sizing: border-box;
         border-radius: 0;
       }
 

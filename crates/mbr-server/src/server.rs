@@ -318,7 +318,13 @@ fn index_page_links(
             // A file that cannot be parsed contributes no backlinks. Withdraw
             // whatever it contributed before so a file that became unreadable
             // does not leave stale backlinks behind.
-            tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
+            // A not-downloaded note (a cloud provider evicted it) is an
+            // expected state on mobile, not something to warn about.
+            if is_not_downloaded_markdown(&e) {
+                tracing::debug!("Backlink index: {} not downloaded yet: {e}", path.display());
+            } else {
+                tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
+            }
             index.remove_page(url_path);
         }
     }
@@ -944,6 +950,50 @@ fn host_header_is_allowed(headers: &HeaderMap, bind_ip: [u8; 4]) -> bool {
     }
 }
 
+/// tower-http's `on_failure`, minus the noise.
+///
+/// Its default logs every 5xx at ERROR. mbr answers `503` only to say "retry
+/// shortly", always with `Retry-After`: a note a cloud provider has not
+/// downloaded yet, a video still being remuxed. Clients do retry, every second
+/// or two, so each one would log an ERROR for an expected, transient state.
+/// Those are DEBUG; every other failure keeps tower-http's ERROR line.
+fn on_request_failure(
+    class: tower_http::classify::ServerErrorsFailureClass,
+    latency: std::time::Duration,
+    span: &tracing::Span,
+) {
+    let latency_ms = latency.as_millis();
+    match class {
+        tower_http::classify::ServerErrorsFailureClass::StatusCode(
+            StatusCode::SERVICE_UNAVAILABLE,
+        ) => {
+            tracing::debug!(parent: span, latency_ms, "response asks for a retry (503)");
+        }
+        class => {
+            tracing::error!(parent: span, classification = %class, latency_ms, "response failed");
+        }
+    }
+}
+
+/// The cloud provider a path lives in, when its location gives it away: the
+/// folder each provider syncs into on Apple platforms (iCloud Drive's
+/// `Mobile Documents`, on iOS and macOS alike; macOS File Provider folders
+/// under `~/Library/CloudStorage`). Third-party providers on iOS live in an
+/// anonymous app-group container, so they get no name ("Downloading…").
+fn cloud_provider_name(path: &Path) -> Option<&'static str> {
+    path.components().find_map(|component| {
+        let name = component.as_os_str().to_str()?;
+        match name {
+            "Mobile Documents" => Some("iCloud"),
+            _ if name == "Dropbox" || name.starts_with("Dropbox-") => Some("Dropbox"),
+            _ if name.starts_with("GoogleDrive-") => Some("Google Drive"),
+            _ if name.starts_with("OneDrive-") => Some("OneDrive"),
+            _ if name.starts_with("Box-") => Some("Box"),
+            _ => None,
+        }
+    })
+}
+
 /// Seconds a client is asked to wait before retrying a not-downloaded file.
 const NOT_DOWNLOADED_RETRY_SECS: &str = "2";
 
@@ -980,7 +1030,15 @@ fn not_downloaded_response(message: Option<&'static str>) -> Response<Body> {
 /// `WouldBlock`). No desktop read produces it.
 fn is_not_downloaded(error: &MbrError) -> bool {
     match error {
-        MbrError::Markdown(mbr_core::errors::MarkdownError::ReadFailed { source, .. }) => {
+        MbrError::Markdown(markdown) => is_not_downloaded_markdown(markdown),
+        _ => false,
+    }
+}
+
+/// [`is_not_downloaded`] for the markdown layer's own error type.
+fn is_not_downloaded_markdown(error: &mbr_core::errors::MarkdownError) -> bool {
+    match error {
+        mbr_core::errors::MarkdownError::ReadFailed { source, .. } => {
             source.kind() == std::io::ErrorKind::WouldBlock
                 || source
                     .get_ref()
@@ -988,6 +1046,20 @@ fn is_not_downloaded(error: &MbrError) -> bool {
                     .is_some_and(|e| matches!(e, VaultError::NotDownloaded { .. }))
         }
         _ => false,
+    }
+}
+
+/// Logs a failed render under `context`.
+///
+/// A note that is not downloaded yet is an expected, transient state: its page
+/// answers 503 "Downloading" with `Refresh: 2`, so the browser asks again every
+/// couple of seconds until the provider delivers it, and each of those asks
+/// would otherwise log an ERROR. That is DEBUG. Every other failure keeps ERROR.
+fn log_render_failure(context: &str, error: &dyn std::fmt::Display, not_downloaded: bool) {
+    if not_downloaded {
+        tracing::debug!("{context}: not downloaded yet: {error}");
+    } else {
+        tracing::error!("{context}: {error}");
     }
 }
 
@@ -1053,6 +1125,9 @@ pub struct Server {
     changes: ChangeApplier,
     /// Files restored from [`EmbeddedStorage::snapshot`], when it was used.
     restored_files: Option<usize>,
+    /// The templates the router renders with (shared: a reload is seen by
+    /// every request), for [`Server::reload_templates`].
+    templates: mbr_core::templates::Templates,
 }
 
 /// Where the background thread parks the file watcher once it is running.
@@ -2430,6 +2505,7 @@ impl Server {
 
         // Spawn background task to reload templates when .html files change
         let templates_for_reload = templates.clone();
+        let templates_for_server = templates.clone();
         // Canonicalize once here, not per event: the watcher reports canonical
         // paths while the configured folder is stored as written, and this
         // cannot change for the life of the process. Fall back to the path as
@@ -2459,9 +2535,7 @@ impl Server {
                 // Otherwise, only reload for changes in .mbr folder
                 if should_reload_template(&event.path, template_folder_for_reload.as_deref()) {
                     tracing::debug!("Template file changed: {}", event.path);
-                    if let Err(e) = templates_for_reload.reload() {
-                        tracing::error!("Failed to reload templates: {}", e);
-                    }
+                    reload_templates(&templates_for_reload);
                 }
             }
         });
@@ -2728,7 +2802,7 @@ impl Server {
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
             .layer(CompressionLayer::new().compress_when(compression_predicate()))
-            .layer(TraceLayer::new_for_http())
+            .layer(TraceLayer::new_for_http().on_failure(on_request_failure))
             .with_state(state);
 
         Ok(Server {
@@ -2741,7 +2815,16 @@ impl Server {
             repo: repo_for_server,
             changes: change_applier,
             restored_files,
+            templates: templates_for_server,
         })
+    }
+
+    /// Re-reads the templates from `.mbr/` (or the template folder), as the
+    /// desktop watcher does when an `.html` file there changes. For an
+    /// embedder without a watcher (the iOS app's refresh). A template that
+    /// does not parse keeps the previous set and is logged; `false` then.
+    pub fn reload_templates(&self) -> bool {
+        reload_templates(&self.templates)
     }
 
     /// The repository index this server serves.
@@ -3542,6 +3625,35 @@ impl Server {
         }
     }
 
+    /// [`Self::resolve_editable_markdown`], asked again after a short pause
+    /// while it fails.
+    ///
+    /// Resolution runs before the per-file write lock (the lock is keyed by
+    /// what it returns), so it can `stat` a note while another request's
+    /// atomic write is renaming over it. On Windows that open can fail for a
+    /// moment (the replaced file is delete-pending, which surfaces as
+    /// `PermissionDenied`), and the resolver reads any stat error as "absent":
+    /// a spurious 404 (or, from the canonicalize check, 400) for a file that is
+    /// plainly there. Seen on CI as `test_concurrent_task_toggles_on_one_file_both_land`
+    /// failing on Windows aarch64. A real miss costs three 20 ms pauses, on an
+    /// edit endpoint only.
+    async fn resolve_editable_markdown_settled(
+        config: &ServerState,
+        path: &str,
+    ) -> Result<PathBuf, (StatusCode, &'static str)> {
+        const RETRIES: usize = 3;
+        const PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+        let mut result = Self::resolve_editable_markdown(config, path);
+        for _ in 0..RETRIES {
+            if result.is_ok() {
+                break;
+            }
+            tokio::time::sleep(PAUSE).await;
+            result = Self::resolve_editable_markdown(config, path);
+        }
+        result
+    }
+
     /// GET /.mbr/raw/{*path} — returns the raw markdown source of an existing
     /// file plus an `X-MBR-Content-Hash` header for optimistic concurrency.
     pub async fn raw_markdown_handler(
@@ -3553,7 +3665,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -3591,7 +3703,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -3691,7 +3803,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &req.path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -3821,7 +3933,7 @@ impl Server {
         if let Err(err) = Self::check_edit_access(&config, &headers, peer.ip()) {
             return err.into_response();
         }
-        let md_path = match Self::resolve_editable_markdown(&config, &req.path) {
+        let md_path = match Self::resolve_editable_markdown_settled(&config, &req.path).await {
             Ok(p) => p,
             Err(err) => return err.into_response(),
         };
@@ -4913,6 +5025,40 @@ impl Server {
         tasks_enabled: bool,
         tasks_default_include: IncludeFilter,
     ) -> Response<Body> {
+        Self::render_error_page_with(
+            templates,
+            status_code,
+            error_title,
+            error_message,
+            requested_url,
+            gui_mode,
+            sidebar_style,
+            sidebar_max_items,
+            graph_depth,
+            tasks_enabled,
+            tasks_default_include,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::render_error_page`] with extra template context: `extra`'s
+    /// keys are added after the standard ones (the Downloading page's
+    /// `downloading`, `note_name`, `download_provider`).
+    #[allow(clippy::too_many_arguments)]
+    fn render_error_page_with(
+        templates: &templates::Templates,
+        status_code: StatusCode,
+        error_title: &str,
+        error_message: Option<&str>,
+        requested_url: &str,
+        gui_mode: bool,
+        sidebar_style: &str,
+        sidebar_max_items: usize,
+        graph_depth: usize,
+        tasks_enabled: bool,
+        tasks_default_include: IncludeFilter,
+        extra: Vec<(&'static str, serde_json::Value)>,
+    ) -> Response<Body> {
         use std::collections::HashMap;
 
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
@@ -4951,6 +5097,12 @@ impl Server {
                 // markdown body to scope review storage against anyway.
                 root_dir: None,
             },
+        );
+
+        context.extend(
+            extra
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value)),
         );
 
         match templates.render_error(context) {
@@ -5102,7 +5254,7 @@ impl Server {
                         if let Some((vault, path)) = config.repo.locate(&md_path) {
                             vault.request_download(std::slice::from_ref(&path));
                         }
-                        Ok(Self::not_downloaded_page(&config, &path))
+                        Ok(Self::not_downloaded_page(&config, &path, &md_path))
                     }
                     Err(e) => {
                         tracing::error!("Error rendering markdown: {e}");
@@ -5253,8 +5405,20 @@ impl Server {
     /// provider's dataless file). The download has been requested; the page
     /// asks to be fetched again shortly (`Retry-After`, and `Refresh` for the
     /// browsers that honour it).
-    fn not_downloaded_page(config: &ServerState, path: &str) -> Response<Body> {
-        let mut response = Self::render_error_page(
+    ///
+    /// Still a `503` underneath, but not shown as an error: downloading on
+    /// first access is the normal life of a cloud note. `error.html`'s
+    /// `downloading` branch draws an indeterminate progress bar, "Downloading
+    /// from iCloud…" (when the provider can be told from the path) and the
+    /// note's name.
+    fn not_downloaded_page(config: &ServerState, path: &str, md_path: &Path) -> Response<Body> {
+        let note_name = md_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("this note")
+            .to_string();
+        let provider = cloud_provider_name(md_path);
+        let mut response = Self::render_error_page_with(
             &config.templates,
             StatusCode::SERVICE_UNAVAILABLE,
             "Downloading",
@@ -5269,6 +5433,20 @@ impl Server {
             config.graph_depth,
             config.tasks_enabled,
             config.tasks_default_include,
+            vec![
+                ("downloading", serde_json::Value::Bool(true)),
+                // The page title is the note the reader tapped: mbr's own header
+                // and the iOS bar (app-bridge.ts reads it) show its name, not
+                // "Downloading".
+                ("title", serde_json::Value::String(note_name.clone())),
+                ("note_name", serde_json::Value::String(note_name)),
+                (
+                    "download_provider",
+                    provider.map_or(serde_json::Value::Null, |name| {
+                        serde_json::Value::String(name.to_string())
+                    }),
+                ),
+            ],
         );
         add_retry_headers(response.headers_mut());
         response
@@ -6134,6 +6312,14 @@ impl Server {
                                 .unwrap_or_default(),
                         )
                     }
+                    // The page itself answers 503 "Downloading" and is
+                    // retried every couple of seconds; its errors.json is
+                    // fetched on each of those loads. Answer cleanly, with
+                    // the problems that do not depend on the note's body.
+                    Err(e) if is_not_downloaded_markdown(&e) => {
+                        log_render_failure("errors.json", &e, true);
+                        return Some(Self::not_downloaded_errors_json(config, page_url_path));
+                    }
                     Err(e) => {
                         tracing::error!("errors.json: failed to render page: {}", e);
                         return None;
@@ -6220,6 +6406,7 @@ impl Server {
         let payload = PageErrors {
             page_url: page_url_path,
             errors,
+            not_downloaded: false,
         };
 
         let json = match serde_json::to_string(&payload) {
@@ -6237,6 +6424,42 @@ impl Server {
                 .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_CACHE)
                 .body(Body::from(json)),
         ))
+    }
+
+    /// `errors.json` for a note whose bytes are not on this device yet: `200`
+    /// with only the problems that do not depend on the note's body (an
+    /// ignored configuration) and `not_downloaded: true`, never cached, so the
+    /// load after the download completes gets the real list.
+    /// `mbr-page-errors.ts` treats it like any other answer: no indicator
+    /// unless there is a problem to show, and nothing in the console.
+    fn not_downloaded_errors_json(config: &ServerState, page_url: String) -> Response<Body> {
+        let errors = config
+            .config_problem
+            .iter()
+            .map(
+                |message| mbr_core::page_errors::PageError::ConfigParseError {
+                    message: message.clone(),
+                },
+            )
+            .collect();
+        let payload = mbr_core::page_errors::PageErrors {
+            page_url,
+            errors,
+            not_downloaded: true,
+        };
+        match serde_json::to_string(&payload) {
+            Ok(json) => build_response_or_500(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+                    .body(Body::from(json)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to serialize errors.json: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
     }
 
     /// Probes a media file for tracks that break browser playback, memoized by
@@ -7097,7 +7320,9 @@ impl Server {
             Some(config.repo.wikilink_index.clone()),
         )
         .await
-        .inspect_err(|e| tracing::error!("Error rendering markdown: {e}"))?;
+        .inspect_err(|e| {
+            log_render_failure("Error rendering markdown", e, is_not_downloaded_markdown(e))
+        })?;
         let mut frontmatter = render_result.frontmatter;
         let headings = render_result.headings;
         let inner_html_output = render_result.html;
@@ -7638,7 +7863,7 @@ impl Server {
                         if let Some((vault, path)) = config.repo.locate(&md_path) {
                             vault.request_download(std::slice::from_ref(&path));
                         }
-                        Ok(Self::not_downloaded_page(&config, ""))
+                        Ok(Self::not_downloaded_page(&config, "", &md_path))
                     }
                     Err(e) => {
                         tracing::error!("Error rendering home markdown: {e}");
@@ -7696,6 +7921,18 @@ impl Server {
 /// Comparison is component-wise via [`Path::starts_with`], not a string prefix
 /// test: `"/x/tmpl-backup/index.html"` textually starts with `"/x/tmpl"` but is
 /// a sibling directory, not a template.
+/// Reloads `templates`, logging a failure: the watcher's template task and
+/// [`Server::reload_templates`] share it. `false` when the reload failed.
+fn reload_templates(templates: &mbr_core::templates::Templates) -> bool {
+    match templates.reload() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!("Failed to reload templates: {}", e);
+            false
+        }
+    }
+}
+
 fn should_reload_template(event_path: &str, template_folder: Option<&Path>) -> bool {
     match template_folder {
         Some(tf) => Path::new(event_path).starts_with(tf),
@@ -8143,6 +8380,37 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let result = validate_media_path("../etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn cloud_provider_names_come_from_the_sync_folder() {
+        let name = |p: &str| cloud_provider_name(std::path::Path::new(p));
+        assert_eq!(
+            name("/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Notes/a.md"),
+            Some("iCloud")
+        );
+        assert_eq!(
+            name("/Users/me/Library/Mobile Documents/com~apple~CloudDocs/a.md"),
+            Some("iCloud")
+        );
+        assert_eq!(
+            name("/Users/me/Library/CloudStorage/Dropbox/notes/a.md"),
+            Some("Dropbox")
+        );
+        assert_eq!(
+            name("/Users/me/Library/CloudStorage/GoogleDrive-me@example.com/My Drive/a.md"),
+            Some("Google Drive")
+        );
+        assert_eq!(
+            name("/Users/me/Library/CloudStorage/OneDrive-Personal/a.md"),
+            Some("OneDrive")
+        );
+        // An iOS third-party provider's container is anonymous.
+        assert_eq!(
+            name("/private/var/mobile/Containers/Shared/AppGroup/1234/File Provider Storage/a.md"),
+            None
+        );
+        assert_eq!(name("/Users/me/notes/Dropboxes/a.md"), None);
     }
 
     #[test]

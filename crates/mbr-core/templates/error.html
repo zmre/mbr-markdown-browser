@@ -3,11 +3,22 @@
 <html lang="en">
   <head>
 {% include "_head.html" %}
-    <title>{{ error_code }} - {{ error_title | default(value="Error") }}</title>
+    {% if downloading %}<title>{{ note_name }}</title>{% else %}<title>{{ error_code }} - {{ error_title | default(value="Error") }}</title>{% endif %}
   </head>
   <body>
 {% include "_nav.html" %}
     <main id="wrapper" class="container">
+      {% if downloading %}
+      {#- A note a cloud provider has not downloaded yet. Served as a 503 with
+          Retry-After/Refresh (the page reloads itself until the note arrives),
+          but not drawn as an error: downloading on first access is normal. -#}
+      <article class="mbr-downloading" aria-live="polite">
+        <progress aria-label="Downloading"></progress>
+        <h1 class="mbr-downloading-title">Downloading{% if download_provider %} from {{ download_provider }}{% endif %}…</h1>
+        <p class="mbr-downloading-name">{{ note_name }}</p>
+        <p><small>This note isn't on this device yet. It opens as soon as it arrives.</small></p>
+      </article>
+      {% else %}
       <article class="error-page">
         <header>
           <h1>{{ error_code }}</h1>
@@ -36,6 +47,7 @@
           <p><small>Tip: Press <kbd>/</kbd> to search for what you're looking for.</small></p>
         </footer>
       </article>
+      {% endif %}
     </main>
 {% include "_footer.html" %}
   </body>

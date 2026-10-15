@@ -172,7 +172,21 @@ async fn not_downloaded_files_get_a_retry_answer_and_a_download_request() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(headers[header::RETRY_AFTER], "2");
     assert_eq!(headers["refresh"], "2");
-    assert!(String::from_utf8(body).unwrap().contains("Downloading"));
+    let page = String::from_utf8(body).unwrap();
+    // Drawn as the normal first-access state, not an error page: a progress
+    // bar and the note's name, never a big "503".
+    assert!(
+        page.contains("<title>cloud</title>"),
+        "the note's name: {page}"
+    );
+    assert!(
+        page.contains("<strong>cloud</strong>"),
+        "the header title: {page}"
+    );
+    assert!(page.contains("class=\"mbr-downloading\""), "{page}");
+    assert!(page.contains("<progress"), "{page}");
+    assert!(page.contains("mbr-downloading-name\">cloud<"), "{page}");
+    assert!(!page.contains("<h1>503</h1>"), "{page}");
 
     let (status, headers, _) = send(&server, get("/media/far.png")).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -280,4 +294,116 @@ async fn a_large_refresh_is_applied_file_by_file_and_keeps_evicted_metadata() {
     let (status, _, _) = send(&server, get("/media/new.png")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(server.refresh().await.is_empty());
+}
+
+/// A vault whose `stat` of one file fails, as `PermissionDenied`, the first
+/// `failures` times: what Windows answers for a moment while another
+/// request's atomic write is renaming over that file.
+#[derive(Debug)]
+struct FlakyStatVault {
+    inner: Arc<MemVault>,
+    target: VaultPath,
+    failures: std::sync::Mutex<usize>,
+}
+
+impl Vault for FlakyStatVault {
+    fn root(&self) -> &std::path::Path {
+        self.inner.root()
+    }
+    fn stat(
+        &self,
+        path: &VaultPath,
+    ) -> Result<Option<mbr_core::vault::Entry>, mbr_core::vault::VaultError> {
+        if *path == self.target {
+            let mut left = self.failures.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(mbr_core::vault::VaultError::PermissionDenied {
+                    path: path.to_string(),
+                });
+            }
+        }
+        self.inner.stat(path)
+    }
+    fn list_dir(
+        &self,
+        dir: &VaultPath,
+    ) -> Result<Vec<mbr_core::vault::Entry>, mbr_core::vault::VaultError> {
+        self.inner.list_dir(dir)
+    }
+    fn canonicalize(&self, path: &VaultPath) -> Result<VaultPath, mbr_core::vault::VaultError> {
+        self.inner.canonicalize(path)
+    }
+    fn read(&self, path: &VaultPath) -> Result<Vec<u8>, mbr_core::vault::VaultError> {
+        self.inner.read(path)
+    }
+    fn read_prefix(
+        &self,
+        path: &VaultPath,
+        max_len: usize,
+    ) -> Result<Vec<u8>, mbr_core::vault::VaultError> {
+        self.inner.read_prefix(path, max_len)
+    }
+    fn write_atomic(
+        &self,
+        path: &VaultPath,
+        bytes: &[u8],
+    ) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.write_atomic(path, bytes)
+    }
+    fn create_dir_all(&self, path: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.create_dir_all(path)
+    }
+    fn remove_file(&self, path: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.remove_file(path)
+    }
+    fn rename(&self, from: &VaultPath, to: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.rename(from, to)
+    }
+}
+
+/// Regression for the Windows CI flake in
+/// `test_concurrent_task_toggles_on_one_file_both_land`: a task toggle whose
+/// path resolution races another write's rename saw the note as absent and
+/// answered 404. Resolution now asks again after a short pause. Deterministic
+/// on every OS: the vault fails the first two stats of the note.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_survives_a_momentary_stat_failure_on_its_note() {
+    let inner = Arc::new(MemVault::new().with_file("notes.md", "# Notes\n\n- [ ] one\n"));
+    let mut config = ServerConfig::from(&Config::default());
+    config.base_dir = inner.root().to_path_buf();
+    config.oembed_timeout_ms = 0;
+    config.edit_enabled = true;
+    let flaky = Arc::new(FlakyStatVault {
+        inner: Arc::clone(&inner),
+        target: VaultPath::new("notes.md").unwrap(),
+        failures: std::sync::Mutex::new(0),
+    });
+    config.embedded = Some(EmbeddedStorage {
+        vault: Arc::clone(&flaky) as Arc<dyn Vault>,
+        snapshot: None,
+    });
+    let server = Server::init(config).expect("init");
+    server.repo().wait_for_media().await;
+
+    // Only now, so the scan saw the note: the next two stats fail.
+    *flaky.failures.lock().unwrap() = 2;
+    let mut toggle = Request::post("/.mbr/task")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("X-MBR-Edit", "1")
+        .body(Body::from(
+            r#"{"path":"notes.md","line":3,"expected":"- [ ] one","to":"done"}"#,
+        ))
+        .unwrap();
+    toggle
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    let (status, _, body) = send(&server, toggle).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let text = String::from_utf8(inner.contents("notes.md").unwrap()).unwrap();
+    assert!(text.contains("- [x] one"), "{text}");
 }

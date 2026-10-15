@@ -76,6 +76,19 @@ export class MbrEditorElement extends LitElement {
     }
   };
 
+  /**
+   * Opens the editor, exactly as `e` and the pencil button do. Public for the
+   * iOS app's menu (`app-bridge.ts`); a no-op where {@link canEdit} is false.
+   */
+  public open(): void {
+    if (this.canEdit) void this._open();
+  }
+
+  /** Whether this page can be edited: editing is on and it has a source file. */
+  public get canEdit(): boolean {
+    return isEditEnabled() && this._markdownSource() !== null;
+  }
+
   private _markdownSource(): string | null {
     const source = window.frontmatter?.['markdown_source'];
     return typeof source === 'string' && source.length > 0 ? source : null;

@@ -216,6 +216,21 @@ export class MbrSlidesElement extends LitElement {
     }
   }
 
+  /** Whether this page is a slide deck (`style: slides`). */
+  public get isSlideDocument(): boolean {
+    return document.body.classList.contains('slides')
+  }
+
+  /**
+   * Starts the presentation, exactly as `p` and the play button do. Public for
+   * the iOS app's menu (`app-bridge.ts`); a no-op on a page that is not a deck.
+   */
+  public open(): void {
+    if (this.isSlideDocument && !this._isPlaying && !this._isLoading) {
+      void this._startPresentation()
+    }
+  }
+
   private async _startPresentation() {
     if (this._isPlaying || this._isLoading) return
 

@@ -326,8 +326,8 @@
           || (builtins.match ".*/apple/quicklook/project\\.yml$" path != null)
           || (builtins.match ".*/apple/quicklook/build\\.sh$" path != null)
           # Swift tooling config
-          || (builtins.match ".*/apple/quicklook/\\.swiftformat$" path != null)
-          || (builtins.match ".*/apple/quicklook/\\.swiftlint\\.yml$" path != null);
+          || (builtins.match ".*/apple/(quicklook|ios)/\\.swiftformat$" path != null)
+          || (builtins.match ".*/apple/(quicklook|ios)/\\.swiftlint\\.yml$" path != null);
       };
 
       # Shared native build inputs
@@ -1100,9 +1100,12 @@
             pkgs.runCommand "mbr-swiftfmt-check" {
               nativeBuildInputs = [pkgs.swiftformat];
             } ''
-              cd ${src}/apple/quicklook
-              # Use explicit exclusion since config file may not be accessible in sandbox
-              swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed" && exit 1)
+              # QuickLook and the iOS app, each with its own config.
+              for dir in apple/quicklook apple/ios; do
+                cd ${src}/$dir
+                # Use explicit exclusion since config file may not be accessible in sandbox
+                swiftformat --lint --swiftversion 5.9 --exclude Generated . 2>&1 || (echo "Swift formatting check failed in $dir" && exit 1)
+              done
               touch $out
             '';
 
@@ -1114,15 +1117,25 @@
               # SwiftLint needs HOME for cache directory
               HOME = "/tmp";
             } ''
-              cd ${src}/apple/quicklook
-              # Check for violations (swiftlint may error about cache but still report correctly)
-              output=$(swiftlint lint --config .swiftlint.yml . 2>&1 || true)
-              echo "$output"
-              # Fail if violations found
-              if echo "$output" | grep -q "Found [1-9][0-9]* violation"; then
-                echo "SwiftLint check failed - violations found"
-                exit 1
-              fi
+              # QuickLook and the iOS app, each with its own config.
+              for dir in apple/quicklook apple/ios; do
+                cd ${src}/$dir
+                # Check for violations (swiftlint may error about cache but still report correctly)
+                # --no-cache: in the sandbox the second run trips over the
+                # first one's half-written cache and lints nothing.
+                output=$(swiftlint lint --no-cache --config .swiftlint.yml . 2>&1 || true)
+                echo "$output"
+                # A run that never got to linting is a failure, not a pass.
+                if ! echo "$output" | grep -q "Done linting!"; then
+                  echo "SwiftLint did not run in $dir"
+                  exit 1
+                fi
+                # Fail if violations found
+                if echo "$output" | grep -q "Found [1-9][0-9]* violation"; then
+                  echo "SwiftLint check failed in $dir - violations found"
+                  exit 1
+                fi
+              done
               touch $out
             '';
         }

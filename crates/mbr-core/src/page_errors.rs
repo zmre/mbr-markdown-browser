@@ -168,6 +168,12 @@ pub struct PageErrors {
     /// Ordered list of detected problems. Always present; the client uses the
     /// length to decide visibility.
     pub errors: Vec<PageError>,
+    /// The note's bytes are not on this device yet (a cloud provider's
+    /// dataless file, mobile only), so `errors` holds only the problems that
+    /// do not depend on its body. Omitted when false, which keeps every
+    /// ordinary payload exactly as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_downloaded: bool,
 }
 
 /// What is wrong with one link, as judged from the href a browser would
@@ -1959,9 +1965,30 @@ mod tests {
         let pe = PageErrors {
             page_url: "/x/".to_string(),
             errors: vec![],
+            not_downloaded: false,
         };
         let json = serde_json::to_string(&pe).unwrap();
         assert!(json.contains("\"page_url\":\"/x/\""));
         assert!(json.contains("\"errors\":[]"));
+        assert!(
+            !json.contains("not_downloaded"),
+            "an ordinary payload is unchanged: {json}"
+        );
+    }
+
+    #[test]
+    fn page_errors_mark_a_not_downloaded_note() {
+        let pe = PageErrors {
+            page_url: "/cloud/".to_string(),
+            errors: vec![],
+            not_downloaded: true,
+        };
+        let json = serde_json::to_string(&pe).unwrap();
+        assert_eq!(
+            json,
+            r#"{"page_url":"/cloud/","errors":[],"not_downloaded":true}"#
+        );
+        let back: PageErrors = serde_json::from_str(r#"{"page_url":"/x/","errors":[]}"#).unwrap();
+        assert!(!back.not_downloaded, "absent means downloaded");
     }
 }
