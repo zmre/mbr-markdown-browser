@@ -975,6 +975,25 @@ fn on_request_failure(
     }
 }
 
+/// The cloud provider a path lives in, when its location gives it away: the
+/// folder each provider syncs into on Apple platforms (iCloud Drive's
+/// `Mobile Documents`, on iOS and macOS alike; macOS File Provider folders
+/// under `~/Library/CloudStorage`). Third-party providers on iOS live in an
+/// anonymous app-group container, so they get no name ("Downloading…").
+fn cloud_provider_name(path: &Path) -> Option<&'static str> {
+    path.components().find_map(|component| {
+        let name = component.as_os_str().to_str()?;
+        match name {
+            "Mobile Documents" => Some("iCloud"),
+            _ if name == "Dropbox" || name.starts_with("Dropbox-") => Some("Dropbox"),
+            _ if name.starts_with("GoogleDrive-") => Some("Google Drive"),
+            _ if name.starts_with("OneDrive-") => Some("OneDrive"),
+            _ if name.starts_with("Box-") => Some("Box"),
+            _ => None,
+        }
+    })
+}
+
 /// Seconds a client is asked to wait before retrying a not-downloaded file.
 const NOT_DOWNLOADED_RETRY_SECS: &str = "2";
 
@@ -4995,6 +5014,40 @@ impl Server {
         tasks_enabled: bool,
         tasks_default_include: IncludeFilter,
     ) -> Response<Body> {
+        Self::render_error_page_with(
+            templates,
+            status_code,
+            error_title,
+            error_message,
+            requested_url,
+            gui_mode,
+            sidebar_style,
+            sidebar_max_items,
+            graph_depth,
+            tasks_enabled,
+            tasks_default_include,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::render_error_page`] with extra template context: `extra`'s
+    /// keys are added after the standard ones (the Downloading page's
+    /// `downloading`, `note_name`, `download_provider`).
+    #[allow(clippy::too_many_arguments)]
+    fn render_error_page_with(
+        templates: &templates::Templates,
+        status_code: StatusCode,
+        error_title: &str,
+        error_message: Option<&str>,
+        requested_url: &str,
+        gui_mode: bool,
+        sidebar_style: &str,
+        sidebar_max_items: usize,
+        graph_depth: usize,
+        tasks_enabled: bool,
+        tasks_default_include: IncludeFilter,
+        extra: Vec<(&'static str, serde_json::Value)>,
+    ) -> Response<Body> {
         use std::collections::HashMap;
 
         let mut context: HashMap<String, serde_json::Value> = HashMap::new();
@@ -5033,6 +5086,12 @@ impl Server {
                 // markdown body to scope review storage against anyway.
                 root_dir: None,
             },
+        );
+
+        context.extend(
+            extra
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value)),
         );
 
         match templates.render_error(context) {
@@ -5184,7 +5243,7 @@ impl Server {
                         if let Some((vault, path)) = config.repo.locate(&md_path) {
                             vault.request_download(std::slice::from_ref(&path));
                         }
-                        Ok(Self::not_downloaded_page(&config, &path))
+                        Ok(Self::not_downloaded_page(&config, &path, &md_path))
                     }
                     Err(e) => {
                         tracing::error!("Error rendering markdown: {e}");
@@ -5335,8 +5394,20 @@ impl Server {
     /// provider's dataless file). The download has been requested; the page
     /// asks to be fetched again shortly (`Retry-After`, and `Refresh` for the
     /// browsers that honour it).
-    fn not_downloaded_page(config: &ServerState, path: &str) -> Response<Body> {
-        let mut response = Self::render_error_page(
+    ///
+    /// Still a `503` underneath, but not shown as an error: downloading on
+    /// first access is the normal life of a cloud note. `error.html`'s
+    /// `downloading` branch draws an indeterminate progress bar, "Downloading
+    /// from iCloud…" (when the provider can be told from the path) and the
+    /// note's name.
+    fn not_downloaded_page(config: &ServerState, path: &str, md_path: &Path) -> Response<Body> {
+        let note_name = md_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("this note")
+            .to_string();
+        let provider = cloud_provider_name(md_path);
+        let mut response = Self::render_error_page_with(
             &config.templates,
             StatusCode::SERVICE_UNAVAILABLE,
             "Downloading",
@@ -5351,6 +5422,16 @@ impl Server {
             config.graph_depth,
             config.tasks_enabled,
             config.tasks_default_include,
+            vec![
+                ("downloading", serde_json::Value::Bool(true)),
+                ("note_name", serde_json::Value::String(note_name)),
+                (
+                    "download_provider",
+                    provider.map_or(serde_json::Value::Null, |name| {
+                        serde_json::Value::String(name.to_string())
+                    }),
+                ),
+            ],
         );
         add_retry_headers(response.headers_mut());
         response
@@ -7767,7 +7848,7 @@ impl Server {
                         if let Some((vault, path)) = config.repo.locate(&md_path) {
                             vault.request_download(std::slice::from_ref(&path));
                         }
-                        Ok(Self::not_downloaded_page(&config, ""))
+                        Ok(Self::not_downloaded_page(&config, "", &md_path))
                     }
                     Err(e) => {
                         tracing::error!("Error rendering home markdown: {e}");
@@ -8272,6 +8353,37 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let result = validate_media_path("../etc/passwd", temp_dir.path(), "");
         assert!(matches!(result, Err(MbrError::DirectoryTraversal)));
+    }
+
+    #[test]
+    fn cloud_provider_names_come_from_the_sync_folder() {
+        let name = |p: &str| cloud_provider_name(std::path::Path::new(p));
+        assert_eq!(
+            name("/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Notes/a.md"),
+            Some("iCloud")
+        );
+        assert_eq!(
+            name("/Users/me/Library/Mobile Documents/com~apple~CloudDocs/a.md"),
+            Some("iCloud")
+        );
+        assert_eq!(
+            name("/Users/me/Library/CloudStorage/Dropbox/notes/a.md"),
+            Some("Dropbox")
+        );
+        assert_eq!(
+            name("/Users/me/Library/CloudStorage/GoogleDrive-me@example.com/My Drive/a.md"),
+            Some("Google Drive")
+        );
+        assert_eq!(
+            name("/Users/me/Library/CloudStorage/OneDrive-Personal/a.md"),
+            Some("OneDrive")
+        );
+        // An iOS third-party provider's container is anonymous.
+        assert_eq!(
+            name("/private/var/mobile/Containers/Shared/AppGroup/1234/File Provider Storage/a.md"),
+            None
+        );
+        assert_eq!(name("/Users/me/notes/Dropboxes/a.md"), None);
     }
 
     #[test]

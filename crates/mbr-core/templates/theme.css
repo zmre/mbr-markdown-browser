@@ -1007,6 +1007,39 @@ body
   text-align: center;
 }
 
+/* ==================== Downloading (a cloud note not on the device yet) ==================== */
+
+/*
+ * `error.html`'s `downloading` branch. Still a 503 with Retry-After/Refresh
+ * underneath, but drawn as the ordinary first-access state it is: Pico's
+ * indeterminate `<progress>`, the provider and the note's name.
+ */
+.mbr-downloading {
+  max-width: 28rem;
+  margin: 18vh auto 2rem;
+  margin-top: 18dvh;
+  padding: 0;
+  text-align: center;
+  background: none;
+  box-shadow: none;
+}
+
+.mbr-downloading progress {
+  max-width: 14rem;
+  margin-inline: auto;
+}
+
+.mbr-downloading-title {
+  font-size: 1.35rem;
+  margin-bottom: 0.25rem;
+}
+
+.mbr-downloading-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  margin-bottom: 0.5rem;
+}
+
 /* ==================== Link Enhancement Tooltips (GUI Mode) ==================== */
 
 /*

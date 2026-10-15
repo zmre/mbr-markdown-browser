@@ -172,7 +172,14 @@ async fn not_downloaded_files_get_a_retry_answer_and_a_download_request() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(headers[header::RETRY_AFTER], "2");
     assert_eq!(headers["refresh"], "2");
-    assert!(String::from_utf8(body).unwrap().contains("Downloading"));
+    let page = String::from_utf8(body).unwrap();
+    // Drawn as the normal first-access state, not an error page: a progress
+    // bar and the note's name, never a big "503".
+    assert!(page.contains("<title>Downloading cloud</title>"), "{page}");
+    assert!(page.contains("class=\"mbr-downloading\""), "{page}");
+    assert!(page.contains("<progress"), "{page}");
+    assert!(page.contains("mbr-downloading-name\">cloud<"), "{page}");
+    assert!(!page.contains("<h1>503</h1>"), "{page}");
 
     let (status, headers, _) = send(&server, get("/media/far.png")).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
