@@ -60,9 +60,25 @@ sheets from the bottom.
 
 ### mbr syntax in the editor
 
-Some of mbr's markdown extensions are understood by the editor and saved back
-exactly as written:
+The editor reads mbr's markdown with the renderer's rules, so what you see
+while editing is the structure the page will have, and it writes each
+construct back the way it was typed:
 
+- **Definition lists** (flashcards, FAQs): `Term` then `: definition`, with
+  nested lists, code and further paragraphs indented two spaces. They stay
+  expanded while editing. **Enter** in a term starts its first definition;
+  **Enter** in a definition starts the next one, and on an empty last
+  definition leaves the list. **Backspace** at the start of a definition
+  merges it back into the definition or term above. Typing `: ` at the start
+  of a paragraph after another paragraph makes that paragraph the term, and
+  the `/` menu has a **Definition list** entry.
+- **Tasks** with every mbr marker: `[ ]` open, `[x]` done, `[-]` cancelled,
+  `[>]` deferred. Click a box to complete or reopen it, right-click to cancel
+  it — the same as on the page. **Enter** in a task starts a new open task.
+  Annotations (`@due(…)`, `@done(…)`, `#tag`, `!!`) are plain text.
+- **Alerts** (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`,
+  `[!CAUTION]`) show as callouts. Typing `[!note] ` at the start of a quote
+  makes it one; **Backspace** at its start turns it back into a plain quote.
 - **Wikilinks** (`[[Note]]`, `[[Note|text]]`, `[[Note#Heading]]`, `![[file]]`)
   show as link chips. Double-click one to edit its source (clear it to remove
   the link). Typing the closing `]]` of a `[[…]]` turns it into a chip, and
@@ -72,6 +88,38 @@ exactly as written:
   a plain rule.
 - **Heading attributes** (`# Title {#id .class}`) stay visible as text in the
   heading.
+- **Math** (`$…$`, `$$…$$`) is edited as its LaTeX source, in monospace
+  between its delimiters; backslashes inside are never touched.
+- **Reference links** (`[text][ref]`, `[text][]`, `[ref]`, `![alt][ref]`) stay
+  references, and their `[ref]: …` definitions stay where they were (shown in
+  monospace and edited as text). Typing right after a link's text goes
+  outside the link; press **←** first to type inside it.
+- **Entities** (`&amp;`, `&nbsp;`, `&copy;`) and `\$` stay as typed.
+
+It also keeps the author's spelling of plain markdown: `-`, `*` or `+`
+bullets, `1.` or `1)` numbering (and `1. 1. 1.`), the spacing after a list
+marker, `---`/`***`/`___` rules, setext (`===`) headings and closing `#`s,
+indented code and `~~~` fences (and a fence's info string), two-space line
+breaks, `>>>` marginalia, table layout, and the backslash escapes you wrote —
+without adding escapes nothing needs (`2 * 3` stays `2 * 3`). New lists get `-`
+bullets and new rules `---`.
+
+### What a save writes
+
+A save rewrites only the blocks you changed. Every other top-level block —
+paragraph, list, table, code block, definition list — is written back exactly
+as it was in the file, including anything the editor would spell differently.
+Editing only the frontmatter leaves the body untouched, and saving without
+changes writes nothing.
+
+When a note contains markdown the editor would write differently, a notice
+above the editor names those lines. They are kept as written unless you edit
+them; if you do, that block is saved the editor's way (same meaning — for
+example a definition written `:no space` is saved as `: no space`). In the
+rare case that the unchanged blocks cannot be kept separately (an unclosed
+code fence at the end of the file swallows anything added after it, for
+instance), the editor asks before saving the whole note in its own spelling,
+listing the lines that would change.
 
 ### Starting a new note
 
