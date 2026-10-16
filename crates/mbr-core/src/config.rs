@@ -3064,6 +3064,24 @@ mod tests {
         assert_eq!(config.port, 5322);
     }
 
+    /// `EditingRequiresToken` tells operators they can supply the hash as
+    /// `MBR_EDIT_TOKEN_HASH` instead of editing the repository's config.toml.
+    /// Pin that the env layer really maps to `edit_token_hash`, and that it
+    /// satisfies the non-loopback check on its own.
+    #[test]
+    fn test_config_read_edit_token_hash_from_env() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("edit_enabled = true\nhost = \"0.0.0.0\"\n"));
+        let _env = EnvVars::set(&[("MBR_EDIT_TOKEN_HASH", "$argon2id$from-env")]);
+
+        let config = Config::read(repo.path()).expect("env-supplied hash must satisfy validate");
+
+        assert_eq!(
+            config.edit_token_hash.as_deref(),
+            Some("$argon2id$from-env")
+        );
+    }
+
     /// The documented precedence: `MBR_*` beats `.mbr/config.toml` beats
     /// defaults. This matters for security, not just ergonomics - the toml
     /// layer ships inside the (possibly untrusted) markdown repository, so an

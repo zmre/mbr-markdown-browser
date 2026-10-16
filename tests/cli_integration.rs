@@ -235,10 +235,35 @@ fn test_ipv6_host_is_rejected() {
         "an IPv6 host should abort startup"
     );
     assert!(
-        stderr_of(&output).contains("InvalidHost"),
+        stderr_of(&output).contains("Invalid host address: ::1"),
         "stderr should name the failure, got:\n{}",
         stderr_of(&output)
     );
+}
+
+/// A startup error reaches the user as its message, not as `Debug`
+/// (`Error: Config(EditingRequiresToken)`), and exits 1. Editing on a
+/// non-loopback host without a token is refused before the server binds, so
+/// server mode terminates here.
+#[test]
+fn test_startup_error_prints_its_message_and_exits_one() {
+    let repo = TestRepo::new();
+    repo.create_markdown("index.md", "# Home\n");
+
+    let output = mbr_command()
+        .args(["-s", "-q", "--edit", "--host", "0.0.0.0", "--port", "5847"])
+        .arg(repo.path())
+        .output()
+        .expect("failed to run the mbr binary");
+    let stderr = stderr_of(&output);
+
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Error: Configuration error: Editing is enabled on a non-loopback host"),
+        "stderr should carry the human message, got:\n{stderr}"
+    );
+    assert!(stderr.contains("MBR_EDIT_TOKEN_HASH"), "{stderr}");
+    assert!(!stderr.contains("EditingRequiresToken"), "{stderr}");
 }
 
 /// `--template-folder` pointing at a file (not a directory) aborts startup.
@@ -259,7 +284,7 @@ fn test_template_folder_that_is_a_file_is_rejected() {
         "a file passed as --template-folder should abort startup"
     );
     assert!(
-        stderr_of(&output).contains("TemplateFolderNotDirectory"),
+        stderr_of(&output).contains("Template folder is not a directory"),
         "stderr should name the failure, got:\n{}",
         stderr_of(&output)
     );

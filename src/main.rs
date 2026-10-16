@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::ExitCode;
 
 use clap::Parser;
 #[cfg(feature = "gui")]
@@ -32,8 +33,46 @@ fn needs_folder_picker(path: &Path) -> bool {
     }
 }
 
+/// Runs mbr and turns a failure into a readable message and exit code 1.
+///
+/// Returning `Result` from `main` would make the standard library print the
+/// error's `Debug` form (`Error: Config(EditingRequiresToken)`), which names
+/// an enum variant instead of telling the user what to do.
 #[tokio::main]
-async fn main() -> Result<(), MbrError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", error_report(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Formats an error and its `source()` chain for the terminal:
+/// `Error: <message>` followed by one `  caused by: <message>` line per source.
+///
+/// A source whose message is already part of the line before it is skipped:
+/// wrapper variants such as `MbrError::Config` print their inner error
+/// (`"Configuration error: {0}"`) *and* expose it as the source, which would
+/// otherwise print the same sentence twice.
+fn error_report(error: &dyn std::error::Error) -> String {
+    let mut report = format!("Error: {error}");
+    let mut previous = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let message = cause.to_string();
+        if !previous.contains(&message) {
+            report.push_str("\n  caused by: ");
+            report.push_str(&message);
+        }
+        previous = message;
+        source = cause.source();
+    }
+    report
+}
+
+async fn run() -> Result<(), MbrError> {
     // Suppress ffmpeg warnings/info messages from the metadata crate
     // These would otherwise clutter stdout/stderr when processing video files
     #[cfg(feature = "media-metadata")]
@@ -513,6 +552,36 @@ mod tests {
     use super::*;
     #[cfg(feature = "gui")]
     use std::path::Path;
+
+    #[test]
+    fn test_error_report_uses_display_not_debug() {
+        let report = error_report(&MbrError::Config(ConfigError::EditingRequiresToken));
+        assert!(
+            report.starts_with("Error: Configuration error: Editing is enabled"),
+            "{report}"
+        );
+        assert!(!report.contains("EditingRequiresToken"), "{report}");
+    }
+
+    #[test]
+    fn test_error_report_skips_a_source_repeated_by_its_wrapper() {
+        let report = error_report(&MbrError::Config(ConfigError::EditingRequiresToken));
+        assert!(!report.contains("caused by"), "{report}");
+    }
+
+    #[test]
+    fn test_error_report_lists_each_distinct_source() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err = mbr::errors::MarkdownError::ReadFailed {
+            path: "notes/a.md".into(),
+            source: io,
+        };
+        let report = error_report(&MbrError::Markdown(err));
+        assert_eq!(
+            report,
+            "Error: Markdown error: Failed to read markdown file: notes/a.md\n  caused by: no such file"
+        );
+    }
 
     #[test]
     fn test_is_loopback_host_loopback_addresses() {

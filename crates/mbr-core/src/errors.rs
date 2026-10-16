@@ -149,7 +149,8 @@ pub enum ConfigError {
     #[error(
         "Editing is enabled on a non-loopback host but no edit_token_hash is set. \
          Run `mbr --generate-edit-token` and add the printed edit_token_hash to \
-         .mbr/config.toml, or bind to 127.0.0.1."
+         .mbr/config.toml or set it in the MBR_EDIT_TOKEN_HASH environment variable \
+         (no change to the repository needed), or bind to 127.0.0.1."
     )]
     EditingRequiresToken,
 }

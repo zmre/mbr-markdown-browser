@@ -151,7 +151,15 @@ mbr -s --edit ~/notes
 
 # Generate a hashed editing token for remote use
 mbr --generate-edit-token
+
+# Remote editing with the hash from the environment (no config.toml change)
+MBR_EDIT_TOKEN_HASH='$argon2id$...' mbr -s --edit --host 0.0.0.0 ~/notes
 ```
+
+A startup failure (an invalid flag value, a broken `.mbr/config.toml`, `--edit`
+on a non-loopback host without an `edit_token_hash`) prints `Error: <message>`
+to stderr, followed by one `caused by:` line per underlying cause, and exits
+with status 1.
 
 ---
 

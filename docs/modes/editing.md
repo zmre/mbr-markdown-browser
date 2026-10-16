@@ -368,6 +368,17 @@ edit_enabled = true
 edit_token_hash = "$argon2id$v=19$m=19456,t=2,p=1$...."
 ```
 
+To keep the hash out of the repository, set it in the environment instead
+(single quotes, since the hash contains `$`). Environment variables override
+`.mbr/config.toml`:
+
+```bash
+MBR_EDIT_TOKEN_HASH='$argon2id$v=19$m=19456,t=2,p=1$....' mbr -s --edit --host 0.0.0.0 ~/notes
+```
+
+Without a hash, `--edit` on a non-loopback host refuses to start and exits
+with status 1, explaining why on stderr.
+
 ### Entering the token
 
 The editor's bottom bar has a token field. It is hidden until there is a reason
