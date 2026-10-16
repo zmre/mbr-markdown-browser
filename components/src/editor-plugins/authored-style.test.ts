@@ -7,7 +7,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { serializeBody } from '../editor-crepe.js';
 import { destroyEditors, openCrepe, placeCursor, press, typeText, viewOf } from '../editor-test-support.js';
-import { headingStyleFrom, listStyleFrom, rowCells, tableStyleFrom } from './authored-style.js';
+import {
+  authoredLines,
+  contentKey,
+  headingStyleFrom,
+  keepAuthoredLines,
+  listStyleFrom,
+  rowCells,
+  tableStyleFrom,
+} from './authored-style.js';
 import type { MdNode } from './remark-support.js';
 
 afterEach(destroyEditors);
@@ -125,6 +133,30 @@ describe('tables', () => {
   });
 });
 
+describe('paragraph lines and top-level gaps', () => {
+  it('keeps an indented paragraph as typed until its text is edited', async () => {
+    const crepe = await openCrepe('  one\n  two \n');
+    expect(serializeBody(crepe)).toBe('  one\n  two \n');
+    expect(await afterTyping('  one\n  two\n', 'two', 3, '!')).toBe('one\ntwo!\n');
+  });
+
+  it('drops a first-line indentation that would join the list above', async () => {
+    const crepe = await openCrepe('* a\n\n# H\n\n  para\n');
+    const view = viewOf(crepe);
+    // Delete the heading: the indented paragraph now follows the list.
+    placeCursor(view, 'H', 0);
+    const $pos = view.state.selection.$from;
+    view.dispatch(view.state.tr.delete($pos.before(), $pos.after()));
+    expect(serializeBody(crepe)).toBe('* a\n\npara\n');
+  });
+
+  it('keeps more than one blank line between the same two blocks, not around a new one', async () => {
+    const crepe = await openCrepe('One\n\n\nTwo\n');
+    expect(serializeBody(crepe)).toBe('One\n\n\nTwo\n');
+    expect(await afterEnter('One\n\n\nTwo\n', 'One', 'New')).toBe('One\n\nNew\n\nTwo\n');
+  });
+});
+
 describe('recording', () => {
   const at = (offset: number, column = 1) => ({ start: { offset, column }, end: { offset } });
 
@@ -155,6 +187,62 @@ describe('recording', () => {
     expect(rowCells('| a | b\\|c |')).toEqual(['a', 'b\\|c']);
     expect(rowCells('a|b')).toEqual(['a', 'b']);
     expect(rowCells('|a|')).toEqual(['a']);
+  });
+
+  it('reads a block\'s lines relative to its container', () => {
+    const node = (start: number, column: number, end: number) => ({
+      type: 'paragraph',
+      position: { start: { offset: start, column }, end: { offset: end } },
+    });
+    // Top level: the first line's indentation and the last line's trailing whitespace are kept.
+    expect(authoredLines('  a\n    b  \nnext', node(2, 3, 11), 0)).toEqual(['  a', '    b  ']);
+    // In a container: its prefix comes off every later line.
+    expect(authoredLines('> a\n>   b\n', node(2, 3, 9), 2)).toEqual(['a', '  b']);
+    // A lazy line in a container cannot be placed.
+    expect(authoredLines('> a\nb\n', node(2, 3, 5), 2)).toBeUndefined();
+  });
+
+  it('keeps authored lines only for the same text', () => {
+    expect(keepAuthoredLines('a\nb', ['  a', 'b '], true)).toBe('  a\nb ');
+    expect(keepAuthoredLines('a\nb', ['  a', 'b '], false)).toBe('a\nb ');
+    expect(keepAuthoredLines('a\nc', ['  a', 'b'], true)).toBe('a\nc');
+    expect(keepAuthoredLines('a\nb', ['a', 'b', 'c'], true)).toBe('a\nb');
+    // Trailing spaces inside the block are a hard break or not: they must match.
+    expect(keepAuthoredLines('a\nb', ['a  ', 'b'], true)).toBe('a\nb');
+    // Four columns would be indented code.
+    expect(keepAuthoredLines('a', ['    a'], true)).toBe('a');
+  });
+
+  it('keys content the same on both sides of the editor\'s round trip', () => {
+    const parsed = [
+      {
+        type: 'paragraph',
+        position: { start: { offset: 0 } },
+        children: [
+          { type: 'text', value: 'a' },
+          { type: 'break', data: { isInline: true } },
+          { type: 'text', value: 'b' },
+          { type: 'inlineMath', value: '$x$', display: false },
+        ],
+      },
+      { type: 'list', ordered: true, start: 1, children: [{ type: 'listItem', label: 1, spread: false, children: [] }] },
+    ];
+    const serialized = [
+      {
+        type: 'paragraph',
+        children: [
+          { type: 'text', value: 'a' },
+          { type: 'text', value: '\n' },
+          { type: 'text', value: 'b' },
+          { type: 'inlineMath', value: '$x$', isMark: true },
+        ],
+      },
+      { type: 'list', ordered: true, start: 1, children: [{ type: 'listItem', spread: false, children: [] }] },
+    ];
+    expect(contentKey(serialized)).toBe(contentKey(parsed));
+    // A hard break is content.
+    const hard = [{ type: 'paragraph', children: [{ type: 'text', value: 'a' }, { type: 'break' }, { type: 'text', value: 'b' }] }];
+    expect(contentKey(hard)).not.toBe(contentKey(parsed.slice(0, 1)));
   });
 
   it('strips container prefixes from table rows', () => {

@@ -43,9 +43,10 @@ import { blockContainerTypes, clearTextInCurrentBlockCommand, paragraphSchema } 
 import { InputRule } from '@milkdown/kit/prose/inputrules';
 import { Fragment, type Node as ProseNode, type NodeType, type ResolvedPos } from '@milkdown/kit/prose/model';
 import { TextSelection, type Command, type EditorState, type Transaction } from '@milkdown/kit/prose/state';
-import type { SerializerState } from '@milkdown/kit/transformer';
+import type { JSONValue, SerializerState } from '@milkdown/kit/transformer';
 import { $command, $inputRule, $nodeSchema, $remark, $useKeymap } from '@milkdown/kit/utils';
 import { remarkDefinitionList } from './definition-list-syntax.js';
+import { contentKey, type DefinitionStyle } from './authored-style.js';
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -56,7 +57,7 @@ export const remarkDefinitionListPlugin = $remark('mbrDefinitionList', () => rem
 export const definitionListSchema = $nodeSchema('definition_list', () => ({
   group: 'block',
   content: '(definition_term | definition_description)+',
-  attrs: { spread: { default: false, validate: 'boolean' } },
+  attrs: { spread: { default: false, validate: 'boolean' }, mbrStyle: { default: null } },
   parseDOM: [
     {
       tag: 'dl',
@@ -73,7 +74,7 @@ export const definitionListSchema = $nodeSchema('definition_list', () => ({
   parseMarkdown: {
     match: (node) => node.type === 'defList',
     runner: (state, node, type) => {
-      state.openNode(type, { spread: Boolean(node.spread) });
+      state.openNode(type, { spread: Boolean(node.spread), mbrStyle: node.mbrStyle ?? null });
       state.next(node.children);
       state.closeNode();
     },
@@ -82,7 +83,7 @@ export const definitionListSchema = $nodeSchema('definition_list', () => ({
     match: (node) => node.type.name === 'definition_list',
     runner: (state, node) => {
       dropListItemFiller(state);
-      state.openNode('defList', undefined, { spread: Boolean(node.attrs.spread) });
+      state.openNode('defList', undefined, { spread: Boolean(node.attrs.spread), ...styleProps(node) });
       state.next(node.content);
       state.closeNode();
     },
@@ -92,12 +93,13 @@ export const definitionListSchema = $nodeSchema('definition_list', () => ({
 export const definitionTermSchema = $nodeSchema('definition_term', () => ({
   content: 'inline*',
   defining: true,
+  attrs: { mbrStyle: { default: null } },
   parseDOM: [{ tag: 'dt' }],
   toDOM: () => ['dt', { class: 'mbr-dt' }, 0],
   parseMarkdown: {
     match: (node) => node.type === 'defListTerm',
     runner: (state, node, type) => {
-      state.openNode(type);
+      state.openNode(type, { mbrStyle: node.mbrStyle ?? null });
       state.next(node.children);
       state.closeNode();
     },
@@ -105,7 +107,7 @@ export const definitionTermSchema = $nodeSchema('definition_term', () => ({
   toMarkdown: {
     match: (node) => node.type.name === 'definition_term',
     runner: (state, node) => {
-      state.openNode('defListTerm', undefined, { spread: false });
+      state.openNode('defListTerm', undefined, { spread: false, ...styleProps(node) });
       serializeInline(state, node);
       state.closeNode();
     },
@@ -118,6 +120,7 @@ export const definitionDescriptionSchema = $nodeSchema('definition_description',
   attrs: {
     spread: { default: false, validate: 'boolean' },
     gapBefore: { default: 0, validate: 'number' },
+    mbrStyle: { default: null },
   },
   parseDOM: [
     {
@@ -136,7 +139,11 @@ export const definitionDescriptionSchema = $nodeSchema('definition_description',
   parseMarkdown: {
     match: (node) => node.type === 'defListDescription',
     runner: (state, node, type) => {
-      state.openNode(type, { spread: Boolean(node.spread), gapBefore: Number(node.gapBefore) || 0 });
+      state.openNode(type, {
+        spread: Boolean(node.spread),
+        gapBefore: Number(node.gapBefore) || 0,
+        mbrStyle: definitionStyle(node),
+      });
       state.next(node.children);
       state.closeNode();
     },
@@ -147,6 +154,7 @@ export const definitionDescriptionSchema = $nodeSchema('definition_description',
       state.openNode('defListDescription', undefined, {
         spread: Boolean(node.attrs.spread),
         gapBefore: Number(node.attrs.gapBefore) || 0,
+        ...styleProps(node),
       });
       // An empty `:` parses to a definition holding one empty paragraph
       // (the schema needs a block); print it as the bare `:` it came from
@@ -189,6 +197,22 @@ function serializeInline(state: SerializerState, node: ProseNode): void {
     if (index < node.childCount - 1) children.push(child);
   });
   state.next(Fragment.fromArray(children));
+}
+
+/**
+ * A definition's recorded lines (`authored-style.ts`) with the key of what
+ * they parsed to, taken here — from the tree the editor's nodes are built
+ * from, after every remark transform — so that the printer can tell an
+ * untouched definition (same key) from an edited one.
+ */
+function definitionStyle(node: { mbrStyle?: unknown; children?: unknown[] }): DefinitionStyle | null {
+  const style = node.mbrStyle as DefinitionStyle | undefined;
+  return style?.lines ? { lines: style.lines, key: contentKey(node.children ?? []) } : null;
+}
+
+/** The recorded spelling a node carries, as mdast props (none when it has none). */
+function styleProps(node: ProseNode): { mbrStyle?: JSONValue } {
+  return node.attrs.mbrStyle == null ? {} : { mbrStyle: node.attrs.mbrStyle as JSONValue };
 }
 
 function isEmptyDefinition(node: ProseNode): boolean {

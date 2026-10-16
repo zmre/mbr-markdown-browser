@@ -102,7 +102,11 @@ marker, `---`/`***`/`___` rules, setext (`===`) headings and closing `#`s,
 indented code and `~~~` fences (and a fence's info string), two-space line
 breaks, `>>>` marginalia, table layout, and the backslash escapes you wrote —
 without adding escapes nothing needs (`2 * 3` stays `2 * 3`). New lists get `*`
-bullets and new rules `---`.
+bullets and new rules `---`. A definition (`: …`) is written exactly as typed
+until you edit it — the spacing after the `:`, unindented continuation lines,
+a list indented further than it needs, the blank lines inside it, trailing
+spaces — and so are indented paragraphs and questions, and two or more blank
+lines between top-level blocks.
 
 ### What a save writes
 

@@ -34,7 +34,9 @@
  * under `: def` was hoisted and the next `: def` folded into its last item
  * (T1-A09/T1-B11 damage), and a fenced code block in a `: def` swallowed the
  * rest of the document (`definition-list.ts`; `deflist-edge` covers the
- * renderer's start/continue/end rules); `[-]`/`[>]` tasks were escaped
+ * renderer's start/continue/end rules), and a question after an empty `:`
+ * and a blank line joined the list above, where the renderer starts a new one
+ * (`deflist-empty-definition`, `ham-study-guide-excerpt`); `[-]`/`[>]` tasks were escaped
  * (`task-markers.ts`); `> [!NOTE]` alerts became `> \[!NOTE]` (`alerts.ts`);
  * `--- {attrs}` became `\--- {attrs}` in both positions (`section-attrs.ts`);
  * heading attributes had no structure (`heading-attrs.ts`); wikilinks were
@@ -47,12 +49,12 @@
  * rewritten as LF (`openEditor`/`savedFile` now keep the file's ending).
  *
  * Cosmetic (same structure — item 6), still normalized:
- * - Definition lists: `:` followed by no space or several → `: `; a lazy
- *   continuation line is indented; `:` alone then content on the next line
- *   joins them (`deflist-edge`).
  * - A paragraph directly under a heading gets a blank line between.
+ * - A lazy continuation line in a list item or block quote is indented
+ *   (`deflist-edge`); in a definition it is kept.
+ * - A definition, once edited, is printed `: ` + two-space continuations.
  * - An unneeded escape the author wrote in a paragraph or heading is kept
- *   (its source rides along); one in a table cell or term may be dropped.
+ *   (its source rides along); one in a table cell may be dropped.
  *   `x\\y` → `x\y` (the same text: `\y` is no escape).
  *
  * Fixed by `authored-style.ts` / `minimal-escapes.ts` (item 6): bullets
@@ -62,7 +64,10 @@
  * fences, a fence's info-string meta (was dropped), two-space hard breaks
  * (were `\`), `>>>` marginalia (were `> > >`), table spacing (was re-padded),
  * and escapes remark adds where nothing needs one (`2 \* 3`, `see \[a]`,
- * `AT\&T`, `\[\[x]]`, `* \[-]`).
+ * `AT\&T`, `\[\[x]]`, `* \[-]`); untouched definitions as typed (`:x`,
+ * `:  x`, `: ` alone, lazy lines, extra-indented lists, per-gap blank lines,
+ * trailing spaces — `deflist-spelling`), indented paragraphs and terms and
+ * two or more blank lines between top-level blocks (`deflist-indented-terms`).
  *
  * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
  * raw HTML blocks and inline HTML, ```` ```chat ```` fences,
@@ -79,7 +84,8 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 
 /** Fixtures whose untouched save is not byte-identical today, and why. */
 const ROUND_TRIP_FAILS: Record<string, string> = {
-  'deflist-edge': 'item 6: `:` spacing and lazy continuation lines normalized, a blank line added after a heading',
+  'deflist-edge':
+    'item 6: a blank line added after a heading; a `:` lazy line in a list item or quote indented and escaped',
 };
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */

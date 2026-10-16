@@ -14,6 +14,9 @@
  * | hard break       | two trailing spaces           | `\`              |
  * | blockquote       | `>>>` (marginalia)            | `> > >`          |
  * | table            | as typed (`\|-\|-\|`, unpadded) | re-padded, aligned |
+ * | paragraph, term  | indented lines, trailing spaces | none        |
+ * | definition       | as typed (see below)          | `: ` + two-space indent |
+ * | top-level gap    | two or more blank lines       | one          |
  *
  * Each is recorded at parse time from the source ({@link recordAuthoredStyles},
  * a remark transform) as `mbrStyle` on the mdast node, carried through the
@@ -25,6 +28,11 @@
  * fits the node (a setext heading changed to level 3, an indented block given
  * a language) is dropped for the default rather than forced.
  *
+ * Paragraphs and terms keep their lines while their text is the same
+ * ({@link keepAuthoredLines}); a definition (`: …`) is written as typed while
+ * its content is what was loaded ({@link DefinitionStyle}, compared by
+ * {@link contentKey}), and in the house style once edited.
+ *
  * Tables are the one construct kept row by row: a row whose cells still read
  * as the authored row's cells (escapes aside) is written as the authored line. When any row
  * changed, a padded and aligned table is re-aligned whole (remark's print);
@@ -32,7 +40,13 @@
  * (`|a|b|` or `| a | b |`).
  */
 import { gfmTableToMarkdown } from 'mdast-util-gfm-table';
-import { defaultHandlers, type Info, type Options as ToMarkdownExtension, type State } from 'mdast-util-to-markdown';
+import {
+  defaultHandlers,
+  type Info,
+  type Join,
+  type Options as ToMarkdownExtension,
+  type State,
+} from 'mdast-util-to-markdown';
 import type { Blockquote, Break, Code, Heading, List, Parents, Table, TableRow, ThematicBreak } from 'mdast';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
 import type { NodeSchema, ParserState, SerializerState } from '@milkdown/kit/transformer';
@@ -84,9 +98,44 @@ export interface CodeStyle {
   meta?: string;
 }
 
-/** A paragraph's source as loaded, for keeping its escapes (`minimal-escapes.ts`). */
+/**
+ * A paragraph's (or a definition term's) spelling: its source as loaded, for
+ * keeping its escapes (`minimal-escapes.ts`), and its lines as typed when
+ * they carry whitespace the printer would drop ({@link keepAuthoredLines}).
+ */
 export interface ParagraphStyle {
-  source: string;
+  source?: string;
+  /** The lines as typed, relative to the container ({@link authoredLines}); only when one has leading or trailing whitespace. */
+  lines?: string[];
+}
+
+/**
+ * A definition's (`: …`) lines as typed, from its colon to the end of its
+ * last line, relative to the container ({@link authoredLines}). Printed back
+ * verbatim while its content is what was loaded — `key`, the
+ * {@link contentKey} of its children, set when the editor parses it
+ * (`definition-list.ts`). That keeps everything the house print normalizes:
+ * the spacing after `:` (`:  x`, `: ` alone), lazy continuation lines, a
+ * nested block indented further than the definition needs, the blank lines
+ * between its blocks one by one, trailing whitespace.
+ */
+export interface DefinitionStyle {
+  lines: string[];
+  key?: string;
+}
+
+/**
+ * Blank lines between two top-level blocks, when more than the one the
+ * printer writes. Kept on both blocks, tagged with the line the gap follows,
+ * so it is written only between the same two blocks: a block inserted
+ * between them, or a neighbour deleted, gets the printer's single blank line.
+ */
+export interface GapStyle {
+  /** Blank lines after this block. */
+  gapAfter?: number;
+  /** The line this block ended on (with `gapAfter`) / the block before it ended on (with `gapBefore`). */
+  gapAfterLine?: number;
+  gapBeforeLine?: number;
 }
 
 /** The line of a thematic break as typed (`---`, `* * *`). */
@@ -175,10 +224,167 @@ export function headingStyleFrom(source: string, heading: Positioned): HeadingSt
   return { source: text, closing: closing.replace(/[ \t]+$/, '') };
 }
 
-export function paragraphStyleFrom(source: string, paragraph: Positioned): ParagraphStyle | undefined {
+/**
+ * The lines of `node` as typed, trailing whitespace on its last line
+ * included, with `prefix` columns of container prefix (`> `, indentation)
+ * removed from every line after the first; the first starts at the node, or
+ * — `prefix` 0, a block not inside any container — at its line's start, so
+ * its indentation is kept. `undefined` when a later line does not have the
+ * prefix (a lazy continuation inside a container), or a position is missing.
+ */
+export function authoredLines(source: string, node: Positioned, prefix: number): string[] | undefined {
+  let start = node.position?.start.offset;
+  let end = node.position?.end.offset;
+  if (start === undefined || end === undefined) return undefined;
+  if (prefix === 0) {
+    const lineStart = source.lastIndexOf('\n', start - 1) + 1;
+    if (/^[ \t]*$/.test(source.slice(lineStart, start))) start = lineStart;
+  }
+  const trailing = /^[ \t]*(?=\r?\n|$)/.exec(source.slice(end))?.[0];
+  if (trailing) end += trailing.length;
+  const lines: string[] = [];
+  for (const [index, raw] of source.slice(start, end).split('\n').entries()) {
+    const line = raw.replace(/\r$/, '');
+    if (index === 0 || prefix === 0) {
+      lines.push(line);
+      continue;
+    }
+    if (!/^[ >]*$/.test(line.slice(0, prefix))) return undefined;
+    lines.push(line.slice(prefix));
+  }
+  return lines;
+}
+
+/** Container nodes: their children's lines carry a prefix (the container's column). */
+const CONTAINERS = new Set(['listItem', 'blockquote', 'defListDescription', 'footnoteDefinition']);
+
+/** The prefix {@link authoredLines} strips for `node`: none outside containers, else up to its column. */
+function prefixOf(node: Positioned, inContainer: boolean): number {
+  return inContainer ? (node.position?.start.column ?? 1) - 1 : 0;
+}
+
+export function paragraphStyleFrom(
+  source: string,
+  paragraph: Positioned,
+  inContainer = false,
+): ParagraphStyle | undefined {
   const text = sliceOf(paragraph, source);
-  // Only worth carrying when there is an escape to keep.
-  return text?.includes('\\') ? { source: text } : undefined;
+  if (text === undefined) return undefined;
+  const style: ParagraphStyle = {};
+  // Each only worth carrying when there is something to keep: an escape, or
+  // whitespace the printer drops.
+  if (text.includes('\\')) style.source = text;
+  const lines = authoredLines(source, paragraph, prefixOf(paragraph, inContainer));
+  if (lines?.some((line) => /^[ \t]|[ \t]$/.test(line))) style.lines = lines;
+  return style.source === undefined && style.lines === undefined ? undefined : style;
+}
+
+/** A definition's lines (see {@link DefinitionStyle}); its `key` is added by the editor's parse. */
+export function definitionStyleFrom(source: string, definition: Positioned): DefinitionStyle | undefined {
+  // Relative to its colon wherever it sits: the printer writes `:` at the
+  // start of the line, inside whatever container prefix.
+  const lines = authoredLines(source, definition, (definition.position?.start.column ?? 1) - 1);
+  return lines ? { lines } : undefined;
+}
+
+/** Trailing spaces and tabs of a line. */
+function trailingSpace(line: string): string {
+  return /[ \t]*$/.exec(line)?.[0] ?? '';
+}
+
+/**
+ * `printed` (one paragraph or term, as the printer wrote it) as the author
+ * typed it, when it is the same text: the same number of lines, each equal
+ * but for leading whitespace (which a paragraph's lines do not mean) and
+ * trailing whitespace on the last line (which nothing means). Trailing
+ * whitespace on any other line must match exactly — two spaces there are a
+ * hard break. Anything else returns `printed`, so an edited paragraph prints
+ * as the printer prints it.
+ *
+ * `indentFirst`: whether the first line may keep its indentation. Not after a
+ * list or definition list, where an indented paragraph would be read as a
+ * continuation of the item or definition above (an edit can put it there).
+ */
+export function keepAuthoredLines(printed: string, lines: readonly string[] | undefined, indentFirst: boolean): string {
+  if (!lines) return printed;
+  const out = printed.split('\n');
+  if (out.length !== lines.length) return printed;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].trim() !== lines[i].trim()) return printed;
+    if (i < out.length - 1 && trailingSpace(out[i]) !== trailingSpace(lines[i])) return printed;
+  }
+  const first = lines[0];
+  // Four columns of indentation would make the first line indented code.
+  const keepIndent = indentFirst && /^ {0,3}(?! )/.test(first) && !first.startsWith('\t');
+  return [keepIndent ? first : first.trimStart(), ...lines.slice(1)].join('\n');
+}
+
+/** Whether an indented paragraph right after `node` (blank lines between) would continue it instead. */
+export function absorbsIndentedParagraph(node: { type: string } | undefined): boolean {
+  return node?.type === 'list' || node?.type === 'defList';
+}
+
+/**
+ * A comparable key for flow content — `nodes` and everything under them,
+ * every field with a primitive value but positions and recorded styles. Equal
+ * keys: the same content, however it was spelled. Used to tell whether a
+ * definition still holds what was loaded ({@link DefinitionStyle}).
+ */
+/**
+ * Fields that are not content: the tree walk, positions, recorded spellings,
+ * and what Milkdown adds on one side only — `isMark` on the mdast its
+ * serializer builds from a mark; on the parsed tree, `label` (an ordered
+ * item's number, derived from the list's `start`) and inline math's `display`
+ * (derived from its `value`, which keeps the `$`/`$$` delimiters).
+ */
+const KEY_IGNORED = new Set(['type', 'children', 'position', 'mbrStyle', 'isMark', 'label', 'display']);
+
+/**
+ * `children` as one side of the round trip sees them: a soft line break is
+ * a `break` marked `isInline` in the parsed tree (Milkdown's line-break
+ * transform) and a `"\n"` text node in the serialized one, and the text
+ * around it is one node or three; both become merged text.
+ */
+function normalizedChildren(children: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const child of children) {
+    const softBreak = child.type === 'break' && (child.data as { isInline?: unknown } | undefined)?.isInline === true;
+    const node = softBreak ? { type: 'text', value: '\n' } : child;
+    const previous = out[out.length - 1];
+    if (node.type === 'text' && previous?.type === 'text' && previous.children === undefined) {
+      out[out.length - 1] = { type: 'text', value: String(previous.value ?? '') + String(node.value ?? '') };
+    } else {
+      out.push(node);
+    }
+  }
+  return out;
+}
+
+/**
+ * A comparable key for flow content — `nodes` and everything under them,
+ * every field with a primitive value but those in {@link KEY_IGNORED}. Equal
+ * keys: the same content, however it was spelled — so a definition printed
+ * from the editor's nodes can be matched to the tree it was loaded from
+ * ({@link DefinitionStyle}). The two sides differ in small ways (see the
+ * helpers); a difference not normalized here only costs the authored
+ * spelling, never content.
+ */
+export function contentKey(nodes: readonly unknown[]): string {
+  const parts: string[] = [];
+  const walk = (node: Record<string, unknown>): void => {
+    parts.push(`(${String(node.type)}`);
+    for (const field of Object.keys(node).sort()) {
+      if (KEY_IGNORED.has(field)) continue;
+      const value = node[field];
+      if (value === null || value === undefined || typeof value === 'object') continue;
+      parts.push(`${field}=${JSON.stringify(value)}`);
+    }
+    const children = node.children;
+    if (Array.isArray(children)) for (const child of normalizedChildren(children)) walk(child);
+    parts.push(')');
+  };
+  for (const node of normalizedChildren(nodes as Record<string, unknown>[])) walk(node);
+  return parts.join('');
 }
 
 export function codeStyleFrom(source: string, code: Positioned & { meta?: string | null }): CodeStyle | undefined {
@@ -229,8 +435,10 @@ export function tableStyleFrom(source: string, table: Positioned): TableStyle | 
   return { rows: rows.map((row) => row.replace(/\r$/, '')) };
 }
 
-const RECORDERS: Record<string, (source: string, node: Positioned) => unknown> = {
+const RECORDERS: Record<string, (source: string, node: Positioned, inContainer: boolean) => unknown> = {
   paragraph: paragraphStyleFrom,
+  defListTerm: paragraphStyleFrom,
+  defListDescription: definitionStyleFrom,
   list: listStyleFrom,
   heading: headingStyleFrom,
   code: codeStyleFrom,
@@ -242,15 +450,31 @@ const RECORDERS: Record<string, (source: string, node: Positioned) => unknown> =
 
 /** Sets `mbrStyle` on every node in `tree` whose spelling is recorded (see the module docs). */
 export function recordAuthoredStyles(tree: MdNode, source: string): void {
-  const visit = (node: MdNode): void => {
+  const visit = (node: MdNode, inContainer: boolean): void => {
     const record = RECORDERS[node.type];
     if (record) {
-      const style = record(source, node as Positioned);
+      const style = record(source, node as Positioned, inContainer);
       if (style) (node as Styled<unknown>).mbrStyle = style;
     }
-    for (const child of node.children ?? []) visit(child);
+    const nested = inContainer || CONTAINERS.has(node.type);
+    for (const child of node.children ?? []) visit(child, nested);
   };
-  visit(tree);
+  visit(tree, false);
+  recordGaps(tree);
+}
+
+/** Records {@link GapStyle} on each pair of top-level blocks with more than one blank line between. */
+function recordGaps(root: MdNode): void {
+  const children = (root.children ?? []) as Positioned[];
+  for (let i = 0; i < children.length - 1; i++) {
+    const end = (children[i].position?.end as { line?: number } | undefined)?.line;
+    const next = (children[i + 1].position?.start as { line?: number } | undefined)?.line;
+    if (end === undefined || next === undefined || next - end - 1 < 2) continue;
+    const left = children[i] as Styled<GapStyle>;
+    const right = children[i + 1] as Styled<GapStyle>;
+    left.mbrStyle = { ...left.mbrStyle, gapAfter: next - end - 1, gapAfterLine: end };
+    right.mbrStyle = { ...right.mbrStyle, gapBeforeLine: end };
+  }
 }
 
 // ============================================================================
@@ -523,7 +747,7 @@ function printedCells(node: Table, state: State, info: Info): string[][] {
 const printTable: Handle<Table> = (node, parent, state, info) => {
   const fresh = () => gfmTable(node, parent, state, info);
   const style = styleOf<TableStyle>(node);
-  if (!style || style.rows.length < 2) return fresh();
+  if (!style?.rows || style.rows.length < 2) return fresh();
   const [header, delimiter, ...body] = style.rows;
   const authored = [header, ...body];
   const columns = Math.max(...node.children.map((row) => row.children.length));
@@ -567,9 +791,25 @@ const printTable: Handle<Table> = (node, parent, state, info) => {
   return [rows[0], delimiterLine, ...rows.slice(1)].join('\n');
 };
 
+/**
+ * Blank lines between two top-level blocks as authored, where there were
+ * more than one ({@link GapStyle}). Never before code: after a list that
+ * would be the list's (the default join separates the two with a comment).
+ */
+const joinAuthoredGaps: Join = (left, right, parent) => {
+  if (parent.type !== 'root' || right.type === 'code') return undefined;
+  const after = styleOf<GapStyle>(left);
+  const line = after?.gapAfterLine;
+  if (after?.gapAfter === undefined || line === undefined || styleOf<GapStyle>(right)?.gapBeforeLine !== line) {
+    return undefined;
+  }
+  return after.gapAfter;
+};
+
 export const authoredStyleToMarkdown: ToMarkdownExtension = {
   bullet: HOUSE_STYLE.bullet,
   rule: HOUSE_STYLE.rule,
+  join: [joinAuthoredGaps],
   handlers: {
     list: printList as never,
     thematicBreak: printRule as never,

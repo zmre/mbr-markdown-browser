@@ -92,6 +92,28 @@ describe('definition list printing in the editor', () => {
   });
 });
 
+describe('definition list spelling', () => {
+  it('writes an untouched definition as typed', async () => {
+    const source = 'Q\n:  wide\nlazy line\n: \n: notes\n    * deeper list\n\n  more\n';
+    const crepe = await openCrepe(source);
+    expect(serializeBody(crepe)).toBe(source);
+  });
+
+  it('prints an edited definition in the house style, and only that one', async () => {
+    const crepe = await openCrepe('Q\n:  wide\nlazy line\n:  other\n');
+    const view = viewOf(crepe);
+    placeCursor(view, 'lazy line', 9);
+    typeText(view, '!');
+    expect(serializeBody(crepe)).toBe('Q\n: wide\n  lazy line!\n:  other\n');
+  });
+
+  it('keeps an indented first term only where nothing above would take it in', async () => {
+    const source = 'Intro\n\n  Q1\n  more\n: a\n\n  Q2 is the definition\'s content, not a term\n: b\n';
+    const crepe = await openCrepe(source);
+    expect(serializeBody(crepe)).toBe(source);
+  });
+});
+
 describe('definition list editing: Backspace at the start of a definition', () => {
   it('merges it into the definition above', async () => {
     const crepe = await openCrepe('Term\n: one\n: two\n');

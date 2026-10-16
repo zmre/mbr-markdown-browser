@@ -148,7 +148,8 @@ describe('openEditor: the safety net', () => {
     document.querySelector('.mbr-editor-overlay')?.remove()
   })
 
-  const INEXACT = '---\ntitle: t\n---\n# Note\n\nTerm\n:no space after the colon\n\nIntro.\n'
+  // A lazy continuation line in a list item is printed indented.
+  const INEXACT = '---\ntitle: t\n---\n# Note\n\n- item\nlazy continuation of the item\n\nIntro.\n'
 
   it('names the lines the editor would write differently', async () => {
     const { modal } = await openOn(INEXACT)

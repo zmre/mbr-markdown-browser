@@ -24,7 +24,11 @@
  *   a heading, a list, a fence, the document start — `: x` is paragraph text.
  * - `:` **interrupts** a paragraph, so `Term\n: def` needs no blank line.
  * - A paragraph straight after a definition list (blank lines allowed) that is
- *   itself followed by a definition is the next term **of the same list**.
+ *   itself followed by a definition is the next term **of the same list** —
+ *   unless the list's last definition is **empty** (`:` and nothing else) and
+ *   a blank line follows it: that ends the list, as an empty list item does
+ *   (pulldown-cmark's `finish_empty_list_item`), so the paragraph starts a new
+ *   one, and a `:` right after the blank line is paragraph text.
  * - The list is **loose** when a blank line separates a term from its first
  *   definition, two definitions, or two blocks inside a definition. A blank
  *   line between a definition and the next term does not count (and is
@@ -60,9 +64,11 @@
  * and what `flashcards.rs` writes — not the package's `:   `. Tight and loose
  * spacing round-trip per gap: each definition records how many blank lines
  * preceded it (`gapBefore`) and whether its blocks are blank-line separated
- * (`spread`), so an untouched list prints byte for byte. Not preserved
- * (structure is): the spacing after an authored `:` (`:x`, `:   x` print as
- * `: x`) and lazy continuation lines (printed indented).
+ * (`spread`). An untouched definition is printed as typed (its lines are
+ * recorded by `authored-style.ts`, `DefinitionStyle`), which keeps what the
+ * house print normalizes — the spacing after `:` (`:x`, `:   x`, `: ` alone),
+ * lazy continuation lines, extra indentation, each blank line between its
+ * blocks, trailing whitespace; an edited one prints in the house style.
  *
  * The extension also replaces mdast-util-to-markdown's `paragraph` handler,
  * with one that escapes a `:` starting any line but the first
@@ -86,6 +92,13 @@ import { blankLine, content } from 'micromark-core-commonmark';
 import { factorySpace } from 'micromark-factory-space';
 import { markdownSpace } from 'micromark-util-character';
 import { minimizeBlockEscapes } from './minimal-escapes.js';
+import {
+  absorbsIndentedParagraph,
+  contentKey,
+  keepAuthoredLines,
+  type DefinitionStyle,
+  type ParagraphStyle,
+} from './authored-style.js';
 
 // ---------------------------------------------------------------------------
 // mdast
@@ -138,6 +151,8 @@ declare module 'micromark-util-types' {
   interface ParseContext {
     /** {@link mayStartDefinition}'s answer for one offset (see there). */
     mbrDefListGate?: { offset: number; ok: boolean };
+    /** The line on which a list ended at an empty definition plus a blank line: no `:` opens one there. */
+    mbrDefListEndedLine?: number;
   }
 }
 
@@ -220,7 +235,9 @@ function mayStartDefinition(self: TokenizeContext): boolean {
   const offset = self.now().offset;
   const cached = self.parser.mbrDefListGate;
   if (cached && cached.offset === offset) return cached.ok;
-  const ok = paragraphPrecedes(self);
+  // The block before is the list that just ended (its term paragraph is
+  // still the flow's last content, which `paragraphPrecedes` would accept).
+  const ok = self.parser.mbrDefListEndedLine !== self.now().line && paragraphPrecedes(self);
   self.parser.mbrDefListGate = { offset, ok };
   return ok;
 }
@@ -361,7 +378,18 @@ function tokenizeDefinitionContinuation(
   }
 
   function notBlank(code: Code): State | undefined {
-    if (state.furtherBlankLines || !markdownSpace(code)) {
+    if (state.furtherBlankLines) {
+      // An empty definition followed by a blank line ends the whole list,
+      // whatever comes next: pulldown-cmark pops the empty item ("a list item
+      // can begin with at most one blank line") and then the list with it
+      // (`finish_empty_list_item` + `finish_list`). So no next `:` here, and
+      // none on this line at all (see `mayStartDefinition`).
+      state.furtherBlankLines = undefined;
+      state.initialBlankLine = undefined;
+      self.parser.mbrDefListEndedLine = self.now().line;
+      return nok(code);
+    }
+    if (!markdownSpace(code)) {
       state.furtherBlankLines = undefined;
       state.initialBlankLine = undefined;
       return notInCurrentDefinition(code);
@@ -489,7 +517,7 @@ export function groupDefinitionTerms(tree: Root): undefined {
       out.pop();
       const term = toTerm(previous);
       const before = out[out.length - 1];
-      if (before?.type === 'defList') {
+      if (before?.type === 'defList' && !endedAtEmptyDefinition(before, term)) {
         before.children.push(term, ...child.children);
         if (before.position && child.position) before.position.end = child.position.end;
       } else {
@@ -502,6 +530,17 @@ export function groupDefinitionTerms(tree: Root): undefined {
     for (const child of out) if (child.type === 'defList') measureSpacing(child);
   };
   visit(tree);
+}
+
+/**
+ * Whether `list` was closed before `next` by an empty definition and a blank
+ * line (the tokenizer's `notBlank`): then `next` starts a list of its own —
+ * pulldown-cmark has already popped the list when it reaches the paragraph,
+ * so the paragraph cannot be its next term.
+ */
+function endedAtEmptyDefinition(list: DefList, next: Nodes): boolean {
+  const last = list.children[list.children.length - 1];
+  return last?.type === 'defListDescription' && last.children.length === 0 && blankLinesBetween(last, next) > 0;
 }
 
 function measureSpacing(list: DefList): void {
@@ -519,7 +558,12 @@ function measureSpacing(list: DefList): void {
 // ---------------------------------------------------------------------------
 // mdast-util-to-markdown
 
-const defListHandler: Handle = (node: DefList, _parent, state: ToMarkdownState, info: Info) => {
+/** Per list being printed: whether its first term may keep an authored indentation (see {@link keepAuthoredLines}). */
+const firstTermMayIndent = new WeakMap<DefList, boolean>();
+
+const defListHandler: Handle = (node: DefList, parent, state: ToMarkdownState, info: Info) => {
+  const siblings = (parent?.children ?? []) as Nodes[];
+  firstTermMayIndent.set(node, !absorbsIndentedParagraph(siblings[siblings.indexOf(node) - 1]));
   const exit = state.enter('defList');
   const value = state.containerFlow(node, info);
   exit();
@@ -549,25 +593,42 @@ export function escapeContinuationColons(value: string): string {
  * where a backslash would be content, and the renderer does not read
  * definitions inside an HTML block anyway.
  */
-const paragraphHandler: Handle = (node: Paragraph, _parent, state: ToMarkdownState, info: Info) => {
+const paragraphHandler: Handle = (node: Paragraph, parent, state: ToMarkdownState, info: Info) => {
   const exit = state.enter('paragraph');
   const phrasing = state.enter('phrasing');
   const value = state.containerPhrasing(node, info);
   phrasing();
   exit();
   const htmlBlock = node.children.length === 1 && node.children[0].type === 'html';
-  const authored = (node as { mbrStyle?: { source?: string } }).mbrStyle?.source;
-  return htmlBlock ? value : escapeContinuationColons(minimizeBlockEscapes(value, state, authored));
+  if (htmlBlock) return value;
+  const style = styleOf<ParagraphStyle>(node);
+  const printed = escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source));
+  // Only a top-level paragraph has an indentation of its own to keep (one in
+  // a container is recorded relative to it, see `authoredLines`).
+  const siblings = (parent?.children ?? []) as Nodes[];
+  const indentFirst = parent?.type === 'root' && !absorbsIndentedParagraph(siblings[siblings.indexOf(node) - 1]);
+  return keepAuthoredLines(printed, style?.lines, indentFirst);
 };
 
-const defListTermHandler: Handle = (node: DefListTerm, _parent, state: ToMarkdownState, info: Info) => {
+const defListTermHandler: Handle = (node: DefListTerm, parent, state: ToMarkdownState, info: Info) => {
   const exit = state.enter('defListTerm');
   const phrasing = state.enter('phrasing');
   const value = state.containerPhrasing(node, { ...info, before: '\n', after: '\n' });
   phrasing();
   exit();
-  return escapeContinuationColons(minimizeBlockEscapes(value, state));
+  const style = styleOf<ParagraphStyle>(node);
+  const printed = escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source));
+  // A term after a definition would be read as that definition's content if
+  // indented; only a list's first term, after something that does not
+  // continue (a heading, a paragraph), keeps its indentation.
+  const list = parent as DefList | undefined;
+  const indentFirst = list?.children[0] === node && firstTermMayIndent.get(list) !== false;
+  return keepAuthoredLines(printed, style?.lines, indentFirst);
 };
+
+function styleOf<T>(node: unknown): T | undefined {
+  return (node as { mbrStyle?: T | null }).mbrStyle ?? undefined;
+}
 
 /** `: ` then the content, continuation lines indented two spaces, blank lines empty. */
 const defListDescriptionHandler: Handle = (
@@ -576,6 +637,9 @@ const defListDescriptionHandler: Handle = (
   state: ToMarkdownState,
   info: Info,
 ) => {
+  // Untouched since it was loaded: as typed (see `DefinitionStyle`).
+  const style = styleOf<DefinitionStyle>(node);
+  if (style?.key !== undefined && style.key === contentKey(node.children ?? [])) return style.lines.join('\n');
   const exit = state.enter('defListDescription');
   const tracker = state.createTracker(info);
   tracker.move(': ');

@@ -86,6 +86,33 @@ describe('definition list syntax: where a definition starts', () => {
 });
 
 describe('definition list syntax: where a definition ends', () => {
+  it('ends the list at an empty definition followed by a blank line, as the renderer does', () => {
+    // pulldown-cmark pops the empty item ("at most one blank line") and the list with it.
+    expect(shapeOf('Q1\n: \n\nQ2\n: b\n')).toBe(
+      'root[defList[defListTerm, defListDescription[]], defList[defListTerm, defListDescription[paragraph]]]',
+    );
+    expect(shapeOf('Q1\n:\n\n\n  Q2\n: b\n')).toBe(
+      'root[defList[defListTerm, defListDescription[]], defList[defListTerm, defListDescription[paragraph]]]',
+    );
+    // Even a `:` after it is text: the block before it is a list, not a paragraph.
+    expect(shapeOf('Q1\n:\n\n: not a definition\n')).toBe('root[defList[defListTerm, defListDescription[]], paragraph]');
+    expect(shapeOf('- Q1\n  :\n\n  : not a definition\n')).toBe(
+      'root[list[listItem[defList[defListTerm, defListDescription[]], paragraph]]]',
+    );
+  });
+
+  it('keeps the list going after an empty definition with no blank line, or one with content', () => {
+    expect(shapeOf('Q1\n:\n: a\n\nQ2\n: b\n')).toBe(
+      'root[defList[defListTerm, defListDescription[], defListDescription[paragraph], defListTerm, defListDescription[paragraph]]]',
+    );
+    expect(shapeOf('Q1\n:\nQ2\n: b\n')).toBe(
+      'root[defList[defListTerm, defListDescription[], defListTerm, defListDescription[paragraph]]]',
+    );
+    expect(shapeOf('Q1\n:\n  * a\n\nQ2\n: b\n')).toBe(
+      'root[defList[defListTerm, defListDescription[list[listItem[paragraph]]], defListTerm, defListDescription[paragraph]]]',
+    );
+  });
+
   it('continues one list across terms separated by blank lines', () => {
     const tree = parse('Q1\n: a\n\nQ2\n: b\n');
     expect(shape(tree)).toBe('root[defList[defListTerm, defListDescription[paragraph], defListTerm, defListDescription[paragraph]]]');
