@@ -152,6 +152,11 @@ Share → **MBR**, or "Open with".
       starts in the file's folder. Open it: the folder becomes a vault, opened at
       that same note, and its links and images now resolve: ______
 - [ ] A Google Drive / OneDrive file opens this way too (single file only): ______
+- [ ] With a vault open (a note on screen), Share → MBR another `.md`: the
+      file replaces the vault (`close: <vault>`, `MbrApp.openFile`), and Back
+      returns to the vault list: ______
+- [ ] Grant Folder Access on a Google Drive / Sync.com file: Open stays dimmed in
+      its folder; Cancel keeps the file open and shows "No folder opened": ______
 
 ## 11. iPad
 

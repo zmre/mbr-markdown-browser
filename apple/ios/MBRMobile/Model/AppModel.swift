@@ -40,8 +40,10 @@ final class AppModel {
     // MARK: Sessions
 
     func open(_ route: Route) async throws -> VaultSession {
-        self.session?.close()
-        self.session = nil
+        if let previous = session {
+            self.session = nil
+            Self.retire(previous)
+        }
         let opened: VaultSession
         switch route {
         case let .vault(id, _):
@@ -61,13 +63,26 @@ final class AppModel {
 
     func close(_ closing: VaultSession) {
         guard self.session === closing else { return }
-        closing.close()
         self.session = nil
+        Self.retire(closing)
         // Warm a page for the next vault.
         self.pool.prewarm()
     }
 
-    /// A file handed to the app (Files "Open in", the share sheet).
+    /// Stops a session that is leaving the screen, saving a vault's index
+    /// first: what was learned since the last save (edits, refreshes) would
+    /// otherwise be rescanned on its next open. The flush holds the session,
+    /// so its `MbrApp` lives until the save is done.
+    private static func retire(_ session: VaultSession) {
+        session.close()
+        guard !session.isSingleFile else { return }
+        Task { await session.flush() }
+    }
+
+    /// A file handed to the app (Files "Open in", the share sheet), over
+    /// whatever is on screen: the vault list, a vault, another file. The
+    /// screen is keyed by its route (`RootView`), so this is a new screen
+    /// whose open closes the current session.
     func openDocument(_ url: URL) {
         Log.info("document: open \(url.path(percentEncoded: false))")
         self.path = [.file(url)]

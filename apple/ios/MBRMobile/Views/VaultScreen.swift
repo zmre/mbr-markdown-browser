@@ -1,6 +1,5 @@
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 import WebKit
 
 /// One open vault or file: the web view, plus the native bits around it.
@@ -13,6 +12,8 @@ struct VaultScreen: View {
     @State private var error: String?
     @State private var picking = false
     @State private var configNoticeDismissed = false
+    /// Grant Folder Access came back without a folder.
+    @State private var noFolderGranted = false
     @State private var searching = false
     /// Counts edge swipes that opened something, to drive their haptic.
     @State private var edgeSwipes = 0
@@ -41,11 +42,18 @@ struct VaultScreen: View {
             // page, whose page message brings the bar back.
             .toolbar(self.editorOpen || self.slidesPlaying ? .hidden : .automatic, for: .navigationBar)
             .statusBarHidden(self.slidesPlaying)
-            .fileImporter(isPresented: self.$picking, allowedContentTypes: [.folder]) { result in
-                guard case let .success(folder) = result else { return }
-                Task { await self.picked(folder) }
+            .sheet(isPresented: self.$picking) {
+                FolderPicker(start: self.pickerStart) { folder in
+                    self.picking = false
+                    if let folder {
+                        self.noFolderGranted = false
+                        Task { await self.picked(folder) }
+                    } else if case .file = self.route {
+                        self.noFolderGranted = true
+                    }
+                }
+                .ignoresSafeArea()
             }
-            .fileDialogDefaultDirectory(self.pickerStart)
             .sheet(isPresented: self.$searching) {
                 if let session { SearchSheet(session: session) }
             }
@@ -75,8 +83,13 @@ struct VaultScreen: View {
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                 .ignoresSafeArea(edges: .bottom)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    if let configError = session.configError, !configNoticeDismissed {
-                        ConfigNotice(message: configError) { self.configNoticeDismissed = true }
+                    VStack(spacing: 0) {
+                        if let configError = session.configError, !configNoticeDismissed {
+                            ConfigNotice(message: configError) { self.configNoticeDismissed = true }
+                        }
+                        if self.noFolderGranted {
+                            NoFolderNotice { self.noFolderGranted = false }
+                        }
                     }
                 }
                 // A config that broke (or broke differently) on a refresh is
@@ -227,6 +240,7 @@ struct VaultScreen: View {
             if case let .vault(_, path) = route { start = path }
             await opened.start(at: start)
             await SelfTest.sessionStarted(opened, model: self.model)
+            if SelfTest.opensGrantPicker, opened.isSingleFile { self.picking = true }
         } catch {
             self.error = error.localizedDescription
             Log.info("open failed: \(error)")
@@ -239,9 +253,11 @@ struct VaultScreen: View {
     private func picked(_ folder: URL) async {
         switch self.route {
         case let .vault(id, start):
+            // Only offered while the open failed, so there is no session;
+            // the route is unchanged, so nothing would re-run the open.
             if await self.store.repick(id, folder: folder) {
-                self.session = nil
-                self.model.path = [.vault(id, start: start)]
+                Log.info("repick: reopening at \(start ?? "/")")
+                await self.open()
             }
         case let .file(file):
             guard let vault = await store.add(folder: folder) else { return }
@@ -287,6 +303,32 @@ private struct ConfigNotice: View {
         }
         .padding(10)
         .background(.yellow.opacity(0.15))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Grant Folder Access came back empty. Usually the provider: Google Drive,
+/// OneDrive and Sync.com let other apps open single files but not folders,
+/// so their folders cannot be picked (Open stays dimmed).
+private struct NoFolderNotice: View {
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle.fill").foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("No folder opened").font(.footnote.bold())
+                Text("Some providers (Google Drive, OneDrive, Sync.com) share single files with other apps, "
+                    + "never folders, so Open stays dimmed in their folders. This file stays open on its own.")
+                    .font(.caption)
+            }
+            Spacer(minLength: 0)
+            Button("Dismiss", systemImage: "xmark", action: self.dismiss)
+                .labelStyle(.iconOnly)
+                .font(.footnote)
+        }
+        .padding(10)
+        .background(.blue.opacity(0.12))
         .accessibilityElement(children: .combine)
     }
 }
