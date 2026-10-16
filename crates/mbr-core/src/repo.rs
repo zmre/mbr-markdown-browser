@@ -102,6 +102,12 @@ pub struct Repo {
     /// *not* canonicalized — the next hop canonicalizes it).
     #[serde(skip)]
     pub queued_folders: HashMap<PathBuf, QueuedFolder>,
+    /// Folders whose listing failed [`VaultError::NotDownloaded`] — on iOS, an
+    /// iCloud Drive folder nothing has listed yet — by canonical key, as of
+    /// the last scan or [`Repo::record_diff`]. Their download was requested;
+    /// their files are indexed by the refresh that first lists them.
+    #[serde(skip)]
+    not_downloaded_folders: HashSet<PathBuf>,
     pub markdown_files: MarkdownFiles,
     pub other_files: OtherFiles,
     /// Thread-safe index of tagged pages.
@@ -811,6 +817,7 @@ impl Repo {
             index_file: index_file.into(),
             scanned_folders: HashSet::new(),
             queued_folders: HashMap::new(),
+            not_downloaded_folders: HashSet::new(),
             markdown_files: MarkdownFiles(HashMap::new()),
             other_files: OtherFiles(HashMap::new()),
             tag_index: Arc::new(TagIndex::new()),
@@ -1043,10 +1050,33 @@ impl Repo {
         // times). A folder that cannot be listed contributes nothing, as the
         // old `WalkDir` loop's error entries did.
         let list_start = Instant::now();
-        let entries = vault.list_dir(&start).unwrap_or_else(|e| {
-            tracing::debug!("Could not list {}: {e}", start_key.display());
-            Vec::new()
-        });
+        let entries = match vault.list_dir(&start) {
+            Ok(entries) => {
+                self.not_downloaded_folders.pin().remove(&start_key);
+                entries
+            }
+            // A file provider's folder whose listing is not on the device
+            // (iCloud Drive on iOS keeps a folder *dataless* until something
+            // lists it on a thread allowed to wait, and mbr's threads are
+            // not). Ask for it, and let the folder be walked again: the
+            // refresh that first lists it indexes its files.
+            Err(VaultError::NotDownloaded { .. }) => {
+                tracing::info!(
+                    "Folder {} is not downloaded yet; requested it",
+                    start_key.display()
+                );
+                vault.request_download(std::slice::from_ref(&start));
+                self.not_downloaded_folders.pin().insert(start_key.clone());
+                self.scanned_folders.pin().remove(&start_key);
+                Vec::new()
+            }
+            // A folder that cannot be listed contributes nothing, as the old
+            // `WalkDir` loop's error entries did.
+            Err(e) => {
+                tracing::debug!("Could not list {}: {e}", start_key.display());
+                Vec::new()
+            }
+        };
 
         let mut markdown: Vec<(PathBuf, VaultPath, MarkdownInfo)> = Vec::new();
         let mut other: Vec<(PathBuf, OtherFileInfo)> = Vec::new();
@@ -1532,6 +1562,7 @@ impl Repo {
     /// the next scan picks up the changes.
     pub fn clear(&self) {
         self.scanned_folders.pin().clear();
+        self.not_downloaded_folders.pin().clear();
         self.markdown_files.pin().clear();
         self.other_files.pin().clear();
         self.queued_folders.pin().clear();

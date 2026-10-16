@@ -36,6 +36,9 @@ struct MemState {
     files: BTreeMap<VaultPath, MemFile>,
     /// Every directory, including the root and every ancestor of every file.
     dirs: BTreeSet<VaultPath>,
+    /// Directories whose listing is not on the device: listed by their
+    /// parent, but `list_dir` fails `NotDownloaded`.
+    unlisted_dirs: BTreeSet<VaultPath>,
     downloads: Vec<VaultPath>,
 }
 
@@ -157,6 +160,26 @@ impl MemVault {
         file.availability = availability;
     }
 
+    /// Marks a directory as one whose *listing* is not downloaded (or back):
+    /// its parent lists it, `stat` finds it, but [`Vault::list_dir`] fails
+    /// [`VaultError::NotDownloaded`] — an iCloud Drive folder on iOS that
+    /// nothing has listed yet. Unlike a file's, a directory's listing does not
+    /// arrive on [`Vault::request_download`]: the request is recorded and the
+    /// test makes it arrive, as the provider would, some time later.
+    ///
+    /// # Panics
+    ///
+    /// When there is no such directory.
+    pub fn set_dir_availability(&self, path: &str, availability: Availability) {
+        let path = fixture_path(path);
+        let mut state = self.state.write();
+        assert!(state.dirs.contains(&path), "no MemVault directory {path}");
+        match availability {
+            Availability::NotDownloaded => state.unlisted_dirs.insert(path),
+            Availability::Local | Availability::Unknown => state.unlisted_dirs.remove(&path),
+        };
+    }
+
     /// Sets a file's modification time.
     ///
     /// # Panics
@@ -246,6 +269,11 @@ impl Vault for MemVault {
                 }
             } else {
                 VaultError::not_found(dir)
+            });
+        }
+        if state.unlisted_dirs.contains(dir) {
+            return Err(VaultError::NotDownloaded {
+                path: dir.to_string(),
             });
         }
         let is_child = |p: &VaultPath| p.parent().as_ref() == Some(dir);

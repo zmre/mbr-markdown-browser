@@ -489,7 +489,30 @@ pub fn walk_files_under(
     base: &VaultPath,
     enter: impl Fn(&Entry) -> bool,
 ) -> Vec<Entry> {
-    let mut files = Vec::new();
+    walk_vault_under(vault, base, enter).files
+}
+
+/// What [`walk_vault_under`] found.
+#[derive(Debug, Default)]
+pub struct VaultWalk {
+    /// Every file below the base, as [`walk_files_under`] returns them.
+    pub files: Vec<Entry>,
+    /// Directories whose listing failed with [`VaultError::NotDownloaded`],
+    /// by canonical vault path: a file provider knows they exist but has not
+    /// fetched what is in them (an iCloud Drive folder on iOS stays
+    /// *dataless* until something lists it on a thread allowed to wait). Their
+    /// files are missing from `files`, not deleted.
+    pub not_downloaded_dirs: Vec<VaultPath>,
+}
+
+/// [`walk_files_under`], also reporting the directories that could not be
+/// listed because their listing is not on the device yet.
+pub fn walk_vault_under(
+    vault: &dyn Vault,
+    base: &VaultPath,
+    enter: impl Fn(&Entry) -> bool,
+) -> VaultWalk {
+    let mut walk = VaultWalk::default();
     let mut visited = std::collections::HashSet::new();
     let mut pending = vec![base.clone()];
     while let Some(dir) = pending.pop() {
@@ -499,8 +522,13 @@ pub fn walk_files_under(
         if !visited.insert(canonical.clone()) {
             continue;
         }
-        let Ok(entries) = vault.list_dir(&canonical) else {
-            continue;
+        let entries = match vault.list_dir(&canonical) {
+            Ok(entries) => entries,
+            Err(VaultError::NotDownloaded { .. }) => {
+                walk.not_downloaded_dirs.push(canonical);
+                continue;
+            }
+            Err(_) => continue,
         };
         for entry in entries {
             if entry.is_dir() {
@@ -508,11 +536,11 @@ pub fn walk_files_under(
                     pending.push(entry.path);
                 }
             } else {
-                files.push(entry);
+                walk.files.push(entry);
             }
         }
     }
-    files
+    walk
 }
 
 #[cfg(test)]

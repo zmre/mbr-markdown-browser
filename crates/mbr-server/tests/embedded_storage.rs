@@ -241,6 +241,36 @@ async fn refresh_applies_what_changed_in_the_vault() {
     assert!(server.refresh().await.is_empty(), "applied once");
 }
 
+/// iCloud Drive on iOS: a folder copied in from another device lists its
+/// subfolders, but each subfolder's own listing is not on the device until
+/// something asks. The scan and every refresh ask, and the refresh after the
+/// listing arrives indexes the folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn folders_whose_listing_is_not_downloaded_are_requested_and_indexed_on_arrival() {
+    let vault = vault();
+    vault.insert_file("trips/rome.md", "---\ntitle: Roman Holiday\n---\n");
+    vault.set_dir_availability("trips", Availability::NotDownloaded);
+    let server = server(&vault).await;
+
+    let trips = VaultPath::new("trips").unwrap();
+    assert!(vault.download_requests().contains(&trips), "the scan asked");
+    assert_eq!(server.repo().not_downloaded_folder_count(), 1);
+    let (_, _, body) = send(&server, get("/.mbr/site.json")).await;
+    assert!(!String::from_utf8(body).unwrap().contains("Roman Holiday"));
+
+    let diff = server.refresh().await;
+    assert!(diff.is_empty(), "{diff:?}");
+    assert_eq!(diff.not_downloaded_folders.len(), 1);
+
+    vault.set_dir_availability("trips", Availability::Local);
+    let diff = server.refresh().await;
+    assert_eq!(diff.created.len(), 1, "{diff:?}");
+    assert!(diff.not_downloaded_folders.is_empty());
+    assert_eq!(server.repo().not_downloaded_folder_count(), 0);
+    let (_, _, body) = send(&server, get("/.mbr/site.json")).await;
+    assert!(String::from_utf8(body).unwrap().contains("Roman Holiday"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_restores_without_reading_and_a_stale_one_is_ignored() {
     let vault = vault();

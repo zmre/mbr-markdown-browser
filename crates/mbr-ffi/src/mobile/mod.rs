@@ -127,6 +127,12 @@ pub struct RefreshSummary {
     /// a few seconds: their arrival shows up as `config_reloaded`,
     /// `templates_reloaded` or `assets_changed`.
     pub mbr_downloads_requested: u32,
+    /// Folders whose contents the provider has not fetched yet (an iCloud
+    /// Drive folder on iOS stays *dataless* until something lists it), so
+    /// their notes are not indexed; their download was requested again.
+    /// When non-zero, refresh again in a few seconds: once listed, their
+    /// files arrive as `added`.
+    pub folders_not_downloaded: u32,
 }
 
 impl RefreshSummary {
@@ -168,6 +174,11 @@ pub struct OpenReport {
     /// styles). When non-zero, [`MbrApp::refresh`] a few seconds later picks
     /// them up.
     pub mbr_downloads_requested: u32,
+    /// Folders the indexing could not list because the provider has not
+    /// fetched their contents yet, whose download was requested (see
+    /// [`RefreshSummary::folders_not_downloaded`]). When non-zero,
+    /// [`MbrApp::refresh`] a few seconds later indexes what has arrived.
+    pub folders_not_downloaded: u32,
 }
 
 /// An open vault. See the [module docs](self).
@@ -635,7 +646,10 @@ async fn initial_indexing(
     if !unchanged {
         save_snapshot(&server, cache.as_ref()).await;
     }
+    let folders_not_downloaded =
+        u32::try_from(repo.not_downloaded_folder_count()).unwrap_or(u32::MAX);
     let report = OpenReport {
+        folders_not_downloaded,
         from_cache: restored.is_some(),
         restored_files: restored.unwrap_or(0) as u64,
         indexed_files: (repo.markdown_files.len() + repo.other_files.len()) as u64,
@@ -830,6 +844,7 @@ impl PageUrls {
             changed: count(&diff.modified),
             removed: count(&diff.deleted),
             evicted: count(&diff.evicted),
+            folders_not_downloaded: count(&diff.not_downloaded_folders),
             changed_pages,
             duration_ms: millis(started),
             ..RefreshSummary::default()

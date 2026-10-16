@@ -143,10 +143,11 @@ final class VaultSession {
                     + "indexed=\(report.indexedFiles) scan=\(report.scanMs)ms ready=\(report.readyMs)ms "
                     + "diff=+\(report.refresh.added)/~\(report.refresh.changed)/-\(report.refresh.removed) "
                     + "cache=\(app.indexCachePath() ?? "none") "
-                    + "mbrDownloads=\(report.mbrDownloadsRequested)")
+                    + "mbrDownloads=\(report.mbrDownloadsRequested) "
+                    + "foldersNotDownloaded=\(report.foldersNotDownloaded)")
                 self?.report = report
-                if report.mbrDownloadsRequested > 0 {
-                    await self?.refreshUntilMbrDownloaded()
+                if report.mbrDownloadsRequested > 0 || report.foldersNotDownloaded > 0 {
+                    await self?.refreshUntilDownloaded()
                 }
             } catch {
                 Log.info("ready: failed: \(error)")
@@ -208,7 +209,8 @@ final class VaultSession {
                 + "evicted=\(summary.evicted) in \(summary.durationMs)ms; changedPages=\(summary.changedPages); "
                 + ".mbr: config=\(summary.configReloaded) templates=\(summary.templatesReloaded) "
                 + "assets=\(summary.assetsChanged) configError=\(summary.configError ?? "none") "
-                + "downloads=\(summary.mbrDownloadsRequested); "
+                + "downloads=\(summary.mbrDownloadsRequested) "
+                + "foldersNotDownloaded=\(summary.foldersNotDownloaded); "
                 + "shown=\(shown ?? "-")")
             if pageChanged || navigationChanged || mbrChanged {
                 let why = pageChanged ? "page changed" : navigationChanged ? "files added or removed" : ".mbr/ changed"
@@ -342,28 +344,32 @@ extension VaultSession {
     }
 }
 
-// MARK: .mbr/ downloads
+// MARK: Downloads: .mbr/ files and folder listings
 
 extension VaultSession {
-    /// Files in the vault's `.mbr/` were in the cloud at open (`user.css`,
-    /// templates, `config.toml`) and Rust asked for them; nothing else would,
-    /// and nothing tells the app when they arrive. Refresh on a backoff until
-    /// a refresh reports none outstanding (their arrival reloads the page) or
-    /// the schedule runs out; foregrounding refreshes anyway.
-    private func refreshUntilMbrDownloaded() async {
-        for delay in Self.mbrDownloadRefreshDelays {
+    /// Something was in the cloud at open and Rust asked for it; nothing tells
+    /// the app when it arrives. Either files in the vault's `.mbr/`
+    /// (`user.css`, templates, `config.toml`) — nothing else would ask for
+    /// them — or folders whose *listing* was not on the device (an iCloud
+    /// Drive folder copied in from another device stays dataless until
+    /// something lists it), so their notes were not indexed. Refresh on a
+    /// backoff until a refresh reports none outstanding (an arrival reloads
+    /// the page) or the schedule runs out; foregrounding and the Refresh
+    /// menu item refresh anyway, and ask again.
+    private func refreshUntilDownloaded() async {
+        for delay in Self.downloadRefreshDelays {
             do {
                 try await Task.sleep(for: .seconds(delay))
             } catch {
                 return // the session closed
             }
-            await self.refresh(reason: ".mbr downloads")
-            if let summary = lastRefresh, summary.mbrDownloadsRequested == 0 {
+            await self.refresh(reason: "downloads")
+            if let summary = lastRefresh, summary.mbrDownloadsRequested == 0, summary.foldersNotDownloaded == 0 {
                 return
             }
         }
-        Log.info("refresh: .mbr/ files still not downloaded; leaving them to the next refresh")
+        Log.info("refresh: .mbr/ files or folders still not downloaded; leaving them to the next refresh")
     }
 
-    private static let mbrDownloadRefreshDelays: [Double] = [3, 6, 12, 30, 60]
+    private static let downloadRefreshDelays: [Double] = [3, 6, 12, 30, 60]
 }

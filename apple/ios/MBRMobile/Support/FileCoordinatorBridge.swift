@@ -106,12 +106,12 @@ final class FileCoordinatorBridge: FileCoordinator, @unchecked Sendable {
         self.record("remove", path, since: start, "delete")
     }
 
-    /// Returns at once; the downloads happen on a background queue. iCloud
-    /// items are asked to download; anything else gets a coordinated read,
-    /// which is what makes a third-party provider (Dropbox, Working Copy)
-    /// materialize the file.
+    /// Returns at once; the downloads happen on a background queue. Folders
+    /// are listed (see `list`); iCloud files are asked to download; any other
+    /// file gets a coordinated read, which is what makes a third-party
+    /// provider (Dropbox, Working Copy) materialize the file.
     func requestDownload(paths: [String]) {
-        Log.info("coordinator: download requested for \(paths.count) file(s): "
+        Log.info("coordinator: download requested for \(paths.count) item(s): "
             + paths.prefix(3).joined(separator: ", "))
         DispatchQueue.global(qos: .utility).async {
             for path in paths {
@@ -151,6 +151,10 @@ final class FileCoordinatorBridge: FileCoordinator, @unchecked Sendable {
     private static func download(_ url: URL) {
         let start = ContinuousClock.now
         let path = url.path(percentEncoded: false)
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            self.list(url, path: path, since: start)
+            return
+        }
         let ubiquitous = (try? url.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem ?? false
         if ubiquitous {
             do {
@@ -175,6 +179,33 @@ final class FileCoordinatorBridge: FileCoordinator, @unchecked Sendable {
         } else {
             Log.info("coordinator: coordinated read of \(path) (\(bytes)B) in \(millis(since: start))ms")
         }
+    }
+
+    /// A folder Rust could not list: a file provider's folder (iCloud Drive
+    /// on iOS) stays *dataless* until something lists it on a thread that may
+    /// wait, and Rust's threads may not (`iopolicy.rs`). This one may, so
+    /// walking the folder makes the provider fetch each listing below it.
+    /// Names and sizes only: no file's contents are read, which is why this is
+    /// not `startDownloadingUbiquitousItem` or a coordinated read, either of
+    /// which can fetch everything inside. The next refresh indexes it.
+    private static func list(_ url: URL, path: String, since start: ContinuousClock.Instant) {
+        var items = 0
+        var failures = 0
+        let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) { failed, error in
+            failures += 1
+            Log.info("coordinator: listing \(failed.path(percentEncoded: false)) failed: "
+                + error.localizedDescription)
+            return true
+        }
+        while enumerator?.nextObject() != nil {
+            items += 1
+        }
+        Log.info("coordinator: listed folder \(path): \(items) item(s), \(failures) failure(s) "
+            + "in \(millis(since: start))ms")
     }
 
     static func coordinatorError(_ error: Error, path: String) -> CoordinatorError {
