@@ -28,6 +28,21 @@ renderer and the editor alike:
 
 * [-] still cancelled
 
+An alert whose body is a definition list, and list items that start with
+one:
+
+> [!TIP]
+> Term in an alert
+> : its definition
+
+> [!NOTE]
+> : a definition with no term is a paragraph
+
+* Term in a list item
+  : its definition
+* [ ] Task term
+  : task definition
+
 ![[embed.png]], ![alt](a.png) and ![ref][img].
 
 --- {#s .c}

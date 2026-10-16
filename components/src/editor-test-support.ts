@@ -5,7 +5,9 @@
  * Not a test file itself (no `.test.ts`), and nothing in a bundle imports it.
  */
 import { Crepe } from '@milkdown/crepe';
-import { remarkCtx } from '@milkdown/kit/core';
+import { editorViewCtx, remarkCtx } from '@milkdown/kit/core';
+import { TextSelection } from '@milkdown/kit/prose/state';
+import type { EditorView } from '@milkdown/kit/prose/view';
 import { CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
 import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
@@ -77,4 +79,50 @@ export async function editorOutline(source: string): Promise<OutlineNode[]> {
   const prefix = source.slice(0, source.length - body.length);
   const lineOffset = prefix.split('\n').length - 1;
   return mdastOutline(tree, body, lineOffset);
+}
+
+// Driving the editor the way a user does: cursor, keys, typing.
+
+/** The editor view of `crepe`. */
+export function viewOf(crepe: Crepe): EditorView {
+  return crepe.editor.action((ctx) => ctx.get(editorViewCtx));
+}
+
+/** Puts the cursor `offset` characters into the first occurrence of `text`. */
+export function placeCursor(view: EditorView, text: string, offset = 0): void {
+  let found = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (found >= 0) return false;
+    if (node.isText && node.text?.includes(text)) found = pos + (node.text.indexOf(text) ?? 0) + offset;
+    return true;
+  });
+  if (found < 0) throw new Error(`no text ${text}`);
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, found)));
+}
+
+/** Places the cursor in the first empty textblock of type `name`. */
+export function placeInEmpty(view: EditorView, name: string): void {
+  let found = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (found >= 0) return false;
+    if (node.type.name === name && node.content.size === 0) found = pos + 1;
+    return true;
+  });
+  if (found < 0) throw new Error(`no empty ${name}`);
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, found)));
+}
+
+/** Presses `key` through the editor's keymaps; returns whether anything handled it. */
+export function press(view: EditorView, key: string): boolean {
+  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+  return Boolean(view.someProp('handleKeyDown', (handle) => handle(view, event)));
+}
+
+/** Types `text` one character at a time through the input rules, as a user would. */
+export function typeText(view: EditorView, text: string): void {
+  for (const char of text) {
+    const { from, to } = view.state.selection;
+    const handled = view.someProp('handleTextInput', (handle) => handle(view, from, to, char, () => view.state.tr));
+    if (!handled) view.dispatch(view.state.tr.insertText(char, from, to));
+  }
 }

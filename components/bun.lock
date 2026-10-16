@@ -10,6 +10,7 @@
         "family-chart": "^0.9.0",
         "lit": "^3.3.3",
         "mdast-util-to-markdown": "2.2.0",
+        "micromark-core-commonmark": "2.0.4",
         "micromark-factory-space": "2.1.0",
         "micromark-util-character": "2.1.1",
         "ts-fsrs": "5.4.2",

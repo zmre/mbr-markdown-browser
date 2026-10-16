@@ -35,6 +35,11 @@ import { mathPlugin } from './editor-plugins/math.js';
 import { escapesPlugin } from './editor-plugins/escapes.js';
 import { referencesPlugin } from './editor-plugins/references.js';
 import { imagesPlugin } from './editor-plugins/images.js';
+import {
+  DEFINITION_LIST_CSS,
+  addDefinitionListMenuItem,
+  definitionListPlugins,
+} from './editor-plugins/definition-list.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -121,6 +126,7 @@ export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlug
   escapesPlugin,
   referencesPlugin,
   imagesPlugin,
+  definitionListPlugins,
 ];
 
 /** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
@@ -154,6 +160,7 @@ function injectStyles(): void {
     crepeCommonCss,
     THEME_CSS,
     FOOTNOTE_CSS,
+    DEFINITION_LIST_CSS,
     MODAL_CSS,
     HEADER_CSS,
     PICKER_CSS,
@@ -811,6 +818,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
           onUpload: (file: File) => uploadFile(file),
           proxyDomURL: (url: string) => mediaProxyURL(url),
         },
+        [CrepeFeature.BlockEdit]: { buildMenu: addDefinitionListMenuItem },
       },
     });
     // mbr's markdown syntax first, so the editing aids below see its nodes.

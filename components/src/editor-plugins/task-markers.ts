@@ -47,10 +47,13 @@ import { markdownLineEnding, markdownLineEndingOrSpace, markdownSpace } from 'mi
 import type { Code, Effects, Extension as SyntaxExtension, State as MicromarkState, TokenizeContext } from 'micromark-util-types';
 import type { Processor } from 'unified';
 import { listItemBlockConfig } from '@milkdown/kit/component/list-item-block';
+import { commandsCtx } from '@milkdown/kit/core';
 import { extendListItemSchemaForTask } from '@milkdown/kit/preset/gfm';
-import type { Node as ProseNode } from '@milkdown/kit/prose/model';
+import type { Node as ProseNode, NodeType } from '@milkdown/kit/prose/model';
+import { splitListItem } from '@milkdown/kit/prose/schema-list';
+import type { Command } from '@milkdown/kit/prose/state';
 import type { NodeView } from '@milkdown/kit/prose/view';
-import { $remark, $view } from '@milkdown/kit/utils';
+import { $command, $remark, $useKeymap, $view } from '@milkdown/kit/utils';
 import { injectEditorCss } from './inject-css.js';
 
 declare module 'micromark-util-types' {
@@ -254,7 +257,9 @@ export function taskMarkerFromMarkdown(): FromMarkdownExtension {
 function listItemWithTaskMarker(node: TaskListItem, parent: Parents | undefined, state: State, info: Info): string {
   const marker = effectiveMarker(node.checked, node.marker);
   const head = node.children[0];
-  const checkable = marker !== undefined && head?.type === 'paragraph';
+  // A definition list's term is the item's first paragraph to the renderer
+  // (`- [ ] Term` / `  : def`), so the box goes in front of it as well.
+  const checkable = marker !== undefined && (head?.type === 'paragraph' || (head?.type as string) === 'defList');
   const checkbox = `[${marker}] `;
   const tracker = state.createTracker(info);
   if (checkable) tracker.move(checkbox);
@@ -484,5 +489,65 @@ export const taskListItemView = $view(taskListItemSchema.node, (ctx) => (initial
   };
 });
 
+// ============================================================================
+// 5. Enter: a new task starts open
+// ============================================================================
+
+/**
+ * Enter in a task item's text: ProseMirror's `splitListItem`, but the new
+ * item is an open task (`[ ]`) instead of a copy of the old item's status —
+ * the split copies every attribute, so Enter after a `[-]` or `[x]` item
+ * used to make another cancelled or done one. Enter at the very start of
+ * the item inserts the new (empty) item above, which is then the open one;
+ * the item the cursor was in keeps its status either way.
+ *
+ * Declines (for the list's own Enter) outside a task item, in an empty item
+ * (which Enter lifts out of the list), with a selection, and below the item's
+ * first level (a nested list or definition list has its own Enter).
+ */
+export function splitTaskItem(itemType: NodeType): Command {
+  return (state, dispatch) => {
+    const { $from, empty } = state.selection;
+    const depth = $from.depth - 1;
+    if (!empty || depth < 1) return false;
+    const item = $from.node(depth);
+    if (item.type !== itemType || item.attrs.checked == null || $from.parent.content.size === 0) return false;
+    const atStart = $from.parentOffset === 0 && $from.index(depth) === 0;
+    return splitListItem(itemType)(
+      state,
+      dispatch &&
+        ((tr) => {
+          const $cursor = tr.selection.$from;
+          const lower = $cursor.before($cursor.depth - 1);
+          const target = atStart ? lower - (tr.doc.resolve(lower).nodeBefore?.nodeSize ?? 0) : lower;
+          const node = tr.doc.nodeAt(target);
+          if (node?.type === itemType) {
+            tr.setNodeMarkup(target, undefined, { ...node.attrs, checked: false, taskMarker: ' ' });
+          }
+          dispatch(tr);
+        }),
+    );
+  };
+}
+
+const splitTaskItemCommand = $command('MbrSplitTaskItem', (ctx) => () => splitTaskItem(taskListItemSchema.type(ctx)));
+
+/** Above the list's own Enter (50), below the definition list's (100), which owns a term in a task item. */
+const SPLIT_TASK_PRIORITY = 60;
+
+const taskItemKeymap = $useKeymap('mbrTaskItemKeymap', {
+  SplitTaskItem: {
+    shortcuts: 'Enter',
+    priority: SPLIT_TASK_PRIORITY,
+    command: (ctx) => () => ctx.get(commandsCtx).call(splitTaskItemCommand.key),
+  },
+});
+
 /** Everything item 2 registers, for `MARKDOWN_EXTENSION_PLUGINS`. */
-export const taskMarkers = [remarkTaskMarkersPlugin, taskListItemSchema, taskListItemView].flat();
+export const taskMarkers = [
+  remarkTaskMarkersPlugin,
+  taskListItemSchema,
+  taskListItemView,
+  splitTaskItemCommand,
+  taskItemKeymap,
+].flat();

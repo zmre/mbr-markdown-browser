@@ -27,24 +27,21 @@
  *
  * # Inventory: what an untouched save changes today (2026-10-15, Crepe 7.22.2)
  *
- * Structural / lossy:
- * - Definition lists (item 1): parsed as one paragraph; an indented nested
- *   list under `: def` becomes a top-level list and the next `: def` is folded
- *   into its last item (T1-A09/T1-B11 damage). **A fenced code block in a
- *   `: def` (`: ```rust`) is worse: the opening fence is escaped
- *   (`\`\`\`rust`), its indented body loses its indent, and the closing fence
- *   then opens a new code block that swallows the rest of the document**
- *   (`flashcards-loose`).
+ * Structural / lossy: none known.
  *
  * Fixed by a plugin in `editor-plugins/` (kept here so a regression is
- * recognisable): `[-]`/`[>]` tasks were escaped (`task-markers.ts`);
- * `> [!NOTE]` alerts became `> \[!NOTE]` (`alerts.ts`); `--- {attrs}` became
- * `\--- {attrs}` in both positions (`section-attrs.ts`); heading attributes
- * had no structure (`heading-attrs.ts`); wikilinks were escaped
- * (`wikilinks.ts`); backslash escapes inside `$…$`/`$$…$$` were consumed
- * (`math.ts`); `&amp;`/`&nbsp;` were decoded and `\$` lost its backslash
- * (`escapes.ts` — still decoded, same meaning, in link destinations and alt
- * text); `[text][ref]` was inlined and its definition deleted
+ * recognisable): definition lists were one paragraph, an indented nested list
+ * under `: def` was hoisted and the next `: def` folded into its last item
+ * (T1-A09/T1-B11 damage), and a fenced code block in a `: def` swallowed the
+ * rest of the document (`definition-list.ts`; `deflist-edge` covers the
+ * renderer's start/continue/end rules); `[-]`/`[>]` tasks were escaped
+ * (`task-markers.ts`); `> [!NOTE]` alerts became `> \[!NOTE]` (`alerts.ts`);
+ * `--- {attrs}` became `\--- {attrs}` in both positions (`section-attrs.ts`);
+ * heading attributes had no structure (`heading-attrs.ts`); wikilinks were
+ * escaped (`wikilinks.ts`); backslash escapes inside `$…$`/`$$…$$` were
+ * consumed (`math.ts`); `&amp;`/`&nbsp;` were decoded and `\$` lost its
+ * backslash (`escapes.ts` — still decoded, same meaning, in link destinations
+ * and alt text); `[text][ref]` was inlined and its definition deleted
  * (`references.ts`); untitled images were deleted and a standalone image's
  * alt became Crepe's ratio `![1.00](src)` (`images.ts`). CRLF files were
  * rewritten as LF (`openEditor`/`savedFile` now keep the file's ending).
@@ -62,13 +59,12 @@
  * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
  * raw HTML blocks and inline HTML, ```` ```chat ```` fences,
  * `TODO:`/`TK`/`FIXME`/`XXX` markers, task annotations (`@due(...)`,
- * `@done(...)`, `#tag`, `!!`, `> date`), `__strong__`/`_em_`, flat
- * definition lines (`: x` as paragraph text), and the already-damaged
- * T1-B11 (a fixed point).
+ * `@done(...)`, `#tag`, `!!`, `> date`), `__strong__`/`_em_`, and definition
+ * lists in house style (`: ` + two-space continuations), the damaged T1-B11
+ * included.
  *
- * Structure only (bytes survive, outline differs): flat definition lists and
- * the damaged deck (item 1); a standalone image (Crepe's image-block has no
- * source position).
+ * Structure only (bytes survive, outline differs): a standalone image
+ * (Crepe's image-block has no source position).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './editor-test-support.js';
@@ -77,12 +73,10 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 const ROUND_TRIP_FAILS: Record<string, string> = {
   'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized',
   crlf: 'item 6: `-` → `*`',
+  'deflist-edge': 'item 6: `:` spacing and lazy lines normalized, indented code fenced, `-` → `*`, table re-padded',
   escapes: 'item 6: `2 * 3` → `2 \\* 3`',
-  'flashcards-a09': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
-  'flashcards-b11': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
-  'flashcards-dash-history': 'item 1: `-` history list hoisted out of its definition',
-  'flashcards-loose': 'item 1: fence in a definition escaped; the rest of the file becomes code',
-  'kitchen-sink': 'items 1, 6',
+  'flashcards-dash-history': 'item 6: `-` → `*`',
+  'kitchen-sink': 'item 6',
   'lists-dash': 'item 6: `-` → `*`',
   'lists-ordered-paren': 'item 6: `1)` → `1.` and adjacent-list delimiters swapped',
   marginalia: 'item 6: `>>>` → `> > >`',
@@ -93,15 +87,7 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
 const OUTLINE_FAILS: Record<string, string> = {
-  crlf: 'item 1: no definition list',
-  'flashcards-a09': 'item 1: no definition list',
-  'flashcards-b11': 'item 1: no definition list',
-  'flashcards-b11-damaged': 'item 1: no definition list',
-  'flashcards-dash-history': 'item 1: no definition list',
-  'flashcards-flat': 'item 1: no definition list',
-  'flashcards-loose': 'item 1: no definition list',
   images: "Crepe's image-block (a lone image) carries no source position, so the outline cannot place it",
-  'kitchen-sink': 'item 1',
 };
 
 const names = Object.keys(EDITOR_FIXTURES);

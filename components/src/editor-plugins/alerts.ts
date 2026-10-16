@@ -29,6 +29,7 @@
 import type { Blockquote, Paragraph, Parents, PhrasingContent, Root } from 'mdast';
 import { defaultHandlers, type Info, type Options as ToMarkdownExtension, type State } from 'mdast-util-to-markdown';
 import type { Processor } from 'unified';
+import type { DefList } from './definition-list-syntax.js';
 import type { VFile } from 'vfile';
 import { blockquoteSchema } from '@milkdown/kit/preset/commonmark';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
@@ -110,22 +111,26 @@ function tagAsText(children: PhrasingContent[], tag: string): PhrasingContent[] 
   return following ? [text, ...rest] : [text, ...(next ? [next] : []), ...rest];
 }
 
+/** What {@link stripTagLine} did. */
+type Stripped = 'no-tag' | 'stripped' | 'emptied';
+
 /**
- * Removes the tag line from the front of `paragraph`. Returns false (and
- * changes nothing) when the paragraph does not start with it, which can only
- * mean remark and pulldown-cmark disagree about the line — then it is not
- * treated as an alert at all. `nextLine` is the offset of the second source
- * line's content, the paragraph's new start.
+ * Removes the tag line from the front of `paragraph` (a paragraph, or a
+ * definition term — a paragraph to the renderer once the tag line is gone).
+ * Returns `'no-tag'` (and changes nothing) when it does not start with it,
+ * which can only mean remark and pulldown-cmark disagree about the line — then
+ * it is not treated as an alert at all; `'emptied'` when nothing is left, for
+ * the caller to remove. `nextLine` is the offset of the second source line's
+ * content, the paragraph's new start.
  */
 function stripTagLine(
-  quote: Blockquote,
-  paragraph: Paragraph,
+  paragraph: { children: PhrasingContent[]; position?: Paragraph['position'] },
   tag: string,
   nextLine: { line: number; column: number; offset: number } | undefined,
-): boolean {
+): Stripped {
   const children = tagAsText(paragraph.children, tag);
   const [head, second] = children;
-  if (head?.type !== 'text' || !head.value.startsWith(tag)) return false;
+  if (head?.type !== 'text' || !head.value.startsWith(tag)) return 'no-tag';
   const rest = head.value.slice(tag.length);
   const lineBreak = /^[ \t]*\r?\n/.exec(rest);
   let remaining: PhrasingContent[];
@@ -138,16 +143,34 @@ function stripTagLine(
     // break (trailing spaces after the tag) ends the line.
     remaining = children.slice(second ? 2 : 1);
   } else {
-    return false;
+    return 'no-tag';
   }
   if (remaining.length === 0 || (remaining.length === 1 && remaining[0].type === 'text' && !remaining[0].value)) {
-    quote.children.splice(quote.children.indexOf(paragraph), 1);
-    return true;
+    return 'emptied';
   }
   paragraph.children = remaining;
   const start = remaining[0].position?.start ?? nextLine;
   if (paragraph.position && start) paragraph.position = { ...paragraph.position, start };
-  return true;
+  return 'stripped';
+}
+
+
+/**
+ * A definition list whose term was only the tag line (`> [!NOTE]` then
+ * `> : text`): to the renderer, which takes the tag line before reading
+ * blocks, `: text` has no term and is a paragraph. Rebuilt as that paragraph
+ * — the `:` prefix as authored, then the definition's inline content — when
+ * the list is one definition holding one paragraph; `undefined` otherwise.
+ */
+function termlessListAsParagraph(list: DefList, source: string): Paragraph | undefined {
+  const [, description, ...rest] = list.children;
+  if (rest.length || description?.type !== 'defListDescription') return undefined;
+  const [body, ...more] = description.children;
+  const prefixStart = description.position?.start.offset;
+  const bodyStart = body?.position?.start.offset;
+  if (more.length || body?.type !== 'paragraph' || prefixStart === undefined || bodyStart === undefined) return undefined;
+  const prefix: PhrasingContent = { type: 'text', value: source.slice(prefixStart, bodyStart) };
+  return { type: 'paragraph', children: [prefix, ...body.children], position: description.position };
 }
 
 /**
@@ -176,11 +199,28 @@ function markAlert(quote: AlertBlockquote, source: string): void {
   if (start?.offset === undefined || end === undefined) return;
   const text = source.slice(start.offset, end);
   const alert = parseAlertLine(text);
+  if (!alert) return;
+  const tag = alert.line.trim();
+  const nextLine = secondLineStart(text, start);
   const first = quote.children[0];
-  if (!alert || first?.type !== 'paragraph') return;
-  if (stripTagLine(quote, first, alert.line.trim(), secondLineStart(text, start))) {
-    quote.data = { ...quote.data, alert: alert.kind, alertLine: alert.line };
+  let result: Stripped = 'no-tag';
+  if (first?.type === 'paragraph') {
+    result = stripTagLine(first, tag, nextLine);
+    if (result === 'emptied') quote.children.shift();
+  } else if (first?.type === 'defList' && first.children[0]?.type === 'defListTerm') {
+    // The tag line opened the term: `> [!NOTE]\n> Term\n> : def`.
+    const term = first.children[0];
+    result = stripTagLine(term, tag, nextLine);
+    if (result === 'stripped' && first.position && term.position) {
+      first.position = { ...first.position, start: term.position.start };
+    }
+    if (result === 'emptied') {
+      const paragraph = termlessListAsParagraph(first, source);
+      if (!paragraph) return;
+      quote.children[0] = paragraph;
+    }
   }
+  if (result !== 'no-tag') quote.data = { ...quote.data, alert: alert.kind, alertLine: alert.line };
 }
 
 /**
@@ -368,7 +408,13 @@ export const alertBackspace = $prose(
           const { selection } = view.state;
           const { $from } = selection;
           if (!selection.empty || $from.parentOffset !== 0 || $from.depth < 2) return false;
-          const depth = $from.depth - 1;
+          // The alert's first block, or the term opening a definition list
+          // that is its first block (`> [!NOTE]` / `> Term` / `> : def`).
+          let depth = $from.depth - 1;
+          if ($from.parent.type.name === 'definition_term' && $from.node(depth).type.name === 'definition_list') {
+            if ($from.index(depth) !== 0) return false;
+            depth -= 1;
+          }
           const quote = $from.node(depth);
           if (quote.type.name !== 'blockquote' || !nodeAlert(quote) || $from.index(depth) !== 0) return false;
           view.dispatch(
