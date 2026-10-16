@@ -92,6 +92,7 @@ import {
   startConcentric,
   type ConcentricState,
 } from './concentric.js'
+import { offerReload } from '../stale-note.js'
 import { fitFace } from './fit.js'
 import { shuffle } from './random.js'
 import { ensureDeckStyles } from './styles.js'
@@ -521,6 +522,10 @@ export class MbrFlashcardDeckElement extends LitElement {
         // again, so saving resumes once a token is entered or the network is
         // back.
         if (outcome.kind === 'conflict' || outcome.kind === 'refused') this._writesBlocked = true
+        // The note changed somewhere else: the cards on screen may no longer
+        // be the ones in the file. Offer the reload that fixes it; declined,
+        // the session carries on read-only as above.
+        if (outcome.kind === 'conflict' && offerReload(outcome.message)) return
         // Spaced repetition keeps the card so the rating can be retried.
         // Concentric keeps going with this rating, session-only — it never
         // needed the writer, and stalling on a 401 would leave the default

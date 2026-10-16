@@ -1033,6 +1033,34 @@ fn not_downloaded_response(message: Option<&'static str>) -> Response<Body> {
     response
 }
 
+/// Why [`Server::read_editable_bytes`] could not hand a note to an edit
+/// endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditReadError {
+    /// The read failed for a reason other than "not downloaded" (`404`, as
+    /// before).
+    NotFound,
+    /// The provider did not deliver the note in time (`503` + `Retry-After`).
+    NotDownloaded,
+    /// The blocking read task itself failed (`500`).
+    Failed,
+    /// A line-level write needs text; the file is not UTF-8 (`400`).
+    NotUtf8,
+}
+
+impl IntoResponse for EditReadError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotFound => (StatusCode::NOT_FOUND, "File not found").into_response(),
+            Self::NotDownloaded => {
+                not_downloaded_response(Some("Note is still downloading; retry shortly"))
+            }
+            Self::Failed => (StatusCode::INTERNAL_SERVER_ERROR, "Read failed").into_response(),
+            Self::NotUtf8 => (StatusCode::BAD_REQUEST, "File is not valid UTF-8").into_response(),
+        }
+    }
+}
+
 /// Whether a render failed because the note's bytes are not on this device
 /// ([`VaultError::NotDownloaded`], which crosses `io::Error` as
 /// `WouldBlock`). No desktop read produces it.
@@ -3678,7 +3706,7 @@ impl Server {
             Err(err) => return err.into_response(),
         };
 
-        match Self::read_file_bytes(&config, &md_path).await {
+        match Self::read_editable_bytes(&config, &md_path, "editing").await {
             Ok(bytes) => {
                 let hash = mbr_core::edit_auth::content_hash(&bytes);
                 let mut resp = (StatusCode::OK, bytes).into_response();
@@ -3691,10 +3719,7 @@ impl Server {
                 }
                 resp
             }
-            Err(e) => {
-                tracing::error!("Failed to read markdown for editing: {e}");
-                (StatusCode::NOT_FOUND, "File not found").into_response()
-            }
+            Err(error) => error.into_response(),
         }
     }
 
@@ -3723,12 +3748,9 @@ impl Server {
         let _write_guard = config.file_write_locks.lock(&md_path).await;
 
         // Optimistic concurrency: reject if the file changed since it was loaded.
-        let current = match Self::read_file_bytes(&config, &md_path).await {
+        let current = match Self::read_editable_bytes(&config, &md_path, "save").await {
             Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!("Failed to read markdown before save: {e}");
-                return (StatusCode::NOT_FOUND, "File not found").into_response();
-            }
+            Err(error) => return error.into_response(),
         };
         if mbr_core::edit_auth::content_hash(&current) != req.base_hash {
             return (
@@ -3798,6 +3820,7 @@ impl Server {
     /// |--------|-------|
     /// | `403` / `401` | [`Self::check_edit_access`] (disabled, CSRF, cross-origin, `Host`, token) |
     /// | `404` | The path is not an editable markdown file, or it could not be read |
+    /// | `503` | The note is not downloaded (a cloud provider's placeholder) and did not arrive within a few seconds; `Retry-After` |
     /// | `400` | Path outside the root, a file that is not UTF-8, no such line, or the line is not a task |
     /// | `409` | The line no longer matches `expected` |
     /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
@@ -3822,7 +3845,7 @@ impl Server {
 
         let source = match Self::read_markdown_source(&config, &md_path, "task toggle").await {
             Ok(source) => source,
-            Err(err) => return err.into_response(),
+            Err(error) => return error.into_response(),
         };
 
         // Local wall clock, matching the naive/local dates `tasks.rs` parses.
@@ -3869,15 +3892,9 @@ impl Server {
         config: &ServerState,
         md_path: &Path,
         action: &str,
-    ) -> Result<String, (StatusCode, &'static str)> {
-        match Self::read_file_bytes(config, md_path).await {
-            Ok(bytes) => String::from_utf8(bytes)
-                .map_err(|_| (StatusCode::BAD_REQUEST, "File is not valid UTF-8")),
-            Err(e) => {
-                tracing::error!("Failed to read markdown before {action}: {e}");
-                Err((StatusCode::NOT_FOUND, "File not found"))
-            }
-        }
+    ) -> Result<String, EditReadError> {
+        let bytes = Self::read_editable_bytes(config, md_path, action).await?;
+        String::from_utf8(bytes).map_err(|_| EditReadError::NotUtf8)
     }
 
     /// After a line-level write: live-reload for connected clients, then the
@@ -3928,6 +3945,7 @@ impl Server {
     /// |--------|-------|
     /// | `403` / `401` | [`Self::check_edit_access`] |
     /// | `404` | The path is not an editable markdown file, or it could not be read |
+    /// | `503` | The note is not downloaded (a cloud provider's placeholder) and did not arrive within a few seconds; `Retry-After` |
     /// | `400` | Path outside the root, or a file that is not UTF-8 |
     /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale — or no insertion keeps every other card intact |
     /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
@@ -3958,7 +3976,7 @@ impl Server {
         let _write_guard = config.file_write_locks.lock(&md_path).await;
         let source = match Self::read_markdown_source(&config, &md_path, "flashcard review").await {
             Ok(source) => source,
-            Err(err) => return err.into_response(),
+            Err(error) => return error.into_response(),
         };
 
         let patch = match mbr_core::flashcards::append_review(
@@ -4058,13 +4076,65 @@ impl Server {
 
     /// The bytes of the file behind an index key, read through the vault on a
     /// blocking thread (where `tokio::fs` read them).
-    async fn read_file_bytes(config: &ServerState, path: &Path) -> std::io::Result<Vec<u8>> {
+    /// Reads a note an edit endpoint (`/.mbr/raw`, `/.mbr/edit`, `/.mbr/task`,
+    /// `/.mbr/flashcard-review`) is about to hand out or patch; `action` only
+    /// names the caller in the log line.
+    ///
+    /// A note the vault reports not downloaded — or whose read fails that way
+    /// — is requested from the provider and polled for up to
+    /// [`MBR_ASSET_DOWNLOAD_WAIT`], like a `/.mbr/*` override
+    /// ([`Self::serve_mbr_file`]); still missing, it is a `503` with
+    /// `Retry-After` (logged at DEBUG), never the `404` it used to be. On iOS
+    /// this is the common case after an edit on another device: iCloud marks
+    /// the phone's copy dataless until the new version is fetched, and the
+    /// app's fail-fast I/O policy turns the read into `EDEADLK`. Once the
+    /// bytes arrive the caller sees the *new* version, so a line-level write
+    /// then answers `409` and the page offers to reload.
+    ///
+    /// Free on the desktop: a `LocalVault` answers `availability` without a
+    /// system call and never fails a read `NotDownloaded`.
+    async fn read_editable_bytes(
+        config: &ServerState,
+        path: &Path,
+        action: &str,
+    ) -> Result<Vec<u8>, EditReadError> {
         let vault = Arc::clone(config.repo.vault());
-        let source = vault.vault_path(path)?;
-        tokio::task::spawn_blocking(move || vault.read(&source))
-            .await
-            .map_err(std::io::Error::other)?
-            .map_err(std::io::Error::from)
+        let source = vault.vault_path(path).map_err(|e| {
+            tracing::error!("Failed to read markdown for {action}: {e}");
+            EditReadError::NotFound
+        })?;
+        let deadline = Instant::now() + MBR_ASSET_DOWNLOAD_WAIT;
+        let mut requested = false;
+        loop {
+            if vault.availability(&source) != Availability::NotDownloaded {
+                let (reader, target) = (Arc::clone(&vault), source.clone());
+                match tokio::task::spawn_blocking(move || reader.read(&target)).await {
+                    Ok(Ok(bytes)) => return Ok(bytes),
+                    Ok(Err(VaultError::NotDownloaded { .. })) => {}
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to read markdown for {action}: {e}");
+                        return Err(EditReadError::NotFound);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read markdown for {action}: {e}");
+                        return Err(EditReadError::Failed);
+                    }
+                }
+            }
+            if !requested {
+                requested = true;
+                vault.request_download(std::slice::from_ref(&source));
+                continue; // a provider with the bytes at hand has them now
+            }
+            if Instant::now() >= deadline {
+                tracing::debug!(
+                    "{source} not downloaded after {}ms for {action}; asking for a retry",
+                    MBR_ASSET_DOWNLOAD_WAIT.as_millis()
+                );
+                return Err(EditReadError::NotDownloaded);
+            }
+            tokio::time::sleep(MBR_ASSET_DOWNLOAD_POLL).await;
+        }
     }
 
     /// Broadcasts a `FileChangeEvent` for live-reload + watcher reconciliation.

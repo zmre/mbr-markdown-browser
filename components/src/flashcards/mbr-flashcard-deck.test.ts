@@ -265,12 +265,16 @@ describe('spaced repetition', () => {
 
   it('stops writing after a conflict and says so', async () => {
     reply = { ok: false, kind: 'conflict', message: 'This note changed on disk — reload to continue reviewing.' }
+    const confirmMock = vi.fn(() => false)
+    window.confirm = confirmMock
     await mountSrs()
     await key(' ')
     await key('3')
     await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
     await deck.updateComplete
     expect(deck.querySelector('.mbr-fc-banner')!.textContent).toContain('changed on disk')
+    // The reload was offered (and declined here).
+    expect(confirmMock).toHaveBeenCalledOnce()
     expect(deck.querySelector('.mbr-fc-ratings')).toBeNull()
     // Read-only from here: Space now moves on.
     await key(' ')
@@ -416,6 +420,7 @@ describe('concentric mode', () => {
 
   it('carries on session-only after a conflict, keeping the notice', async () => {
     reply = { ok: false, kind: 'conflict', message: 'This note changed on disk — reload to continue reviewing.' }
+    window.confirm = vi.fn(() => false)
     await mount({ html: SECTIONED_DECK_HTML, recorder })
     await select('concentric')
     await rate('3')

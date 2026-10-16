@@ -160,7 +160,8 @@ embed is the current target it reads **Edit media** instead of **Media**.
 |--------|---------|
 | Authentication required | A token is required (an `edit_token_hash` is configured, the caller is remote, or `edit_require_token_on_loopback`). Enter it and retry. |
 | Editing is disabled or blocked | Editing is off, or the request failed the CSRF/same-origin/`Host` check. |
-| File changed on disk | The file was modified since you loaded it (e.g. by the watcher or another editor). Reload the page before saving. |
+| Changed somewhere else | The file was modified since you loaded it (another editor, another device). Nothing was saved: copy your changes, then reload the page. |
+| Still downloading | The note is a cloud placeholder (the iOS app over iCloud) that has not arrived yet; the server asked for it. Try again in a moment. |
 
 ## Creating, renaming, and moving files
 
@@ -233,6 +234,16 @@ Only the marker byte and the `@done(...)` annotation change; indentation, bullet
 style, spacing, other annotations, the line's terminator (a CRLF file stays
 CRLF) and the presence or absence of a trailing newline are all preserved. See
 [`tasks_stamp_done`](../reference/configuration.md#task-settings) for the stamp.
+
+Every edit endpoint (`/.mbr/raw`, `/.mbr/edit`, `/.mbr/task`,
+`/.mbr/flashcard-review`) reads the note first. When the vault reports the note
+not downloaded — a cloud provider's placeholder, as on the iOS app after the
+note was edited on another device — the server asks the provider for it and
+waits up to three seconds; if it has still not arrived the answer is `503` with
+`Retry-After`, never `404`. Once it arrives the request sees the new version, so
+a toggle of a line that changed elsewhere is a `409` and the page offers to
+reload. On the desktop nothing here costs anything: a local file is always
+downloaded.
 
 A toggle deliberately does **not** live-reload the page. The marker byte and the
 `@done(...)` stamp are the only things a status change alters, so the page

@@ -17,22 +17,42 @@
  * The review is stamped here, with the reviewer's local wall-clock time (`at`),
  * because that is how `history.ts` replays it; the server only validates it.
  */
+import { NOTE_DOWNLOADING_MESSAGE, staleKindForRead, staleKindForWrite } from '../stale-note.js'
 import { formatEntryTime } from './history.js'
 import type { ReviewOutcome, ReviewRecorder, ReviewServices, SourceLines } from './types.js'
 
 /** Endpoint for one review (`server.rs::flashcard_review_handler`). */
 const REVIEW_ENDPOINT = '/.mbr/flashcard-review'
 
-const CONFLICT_MESSAGE = 'This note changed on disk — reload to continue reviewing.'
+const CONFLICT_MESSAGE =
+  'This note was changed somewhere else since it was opened, so this review was not saved.'
 
 const REFUSED_MESSAGE =
   'This server is not accepting edits from this page, so reviews are not being saved.'
 
-/** Human-readable reason for a failed read or write, by status. */
-function failure(status: number, tokenMessage: string): Extract<ReviewOutcome, { ok: false }> {
-  switch (status) {
-    case 409:
+type Failure = Extract<ReviewOutcome, { ok: false }>
+
+/**
+ * The stale-note half of {@link failure}: the note changed elsewhere (a
+ * `conflict`, which stops writing for the session and makes the deck offer a
+ * reload), or it is still downloading (`other`: the next rating tries again).
+ */
+function staleFailure(kind: 'changed' | 'downloading' | null): Failure | null {
+  switch (kind) {
+    case 'changed':
       return { ok: false, kind: 'conflict', message: CONFLICT_MESSAGE }
+    case 'downloading':
+      return { ok: false, kind: 'other', message: NOTE_DOWNLOADING_MESSAGE }
+    default:
+      return null
+  }
+}
+
+/** Human-readable reason for a failed write, by status. */
+function failure(status: number, tokenMessage: string): Failure {
+  const stale = staleFailure(staleKindForWrite(status))
+  if (stale) return stale
+  switch (status) {
     case 401:
       return { ok: false, kind: 'auth', message: tokenMessage }
     case 403:
@@ -82,6 +102,9 @@ function isReviewResponse(body: unknown): body is ReviewResponse {
 export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
   const { path } = services
   const fail = (status: number) => failure(status, services.tokenMessage)
+  // A read's `404` means the note left the place this page found it.
+  const failRead = (status: number) =>
+    staleFailure(staleKindForRead(status)) ?? failure(status, services.tokenMessage)
 
   return async (target) => {
     // Taken when the card is rated, before any round trip.
@@ -95,7 +118,7 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
     if (!read.ok) {
       services.forget(path)
       if (read.status === 401) services.tokenRequired()
-      return fail(read.status)
+      return failRead(read.status)
     }
     const expected = read.lines[target.line - 1]
     if (expected === undefined) {
@@ -121,7 +144,7 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
     }
 
     if (!response.ok) {
-      if (response.status === 409) services.forget(path)
+      if (response.status === 409 || response.status === 503) services.forget(path)
       if (response.status === 401) services.tokenRequired()
       return fail(response.status)
     }

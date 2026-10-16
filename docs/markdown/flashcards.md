@@ -227,8 +227,9 @@ written to the card's [review history](#the-review-history) exactly as a spaced
 repetition rating is, so practice counts toward FSRS scheduling later. Without
 editing — a static site, a read-only server — ratings last for the session only:
 they steer the stack but nothing is written. If a write fails, the deck says so
-and the rating still counts for the session. When the note changed on disk, the
-deck stops writing and carries on session-only. A page reached under a hostname
+and the rating still counts for the session. When the note changed on disk (or
+on another device), the deck offers to reload the page for the latest version;
+if you stay, it stops writing and carries on session-only. A page reached under a hostname
 the server will not take edits from (behind `tailscale serve` or a reverse proxy,
 with no [edit token](../modes/editing/) configured) is rendered with editing
 off, so its ratings are session-only from the start; to save reviews there,
@@ -395,7 +396,7 @@ Each entry is stamped with your device's clock when you rate the card, and the
 server writes only that line (plus the `___Review History___` line the first
 time), keeping the file's line endings.
 If the note changed on disk since the page loaded, nothing is written and the
-deck says so; reload the page to continue. The endpoint is
+deck offers to reload the page; reload to continue saving. The endpoint is
 [`POST /.mbr/flashcard-review`](../modes/editing/#flashcard-reviews).
 
 > [!NOTE]

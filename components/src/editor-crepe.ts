@@ -46,6 +46,7 @@ import { mathPlugin } from './editor-plugins/math.js';
 import { escapesPlugin } from './editor-plugins/escapes.js';
 import { referencesPlugin } from './editor-plugins/references.js';
 import { imagesPlugin } from './editor-plugins/images.js';
+import { NOTE_DOWNLOADING_MESSAGE } from './stale-note.js';
 import {
   DEFINITION_LIST_CSS,
   addDefinitionListMenuItem,
@@ -1368,9 +1369,12 @@ function describeError(status: number, phase: 'load' | 'save'): string {
     case 403:
       return 'Editing is disabled or this request was blocked.';
     case 409:
-      return 'This file changed on disk since it was loaded. Reload the page before saving.';
+      // Not offered as a reload: that would throw away the edits in here.
+      return 'This note was changed somewhere else since you opened it, so it was not saved. Copy your changes, then reload the page to get the latest version.';
     case 404:
       return 'File not found.';
+    case 503:
+      return NOTE_DOWNLOADING_MESSAGE;
     default:
       return `Failed to ${phase} (HTTP ${status}).`;
   }

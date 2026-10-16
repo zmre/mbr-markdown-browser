@@ -37,8 +37,9 @@
  * of a task's markup a status change alters beyond the box itself.
  */
 import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
+import { NOTE_CHANGED_MESSAGE, staleKindForRead, staleKindForWrite, staleNoteMessage } from './stale-note.js'
 import { syncDoneChip } from './task-chips.js'
-import type { TaskStatus, TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
+import type { TaskStatus, TaskToggleFailure, TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 
 /** Endpoint for a single-line task patch (`server.rs::task_toggle_handler`). */
 const TASK_ENDPOINT = '/.mbr/task'
@@ -266,14 +267,19 @@ export const TOKEN_MESSAGE = 'Editing needs a token — open the editor (e) and 
  */
 const REFUSED_MESSAGE = 'This server is not accepting edits from this page.'
 
+/** A failed toggle, as {@link toggleTask} resolves it. */
+type ToggleFailure = { kind: TaskToggleFailure; message: string }
+
+/** The failure for a note that changed elsewhere, or is still downloading. */
+function staleFailure(kind: 'changed' | 'downloading'): ToggleFailure {
+  return { kind: kind === 'changed' ? 'conflict' : 'downloading', message: staleNoteMessage(kind) }
+}
+
 /** Human-readable reason for a failed write, by status. */
-function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other'; message: string } {
+function describeFailure(status: number): ToggleFailure {
+  const stale = staleKindForWrite(status)
+  if (stale) return staleFailure(stale)
   switch (status) {
-    case 409:
-      return {
-        kind: 'conflict',
-        message: 'That line changed on disk, so nothing was written.',
-      }
     case 401:
       return { kind: 'auth', message: TOKEN_MESSAGE }
     case 403:
@@ -294,19 +300,22 @@ function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other';
  * different things here: `/.mbr/raw` is behind the identical `check_edit_access`
  * policy, so a token-protected server refuses the read before the write is ever
  * attempted, and reporting that as a generic "could not read the file" hides
- * the one thing the user can act on.
+ * the one thing the user can act on. A `404` means the note is no longer where
+ * this page found it, and a `503` that it is still downloading (the iOS app,
+ * after an edit on another device made the local copy a placeholder).
  */
-function describeReadFailure(status: number): {
-  kind: 'conflict' | 'auth' | 'other'
-  message: string
-} {
+function describeReadFailure(status: number): ToggleFailure {
+  const stale = staleKindForRead(status)
+  if (stale) return staleFailure(stale)
   switch (status) {
     case 401:
       return { kind: 'auth', message: TOKEN_MESSAGE }
     case 403:
       return { kind: 'auth', message: REFUSED_MESSAGE }
+    case 0:
+      return { kind: 'other', message: 'The server could not be reached.' }
     default:
-      return { kind: 'other', message: 'Could not read the file to update it.' }
+      return { kind: 'other', message: `Could not read the note to update it (${status}).` }
   }
 }
 
@@ -336,7 +345,7 @@ export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOu
     // No such line means no `expected`, and sending a guess would either be
     // rejected as a conflict or — worse — match a line we never saw.
     lineCache.delete(path)
-    return { ok: false, kind: 'other', message: 'Could not read the file to update it.' }
+    return { ok: false, kind: 'conflict', message: NOTE_CHANGED_MESSAGE }
   }
 
   // Before the request, not after it: see `noteSelfWrite`.
@@ -358,8 +367,9 @@ export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOu
   if (!response.ok) {
     const failure = describeFailure(response.status)
     // Our copy of the line is what the server just disagreed with; drop it so
-    // the retry re-reads rather than repeating the same rejected request.
-    if (failure.kind === 'conflict') lineCache.delete(path)
+    // the retry re-reads rather than repeating the same rejected request. A
+    // note still downloading is about to change under us too.
+    if (failure.kind === 'conflict' || failure.kind === 'downloading') lineCache.delete(path)
     if (response.status === 401) noteEditTokenRequired()
     return { ok: false, ...failure }
   }

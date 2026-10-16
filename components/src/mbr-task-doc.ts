@@ -42,6 +42,7 @@ import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { waitForDom } from './dynamic-loader.js'
 import { isEditEnabled } from './shared.js'
+import { offerReload } from './stale-note.js'
 import { syncDoneChip } from './task-chips.js'
 import {
   applyCheckboxStatus,
@@ -51,7 +52,7 @@ import {
   nextToggleStatus,
   toggleTask,
 } from './task-toggle.js'
-import type { TaskStatus } from './tasks/types.js'
+import type { TaskStatus, TaskToggleOutcome } from './tasks/types.js'
 
 /** Class marking a checkbox this element has made interactive. */
 const EDITABLE_CLASS = 'mbr-task-editable'
@@ -258,7 +259,7 @@ export class MbrTaskDocElement extends LitElement {
       const outcome = await toggleTask({ path, line, to })
       if (!outcome.ok) {
         applyCheckboxStatus(input, previous)
-        this._report(outcome.message)
+        this._report(outcome)
       } else if (outcome.text !== undefined) {
         // The write suppressed its own reload, so this is where a newly
         // stamped `@done(...)` appears — or disappears, on a reopen.
@@ -273,10 +274,18 @@ export class MbrTaskDocElement extends LitElement {
    * Surface a failure. `alert` rather than a toast component on purpose: this
    * fires only when a write was refused, which on a local server means a real
    * misconfiguration the user needs to see rather than dismiss.
+   *
+   * A conflict is different: the note changed somewhere else (another device,
+   * another editor) since this page was rendered, so every checkbox on it may
+   * name the wrong line. The fix is a reload, so that is what is offered.
    */
-  private _report(message: string): void {
-    console.warn('Task toggle failed:', message)
-    window.alert(message)
+  private _report(failure: Extract<TaskToggleOutcome, { ok: false }>): void {
+    console.warn('Task toggle failed:', failure.message)
+    if (failure.kind === 'conflict') {
+      offerReload(failure.message)
+    } else {
+      window.alert(failure.message)
+    }
   }
 
   override render() {

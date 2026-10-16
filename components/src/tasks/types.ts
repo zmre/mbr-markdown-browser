@@ -149,8 +149,18 @@ export interface TaskToggleTarget {
 
 /** Why a toggle failed, at the granularity the UI reacts to. */
 export type TaskToggleFailure =
-  /** `409`: the line changed on disk. The view is stale and must be refreshed. */
+  /**
+   * The note changed somewhere else since this view read it — a `409`, a
+   * `404` from `/.mbr/raw`, or a line past the end of the file. The view is
+   * stale and must be refreshed (the page offers a reload; the panel
+   * re-queries).
+   */
   | 'conflict'
+  /**
+   * `503`: the note is not downloaded yet (a cloud provider's placeholder);
+   * the server asked for it, so trying again shortly works.
+   */
+  | 'downloading'
   /** `401`/`403`: editing is off, or the server wants a token we do not have. */
   | 'auth'
   /** Anything else — a bad line, an unreadable file, a network failure. */

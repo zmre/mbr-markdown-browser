@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { NOTE_CHANGED_MESSAGE, NOTE_DOWNLOADING_MESSAGE } from './stale-note.js'
 import {
   applyCheckboxStatus,
   checkboxStatus,
@@ -137,13 +138,44 @@ describe('toggleTask', () => {
     expect(conflict).toEqual({
       ok: false,
       kind: 'conflict',
-      message: 'That line changed on disk, so nothing was written.',
+      message: NOTE_CHANGED_MESSAGE,
     })
 
     routeFetch({ ok: true, status: 200 })
     await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
     const rawCalls = fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/.mbr/raw/'))
     expect(rawCalls).toHaveLength(2)
+  })
+
+  it('reports a 503 on the write as still downloading and re-reads next time', async () => {
+    routeFetch({ ok: false, status: 503 })
+    const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(outcome).toEqual({ ok: false, kind: 'downloading', message: NOTE_DOWNLOADING_MESSAGE })
+
+    routeFetch({ ok: true, status: 200 })
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    const rawCalls = fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/.mbr/raw/'))
+    expect(rawCalls).toHaveLength(2)
+  })
+
+  // Regression (iPhone, iCloud vault): the note was edited on the Mac, the
+  // phone's copy became a placeholder, and `/.mbr/raw` answered 404 — shown
+  // as "Could not read the file to update it."
+  it.each([
+    [404, 'conflict', NOTE_CHANGED_MESSAGE],
+    [503, 'downloading', NOTE_DOWNLOADING_MESSAGE],
+  ] as const)('reports a %i on the source read as %s, without writing', async (status, kind, message) => {
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status }))
+    const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(outcome).toEqual({ ok: false, kind, message })
+    expect(taskCalls()).toHaveLength(0)
+  })
+
+  it('reports a line past the end of the file as a conflict, without writing', async () => {
+    routeFetch({ ok: true, status: 200 })
+    const outcome = await toggleTask({ path: 'notes.md', line: 999, to: 'done' })
+    expect(outcome).toEqual({ ok: false, kind: 'conflict', message: NOTE_CHANGED_MESSAGE })
+    expect(taskCalls()).toHaveLength(0)
   })
 
   it('classifies auth failures separately from everything else', async () => {
@@ -167,7 +199,7 @@ describe('toggleTask', () => {
   it('refuses to guess `expected` when the source cannot be read', async () => {
     fetchMock.mockImplementation((url: string) =>
       String(url).startsWith('/.mbr/raw/')
-        ? Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve('') })
+        ? Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('') })
         : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
     )
 
@@ -221,12 +253,6 @@ describe('toggleTask', () => {
     await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
     const rawCalls = fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/.mbr/raw/'))
     expect(rawCalls).toHaveLength(2)
-  })
-
-  it('refuses a line the file does not have', async () => {
-    const outcome = await toggleTask({ path: 'notes.md', line: 99, to: 'done' })
-    expect(outcome).toMatchObject({ ok: false, kind: 'other' })
-    expect(taskCalls()).toHaveLength(0)
   })
 
   it('numbers lines the way the server does, ignoring a lone CR', async () => {

@@ -138,7 +138,7 @@ describe('makeReviewRecorder', () => {
     route({ ok: false, status: 409 })
     const outcome = await recordReview({ line: 1, rating: 'again' })
     expect(outcome).toMatchObject({ ok: false, kind: 'conflict' })
-    expect(outcome.ok === false && outcome.message).toContain('changed on disk')
+    expect(outcome.ok === false && outcome.message).toContain('changed somewhere else')
     await readSourceLines('deck.md')
     expect(fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('/.mbr/raw/'))).toHaveLength(2)
   })
@@ -165,6 +165,25 @@ describe('makeReviewRecorder', () => {
     const outcome = await recordReview({ line: 1, rating: 'good' })
     expect(outcome).toMatchObject({ ok: false, kind: 'refused' })
     expect(fetchMock.mock.calls.some((c) => c[0] === '/.mbr/flashcard-review')).toBe(false)
+  })
+
+  it('reports a 404 on the source read as a conflict: the note moved or changed elsewhere', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 404 }))
+    const outcome = await recordReview({ line: 1, rating: 'good' })
+    expect(outcome).toMatchObject({ ok: false, kind: 'conflict' })
+    expect(fetchMock.mock.calls.some((c) => c[0] === '/.mbr/flashcard-review')).toBe(false)
+  })
+
+  it('reports a 503 on the read or the write as still downloading, retryable', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 503 }))
+    const read = await recordReview({ line: 1, rating: 'good' })
+    expect(read).toMatchObject({ ok: false, kind: 'other' })
+    expect(read.ok === false && read.message).toMatch(/still downloading/)
+
+    route({ ok: false, status: 503 })
+    const write = await recordReview({ line: 1, rating: 'good' })
+    expect(write).toMatchObject({ ok: false, kind: 'other' })
+    expect(write.ok === false && write.message).toMatch(/still downloading/)
   })
 
   it('treats a line past the end of the file as a conflict, without writing', async () => {
