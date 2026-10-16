@@ -5,7 +5,8 @@
  * the Crepe instance via `crepe.editor.use(...)` before `.create()`. While the
  * caret sits just after an unclosed `[[`, it shows a fuzzy-filtered list of
  * markdown files (from a fresh site.json fetch). Selecting one inserts either:
- *   - a wiki link `[[Name]]` (default), or
+ *   - a wiki link `[[Name]]` (default) — the `mbr_wikilink` node from
+ *     `editor-plugins/wikilinks.ts`, so it saves verbatim, or
  *   - a relative markdown link `[title](../rel/path/)` computed from the current
  *     page to the target (Tab toggles the mode).
  *
@@ -23,6 +24,7 @@ import type { EditorView } from '@milkdown/kit/prose/view';
 import type { MilkdownPlugin } from '@milkdown/kit/ctx';
 import { fuzzyFilter } from './fuzzy.js';
 import { relativeUrlPath, encodeLinkDestination, normalizeUrl } from './editor-picker-shared.js';
+import { wikilinkNode } from './editor-plugins/wikilinks.js';
 
 /** Minimal markdown-file shape read from site.json. */
 export interface LinkAutocompleteSite {
@@ -237,9 +239,17 @@ export function createLinkAutocompletePlugin(services: LinkAutocompleteServices)
           let insertedLen: number;
           let tr = state.tr;
           if (mode === 'wiki') {
+            // The wikilink node (editor-plugins/wikilinks.ts) when the name
+            // makes a valid one; text otherwise (a name holding `[`/`]`).
             const text = `[[${target.wiki}]]`;
-            insertedLen = text.length;
-            tr = tr.insertText(text, range.from, range.to);
+            const node = wikilinkNode(schema, text);
+            if (node) {
+              insertedLen = node.nodeSize;
+              tr = tr.replaceRangeWith(range.from, range.to, node);
+            } else {
+              insertedLen = text.length;
+              tr = tr.insertText(text, range.from, range.to);
+            }
           } else {
             const rel = encodeLinkDestination(relativeUrlPath(services.currentUrl(), target.url));
             const linkMark = schema.marks.link;

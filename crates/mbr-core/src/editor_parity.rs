@@ -550,6 +550,106 @@ fn section_rule_needs_a_paragraph_of_its_own() {
     assert_eq!(shape("--- {#x} tail\n")[0].1, "paragraph");
 }
 
+/// The spellings `components/src/editor-plugins/section-attrs.ts` treats as a
+/// section break (and the near misses it does not), pinned on this side so the
+/// two cannot drift.
+#[test]
+fn section_rule_spellings_the_editor_mirrors() {
+    let kind = |source: &str| shape(source)[0].1;
+    for source in [
+        "--- {.a}\n",
+        "\u{2014} {.a}\n",
+        "&mdash; {.a}\n",
+        "--- {}\n",
+        "--- {data-background-iframe=https://example.com/x}\n",
+    ] {
+        assert_eq!(kind(source), "section_break", "{source:?}");
+    }
+    for source in [
+        "---{x}\n",
+        "---  {x}\n",
+        "---- {x}\n",
+        "-- {x}\n",
+        "\\--- {x}\n",
+        "--- {a *b*}\n",
+        "--- {a `b`}\n",
+    ] {
+        assert_eq!(kind(source), "paragraph", "{source:?}");
+    }
+    assert_eq!(shape("> a\n>\n> --- {.x}\n")[2], (1, "section_break", 3, 3));
+}
+
+/// Wikilink edges `components/src/editor-plugins/wikilinks.ts` mirrors: what
+/// pulldown-cmark makes a wikilink of, and its destination (target and
+/// heading, raw — `\\` escapes nothing before the `|`).
+#[test]
+fn wikilink_edges_the_editor_mirrors() {
+    use pulldown_cmark::LinkType;
+    let links = |source: &str| -> Vec<(bool, String)> {
+        Parser::new_ext(source, markdown_options())
+            .filter_map(|event| match event {
+                Event::Start(Tag::Link {
+                    link_type: LinkType::WikiLink { .. },
+                    dest_url,
+                    ..
+                }) => Some((false, dest_url.to_string())),
+                Event::Start(Tag::Image {
+                    link_type: LinkType::WikiLink { .. },
+                    dest_url,
+                    ..
+                }) => Some((true, dest_url.to_string())),
+                _ => None,
+            })
+            .collect()
+    };
+    let one = |embed: bool, dest: &str| vec![(embed, dest.to_string())];
+    assert_eq!(links("[[Note]]"), one(false, "Note"));
+    assert_eq!(links("[[Note|the alias]]"), one(false, "Note"));
+    assert_eq!(links("[[Note#Heading]]"), one(false, "Note#Heading"));
+    assert_eq!(links("[[#Local]]"), one(false, "#Local"));
+    assert_eq!(links("![[diagram.png]]"), one(true, "diagram.png"));
+    assert_eq!(links("[[a#b|c|d]]"), one(false, "a#b"));
+    assert_eq!(links("[[a\\|b]]"), one(false, "a\\"));
+    assert_eq!(links("[[[a]]"), one(false, "a"));
+    assert_eq!(links("[[x|]]"), one(false, "x"));
+    assert_eq!(links("[[a]b]]"), one(false, "a]b"));
+    // Wider than the editor (which keeps these as text): a line break or a `[`.
+    assert_eq!(links("[[a\nb]]"), one(false, "a\nb"));
+    assert_eq!(links("[[a[b]]"), one(false, "a[b"));
+    assert_eq!(links("Wow\\![[x]]"), one(false, "x"));
+    for source in ["[[]]", "[[|x]]", "`[[x]]`"] {
+        assert_eq!(links(source), [], "{source:?}");
+    }
+}
+
+/// Heading attribute edges `components/src/editor-plugins/heading-attrs.ts`
+/// mirrors: the nearest `{` opens the block, one-character tokens and
+/// `key=value` pairs give no id or class, and the last `#id` wins.
+#[test]
+fn heading_attribute_edges_the_editor_mirrors() {
+    let attrs = |source: &str| {
+        let node = outline(source).remove(0);
+        (node.id, node.classes)
+    };
+    assert_eq!(
+        attrs("# Nest {#a {.b}\n"),
+        (None, Some(vec!["b".to_string()]))
+    );
+    assert_eq!(
+        attrs("# Both {#a .b .c #d}\n"),
+        (
+            Some("d".to_string()),
+            Some(vec!["b".to_string(), "c".to_string()])
+        )
+    );
+    assert_eq!(
+        attrs("# Pairs {key=v # . .ok}\n").1,
+        Some(vec!["ok".to_string()])
+    );
+    assert_eq!(attrs("# Esc {#a\\b}\n"), (None, None));
+    assert_eq!(attrs("Setext {#s}\n===\n").0, Some("s".to_string()));
+}
+
 #[test]
 fn definition_list_nesting_and_frontmatter_lines() {
     let source = "---\ntitle: x\n---\nTerm\n: one\n  * aid\n: two\n";

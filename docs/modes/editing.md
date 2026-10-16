@@ -58,6 +58,21 @@ the formatting tools that are not in Crepe's own menus: **Footnote** and
 **Media**. On a phone the editor fills the screen, and the path pickers open as
 sheets from the bottom.
 
+### mbr syntax in the editor
+
+Some of mbr's markdown extensions are understood by the editor and saved back
+exactly as written:
+
+- **Wikilinks** (`[[Note]]`, `[[Note|text]]`, `[[Note#Heading]]`, `![[file]]`)
+  show as link chips. Double-click one to edit its source (clear it to remove
+  the link). Typing the closing `]]` of a `[[…]]` turns it into a chip, and
+  the `[[` page autocomplete inserts one.
+- **Section attributes** (`--- {#id .class key=value}`) show as a rule with
+  the attributes on a chip. Click the chip to edit them; clearing them leaves
+  a plain rule.
+- **Heading attributes** (`# Title {#id .class}`) stay visible as text in the
+  heading.
+
 ### Starting a new note
 
 In the editor, ⋯ → **New note…** asks for a path, prefilled with the note's own
