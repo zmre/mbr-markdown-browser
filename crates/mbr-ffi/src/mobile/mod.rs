@@ -51,7 +51,7 @@ use std::time::Instant;
 use axum::Router;
 use mbr_core::config::{Config, IpArray};
 use mbr_core::repo::{RepoDiff, build_markdown_url_path, is_markdown_extension};
-use mbr_core::vault::Vault;
+use mbr_core::vault::{Availability, Vault, VaultPath};
 use mbr_server::{EmbeddedStorage, Server, ServerConfig};
 
 pub use coordinated_vault::CoordinatedVault;
@@ -66,6 +66,19 @@ use runtime::BackgroundRuntime;
 
 /// Log filter for the in-process server (stdout ends up in the device log).
 const LOG_FILTER: &str = "mbr=info,tower_http=warn";
+
+/// How long a refresh waits for a changed `.mbr/` file it asked a cloud
+/// provider for before leaving it to a later refresh. The size of the server's
+/// own wait for a `/.mbr/*` asset: these files are small and normally arrive
+/// within a second or two, and in that case the refresh applies them at once.
+const MBR_DOWNLOAD_WAIT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(600)
+} else {
+    std::time::Duration::from_secs(3)
+};
+
+/// How often [`MBR_DOWNLOAD_WAIT`] looks again.
+const MBR_DOWNLOAD_POLL: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Errors crossing the FFI boundary.
 #[derive(Debug, thiserror::Error)]
@@ -123,9 +136,12 @@ pub struct RefreshSummary {
     /// cleared when it was fixed.
     pub config_error: Option<String>,
     /// Files in `.mbr/` (or the template folder) still not downloaded, whose
-    /// download this refresh asked for again. When non-zero, refresh again in
-    /// a few seconds: their arrival shows up as `config_reloaded`,
-    /// `templates_reloaded` or `assets_changed`.
+    /// download this refresh asked for again — including a changed
+    /// `config.toml`, template or asset whose new version is still in the
+    /// cloud, which is not acted on until it arrives (the vault keeps running
+    /// with what it had). When non-zero, refresh again in a few seconds:
+    /// their arrival shows up as `config_reloaded`, `templates_reloaded` or
+    /// `assets_changed`.
     pub mbr_downloads_requested: u32,
     /// Folders whose contents the provider has not fetched yet (an iCloud
     /// Drive folder on iOS stays *dataless* until something lists it), so
@@ -268,7 +284,45 @@ struct LoadedConfig {
     error: Option<String>,
 }
 
+/// What reading `.mbr/config.toml` through the vault gave.
+enum ConfigRead {
+    Loaded(Box<LoadedConfig>),
+    /// The provider has not downloaded it: no configuration at all, and no
+    /// error either — reading it again once it arrives is the answer.
+    NotDownloaded,
+}
+
+/// `.mbr/config.toml`'s place in a vault.
+fn config_path() -> Option<VaultPath> {
+    VaultPath::new(".mbr/config.toml").ok()
+}
+
 impl LoadedConfig {
+    /// [`Self::read`], unless `vault` reports `config.toml` not downloaded
+    /// once the read is done.
+    ///
+    /// Asked *after* reading, not before: on a thread that materializes
+    /// dataless files (the caller's, at open) the read itself downloads the
+    /// file and succeeds, and only then is the answer final. On mbr's
+    /// fail-fast threads (a refresh) the read fails `EDEADLK`, which figment
+    /// reports as a parse failure; a legacy `.config.toml.icloud`
+    /// placeholder reads as no file at all. Neither is the repository's
+    /// configuration being broken or absent.
+    fn read_through(vault: &dyn Vault, root: &Path) -> ConfigRead {
+        let loaded = Self::read(root);
+        let not_downloaded = config_path()
+            .is_some_and(|path| vault.availability(&path) == Availability::NotDownloaded);
+        if not_downloaded {
+            tracing::info!(
+                "{} is not downloaded yet; requested",
+                root.join(".mbr/config.toml").display()
+            );
+            ConfigRead::NotDownloaded
+        } else {
+            ConfigRead::Loaded(Box::new(loaded))
+        }
+    }
+
     /// The repository's configuration, read at `root` (never above it).
     ///
     /// Unlike the desktop, which refuses to start on a broken
@@ -353,9 +407,18 @@ impl MbrApp {
     ) -> Result<Arc<Self>, MobileError> {
         let started = Instant::now();
         let root = canonical_dir(Path::new(&root_path))?;
-        let mut loaded = LoadedConfig::read(&root);
-        apply_mobile_overrides(&mut loaded.config, &root);
         let vault: Arc<dyn Vault> = Arc::new(CoordinatedVault::new(&root, coordinator));
+        // Not downloaded (offline at open, say): the defaults until it
+        // arrives, without an error. The stamp records it not downloaded, so
+        // the open requests it and its arrival rebuilds.
+        let mut loaded = match LoadedConfig::read_through(vault.as_ref(), &root) {
+            ConfigRead::Loaded(loaded) => *loaded,
+            ConfigRead::NotDownloaded => LoadedConfig {
+                config: Config::default(),
+                error: None,
+            },
+        };
+        apply_mobile_overrides(&mut loaded.config, &root);
         let identity = vault_id.unwrap_or_else(|| root.to_string_lossy().into_owned());
         let cache = cache_dir.map(|dir| IndexCache::new(Path::new(&dir), &identity));
         let snapshot = cache.as_ref().and_then(IndexCache::load);
@@ -682,6 +745,16 @@ async fn initial_indexing(
 /// - **Other files** (`theme.css`, `user.css`, `components/*.js`, …):
 ///   nothing to do server-side. `/.mbr/*` assets are read per request with
 ///   `no-cache`; the summary tells the app to reload the page.
+///
+/// **Not downloaded yet.** A change made on another device arrives as a
+/// dataless file, and this runs on threads that fail fast on those
+/// ([`iopolicy`]). So a changed file still in the cloud is requested and
+/// polled for up to [`MBR_DOWNLOAD_WAIT`] — polled rather than read with
+/// materialization on, because a materializing read cannot be abandoned and
+/// offline it may never return — and, still missing, held back
+/// ([`MbrStamp::settle`]): the vault keeps the configuration, templates and
+/// page it has, and `mbr_downloads_requested` keeps the app refreshing until
+/// it arrives.
 async fn refresh_mbr(
     slot: &RwLock<Arc<Served>>,
     served: &Arc<Served>,
@@ -689,53 +762,99 @@ async fn refresh_mbr(
     root: &Path,
     summary: &mut RefreshSummary,
 ) -> bool {
-    let stamp_vault = Arc::clone(vault);
     let template_folder = served.config.template_folder.clone();
-    let now = tokio::task::spawn_blocking(move || {
-        MbrStamp::take(stamp_vault.as_ref(), template_folder.as_deref())
-    })
-    .await
-    .unwrap_or_default();
+    // Refreshes are serialized (the index lock), so nothing moves this
+    // between here and the write below.
+    let seen = served
+        .stamp
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let deadline = Instant::now() + MBR_DOWNLOAD_WAIT;
+    let mut now = take_stamp(vault, template_folder.clone()).await;
     // Asked for again on every refresh until they are here: a provider may
     // drop a request (offline, app suspended), and asking is idempotent.
-    summary.mbr_downloads_requested = now.request_downloads(vault.as_ref());
-    let changes = {
-        let mut seen = served
-            .stamp
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let changes = now.changes_since(&seen);
-        *seen = now.clone();
-        changes
-    };
+    now.request_downloads(vault.as_ref());
+    let mut settled = now.settle(&seen);
+    while settled.waiting && Instant::now() < deadline {
+        tokio::time::sleep(MBR_DOWNLOAD_POLL).await;
+        now = take_stamp(vault, template_folder.clone()).await;
+        settled = now.settle(&seen);
+    }
+    summary.mbr_downloads_requested = now.not_downloaded_count();
+    if settled.waiting {
+        tracing::info!(
+            "{} changed, but not everything that changed is downloaded yet; \
+             keeping what is in use until it arrives",
+            root.join(".mbr").display()
+        );
+    }
+    let changes = settled.changes;
+    *served
+        .stamp
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = settled.stamp.clone();
     if !changes.any() {
         return false;
     }
     tracing::info!("{} changed: {changes:?}", root.join(".mbr").display());
     let mut rebuilt = false;
+    let mut reads_pending = false;
     if changes.config {
-        match rebuild(root, vault, served, now).await {
-            Ok(Some(next)) => {
+        match rebuild(root, vault, served, settled.stamp.clone()).await {
+            Ok(Rebuilt::New(next)) => {
                 *slot
                     .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(next);
                 summary.config_reloaded = true;
                 rebuilt = true;
             }
-            Ok(None) => {}
+            Ok(Rebuilt::Unchanged) => {}
+            Ok(Rebuilt::NotDownloaded) => {
+                // Evicted between the stamp and the read: as if the stamp
+                // had seen it, so the next refresh looks again.
+                *served
+                    .stamp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    settled.stamp.with_reads_from(&seen);
+                if let Some(path) = config_path() {
+                    vault.request_download(std::slice::from_ref(&path));
+                }
+                summary.mbr_downloads_requested = summary.mbr_downloads_requested.max(1);
+                reads_pending = true;
+            }
             Err(e) => tracing::warn!("Could not reopen with the changed configuration: {e}"),
         }
     }
-    if changes.templates && !rebuilt {
+    if changes.templates && !rebuilt && !reads_pending {
         summary.templates_reloaded = served.server.reload_templates();
     }
     summary.assets_changed = changes.assets;
     rebuilt
 }
 
+/// [`MbrStamp::take`] off the async threads.
+async fn take_stamp(vault: &Arc<dyn Vault>, template_folder: Option<PathBuf>) -> MbrStamp {
+    let vault = Arc::clone(vault);
+    tokio::task::spawn_blocking(move || MbrStamp::take(vault.as_ref(), template_folder.as_deref()))
+        .await
+        .unwrap_or_default()
+}
+
+/// What [`rebuild`] made of a changed `config.toml`.
+enum Rebuilt {
+    /// A server for the new configuration.
+    New(Box<Served>),
+    /// The file changed, its configuration did not.
+    Unchanged,
+    /// The file is not downloaded (any more): nothing was read, nothing
+    /// changes.
+    NotDownloaded,
+}
+
 /// The server for `.mbr/config.toml` as it is now, when that differs from
-/// what `served` runs with; `None` when the file changed but its
-/// configuration did not.
+/// what `served` runs with.
 ///
 /// Same vault, so the same coordinator and grant; the caller keeps the same
 /// cache and identity. The index is handed over as a snapshot, which the new
@@ -743,27 +862,32 @@ async fn refresh_mbr(
 /// globs, markdown extensions, static folder, …) changed, in which case its
 /// fingerprint no longer matches and it rescans, as it should. Read with the
 /// open's fallback: a `config.toml` that no longer parses gives the defaults
-/// plus its error, and fixing it clears the error.
+/// plus its error, and fixing it clears the error. One that is not
+/// downloaded is neither ([`LoadedConfig::read_through`]).
 async fn rebuild(
     root: &Path,
     vault: &Arc<dyn Vault>,
     served: &Arc<Served>,
     stamp: MbrStamp,
-) -> Result<Option<Served>, MobileError> {
+) -> Result<Rebuilt, MobileError> {
     let started = Instant::now();
     let read_root = root.to_path_buf();
-    let loaded = tokio::task::spawn_blocking(move || {
-        let mut loaded = LoadedConfig::read(&read_root);
-        apply_mobile_overrides(&mut loaded.config, &read_root);
-        loaded
+    let read_vault = Arc::clone(vault);
+    let read = tokio::task::spawn_blocking(move || {
+        LoadedConfig::read_through(read_vault.as_ref(), &read_root)
     })
     .await
     .map_err(|e| MobileError::Internal {
         message: format!("config read: {e}"),
     })?;
+    let mut loaded = match read {
+        ConfigRead::Loaded(loaded) => *loaded,
+        ConfigRead::NotDownloaded => return Ok(Rebuilt::NotDownloaded),
+    };
+    apply_mobile_overrides(&mut loaded.config, root);
     if same_config(&loaded.config, &served.config) && loaded.error == served.config_error {
         tracing::info!("config.toml changed on disk, but not its configuration");
-        return Ok(None);
+        return Ok(Rebuilt::Unchanged);
     }
     let repo = Arc::clone(served.server.repo());
     let snapshot = tokio::task::spawn_blocking(move || repo.snapshot())
@@ -781,7 +905,7 @@ async fn rebuild(
             None => "scan configuration changed, rescanned".to_owned(),
         }
     );
-    Ok(Some(next))
+    Ok(Rebuilt::New(Box::new(next)))
 }
 
 /// Whether two configurations are the same, field for field.

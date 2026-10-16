@@ -1974,9 +1974,12 @@ public struct RefreshSummary: Equatable, Hashable {
     public var configError: String?
     /**
      * Files in `.mbr/` (or the template folder) still not downloaded, whose
-     * download this refresh asked for again. When non-zero, refresh again in
-     * a few seconds: their arrival shows up as `config_reloaded`,
-     * `templates_reloaded` or `assets_changed`.
+     * download this refresh asked for again — including a changed
+     * `config.toml`, template or asset whose new version is still in the
+     * cloud, which is not acted on until it arrives (the vault keeps running
+     * with what it had). When non-zero, refresh again in a few seconds:
+     * their arrival shows up as `config_reloaded`, `templates_reloaded` or
+     * `assets_changed`.
      */
     public var mbrDownloadsRequested: UInt32
     /**
@@ -2031,9 +2034,12 @@ public struct RefreshSummary: Equatable, Hashable {
          */configError: String?, 
         /**
          * Files in `.mbr/` (or the template folder) still not downloaded, whose
-         * download this refresh asked for again. When non-zero, refresh again in
-         * a few seconds: their arrival shows up as `config_reloaded`,
-         * `templates_reloaded` or `assets_changed`.
+         * download this refresh asked for again — including a changed
+         * `config.toml`, template or asset whose new version is still in the
+         * cloud, which is not acted on until it arrives (the vault keeps running
+         * with what it had). When non-zero, refresh again in a few seconds:
+         * their arrival shows up as `config_reloaded`, `templates_reloaded` or
+         * `assets_changed`.
          */mbrDownloadsRequested: UInt32, 
         /**
          * Folders whose contents the provider has not fetched yet (an iCloud

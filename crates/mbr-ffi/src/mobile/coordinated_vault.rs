@@ -317,6 +317,9 @@ pub(crate) mod tests {
     pub(crate) struct RecordingCoordinator {
         pub(crate) calls: Mutex<Vec<String>>,
         pub(crate) downloads: Mutex<Vec<String>>,
+        /// Files a download request delivers, by native path: written, and
+        /// their `.Name.icloud` placeholder removed, as the provider would.
+        pub(crate) deliveries: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     }
 
     impl RecordingCoordinator {
@@ -355,6 +358,16 @@ pub(crate) mod tests {
             })
         }
         fn request_download(&self, paths: Vec<String>) {
+            let mut deliveries = self.deliveries.lock().unwrap();
+            for path in &paths {
+                if let Some(bytes) = deliveries.remove(path) {
+                    let path = Path::new(path);
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    let stub = path.with_file_name(placeholder_name(&name));
+                    std::fs::write(path, bytes).unwrap();
+                    let _ = std::fs::remove_file(stub);
+                }
+            }
             self.downloads.lock().unwrap().extend(paths);
         }
     }

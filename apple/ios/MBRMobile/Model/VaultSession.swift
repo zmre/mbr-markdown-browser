@@ -40,6 +40,9 @@ final class VaultSession {
     }
 
     private var watchers: [Task<Void, Never>] = []
+    /// The download backoff (`refreshUntilDownloaded`), while one runs.
+    private var downloadRefresh: Task<Void, Never>?
+    private var closed = false
     /// Whether WebKit was seen to re-request a 503 page by itself (`Refresh`).
     private(set) var webKitHonoursRefresh: Bool?
     /// Back-list entries that predate this vault's first page.
@@ -161,7 +164,7 @@ final class VaultSession {
                     await self?.apply(report.refresh, reason: "initial indexing")
                 }
                 if report.mbrDownloadsRequested > 0 || report.foldersNotDownloaded > 0 {
-                    await self?.refreshUntilDownloaded()
+                    self?.followDownloads()
                 }
             } catch {
                 Log.info("ready: failed: \(error)")
@@ -197,6 +200,9 @@ final class VaultSession {
     func close() {
         self.watchers.forEach { $0.cancel() }
         self.watchers.removeAll()
+        self.closed = true
+        self.downloadRefresh?.cancel()
+        self.downloadRefresh = nil
         self.web.target.app = nil
         Log.info("close: \(self.title)")
     }
@@ -305,6 +311,9 @@ extension VaultSession {
             let summary = try await app.refresh()
             self.lastRefresh = summary
             await self.apply(summary, reason: reason, always: always)
+            if summary.mbrDownloadsRequested > 0 || summary.foldersNotDownloaded > 0 {
+                self.followDownloads()
+            }
         } catch {
             Log.info("refresh (\(reason)): failed: \(error)")
             if always {
@@ -420,15 +429,31 @@ extension VaultSession {
 // MARK: Downloads: .mbr/ files and folder listings
 
 extension VaultSession {
-    /// Something was in the cloud at open and Rust asked for it; nothing tells
-    /// the app when it arrives. Either files in the vault's `.mbr/`
-    /// (`user.css`, templates, `config.toml`) — nothing else would ask for
-    /// them — or folders whose *listing* was not on the device (an iCloud
-    /// Drive folder copied in from another device stays dataless until
-    /// something lists it), so their notes were not indexed. Refresh on a
-    /// backoff until a refresh reports none outstanding (an arrival reloads
-    /// the page) or the schedule runs out; foregrounding and the Refresh
-    /// menu item refresh anyway, and ask again.
+    /// Starts `refreshUntilDownloaded` unless it is already running. Called
+    /// after the open and after **any** refresh that reports something
+    /// outstanding: an edit made on another device reaches `.mbr/` as a
+    /// file still in the cloud, which Rust keeps out of use until it arrives
+    /// — found by a foreground refresh, it needs the backoff as much as a
+    /// file missing at open does, or the page keeps its old styles and
+    /// configuration until the next foreground.
+    private func followDownloads() {
+        guard self.downloadRefresh == nil, !self.closed else { return }
+        self.downloadRefresh = Task { [weak self] in
+            await self?.refreshUntilDownloaded()
+            self?.downloadRefresh = nil
+        }
+    }
+
+    /// Something was in the cloud and Rust asked for it; nothing tells the app
+    /// when it arrives. Either files in the vault's `.mbr/` (`user.css`,
+    /// templates, `config.toml`, or a new version of one edited elsewhere) —
+    /// nothing else would ask for them — or folders whose *listing* was not on
+    /// the device (an iCloud Drive folder copied in from another device stays
+    /// dataless until something lists it), so their notes were not indexed.
+    /// Refresh on a backoff until a refresh reports none outstanding (the
+    /// arrival's refresh reloads the page, like any other) or the schedule
+    /// runs out; foregrounding and the Refresh menu item refresh anyway, and
+    /// ask again.
     private func refreshUntilDownloaded() async {
         for delay in Self.downloadRefreshDelays {
             do {
