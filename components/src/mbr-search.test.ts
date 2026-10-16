@@ -815,6 +815,24 @@ describe('MbrSearchElement', () => {
   })
 })
 
+describe('search input on touch keyboards', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('asks for no autocorrect, capitalization or predictions (iOS QuickType bar)', async () => {
+    fetchMock = vi.fn().mockResolvedValue(okResponse())
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    setConfig(true)
+    const node = input(await mount())
+    expect(node.getAttribute('autocomplete')).toBe('off')
+    expect(node.getAttribute('autocorrect')).toBe('off')
+    expect(node.getAttribute('autocapitalize')).toBe('off')
+    expect(node.getAttribute('spellcheck')).toBe('false')
+    expect(node.getAttribute('enterkeyhint')).toBe('search')
+  })
+})
+
 describe('searchFolderFor', () => {
   it('treats a page without a markdown source as a folder', () => {
     expect(searchFolderFor('/people/')).toBe('/people/')

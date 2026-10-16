@@ -941,7 +941,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 @input=${this._handleInput}
                 @keydown=${this._handleKeydown}
                 autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
                 spellcheck="false"
+                enterkeyhint="search"
               />
               ${this._isLoading ? html`<span class="loading-indicator" aria-busy="true">Searching...</span>` : nothing}
             </div>
