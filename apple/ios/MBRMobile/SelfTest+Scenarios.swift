@@ -146,6 +146,7 @@ extension SelfTest {
         return `title=${JSON.stringify(document.title)} h1=${JSON.stringify(document.querySelector('h1')?.textContent ?? null)} name=${JSON.stringify(document.querySelector('.mbr-downloading-name')?.textContent ?? null)} progress=${!!document.querySelector('.mbr-downloading progress')}`;
         """))
         FileHandle.standardError.write(Data("SCREEN downloading\n".utf8))
+        await self.downloadOffline(session)
         // What `<mbr-page-errors>` gets on each of those loads.
         await self.log("download.errorsJson", self.js(session, """
         const r = await fetch('/\(self.fixtureFolder)/pending/errors.json');
@@ -172,6 +173,41 @@ extension SelfTest {
         }
         self.log("download.arrived", "\(result.contains("Arrived") ? "PASS" : "FAIL") h1=\(result)")
         self.log("done", "download")
+    }
+
+    /// The Downloading page's offline variant, with the device forced
+    /// offline: the page on screen switches at once, a `Refresh` reload starts
+    /// offline (the document-start script was replaced), and going back online
+    /// restores the progress bar.
+    private static func downloadOffline(_ session: VaultSession) async {
+        let state = """
+        const shown = sel => { const el = document.querySelector(sel); return !!el && getComputedStyle(el).display !== 'none'; };
+        const text = [...document.querySelectorAll('.mbr-downloading > *')]
+          .filter(el => getComputedStyle(el).display !== 'none').map(el => el.textContent.trim()).join(' | ');
+        return `offline=${document.documentElement.classList.contains('mbr-offline')} progress=${shown('.mbr-downloading progress')} reloaded=${!window.__mbrSelfTestMark} text=${text}`;
+        """
+        _ = await self.js(session, "window.__mbrSelfTestMark = 1; return ''")
+        NetworkStatus.shared.force(true)
+        try? await Task.sleep(for: .milliseconds(300))
+        let now = await self.js(session, state)
+        let nowPass = now.contains("offline=true progress=false reloaded=false") && now.contains("back online")
+        self.log("download.offline", "\(nowPass ? "PASS" : "FAIL") \(now)")
+        FileHandle.standardError.write(Data("SCREEN downloading-offline\n".utf8))
+        _ = await self.js(session, "window.__mbrSelfTestMark = 1; return ''")
+        var reloaded = ""
+        for _ in 0 ..< 16 {
+            try? await Task.sleep(for: .milliseconds(500))
+            reloaded = await self.js(session, state)
+            if reloaded.contains("reloaded=true") { break }
+        }
+        let reloadPass = reloaded.contains("offline=true progress=false reloaded=true")
+        self.log("download.offlineReload", "\(reloadPass ? "PASS" : "FAIL") \(reloaded)")
+        NetworkStatus.shared.force(false)
+        try? await Task.sleep(for: .milliseconds(300))
+        let back = await self.js(session, state)
+        let backPass = back.contains("offline=false progress=true") && back.contains("Downloading")
+        self.log("download.online", "\(backPass ? "PASS" : "FAIL") \(back)")
+        NetworkStatus.shared.force(nil)
     }
 
     // MARK: screens

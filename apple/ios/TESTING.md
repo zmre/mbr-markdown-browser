@@ -175,6 +175,11 @@ With Notes kept downloaded, turn on airplane mode and force-quit.
 - [ ] A task toggle writes locally and syncs once back online: ______
 - [ ] A not-downloaded note shows the Downloading page; does it recover once
       back online?: ______
+- [ ] That page says **"You're offline."** and "This note will download when
+      you're back online." under the note's name, with no progress bar; the
+      log shows `network: offline`. Turn airplane mode off with the page
+      open: it switches back to "Downloading from iCloud…" (`network:
+      online`) and the note loads by itself: ______
 
 ## 13. Lifecycle and memory
 

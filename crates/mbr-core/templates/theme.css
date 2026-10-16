@@ -1301,6 +1301,15 @@ html.mbr-embedded {
   margin-bottom: 0.25rem;
 }
 
+/*
+ * Offline variant: the iOS app sets `html.mbr-offline` while the device has
+ * no network path (never set on the desktop, a server or a static site).
+ */
+html:not(.mbr-offline) .mbr-downloading-offline,
+html.mbr-offline .mbr-downloading-online {
+  display: none;
+}
+
 .mbr-downloading-name {
   font-weight: 600;
   overflow-wrap: anywhere;

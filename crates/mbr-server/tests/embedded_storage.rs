@@ -186,6 +186,13 @@ async fn not_downloaded_files_get_a_retry_answer_and_a_download_request() {
     assert!(page.contains("class=\"mbr-downloading\""), "{page}");
     assert!(page.contains("<progress"), "{page}");
     assert!(page.contains("mbr-downloading-name\">cloud<"), "{page}");
+    // The offline variant ships hidden; only the iOS app's `html.mbr-offline`
+    // shows it.
+    assert!(
+        page.contains("class=\"mbr-downloading-title mbr-downloading-offline\""),
+        "{page}"
+    );
+    assert!(page.contains("back online"), "{page}");
     assert!(!page.contains("<h1>503</h1>"), "{page}");
 
     let (status, headers, _) = send(&server, get("/media/far.png")).await;
