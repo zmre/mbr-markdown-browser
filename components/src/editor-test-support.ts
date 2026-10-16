@@ -8,7 +8,7 @@ import { Crepe } from '@milkdown/crepe';
 import { editorViewCtx, remarkCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
-import { CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
+import { CREPE_FEATURE_CONFIGS, CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
 import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
 
@@ -32,7 +32,7 @@ const open: Crepe[] = [];
 export async function openCrepe(body: string): Promise<Crepe> {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  const crepe = new Crepe({ root, defaultValue: body, features: CREPE_FEATURES });
+  const crepe = new Crepe({ root, defaultValue: body, features: CREPE_FEATURES, featureConfigs: CREPE_FEATURE_CONFIGS });
   useMarkdownExtensions(crepe);
   await crepe.create();
   open.push(crepe);

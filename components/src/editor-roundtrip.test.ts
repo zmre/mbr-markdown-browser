@@ -82,38 +82,43 @@ describe('editor round trip: authored spelling (TODO item 6)', () => {
   })
 })
 
+/** Opens the real editor on `raw`, with `fetch` stubbed; POSTs are recorded. */
+async function openOn(raw: string): Promise<{ posts: RequestInit[]; onSaved: ReturnType<typeof vi.fn>; modal: Element }> {
+  const posts: RequestInit[] = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(init)
+        return new Response('', { status: 200, headers: { 'X-MBR-Content-Hash': 'h2' } })
+      }
+      return new Response(raw, { status: 200, headers: { 'X-MBR-Content-Hash': 'h1' } })
+    }),
+  )
+  const onSaved = vi.fn()
+  await openEditor({
+    rawUrl: '/.mbr/raw/deck.md',
+    saveUrl: '/.mbr/edit/deck.md',
+    filePath: 'deck.md',
+    onClose: () => {},
+    onSaved,
+  })
+  const modal = document.querySelector('.mbr-editor-modal')
+  if (!modal) throw new Error('editor modal not built')
+  return { posts, onSaved, modal }
+}
+
+const clickSave = async (modal: Element): Promise<void> => {
+  ;(modal.querySelector('.mbr-editor-save') as HTMLButtonElement).click()
+  await new Promise((r) => setTimeout(r, 0))
+}
+
+/** The `content` a recorded POST sent. */
+const postedContent = (init: RequestInit): string => (JSON.parse(String(init.body)) as { content: string }).content
+
 describe('openEditor: a save with nothing changed writes nothing', () => {
   const RAW = CARD_A09
-
-  async function open(): Promise<{ posts: RequestInit[]; onSaved: ReturnType<typeof vi.fn>; modal: Element }> {
-    const posts: RequestInit[] = []
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (_url: string, init?: RequestInit) => {
-        if (init?.method === 'POST') {
-          posts.push(init)
-          return new Response('', { status: 200, headers: { 'X-MBR-Content-Hash': 'h2' } })
-        }
-        return new Response(RAW, { status: 200, headers: { 'X-MBR-Content-Hash': 'h1' } })
-      }),
-    )
-    const onSaved = vi.fn()
-    await openEditor({
-      rawUrl: '/.mbr/raw/deck.md',
-      saveUrl: '/.mbr/edit/deck.md',
-      filePath: 'deck.md',
-      onClose: () => {},
-      onSaved,
-    })
-    const modal = document.querySelector('.mbr-editor-modal')
-    if (!modal) throw new Error('editor modal not built')
-    return { posts, onSaved, modal }
-  }
-
-  const clickSave = async (modal: Element): Promise<void> => {
-    ;(modal.querySelector('.mbr-editor-save') as HTMLButtonElement).click()
-    await new Promise((r) => setTimeout(r, 0))
-  }
+  const open = () => openOn(RAW)
 
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -136,3 +141,34 @@ describe('openEditor: a save with nothing changed writes nothing', () => {
     expect(onSaved).toHaveBeenCalledOnce()
   })
 })
+
+describe('openEditor: the safety net', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.querySelector('.mbr-editor-overlay')?.remove()
+  })
+
+  const INEXACT = '---\ntitle: t\n---\n# Note\n\nTerm\n:no space after the colon\n\nIntro.\n'
+
+  it('names the lines the editor would write differently', async () => {
+    const { modal } = await openOn(INEXACT)
+    const notice = modal.querySelector('.mbr-editor-notice')
+    expect(notice?.textContent).toContain('Lines 6–7')
+    expect(notice?.textContent).toContain('saved as written unless you edit them')
+  })
+
+  it('shows no notice when the round trip is exact', async () => {
+    const { modal } = await openOn(CARD_A09)
+    expect(modal.querySelector('.mbr-editor-notice')).toBeNull()
+  })
+
+  it('a frontmatter edit leaves the body byte for byte, inexact lines included', async () => {
+    const { posts, modal } = await openOn(INEXACT)
+    const fm = modal.querySelector('textarea') as HTMLTextAreaElement
+    fm.value = 'title: t2\n'
+    await clickSave(modal)
+    expect(posts).toHaveLength(1)
+    expect(postedContent(posts[0])).toBe(INEXACT.replace('title: t', 'title: t2'))
+  })
+})
+

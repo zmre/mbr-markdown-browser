@@ -13,7 +13,7 @@
 
 import { Crepe, CrepeFeature } from '@milkdown/crepe';
 import crepeCommonCss from '@milkdown/crepe/theme/common/style.css?inline';
-import { editorViewCtx, schemaCtx } from '@milkdown/kit/core';
+import { editorViewCtx, remarkCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
@@ -26,9 +26,18 @@ import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
 import { noteDir } from './editor-upload.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
+import {
+  formatLineRanges,
+  matchSequences,
+  minimalDiff,
+  prepareBaseline,
+  rewrittenLines,
+  type LineRange,
+  type ParsedRoot,
+} from './editor-minimal-diff.js';
 import { alerts } from './editor-plugins/alerts.js';
 import { authoredStylePlugin } from './editor-plugins/authored-style.js';
-import { minimalEscapesPlugin } from './editor-plugins/minimal-escapes.js';
+import { canonicalOf, minimalEscapesPlugin, type Parser } from './editor-plugins/minimal-escapes.js';
 import { taskMarkers } from './editor-plugins/task-markers.js';
 import { headingAttrsPlugin } from './editor-plugins/heading-attrs.js';
 import { sectionAttrsPlugin } from './editor-plugins/section-attrs.js';
@@ -107,6 +116,15 @@ export const CREPE_FEATURES = {
 } as const;
 
 /**
+ * Feature settings every editor needs, tests included: Crepe's virtual
+ * cursor is off because `references.ts` installs the same plugin configured
+ * for its `mbr_link_ref` mark.
+ */
+export const CREPE_FEATURE_CONFIGS = {
+  [CrepeFeature.Cursor]: { virtual: false },
+} as const;
+
+/**
  * The Milkdown plugins that teach the editor mbr's markdown extensions
  * (definition lists, `[-]`/`[>]` tasks, `--- {attrs}`, wikilinks, …), one per
  * `editor-plugins/<name>.ts`.
@@ -145,6 +163,63 @@ export function useMarkdownExtensions(crepe: Crepe): void {
  */
 export function serializeBody(crepe: Crepe): string {
   return crepe.getMarkdown();
+}
+
+/** What a save writes, given the body Crepe was opened on (see `editor-minimal-diff.ts`). */
+export interface BodySaver {
+  /**
+   * The body to write: the current serialization with every unedited block
+   * as it was loaded. `whole`: that was not possible, and the body is the
+   * whole serialization (which rewrites {@link BodySaver.rewritten}'s lines).
+   */
+  body(): { body: string; whole: boolean };
+  /** Lines of the loaded body the editor prints differently (see `rewrittenLines`). */
+  rewritten: { ifEdited: LineRange[]; onSave: LineRange[] };
+}
+
+/**
+ * The save path for a body opened in `crepe`: call right after `create()`,
+ * before any edit, with the body `crepe` was given.
+ */
+export function createBodySaver(crepe: Crepe, original: string): BodySaver {
+  const baseline = serializeBody(crepe);
+  const whole = () => ({ body: serializeBody(crepe), whole: false });
+  // The round trip is exact: every unedited block already prints as loaded.
+  if (baseline === original) return { body: whole, rewritten: { ifEdited: [], onSave: [] } };
+  const remark = crepe.editor.action((ctx) => ctx.get(remarkCtx)) as unknown as Parser;
+  const parse = (markdown: string) => remark.parse(markdown) as ParsedRoot;
+  const base = prepareBaseline(original, baseline, parse, canonicalOf(remark));
+  if (!base) {
+    const lines = changedLines(original, baseline);
+    return { body: () => ({ body: serializeBody(crepe), whole: true }), rewritten: { ifEdited: [], onSave: lines } };
+  }
+  return {
+    body: () => {
+      const current = serializeBody(crepe);
+      const body = minimalDiff(base, current, parse);
+      return body === null ? { body: current, whole: true } : { body, whole: false };
+    },
+    rewritten: rewrittenLines(base),
+  };
+}
+
+/** `s` for more than one line. */
+function plural(ranges: readonly LineRange[]): string {
+  return ranges.length > 1 || ranges[0].first !== ranges[0].last ? 's' : '';
+}
+
+/** Line ranges of `original` that are not in `changed` (a line diff). */
+export function changedLines(original: string, changed: string): LineRange[] {
+  const a = original.split('\n');
+  const kept = new Set(matchSequences(a, changed.split('\n')).map(([i]) => i));
+  const ranges: LineRange[] = [];
+  a.forEach((_, i) => {
+    if (kept.has(i)) return;
+    const last = ranges[ranges.length - 1];
+    if (last && last.last === i) last.last = i + 1;
+    else ranges.push({ first: i + 1, last: i + 1 });
+  });
+  return ranges;
 }
 
 let stylesInjected = false;
@@ -238,6 +313,16 @@ const MODAL_CSS = `
   overflow: hidden;
 }
 .mbr-editor-body { flex: 1; display: flex; flex-direction: column; overflow: auto; }
+.mbr-editor-notice {
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  padding: 0.5rem 1rem; font-size: 0.85rem;
+  background: var(--pico-card-sectioning-background-color, #f6f7f9);
+  border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0);
+}
+.mbr-editor-notice p { margin: 0; flex: 1; }
+.mbr-editor-notice-dismiss {
+  all: unset; cursor: pointer; padding: 0 0.25rem; opacity: 0.7;
+}
 .mbr-editor-fm { border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0); }
 .mbr-editor-fm summary { cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem; opacity: 0.85; }
 .mbr-editor-fm textarea {
@@ -605,7 +690,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
 
   // The editor works in LF; a CRLF file is saved back as CRLF (`currentContent`).
   const lineEnding = lineEndingOf(raw);
-  const { frontmatter, body } = splitFrontmatter(toLf(raw));
+  const lfRaw = toLf(raw);
+  const { frontmatter, body } = splitFrontmatter(lfRaw);
+  // Lines before the body (frontmatter), so body line numbers can be shown as file lines.
+  const bodyLineOffset = lfRaw.slice(0, lfRaw.length - body.length).split('\n').length - 1;
   loading.remove();
 
   // Build modal chrome: Cancel | title | ⋯ Save, as a native editing sheet.
@@ -788,6 +876,39 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     status.className = `status${kind ? ' ' + kind : ''}`;
   };
 
+  /**
+   * A non-blocking note above the editor when the round trip is not exact:
+   * which lines the editor would spell differently (kept unless edited) and
+   * which any save rewrites. Dismissible; nothing else depends on it.
+   */
+  const showRoundTripNotice = (saverInfo: BodySaver): void => {
+    const { ifEdited, onSave } = saverInfo.rewritten;
+    if (ifEdited.length === 0 && onSave.length === 0) return;
+    const notice = document.createElement('div');
+    notice.className = 'mbr-editor-notice';
+    notice.setAttribute('role', 'note');
+    const text = document.createElement('p');
+    const parts: string[] = [];
+    if (ifEdited.length > 0) {
+      parts.push(
+        `Line${plural(ifEdited)} ${formatLineRanges(ifEdited, bodyLineOffset)} use markdown the editor writes differently; ` +
+          'they are saved as written unless you edit them.',
+      );
+    }
+    if (onSave.length > 0) {
+      parts.push(`Line${plural(onSave)} ${formatLineRanges(onSave, bodyLineOffset)} will be rewritten when you save.`);
+    }
+    text.textContent = parts.join(' ');
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'mbr-editor-notice-dismiss';
+    dismiss.textContent = '✕';
+    dismiss.setAttribute('aria-label', 'Dismiss');
+    dismiss.addEventListener('click', () => notice.remove());
+    notice.append(text, dismiss);
+    bodyWrap.prepend(notice);
+  };
+
   // Reflects context on the media button: when an embed is the current target
   // (selection or cursor-adjacent) it reads "Edit media"; otherwise "Insert
   // media". Driven by the media-edit plugin's selection-change hook. Defined
@@ -818,6 +939,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       // forwards this single `proxyDomURL` to both inline and block images, and
       // it only touches the reactive `src` — the saved markdown is unchanged.
       featureConfigs: {
+        ...CREPE_FEATURE_CONFIGS,
         [CrepeFeature.ImageBlock]: {
           onUpload: (file: File) => uploadFile(file),
           proxyDomURL: (url: string) => mediaProxyURL(url),
@@ -851,10 +973,19 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     return;
   }
 
-  // Baseline for dirty-tracking: Crepe normalizes markdown on load, so capture
-  // the normalized content now rather than comparing against the raw source.
-  const currentContent = (): string =>
-    crepe ? withLineEnding(recombine(fmTextarea.value, serializeBody(crepe)), lineEnding) : savedContent;
+  // What a save writes: unedited blocks as loaded (the safety net,
+  // `editor-minimal-diff.ts`). Captured before any edit.
+  const saver = createBodySaver(crepe, body);
+  showRoundTripNotice(saver);
+  let wholeBody = false;
+  const currentContent = (): string => {
+    if (!crepe) return savedContent;
+    const next = saver.body();
+    wholeBody = next.whole;
+    return withLineEnding(recombine(fmTextarea.value, next.body), lineEnding);
+  };
+  // Baseline for dirty-tracking: what a save would write right now (the
+  // loaded file itself when the round trip is exact).
   const isDirty = (): boolean => ready && currentContent() !== savedContent;
   savedContent = currentContent();
   ready = true;
@@ -866,6 +997,16 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     sessionToken = tokenInput.value.trim();
     opts.onToken?.(sessionToken);
     const content = currentContent();
+    if (wholeBody && saver.rewritten.onSave.length + saver.rewritten.ifEdited.length > 0) {
+      const lines = formatLineRanges([...saver.rewritten.onSave, ...saver.rewritten.ifEdited], bodyLineOffset);
+      const proceed = window.confirm(
+        `This save rewrites the whole note in the editor's markdown, which also changes lines you did not edit: ${lines}. Save anyway?`,
+      );
+      if (!proceed) {
+        setStatus('Not saved.');
+        return false;
+      }
+    }
     saveBtn.setAttribute('aria-busy', 'true');
     setStatus('Saving…');
     try {
@@ -897,12 +1038,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   /** A save the reader asked for: on success, let the trigger refresh the page. */
   const saveAndNotify = async (): Promise<void> => {
     if (saveBtn.hasAttribute('aria-busy')) return;
-    // Nothing changed: write nothing. The baseline is Crepe's *normalized*
-    // markdown, not the file, so posting it would replace the source with
-    // remark's re-serialization of it — which is lossy for everything
-    // CommonMark+GFM cannot represent (definition-list continuations,
-    // `--- {attrs}`, `[-]`/`[>]` tasks; see editor-roundtrip.test.ts). Skipping
-    // the request leaves the file byte-for-byte as it was.
+    // Nothing changed: write nothing. (The baseline is what a save would
+    // write now, which is the file itself unless a block could not be paired
+    // — `editor-minimal-diff.ts` — so skipping the request is what leaves the
+    // file byte for byte as it was.)
     if (!isDirty()) {
       setStatus('No changes to save.');
       return;

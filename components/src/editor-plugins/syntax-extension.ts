@@ -9,6 +9,7 @@
  * data on every parse/serialize, so registering at attach time is enough.
  */
 import { $remark } from '@milkdown/kit/utils';
+import { addRemarkExtensions } from './remark-support.js';
 import type { Extension as FromMarkdownExtension } from 'mdast-util-from-markdown';
 import type { Options as ToMarkdownExtension } from 'mdast-util-to-markdown';
 import type { Extension as MicromarkExtension } from 'micromark-util-types';
@@ -20,21 +21,15 @@ export interface SyntaxExtension {
   toMarkdown?: ToMarkdownExtension;
 }
 
-/** The processor data keys remark-parse / remark-stringify read. */
-interface ProcessorData {
-  micromarkExtensions?: MicromarkExtension[];
-  fromMarkdownExtensions?: FromMarkdownExtension[];
-  toMarkdownExtensions?: ToMarkdownExtension[];
-}
-
-/** A Milkdown plugin installing `extension` on the editor's remark processor. */
+/**
+ * A Milkdown plugin installing `extension` on the editor's remark processor
+ * (`addRemarkExtensions`; plugins that also transform the tree call that
+ * from their own `$remark`).
+ */
 export function $syntax<Id extends string>(id: Id, extension: SyntaxExtension) {
   return $remark(id, () =>
-    function attach(this: { data(): unknown }) {
-      const data = this.data() as ProcessorData;
-      if (extension.micromark) (data.micromarkExtensions ??= []).push(extension.micromark);
-      if (extension.fromMarkdown) (data.fromMarkdownExtensions ??= []).push(extension.fromMarkdown);
-      if (extension.toMarkdown) (data.toMarkdownExtensions ??= []).push(extension.toMarkdown);
+    function attach(this: unknown) {
+      addRemarkExtensions(this, extension);
     },
   );
 }

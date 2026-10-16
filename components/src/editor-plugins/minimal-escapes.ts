@@ -199,11 +199,20 @@ function printRoot(node: Root, parent: Parents | undefined, state: State, info: 
   return defaultHandlers.root(node, parent, state, info);
 }
 
+/** The parts of a unified processor {@link canonicalOf} uses. */
+export interface Parser {
+  parse(markdown: string): unknown;
+  runSync(tree: never, file: string): unknown;
+}
+
+/** `markdown` parsed (and transformed) by `remark`, as a comparable key: what it means, not how it is spelled. */
+export function canonicalOf(remark: Parser): Canonical {
+  return (markdown) => treeKey(remark.runSync(remark.parse(markdown) as never, markdown));
+}
+
+/** {@link canonicalOf} the editor's processor, looked up when called (it is built after the plugins). */
 function canonicalFor(ctx: Ctx): Canonical {
-  return (markdown) => {
-    const remark = ctx.get(remarkCtx);
-    return treeKey(remark.runSync(remark.parse(markdown), markdown));
-  };
+  return (markdown) => canonicalOf(ctx.get(remarkCtx) as unknown as Parser)(markdown);
 }
 
 /**

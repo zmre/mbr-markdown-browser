@@ -5,7 +5,8 @@
 import { editorViewCtx } from '@milkdown/kit/core';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { afterEach, describe, expect, it } from 'vitest';
-import { destroyEditors, savedFile } from '../editor-test-support.js';
+import { serializeBody } from '../editor-crepe.js';
+import { destroyEditors, openCrepe, placeCursor, press, savedFile, typeText, viewOf } from '../editor-test-support.js';
 
 afterEach(destroyEditors);
 
@@ -79,5 +80,34 @@ describe('editing references', () => {
       view.dispatch(view.state.tr.insertText('/new', at, at + '/old'.length));
     });
     expect(saved).toBe('See [x][a].\n\n[a]: /new\n');
+  });
+});
+
+describe('the caret at a reference link\'s edges', () => {
+  const SOURCE = 'See [docs][d] now.\n\n[d]: /d\n';
+
+  it('typing right after the link text goes outside the link', async () => {
+    const crepe = await openCrepe(SOURCE);
+    const view = viewOf(crepe);
+    placeCursor(view, 'docs', 4);
+    typeText(view, 'X');
+    expect(serializeBody(crepe)).toBe('See [docs][d]X now.\n\n[d]: /d\n');
+  });
+
+  it('← at the edge moves the caret inside first (the virtual cursor), so typing extends the text', async () => {
+    const crepe = await openCrepe(SOURCE);
+    const view = viewOf(crepe);
+    placeCursor(view, 'docs', 4);
+    expect(press(view, 'ArrowLeft')).toBe(true);
+    typeText(view, 'X');
+    expect(serializeBody(crepe)).toBe('See [docsX][d] now.\n\n[d]: /d\n');
+  });
+
+  it('typing right before the link text stays outside it', async () => {
+    const crepe = await openCrepe(SOURCE);
+    const view = viewOf(crepe);
+    placeCursor(view, 'docs', 0);
+    typeText(view, 'X');
+    expect(serializeBody(crepe)).toBe('See X[docs][d] now.\n\n[d]: /d\n');
   });
 });

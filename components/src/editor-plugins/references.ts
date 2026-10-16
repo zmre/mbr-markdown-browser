@@ -23,7 +23,8 @@
  *   records that the next block followed it with no blank line — how a run
  *   of definitions is usually written — so it is printed that way again.
  */
-import { $markSchema, $nodeSchema } from '@milkdown/kit/utils';
+import { $markSchema, $nodeSchema, $prose } from '@milkdown/kit/utils';
+import { createVirtualCursor } from 'prosemirror-virtual-cursor';
 import type { Definition, Literal } from 'mdast';
 import type { CompileContext, Token } from 'mdast-util-from-markdown';
 import type { Join } from 'mdast-util-to-markdown';
@@ -288,4 +289,22 @@ export const definitionSchema = $nodeSchema('mbr_definition', () => ({
 }));
 
 /** Everything the editor needs for references. */
-export const referencesPlugin = [remarkMbrReferences, linkReferenceSchema, imageReferenceSchema, definitionSchema].flat();
+/**
+ * Crepe's virtual cursor (the caret that shows, at a mark's edge, whether
+ * typing goes inside or outside it; ←/→ choose), configured for
+ * `mbr_link_ref`. The plugin warns about every non-inclusive mark it was not
+ * told about, and `mbr_link_ref` must be non-inclusive — typing after
+ * `[text][ref]` must not grow the link — exactly like Milkdown's own
+ * `inlineCode`, which Crepe lists. So this is Crepe's plugin with our mark
+ * added; Crepe's own is switched off (`CREPE_FEATURE_CONFIGS` in
+ * `editor-crepe.ts`), or there would be two carets.
+ */
+export const virtualCursorPlugin = $prose(() => createVirtualCursor({ skipWarning: ['inlineCode', 'mbr_link_ref'] }));
+
+export const referencesPlugin = [
+  remarkMbrReferences,
+  linkReferenceSchema,
+  imageReferenceSchema,
+  definitionSchema,
+  virtualCursorPlugin,
+].flat();
