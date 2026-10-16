@@ -47,12 +47,12 @@ describe('lists keep their marker, delimiter, numbering and gap when edited', ()
     expect(await afterTyping('1) a\n2) b\n\n5. c\n', 'c', 1, 'd')).toBe('1) a\n2) b\n\n5. cd\n');
   });
 
-  it('gives a list made in the editor `-` bullets', async () => {
+  it('gives a list made in the editor `*` bullets, whatever was typed', async () => {
     const crepe = await openCrepe('Para\n');
     const view = viewOf(crepe);
     placeCursor(view, 'Para', 0);
-    typeText(view, '* ');
-    expect(serializeBody(crepe)).toBe('- Para\n');
+    typeText(view, '- ');
+    expect(serializeBody(crepe)).toBe('* Para\n');
   });
 });
 

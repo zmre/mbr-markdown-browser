@@ -101,7 +101,7 @@ bullets, `1.` or `1)` numbering (and `1. 1. 1.`), the spacing after a list
 marker, `---`/`***`/`___` rules, setext (`===`) headings and closing `#`s,
 indented code and `~~~` fences (and a fence's info string), two-space line
 breaks, `>>>` marginalia, table layout, and the backslash escapes you wrote —
-without adding escapes nothing needs (`2 * 3` stays `2 * 3`). New lists get `-`
+without adding escapes nothing needs (`2 * 3` stays `2 * 3`). New lists get `*`
 bullets and new rules `---`.
 
 ### What a save writes

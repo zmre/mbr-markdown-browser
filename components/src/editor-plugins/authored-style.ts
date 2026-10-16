@@ -21,7 +21,7 @@
  * — copied along when ProseMirror splits or copies the node), and handed back
  * to mdast on serialize, where this module's to-markdown handlers print it.
  * A node made in the editor has no style and prints in the house style
- * ({@link HOUSE_STYLE}: `-` bullets, `---` rules), and a style that no longer
+ * ({@link HOUSE_STYLE}: `*` bullets, `---` rules), and a style that no longer
  * fits the node (a setext heading changed to level 3, an indented block given
  * a language) is dropped for the default rather than forced.
  *
@@ -109,8 +109,8 @@ export interface TableStyle {
   rows: string[];
 }
 
-/** The styles a fresh node gets: remark's defaults, except `-` bullets and `---` rules. */
-export const HOUSE_STYLE = { bullet: '-', rule: '-' } as const;
+/** The styles a fresh node gets: remark's defaults (`*` bullets), except `---` rules. */
+export const HOUSE_STYLE = { bullet: '*', rule: '-' } as const;
 
 type Styled<T> = { mbrStyle?: T };
 
