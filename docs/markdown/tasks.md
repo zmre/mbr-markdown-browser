@@ -190,8 +190,8 @@ place:
 The card or checkbox moves immediately and the change is written to the file
 behind it. If the write is refused, it moves back and tells you why — most
 usefully when the note has changed somewhere else since the page was rendered
-(on disk, in another editor, or on another device), in which case nothing is
-written: a checkbox in the document offers to reload the page for the latest
+(on disk, in another editor, or on another device — anywhere in the note, since
+an added line moves every task below it), in which case nothing is written: a checkbox in the document offers to reload the page for the latest
 version, and the panel refreshes its list so you can try again. On a vault the
 server has to fetch from the cloud first (the iOS app over iCloud), a note that
 is still downloading says so; try again in a moment.

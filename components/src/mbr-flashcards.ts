@@ -40,7 +40,9 @@ import {
   currentDocumentPath,
   forgetSourceLines,
   noteSelfWrite,
+  noteSourceHash,
   readSourceLines,
+  serializeWrite,
 } from './task-toggle.js'
 import type { ReviewRecorder, ReviewServices } from './flashcards/types.js'
 import type { MbrOverlay } from './overlay.js'
@@ -138,6 +140,8 @@ function reviewServices(): ReviewServices | null {
         read: readSourceLines,
         forget: forgetSourceLines,
         selfWrite: noteSelfWrite,
+        noteHash: noteSourceHash,
+        serialize: serializeWrite,
         headers: editAuthHeaders,
         tokenRequired: noteEditTokenRequired,
         tokenMessage: TOKEN_MESSAGE,

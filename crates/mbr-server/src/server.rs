@@ -1940,6 +1940,14 @@ pub struct TaskToggleRequest {
     pub expected: String,
     /// Target status: `open`, `done` or `canceled`.
     pub to: mbr_core::tasks::TaskStatus,
+    /// The version of the file the client's line numbers come from
+    /// ([`mbr_core::edit_auth::content_hash`], as `/.mbr/raw` and the page's
+    /// `markdown_source_hash` report it). When present, a file that is any
+    /// other version is a `409` even if `expected` happens to match: a line
+    /// added above the task moves a *different* task onto `line`. Optional so
+    /// that older clients keep the line-only check.
+    #[serde(default)]
+    pub base_hash: Option<String>,
 }
 
 /// Response for a successful `POST /.mbr/task`.
@@ -1950,6 +1958,8 @@ pub struct TaskToggleResponse {
     /// Its new text, without the terminator — including any `@done(...)` the
     /// server added or removed, which the client cannot predict.
     pub text: String,
+    /// The fingerprint of the file as written, the client's next `base_hash`.
+    pub hash: String,
 }
 
 /// JSON body for `POST /.mbr/flashcard-review`.
@@ -1971,6 +1981,10 @@ pub struct FlashcardReviewRequest {
     /// the entry's timestamp after [`mbr_core::flashcards::parse_review_time`]
     /// checks it. Required.
     pub at: String,
+    /// The version of the file the client read; see
+    /// [`TaskToggleRequest::base_hash`].
+    #[serde(default)]
+    pub base_hash: Option<String>,
 }
 
 /// Response for a successful `POST /.mbr/flashcard-review`.
@@ -1990,6 +2004,8 @@ pub struct FlashcardReviewResponse {
     /// The inserted lines, without terminators (one, or two when the term's
     /// `___Review History___` definition was created).
     pub inserted: Vec<String>,
+    /// The fingerprint of the file as written, the client's next `base_hash`.
+    pub hash: String,
 }
 
 /// JSON body for `POST /.mbr/create/{*path}`.
@@ -3752,12 +3768,8 @@ impl Server {
             Ok(bytes) => bytes,
             Err(error) => return error.into_response(),
         };
-        if mbr_core::edit_auth::content_hash(&current) != req.base_hash {
-            return (
-                StatusCode::CONFLICT,
-                "File changed on disk since it was loaded",
-            )
-                .into_response();
+        if let Some(conflict) = Self::base_hash_conflict(&current, Some(&req.base_hash)) {
+            return conflict;
         }
 
         let new_bytes = req.content.into_bytes();
@@ -3806,15 +3818,18 @@ impl Server {
     /// answers to the editing switch, not to `tasks_enabled` (in-document
     /// checkboxes exist whether or not the task browser does).
     ///
-    /// # Why `expected` rather than a whole-file hash
+    /// # `expected` and `base_hash`
     ///
-    /// The editor holds a whole file open and can afford
-    /// [`EditRequest::base_hash`]. A checkbox cannot: the page has been open for
-    /// an hour and the user has no idea what else changed in the file. Matching
-    /// just the one line means an unrelated edit elsewhere in the file does not
-    /// spuriously fail the toggle, while an edit *to that line* — the only case
-    /// where flipping its marker could corrupt something — still does, with a
-    /// `409`.
+    /// `expected` alone is not enough. It proves that line `line` still reads
+    /// the way the client thinks, not that it is the *same task*: add two lines
+    /// above a list of identical `- [ ] call back` items and a page rendered
+    /// before the edit would toggle a different one, silently. So the client
+    /// also sends `base_hash`, the version of the file its line numbers come
+    /// from — the page's own render (`markdown_source_hash`) or its
+    /// `/.mbr/raw` read — and any other version on disk is a `409`. The
+    /// response carries the new version, so a page's consecutive writes chain.
+    /// `base_hash` is optional: without it the line check is all there is, as
+    /// before.
     ///
     /// | Status | Cause |
     /// |--------|-------|
@@ -3822,7 +3837,7 @@ impl Server {
     /// | `404` | The path is not an editable markdown file, or it could not be read |
     /// | `503` | The note is not downloaded (a cloud provider's placeholder) and did not arrive within a few seconds; `Retry-After` |
     /// | `400` | Path outside the root, a file that is not UTF-8, no such line, or the line is not a task |
-    /// | `409` | The line no longer matches `expected` |
+    /// | `409` | The line no longer matches `expected`, or `base_hash` names another version of the file |
     /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
     /// | `500` | The write failed |
     pub async fn task_toggle_handler(
@@ -3847,6 +3862,11 @@ impl Server {
             Ok(source) => source,
             Err(error) => return error.into_response(),
         };
+        if let Some(conflict) =
+            Self::base_hash_conflict(source.as_bytes(), req.base_hash.as_deref())
+        {
+            return conflict;
+        }
 
         // Local wall clock, matching the naive/local dates `tasks.rs` parses.
         let stamp = config
@@ -3867,6 +3887,7 @@ impl Server {
                 }
             };
 
+        let hash = mbr_core::edit_auth::content_hash(patched.source.as_bytes());
         if let Err(e) =
             Self::atomic_write_file_async(&config, &md_path, patched.source.into_bytes()).await
         {
@@ -3879,8 +3900,28 @@ impl Server {
         Json(TaskToggleResponse {
             line: req.line,
             text: patched.text,
+            hash,
         })
         .into_response()
+    }
+
+    /// The `409` for a write whose `base_hash` names another version of the
+    /// file than `current`, the bytes read under the file's write lock; `None`
+    /// when they agree or the client sent no hash.
+    ///
+    /// The one comparison behind `/.mbr/edit`'s required hash and the optional
+    /// one on `/.mbr/task` and `/.mbr/flashcard-review`, all against
+    /// [`mbr_core::edit_auth::content_hash`] — the fingerprint `/.mbr/raw`
+    /// reports and a rendered page carries as `markdown_source_hash`.
+    fn base_hash_conflict(current: &[u8], base_hash: Option<&str>) -> Option<Response> {
+        let base_hash = base_hash?;
+        (mbr_core::edit_auth::content_hash(current) != base_hash).then(|| {
+            (
+                StatusCode::CONFLICT,
+                "File changed on disk since it was loaded",
+            )
+                .into_response()
+        })
     }
 
     /// Reads a markdown file a line-level write is about to patch.
@@ -3947,7 +3988,7 @@ impl Server {
     /// | `404` | The path is not an editable markdown file, or it could not be read |
     /// | `503` | The note is not downloaded (a cloud provider's placeholder) and did not arrive within a few seconds; `Retry-After` |
     /// | `400` | Path outside the root, or a file that is not UTF-8 |
-    /// | `409` | The line is gone, changed, or no longer a top-level term — the client's copy is stale — or no insertion keeps every other card intact |
+    /// | `409` | `base_hash` names another version of the file; the line is gone, changed, or no longer a top-level term — the client's copy is stale — or no insertion keeps every other card intact |
     /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
     /// | `500` | The write failed |
     pub async fn flashcard_review_handler(
@@ -3978,6 +4019,11 @@ impl Server {
             Ok(source) => source,
             Err(error) => return error.into_response(),
         };
+        if let Some(conflict) =
+            Self::base_hash_conflict(source.as_bytes(), req.base_hash.as_deref())
+        {
+            return conflict;
+        }
 
         let patch = match mbr_core::flashcards::append_review(
             &source,
@@ -3991,6 +4037,7 @@ impl Server {
         };
 
         let entry_line = patch.entry_line();
+        let hash = mbr_core::edit_auth::content_hash(patch.source.as_bytes());
         if let Err(e) =
             Self::atomic_write_file_async(&config, &md_path, patch.source.into_bytes()).await
         {
@@ -4004,6 +4051,7 @@ impl Server {
             entry: patch.entry,
             inserted_at: patch.inserted_at,
             inserted: patch.inserted,
+            hash,
         })
         .into_response()
     }
@@ -7437,22 +7485,38 @@ impl Server {
         let transcode_enabled = false;
 
         let valid_tag_sources = mbr_core::config::tag_sources_to_set(&config.tag_sources);
-        let render_result = markdown::render_from_vault_with_cache(
+        // Read here rather than inside the render so the page can carry the
+        // fingerprint of exactly the bytes it was rendered from: every line
+        // number on it (`data-mbr-line`, `mbr-task-N`) is relative to them.
+        let source = markdown::read_source_fingerprinted(
             Arc::clone(config.repo.vault()),
             md_path.to_path_buf(),
-            root_path,
-            config.oembed_timeout_ms,
-            link_transform_config,
-            Some(config.oembed_cache.clone()),
-            true, // server_mode is always true in server
-            transcode_enabled,
-            valid_tag_sources,
-            // The one place the feature is ever on: the real page render.
-            // Editing alone still numbers `<dt>`s, for flashcard reviews.
-            markdown::ReviewLines::for_server(config.review_enabled, config.edit_enabled),
-            config.mark_incomplete,
-            &config.incomplete_markers,
-            Some(config.repo.wikilink_index.clone()),
+        )
+        .await
+        .inspect_err(|e| {
+            log_render_failure("Error rendering markdown", e, is_not_downloaded_markdown(e))
+        })?;
+        let render_result = markdown::render_text_with_cache(
+            &source.text,
+            md_path,
+            markdown::RenderOptions {
+                root_path,
+                oembed_timeout_ms: config.oembed_timeout_ms,
+                link_transform_config,
+                oembed_cache: Some(config.oembed_cache.clone()),
+                server_mode: true,
+                transcode_enabled,
+                valid_tag_sources,
+                // The one place the feature is ever on: the real page render.
+                // Editing alone still numbers `<dt>`s, for flashcard reviews.
+                review: markdown::ReviewLines::for_server(
+                    config.review_enabled,
+                    config.edit_enabled,
+                ),
+                mark_incomplete: config.mark_incomplete,
+                incomplete_markers: &config.incomplete_markers,
+                wikilink_index: Some(config.repo.wikilink_index.clone()),
+            },
         )
         .await
         .inspect_err(|e| {
@@ -7482,6 +7546,11 @@ impl Server {
             "markdown_source".into(),
             mbr_core::url_path::path_to_url(&relative_md_path).into(),
         );
+        // The version of `markdown_source` this page shows. In-place writes
+        // from the page send it back as `base_hash`, so a note changed
+        // elsewhere since the render answers 409 instead of having a line the
+        // page never saw patched (`task-toggle.ts`).
+        frontmatter.insert("markdown_source_hash".into(), source.hash.into());
         // Indicate server mode for frontend search functionality
         frontmatter.insert("server_mode".into(), "true".into());
         // Indicate GUI mode for native window detection

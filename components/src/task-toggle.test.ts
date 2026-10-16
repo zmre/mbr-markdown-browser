@@ -436,3 +436,123 @@ describe('checkbox status helpers', () => {
     expect(input.parentElement!.querySelector('.mbr-task-completed')).toBeNull()
   })
 })
+
+describe('toggleTask: the version of the file (`base_hash`)', () => {
+  /** Raw reads return SOURCE as version `hash`; toggles answer with `next()`. */
+  function routeVersioned(hash: string, next: () => string) {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).startsWith('/.mbr/raw/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'x-mbr-content-hash': hash }),
+          text: () => Promise.resolve(SOURCE),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ line: 3, text: '- [x] write the report !!', hash: next() }),
+      })
+    })
+  }
+
+  function rawReads(): number {
+    return fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('/.mbr/raw/')).length
+  }
+
+  beforeEach(() => {
+    resetTaskToggleState()
+    clearEditToken()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    window.frontmatter = { markdown_source: 'notes.md', markdown_source_hash: 'rendered' }
+    fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+  })
+
+  afterEach(() => {
+    resetTaskToggleState()
+    window.__MBR_CONFIG__ = undefined
+    window.frontmatter = undefined
+    vi.restoreAllMocks()
+  })
+
+  it("is a conflict, with nothing sent, when the page's note changed since it was rendered", async () => {
+    // Lines were added above the task elsewhere: line 3 of the file now is
+    // not line 3 of the page, even if it reads the same.
+    routeVersioned('changed-elsewhere', () => 'never')
+    const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(outcome).toEqual({ ok: false, kind: 'conflict', message: NOTE_CHANGED_MESSAGE })
+    expect(taskCalls()).toHaveLength(0)
+
+    // Not cached: every attempt says the same until the page is reloaded.
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(taskCalls()).toHaveLength(0)
+    expect(rawReads()).toBe(2)
+  })
+
+  it('sends the rendered version, then the one each write answers with', async () => {
+    let n = 0
+    routeVersioned('rendered', () => `v${++n}`)
+
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(lastTaskBody()).toMatchObject({ base_hash: 'rendered' })
+    await toggleTask({ path: 'notes.md', line: 4, to: 'done' })
+    expect(lastTaskBody()).toMatchObject({ base_hash: 'v1' })
+    await toggleTask({ path: 'notes.md', line: 3, to: 'open' })
+    expect(lastTaskBody()).toMatchObject({ base_hash: 'v2' })
+    expect(rawReads()).toBe(1)
+  })
+
+  it('serializes writes to one file, so two quick clicks chain their versions', async () => {
+    let n = 0
+    routeVersioned('rendered', () => `v${++n}`)
+
+    const [first, second] = await Promise.all([
+      toggleTask({ path: 'notes.md', line: 3, to: 'done' }),
+      toggleTask({ path: 'notes.md', line: 4, to: 'done' }),
+    ])
+    expect(first.ok && second.ok).toBe(true)
+    const sent = taskCalls().map((c) => JSON.parse(c[1].body as string).base_hash)
+    expect(sent).toEqual(['rendered', 'v1'])
+  })
+
+  it('after a server 409 the page stays stale: the re-read is checked against the page', async () => {
+    routeVersioned('rendered', () => 'v1')
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+
+    // Somebody else wrote the file; the server refuses the next toggle.
+    fetchMock.mockImplementation((url: string) =>
+      String(url).startsWith('/.mbr/raw/')
+        ? Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'x-mbr-content-hash': 'theirs' }),
+            text: () => Promise.resolve(SOURCE),
+          })
+        : Promise.resolve({ ok: false, status: 409 })
+    )
+    expect(await toggleTask({ path: 'notes.md', line: 4, to: 'done' })).toMatchObject({ kind: 'conflict' })
+    const before = taskCalls().length
+    expect(await toggleTask({ path: 'notes.md', line: 4, to: 'done' })).toMatchObject({ kind: 'conflict' })
+    expect(taskCalls()).toHaveLength(before)
+  })
+
+  it("trusts the first read of another file (the panel's), then guards later writes with it", async () => {
+    let n = 0
+    routeVersioned('panel-file-v0', () => `p${++n}`)
+
+    const outcome = await toggleTask({ path: 'other.md', line: 3, to: 'done' })
+    expect(outcome.ok).toBe(true)
+    expect(lastTaskBody()).toMatchObject({ path: 'other.md', base_hash: 'panel-file-v0' })
+    await toggleTask({ path: 'other.md', line: 3, to: 'open' })
+    expect(lastTaskBody()).toMatchObject({ base_hash: 'p1' })
+  })
+
+  it('sends no base_hash when the server reports no version', async () => {
+    window.frontmatter = { markdown_source: 'notes.md' }
+    routeFetch({ ok: true, status: 200 })
+    await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    expect(lastTaskBody()).not.toHaveProperty('base_hash')
+  })
+})

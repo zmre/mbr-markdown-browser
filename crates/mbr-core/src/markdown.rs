@@ -2141,11 +2141,46 @@ async fn read_source_blocking(
         })?
 }
 
+/// A markdown source as read for a page render, with its fingerprint.
+#[derive(Debug, Clone)]
+pub struct FingerprintedSource {
+    /// The file's text, exactly as read.
+    pub text: String,
+    /// [`crate::edit_auth::content_hash`] of `text`'s bytes: the version of the
+    /// file the page was rendered from, which the write endpoints compare
+    /// against (`base_hash`) so a page cannot patch a file it never saw.
+    pub hash: String,
+}
+
+/// [`read_source`] plus the source's fingerprint, both on tokio's blocking
+/// pool (hashing a large note is not something to do on an executor thread).
+///
+/// For the server's page render, the one render whose output can drive a
+/// write; every other render skips the hash.
+pub async fn read_source_fingerprinted(
+    vault: Arc<dyn crate::vault::Vault>,
+    file: PathBuf,
+) -> Result<FingerprintedSource, MarkdownError> {
+    let key = file.clone();
+    tokio::task::spawn_blocking(move || {
+        read_source(vault.as_ref(), &key).map(|text| FingerprintedSource {
+            hash: crate::edit_auth::content_hash(text.as_bytes()),
+            text,
+        })
+    })
+    .await
+    .map_err(|e| MarkdownError::ReadFailed {
+        path: file,
+        source: std::io::Error::other(e),
+    })?
+}
+
 /// The async render of already-read text: [`render_str`] plus network
 /// OpenGraph enrichment. Shared by [`render_with_cache`] and
 /// [`render_from_vault_with_cache`], which differ only in where the text
-/// comes from.
-async fn render_text_with_cache(
+/// comes from, and by the server's page render, which reads the text itself
+/// ([`read_source_fingerprinted`]).
+pub async fn render_text_with_cache(
     raw_markdown_input: &str,
     file: &Path,
     opts: RenderOptions<'_>,

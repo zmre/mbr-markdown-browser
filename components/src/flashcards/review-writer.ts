@@ -12,14 +12,17 @@
  *
  * The page itself is brought up to date by the deck (`dom.ts`), which knows
  * which card was reviewed; this module keeps only the *source* cache in step,
- * by splicing in the lines the server inserted.
+ * by splicing in the lines the server inserted, and the file's version
+ * (`base_hash`, see `task-toggle.ts`) by recording the one the server answers
+ * with. Writes go through the same per-file queue as task toggles, so a review
+ * and a checkbox click on one note never race each other's version.
  *
  * The review is stamped here, with the reviewer's local wall-clock time (`at`),
  * because that is how `history.ts` replays it; the server only validates it.
  */
 import { NOTE_DOWNLOADING_MESSAGE, staleKindForRead, staleKindForWrite } from '../stale-note.js'
 import { formatEntryTime } from './history.js'
-import type { ReviewOutcome, ReviewRecorder, ReviewServices, SourceLines } from './types.js'
+import type { ReviewOutcome, ReviewRecorder, ReviewServices, ReviewTarget, SourceLines } from './types.js'
 
 /** Endpoint for one review (`server.rs::flashcard_review_handler`). */
 const REVIEW_ENDPOINT = '/.mbr/flashcard-review'
@@ -77,6 +80,8 @@ function failure(status: number, tokenMessage: string): Failure {
 
 /** Shape of a successful response body. */
 interface ReviewResponse {
+  /** The file's new version; absent from an older server. */
+  hash?: unknown
   entry: string
   line: number
   inserted_at: number
@@ -106,9 +111,13 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
   const failRead = (status: number) =>
     staleFailure(staleKindForRead(status)) ?? failure(status, services.tokenMessage)
 
-  return async (target) => {
-    // Taken when the card is rated, before any round trip.
+  return (target) => {
+    // Taken when the card is rated, before any round trip or queue.
     const at = formatEntryTime(new Date())
+    return services.serialize(path, () => write(target, at))
+  }
+
+  async function write(target: ReviewTarget, at: string): Promise<ReviewOutcome> {
     let read: SourceLines
     try {
       read = await services.read(path)
@@ -136,7 +145,14 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
         method: 'POST',
         headers: services.headers({ 'Content-Type': 'application/json' }),
         credentials: 'same-origin',
-        body: JSON.stringify({ path, line: target.line, expected, rating: target.rating, at }),
+        body: JSON.stringify({
+          path,
+          line: target.line,
+          expected,
+          rating: target.rating,
+          at,
+          base_hash: read.hash ?? undefined,
+        }),
       })
     } catch (err) {
       console.warn('Flashcard review request failed:', err)
@@ -164,6 +180,7 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
     // Keep the cached source in step, so the next card's `expected` needs no
     // round trip — `read.lines` is the cache's own array.
     read.lines.splice(body.inserted_at - 1, 0, ...body.inserted)
+    services.noteHash(path, typeof body.hash === 'string' ? body.hash : null)
     return {
       ok: true,
       entry: body.entry,

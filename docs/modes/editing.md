@@ -283,14 +283,21 @@ the same from the keyboard). Flipping one patches the single line it came from:
 It answers to `edit_enabled`, not to `tasks_enabled` — in-document checkboxes
 exist whether or not the [task browser](../reference/configuration.md#task-settings)
 does — and it carries the same headers and token as every other write endpoint.
-On success it returns `{ "line": 42, "text": "…" }` with the line's new text.
+On success it returns `{ "line": 42, "text": "…", "hash": "…" }` with the
+line's new text and the file's new fingerprint.
 
-`expected` is the line-sized version of `/.mbr/edit`'s `base_hash`: it must
-still match the file on disk (ignoring the line terminator) or the request is
-rejected with `409`. Matching one line rather than the whole file means somebody
-else editing a different part of the document does not spuriously fail your
-click, while an edit to *that* line — the only case where flipping its marker
-could clobber something — still does.
+`expected` must still match the file on disk (ignoring the line terminator) or
+the request is rejected with `409`. On its own that only proves the line reads
+the same, not that it is the same task: if lines were added above it elsewhere,
+another `- [ ] call back` may now sit on line 42. So the request may also carry
+`base_hash`, the fingerprint (`/.mbr/edit`'s SHA-256, as `/.mbr/raw` reports it
+in `X-MBR-Content-Hash`) of the version its line numbers come from, and any
+other version on disk is a `409` too. A rendered page carries the fingerprint of
+the source it was rendered from (`window.frontmatter.markdown_source_hash`), and
+its checkboxes and flashcard reviews send it, then the `hash` each write answers
+with — so a note changed anywhere since the page was rendered refuses the click
+and the page offers to reload, rather than flipping a different task. Without
+`base_hash` only the line is checked, as in earlier versions.
 
 Only the marker byte and the `@done(...)` annotation change; indentation, bullet
 style, spacing, other annotations, the line's terminator (a CRLF file stays
@@ -327,7 +334,8 @@ appended to the card's `___Review History___` in the note itself:
 It is gated and authenticated exactly like `POST /.mbr/task`, and `expected`
 plays the same role: it is the card's **term** line, which must still match the
 file, or the request is rejected with `409` (as it is when the line is no longer
-a top-level definition-list term). `at` is the reviewer's local wall-clock
+a top-level definition-list term), and so is `base_hash`, which is optional and
+checked the same way; a success answers with the file's new `hash`. `at` is the reviewer's local wall-clock
 time, and it is what the entry records: the deck replays history in the
 browser's time zone, so the server's own clock would be wrong whenever the two
 zones differ. It is required, must be exactly `YYYY-MM-DD HH:MM`, and must lie
