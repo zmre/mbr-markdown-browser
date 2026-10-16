@@ -74,10 +74,11 @@ describe('editor round trip: definition lists (flashcard decks)', () => {
   // flat definition lines: `editor-parity.test.ts` (flashcards-* fixtures).
 })
 
-describe('editor round trip: cosmetic normalization (TODO item 6)', () => {
-  // Section attributes, `[-]`/`[>]` and wikilinks: `editor-parity.test.ts`.
-  it('normalizes `-` bullets to `*` (cosmetic, but a whole-file diff)', async () => {
-    expect(await saved(`- a\n- b\n`)).toBe(`* a\n* b\n`)
+describe('editor round trip: authored spelling (TODO item 6)', () => {
+  // Section attributes, `[-]`/`[>]` and wikilinks: `editor-parity.test.ts`;
+  // each spelling, edited: `editor-plugins/authored-style.test.ts`.
+  it('keeps `-` bullets (remark would write `*`)', async () => {
+    expect(await saved(`- a\n- b\n`)).toBe(`- a\n- b\n`)
   })
 })
 

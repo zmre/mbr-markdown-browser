@@ -85,6 +85,7 @@ import type { Nodes, Parent, Paragraph, PhrasingContent, Root, BlockContent, Def
 import { blankLine, content } from 'micromark-core-commonmark';
 import { factorySpace } from 'micromark-factory-space';
 import { markdownSpace } from 'micromark-util-character';
+import { minimizeBlockEscapes } from './minimal-escapes.js';
 
 // ---------------------------------------------------------------------------
 // mdast
@@ -555,7 +556,8 @@ const paragraphHandler: Handle = (node: Paragraph, _parent, state: ToMarkdownSta
   phrasing();
   exit();
   const htmlBlock = node.children.length === 1 && node.children[0].type === 'html';
-  return htmlBlock ? value : escapeContinuationColons(value);
+  const authored = (node as { mbrStyle?: { source?: string } }).mbrStyle?.source;
+  return htmlBlock ? value : escapeContinuationColons(minimizeBlockEscapes(value, state, authored));
 };
 
 const defListTermHandler: Handle = (node: DefListTerm, _parent, state: ToMarkdownState, info: Info) => {
@@ -564,7 +566,7 @@ const defListTermHandler: Handle = (node: DefListTerm, _parent, state: ToMarkdow
   const value = state.containerPhrasing(node, { ...info, before: '\n', after: '\n' });
   phrasing();
   exit();
-  return escapeContinuationColons(value);
+  return escapeContinuationColons(minimizeBlockEscapes(value, state));
 };
 
 /** `: ` then the content, continuation lines indented two spaces, blank lines empty. */

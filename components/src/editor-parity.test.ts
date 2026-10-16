@@ -46,15 +46,23 @@
  * alt became Crepe's ratio `![1.00](src)` (`images.ts`). CRLF files were
  * rewritten as LF (`openEditor`/`savedFile` now keep the file's ending).
  *
- * Cosmetic (same structure, whole-file diff — item 6):
- * - `-` and `+` bullets → `*`; `[X]` → `[x]`.
- * - `1)` → `1.`; and remark alternates delimiters between *adjacent* ordered
- *   lists, so `1)…` then `5.…` saves as `1.…` then `5)…` (swapped).
- * - `---` thematic break → `***`.
- * - Tables re-padded and delimiter rows normalized (`|-|-|` → `| - | - |`).
- * - `>>>` marginalia / `>>` pull quotes → `> > >` / `> >` (same nesting).
- * - Setext headings → ATX; indented code → fenced; `~~~` fences → backticks;
- *   two-space hard breaks → `\`; `2 * 3` → `2 \* 3`.
+ * Cosmetic (same structure — item 6), still normalized:
+ * - Definition lists: `:` followed by no space or several → `: `; a lazy
+ *   continuation line is indented; `:` alone then content on the next line
+ *   joins them (`deflist-edge`).
+ * - A paragraph directly under a heading gets a blank line between.
+ * - An unneeded escape the author wrote in a paragraph or heading is kept
+ *   (its source rides along); one in a table cell or term may be dropped.
+ *   `x\\y` → `x\y` (the same text: `\y` is no escape).
+ *
+ * Fixed by `authored-style.ts` / `minimal-escapes.ts` (item 6): bullets
+ * (`-`/`+` were `*`), `1)` delimiters (and the swap between adjacent ordered
+ * lists), `1. 1. 1.` numbering, `-   x` gaps, `---`/`___`/`* * *` rules (were
+ * `***`), setext headings and ATX closing `#`s, indented code, `~~~` and long
+ * fences, a fence's info-string meta (was dropped), two-space hard breaks
+ * (were `\`), `>>>` marginalia (were `> > >`), table spacing (was re-padded),
+ * and escapes remark adds where nothing needs one (`2 \* 3`, `see \[a]`,
+ * `AT\&T`, `\[\[x]]`, `* \[-]`).
  *
  * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
  * raw HTML blocks and inline HTML, ```` ```chat ```` fences,
@@ -71,18 +79,7 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 
 /** Fixtures whose untouched save is not byte-identical today, and why. */
 const ROUND_TRIP_FAILS: Record<string, string> = {
-  'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized',
-  crlf: 'item 6: `-` → `*`',
-  'deflist-edge': 'item 6: `:` spacing and lazy lines normalized, indented code fenced, `-` → `*`, table re-padded',
-  escapes: 'item 6: `2 * 3` → `2 \\* 3`',
-  'flashcards-dash-history': 'item 6: `-` → `*`',
-  'kitchen-sink': 'item 6',
-  'lists-dash': 'item 6: `-` → `*`',
-  'lists-ordered-paren': 'item 6: `1)` → `1.` and adjacent-list delimiters swapped',
-  marginalia: 'item 6: `>>>` → `> > >`',
-  rules: 'item 6: `---` → `***`',
-  tables: 'item 6: tables re-padded',
-  tasks: 'item 6: `-` → `*`',
+  'deflist-edge': 'item 6: `:` spacing and lazy continuation lines normalized, a blank line added after a heading',
 };
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */

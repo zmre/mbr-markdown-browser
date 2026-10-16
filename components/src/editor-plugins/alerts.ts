@@ -27,7 +27,7 @@
  *    ({@link alertBackspace}).
  */
 import type { Blockquote, Paragraph, Parents, PhrasingContent, Root } from 'mdast';
-import { defaultHandlers, type Info, type Options as ToMarkdownExtension, type State } from 'mdast-util-to-markdown';
+import { type Info, type Options as ToMarkdownExtension, type State } from 'mdast-util-to-markdown';
 import type { Processor } from 'unified';
 import type { DefList } from './definition-list-syntax.js';
 import type { VFile } from 'vfile';
@@ -36,6 +36,7 @@ import type { Node as ProseNode } from '@milkdown/kit/prose/model';
 import { InputRule } from '@milkdown/kit/prose/inputrules';
 import { Plugin } from '@milkdown/kit/prose/state';
 import { $inputRule, $prose, $remark } from '@milkdown/kit/utils';
+import { carryAuthoredStyle, printBlockquote } from './authored-style.js';
 import { injectEditorCss } from './inject-css.js';
 
 /** The alert kinds pulldown-cmark knows, lowercase. */
@@ -247,14 +248,14 @@ export function markAlerts(tree: Root, source: string): void {
 // 2. Markdown out
 // ============================================================================
 
-/** The default `blockquote` handler, with the tag line in front for an alert. */
+/** The blockquote printer (`authored-style.ts`), with the tag line in front for an alert. */
 function blockquoteWithAlert(node: AlertBlockquote, parent: Parents | undefined, state: State, info: Info): string {
   const kind = node.data?.alert;
-  if (!kind) return defaultHandlers.blockquote(node, parent, state, info);
+  if (!kind) return printBlockquote(node, parent, state, info);
   const head = `>${alertLineFor(kind, node.data?.alertLine)}`;
   // Milkdown's serializer omits `children` on a node it pushed none into.
   if (!node.children?.length) return head;
-  return `${head}\n${defaultHandlers.blockquote(node, parent, state, info)}`;
+  return `${head}\n${printBlockquote(node, parent, state, info)}`;
 }
 
 export function alertToMarkdown(): ToMarkdownExtension {
@@ -323,7 +324,7 @@ function nodeAlert(node: ProseNode): AlertKind | undefined {
 }
 
 /** Commonmark's `blockquote`, plus `alert` (lowercase kind or null) and `alertLine` (authored, or null). */
-export const alertBlockquoteSchema = blockquoteSchema.extendSchema((prev) => (ctx) => {
+export const alertBlockquoteSchema = carryAuthoredStyle(blockquoteSchema.extendSchema((prev) => (ctx) => {
   const base = prev(ctx);
   return {
     ...base,
@@ -376,7 +377,7 @@ export const alertBlockquoteSchema = blockquoteSchema.extendSchema((prev) => (ct
       },
     },
   };
-});
+}));
 
 /**
  * `[!note] ` (any kind, any case) typed at the start of a plain blockquote's

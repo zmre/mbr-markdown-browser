@@ -42,15 +42,16 @@ describe('the `\\$` escape round-trips', () => {
 
 describe('where decoding is the right reading', () => {
   it('keeps the decoded value in link destinations (same link)', async () => {
-    // The URL attribute holds `&`; the serializer escapes it as `\&`, which
-    // reads back as the same `&`.
-    expect(await savedFile('[l](u?a&amp;b)\n')).toBe('[l](u?a\\&b)\n');
+    // The URL attribute holds `&`, printed as `&` (remark's `\&` is dropped
+    // as unneeded, `minimal-escapes.ts`); it reads back as the same `&`.
+    expect(await savedFile('[l](u?a&amp;b)\n')).toBe('[l](u?a&b)\n');
   });
 });
 
 describe('a bare `&`', () => {
-  it('stays text; before a letter remark escapes it (cosmetic, same meaning — item 6)', async () => {
-    expect(await savedFile('AT&T and &unknown; and & alone.\n')).toBe('AT\\&T and \\&unknown; and & alone.\n');
+  it('stays text, unescaped (remark\'s `\\&` before a letter is not needed)', async () => {
+    const source = 'AT&T and &unknown; and & alone.\n';
+    expect(await savedFile(source)).toBe(source);
   });
 });
 

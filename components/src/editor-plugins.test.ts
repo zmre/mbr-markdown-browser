@@ -136,7 +136,8 @@ describe('section attributes: the renderer rule', () => {
     expect(serializeBody(crepe)).toBe('a\n\n--- {#y .z}\n\nb\n');
     view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
     view.dispatch(view.state.tr.replaceSelectionWith(view.state.schema.nodes.hr.create()));
-    expect(serializeBody(crepe)).toBe('a\n\n***\n\nb\n');
+    // A rule made in the editor is `---` (the house style).
+    expect(serializeBody(crepe)).toBe('a\n\n---\n\nb\n');
   });
 });
 

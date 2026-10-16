@@ -27,6 +27,8 @@ import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js'
 import { noteDir } from './editor-upload.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
 import { alerts } from './editor-plugins/alerts.js';
+import { authoredStylePlugin } from './editor-plugins/authored-style.js';
+import { minimalEscapesPlugin } from './editor-plugins/minimal-escapes.js';
 import { taskMarkers } from './editor-plugins/task-markers.js';
 import { headingAttrsPlugin } from './editor-plugins/heading-attrs.js';
 import { sectionAttrsPlugin } from './editor-plugins/section-attrs.js';
@@ -127,6 +129,8 @@ export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlug
   referencesPlugin,
   imagesPlugin,
   definitionListPlugins,
+  authoredStylePlugin,
+  minimalEscapesPlugin,
 ];
 
 /** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
