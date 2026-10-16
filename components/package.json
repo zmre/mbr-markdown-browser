@@ -21,7 +21,11 @@
   },
   "devDependencies": {
     "@types/d3-force": "^3.0.10",
+    "@types/mdast": "^4.0.0",
     "happy-dom": "^20.14.5",
+    "mdast-util-from-markdown": "^2.0.0",
+    "mdast-util-to-markdown": "^2.0.0",
+    "micromark-util-types": "^2.0.0",
     "terser": "^5.51.2",
     "typescript": "~7.0.2",
     "vite": "^8.3.3",

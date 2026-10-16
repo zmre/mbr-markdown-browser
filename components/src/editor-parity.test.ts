@@ -39,17 +39,20 @@
  * - `--- {attrs}` (item 3) → `\--- {attrs}`, no longer a section rule. The
  *   setext-position case (`--- {…}` directly under a paragraph) is a
  *   paragraph continuation to the renderer too, but is escaped the same way.
- * - Math (new, item 5): `$…$`/`$$…$$` are plain text to the editor (Crepe's
- *   LaTeX feature is off), so CommonMark backslash escapes inside them are
- *   consumed: `\,` → `,`, `\;` → `;`, `\{a\}` → `{a}`. Silent LaTeX damage.
+ * - Math (item 5, **fixed** by `editor-plugins/math.ts`): `$…$`/`$$…$$` were
+ *   plain text, so backslash escapes inside them were consumed (`\,` → `,`).
  * - GitHub alerts (new, item 5): `> [!NOTE]` → `> \[!NOTE]`, which the
  *   renderer no longer treats as an alert.
- * - Entities (new, item 5): `&amp;` → `&`, `&copy;` → `©`, `&nbsp;` → a
- *   literal U+00A0 (an invisible change).
- * - Reference links (new, item 5/6): `[text][ref]` is inlined to
- *   `[text](url "title")` and the `[ref]: …` definition is deleted.
- * - Line endings (new, item 6): CRLF files are rewritten with LF throughout,
- *   frontmatter included.
+ * - Entities (item 5, **fixed** by `editor-plugins/escapes.ts`, with `\$`):
+ *   `&amp;` → `&`, `&nbsp;` → a literal U+00A0. Still decoded (same meaning)
+ *   in link destinations and image alt text.
+ * - Reference links (item 5, **fixed** by `editor-plugins/references.ts`):
+ *   `[text][ref]` was inlined and the `[ref]: …` definition deleted.
+ * - Line endings (**fixed** in `openEditor`/`savedFile`): CRLF files were
+ *   rewritten with LF throughout, frontmatter included.
+ * - Images (**fixed** by `editor-plugins/images.ts`): an image without a
+ *   title (`![alt](src)`) was deleted on save, and a standalone image's alt
+ *   text was replaced by Crepe's ratio (`![1.00](src)`).
  *
  * Cosmetic (same structure, whole-file diff — item 6):
  * - `-` and `+` bullets → `*`; `[X]` → `[x]`.
@@ -79,9 +82,9 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 /** Fixtures whose untouched save is not byte-identical today, and why. */
 const ROUND_TRIP_FAILS: Record<string, string> = {
   alerts: 'item 5: `[!NOTE]` → `\\[!NOTE]`',
-  'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized; item 5: reference definition dropped',
-  crlf: 'item 6: CRLF → LF; `-` → `*`',
-  escapes: 'item 5: entities decoded (`&nbsp;` → U+00A0); `*` escaped',
+  'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized',
+  crlf: 'item 6: `-` → `*`',
+  escapes: 'item 6: `2 * 3` → `2 \\* 3`',
   'flashcards-a09': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
   'flashcards-b11': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
   'flashcards-dash-history': 'item 1: `-` history list hoisted out of its definition',
@@ -90,7 +93,6 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
   'lists-dash': 'item 6: `-` → `*`',
   'lists-ordered-paren': 'item 6: `1)` → `1.` and adjacent-list delimiters swapped',
   marginalia: 'item 6: `>>>` → `> > >`',
-  math: 'item 5: backslash escapes inside math consumed (`\\,` → `,`)',
   rules: 'item 6: `---` → `***`',
   'section-attrs': 'item 3: `--- {attrs}` → `\\--- {attrs}`',
   'section-attrs-setext': 'item 3: `--- {attrs}` under a paragraph → `\\--- {attrs}`',
@@ -109,6 +111,7 @@ const OUTLINE_FAILS: Record<string, string> = {
   'flashcards-flat': 'item 1: no definition list',
   'flashcards-loose': 'item 1: no definition list',
   'heading-attrs': 'item 5: no heading attributes',
+  images: "Crepe's image-block (a lone image) carries no source position, so the outline cannot place it",
   'kitchen-sink': 'items 1, 2, 3, 5',
   'section-attrs': 'item 3: no section break',
   tasks: 'item 2: no `[-]`/`[>]` status',

@@ -17,7 +17,14 @@ import { editorViewCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
-import { recombine, splitFrontmatter, unescapeWikilinks } from './editor-frontmatter.js';
+import {
+  lineEndingOf,
+  recombine,
+  splitFrontmatter,
+  toLf,
+  unescapeWikilinks,
+  withLineEnding,
+} from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
 import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
@@ -26,6 +33,10 @@ import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
 import { noteDir } from './editor-upload.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
+import { mathPlugin } from './editor-plugins/math.js';
+import { escapesPlugin } from './editor-plugins/escapes.js';
+import { referencesPlugin } from './editor-plugins/references.js';
+import { imagesPlugin } from './editor-plugins/images.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -102,7 +113,12 @@ export const CREPE_FEATURES = {
  * syntax (link autocomplete, media double-click) are registered in
  * `openEditor` only.
  */
-export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [];
+export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [
+  mathPlugin,
+  escapesPlugin,
+  referencesPlugin,
+  imagesPlugin,
+];
 
 /** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
 export function useMarkdownExtensions(crepe: Crepe): void {
@@ -573,7 +589,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     return;
   }
 
-  const { frontmatter, body } = splitFrontmatter(raw);
+  // The editor works in LF; a CRLF file is saved back as CRLF (`currentContent`).
+  const lineEnding = lineEndingOf(raw);
+  const { frontmatter, body } = splitFrontmatter(toLf(raw));
   loading.remove();
 
   // Build modal chrome: Cancel | title | ⋯ Save, as a native editing sheet.
@@ -821,7 +839,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // Baseline for dirty-tracking: Crepe normalizes markdown on load, so capture
   // the normalized content now rather than comparing against the raw source.
   const currentContent = (): string =>
-    crepe ? recombine(fmTextarea.value, serializeBody(crepe)) : savedContent;
+    crepe ? withLineEnding(recombine(fmTextarea.value, serializeBody(crepe)), lineEnding) : savedContent;
   const isDirty = (): boolean => ready && currentContent() !== savedContent;
   savedContent = currentContent();
   ready = true;

@@ -147,8 +147,9 @@ export function mdastOutline(tree: MdastNode, body: string, lineOffset: number):
     const end = node.position?.end.offset;
     // A node with no position was synthesized by a transform; it has no
     // source to compare. A link reference definition is not a block to the
-    // renderer (pulldown-cmark consumes it), so it is not one here either.
-    if (start === undefined || end === undefined || node.type === 'definition') return;
+    // renderer (pulldown-cmark consumes it), so it is not one here either
+    // (`mbrDefinition`: the editor's name for it, `editor-plugins/references.ts`).
+    if (start === undefined || end === undefined || node.type === 'definition' || node.type === 'mbrDefinition') return;
     const base = { depth, kind: '', lines: span(start, end) };
     const entry: OutlineNode = describe(node, base, body.slice(start, end));
     out.push(entry);
