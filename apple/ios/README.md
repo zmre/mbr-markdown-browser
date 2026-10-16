@@ -69,7 +69,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 |------|------|
 | `project.yml` | XcodeGen project: iOS 26, team X2SAY6ACE6, `com.zmre.mbr.ios`, a markdown document type for opening files in place, and the repository's `docs/` bundled as the sample vault |
 | `MBRMobile/MBRMobileApp.swift` | App entry. Scene-phase hooks (refresh on foreground, flush on background), `onOpenURL` for documents, and the web view prewarm |
-| `MBRMobile/Model/AppModel.swift` | Navigation, the open session (one at a time), lifecycle, and the dataless-files toggle |
+| `MBRMobile/Model/AppModel.swift` | Navigation, the open session (one at a time), and lifecycle |
 | `MBRMobile/Model/VaultStore.swift` | Vault list in `UserDefaults`: add, rename, remove, re-pick. Plain `bookmarkData()`, resolved off the main thread and re-saved when stale. `FolderAccess` holds the security scope; `AppPaths` has the per-vault cache folders |
 | `MBRMobile/Model/VaultSession.swift` | One open vault or file: `MbrApp.open`/`openFile`, timings, `refresh()` with reload, `flushIndex()`, WebContent crash recovery, and the Downloading-page watchdog |
 | `MBRMobile/Web/MbrSchemeHandler.swift` | `mbr://` handler. Pull-based: each `next()` is one `MbrResponse.nextChunk()`, so media streams with Rust's bounded buffer. Logs one line per request |
@@ -96,7 +96,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `refresh()` → `RefreshSummary` | Foreground and the Refresh menu item. The page reloads when it is in `changedPages`, when anything was added or removed, or when `.mbr/` changed (`configReloaded`, `templatesReloaded`, `assetsChanged`). `configError` updates the notice |
 | `flushIndex()` | Background, inside `beginBackgroundTask` |
 | `indexCachePath()` | Settings and the `ready:` line |
-| `setMaterializeDatalessFiles(_:)` | Settings → "Download files on read" (off by default, matching Rust) |
+| `setMaterializeDatalessFiles(_:)` | Not called by the app, which always runs with Rust's default (off: reading a not-downloaded file fails fast and the page says Downloading). The Settings toggle was removed because, turned on, opening a 2.3 GB iCloud vault downloaded the whole vault and the scan had not finished after 5+ minutes. Still exported for tests |
 | `FileCoordinator` | `FileCoordinatorBridge`, passed to every open |
 
 Pages must be loaded from `mbr://localhost/`. Rust derives `Host` from the URL

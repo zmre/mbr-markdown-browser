@@ -503,6 +503,8 @@ pub struct VaultWalk {
     /// *dataless* until something lists it on a thread allowed to wait). Their
     /// files are missing from `files`, not deleted.
     pub not_downloaded_dirs: Vec<VaultPath>,
+    /// How many directories were listed, for diagnostics.
+    pub dirs_listed: usize,
 }
 
 /// [`walk_files_under`], also reporting the directories that could not be
@@ -523,7 +525,10 @@ pub fn walk_vault_under(
             continue;
         }
         let entries = match vault.list_dir(&canonical) {
-            Ok(entries) => entries,
+            Ok(entries) => {
+                walk.dirs_listed += 1;
+                entries
+            }
             Err(VaultError::NotDownloaded { .. }) => {
                 walk.not_downloaded_dirs.push(canonical);
                 continue;

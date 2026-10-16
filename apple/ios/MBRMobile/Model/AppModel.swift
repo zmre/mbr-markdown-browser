@@ -28,7 +28,13 @@ final class AppModel {
     private var wasInBackground = false
 
     init() {
-        self.applyDatalessPolicy()
+        // "Download files on read" was a Settings toggle until 2026-10-15; drop
+        // its stored value. The app always runs with Rust's default (dataless
+        // files fail fast → Downloading page): turned on, opening a 2.3 GB
+        // iCloud vault downloaded the whole vault and the scan had not
+        // finished after 5+ minutes. `setMaterializeDatalessFiles` stays
+        // exported for tests.
+        UserDefaults.standard.removeObject(forKey: "materializeDatalessFiles")
     }
 
     // MARK: Sessions
@@ -96,19 +102,5 @@ final class AppModel {
         self.wasInBackground = false
         guard let session else { return }
         Task { await session.refresh(reason: "foreground") }
-    }
-
-    // MARK: Settings
-
-    static let materializeKey = "materializeDatalessFiles"
-
-    /// Whether mbr's threads wait for not-downloaded files (the debug toggle).
-    /// Off by default: reads of dataless files fail fast and the page says
-    /// "Downloading". Takes effect for the next vault opened (and for the
-    /// scan's thread pool, from the next launch).
-    func applyDatalessPolicy() {
-        let materialize = UserDefaults.standard.bool(forKey: Self.materializeKey)
-        setMaterializeDatalessFiles(materialize: materialize)
-        Log.info("iopolicy: materialize dataless files = \(materializesDatalessFiles())")
     }
 }

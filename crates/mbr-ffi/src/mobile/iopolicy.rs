@@ -21,6 +21,21 @@
 //! rayon pool is the process's and starts once, so for the scan it applies
 //! from the next app launch.
 //!
+//! **Directory listings are the exception** ([`with_materialization`]):
+//! `CoordinatedVault::list_dir` turns materialization *on* for the calling
+//! thread for the length of one listing. A file provider's folder can be
+//! *dataless* too — iCloud Drive on iOS fetches a folder's entries only when
+//! something lists it with materialization allowed — and with it off, `readdir`
+//! does not fail: it silently returns only the entries already on the device
+//! (seen on an iPhone: a vault root listing 5 notes and 1 of ~30 subfolders).
+//! Materializing a directory fetches its entries — names and metadata — never
+//! a file's contents, so the listing may wait while reads still fail fast.
+//! This is what Foundation does: the kernel's own comment on the per-thread
+//! flag (`vfs_context_dataless_materialization_is_prevented`, xnu
+//! `bsd/vfs/vfs_syscalls.c`) says "Foundation uses this", and the same check
+//! guards `vfs_materialize_dir` and file materialization alike — there is no
+//! directory-only policy (`getiopolicy_np(3)`), hence the scoped switch.
+//!
 //! Everything here is a no-op off Apple platforms.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +67,16 @@ pub(crate) fn apply_to_current_thread() {
     }
 }
 
+/// Runs `f` with materialization of dataless items **on** for the calling
+/// thread, then puts the thread's previous policy back — also when `f`
+/// panics. For directory listings only (see the module docs): `f` must not
+/// read file contents. Off Apple platforms it just runs `f`.
+pub(crate) fn with_materialization<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(target_vendor = "apple")]
+    let _restore = sys::ThreadPolicyGuard::materializing();
+    f()
+}
+
 /// Whether the calling thread's own policy materializes dataless files, or
 /// `None` when it has none of its own (it follows the process). Apple only.
 #[cfg(all(test, target_vendor = "apple"))]
@@ -68,7 +93,6 @@ mod sys {
 
     const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: c_int = 3;
     const IOPOL_SCOPE_THREAD: c_int = 1;
-    #[cfg(test)]
     const IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT: c_int = 0;
     const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
     const IOPOL_MATERIALIZE_DATALESS_FILES_ON: c_int = 2;
@@ -77,16 +101,82 @@ mod sys {
 
     unsafe extern "C" {
         fn setiopolicy_np(iotype: c_int, scope: c_int, policy: c_int) -> c_int;
-        #[cfg(test)]
         fn getiopolicy_np(iotype: c_int, scope: c_int) -> c_int;
     }
 
     pub(super) fn set_thread_policy(materialize: bool) -> io::Result<()> {
-        let policy = if materialize {
+        set_raw_thread_policy(if materialize {
             IOPOL_MATERIALIZE_DATALESS_FILES_ON
         } else {
             IOPOL_MATERIALIZE_DATALESS_FILES_OFF
+        })
+    }
+
+    /// The calling thread's own policy value: `OFF`, `ON` or `DEFAULT`
+    /// (follows the process).
+    fn raw_thread_policy() -> io::Result<c_int> {
+        // SAFETY: a system call taking two integers and returning one.
+        let rc = unsafe {
+            getiopolicy_np(
+                IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+                IOPOL_SCOPE_THREAD,
+            )
         };
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(rc & 3)
+        }
+    }
+
+    /// Materialization on for the calling thread while it lives; the
+    /// thread's previous value back on drop. Never sent to another thread
+    /// (the policy is per thread), which the raw-pointer marker enforces.
+    pub(super) struct ThreadPolicyGuard {
+        previous: Option<c_int>,
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl ThreadPolicyGuard {
+        pub(super) fn materializing() -> Self {
+            let previous = match raw_thread_policy() {
+                Ok(previous) if previous == IOPOL_MATERIALIZE_DATALESS_FILES_ON => None,
+                Ok(previous) => match set_raw_thread_policy(IOPOL_MATERIALIZE_DATALESS_FILES_ON) {
+                    Ok(()) => Some(previous),
+                    Err(e) => {
+                        tracing::warn!("setiopolicy_np(materialize on) failed: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("getiopolicy_np failed: {e}");
+                    None
+                }
+            };
+            Self {
+                previous,
+                _not_send: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl Drop for ThreadPolicyGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous
+                && let Err(e) = set_raw_thread_policy(previous)
+            {
+                tracing::warn!("setiopolicy_np(restore {previous}) failed: {e}");
+            }
+        }
+    }
+
+    fn set_raw_thread_policy(policy: c_int) -> io::Result<()> {
+        debug_assert!(matches!(
+            policy,
+            IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT
+                | IOPOL_MATERIALIZE_DATALESS_FILES_OFF
+                | IOPOL_MATERIALIZE_DATALESS_FILES_ON
+        ));
         // SAFETY: a system call taking three integers; no pointers, no state
         // beyond the calling thread's I/O policy.
         let rc = unsafe {
@@ -105,22 +195,14 @@ mod sys {
 
     #[cfg(test)]
     pub(super) fn thread_policy() -> io::Result<Option<bool>> {
-        // SAFETY: as above, two integers in, one out.
-        let rc = unsafe {
-            getiopolicy_np(
-                IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
-                IOPOL_SCOPE_THREAD,
-            )
-        };
-        if rc < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(match rc & IOPOL_MATERIALIZE_DATALESS_FILES_BASIC_MASK {
-            IOPOL_MATERIALIZE_DATALESS_FILES_OFF => Some(false),
-            IOPOL_MATERIALIZE_DATALESS_FILES_ON => Some(true),
-            IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT => None,
-            _ => None,
-        })
+        Ok(
+            match raw_thread_policy()? & IOPOL_MATERIALIZE_DATALESS_FILES_BASIC_MASK {
+                IOPOL_MATERIALIZE_DATALESS_FILES_OFF => Some(false),
+                IOPOL_MATERIALIZE_DATALESS_FILES_ON => Some(true),
+                IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT => None,
+                _ => None,
+            },
+        )
     }
 }
 
@@ -146,5 +228,42 @@ mod tests {
         assert_eq!(on_thread(true), (None, Some(true)), "wait for downloads");
         set_materialize_dataless_files(original);
         assert_eq!(current_thread_materializes(), None, "this thread untouched");
+    }
+
+    #[test]
+    fn a_listing_materializes_and_puts_the_thread_policy_back() {
+        let run = |start: Option<bool>| {
+            std::thread::spawn(move || {
+                if let Some(materialize) = start {
+                    sys::set_thread_policy(materialize).unwrap();
+                }
+                let inside = with_materialization(current_thread_materializes);
+                (inside, current_thread_materializes())
+            })
+            .join()
+            .unwrap()
+        };
+        assert_eq!(
+            run(Some(false)),
+            (Some(true), Some(false)),
+            "fail-fast thread"
+        );
+        assert_eq!(
+            run(None),
+            (Some(true), None),
+            "a thread with no policy of its own"
+        );
+        assert_eq!(run(Some(true)), (Some(true), Some(true)));
+
+        // Restored on unwind too.
+        let after_panic = std::thread::spawn(|| {
+            sys::set_thread_policy(false).unwrap();
+            let caught = std::panic::catch_unwind(|| with_materialization(|| panic!("boom")));
+            assert!(caught.is_err());
+            current_thread_materializes()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(after_panic, Some(false));
     }
 }

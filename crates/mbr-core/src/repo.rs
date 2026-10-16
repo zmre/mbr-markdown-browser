@@ -1078,6 +1078,19 @@ impl Repo {
             }
         };
 
+        if start.is_root() {
+            // What the root lists decides everything below it, and a file
+            // provider can list less than its own UI shows: say what we got.
+            let folders = entries.iter().filter(|e| e.is_dir()).count();
+            tracing::info!(
+                "Root {} lists {} entries ({} folders, {} files)",
+                start_key.display(),
+                entries.len(),
+                folders,
+                entries.len() - folders
+            );
+        }
+
         let mut markdown: Vec<(PathBuf, VaultPath, MarkdownInfo)> = Vec::new();
         let mut other: Vec<(PathBuf, OtherFileInfo)> = Vec::new();
 
@@ -1312,10 +1325,12 @@ impl Repo {
         }
 
         tracing::info!(
-            "scan_all completed in {:?}: {} markdown files, {} other files (pdf={}, image={}, video={}, audio={}, text={}, other={})",
+            "scan_all completed in {:?}: {} markdown files, {} other files in {} folders, {} not downloaded (pdf={}, image={}, video={}, audio={}, text={}, other={})",
             scan_all_start.elapsed(),
             markdown_count,
             other_count,
+            self.scanned_folders.len(),
+            self.not_downloaded_folders.len(),
             pdf_count,
             image_count,
             video_count,

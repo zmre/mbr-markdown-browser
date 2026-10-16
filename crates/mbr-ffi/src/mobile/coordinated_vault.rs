@@ -35,7 +35,10 @@ use super::coordinator::FileCoordinator;
 ///
 /// Reading a not-downloaded file fails with [`VaultError::NotDownloaded`]
 /// (`EDEADLK` under the runtime's fail-fast I/O policy, or the placeholder);
-/// nothing here waits for a download.
+/// nothing here waits for a file's download. **Listings do wait** for the
+/// provider to fetch a folder's entries (`iopolicy::with_materialization`):
+/// with materialization off, a not-yet-fetched iCloud Drive folder lists only
+/// what is already on the device, with no error at all.
 pub struct CoordinatedVault {
     local: LocalVault,
     coordinator: Option<Arc<dyn FileCoordinator>>,
@@ -160,7 +163,21 @@ impl Vault for CoordinatedVault {
     }
 
     fn list_dir(&self, dir: &VaultPath) -> Result<Vec<Entry>, VaultError> {
-        let entries = self.local.list_dir(dir)?;
+        // With materialization off, a file provider's not-yet-fetched folder
+        // lists only what is already on the device, *without* an error — so
+        // the listing alone may wait for the provider (entries only, never a
+        // file's contents; see `iopolicy`). Should that fail (offline, the
+        // provider refusing), what is local still lists, as before.
+        let entries = match super::iopolicy::with_materialization(|| self.local.list_dir(dir)) {
+            Ok(entries) => entries,
+            Err(e) if e.is_not_found() => return Err(e),
+            Err(e) => {
+                tracing::info!(
+                    "Listing {dir:?} with materialization failed ({e}); listing what is local"
+                );
+                self.local.list_dir(dir)?
+            }
+        };
         if !self.icloud_placeholders {
             return Ok(entries);
         }

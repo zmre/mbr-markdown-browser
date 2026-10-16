@@ -44,6 +44,12 @@ final class VaultSession {
     private(set) var webKitHonoursRefresh: Bool?
     /// Back-list entries that predate this vault's first page.
     private var historyBase = 0
+    /// When a refresh (or the initial indexing's) last changed what pages
+    /// show: notes added, changed or removed, or `.mbr/`. A page WebKit
+    /// restores from its back/forward cache that was loaded before this is
+    /// stale (its navigation came from the old `site.json`), so Back reloads
+    /// it (`go(to:)`).
+    private var indexChangedAt: ContinuousClock.Instant?
     private var retries: [URL: Int] = [:]
     private static let maxRetries = 150
 
@@ -137,6 +143,7 @@ final class VaultSession {
     func start(at start: String? = nil) async {
         let app = app
         self.watchers.append(Task { [weak self] in
+            Log.info("ready: waiting for the initial indexing")
             do {
                 let report = try await app.waitUntilReady()
                 Log.info("ready: fromCache=\(report.fromCache) restored=\(report.restoredFiles) "
@@ -146,6 +153,13 @@ final class VaultSession {
                     + "mbrDownloads=\(report.mbrDownloadsRequested) "
                     + "foldersNotDownloaded=\(report.foldersNotDownloaded)")
                 self?.report = report
+                // A restored index is answered at once and then corrected by
+                // a stat-diff that can take seconds (iCloud listings): the
+                // page on screen was drawn from the old one. (After a scan
+                // there is nothing to correct: `site.json` waits for it.)
+                if report.fromCache {
+                    await self?.apply(report.refresh, reason: "initial indexing")
+                }
                 if report.mbrDownloadsRequested > 0 || report.foldersNotDownloaded > 0 {
                     await self?.refreshUntilDownloaded()
                 }
@@ -185,51 +199,6 @@ final class VaultSession {
         self.watchers.removeAll()
         self.web.target.app = nil
         Log.info("close: \(self.title)")
-    }
-
-    // MARK: Freshness
-
-    /// Re-lists the vault (on foreground, or the refresh button) and reloads
-    /// the page when what it shows changed: a WebSocket cannot cross a scheme
-    /// handler, so the app is the live-reload channel. That includes the
-    /// vault's `.mbr/` (config, templates, CSS and component overrides). After
-    /// the reload the page reports itself again, so the native bar follows.
-    func refresh(reason: String) async {
-        do {
-            let summary = try await app.refresh()
-            self.lastRefresh = summary
-            self.configError = summary.configError
-            let shown = self.currentPath
-            let pageChanged = shown.map { path in
-                summary.changedPages.contains { Self.samePage($0, path) }
-            } ?? false
-            let navigationChanged = summary.added > 0 || summary.removed > 0
-            let mbrChanged = summary.configReloaded || summary.templatesReloaded || summary.assetsChanged
-            Log.info("refresh (\(reason)): +\(summary.added) ~\(summary.changed) -\(summary.removed) "
-                + "evicted=\(summary.evicted) in \(summary.durationMs)ms; changedPages=\(summary.changedPages); "
-                + ".mbr: config=\(summary.configReloaded) templates=\(summary.templatesReloaded) "
-                + "assets=\(summary.assetsChanged) configError=\(summary.configError ?? "none") "
-                + "downloads=\(summary.mbrDownloadsRequested) "
-                + "foldersNotDownloaded=\(summary.foldersNotDownloaded); "
-                + "shown=\(shown ?? "-")")
-            if pageChanged || navigationChanged || mbrChanged {
-                let why = pageChanged ? "page changed" : navigationChanged ? "files added or removed" : ".mbr/ changed"
-                Log.info("refresh: reloading \(shown ?? "page") (\(why))")
-                // The native reload rather than `location.reload()` from
-                // script, so this returns once the page has reloaded and
-                // nothing that follows races the navigation.
-                let start = ContinuousClock.now
-                do {
-                    for try await event in self.page.reload() where event == .finished {
-                        Log.info("refresh: reloaded in \(millis(since: start))ms")
-                    }
-                } catch {
-                    Log.info("refresh: reload failed: \(error)")
-                }
-            }
-        } catch {
-            Log.info("refresh (\(reason)): failed: \(error)")
-        }
     }
 
     /// Saves the index snapshot (as the app goes to the background).
@@ -311,6 +280,77 @@ final class VaultSession {
     }
 }
 
+// MARK: Freshness
+
+extension VaultSession {
+    /// Re-lists the vault (on foreground, or the refresh button) and reloads
+    /// the page when what it shows changed: a WebSocket cannot cross a scheme
+    /// handler, so the app is the live-reload channel. That includes the
+    /// vault's `.mbr/` (config, templates, CSS and component overrides). After
+    /// the reload the page reports itself again, so the native bar follows.
+    ///
+    /// `always` (the Refresh menu item) reloads the page whatever the
+    /// refresh found: the reader asked for it, and the index may have changed
+    /// before they did (a background refresh, the initial indexing).
+    func refresh(reason: String, always: Bool = false) async {
+        do {
+            let summary = try await app.refresh()
+            self.lastRefresh = summary
+            await self.apply(summary, reason: reason, always: always)
+        } catch {
+            Log.info("refresh (\(reason)): failed: \(error)")
+            if always {
+                await self.reload(why: "requested")
+            }
+        }
+    }
+
+    /// Acts on what a refresh found: reloads the page on screen when it
+    /// changed, when notes were added or removed (the navigation changed), or
+    /// when `.mbr/` changed — or always, when asked.
+    private func apply(_ summary: RefreshSummary, reason: String, always: Bool = false) async {
+        self.configError = summary.configError
+        let shown = self.currentPath
+        let pageChanged = shown.map { path in
+            summary.changedPages.contains { Self.samePage($0, path) }
+        } ?? false
+        let navigationChanged = summary.added > 0 || summary.removed > 0
+        let mbrChanged = summary.configReloaded || summary.templatesReloaded || summary.assetsChanged
+        if summary.added > 0 || summary.changed > 0 || summary.removed > 0 || mbrChanged {
+            self.indexChangedAt = .now
+        }
+        Log.info("refresh (\(reason)): +\(summary.added) ~\(summary.changed) -\(summary.removed) "
+            + "evicted=\(summary.evicted) in \(summary.durationMs)ms; changedPages=\(summary.changedPages); "
+            + ".mbr: config=\(summary.configReloaded) templates=\(summary.templatesReloaded) "
+            + "assets=\(summary.assetsChanged) configError=\(summary.configError ?? "none") "
+            + "downloads=\(summary.mbrDownloadsRequested) "
+            + "foldersNotDownloaded=\(summary.foldersNotDownloaded); "
+            + "shown=\(shown ?? "-")")
+        if pageChanged || navigationChanged || mbrChanged || always {
+            let why = pageChanged ? "page changed"
+                : navigationChanged ? "files added or removed"
+                : mbrChanged ? ".mbr/ changed" : "requested"
+            await self.reload(why: why)
+        }
+    }
+
+    /// Reloads the page on screen. The native reload rather than
+    /// `location.reload()` from script, so this returns once the page has
+    /// reloaded and nothing that follows races the navigation.
+    private func reload(why: String) async {
+        guard self.page.url != nil else { return }
+        Log.info("refresh: reloading \(self.currentPath ?? "page") (\(why))")
+        let start = ContinuousClock.now
+        do {
+            for try await event in self.page.reload() where event == .finished {
+                Log.info("refresh: reloaded in \(millis(since: start))ms")
+            }
+        } catch {
+            Log.info("refresh: reload failed: \(error)")
+        }
+    }
+}
+
 // MARK: History
 
 extension VaultSession {
@@ -333,14 +373,39 @@ extension VaultSession {
     }
 
     /// Jumps to an entry of the back list.
+    ///
+    /// WebKit may restore the page from its back/forward cache — no request
+    /// reaches the scheme handler — with the JavaScript state it had,
+    /// `site.json` included. If the index changed since that page was loaded,
+    /// it is reloaded, so Back never shows navigation older than the index.
     func go(to item: WebPage.BackForwardList.Item) async {
+        let document = Self.documentURL(item.url)
+        let loadedAt = self.web.target.lastDocumentRequest(document)
+        let started = ContinuousClock.now
         do {
             for try await event in self.page.load(item) where event == .finished {
                 break
             }
         } catch {
             Log.info("history: \(item.url.absoluteString) failed: \(error)")
+            return
         }
+        let requested = self.web.target.lastDocumentRequest(document).map { $0 >= started } ?? false
+        guard !requested, let changed = indexChangedAt else { return }
+        if loadedAt.map({ $0 < changed }) ?? true {
+            Log.info("history: \(document.path(percentEncoded: false)) came from the back/forward cache, "
+                + "older than the index")
+            await self.reload(why: "restored page predates the index")
+        }
+    }
+
+    /// `url` as the scheme handler saw it: WebKit never sends the fragment.
+    private static func documentURL(_ url: URL) -> URL {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.fragment != nil else {
+            return url
+        }
+        parts.fragment = nil
+        return parts.url ?? url
     }
 }
 

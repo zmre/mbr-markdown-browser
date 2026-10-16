@@ -388,6 +388,12 @@ impl Repo {
             .chain(self.static_vault.as_ref().map(|v| (v, true)))
         {
             let walk = self.listed_files(vault.as_ref());
+            tracing::info!(
+                "Refresh listed {} folders, {} files under {}",
+                walk.dirs_listed,
+                walk.files.len(),
+                vault.root().display()
+            );
             if !walk.not_downloaded_dirs.is_empty() {
                 // Asked for again on every diff until they are listed: a
                 // provider may drop a request, and asking is idempotent.

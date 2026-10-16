@@ -58,15 +58,17 @@ Vault list → folder-plus → iCloud Drive → Notes → **Open**.
 
 ## 3. The dataless I/O policy
 
-Settings → **Download files on read**. Off (the default) makes reads of
-not-downloaded files fail fast and shows a Downloading page. On makes them wait.
-Force-quit and relaunch after changing it (the scan's thread pool reads it at
-launch).
+The app always runs with Rust's default: reads of not-downloaded files fail
+fast and the page shows Downloading. The **Download files on read** setting
+(materialize on read) was removed: on a 2.3 GB iCloud vault, turning it on made
+the open download the whole vault, and the scan had not finished after 5+
+minutes. `setMaterializeDatalessFiles` is still exported for tests.
 
 | | cold scan | cache-warm ready | pages that failed to render |
 |---|---|---|---|
-| Off (default) | ____ | ____ | ____ |
-| On | ____ | ____ | ____ |
+| Off (the only mode) | 718 ms | 545 ms | none |
+
+Measured 2026-10-15 on an iPhone 15 Pro with `~/Notes` (4,452 files).
 
 ## 4. Remove Download: dataless files and the Downloading page
 
