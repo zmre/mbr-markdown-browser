@@ -771,10 +771,14 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
       white-space: nowrap;
     }
 
+    /*
+     * Insets keep it off the home indicator; the stack offset (fab.ts) lifts
+     * it above a floating slides/flashcards play button in the same corner.
+     */
     .review-fab {
       position: fixed;
-      right: 1rem;
-      bottom: 1rem;
+      right: calc(1rem + env(safe-area-inset-right, 0px));
+      bottom: calc(1rem + env(safe-area-inset-bottom, 0px) + var(--mbr-fab-stack-offset, 0px));
       z-index: 800;
       width: 3rem;
       height: 3rem;
@@ -832,8 +836,8 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
 
     /* No selection to point at: park it clear of the floating action button. */
     .form-anchor.form-corner {
-      right: 1rem;
-      bottom: 5rem;
+      right: calc(1rem + env(safe-area-inset-right, 0px));
+      bottom: calc(5rem + env(safe-area-inset-bottom, 0px) + var(--mbr-fab-stack-offset, 0px));
     }
 
     .review-loading {

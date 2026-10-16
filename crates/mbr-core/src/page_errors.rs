@@ -5,8 +5,8 @@
 //! 1. Broken internal links — reuse `OutboundLink` data from `LinkCache` and
 //!    resolve each through `path_resolver::resolve_request_path`.
 //! 2. Broken media references — parse rendered HTML for `<img>`, `<video>`,
-//!    `<audio>`, and `<source>` tags and confirm internal `src` attributes
-//!    resolve when interpreted the way a browser would: relative to the
+//!    `<audio>`, and `<source>` tags (plus Reveal.js `data-background-*`
+//!    URLs on `<section>`) and confirm internal `src` attributes resolve when interpreted the way a browser would: relative to the
 //!    page's canonical URL, then through the same request pipeline the
 //!    server uses. Checking never duplicates resolution logic, so it cannot
 //!    disagree with what a live request actually serves.
@@ -422,7 +422,7 @@ pub fn validate_media_references(
     resolver_config: &PathResolverConfig,
     page_url: &str,
 ) -> Vec<PageError> {
-    scan_media_elements(html)
+    scan_media_elements(html, SectionBackgrounds::Include)
         .into_iter()
         .filter(|(src, _)| !media_reference_resolves(src, resolver_config, page_url))
         .map(|(src, kind)| PageError::BrokenMediaReference { src, kind })
@@ -436,8 +436,12 @@ pub fn validate_media_references(
 /// nothing local can be said about them. Parsing the document is
 /// ~microseconds for typical page sizes; the selectors compile once per call,
 /// which keeps the API ergonomic and the endpoint off any hot path.
-fn scan_media_elements(html: &str) -> Vec<(String, MediaKind)> {
+fn scan_media_elements(html: &str, backgrounds: SectionBackgrounds) -> Vec<(String, MediaKind)> {
     let doc = Html::parse_document(html);
+    let section_backgrounds = match backgrounds {
+        SectionBackgrounds::Include => scan_section_backgrounds(&doc),
+        SectionBackgrounds::Skip => Vec::new(),
+    };
 
     let specs: [(&str, MediaKind); 4] = [
         ("img[src]", MediaKind::Image),
@@ -457,6 +461,60 @@ fn scan_media_elements(html: &str) -> Vec<(String, MediaKind)> {
                 .filter(|src| !src.is_empty() && !is_external_url(src))
                 .map(|src| (src.to_string(), kind.clone()))
                 .collect::<Vec<_>>()
+        })
+        .chain(section_backgrounds)
+        .collect()
+}
+
+/// Whether [`scan_media_elements`] also reports Reveal.js section backgrounds.
+///
+/// Only the broken-reference check wants them: [`collect_media_references`]
+/// feeds the video playback probe, which is about `<video>` elements a reader
+/// plays, not a slide's muted background loop.
+#[derive(Clone, Copy)]
+enum SectionBackgrounds {
+    Include,
+    Skip,
+}
+
+/// Internal Reveal.js background URLs on `<section>` elements — the
+/// `--- {data-background-image=…}` attributes `markdown.rs` rewrites with the
+/// image transform, so they resolve against the page URL the same way an
+/// `<img src>` does.
+///
+/// `data-background` counts only when Reveal itself would read it as an image
+/// (a colour is not a reference), and `data-background-video` is a
+/// comma-separated list. `data-background-iframe` is not checked: it names a
+/// page, which the link checks, not the media checks, are about.
+fn scan_section_backgrounds(doc: &Html) -> Vec<(String, MediaKind)> {
+    let Ok(selector) = Selector::parse(
+        "section[data-background-image], section[data-background], \
+         section[data-background-video]",
+    ) else {
+        return Vec::new();
+    };
+    let internal = |url: &str| !url.is_empty() && !is_external_url(url);
+
+    doc.select(&selector)
+        .flat_map(|el| {
+            let attr = |name| el.value().attr(name);
+            let images = attr("data-background-image")
+                .into_iter()
+                .chain(
+                    attr("data-background")
+                        .filter(|v| crate::markdown::is_reveal_background_url(v)),
+                )
+                .map(str::trim)
+                .filter(|url| internal(url))
+                .map(|url| (url.to_string(), MediaKind::Image));
+            let videos = attr("data-background-video")
+                .filter(|v| internal(v.trim()))
+                .into_iter()
+                .flat_map(|v| v.split(','))
+                .map(str::trim)
+                .filter(|url| internal(url))
+                .map(|url| (url.to_string(), MediaKind::Video));
+            images.chain(videos).collect::<Vec<_>>()
         })
         .collect()
 }
@@ -478,7 +536,7 @@ pub fn collect_media_references(
 ) -> Vec<MediaReference> {
     let mut seen = std::collections::HashSet::new();
 
-    scan_media_elements(html)
+    scan_media_elements(html, SectionBackgrounds::Skip)
         .into_iter()
         .filter_map(|(src, kind)| {
             let path_part = src.split(['#', '?']).next().unwrap_or_default();
@@ -1397,6 +1455,54 @@ mod tests {
             &errs[0],
             PageError::BrokenMediaReference { kind: MediaKind::Image, src } if src == "./missing.png"
         ));
+    }
+
+    #[test]
+    fn broken_section_backgrounds_are_reported() {
+        let (_guard, base) = media_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        // As `markdown.rs` emits them for a page at `/deck/`: already rewritten.
+        let html = r##"
+            <section data-background-image="../photo.png"></section>
+            <section data-background-image="../gone.png"></section>
+            <section data-background="#336"></section>
+            <section data-background="../also-gone.jpg"></section>
+            <section data-background-video="../photo.png, ../missing.mp4"></section>
+            <section data-background-image="https://example.com/x.png"></section>
+            <section data-background-video="data:video/mp4;base64,AAAA"></section>
+            <section data-background-iframe="../nowhere.html"></section>
+        "##;
+        let errs = validate_media_references(html, &cfg, "/deck/");
+        let mut found: Vec<(String, MediaKind)> = errs
+            .into_iter()
+            .map(|e| match e {
+                PageError::BrokenMediaReference { src, kind } => (src, kind),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            found,
+            vec![
+                ("../also-gone.jpg".to_string(), MediaKind::Image),
+                ("../gone.png".to_string(), MediaKind::Image),
+                ("../missing.mp4".to_string(), MediaKind::Video),
+            ]
+        );
+    }
+
+    #[test]
+    fn section_backgrounds_stay_out_of_collected_media() {
+        let (_guard, base) = media_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        let html = r#"<section data-background-image="../photo.png"></section>"#;
+        assert!(collect_media_references(html, &cfg, "/deck/").is_empty());
     }
 
     #[test]

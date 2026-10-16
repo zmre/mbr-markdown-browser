@@ -40,16 +40,19 @@ struct HistoryBackButton: View {
 }
 
 /// The ⋯ menu: the page's own actions (what `app-bridge.ts` reported it
-/// supports), then the app's.
+/// supports), then the app's. New Note is not here: it is the bar's own `+`.
+/// Search is the native `SearchSheet`, not the page's modal: WebKit would
+/// focus the modal's input but keep the keyboard down for a menu tap.
 struct VaultActionsMenu: View {
     let session: VaultSession
+    let openSearch: () -> Void
     let openSettings: () -> Void
     let leave: () -> Void
 
     var body: some View {
         Menu("More", systemImage: "ellipsis") {
             Section {
-                ForEach(self.session.web.info.actions) { action in
+                ForEach(self.session.web.info.actions.filter { $0 != .newNote }) { action in
                     Button(action.label, systemImage: action.symbol) {
                         Task { await self.perform(action) }
                     }
@@ -75,6 +78,10 @@ struct VaultActionsMenu: View {
     }
 
     private func perform(_ action: AppAction) async {
+        if action == .search {
+            self.openSearch()
+            return
+        }
         let opened = await AppBridge.open(action, in: self.session.page)
         Log.info("bridge: open \(action.rawValue) -> \(opened)")
     }

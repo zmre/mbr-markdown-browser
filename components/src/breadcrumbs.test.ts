@@ -88,6 +88,22 @@ describe('narrow-screen rules', () => {
     expect(narrow).toMatch(/\.milkdown \.milkdown-toolbar \{\s*flex-wrap: wrap;/)
   })
 
+  it('keeps every editor field at 16px (no iOS focus zoom) and its targets at 44px', () => {
+    const narrow = editorSource.slice(editorSource.indexOf('export const NARROW_CSS'))
+    expect(narrow).toMatch(/\.mbr-editor-token \{[^}]*font-size: 16px/)
+    expect(narrow).toMatch(/\.mbr-editor-fm textarea \{ font-size: 16px; \}/)
+    expect(narrow).toMatch(/\.mbr-picker-field input\[type="text"\], \.mbr-picker-field textarea \{ font-size: 16px; \}/)
+    expect(narrow).toContain('min-height: 44px')
+    // The pickers are cards anchored a fixed distance below the top inset, so
+    // typing (which shrinks the list) only moves their bottom edge...
+    expect(narrow).toMatch(/\.mbr-picker-backdrop \{\s*align-items: flex-start;\s*padding-top: calc\(env\(safe-area-inset-top, 0px\) \+ 0\.75rem\);/)
+    expect(narrow).not.toContain('align-items: flex-end')
+    // ...capped in svh, which the keyboard does not change.
+    expect(narrow).toContain('max-height: calc(100svh - env(safe-area-inset-top, 0px) - 2rem)')
+    // The bar buttons are 44px at every width.
+    expect(editorSource).toContain('min-height: 44px; min-width: 44px')
+  })
+
   it('sizes the info, page-errors and search popups with dvh', () => {
     for (const [name, source] of [
       ['mbr-info', infoSource],
@@ -97,6 +113,9 @@ describe('narrow-screen rules', () => {
       expect(source, name).toContain('dvh')
     }
     expect(infoSource).toContain('height: 100dvh')
+    // The close button clears the native bar / notch (it is absolute in the
+    // fixed panel, so the panel's own padding does not move it).
+    expect(infoSource).toContain('top: calc(0.5rem + env(safe-area-inset-top, 0px))')
     expect(pageErrorsSource).toContain('height: 100dvh')
     expect(searchSource).toContain('max-height: 70dvh')
   })

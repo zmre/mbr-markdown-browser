@@ -71,6 +71,12 @@
   max-width: 800px;
   height: 200px;
 }
+/* The summary table is injected by script as raw HTML, so it gets no
+ * `.mbr-table-scroll` wrapper; its section scrolls instead of the page. */
+#bench-summary-section {
+  overflow-x: auto;
+  max-width: 100%;
+}
 .bench-summary-table {
   width: 100%;
   border-collapse: collapse;

@@ -75,7 +75,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `MBRMobile/Web/MbrSchemeHandler.swift` | `mbr://` handler. Pull-based: each `next()` is one `MbrResponse.nextChunk()`, so media streams with Rust's bounded buffer. Logs one line per request |
 | `MBRMobile/Web/WebPagePool.swift` | The `WebPage` setup (scheme handler, link policy, JS dialogs, the app bridge) and the prewarmed page |
 | `MBRMobile/Web/AppBridge.swift` | The native half of the page ↔ app bridge: the document-start user script that marks pages embedded, the `mbrApp` script-message handler feeding `PageInfo` (title, breadcrumbs, actions), and `AppBridge.open` calling `window.mbrApp.open(name)` |
-| `MBRMobile/Views/VaultToolbar.swift` | The native bar: history Back (long press: recent pages, then Vaults), the ⋯ menu (the page's actions, then Refresh, Home, Settings, Open Other Vault…), and the breadcrumb title menu |
+| `MBRMobile/Views/VaultToolbar.swift` | The native bar: history Back (long press: recent pages, then Vaults), the ⋯ menu (the `+` beside it is in `VaultScreen.swift`) (the page's actions, then Refresh, Home, Settings, Open Other Vault…), and the breadcrumb title menu |
 | `MBRMobile/Assets.xcassets` | The app icon: one opaque 1024×1024 PNG, the macOS icon's tree cropped full-bleed |
 | `MBRMobileUITests/` | UI tests for what only a tap opens (the bar's menus, the home-screen icon); each state prints `SHOT <name>` and is kept as an attachment |
 | `MBRMobile/Support/FileCoordinatorBridge.swift` | mbr's `FileCoordinator`: `NSFileCoordinator` writes (`.forReplacing`, item-replacement directory plus `replaceItemAt`, with an in-place fallback), mkdir, move, remove, and download requests |
@@ -116,6 +116,17 @@ stat-only: nothing is read unless something changed.
 
 In every case the page on screen reloads.
 
+**`.mbr/` files still in the cloud.** The scan skips hidden folders, so nothing
+would ever ask iCloud (or another provider) for a `.mbr/` file it has not
+downloaded. Opening the vault asks for every such file (`OpenReport
+.mbrDownloadsRequested`), and so does each refresh until they are all here
+(`RefreshSummary.mbrDownloadsRequested`). When the open asked for any, the app
+refreshes again after 3, 6, 12, 30 and 60 s, stopping as soon as none are
+outstanding; their arrival counts as a change, so the page reloads with them.
+Meanwhile a page's request for such an asset (`/.mbr/user.css`, an SVG it
+references) waits up to 3 s for it and otherwise answers `503` with
+`Retry-After`, never a 500.
+
 ## The native bar and the bridge
 
 In the app, mbr's own web header and breadcrumbs are hidden and the iOS
@@ -124,23 +135,94 @@ navigation bar takes over:
 - **Title:** the page's title. Its menu (tap the title) is the breadcrumb path.
 - **Back:** web history. At the vault's first page it returns to the vault
   list. A long press lists recent pages, then Vaults.
+- **`+` (New Note):** beside ⋯, in the same Liquid Glass capsule (one
+  `ToolbarItem` holding both: a `ToolbarItemGroup` of two folds into a single
+  overflow ⋯ on an iPhone beside a long title). Opens the editor's new-note picker, defaulting to the
+  current folder; the note is created and opened in the editor. Shown where
+  editing is on, on listings too, and never for a file opened in place (its
+  Grant Folder Access… gets a capsule of its own).
 - **⋯ menu:** the page's own actions, then the app's (Refresh, Home, Settings,
   Open Other Vault…). The page's actions are Browse, Search, Edit, Info,
-  Tasks, Flashcards and Slides, each listed only where it works: Edit with
-  editing on, Tasks with the task browser enabled, Flashcards and Slides only
-  on a deck.
+  Contents, Links Out, Links In, Tasks, Flashcards and Slides, each listed
+  only where it works: Edit with editing on, Contents on a page with
+  headings, Links Out/In on a note page, Tasks with the task browser enabled,
+  Flashcards and Slides only on a deck.
+- **Search (⋯ → Search):** a native sheet, not the page's modal (see
+  [Native search](#native-search)).
+- **While the editor is open** the bar is hidden and the edge swipes are
+  off: the editor has its own Cancel/Save header, and Back would only throw
+  away unsaved edits.
+
+The page's actions:
+
+| Action | Element and method | Offered when |
+|--------|--------------------|--------------|
+| `browse` | `<mbr-browse>` / `<mbr-browse-single>` `open()` | always |
+| `search` | `<mbr-search>` `open()` (the ⋯ menu opens the native sheet instead) | always |
+| `edit` | `<mbr-editor>` `open()` | `canEdit` (editing on, a source file) |
+| `info` | `<mbr-info>` `open()` | always |
+| `toc` | `<mbr-fuzzy-nav>` `open('toc')` | `hasHeadings` (the page has headings) |
+| `links-out` | `<mbr-fuzzy-nav>` `open('links-out')` | `hasPageLinks` (a note page; with link tracking off the tab is just empty) |
+| `links-in` | `<mbr-fuzzy-nav>` `open('links-in')` | `hasPageLinks` |
+| `tasks` | `<mbr-tasks>` `open()` | the task browser is enabled |
+| `flashcards` | `<mbr-flashcards>` `open()` | a deck page |
+| `slides` | `<mbr-slides>` `open()` | a slide document |
+| `new` | `<mbr-editor>` `openNew()` | `canCreate` (editing on); the `+` button, not a ⋯ item |
+
+**Edge swipes:** a swipe in from the left screen edge opens Browse, one from
+the right edge opens Info, each only where the page offers that action and
+never while the editor is open, slides are playing (Reveal changes slides on a
+horizontal swipe) or the search sheet is up; a light haptic marks it. They are
+a shortcut: both stay in ⋯. The trade-off is Back: WebKit's back/forward
+swipes own the same edges, so they are off for good (both would fire), and
+Back is the bar's button and its long-press history. The gesture is UIKit's
+`UIScreenEdgePanGestureRecognizer` (`EdgeSwipe` in `VaultScreen.swift`),
+attached to the web view beside its own recognizers rather than drawn over it:
+it begins only at the screen's edge (in landscape too, beside the notch), it
+fires once a drag is clearly horizontal and inward (40pt, or a fast 16pt
+flick), and a tap, a vertical scroll or a selection handle that does not start
+at the very edge reaches the page untouched, which an overlay strip could not
+promise. Once it fires, UIKit cancels the page's touches.
 
 The two halves:
 
 | Direction | How |
 |-----------|-----|
 | App → page, at document start | A `WKUserScript` sets `window.__MBR_EMBEDDED__ = true` and `html.mbr-embedded`. theme.css then collapses the header (to zero height, not `display: none`, because its components host the overlays) and hides the breadcrumbs. Nothing server-side changes, so desktop, server and static pages never see it |
-| Page → app, on every load | `components/src/app-bridge.ts` posts `{type: 'page', url, title, breadcrumbs, actions}` to the `mbrApp` script-message handler, which fills `PageInfo` |
-| App → page, on a menu tap | `window.mbrApp.open('<action>')` calls the element's public `open()`, the same path as its button and shortcut |
+| Page → app, on every load | `components/src/app-bridge.ts` posts `{type: 'page', url, title, breadcrumbs, actions, editorOpen}` to the `mbrApp` script-message handler, which fills `PageInfo` |
+| Page → app, editor opens/closes | `{type: 'editor', open}`, from `<mbr-editor>`'s `mbr-editor-state` event; sets `PageInfo.editorOpen` (every page message sets it again, so a new page starts with the bar back) |
+| App → page, on a menu tap | `window.mbrApp.open('<action>')` calls the element's public `open()` (`openNew()` for `new`), the same path as its button and shortcut |
 
-The action names are Swift string literals (`AppAction` raw values).
-`app-bridge.test.ts` reads `AppBridge.swift` and checks every name, so a rename
+The action names and the message types (`"page"`, `"editor"`) are Swift
+string literals (`AppAction` raw values, `PageInfo.apply`).
+`app-bridge.test.ts` reads `AppBridge.swift` and checks every one, so a rename
 on either side fails a test.
+
+## Native search
+
+⋯ → Search presents `Views/SearchSheet.swift`, a SwiftUI sheet with a
+`.searchable` field activated as it appears, so the keyboard comes up with it.
+The page's `<mbr-search>` modal cannot do that from the menu: WebKit raises the
+software keyboard for a script `focus()` only while the user is touching the
+web view, and a choice in a native menu is not that (the modal opened with a
+focused input and no keyboard). The page still lists `search` as an action, and
+its own button and `/` shortcut still open the web modal.
+
+`Model/VaultSearch.swift` sends `POST /.mbr/search` through `MbrApp.handle`
+(in process, like the scheme handler) with the web modal's defaults: `scope:
+all` (titles, tags and content), the whole vault, markdown only, 20 results,
+nothing under two characters. Each keystroke restarts a `.task(id: query)`,
+which is the 200 ms debounce and the stale-answer guard in one: a cancelled
+run changes nothing. Rows show the title, the folder and the content snippet
+(else the description); a footnote reports `not_downloaded` notes content search
+skipped, a scan still in progress, and "Showing N of M". Tapping a row (or
+Return, for the first) closes the sheet and loads the page. While the field is
+active iOS swaps the sheet's bar (and its Close) for the field and a system X
+that only deactivates it; the sheet dismisses itself when that happens, so the
+X closes it. Snippets drop grep's `Line N: ` prefix.
+
+Known gaps: no type facets, folder picker, "current folder only" or file-type
+toggle (the web modal has them); `key:value` facets typed into the field work.
 
 ## Simulator self-test
 
@@ -169,7 +251,9 @@ Run twice: the second `full` launch should report `localStorage: previous launch
 and `open: fromCache=true`.
 
 `./build.sh uitest` runs `MBRMobileUITests`. It launches `deep`, opens the title,
-⋯ and Back menus, then goes to the home screen and finds the icon. At each
-state it prints `SHOT <name>` and pauses. A script watching the output can
-take `xcrun simctl io <device> screenshot` then; the same states are kept as
-attachments in the `.xcresult`.
+⋯ and Back menus, taps `+` (New Note), then goes to the home screen and finds the icon.
+`testNativeSearchFromMenu` picks ⋯ → Search and checks the native search field
+is there with the keyboard already up, types `flashcards`, waits for the
+Flashcards result, taps it and checks the bar's title changed. At each state the tests print
+`SHOT <name>` and pause. A script watching the output can take `xcrun simctl io <device> screenshot`
+then; the same states are kept as attachments in the `.xcresult`.

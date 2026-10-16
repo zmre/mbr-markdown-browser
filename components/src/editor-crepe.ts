@@ -60,7 +60,35 @@ export interface OpenEditorOptions {
   onReady?: () => void;
   /** Called when the modal is dismissed so the trigger can reset its state. */
   onClose: () => void;
+  /**
+   * Called after a save the reader asked for (Save, Cmd/Ctrl+S, or "Save" in
+   * the unsaved-changes prompt on close) succeeded. Not called for the save a
+   * New/Rename/Move makes on its way to another page, which navigates anyway.
+   *
+   * The trigger uses it to reload the page where no live-reload socket will
+   * (the iOS app's `mbr:` scheme), so the page under the editor shows the edit.
+   */
+  onSaved?: () => void;
 }
+
+/**
+ * The Crepe feature switches the editor runs with.
+ *
+ * CodeMirror (and its dependent LaTeX feature) are disabled. CodeMirror
+ * statically pulls in @codemirror/language-data (≈50 lazy language imports) —
+ * bloating the bundle and, when inlined into a single chunk, breaking module
+ * init order. The LaTeX feature depends on CodeMirror, so it must be disabled
+ * too. Neither is essential here: code blocks still save as fenced code and
+ * math still saves as `$…$` (rendered on the page by the existing katex
+ * component); only the in-editor helpers are dropped.
+ *
+ * Exported so `editor-roundtrip.test.ts` parses and serializes with exactly the
+ * configuration a real save uses.
+ */
+export const CREPE_FEATURES = {
+  [CrepeFeature.CodeMirror]: false,
+  [CrepeFeature.Latex]: false,
+} as const;
 
 let stylesInjected = false;
 
@@ -151,13 +179,6 @@ const MODAL_CSS = `
   border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.35);
   overflow: hidden;
 }
-.mbr-editor-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0.75rem 1rem; border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0);
-}
-.mbr-editor-header h2 { margin: 0; font-size: 1rem; }
-.mbr-editor-header .path { font-weight: normal; opacity: 0.7; font-size: 0.85rem; margin-left: 0.5rem; }
-.mbr-editor-close { background: transparent; border: none; font-size: 1.4rem; cursor: pointer; color: inherit; line-height: 1; padding: 0.25rem 0.5rem; }
 .mbr-editor-body { flex: 1; display: flex; flex-direction: column; overflow: auto; }
 .mbr-editor-fm { border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0); }
 .mbr-editor-fm summary { cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem; opacity: 0.85; }
@@ -168,15 +189,21 @@ const MODAL_CSS = `
 }
 .mbr-editor-crepe { flex: 1; min-height: 12rem; overflow: auto; }
 .mbr-editor-footer {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0.6rem 1rem; border-top: 1px solid var(--pico-muted-border-color, #e0e0e0);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0 0.5rem;
+  padding: 0 0.5rem; min-height: 44px;
+  border-top: 1px solid var(--pico-muted-border-color, #e0e0e0);
 }
-.mbr-editor-footer .status { flex: 1; font-size: 0.85rem; }
+.mbr-editor-tools { display: flex; align-items: center; gap: 0.25rem; }
+.mbr-editor-footer .status { flex: 1 1 8rem; min-width: 0; font-size: 0.85rem; padding: 0.25rem 0.5rem; }
+.mbr-editor-footer .status:empty { padding: 0; }
 .mbr-editor-footer .status.error { color: var(--pico-del-color, #b3261e); }
 .mbr-editor-footer .status.ok { color: var(--pico-ins-color, #1a7f37); }
-.mbr-editor-token { display: none; font-family: var(--pico-font-family-monospace, monospace); font-size: 0.85rem; padding: 0.3rem 0.5rem; min-width: 16rem; }
-.mbr-editor-token.show { display: inline-block; }
-.mbr-editor-footer button { padding: 0.35rem 0.9rem; cursor: pointer; }
+.mbr-editor-modal .mbr-editor-token {
+  display: none; width: auto; margin: 0.35rem 0.5rem;
+  font-family: var(--pico-font-family-monospace, monospace); font-size: 0.85rem;
+  padding: 0.3rem 0.5rem; min-width: 16rem; height: auto;
+}
+.mbr-editor-modal .mbr-editor-token.show { display: inline-block; }
 .mbr-editor-loading { padding: 2rem; text-align: center; opacity: 0.7; }
 `;
 
@@ -186,8 +213,11 @@ const MODAL_CSS = `
  * is a no-wrap row of 44px items with `overflow: hidden`, so most of it was out
  * of reach. Here the modal is full-screen (clear of the notch and home
  * indicator), the document gets phone margins (wider on the left, where
- * Crepe's block handle sits), the toolbar wraps onto a second row within the
- * screen, and the header and footer wrap instead of running off the edge.
+ * Crepe's block handle sits), and the toolbar wraps onto a second row within
+ * the screen. The header and footer are one layout at every width (see
+ * HEADER_CSS); here the status takes its own row, every field the reader can
+ * type into is 16px (anything smaller makes iOS zoom the page on focus), and
+ * the nested pickers become top-anchored cards below the inset.
  */
 export const NARROW_CSS = `
 @media (max-width: 600px) {
@@ -199,14 +229,29 @@ export const NARROW_CSS = `
     box-sizing: border-box;
   }
   .milkdown .ProseMirror { padding: 16px 14px 24px 30px; }
-  .mbr-editor-header { flex-wrap: wrap; gap: 0.25rem 0.5rem; padding: 0.5rem 0.75rem; }
-  .mbr-editor-header h2 { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
-  .mbr-editor-header .path { display: block; margin-left: 0; }
-  .mbr-editor-fileactions { margin-left: 0; flex-wrap: wrap; }
-  .mbr-editor-close { min-width: 44px; min-height: 44px; }
-  .mbr-editor-footer { flex-wrap: wrap; padding: 0.5rem 0.75rem; }
-  .mbr-editor-footer .status { flex: 1 1 100%; }
-  .mbr-editor-token { min-width: 0; flex: 1 1 100%; }
+  .mbr-editor-footer .status { flex: 1 1 100%; order: -1; }
+  .mbr-editor-footer .status:empty { display: none; }
+  .mbr-editor-modal .mbr-editor-token { min-width: 0; flex: 1 1 100%; font-size: 16px; }
+  .mbr-editor-fm textarea { font-size: 16px; }
+  .mbr-picker-field input[type="text"], .mbr-picker-field textarea { font-size: 16px; }
+  /* A card at a fixed distance below the top inset (the native bar in the
+   * app, the notch in a browser), never a bottom sheet: the list shrinks as
+   * the reader types, and a bottom-anchored box then moves its path field
+   * around under their finger. Anchored at the top only the bottom edge moves.
+   * The cap uses svh, which the on-screen keyboard does not change. */
+  .mbr-picker-backdrop {
+    align-items: flex-start;
+    padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  }
+  .mbr-picker-modal {
+    width: calc(100vw - 1rem); border-radius: 12px;
+    max-height: calc(100vh - env(safe-area-inset-top, 0px) - 2rem);
+    max-height: calc(100svh - env(safe-area-inset-top, 0px) - 2rem);
+    box-sizing: border-box;
+  }
+  .mbr-picker-footer { flex-wrap: wrap; }
+  .mbr-picker-footer button, .mbr-picker-close, .mbr-picker-confirm button { min-height: 44px; }
+  .mbr-picker-close { min-width: 44px; }
   .milkdown .milkdown-toolbar {
     flex-wrap: wrap;
     max-width: calc(100vw - 16px);
@@ -216,17 +261,73 @@ export const NARROW_CSS = `
 }
 `;
 
-// Header file actions (New / Rename / Move) and the footer "Insert media"
-// button. Kept visually light so they don't compete with the title/close.
+/**
+ * The editor's bars, in the shape of a native editing sheet: Cancel on the
+ * left, the note's name in the middle, a ⋯ menu (New / Rename / Move) and Save
+ * on the right; a format bar of icon + label tools at the bottom. One layout at
+ * every width. Scoped under `.mbr-editor-modal` so it outranks Pico's global
+ * `button` rules (filled, bordered, full-width in places), which would
+ * otherwise turn every bar button into a coloured block.
+ */
 const HEADER_CSS = `
-.mbr-editor-fileactions { display: flex; align-items: center; gap: 0.3rem; margin-left: auto; margin-right: 0.5rem; }
-.mbr-editor-fileactions button {
-  font-size: 0.8rem; padding: 0.2rem 0.55rem; cursor: pointer;
-  background: transparent; color: inherit;
-  border: 1px solid var(--pico-muted-border-color, #ccc); border-radius: 5px;
+.mbr-editor-header {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: 0.25rem; min-height: 44px; padding: 0 0.25rem;
+  border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0);
 }
-.mbr-editor-fileactions button:hover { background: var(--pico-secondary-hover-background, #eceef4); }
-.mbr-editor-media { }
+.mbr-editor-modal .mbr-editor-bar-btn,
+.mbr-editor-modal .mbr-editor-tool {
+  appearance: none; -webkit-appearance: none;
+  background: none; border: 0; box-shadow: none; margin: 0;
+  padding: 0 0.75rem; min-height: 44px; min-width: 44px; width: auto;
+  font: inherit; font-size: 1.0625rem; line-height: 1.2;
+  color: var(--pico-primary, #0172ad); border-radius: 8px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem;
+}
+.mbr-editor-modal .mbr-editor-bar-btn:hover,
+.mbr-editor-modal .mbr-editor-tool:hover {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.mbr-editor-modal .mbr-editor-bar-btn:focus-visible,
+.mbr-editor-modal .mbr-editor-tool:focus-visible,
+.mbr-editor-modal .mbr-editor-menu [role="menuitem"]:focus-visible {
+  outline: 2px solid var(--pico-primary, #0172ad); outline-offset: -2px;
+}
+.mbr-editor-modal .mbr-editor-save { font-weight: 600; }
+.mbr-editor-modal .mbr-editor-more { font-size: 1.4rem; letter-spacing: 0.05em; }
+.mbr-editor-title { min-width: 0; text-align: center; line-height: 1.2; }
+.mbr-editor-title h2 {
+  margin: 0; font-size: 1.0625rem; font-weight: 600; color: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mbr-editor-title .path {
+  display: block; font-size: 0.75rem; color: var(--pico-muted-color, #6b7280);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mbr-editor-title .path:empty { display: none; }
+.mbr-editor-actions { position: relative; display: flex; align-items: center; }
+.mbr-editor-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 10;
+  min-width: 13rem; padding: 0.35rem;
+  background: var(--pico-card-background-color, var(--pico-background-color, #fff));
+  color: var(--pico-color, #1a1a1a);
+  border: 1px solid var(--pico-muted-border-color, #e0e0e0); border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0,0,0,0.22);
+  display: flex; flex-direction: column;
+}
+.mbr-editor-menu[hidden] { display: none; }
+.mbr-editor-modal .mbr-editor-menu [role="menuitem"] {
+  appearance: none; -webkit-appearance: none;
+  background: none; border: 0; box-shadow: none; margin: 0; width: 100%;
+  min-height: 44px; padding: 0 0.75rem; border-radius: 8px;
+  font: inherit; font-size: 1rem; color: inherit; text-align: left; cursor: pointer;
+}
+.mbr-editor-modal .mbr-editor-menu [role="menuitem"]:hover,
+.mbr-editor-modal .mbr-editor-menu [role="menuitem"]:focus {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.mbr-editor-tool svg { width: 1.15em; height: 1.15em; flex: none; }
+.mbr-editor-modal .mbr-editor-tool { font-size: 0.95rem; }
 `;
 
 // Footnote nodes (from the gfm preset) are unstyled in the editor by default.
@@ -262,7 +363,6 @@ const FOOTNOTE_CSS = `
   display: inline;
   margin: 0;
 }
-.mbr-editor-footnote { margin-right: auto; }
 `;
 
 /**
@@ -341,26 +441,53 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // Normalized document content as of load / last successful save. Compared
   // against the live content to detect unsaved edits before File operations.
   let savedContent = '';
+  // True once Crepe is up and `savedContent` holds its normalized baseline.
+  // Until then nothing can be dirty and nothing can be saved.
+  let ready = false;
+  let closed = false;
 
   const close = () => {
+    if (closed) return;
+    closed = true;
     if (crepe) {
       try { crepe.destroy(); } catch { /* ignore */ }
     }
     document.removeEventListener('keydown', onKeydown);
+    closeMenu();
     backdrop.remove();
     opts.onClose();
   };
 
+  // Replaced once the editor is up (it needs the dirty check and the save).
+  // Before that there is nothing to lose, so closing is immediate.
+  let requestClose: () => Promise<void> = async () => close();
+  let saveFromShortcut: () => void = () => {};
+
   const onKeydown = (e: KeyboardEvent) => {
+    // A nested picker or the unsaved-changes prompt owns the keyboard.
+    if (document.querySelector('.mbr-picker-backdrop')) return;
     if (e.key === 'Escape') {
       e.preventDefault();
-      close();
+      void requestClose();
+    } else if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      e.key.toLowerCase() === 's'
+    ) {
+      // Always swallow it: the browser's own "Save page as…" is never wanted here.
+      e.preventDefault();
+      saveFromShortcut();
     }
   };
   document.addEventListener('keydown', onKeydown);
   backdrop.addEventListener('mousedown', (e) => {
-    if (e.target === backdrop) close();
+    if (e.target === backdrop) void requestClose();
   });
+
+  // The ⋯ menu's open/close live up here because `close()` tears it down.
+  // Both are rebound once the header exists.
+  let closeMenu: () => void = () => {};
 
   // Loading placeholder while we fetch + spin up Crepe.
   const loading = document.createElement('div');
@@ -421,39 +548,106 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   const { frontmatter, body } = splitFrontmatter(raw);
   loading.remove();
 
-  // Build modal chrome.
+  // Build modal chrome: Cancel | title | ⋯ Save, as a native editing sheet.
   modal.innerHTML = '';
   const header = document.createElement('div');
   header.className = 'mbr-editor-header';
-  header.innerHTML = `<h2>Edit<span class="path"></span></h2>`;
-  header.querySelector('.path')!.textContent = opts.filePath;
 
-  // File actions (New / Rename / Move). Rename and Move share the path picker
-  // (rename = move to a new filename); they differ only in the initial cursor
-  // selection. Each guards unsaved edits before navigating away.
-  const fileActions = document.createElement('div');
-  fileActions.className = 'mbr-editor-fileactions';
-  const mkFileBtn = (label: string, title: string, onClick: () => void): HTMLButtonElement => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.title = title;
-    b.addEventListener('click', onClick);
-    return b;
+  const cancelBtn = barButton('Cancel', 'mbr-editor-cancel');
+  cancelBtn.title = 'Close the editor (Esc)';
+  cancelBtn.addEventListener('click', () => void requestClose());
+
+  const { name, folder } = splitFilePath(opts.filePath);
+  const title = document.createElement('div');
+  title.className = 'mbr-editor-title';
+  title.title = opts.filePath;
+  const h2 = document.createElement('h2');
+  h2.textContent = name;
+  const pathLine = document.createElement('span');
+  pathLine.className = 'path';
+  pathLine.textContent = folder;
+  title.append(h2, pathLine);
+
+  // File actions (New / Rename / Move) behind ⋯. Rename and Move share the path
+  // picker (rename = move to a new filename); they differ only in the initial
+  // cursor selection. Each guards unsaved edits before navigating away.
+  const actions = document.createElement('div');
+  actions.className = 'mbr-editor-actions';
+  const moreBtn = barButton('⋯', 'mbr-editor-more');
+  moreBtn.setAttribute('aria-label', 'File actions');
+  moreBtn.title = 'File actions';
+  moreBtn.setAttribute('aria-haspopup', 'menu');
+  moreBtn.setAttribute('aria-expanded', 'false');
+  const menu = document.createElement('div');
+  menu.className = 'mbr-editor-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'File actions');
+  menu.hidden = true;
+  const menuItem = (label: string, hint: string, run: () => void): HTMLButtonElement => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
+    item.textContent = label;
+    item.title = hint;
+    item.addEventListener('click', () => {
+      closeMenu();
+      run();
+    });
+    return item;
   };
-  fileActions.append(
-    mkFileBtn('New', 'Create a new markdown file', () => void handleNew()),
-    mkFileBtn('Rename', 'Rename this file', () => void handleMove('basename')),
-    mkFileBtn('Move', 'Move this file to another folder', () => void handleMove('folder')),
-  );
-  header.appendChild(fileActions);
+  const menuItems = [
+    menuItem('New note…', 'Create a new markdown file', () => void handleNew()),
+    menuItem('Rename…', 'Rename this file', () => void handleMove('basename')),
+    menuItem('Move…', 'Move this file to another folder', () => void handleMove('folder')),
+  ];
+  menu.append(...menuItems);
 
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'mbr-editor-close';
-  closeBtn.setAttribute('aria-label', 'Close editor');
-  closeBtn.textContent = '×';
-  closeBtn.addEventListener('click', close);
-  header.appendChild(closeBtn);
+  // While open, a capture-phase listener on the document sees Escape before
+  // the editor's own (bubble-phase) handler and stops it, so Escape closes the
+  // menu, not the editor; a pointerdown anywhere outside closes it too.
+  const onMenuKeydown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu();
+      moreBtn.focus();
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const at = menuItems.indexOf(document.activeElement as HTMLButtonElement);
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = (at + step + menuItems.length) % menuItems.length;
+      menuItems[at < 0 && step < 0 ? menuItems.length - 1 : next].focus();
+    }
+  };
+  const onOutsidePointer = (e: Event) => {
+    const t = e.target as Node | null;
+    if (t && (menu.contains(t) || moreBtn.contains(t))) return;
+    closeMenu();
+  };
+  const openMenu = () => {
+    menu.hidden = false;
+    moreBtn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('keydown', onMenuKeydown, true);
+    document.addEventListener('pointerdown', onOutsidePointer, true);
+    menuItems[0].focus();
+  };
+  closeMenu = () => {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    moreBtn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('keydown', onMenuKeydown, true);
+    document.removeEventListener('pointerdown', onOutsidePointer, true);
+  };
+  moreBtn.addEventListener('click', () => (menu.hidden ? openMenu() : closeMenu()));
+
+  const saveBtn = barButton('Save', 'mbr-editor-save');
+  saveBtn.title = 'Save (⌘S / Ctrl+S)';
+  actions.append(moreBtn, menu, saveBtn);
+
+  header.append(cancelBtn, title, actions);
   modal.appendChild(header);
 
   const bodyWrap = document.createElement('div');
@@ -479,17 +673,19 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   bodyWrap.appendChild(crepeHost);
   modal.appendChild(bodyWrap);
 
-  // Footer: status, token field, actions.
+  // Footer: the format bar, status and the token field.
   const footer = document.createElement('div');
   footer.className = 'mbr-editor-footer';
   const status = document.createElement('span');
   status.className = 'status';
+  status.setAttribute('role', 'status');
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
   tokenInput.className = 'mbr-editor-token';
   tokenInput.placeholder = 'Edit token';
   tokenInput.value = sessionToken;
   tokenInput.autocomplete = 'off';
+  tokenInput.setAttribute('aria-label', 'Edit token');
   // Publish as the user types, rather than only on save. Uploads, New, Rename
   // and Move all read `sessionToken` through `authHeaders`, and a token typed
   // for one of those used not to be picked up until a save happened to run.
@@ -501,10 +697,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // than a slash-menu item) so the insert never has to reconcile with Crepe's
   // typed `/query` range. ProseMirror keeps the last selection even when focus
   // moves to this button, so the reference lands at the previous cursor.
-  const footnoteBtn = document.createElement('button');
-  footnoteBtn.type = 'button';
-  footnoteBtn.className = 'mbr-editor-footnote';
-  footnoteBtn.textContent = 'Footnote';
+  const footnoteBtn = toolButton(FOOTNOTE_ICON, 'Footnote', 'mbr-editor-footnote');
   footnoteBtn.title = 'Insert a footnote at the cursor';
   footnoteBtn.setAttribute('aria-label', 'Insert footnote');
   footnoteBtn.addEventListener('click', () => {
@@ -519,19 +712,15 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // it opens the picker in edit mode (prefilled) to replace it; otherwise it
   // inserts a new embed at the cursor. Its label tracks that context (see
   // `setMediaButtonMode`); double-clicking any embed is the primary edit path.
-  const mediaBtn = document.createElement('button');
-  mediaBtn.type = 'button';
-  mediaBtn.className = 'mbr-editor-media';
-  mediaBtn.textContent = 'Insert media';
+  const mediaBtn = toolButton(MEDIA_ICON, 'Media', 'mbr-editor-media');
+  const mediaLabel = mediaBtn.querySelector('.label') as HTMLSpanElement;
   mediaBtn.title = 'Insert a media embed — double-click an existing embed to edit';
   mediaBtn.setAttribute('aria-label', 'Insert media');
   mediaBtn.addEventListener('click', () => void handleMedia());
-  const cancelBtn = document.createElement('button');
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.addEventListener('click', close);
-  const saveBtn = document.createElement('button');
-  saveBtn.textContent = 'Save';
-  footer.append(footnoteBtn, mediaBtn, status, tokenInput, cancelBtn, saveBtn);
+  const tools = document.createElement('div');
+  tools.className = 'mbr-editor-tools';
+  tools.append(footnoteBtn, mediaBtn);
+  footer.append(tools, status, tokenInput);
   modal.appendChild(footer);
 
   const setStatus = (msg: string, kind: '' | 'ok' | 'error' = '') => {
@@ -545,28 +734,19 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // before Crepe so the plugin can call it from its first `update`.
   const setMediaButtonMode = (target: EditTarget | null): void => {
     const editing = target !== null;
-    mediaBtn.textContent = editing ? 'Edit media' : 'Insert media';
+    mediaLabel.textContent = editing ? 'Edit media' : 'Media';
     mediaBtn.setAttribute('aria-label', editing ? 'Edit media' : 'Insert media');
     mediaBtn.title = editing
       ? 'Edit the selected embed — or double-click any embed to edit'
       : 'Insert a media embed — double-click an existing embed to edit';
   };
 
-  // Instantiate Crepe with CodeMirror (and its dependent LaTeX feature)
-  // disabled. CodeMirror statically pulls in @codemirror/language-data (≈50
-  // lazy language imports) — bloating the bundle and, when inlined into a single
-  // chunk, breaking module init order. The LaTeX feature depends on CodeMirror,
-  // so it must be disabled too. Neither is essential here: code blocks still
-  // save as fenced code and math still saves as `$…$` (rendered on the page by
-  // the existing katex component); only the in-editor helpers are dropped.
+  // Instantiate Crepe (see CREPE_FEATURES for why CodeMirror/LaTeX are off).
   try {
     crepe = new Crepe({
       root: crepeHost,
       defaultValue: body,
-      features: {
-        [CrepeFeature.CodeMirror]: false,
-        [CrepeFeature.Latex]: false,
-      },
+      features: CREPE_FEATURES,
       // Route the ImageBlock uploader to our server endpoint. Crepe falls back
       // `inlineOnUpload ?? onUpload` and `blockOnUpload ?? onUpload`, and its
       // drop/paste uploader reads the same block `onUpload`, so this single
@@ -612,11 +792,12 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // the normalized content now rather than comparing against the raw source.
   const currentContent = (): string =>
     crepe ? recombine(fmTextarea.value, unescapeWikilinks(crepe.getMarkdown())) : savedContent;
-  const isDirty = (): boolean => crepe !== null && currentContent() !== savedContent;
+  const isDirty = (): boolean => ready && currentContent() !== savedContent;
   savedContent = currentContent();
+  ready = true;
 
   const doSave = async (): Promise<boolean> => {
-    if (!crepe) return false;
+    if (!crepe || !ready) return false;
     // Belt and braces alongside the `input` listener: a value set some way that
     // fires no input event still reaches the request and the main bundle.
     sessionToken = tokenInput.value.trim();
@@ -650,35 +831,59 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       return false;
     }
   };
-  saveBtn.addEventListener('click', () => void doSave());
+  /** A save the reader asked for: on success, let the trigger refresh the page. */
+  const saveAndNotify = async (): Promise<void> => {
+    if (saveBtn.hasAttribute('aria-busy')) return;
+    // Nothing changed: write nothing. The baseline is Crepe's *normalized*
+    // markdown, not the file, so posting it would replace the source with
+    // remark's re-serialization of it — which is lossy for everything
+    // CommonMark+GFM cannot represent (definition-list continuations,
+    // `--- {attrs}`, `[-]`/`[>]` tasks; see editor-roundtrip.test.ts). Skipping
+    // the request leaves the file byte-for-byte as it was.
+    if (!isDirty()) {
+      setStatus('No changes to save.');
+      return;
+    }
+    if (await doSave()) opts.onSaved?.();
+  };
+  saveBtn.addEventListener('click', () => void saveAndNotify());
+  saveFromShortcut = () => void saveAndNotify();
 
   // ---------------------------------------------------------------------------
   // File operations (New / Rename / Move) and media insertion.
   // ---------------------------------------------------------------------------
 
-  const encodeFsPath = (p: string): string =>
-    p.split('/').map(encodeURIComponent).join('/');
-
-  /** Minimal starter body for a newly created file (an H1 of its stem). */
-  const newFileTemplate = (path: string): string => {
-    const stem = (path.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
-    return `# ${stem}\n`;
-  };
-
   /**
    * Prompts to save/discard/cancel when there are unsaved edits. Resolves
-   * `true` when it's safe to proceed (saved or discarded), `false` on cancel.
+   * `'clean'`, `'saved'` or `'discarded'` when it's safe to proceed, `null` on
+   * cancel (or a failed save, whose error is then on the status line).
    */
-  const guardUnsaved = async (): Promise<boolean> => {
-    if (!isDirty()) return true;
-    const choice = await confirmUnsaved();
-    if (choice === 'cancel') return false;
-    if (choice === 'save') return doSave();
-    return true; // discard
+  let guarding = false;
+  const guardUnsaved = async (): Promise<'clean' | 'saved' | 'discarded' | null> => {
+    if (!isDirty()) return 'clean';
+    if (guarding) return null;
+    guarding = true;
+    try {
+      const choice = await confirmUnsaved();
+      if (choice === 'cancel') return null;
+      if (choice === 'save') return (await doSave()) ? 'saved' : null;
+      return 'discarded';
+    } finally {
+      guarding = false;
+    }
+  };
+
+  // Cancel, Escape and a backdrop click all close through the guard: unsaved
+  // edits used to be dropped without a word.
+  requestClose = async () => {
+    const outcome = await guardUnsaved();
+    if (outcome === null) return;
+    close();
+    if (outcome === 'saved') opts.onSaved?.();
   };
 
   const handleNew = async (): Promise<void> => {
-    if (!(await guardUnsaved())) return;
+    if ((await guardUnsaved()) === null) return;
     const dest = await openPathPicker({
       mode: 'new',
       currentFsPath: opts.filePath,
@@ -688,7 +893,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   };
 
   const handleMove = async (select: 'basename' | 'folder'): Promise<void> => {
-    if (!(await guardUnsaved())) return;
+    if ((await guardUnsaved()) === null) return;
     const dest = await openPathPicker({
       mode: 'move',
       currentFsPath: opts.filePath,
@@ -701,23 +906,17 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   const doCreate = async (path: string, createDirs: boolean): Promise<void> => {
     setStatus('Creating…');
     try {
-      const resp = await fetch(`/.mbr/create/${encodeFsPath(path)}`, {
-        method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/json' }),
-        credentials: 'same-origin',
-        body: JSON.stringify({ content: newFileTemplate(path), create_dirs: createDirs }),
-      });
-      if (resp.ok) {
-        const data = (await resp.json()) as { url_path: string };
+      const result = await postCreate(path, createDirs, authHeaders());
+      if (result.ok) {
         setStatus('Created. Opening…', 'ok');
-        window.location.href = data.url_path;
+        window.location.href = result.urlPath + EDIT_ON_ARRIVAL_HASH;
         return;
       }
-      if (resp.status === 401) {
+      if (result.status === 401) {
         tokenInput.classList.add('show');
         tokenInput.focus();
       }
-      setStatus(describeFileOpError(resp.status, 'create'), 'error');
+      setStatus(describeFileOpError(result.status, 'create'), 'error');
     } catch (err) {
       setStatus(`Create failed: ${(err as Error).message}`, 'error');
     }
@@ -831,6 +1030,133 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // write refused for want of one — the token lives only as long as the page,
   // so on a token-protected server the second case is the usual one.
   if (sessionToken || opts.tokenRequired) tokenInput.classList.add('show');
+}
+
+/**
+ * Fragment a page is opened with to start editing on arrival. `<mbr-editor>`
+ * strips it and opens the editor, so a freshly created note opens ready to
+ * type. Mirrored as a literal in `mbr-editor.ts`, which cannot import this
+ * chunk.
+ */
+export const EDIT_ON_ARRIVAL_HASH = '#mbr-edit';
+
+/** Percent-encodes each segment of a repo-relative path for a URL. */
+function encodeFsPath(p: string): string {
+  return p.split('/').map(encodeURIComponent).join('/');
+}
+
+/** Minimal starter body for a newly created file (an H1 of its stem). */
+export function newFileTemplate(path: string): string {
+  const stem = (path.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
+  return `# ${stem}\n`;
+}
+
+/** Outcome of {@link postCreate}. */
+export type CreateResult = { ok: true; urlPath: string } | { ok: false; status: number };
+
+/**
+ * `POST /.mbr/create/<path>` with the starter template. The one create request,
+ * shared by the editor's New and {@link createNote}. Network failures reject.
+ */
+export async function postCreate(
+  path: string,
+  createDirs: boolean,
+  headers: Record<string, string>,
+): Promise<CreateResult> {
+  const resp = await fetch(`/.mbr/create/${encodeFsPath(path)}`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ content: newFileTemplate(path), create_dirs: createDirs }),
+  });
+  if (!resp.ok) return { ok: false, status: resp.status };
+  const data = (await resp.json()) as { url_path: string };
+  return { ok: true, urlPath: data.url_path };
+}
+
+export interface CreateNoteOptions {
+  /** Repo-relative folder to prefill (`''` for the root). */
+  folder: string;
+  /** The page's in-memory edit token, if it has one (see `edit-token.ts`). */
+  token?: string;
+  /** Called on a 401, so the main bundle can show the token field next time. */
+  onAuthRequired?: () => void;
+}
+
+/**
+ * "New note" without an open editor: pick a path, create the file, and open
+ * it with {@link EDIT_ON_ARRIVAL_HASH} so the editor comes up on arrival.
+ *
+ * There is no editor footer to type a token into here, so a refusal is an
+ * `alert` (native in the iOS app). On a token-protected server the token the
+ * page holds lives only in memory and does not survive the navigation: the new
+ * note's page asks for it again on its first save.
+ */
+export async function createNote(opts: CreateNoteOptions): Promise<void> {
+  injectStyles();
+  const dest = await openPathPicker({
+    mode: 'new',
+    currentFsPath: '',
+    initialFolder: opts.folder,
+    fetchSiteFiles: fetchSiteMarkdownFiles,
+  });
+  if (!dest) return;
+  const headers: Record<string, string> = { 'X-MBR-Edit': '1' };
+  if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
+  let result: CreateResult;
+  try {
+    result = await postCreate(dest.path, dest.createDirs, headers);
+  } catch (err) {
+    window.alert(`Create failed: ${(err as Error).message}`);
+    return;
+  }
+  if (result.ok) {
+    window.location.href = result.urlPath + EDIT_ON_ARRIVAL_HASH;
+    return;
+  }
+  if (result.status === 401) opts.onAuthRequired?.();
+  window.alert(describeFileOpError(result.status, 'create'));
+}
+
+/** A header bar button (Cancel / ⋯ / Save): text only, native-sheet styling. */
+function barButton(label: string, className: string): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = `mbr-editor-bar-btn ${className}`;
+  b.textContent = label;
+  return b;
+}
+
+/** A format-bar tool: a small inline icon plus a text label. */
+function toolButton(iconSvg: string, label: string, className: string): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = `mbr-editor-tool ${className}`;
+  b.innerHTML = iconSvg;
+  const text = document.createElement('span');
+  text.className = 'label';
+  text.textContent = label;
+  b.appendChild(text);
+  return b;
+}
+
+const SVG_ATTRS =
+  'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
+/** Lines of text with a raised mark: a footnote. */
+const FOOTNOTE_ICON = `<svg ${SVG_ATTRS}><path d="M3 8h11M3 13h11M3 18h7"/><path d="M18 4.5l1.5-1v6"/></svg>`;
+/** A framed picture: media. */
+const MEDIA_ICON = `<svg ${SVG_ATTRS}><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 15.5l-5-5-9 9"/></svg>`;
+
+/**
+ * The note's name and its folder, for the title: `notes/2026/plan.md` →
+ * `{ name: 'plan.md', folder: 'notes/2026' }`.
+ */
+export function splitFilePath(path: string): { name: string; folder: string } {
+  const slash = path.lastIndexOf('/');
+  return slash < 0
+    ? { name: path, folder: '' }
+    : { name: path.slice(slash + 1), folder: path.slice(0, slash) };
 }
 
 function describeError(status: number, phase: 'load' | 'save'): string {

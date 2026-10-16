@@ -189,3 +189,76 @@ describe('MbrFuzzyNavElement link sanitization', () => {
     expect(hrefs).toEqual(['#', '#', 'https://example.com/ok', '/docs/guide/'])
   })
 })
+
+/**
+ * The iOS app opens the panel from its ⋯ menu (`app-bridge.ts`'s `toc`,
+ * `links-out`, `links-in`), gated on these two getters.
+ */
+describe('MbrFuzzyNavElement app-menu gates', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    window.headings = undefined
+    window.frontmatter = undefined
+  })
+
+  function mount(): HTMLElement & { hasHeadings: boolean; hasPageLinks: boolean } {
+    const nav = document.createElement('mbr-fuzzy-nav')
+    document.body.appendChild(nav)
+    return nav as HTMLElement & { hasHeadings: boolean; hasPageLinks: boolean }
+  }
+
+  it('reports headings only when the page has some', () => {
+    window.headings = []
+    expect(mount().hasHeadings).toBe(false)
+    document.body.innerHTML = ''
+    window.headings = [{ level: 2, id: 'one', text: 'One' }]
+    expect(mount().hasHeadings).toBe(true)
+  })
+
+  it('reports page links only on a note page (one with a markdown source)', () => {
+    window.frontmatter = undefined
+    expect(mount().hasPageLinks).toBe(false)
+    document.body.innerHTML = ''
+    window.frontmatter = { markdown_source: 'notes/a.md' }
+    expect(mount().hasPageLinks).toBe(true)
+  })
+})
+
+/**
+ * Under 600px (phones, the iOS app) the panel is a full-screen sheet. The app
+ * lays pages out under its status and navigation bars (viewport-fit=cover), so
+ * the sheet must take the safe-area insets, and with no backdrop left to tap
+ * it needs its own close button.
+ */
+describe('MbrFuzzyNavElement narrow layout', () => {
+  const css = (customElements.get('mbr-fuzzy-nav') as unknown as { styles: { cssText: string } }).styles.cssText
+  const narrow = css.slice(css.indexOf('@media (max-width: 600px)'))
+
+  it('is a full-screen sheet clear of the safe areas', () => {
+    expect(narrow).toMatch(/\.modal \{[^}]*height: 100%;[^}]*padding-top: env\(safe-area-inset-top, 0px\);[^}]*padding-bottom: env\(safe-area-inset-bottom, 0px\)/)
+    expect(narrow).toMatch(/\.close-button \{\s*display: flex;/)
+  })
+
+  it('has 44px targets and a 16px field', () => {
+    expect(narrow).toMatch(/\.tab \{[^}]*min-height: 44px/)
+    expect(narrow).toMatch(/\.result-item \{[^}]*min-height: 44px/)
+    expect(narrow).toMatch(/#fuzzy-search-input \{[^}]*font-size: 16px/)
+  })
+
+  it('closes from the close button', async () => {
+    const nav = document.createElement('mbr-fuzzy-nav') as HTMLElement & {
+      open(tab?: string): void
+      isOpen: boolean
+      updateComplete: Promise<unknown>
+    }
+    document.body.appendChild(nav)
+    try {
+      nav.open('toc')
+      await nav.updateComplete
+      nav.shadowRoot?.querySelector<HTMLButtonElement>('.close-button')?.click()
+      expect(nav.isOpen).toBe(false)
+    } finally {
+      nav.remove()
+    }
+  })
+})

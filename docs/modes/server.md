@@ -138,6 +138,13 @@ Press **`-`** (minus key) to open the file browser sidebar. This is a three-pane
 | **Tags** | Hierarchical tag tree with file counts |
 | **Folders** | Directory structure mirroring your filesystem |
 
+Selecting a folder or tag opens a second pane listing its notes. For a folder, the pane lists
+the folder's direct subfolders first (with their note counts), then the notes directly inside
+it; tapping a subfolder moves the pane into it and expands the folder tree to match. On a phone
+the pane covers the tree, so this is how you walk down the folders. Long lists show 100 entries
+at a time, with **Show more** to reveal the next 100. The note you are reading is marked with a
+tinted card and an accent bar.
+
 ### Keyboard Shortcuts
 
 | Key | Action |

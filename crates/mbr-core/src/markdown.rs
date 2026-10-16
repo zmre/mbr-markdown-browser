@@ -1717,6 +1717,117 @@ pub struct RenderOptions<'a> {
     pub wikilink_index: Option<Arc<WikilinkIndex>>,
 }
 
+/// Rewrites the URL-valued Reveal.js background attributes of every
+/// `--- {attrs}` section through [`transform_link`], exactly as an image's
+/// `dest_url` is rewritten in pass 2.
+///
+/// Pages are served at trailing-slash URLs (`deck.md` → `/deck/`), so an
+/// authored `data-background-image="images/x.png"` left verbatim resolves to
+/// `/deck/images/x.png` — a 404 — while `![](images/x.png)` on the same page
+/// works. Running the image transform keeps the two in agreement in server,
+/// static-build (`url_depth`) and QuickLook rendering alike.
+///
+/// - `data-background-image`, `data-background-iframe`: one URL.
+/// - `data-background-video`: a comma-separated list, each item rewritten.
+/// - `data-background`: Reveal's shorthand, which is a URL only when Reveal
+///   itself would treat it as one ([`is_reveal_background_url`]); a colour or
+///   gradient is left alone.
+///
+/// External, root-relative and anchor values are untouched because
+/// [`transform_link`] leaves them untouched.
+fn transform_section_background_urls(
+    section_attrs: HashMap<usize, ParsedAttrs>,
+    config: &LinkTransformConfig,
+) -> HashMap<usize, ParsedAttrs> {
+    section_attrs
+        .into_iter()
+        .map(|(index, attrs)| {
+            let rewritten = attrs
+                .attrs
+                .into_iter()
+                .map(|(key, value)| {
+                    let value = value.map(|v| transform_background_attr(&key, v, config));
+                    (key, value)
+                })
+                .collect();
+            (
+                index,
+                ParsedAttrs {
+                    attrs: rewritten,
+                    ..attrs
+                },
+            )
+        })
+        .collect()
+}
+
+/// The rewrite for one section attribute; anything not a background URL is
+/// returned as is.
+fn transform_background_attr(key: &str, value: String, config: &LinkTransformConfig) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "data-background-image" | "data-background-iframe" => transform_link(&value, config),
+        // A `data:` URL carries its own commas; splitting it would mangle the
+        // payload (`data:…;base64,../AAAA`).
+        "data-background-video"
+            if value
+                .trim_start()
+                .get(..5)
+                .is_some_and(|s| s.eq_ignore_ascii_case("data:")) =>
+        {
+            value
+        }
+        "data-background-video" => value
+            .split(',')
+            .map(|item| {
+                let trimmed = item.trim();
+                if trimmed.is_empty() {
+                    item.to_string()
+                } else {
+                    // Keep the author's spacing around each comma.
+                    let start = item.len() - item.trim_start().len();
+                    let end = start + trimmed.len();
+                    format!(
+                        "{}{}{}",
+                        &item[..start],
+                        transform_link(trimmed, config),
+                        &item[end..]
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        "data-background" if is_reveal_background_url(&value) => transform_link(&value, config),
+        _ => value,
+    }
+}
+
+/// Whether Reveal.js treats a `data-background` shorthand value as an image
+/// URL rather than a CSS background.
+///
+/// Mirrors Reveal's own test (`backgrounds.js`): a value starting with
+/// `http`, `file` or `//`, or containing an image extension followed by
+/// `?`, `#`, whitespace or the end. Anything else (`#336`, `red`,
+/// `rgb(…)`, `linear-gradient(…)`) is assigned to `style.background` by
+/// Reveal and must not be rewritten. Case-insensitive, like Reveal's `/gi`.
+pub(crate) fn is_reveal_background_url(value: &str) -> bool {
+    const IMAGE_EXTENSIONS: [&str; 7] = ["svg", "png", "jpg", "jpeg", "gif", "bmp", "webp"];
+    let lower = value.to_ascii_lowercase();
+    if ["http", "file", "//"].iter().any(|p| lower.starts_with(p)) {
+        return true;
+    }
+    lower.match_indices('.').any(|(dot, _)| {
+        let rest = &lower[dot + 1..];
+        IMAGE_EXTENSIONS.iter().any(|ext| {
+            rest.strip_prefix(ext).is_some_and(|after| {
+                after
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c == '?' || c == '#' || c.is_whitespace())
+            })
+        })
+    })
+}
+
 /// Pass 1's output plus the state passes 2 and 3 read back.
 ///
 /// Bundled so the async and sync entry points cannot drift apart between
@@ -1819,6 +1930,11 @@ fn finish_render(
         opts.valid_tag_sources,
         opts.wikilink_index,
     );
+
+    // Section attributes are parsed in pass 1, before any link context exists;
+    // their Reveal.js background URLs get the same rewrite as an image source.
+    let section_attrs =
+        transform_section_background_urls(section_attrs, &state.link_transform_config);
 
     // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
     // mode. It also re-keys `block_lines` onto its own output; skipping it
@@ -5107,6 +5223,230 @@ mod tests {
             "Value should have escaped &. Got: {}",
             html
         );
+    }
+
+    // ============ Section background URL tests (Reveal.js slides) ============
+
+    /// Renders `content` as a non-index page with the given build-mode depth
+    /// (`None` = server mode, root-relative URLs left alone).
+    fn render_with_depth(content: &str, url_depth: Option<usize>) -> String {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let base = plain_options(root, url_depth.is_none());
+        let opts = RenderOptions {
+            link_transform_config: LinkTransformConfig {
+                url_depth,
+                ..base.link_transform_config.clone()
+            },
+            ..base
+        };
+        render_str(content, &root.join("deck.md"), opts)
+            .unwrap()
+            .html
+    }
+
+    /// The `src` an image with `path` gets on the same page.
+    fn image_src(path: &str, url_depth: Option<usize>) -> String {
+        let html = render_with_depth(&format!("![]({path})"), url_depth);
+        let start = html.find("src=\"").expect("image src") + 5;
+        let len = html[start..].find('"').expect("closing quote");
+        html[start..start + len].to_string()
+    }
+
+    fn background_html(attr: &str, value: &str, url_depth: Option<usize>) -> String {
+        render_with_depth(
+            &format!("First\n\n--- {{{attr}=\"{value}\"}}\n\nSecond"),
+            url_depth,
+        )
+    }
+
+    #[test]
+    fn section_background_image_is_rewritten_like_an_image_src() {
+        for depth in [None, Some(0), Some(2)] {
+            for path in [
+                "images/x.png",
+                "./images/x.png",
+                "../shared/bg.jpg",
+                "/images/x.png",
+            ] {
+                let expected = image_src(path, depth);
+                let html = background_html("data-background-image", path, depth);
+                assert!(
+                    html.contains(&format!(r#"data-background-image="{expected}""#)),
+                    "depth {depth:?}, {path} should become {expected}. Got: {html}"
+                );
+            }
+        }
+        // Spelled out once, so the comparison above cannot pass vacuously.
+        assert!(
+            background_html("data-background-image", "images/x.png", None)
+                .contains(r#"data-background-image="../images/x.png""#)
+        );
+        assert!(
+            background_html("data-background-image", "/images/x.png", Some(2))
+                .contains(r#"data-background-image="../../images/x.png""#)
+        );
+    }
+
+    #[test]
+    fn section_background_on_a_nested_page() {
+        // A page's own folder never enters the arithmetic: `notes/talks/deck.md`
+        // is served at `/notes/talks/deck/`, one level below its folder, exactly
+        // like a root-level page — what differs is the build-mode depth.
+        let html = background_html("data-background-image", "img/bg.png", Some(3));
+        assert!(
+            html.contains(r#"data-background-image="../img/bg.png""#),
+            "{html}"
+        );
+        let html = background_html("data-background-image", "/static/bg.png", Some(3));
+        assert!(
+            html.contains(r#"data-background-image="../../../static/bg.png""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn section_background_index_page_gets_no_extra_parent() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let base = plain_options(root, true);
+        let opts = RenderOptions {
+            link_transform_config: LinkTransformConfig {
+                is_index_file: true,
+                ..base.link_transform_config.clone()
+            },
+            ..base
+        };
+        let html = render_str(
+            "A\n\n--- {data-background-image=\"images/x.png\"}\n\nB",
+            &root.join("index.md"),
+            opts,
+        )
+        .unwrap()
+        .html;
+        assert!(
+            html.contains(r#"data-background-image="images/x.png""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn section_background_external_urls_are_untouched() {
+        for url in [
+            "https://example.com/bg.png",
+            "http://example.com/bg.png",
+            "//cdn.example.com/bg.png",
+            "data:image/png;base64,AAAA",
+        ] {
+            for attr in [
+                "data-background-image",
+                "data-background-video",
+                "data-background-iframe",
+                "data-background",
+            ] {
+                let html = background_html(attr, url, Some(2));
+                assert!(
+                    html.contains(&format!(r#"{attr}="{url}""#)),
+                    "{attr}={url} should be unchanged. Got: {html}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn section_background_shorthand_rewrites_paths_but_not_colours() {
+        for colour in [
+            "#336",
+            "#ff0000",
+            "red",
+            "rgb(10, 20, 30)",
+            "rgba(0,0,0,0.5)",
+            "hsl(120, 50%, 50%)",
+            "linear-gradient(to bottom, #283b95, #17b2c3)",
+            "transparent",
+        ] {
+            let html = background_html("data-background", colour, None);
+            assert!(
+                html.contains(&format!(r#"data-background="{colour}""#)),
+                "colour {colour} must not be rewritten. Got: {html}"
+            );
+        }
+        for (path, expected) in [
+            ("images/bg.png", "../images/bg.png"),
+            ("bg.JPG", "../bg.JPG"),
+            ("img/bg.svg?v=2", "../img/bg.svg?v=2"),
+            ("img/bg.webp#frag", "../img/bg.webp#frag"),
+        ] {
+            let html = background_html("data-background", path, None);
+            assert!(
+                html.contains(&format!(r#"data-background="{expected}""#)),
+                "{path} should become {expected}. Got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn section_background_video_list_is_rewritten_per_item() {
+        let html = background_html(
+            "data-background-video",
+            "media/a.mp4, media/a.webm,https://x.example/a.ogv",
+            None,
+        );
+        assert!(
+            html.contains(
+                r#"data-background-video="../media/a.mp4, ../media/a.webm,https://x.example/a.ogv""#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn section_background_iframe_and_other_attrs() {
+        let html = render_with_depth(
+            "A\n\n--- {#s .c data-background-iframe=\"embeds/demo.html\" \
+             data-transition=\"zoom\" data-background-size=\"cover\" \
+             data-background-color=\"#336\"}\n\nB",
+            None,
+        );
+        assert!(
+            html.contains(r#"data-background-iframe="../embeds/demo.html""#),
+            "{html}"
+        );
+        for untouched in [
+            r#"id="s""#,
+            r#"class="c""#,
+            r#"data-transition="zoom""#,
+            r#"data-background-size="cover""#,
+            r##"data-background-color="#336""##,
+        ] {
+            assert!(html.contains(untouched), "{untouched} missing in {html}");
+        }
+    }
+
+    #[test]
+    fn reveal_background_url_detection_mirrors_reveal() {
+        for url in [
+            "http://x/y",
+            "https://x/y",
+            "file:///x",
+            "//cdn/x",
+            "a.png",
+            "a.PNG",
+            "a.jpeg?x",
+            "a.gif#y",
+            "a.bmp b",
+        ] {
+            assert!(is_reveal_background_url(url), "{url}");
+        }
+        for value in [
+            "#336",
+            "red",
+            "rgb(0,0,0)",
+            "linear-gradient(red, blue)",
+            "a.pngx",
+            "a.png-old",
+            "",
+        ] {
+            assert!(!is_reveal_background_url(value), "{value}");
+        }
     }
 
     // ==================== Incomplete-block marker tests ====================

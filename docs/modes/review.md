@@ -51,6 +51,10 @@ floating button, which appears only once there is something to look at. The
 header is already crowded with controls that are useful on every page; a review
 button would be useful on the handful of pages where you are actually reviewing.
 
+On a phone or in the iOS app, slide decks and flashcard pages put a floating ▶
+button in the same corner. The review button then stacks above it, and both
+stay clear of the home indicator.
+
 ## The six note types
 
 | Type | Marker | Label in the export | Meaning |

@@ -880,12 +880,14 @@ export class MbrInfoElement extends LitElement {
     }
 
     /* Close button */
+    /* Absolute inside the fixed panel, so the panel's safe-area padding does
+     * not move it: in the iOS app it sat under the native bar, untappable. */
     .info-panel-close {
       position: absolute;
-      top: 1rem;
-      right: 1rem;
-      width: 2rem;
-      height: 2rem;
+      top: calc(0.5rem + env(safe-area-inset-top, 0px));
+      right: calc(0.5rem + env(safe-area-inset-right, 0px));
+      width: 44px;
+      height: 44px;
       display: flex;
       align-items: center;
       justify-content: center;

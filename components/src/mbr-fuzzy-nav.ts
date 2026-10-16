@@ -177,6 +177,24 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
     return this._isOpen;
   }
 
+  /**
+   * Whether the ToC tab has anything to list (`window.headings`, which only
+   * markdown pages set). The iOS app lists "Contents" in its menu only then.
+   */
+  public get hasHeadings(): boolean {
+    return this._headings.length > 0;
+  }
+
+  /**
+   * Whether the Links Out / Links In tabs can have entries: only a note page
+   * has a `links.json`. Whether link tracking is on is not known until that
+   * fetch answers (a 404 is "no links"), so a note page with tracking off
+   * still says yes and the tabs show their empty state.
+   */
+  public get hasPageLinks(): boolean {
+    return typeof window.frontmatter?.['markdown_source'] === 'string';
+  }
+
   // ========================================
   // Links Loading
   // ========================================
@@ -731,6 +749,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
         <div class="modal" @click=${this._handleModalClick}>
           <div class="modal-header">
             ${this._renderTabs()}
+            <button class="close-button" @click=${() => this.close()} aria-label="Close">✕</button>
           </div>
           ${this._renderSearchInput()}
           ${this._renderResults()}
@@ -795,14 +814,33 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
 
     /* Header with tabs */
     .modal-header {
+      display: flex;
+      align-items: stretch;
       border-bottom: 1px solid var(--pico-muted-border-color, #eee);
       flex-shrink: 0;
     }
 
     /* Tabs */
     .tabs {
+      flex: 1;
       display: flex;
       padding: 0;
+    }
+
+    /* Only the full-screen (narrow) layout has no backdrop to tap. */
+    .close-button {
+      display: none;
+      flex-shrink: 0;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      margin: 0;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: var(--pico-muted-color, #666);
+      font-size: 1.1rem;
+      cursor: pointer;
     }
 
     .tab {
@@ -909,7 +947,9 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
       font-size: 0.7rem;
       font-weight: 600;
       padding: 0.15rem 0.35rem;
-      background: var(--pico-secondary-background, #f5f5f5);
+      /* Not --pico-secondary-background: that is Pico's slate button fill,
+         against which the muted label all but disappeared. */
+      background: var(--pico-muted-border-color, #eee);
       color: var(--pico-muted-color, #666);
       border-radius: 4px;
       flex-shrink: 0;
@@ -992,20 +1032,69 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
       font-size: 0.7rem;
     }
 
-    /* Responsive */
-    @media (max-width: 480px) {
+    /* Phones and the iOS app: one full-screen sheet, the way the task browser
+       and the browse drawers go. viewport-fit=cover lays the page out under
+       the status bar, the app's native bar and the home indicator, so every
+       edge takes its safe-area inset. Touch targets are 44px; the field is
+       16px so iOS does not zoom on focus. No keyboard hints: there is no
+       keyboard to hint at. */
+    @media (max-width: 600px) {
+      .modal-backdrop {
+        padding: 0;
+        align-items: stretch;
+      }
+
       .modal {
-        margin: 0 0.5rem;
-        max-height: 80vh;
+        max-width: none;
+        max-height: none;
+        height: 100%;
+        margin: 0;
+        border-radius: 0;
+        box-sizing: border-box;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        padding-left: env(safe-area-inset-left, 0px);
+        padding-right: env(safe-area-inset-right, 0px);
+        animation: none;
+      }
+
+      .close-button {
+        display: flex;
       }
 
       .tab {
-        padding: 0.6rem 0.5rem;
+        min-height: 44px;
+        padding: 0.5rem 0.25rem;
         font-size: 0.85rem;
+        gap: 0.35rem;
       }
 
-      .hint {
-        justify-content: center;
+      #fuzzy-search-input {
+        font-size: 16px;
+        min-height: 44px;
+      }
+
+      .search-wrapper {
+        padding-top: 0;
+        padding-bottom: 0;
+      }
+
+      .results-list {
+        min-height: 0;
+        max-height: none;
+      }
+
+      .result-item {
+        min-height: 44px;
+        box-sizing: border-box;
+      }
+
+      .item-text {
+        font-size: 1rem;
+      }
+
+      .modal-footer {
+        display: none;
       }
     }
   `;

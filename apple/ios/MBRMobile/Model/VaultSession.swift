@@ -142,8 +142,12 @@ final class VaultSession {
                 Log.info("ready: fromCache=\(report.fromCache) restored=\(report.restoredFiles) "
                     + "indexed=\(report.indexedFiles) scan=\(report.scanMs)ms ready=\(report.readyMs)ms "
                     + "diff=+\(report.refresh.added)/~\(report.refresh.changed)/-\(report.refresh.removed) "
-                    + "cache=\(app.indexCachePath() ?? "none")")
+                    + "cache=\(app.indexCachePath() ?? "none") "
+                    + "mbrDownloads=\(report.mbrDownloadsRequested)")
                 self?.report = report
+                if report.mbrDownloadsRequested > 0 {
+                    await self?.refreshUntilMbrDownloaded()
+                }
             } catch {
                 Log.info("ready: failed: \(error)")
             }
@@ -203,7 +207,8 @@ final class VaultSession {
             Log.info("refresh (\(reason)): +\(summary.added) ~\(summary.changed) -\(summary.removed) "
                 + "evicted=\(summary.evicted) in \(summary.durationMs)ms; changedPages=\(summary.changedPages); "
                 + ".mbr: config=\(summary.configReloaded) templates=\(summary.templatesReloaded) "
-                + "assets=\(summary.assetsChanged) configError=\(summary.configError ?? "none"); "
+                + "assets=\(summary.assetsChanged) configError=\(summary.configError ?? "none") "
+                + "downloads=\(summary.mbrDownloadsRequested); "
                 + "shown=\(shown ?? "-")")
             if pageChanged || navigationChanged || mbrChanged {
                 let why = pageChanged ? "page changed" : navigationChanged ? "files added or removed" : ".mbr/ changed"
@@ -335,4 +340,30 @@ extension VaultSession {
             Log.info("history: \(item.url.absoluteString) failed: \(error)")
         }
     }
+}
+
+// MARK: .mbr/ downloads
+
+extension VaultSession {
+    /// Files in the vault's `.mbr/` were in the cloud at open (`user.css`,
+    /// templates, `config.toml`) and Rust asked for them; nothing else would,
+    /// and nothing tells the app when they arrive. Refresh on a backoff until
+    /// a refresh reports none outstanding (their arrival reloads the page) or
+    /// the schedule runs out; foregrounding refreshes anyway.
+    private func refreshUntilMbrDownloaded() async {
+        for delay in Self.mbrDownloadRefreshDelays {
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return // the session closed
+            }
+            await self.refresh(reason: ".mbr downloads")
+            if let summary = lastRefresh, summary.mbrDownloadsRequested == 0 {
+                return
+            }
+        }
+        Log.info("refresh: .mbr/ files still not downloaded; leaving them to the next refresh")
+    }
+
+    private static let mbrDownloadRefreshDelays: [Double] = [3, 6, 12, 30, 60]
 }

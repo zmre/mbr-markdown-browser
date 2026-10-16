@@ -15,10 +15,45 @@
  * 5. Wraps sections in .reveal > .slides structure
  * 6. Initializes Reveal.js with notes plugin
  */
-import { LitElement, html, css, nothing } from 'lit'
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
 import { isPlayKey } from './mbr-keys.js'
+import { FAB_CSS, PlayFabController } from './fab.ts'
+import { mermaidSettled } from './mbr-mermaid.ts'
+
+/**
+ * How long Play waits for the page's diagrams before cloning the slides
+ * anyway. Generous, because a phone can take seconds over a large diagram,
+ * but bounded so a stuck render never leaves the button spinning.
+ */
+const DIAGRAM_WAIT_MS = 8000
+
+/**
+ * Dispatched on `document` with `detail: { playing: boolean }`: `true` once
+ * the page has been turned into the presentation (the deck is what is on
+ * screen), `false` when a start fails and on exit. The iOS app bridge
+ * (`app-bridge.ts`) relays it so the native bar steps aside while a deck
+ * plays — the slides' own counterpart to `mbr-editor.ts`'s
+ * `EDITOR_STATE_EVENT`.
+ */
+export const SLIDES_STATE_EVENT = 'mbr-slides-state'
+
+/** Tell the app bridge (and anyone else) whether a presentation is playing. */
+function announceSlidesState(playing: boolean): void {
+  document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing } }))
+}
+
+/** Resolves when `promise` does or after `ms`, whichever is first. */
+function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    void promise.then(() => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
 
 interface RevealPlugin {
   id: string
@@ -97,7 +132,17 @@ export class MbrSlidesElement extends LitElement {
 
   private _slidecontainer: HTMLElement | null = null
 
-  static override styles = css`
+  /** The floating play button's narrow/app gate (`fab.ts`). */
+  private _fab = new PlayFabController(this, () => this._showsPlayFab())
+
+  /**
+   * The "Exit slides" button, while a presentation plays where the floating
+   * form applies. Lives on `<body>`, not in this shadow root: `_transformDom`
+   * hides the `<nav>` this element sits in.
+   */
+  private _exitButton: HTMLButtonElement | null = null
+
+  static override styles = [css`
     :host {
       display: contents;
     }
@@ -153,7 +198,7 @@ export class MbrSlidesElement extends LitElement {
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
-  `
+  `, FAB_CSS]
 
   private _boundKeyHandler: ((e: KeyboardEvent) => void) | null = null
 
@@ -188,6 +233,8 @@ export class MbrSlidesElement extends LitElement {
 
   override disconnectedCallback() {
     super.disconnectedCallback()
+    this._exitButton?.remove()
+    this._exitButton = null
     if (this._boundKeyHandler) {
       document.removeEventListener('keydown', this._boundKeyHandler)
       this._boundKeyHandler = null
@@ -250,6 +297,10 @@ export class MbrSlidesElement extends LitElement {
         loadCss(`${assetBase}reveal-slides.css`),
         loadScript(`${assetBase}reveal.js`),
         loadScript(`${assetBase}reveal-notes.js`),
+        // `_transformDom` deep-clones the slides, so diagrams must be drawn
+        // first: a clone of a block mermaid has not reached yet stays raw
+        // source, and mermaid then draws into the detached original.
+        withTimeout(mermaidSettled(), DIAGRAM_WAIT_MS),
       ])
 
       const win = window as WindowWithReveal
@@ -268,11 +319,16 @@ export class MbrSlidesElement extends LitElement {
         // fill it, which loses the .slides page styling for good.
         document.body.classList.remove('slides-container')
         document.body.classList.add('slides')
+        announceSlidesState(false)
         return
       }
 
       this._transformDom()
       this._isPlaying = true
+      // The deck has replaced the page: announce it now, before Reveal lays
+      // out, so the app's bar is already going when Reveal first measures (it
+      // re-fits on the resize that follows anyway).
+      announceSlidesState(true)
 
       // Build plugins array (only include loaded plugins)
       const plugins: RevealPlugin[] = []
@@ -287,6 +343,17 @@ export class MbrSlidesElement extends LitElement {
             progress: true,
             center: true,
             transition: 'slide',
+            // Reveal 6 switches to its scroll view whenever the viewport is
+            // narrower than `scrollActivationWidth` (default 435px), i.e. on
+            // every phone held upright. That view re-parents each slide into
+            // `.scroll-page` wrappers, moves the backgrounds and reflows the
+            // slides, so a deck's own CSS (`.reveal .slides > section`,
+            // `section.present`), images and diagrams stop rendering as they
+            // do on the desktop -- and `body.slides-container`'s
+            // `overflow: hidden` leaves nothing to scroll anyway. Reveal only
+            // checks the option when it is a number, so `null` keeps the
+            // ordinary scaled 960x700 slides at every width.
+            scrollActivationWidth: null,
             plugins,
           })
           this._deck = win.Reveal!
@@ -297,6 +364,9 @@ export class MbrSlidesElement extends LitElement {
           this._updateScrolling();
         } catch (initError) {
           console.error('[mbr-slides] Reveal.js initialization failed:', initError)
+          // No deck to drive: give the app its bar back so the reader can
+          // navigate away from the half-transformed page.
+          announceSlidesState(false)
         }
       })
     } catch (loadError) {
@@ -304,6 +374,7 @@ export class MbrSlidesElement extends LitElement {
       // Restore original class on error
       document.body.classList.remove('slides-container')
       document.body.classList.add('slides')
+      announceSlidesState(false)
     } finally {
       this._isLoading = false
     }
@@ -392,11 +463,68 @@ export class MbrSlidesElement extends LitElement {
     document.body.classList.add('reveal-viewport')
   }
 
+  /** A slide deck, not yet playing, where the floating form applies. */
+  private _showsPlayFab(): boolean {
+    return this._isSlideDocument && !this._isPlaying && this._fab.visible
+  }
+
+  override updated(changed: PropertyValues<this>) {
+    super.updated(changed)
+    this._syncExitButton()
+  }
+
+  /**
+   * Reveal.js has no way out of a presentation on a touch screen (its `Esc`
+   * is the overview), and the transform has replaced the page's content, so
+   * where the floating play button applies, a playing deck gets a small exit
+   * button in the bottom-left corner — clear of Reveal's own controls at the
+   * bottom right, and above `.reveal` and the (hidden) header.
+   */
+  private _syncExitButton() {
+    const wanted = this._isPlaying && this._fab.visible
+    if (wanted && !this._exitButton) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'mbr-slides-exit'
+      button.textContent = '\u2715'
+      button.setAttribute('aria-label', 'Exit slides')
+      button.title = 'Exit slides'
+      // Light DOM, so the styles travel inline; theme.css is not ours to rely on.
+      button.style.cssText =
+        'position:fixed;z-index:1000;left:calc(0.75rem + env(safe-area-inset-left,0px));' +
+        'bottom:calc(0.75rem + env(safe-area-inset-bottom,0px));width:2.5rem;height:2.5rem;' +
+        'margin:0;padding:0;border:none;border-radius:50%;font-size:1rem;line-height:1;' +
+        'background:rgba(0,0,0,0.45);color:#fff;cursor:pointer;opacity:0.7'
+      button.addEventListener('click', () => this._exitPresentation())
+      document.body.append(button)
+      this._exitButton = button
+    } else if (!wanted && this._exitButton) {
+      this._exitButton.remove()
+      this._exitButton = null
+    }
+  }
+
+  /**
+   * Leave the presentation by reloading the page: `_transformDom` replaced
+   * `main`'s content with clones, so there is nothing to put back. Reveal's
+   * `#/2` slide hash is dropped first, or the reload would land on it.
+   */
+  protected _exitPresentation() {
+    // The reload's fresh page message resets the app anyway; say so first.
+    announceSlidesState(false)
+    history.replaceState(history.state, '', location.pathname + location.search)
+    location.reload()
+  }
+
   override render() {
     // Only show button if this is a slides document and not already playing
     if (!this._isSlideDocument || this._isPlaying) {
       return nothing
     }
+
+    const icon = this._isLoading
+      ? html`<span class="loading-spinner"></span>`
+      : html`<span class="play-icon"></span>`
 
     return html`
       <button
@@ -405,12 +533,19 @@ export class MbrSlidesElement extends LitElement {
         ?disabled=${this._isLoading}
         title="Start presentation mode (P)"
       >
-        ${this._isLoading
-        ? html`<span class="loading-spinner"></span>`
-        : html`<span class="play-icon"></span>`
-      }
+        ${icon}
         <span>${this._isLoading ? 'Loading...' : 'Play Slides (P)'}</span>
       </button>
+      ${this._showsPlayFab()
+        ? html`<button
+            type="button"
+            class="mbr-fab play-fab"
+            @click=${this._startPresentation}
+            ?disabled=${this._isLoading}
+            aria-label="Play slides"
+            title="Play slides (P)"
+          >${icon}</button>`
+        : nothing}
     `
   }
 }

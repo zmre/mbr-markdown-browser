@@ -444,8 +444,21 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     this._isOpen = true;
     this._lastPointer = null;
     if (getMbrConfig().serverMode) this._loadSiteFacets();
-    this.updateComplete.then(() => {
+    // Render now and focus in the same call stack. iOS WebKit raises the
+    // software keyboard only for a focus() made while it still considers the
+    // user to be interacting (the tap, or the app's menu choice that called
+    // `open()`); a focus after Lit's microtask render falls outside that
+    // window, so the field gets focus but no keyboard. `performUpdate` is a
+    // no-op when no update is pending, and the scheduled one then finds
+    // nothing left to do.
+    if (this.isConnected) {
+      this.performUpdate();
       this._input?.focus();
+    }
+    // Fallback for a render that could not happen synchronously (not yet
+    // connected, or an update already in flight).
+    this.updateComplete.then(() => {
+      if (this._isOpen && this.shadowRoot?.activeElement !== this._input) this._input?.focus();
     });
   }
 

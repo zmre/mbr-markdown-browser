@@ -997,6 +997,14 @@ fn cloud_provider_name(path: &Path) -> Option<&'static str> {
 /// Seconds a client is asked to wait before retrying a not-downloaded file.
 const NOT_DOWNLOADED_RETRY_SECS: &str = "2";
 
+/// How long a `/.mbr/*` request waits for a file it asked a cloud provider
+/// for before answering `503`. Short: the page is waiting on it, and a small
+/// CSS or SVG file normally arrives within a second or two.
+const MBR_ASSET_DOWNLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often [`MBR_ASSET_DOWNLOAD_WAIT`] checks whether the file arrived.
+const MBR_ASSET_DOWNLOAD_POLL: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// `Retry-After` plus the de-facto `Refresh`, so a browser that honours it
 /// reloads the page by itself once the file had time to arrive.
 fn add_retry_headers(headers: &mut HeaderMap) {
@@ -4904,7 +4912,7 @@ impl Server {
             tracing::trace!("Checking template folder for: {}", relative_path);
 
             if let Some(file_path) = safe_join_asset(template_folder, &relative_path) {
-                return Self::serve_file_from_path(&file_path).await;
+                return Self::serve_mbr_file(&config, &file_path).await;
             }
         }
 
@@ -4913,7 +4921,7 @@ impl Server {
         tracing::trace!("Checking .mbr dir for: {}", asset_path);
 
         if let Some(file_path) = safe_join_asset(&mbr_dir, &asset_path) {
-            return Self::serve_file_from_path(&file_path).await;
+            return Self::serve_mbr_file(&config, &file_path).await;
         }
 
         // Handle /pico.min.css dynamically based on theme config
@@ -4925,13 +4933,68 @@ impl Server {
         Self::serve_default_file(&asset_path)
     }
 
-    /// Serve a file from the filesystem with appropriate MIME type and cache headers.
-    async fn serve_file_from_path(path: &std::path::Path) -> Result<Response<Body>, StatusCode> {
+    /// Serves one `/.mbr/*` override at `path` (canonical, already vetted by
+    /// `safe_join_asset`), waiting briefly for it when a cloud provider has
+    /// not downloaded it yet.
+    ///
+    /// `.mbr/` is a hidden folder, so the scan never reads anything in it and
+    /// nothing else asks the provider for its files: on iOS a dataless
+    /// `user.css` would otherwise fail every request (`EDEADLK` under the
+    /// app's fail-fast I/O policy). When the repository's vault reports the
+    /// file not downloaded — or the read fails that way — the download is
+    /// requested and the file polled for up to [`MBR_ASSET_DOWNLOAD_WAIT`];
+    /// still missing, it is a `503` with `Retry-After`, logged at DEBUG like
+    /// every other not-downloaded answer.
+    ///
+    /// Free on the desktop: a `LocalVault` answers `availability` without a
+    /// system call, and a file outside the vault (an external
+    /// `template_folder`) is only read, as before.
+    async fn serve_mbr_file(
+        config: &ServerState,
+        path: &Path,
+    ) -> Result<Response<Body>, StatusCode> {
+        let vault = config.repo.vault();
+        let in_vault = vault.vault_path(path).ok();
+        let deadline = Instant::now() + MBR_ASSET_DOWNLOAD_WAIT;
+        let mut requested = false;
+        loop {
+            let pending = in_vault
+                .as_ref()
+                .is_some_and(|p| vault.availability(p) == Availability::NotDownloaded);
+            if !pending {
+                match tokio::fs::read(path).await {
+                    Ok(bytes) => return Self::file_response(path, bytes).await,
+                    Err(e) => {
+                        let error = VaultError::from_io(path.display(), e);
+                        if !matches!(error, VaultError::NotDownloaded { .. }) {
+                            tracing::error!("Failed to read file {}: {error}", path.display());
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                    }
+                }
+            }
+            if !requested {
+                requested = true;
+                if let Some(vault_path) = &in_vault {
+                    vault.request_download(std::slice::from_ref(vault_path));
+                    continue; // a provider with the bytes at hand has them now
+                }
+            }
+            if Instant::now() >= deadline {
+                tracing::debug!(
+                    "{} not downloaded after {}ms; asking for a retry",
+                    path.display(),
+                    MBR_ASSET_DOWNLOAD_WAIT.as_millis()
+                );
+                return Ok(not_downloaded_response(None));
+            }
+            tokio::time::sleep(MBR_ASSET_DOWNLOAD_POLL).await;
+        }
+    }
+
+    /// `bytes` read from `path`, with its MIME type and cache headers.
+    async fn file_response(path: &Path, bytes: Vec<u8>) -> Result<Response<Body>, StatusCode> {
         let mime = Self::guess_mime_type(path);
-        let bytes = tokio::fs::read(path).await.map_err(|e| {
-            tracing::error!("Failed to read file {}: {}", path.display(), e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
 
         // Generate ETag from content
         let etag = generate_etag(&bytes);
@@ -5264,11 +5327,13 @@ impl Server {
             }
             ResolvedPath::DirectoryListing(dir_path) => {
                 tracing::debug!("generating directory listing: {:?}", &dir_path);
+                let edit_enabled = Self::page_edit_enabled(&config, req.headers());
                 Self::directory_to_html(
                     &dir_path,
                     &config.templates,
                     config.base_dir.as_path(),
                     &config,
+                    edit_enabled,
                 )
                 .await
                 .map_err(|e| {
@@ -7610,11 +7675,15 @@ impl Server {
         }
     }
 
+    /// `edit_enabled` is the per-request value from [`Self::page_edit_enabled`]:
+    /// a listing carries `<mbr-editor>` too (its "New note" entry point), so it
+    /// must advertise editing exactly when a markdown page here would.
     async fn directory_to_html(
         dir_path: &Path,
         templates: &mbr_core::templates::Templates,
         root_path: &Path,
         config: &ServerState,
+        edit_enabled: bool,
     ) -> Result<Response<Body>, MbrError> {
         use serde_json::json;
 
@@ -7707,6 +7776,10 @@ impl Server {
 
         // Add is_home to context for template conditional rendering
         context.insert("is_home".to_string(), json!(is_root));
+        // Drives `window.__MBR_CONFIG__.editEnabled` and the nav's
+        // `<mbr-editor>`, which on a listing offers "New note" here. Off when the
+        // request's Host would be refused, as on a markdown page.
+        context.insert("edit_enabled".to_string(), json!(edit_enabled));
 
         let full_html_output = if is_root {
             templates
@@ -7878,6 +7951,7 @@ impl Server {
                     &config.templates,
                     config.base_dir.as_path(),
                     &config,
+                    Self::page_edit_enabled(&config, &headers),
                 )
                 .await
                 .map_err(|e| {
@@ -7892,6 +7966,7 @@ impl Server {
                     &config.templates,
                     config.base_dir.as_path(),
                     &config,
+                    Self::page_edit_enabled(&config, &headers),
                 )
                 .await
                 .map_err(|e| {

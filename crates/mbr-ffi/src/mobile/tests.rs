@@ -464,6 +464,52 @@ fn a_placeholder_note_is_listed_answers_downloading_and_is_requested() {
     );
 }
 
+/// Regression (iOS, vault in iCloud Drive): `.mbr/` files the provider had not
+/// downloaded were never asked for — the scan skips hidden folders — so a
+/// vault ran without its `user.css` and `config.toml` for good. Open asks for
+/// them, says so, and the refresh after they arrive picks them up.
+#[test]
+fn not_downloaded_mbr_files_are_requested_at_open_and_picked_up_by_refresh() {
+    if !cfg!(target_vendor = "apple") {
+        return; // placeholders are only mapped on Apple platforms
+    }
+    let dir = vault();
+    let mbr = dir.path().join(".mbr");
+    std::fs::write(mbr.join(".user.css.icloud"), "plist").unwrap();
+    std::fs::write(mbr.join(".config.toml.icloud"), "plist").unwrap();
+    let (app, coordinator) = open_coordinated(dir.path());
+    let report = block_on(app.wait_until_ready()).unwrap();
+    assert_eq!(report.mbr_downloads_requested, 2, "{report:?}");
+    let mut downloads = coordinator.downloads.lock().unwrap().clone();
+    downloads.sort();
+    assert_eq!(downloads.len(), 2, "{downloads:?}");
+    assert!(downloads[0].ends_with("/.mbr/config.toml"), "{downloads:?}");
+    assert!(downloads[1].ends_with("/.mbr/user.css"), "{downloads:?}");
+    assert_eq!(
+        report.config_error, None,
+        "a placeholder is no broken config"
+    );
+
+    // Still in the cloud: asked for again, nothing to reload yet.
+    let pending = refresh(&app);
+    assert_eq!(pending.mbr_downloads_requested, 2, "{pending:?}");
+    assert!(!pending.mbr_changed(), "{pending:?}");
+
+    // The provider delivers both.
+    std::fs::remove_file(mbr.join(".user.css.icloud")).unwrap();
+    std::fs::remove_file(mbr.join(".config.toml.icloud")).unwrap();
+    std::fs::write(mbr.join("user.css"), "body { color: papayawhip; }").unwrap();
+    std::fs::write(mbr.join("config.toml"), "theme = \"amber\"\n").unwrap();
+    let arrived = refresh(&app);
+    assert_eq!(arrived.mbr_downloads_requested, 0, "{arrived:?}");
+    assert!(
+        arrived.config_reloaded && arrived.assets_changed,
+        "{arrived:?}"
+    );
+    assert_eq!(current(&app.served).config.theme, "amber");
+    assert!(get(&app, "/.mbr/user.css").text().contains("papayawhip"));
+}
+
 // ---- the index cache and refresh ---------------------------------------------
 
 fn open_cached(dir: &Path, cache: &Path) -> Arc<MbrApp> {

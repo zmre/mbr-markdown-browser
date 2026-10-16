@@ -291,6 +291,26 @@ keyword (`interpolate-size: allow-keywords`). Elsewhere — Safari, at the time
 of writing — answers simply snap open, and `prefers-reduced-motion: reduce`
 drops the transitions everywhere.
 
+### Wide Content on Narrow Screens
+
+Nothing in a note should make the page scroll sideways on a phone. Every
+markdown table is wrapped in `<div class="mbr-table-scroll">`, which scrolls
+horizontally on its own when the table is wider than the column. The wrapper
+carries the table's bottom margin, so style spacing there:
+
+```css
+.mbr-table-scroll {
+  margin-bottom: 2rem;
+  border: 1px solid var(--pico-muted-border-color);
+}
+```
+
+Tables you write as raw HTML get no wrapper; below 600px wide they scroll as
+a block instead. The same section of `theme.css` breaks long inline code and
+link text, scrolls wide display math, keeps images and videos within the
+column, and moves marginalia (`>>>`) on screen. Printing turns the table
+scrolling off, so a printed table is never cut at the scroll edge.
+
 ## Printing
 
 Printing (and "Save as PDF", which is the same code path) is governed by the

@@ -9,8 +9,12 @@ import {
   pageBreadcrumbs,
   pageState,
   pageTitle,
+  postEditorState,
   postPageState,
+  postSlidesState,
 } from './app-bridge.ts'
+import { EDITOR_STATE_EVENT } from './mbr-editor.ts'
+import { SLIDES_STATE_EVENT } from './mbr-slides.ts'
 // The Swift side of the bridge and theme.css, as text (vitest.config.ts reads
 // them: Vite's `?raw` is denied outside components/, and CSS imports are
 // stubbed empty). AppBridge.swift's string literals are the other half of the
@@ -28,7 +32,19 @@ const themeCss = __MBR_THEME_CSS__
  */
 describe('app bridge contract (referenced from Swift)', () => {
   it('keeps the action names and their order', () => {
-    expect(APP_ACTIONS).toEqual(['browse', 'search', 'edit', 'info', 'tasks', 'flashcards', 'slides'])
+    expect(APP_ACTIONS).toEqual([
+      'browse',
+      'search',
+      'edit',
+      'info',
+      'toc',
+      'links-out',
+      'links-in',
+      'tasks',
+      'flashcards',
+      'slides',
+      'new',
+    ])
     expect(APP_MESSAGE_HANDLER).toBe('mbrApp')
   })
 
@@ -40,6 +56,10 @@ describe('app bridge contract (referenced from Swift)', () => {
     expect(appBridgeSwift).toContain('window.mbrApp')
     expect(appBridgeSwift).toContain('__MBR_EMBEDDED__')
     expect(appBridgeSwift).toContain('mbr-embedded')
+    // The message types PageInfo.apply switches on.
+    expect(appBridgeSwift).toContain('"page"')
+    expect(appBridgeSwift).toContain('"editor"')
+    expect(appBridgeSwift).toContain('"slides"')
   })
 })
 
@@ -56,7 +76,17 @@ describe('embedded header hiding', () => {
 })
 
 /** A page shaped like `_nav.html` + `_breadcrumbs.html`, with stub elements. */
-function installPage(options: { deck?: boolean; slides?: boolean; canEdit?: boolean; tasks?: boolean } = {}): {
+function installPage(
+  options: {
+    deck?: boolean
+    slides?: boolean
+    canEdit?: boolean
+    canCreate?: boolean
+    tasks?: boolean
+    headings?: boolean
+    links?: boolean
+  } = {},
+): {
   opened: string[]
 } {
   const opened: string[] = []
@@ -85,11 +115,20 @@ function installPage(options: { deck?: boolean; slides?: boolean; canEdit?: bool
   }
   stub('mbr-browse-single')
   stub('mbr-search')
-  stub('mbr-editor', { canEdit: options.canEdit ?? false })
+  stub('mbr-editor', {
+    canEdit: options.canEdit ?? false,
+    canCreate: options.canCreate ?? false,
+    openNew: () => opened.push('mbr-editor:new'),
+  })
   stub('mbr-info')
   stub('mbr-tasks')
   stub('mbr-flashcards')
   stub('mbr-slides', { isSlideDocument: options.slides ?? false })
+  stub('mbr-fuzzy-nav', {
+    hasHeadings: options.headings ?? false,
+    hasPageLinks: options.links ?? false,
+    open: (tab: string) => opened.push(`mbr-fuzzy-nav:${tab}`),
+  })
   window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: options.tasks ?? false }
   return { opened }
 }
@@ -106,9 +145,55 @@ describe('available actions follow the page', () => {
     expect(availableActions()).toEqual(['browse', 'search', 'info'])
   })
 
-  it('adds edit, tasks, flashcards and slides when the page has them', () => {
-    installPage({ canEdit: true, tasks: true, deck: true, slides: true })
-    expect(availableActions()).toEqual(['browse', 'search', 'edit', 'info', 'tasks', 'flashcards', 'slides'])
+  it('adds edit, contents, links, tasks, flashcards and slides when the page has them', () => {
+    installPage({ canEdit: true, canCreate: true, tasks: true, deck: true, slides: true, headings: true, links: true })
+    expect(availableActions()).toEqual([...APP_ACTIONS])
+  })
+
+  it('offers contents only with headings and links only on a note page', () => {
+    installPage({ headings: true })
+    expect(availableActions()).toEqual(['browse', 'search', 'info', 'toc'])
+    document.body.innerHTML = ''
+    installPage({ links: true })
+    expect(availableActions()).toEqual(['browse', 'search', 'info', 'links-out', 'links-in'])
+  })
+
+  it('opens the fuzzy-nav panel on the tab each action names', () => {
+    const { opened } = installPage({ headings: true, links: true })
+    expect(openAppAction('toc')).toBe(true)
+    expect(openAppAction('links-out')).toBe(true)
+    expect(openAppAction('links-in')).toBe(true)
+    expect(opened).toEqual(['mbr-fuzzy-nav:toc', 'mbr-fuzzy-nav:links-out', 'mbr-fuzzy-nav:links-in'])
+  })
+
+  it('refuses contents and links where the page has neither', () => {
+    const { opened } = installPage()
+    expect(openAppAction('toc')).toBe(false)
+    expect(openAppAction('links-out')).toBe(false)
+    expect(openAppAction('links-in')).toBe(false)
+    expect(opened).toEqual([])
+  })
+
+  it('offers new only when the editor can create, and opens it through openNew', () => {
+    const { opened } = installPage({ canEdit: false, canCreate: false })
+    expect(availableActions()).not.toContain('new')
+    expect(openAppAction('new')).toBe(false)
+    document.body.innerHTML = ''
+    // A listing page: nothing to edit, but a note can be created there.
+    const second = installPage({ canEdit: false, canCreate: true })
+    expect(availableActions()).toContain('new')
+    expect(availableActions()).not.toContain('edit')
+    expect(openAppAction('new')).toBe(true)
+    expect(opened).toEqual([])
+    expect(second.opened).toEqual(['mbr-editor:new'])
+  })
+
+  it('does not offer new on an editor without openNew', () => {
+    installPage({ canCreate: true })
+    const editor = document.querySelector('mbr-editor') as HTMLElement
+    Object.defineProperty(editor, 'openNew', { value: undefined, configurable: true })
+    expect(availableActions()).not.toContain('new')
+    expect(openAppAction('new')).toBe(false)
   })
 
   it('opens an action through the element and refuses unknown or unavailable ones', () => {
@@ -189,5 +274,79 @@ describe('embedded mode only', () => {
     expect(window.mbrApp?.open('search')).toBe(true)
     expect(postMessage).toHaveBeenCalled()
     expect(postMessage.mock.calls[0][0]).toMatchObject({ type: 'page', title: 'A Very Long Title' })
+  })
+
+  it('in the app, posts the editor opening and closing', () => {
+    const postMessage = vi.fn()
+    window.webkit = { messageHandlers: { mbrApp: { postMessage } } }
+    window.__MBR_EMBEDDED__ = true
+    installAppBridge()
+    // Installed twice, still one message per event.
+    installAppBridge()
+    postMessage.mockClear()
+    document.dispatchEvent(new CustomEvent(EDITOR_STATE_EVENT, { detail: { open: true } }))
+    document.dispatchEvent(new CustomEvent(EDITOR_STATE_EVENT, { detail: { open: false } }))
+    document.dispatchEvent(new CustomEvent(EDITOR_STATE_EVENT, { detail: {} }))
+    expect(postMessage.mock.calls.map((call) => call[0])).toEqual([
+      { type: 'editor', open: true },
+      { type: 'editor', open: false },
+    ])
+  })
+
+  it('carries the editor state in the page state, for the load re-post', () => {
+    window.webkit = { messageHandlers: { mbrApp: { postMessage: vi.fn() } } }
+    window.__MBR_EMBEDDED__ = true
+    installAppBridge()
+    document.dispatchEvent(new CustomEvent(EDITOR_STATE_EVENT, { detail: { open: true } }))
+    expect(pageState().editorOpen).toBe(true)
+    document.dispatchEvent(new CustomEvent(EDITOR_STATE_EVENT, { detail: { open: false } }))
+    expect(pageState().editorOpen).toBe(false)
+    expect(appBridgeSwift).toContain('"editorOpen"')
+  })
+
+  it('in the app, posts slides starting and stopping', () => {
+    const postMessage = vi.fn()
+    window.webkit = { messageHandlers: { mbrApp: { postMessage } } }
+    window.__MBR_EMBEDDED__ = true
+    installAppBridge()
+    // Installed twice, still one message per event.
+    installAppBridge()
+    postMessage.mockClear()
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: true } }))
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: false } }))
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: {} }))
+    expect(postMessage.mock.calls.map((call) => call[0])).toEqual([
+      { type: 'slides', playing: true },
+      { type: 'slides', playing: false },
+    ])
+    // The Swift side reads the message's field by this name.
+    expect(appBridgeSwift).toContain('"playing"')
+  })
+
+  it('carries the slides state in the page state, for the load re-post', () => {
+    window.webkit = { messageHandlers: { mbrApp: { postMessage: vi.fn() } } }
+    window.__MBR_EMBEDDED__ = true
+    installAppBridge()
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: true } }))
+    expect(pageState().slidesPlaying).toBe(true)
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: false } }))
+    expect(pageState().slidesPlaying).toBe(false)
+    expect(appBridgeSwift).toContain('"slidesPlaying"')
+  })
+
+  it('posts no slides state outside the app', () => {
+    const postMessage = vi.fn()
+    window.webkit = { messageHandlers: { mbrApp: { postMessage } } }
+    expect(postSlidesState(true)).toBe(false)
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: true } }))
+    expect(postMessage).not.toHaveBeenCalled()
+  })
+
+  it('posts no editor state outside the app', () => {
+    const postMessage = vi.fn()
+    window.webkit = { messageHandlers: { mbrApp: { postMessage } } }
+    expect(postEditorState(true)).toBe(false)
+    document.dispatchEvent(new CustomEvent(EDITOR_STATE_EVENT, { detail: { open: true } }))
+    expect(postMessage).not.toHaveBeenCalled()
   })
 })

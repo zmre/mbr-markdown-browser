@@ -267,3 +267,65 @@ describe('<mbr-flashcards>', () => {
     window.frontmatter = undefined
   })
 })
+
+describe('<mbr-flashcards> floating button', () => {
+  const fab = () => trigger.shadowRoot!.querySelector<HTMLButtonElement>('.mbr-fab')
+
+  beforeEach(() => {
+    document.documentElement.classList.add('mbr-embedded')
+  })
+
+  afterEach(() => {
+    document.documentElement.classList.remove('mbr-embedded')
+    vi.restoreAllMocks()
+  })
+
+  it('appears on a deck page in the app, hides while open, and returns on close', async () => {
+    installDeckPage()
+    await mount()
+    expect(fab()?.getAttribute('aria-label')).toBe('Review flashcards')
+
+    fab()!.click()
+    expect(trigger.isOpen).toBe(true)
+    await trigger.updateComplete
+    expect(fab()).toBeNull()
+
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
+    trigger.close()
+    await trigger.updateComplete
+    expect(fab()).not.toBeNull()
+  })
+
+  it('appears in a narrow browser viewport', async () => {
+    document.documentElement.classList.remove('mbr-embedded')
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    } as unknown as MediaQueryList)
+    installDeckPage()
+    await mount()
+    expect(fab()).not.toBeNull()
+  })
+
+  it('is absent on a wide browser page', async () => {
+    document.documentElement.classList.remove('mbr-embedded')
+    installDeckPage()
+    await mount()
+    expect(button()).not.toBeNull()
+    expect(fab()).toBeNull()
+  })
+
+  it('leaves the corner to the slides on a page that is both', async () => {
+    installDeckPage()
+    document.body.classList.add('slides')
+    await mount()
+    expect(fab()).toBeNull()
+  })
+
+  it('is absent on an ordinary page', async () => {
+    document.body.innerHTML = '<main id="wrapper"><p>hi</p></main>'
+    await mount()
+    expect(fab()).toBeNull()
+  })
+})

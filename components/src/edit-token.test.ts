@@ -30,7 +30,7 @@ import './mbr-editor.js'
 import { setEditorChunkImporter } from './mbr-editor.js'
 import { resetTaskToggleState, toggleTask } from './task-toggle.js'
 // Type-only, so the Milkdown-laden chunk is never actually loaded here.
-import type { OpenEditorOptions } from './editor-crepe.js'
+import type { CreateNoteOptions, OpenEditorOptions } from './editor-crepe.js'
 
 const TOKEN = 'sup3r-s3cret-token'
 
@@ -192,6 +192,9 @@ describe('a full editor-open, save and toggle cycle', () => {
         // The user types the token into the footer field.
         options.onToken?.(TOKEN)
       },
+      // "New note" borrows the page's token and keeps nothing; it is not
+      // driven here, only typed against the real contract.
+      createNote: async (_options: CreateNoteOptions) => {},
     }))
   }
 

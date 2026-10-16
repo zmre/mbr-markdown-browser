@@ -1496,6 +1496,585 @@ mod tests {
         );
     }
 
+    // ---- a real deck: multi-line terms, quoted and bulleted answers ---------
+
+    /// One card exactly as a user's deck writes it: a bold question paragraph,
+    /// a blank line, the four choices as the (multi-line) term, then answers
+    /// including a blockquote and a `Memory aids:` answer with an indented
+    /// `  * ` bullet. `{n}` names the card; `{history}` is the tail after
+    /// `: Memory aids:`'s bullet (empty for a card never reviewed).
+    fn ham_card(n: u32, history: &str) -> String {
+        format!(
+            concat!(
+                "**T1-A{n:02}: Who selects a Frequency Coordinator?**\n",
+                "\n",
+                "A. The FCC Office of Spectrum Management and Coordination Policy\n",
+                "B. The local chapter of the Office of National Council of Independent Frequency Coordinators\n",
+                "C. Amateur operators in a local or regional area whose stations are eligible to be repeater or auxiliary stations\n",
+                "D. The FCC Regional Field Office\n",
+                ": **C.** Amateur operators in a local or regional area whose stations are eligible to be repeater or auxiliary stations\n",
+                ": **47 CFR 97.3(a)(22):**\n",
+                ": > **Frequency coordinator.** An entity, ***recognized in a local or regional area by amateur operators whose stations are eligible to be auxiliary or repeater stations,*** that recommends transmit/receive channels and associated operating and technical parameters for such stations in order to avoid or minimize potential interference.\n",
+                ": Frequency coordinators are amateur radio operators who are recognized by other local or regional amateurs (particularly those who operate repeaters or auxiliary stations). They recommend which transmit/receive channels and what operating and technical parameters should be used so repeaters don't interfere with one another. This local recognition means the coordinators are chosen by the amateur community in the area rather than by an FCC office.\n",
+                ": Coordination is important because if an operator ignores the locally established band plan or the coordinator's recommendations, they might transmit on or near a repeater input and cause harmful interference to others.\n",
+                ": Memory aids:\n",
+                "  * Remember: \"Frequency coordinator\" = someone recognized by local/regional amateur operators (not an FCC office).\n",
+                "{history}",
+            ),
+            n = n,
+            history = history,
+        )
+    }
+
+    /// The term line of a [`ham_card`] — line 3 of the card: the `<dt>` is the
+    /// `A.`–`D.` paragraph, not the bold question, which is a `<p>` before the
+    /// `<dl>`.
+    const HAM_TERM: &str = "A. The FCC Office of Spectrum Management and Coordination Policy";
+    const HAM_TERM_OFFSET: u32 = 2;
+    const HAM_REMEMBER: &str = "  * Remember: \"Frequency coordinator\"";
+    const HAM_HISTORY: &str = ": ___Review History___\n  * 2026-10-07 14:53 - Good\n";
+
+    /// `source` rendered by the real page pipeline ([`crate::markdown::render_str`]
+    /// with `data-mbr-line` on, as the server renders a deck).
+    fn render_page(source: &str) -> String {
+        use crate::link_transform::LinkTransformConfig;
+        use crate::markdown::{RenderOptions, ReviewLines, render_str};
+        let root = std::path::Path::new("/nonexistent-root");
+        let opts = RenderOptions {
+            root_path: root,
+            oembed_timeout_ms: 0,
+            link_transform_config: LinkTransformConfig {
+                markdown_extensions: vec!["md".to_string()],
+                index_file: "index.md".to_string(),
+                is_index_file: false,
+                url_depth: None,
+                current_page_url: String::new(),
+                markdown_page_probe: None,
+            },
+            oembed_cache: None,
+            server_mode: true,
+            transcode_enabled: false,
+            valid_tag_sources: Default::default(),
+            review: ReviewLines::Emit,
+            mark_incomplete: false,
+            incomplete_markers: &[],
+            wikilink_index: None,
+        };
+        render_str(source, std::path::Path::new("deck.md"), opts)
+            .expect("renders")
+            .html
+    }
+
+    /// Every `data-mbr-line` on a rendered `<dt>` — what the deck sends as
+    /// `line`.
+    fn page_term_lines(html: &str) -> Vec<u32> {
+        html.match_indices("<dt data-mbr-line=\"")
+            .map(|(at, prefix)| {
+                let rest = &html[at + prefix.len()..];
+                rest[..rest.find('"').expect("closing quote")]
+                    .parse()
+                    .expect("numeric line")
+            })
+            .collect()
+    }
+
+    /// Asserts every list item of the page sits inside a `<dd>` of a `<dl>`:
+    /// the `Memory aids` bullet and each history entry, never a stray `<ul>`
+    /// after the list. Returns the number of `<dl>`s.
+    fn assert_bullets_inside_definitions(html: &str, entries: &[&str]) -> usize {
+        let mut outside = html.to_string();
+        let mut lists = 0;
+        while let Some(open) = outside.find("<dl>") {
+            let close = open + outside[open..].find("</dl>").expect("closed dl") + "</dl>".len();
+            let list = outside[open..close].to_string();
+            assert!(list.contains("<li"), "a <dl> without its bullets: {html}");
+            outside.replace_range(open..close, "");
+            lists += 1;
+        }
+        assert!(!outside.contains("<li"), "a bullet left the <dl>: {html}");
+        assert!(!outside.contains("<ul"), "a list left the <dl>: {html}");
+        for entry in entries {
+            assert!(html.contains(entry), "{entry:?} missing: {html}");
+        }
+        // Each card's `Memory aids` answer still owns its bullet.
+        let answers = html.matches("Memory aids:").count();
+        assert!(answers > 0, "{html}");
+        assert_eq!(
+            html.matches("Memory aids:\n<ul>\n<li").count(),
+            answers,
+            "{html}"
+        );
+        lists
+    }
+
+    /// Asserts `patch` is `before` with `patch.inserted` spliced in at
+    /// `patch.inserted_at` and not one other byte changed.
+    fn assert_pure_insert(before: &str, patch: &ReviewPatch) {
+        let terminator = if before.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let mut lines: Vec<&str> = before.split(terminator).collect();
+        let at = patch.inserted_at as usize - 1;
+        // A file with no trailing newline gains the terminator before the
+        // insert, not after it.
+        let unterminated_tail = !before.ends_with('\n') && at == lines.len();
+        for (i, line) in patch.inserted.iter().enumerate() {
+            lines.insert(at + i, line);
+        }
+        let rebuilt = lines.join(terminator);
+        assert_eq!(patch.source, rebuilt, "inserted {:?}", patch.inserted);
+        if unterminated_tail {
+            assert!(!patch.source.ends_with('\n'));
+        }
+    }
+
+    fn ham_append(source: &str, line: u32, rating: Rating, minute: u32) -> ReviewPatch {
+        let patch = append_review(source, line, HAM_TERM, rating, at(13, minute))
+            .unwrap_or_else(|e| panic!("append at {line}: {e:?}\n{source}"));
+        assert_pure_insert(source, &patch);
+        patch
+    }
+
+    /// The reported corruption — a blank line, then the bullets at column 0 —
+    /// takes them out of the `<dl>`. Pins that the checks above can see it, so
+    /// their passing means the writer does not produce it.
+    #[test]
+    fn ham_deck_reported_corruption_moves_bullets_out_of_the_list() {
+        let good = ham_card(9, HAM_HISTORY);
+        let broken = good
+            .replace("\n  * Remember", "\n\n* Remember")
+            .replace("\n  * 2026", "\n\n* 2026");
+        let html = render_page(&broken);
+        let remember = html.find("Remember: ").expect("rendered");
+        let dl_end = html.find("</dl>").expect("a <dl>");
+        assert!(dl_end < remember, "{html}");
+        assert!(
+            std::panic::catch_unwind(|| assert_bullets_inside_definitions(&html, &[])).is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_bullets_inside_definitions(&render_page(&good), &[])
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ham_deck_term_is_the_choices_paragraph() {
+        let source = ham_card(9, HAM_HISTORY);
+        let html = render_page(&source);
+        assert_eq!(page_term_lines(&html), vec![3], "{html}");
+        assert_eq!(
+            scan_terms(&source)
+                .iter()
+                .map(|t| t.line)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(
+            html.contains("<p data-mbr-line=\"1\"><strong>T1-A09"),
+            "{html}"
+        );
+        assert_bullets_inside_definitions(&html, &["2026-10-07 14:53 - Good"]);
+        // The bold question is not the term, so it is not a valid `expected`.
+        let question = "**T1-A09: Who selects a Frequency Coordinator?**";
+        assert_eq!(
+            append_review(&source, 1, question, Rating::Good, at(13, 45)),
+            Err(FlashcardPatchError::NotATerm { line: 1 })
+        );
+    }
+
+    #[test]
+    fn ham_deck_appends_one_bullet_after_the_history() {
+        let source = ham_card(9, HAM_HISTORY);
+        let patch = ham_append(&source, 3, Rating::Good, 45);
+        assert_eq!(
+            patch.source,
+            format!("{source}  * 2026-10-06 13:45 - Good\n"),
+            "only the new bullet, after the last one"
+        );
+        assert_eq!(patch.inserted, vec!["  * 2026-10-06 13:45 - Good"]);
+        assert_eq!(patch.inserted_at, 16);
+        assert_eq!(patch.entry_line(), 16);
+        assert!(patch.source.contains(&format!("\n{HAM_REMEMBER}")));
+        assert!(
+            !patch.source.contains("\n\n  *"),
+            "no blank before a bullet"
+        );
+        let html = render_page(&patch.source);
+        assert_eq!(page_term_lines(&html), vec![3]);
+        assert_bullets_inside_definitions(
+            &html,
+            &["2026-10-07 14:53 - Good", "2026-10-06 13:45 - Good"],
+        );
+    }
+
+    #[test]
+    fn ham_deck_first_review_creates_history_after_memory_aids_bullet() {
+        let source = ham_card(9, "");
+        let patch = ham_append(&source, 3, Rating::Hard, 45);
+        assert_eq!(
+            patch.source,
+            format!("{source}: ___Review History___\n  * 2026-10-06 13:45 - Hard\n")
+        );
+        assert_eq!(patch.inserted_at, 14, "right after the Remember bullet");
+        let html = render_page(&patch.source);
+        assert_bullets_inside_definitions(&html, &["2026-10-06 13:45 - Hard"]);
+        assert!(
+            html.contains(
+                "<dd data-mbr-line=\"14\"><em><strong>Review History</strong></em>\n<ul>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn ham_deck_with_several_history_entries() {
+        let history = concat!(
+            ": ___Review History___\n",
+            "  * 2026-10-01 08:00 - Again\n",
+            "  * 2026-10-03 09:10 - Hard\n",
+            "  * 2026-10-07 14:53 - Good\n",
+        );
+        let source = ham_card(9, history);
+        let patch = ham_append(&source, 3, Rating::Easy, 45);
+        assert_eq!(
+            patch.source,
+            format!("{source}  * 2026-10-06 13:45 - Easy\n")
+        );
+        assert_eq!(patch.inserted_at, 18);
+        assert_bullets_inside_definitions(&render_page(&patch.source), &["13:45 - Easy"]);
+    }
+
+    /// Five sequential reviews of the user's card: each one only appends,
+    /// the `Memory aids` bullet never moves, and the page keeps one `<dl>`.
+    #[test]
+    fn ham_deck_is_stable_over_repeated_reviews() {
+        for start in ["", HAM_HISTORY] {
+            let original = ham_card(9, start);
+            let mut source = original.clone();
+            let mut expected_tail = if start.is_empty() {
+                ": ___Review History___\n".to_string()
+            } else {
+                start.to_string()
+            };
+            let ratings = [
+                Rating::Again,
+                Rating::Hard,
+                Rating::Good,
+                Rating::Easy,
+                Rating::Good,
+            ];
+            for (minute, rating) in (0u32..).zip(ratings) {
+                let patch = ham_append(&source, 3, rating, minute);
+                source = patch.source;
+                expected_tail.push_str(&format!(
+                    "  * 2026-10-06 13:{minute:02} - {}\n",
+                    rating.label()
+                ));
+                assert_eq!(source, format!("{}{expected_tail}", ham_card(9, "")));
+                let html = render_page(&source);
+                assert_eq!(page_term_lines(&html), vec![3]);
+                assert_eq!(assert_bullets_inside_definitions(&html, &[]), 1);
+                assert_eq!(
+                    html.matches("Review History").count(),
+                    1,
+                    "one history: {html}"
+                );
+            }
+            assert!(source.starts_with(&original[..original.len() - start.len()]));
+        }
+    }
+
+    /// Three cards separated by blank lines, the first and last with
+    /// history, the middle one without: each review lands under its own card,
+    /// addressed by the `<dt>` line the page renders after the previous write.
+    #[test]
+    fn ham_deck_several_cards_in_a_row() {
+        let cards = [
+            ham_card(1, HAM_HISTORY),
+            ham_card(2, ""),
+            ham_card(3, HAM_HISTORY),
+        ];
+        let mut source = cards.join("\n");
+        let mut cards = cards.to_vec();
+        // Review middle, last, first, middle again.
+        for (minute, card) in [1usize, 2, 0, 1].into_iter().enumerate() {
+            let lines = page_term_lines(&render_page(&source));
+            assert_eq!(lines.len(), 3, "{source}");
+            assert_eq!(
+                lines,
+                scan_terms(&source)
+                    .iter()
+                    .map(|t| t.line)
+                    .collect::<Vec<_>>()
+            );
+            let minute = u32::try_from(minute).unwrap();
+            let patch = ham_append(&source, lines[card], Rating::Good, minute);
+            let bullet = format!("  * 2026-10-06 13:{minute:02} - Good\n");
+            if !cards[card].contains("Review History") {
+                cards[card].push_str(": ___Review History___\n");
+            }
+            cards[card].push_str(&bullet);
+            source = patch.source;
+            assert_eq!(source, cards.join("\n"));
+            let html = render_page(&source);
+            assert_eq!(assert_bullets_inside_definitions(&html, &[]), 3, "{html}");
+        }
+        // Every card's term moved only by the lines inserted above it.
+        let first_len = u32::try_from(cards[0].lines().count()).unwrap();
+        let second_len = u32::try_from(cards[1].lines().count()).unwrap();
+        assert_eq!(
+            page_term_lines(&render_page(&source)),
+            vec![
+                1 + HAM_TERM_OFFSET,
+                first_len + 2 + HAM_TERM_OFFSET,
+                first_len + second_len + 3 + HAM_TERM_OFFSET,
+            ]
+        );
+    }
+
+    #[test]
+    fn ham_deck_crlf() {
+        let source = ham_card(9, HAM_HISTORY).replace('\n', "\r\n");
+        let patch = ham_append(&source, 3, Rating::Good, 45);
+        assert_eq!(
+            patch.source,
+            format!("{source}  * 2026-10-06 13:45 - Good\r\n")
+        );
+        let fresh = ham_card(9, "").replace('\n', "\r\n");
+        let patch = ham_append(&fresh, 3, Rating::Good, 45);
+        assert_eq!(
+            patch.source,
+            format!("{fresh}: ___Review History___\r\n  * 2026-10-06 13:45 - Good\r\n")
+        );
+        assert_bullets_inside_definitions(&render_page(&patch.source), &["13:45 - Good"]);
+    }
+
+    #[test]
+    fn ham_deck_without_trailing_newline() {
+        let with = ham_card(9, HAM_HISTORY);
+        let source = with.trim_end_matches('\n');
+        let patch = ham_append(source, 3, Rating::Good, 45);
+        assert_eq!(
+            patch.source,
+            format!("{source}\n  * 2026-10-06 13:45 - Good")
+        );
+        let fresh = ham_card(9, "");
+        let fresh = fresh.trim_end_matches('\n');
+        let patch = ham_append(fresh, 3, Rating::Good, 45);
+        assert_eq!(
+            patch.source,
+            format!("{fresh}\n: ___Review History___\n  * 2026-10-06 13:45 - Good")
+        );
+        assert_bullets_inside_definitions(&render_page(&patch.source), &["13:45 - Good"]);
+    }
+
+    /// The next card's question glued to the history bullet (no blank line)
+    /// is, before any write, a lazy continuation of that bullet — the page
+    /// shows it inside the history, and both cards share one `<dl>`. The write
+    /// must not change what the page shows beyond adding the entry: the second
+    /// card's term stays a term, and nothing is outdented or separated.
+    #[test]
+    fn ham_deck_second_card_glued_after_the_history() {
+        for first in [HAM_HISTORY, ""] {
+            let source = format!("{}{}", ham_card(1, first), ham_card(2, HAM_HISTORY));
+            let html = render_page(&source);
+            let lines = page_term_lines(&html);
+            assert_eq!(lines.len(), 2, "{html}");
+            // Already one `<dl>`: the glued question continues the bullet.
+            let lists = assert_bullets_inside_definitions(&html, &[]);
+            assert_eq!(lists, 1, "{html}");
+            for &line in &lines {
+                let patch = ham_append(&source, line, Rating::Good, 45);
+                let after = render_page(&patch.source);
+                assert_eq!(
+                    page_term_lines(&after).len(),
+                    2,
+                    "a card was lost: {}",
+                    patch.source
+                );
+                assert!(after.contains("2026-10-06 13:45 - Good"), "{after}");
+                assert_eq!(
+                    patch.source.matches(HAM_REMEMBER).count(),
+                    2,
+                    "{}",
+                    patch.source
+                );
+                assert_eq!(
+                    assert_bullets_inside_definitions(&after, &[]),
+                    lists,
+                    "{after}"
+                );
+            }
+        }
+    }
+
+    // ---- T1-B11: the second damaged card ------------------------------------
+
+    /// T1-B11 as it presumably was before it was damaged: two indented
+    /// `Memory aids` bullets, then `{history}`.
+    fn b11_card(history: &str) -> String {
+        format!(
+            concat!(
+                "**T1-B11: What is the maximum peak envelope power output for Technician class operators in their HF band segments?**\n",
+                "\n",
+                "A. 200 watts\n",
+                "B. 100 watts\n",
+                "C. 50 watts\n",
+                "D. 10 watts\n",
+                ": **A.** 200 watts\n",
+                ": Technician-class operators are limited to 200 watts PEP (Peak Envelope Power) on any portion of an HF band that they are authorized to use. This is an FCC regulation that must be memorized for the exam.\n",
+                ": Also remember that FCC rule 97.313 requires stations to use the minimum transmitter power necessary to carry out the desired communications, even though the maximum allowed for Technician HF segments is 200 W PEP.\n",
+                ": Memory aids:\n",
+                "  * \"HF\" has 2 letters → 2-hundred watts (200 W)\n",
+                "  * The word \"maximum\" corresponds to the largest numeric choice\n",
+                "{history}",
+            ),
+            history = history,
+        )
+    }
+
+    /// The card exactly as found on disk.
+    const B11_DAMAGED: &str = concat!(
+        "**T1-B11: What is the maximum peak envelope power output for Technician class operators in their HF band segments?**\n",
+        "\n",
+        "A. 200 watts\n",
+        "B. 100 watts\n",
+        "C. 50 watts\n",
+        "D. 10 watts\n",
+        ": **A.** 200 watts\n",
+        ": Technician-class operators are limited to 200 watts PEP (Peak Envelope Power) on any portion of an HF band that they are authorized to use. This is an FCC regulation that must be memorized for the exam.\n",
+        ": Also remember that FCC rule 97.313 requires stations to use the minimum transmitter power necessary to carry out the desired communications, even though the maximum allowed for Technician HF segments is 200 W PEP.\n",
+        ": Memory aids:\n",
+        "\n",
+        "* \"HF\" has 2 letters → 2-hundred watts (200 W)\n",
+        "* The word \"maximum\" corresponds to the largest numeric choice\n",
+        "  : ___Review History___\n",
+        "* 2026-10-07 14:54 - Again\n",
+    );
+    const B11_TERM: &str = "A. 200 watts";
+
+    fn b11_append(source: &str, minute: u32) -> ReviewPatch {
+        let patch = append_review(source, 3, B11_TERM, Rating::Again, at(14, minute))
+            .unwrap_or_else(|e| panic!("{e:?}\n{source}"));
+        assert_pure_insert(source, &patch);
+        patch
+    }
+
+    /// The writer's own first review of a card whose last answer ends in an
+    /// indented bullet: the label takes the answer's *first* line's `: `
+    /// prefix (column 0), never the bullet's indent, and the entry is indented
+    /// under it — not `  : ___Review History___` and `* …` at column 0, which
+    /// is the damage found on disk.
+    #[test]
+    fn b11_first_review_labels_at_column_zero_after_the_bullets() {
+        let source = b11_card("");
+        let patch = b11_append(&source, 54);
+        assert_eq!(
+            patch.inserted,
+            vec![": ___Review History___", "  * 2026-10-06 14:54 - Again"]
+        );
+        assert_eq!(patch.inserted_at, 13, "after the second Memory aids bullet");
+        assert_eq!(
+            patch.source,
+            format!("{source}: ___Review History___\n  * 2026-10-06 14:54 - Again\n")
+        );
+        let html = render_page(&patch.source);
+        assert_bullets_inside_definitions(
+            &html,
+            &["2 letters", "largest numeric", "14:54 - Again"],
+        );
+        assert!(!patch.source.contains("\n  : "), "{}", patch.source);
+        assert!(!patch.source.contains("\n* "), "{}", patch.source);
+        assert!(!patch.source.contains(":\n\n"), "{}", patch.source);
+    }
+
+    /// From either original form — no history yet, or one with entries — no
+    /// number of reviews produces the damaged shape.
+    #[test]
+    fn b11_repeated_reviews_never_produce_the_damage() {
+        for history in ["", ": ___Review History___\n  * 2026-10-05 09:00 - Good\n"] {
+            let mut source = b11_card(history);
+            for minute in 0..5 {
+                source = b11_append(&source, minute).source;
+                assert!(!source.contains("\n  : "), "{source}");
+                assert!(!source.contains("\n* "), "{source}");
+                assert!(!source.contains(":\n\n"), "{source}");
+                let html = render_page(&source);
+                assert_eq!(page_term_lines(&html), vec![3]);
+                assert_eq!(assert_bullets_inside_definitions(&html, &[]), 1, "{html}");
+                assert_eq!(html.matches("Review History").count(), 1, "{html}");
+            }
+            let entries = (0..5)
+                .map(|m| format!("  * 2026-10-06 14:{m:02} - Again\n"))
+                .collect::<String>();
+            let label = if history.is_empty() {
+                ": ___Review History___\n"
+            } else {
+                ""
+            };
+            assert_eq!(source, format!("{}{label}{entries}", b11_card(history)));
+        }
+    }
+
+    /// On the damaged file the card has no history the parser can see: the
+    /// blank line ends the `<dl>` after `: Memory aids:`, and the bullets, the
+    /// indented label (a lazy continuation of the second bullet) and the old
+    /// entry are an ordinary list after it. The writer therefore treats the
+    /// card as never reviewed and creates a fresh history *inside* the `<dl>`
+    /// right after `: Memory aids:` — a pure insert, so it neither moves nor
+    /// repairs the stray list, and the old entry stays outside (unread by
+    /// the deck, which reads history from the `<dd>`).
+    ///
+    /// The indented label also makes the second stray bullet a *nested*
+    /// definition list (term `The word "maximum" …`, line 13). Nested lists
+    /// are not cards on either side — `scan_terms` and the deck's `dom.ts`
+    /// both take top-level lists only — so a review addressed there is
+    /// `NotATerm`.
+    #[test]
+    fn b11_damaged_file_gets_a_fresh_history_inside_the_list() {
+        let html = render_page(B11_DAMAGED);
+        assert_eq!(page_term_lines(&html), vec![3, 13], "{html}");
+        assert_eq!(
+            scan_terms(B11_DAMAGED)
+                .iter()
+                .map(|t| t.line)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        let nested = B11_DAMAGED.lines().nth(12).unwrap();
+        assert_eq!(
+            append_review(B11_DAMAGED, 13, nested, Rating::Good, at(14, 54)),
+            Err(FlashcardPatchError::NotATerm { line: 13 })
+        );
+        let dl_end = html.find("</dl>").expect("a <dl>");
+        assert!(dl_end < html.find("2 letters").unwrap(), "{html}");
+        assert!(!html[..dl_end].contains("Review History"), "{html}");
+
+        let patch = b11_append(B11_DAMAGED, 54);
+        assert_eq!(patch.inserted_at, 11, "right after `: Memory aids:`");
+        assert_eq!(
+            patch.inserted,
+            vec![": ___Review History___", "  * 2026-10-06 14:54 - Again"]
+        );
+        let html = render_page(&patch.source);
+        let dl_end = html.find("</dl>").expect("a <dl>");
+        assert!(html[..dl_end].contains("<em><strong>Review History</strong></em>\n<ul>"));
+        assert!(html[..dl_end].contains("14:54 - Again"), "{html}");
+        // The old, damaged block is untouched and still outside.
+        assert!(
+            html[dl_end..].contains("2026-10-07 14:54 - Again"),
+            "{html}"
+        );
+        // A second review lands in the new history, not the stray list.
+        let second = b11_append(&patch.source, 55);
+        assert_eq!(second.inserted, vec!["  * 2026-10-06 14:55 - Again"]);
+        assert_eq!(second.inserted_at, 13);
+    }
+
     // ---- properties ---------------------------------------------------------
 
     /// One generated card: its term, its answers and an optional history.

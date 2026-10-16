@@ -6731,6 +6731,75 @@ async fn test_page_edit_enabled_on_any_host_when_a_token_is_configured() {
 }
 
 #[tokio::test]
+async fn test_listings_advertise_editing_and_carry_the_editor() {
+    // A listing (home without an index note, or a section folder) hosts
+    // `<mbr-editor>` for its "New note" entry point. It used to render without
+    // `edit_enabled` at all, so `editEnabled` was false and the element absent.
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide\n\nbody");
+    repo.create_markdown("top.md", "# Top\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let port = server.port;
+    let local = format!("localhost:{port}");
+    for path in ["/", "/docs/"] {
+        assert!(
+            page_edit_enabled(&server, path, &local).await,
+            "listing {path} at localhost must advertise editing"
+        );
+        let html = server
+            .client
+            .get(server.url(path))
+            .header("Host", &local)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            html.contains("<mbr-editor></mbr-editor>"),
+            "listing {path} must carry the editor element"
+        );
+
+        // A Host the write endpoints refuse gets a read-only listing.
+        assert!(
+            !page_edit_enabled(&server, path, "avalon.example.ts.net:5201").await,
+            "listing {path} at a refused Host must not advertise editing"
+        );
+        let refused = server
+            .client
+            .get(server.url(path))
+            .header("Host", "avalon.example.ts.net:5201")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !refused.contains("<mbr-editor>"),
+            "listing {path} at a refused Host must not carry the editor"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_listing_edit_enabled_false_when_editing_is_off() {
+    let repo = TestRepo::new();
+    repo.create_markdown("docs/guide.md", "# Guide\n\nbody");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let port = server.port;
+    assert!(!page_edit_enabled(&server, "/docs/", &format!("localhost:{port}")).await);
+}
+
+#[tokio::test]
 async fn test_page_edit_enabled_false_when_editing_is_off() {
     let repo = TestRepo::new();
     repo.create_markdown("note.md", "# Note\n\nbody");
@@ -9542,6 +9611,100 @@ async fn test_flashcard_review_round_trip_from_rendered_dt_lines() {
         std::fs::read_to_string(&file).unwrap(),
         format!("{after_first}  * {second}\n")
     );
+}
+
+/// One card of a real ham-radio deck: a bold question paragraph, then the
+/// choices as a multi-line term, answers including a blockquote, and a
+/// `Memory aids:` answer with a 2-space indented `  * ` bullet. `{history}` is
+/// the tail after that bullet.
+fn ham_card(n: u32, history: &str) -> String {
+    format!(
+        concat!(
+            "**T1-A{n:02}: Who selects a Frequency Coordinator?**\n",
+            "\n",
+            "A. The FCC Office of Spectrum Management and Coordination Policy\n",
+            "B. The local chapter of the Office of National Council of Independent Frequency Coordinators\n",
+            "C. Amateur operators in a local or regional area whose stations are eligible to be repeater or auxiliary stations\n",
+            "D. The FCC Regional Field Office\n",
+            ": **C.** Amateur operators in a local or regional area whose stations are eligible to be repeater or auxiliary stations\n",
+            ": **47 CFR 97.3(a)(22):**\n",
+            ": > **Frequency coordinator.** An entity, ***recognized in a local or regional area by amateur operators whose stations are eligible to be auxiliary or repeater stations,*** that recommends transmit/receive channels and associated operating and technical parameters for such stations in order to avoid or minimize potential interference.\n",
+            ": Frequency coordinators are amateur radio operators who are recognized by other local or regional amateurs (particularly those who operate repeaters or auxiliary stations). They recommend which transmit/receive channels and what operating and technical parameters should be used so repeaters don't interfere with one another.\n",
+            ": Memory aids:\n",
+            "  * Remember: \"Frequency coordinator\" = someone recognized by local/regional amateur operators (not an FCC office).\n",
+            "{history}",
+        ),
+        n = n,
+        history = history,
+    )
+}
+
+/// The user's deck shape through the endpoint, five reviews across two cards
+/// (one with history, one without), each addressed by the `<dt>` line the
+/// re-rendered page reports: the file on disk is the original plus exactly
+/// the history lines, every `  * ` bullet keeps its indent, no blank line
+/// appears before a bullet, and the page keeps every bullet inside the `<dl>`.
+#[tokio::test]
+async fn test_flashcard_review_preserves_indented_definition_bullets() {
+    const TERM: &str = "A. The FCC Office of Spectrum Management and Coordination Policy";
+    let header = "---\ntype: flashcard\n---\n\n";
+    let mut cards = [
+        ham_card(9, ": ___Review History___\n  * 2026-10-07 14:53 - Good\n"),
+        ham_card(10, ""),
+    ];
+    let source = format!("{header}{}", cards.join("\n"));
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", &source);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    for (card, rating) in [
+        (0, "good"),
+        (1, "again"),
+        (1, "hard"),
+        (0, "easy"),
+        (1, "good"),
+    ] {
+        let html = server.get_text("/deck/").await;
+        let lines = dt_lines(&html);
+        assert_eq!(lines.len(), 2, "{html}");
+        let resp = edit_post(
+            &server,
+            "/.mbr/flashcard-review",
+            review_body(lines[card], TERM, rating),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let json: serde_json::Value = resp.json().await.expect("JSON");
+        let entry = json["entry"].as_str().expect("entry");
+        if !cards[card].contains("Review History") {
+            cards[card].push_str(": ___Review History___\n");
+        }
+        cards[card].push_str(&format!("  * {entry}\n"));
+
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(on_disk, format!("{header}{}", cards.join("\n")));
+        assert!(!on_disk.contains("\n\n  *"), "{on_disk}");
+        assert!(!on_disk.contains("\n* "), "a bullet outdented: {on_disk}");
+    }
+
+    let html = server.get_text("/deck/").await;
+    let dl = &html[html.find("<dl>").expect("dl")..html.rfind("</dl>").expect("/dl")];
+    // Every content bullet (they carry their source line) is inside the list.
+    let item = "<li data-mbr-line=";
+    assert_eq!(
+        dl.matches(item).count(),
+        html.matches(item).count(),
+        "{html}"
+    );
+    assert_eq!(dl.matches("Memory aids:\n<ul>\n<li").count(), 2, "{html}");
+    assert_eq!(
+        dl.matches("<em><strong>Review History</strong></em>\n<ul>")
+            .count(),
+        2
+    );
+    // 1 old + 2 new under the first card, 3 new under the second, 2 Remember.
+    assert_eq!(dl.matches(item).count(), 8, "{html}");
 }
 
 /// `--no-review` turns off the review-notes anchors, not flashcard writes: with

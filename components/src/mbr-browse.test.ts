@@ -645,6 +645,148 @@ describe('MbrBrowseElement with site data', () => {
     })
   })
 
+  describe('subfolders in the middle pane', () => {
+    /**
+     * /projects/ holds only folders: /projects/alpha/ (two notes plus an index)
+     * and /projects/beta/ (one note). /projects/alpha/deep/ is a grandchild.
+     */
+    const files = (): MarkdownFile[] => [
+      makeFile('/top/', 'top.md', { title: 'Top' }),
+      makeFile('/projects/alpha/', 'projects/alpha/index.md', { title: 'Alpha' }),
+      makeFile('/projects/alpha/one/', 'projects/alpha/one.md', { title: 'One' }),
+      makeFile('/projects/alpha/two/', 'projects/alpha/two.md', { title: 'Two' }),
+      makeFile('/projects/alpha/deep/x/', 'projects/alpha/deep/x.md', { title: 'X' }),
+      makeFile('/projects/beta/b1/', 'projects/beta/b1.md', { title: 'B1' }),
+    ]
+
+    function folderLabel(el: MbrBrowseElement, name: string): HTMLElement {
+      const label = [...root(el).querySelectorAll('.folder-item .tree-label')].find(
+        b => b.querySelector('.label-text')?.textContent?.trim() === name
+      ) as HTMLElement | undefined
+      expect(label, `folder "${name}" not rendered`).toBeDefined()
+      return label!
+    }
+
+    async function selectFolder(el: MbrBrowseElement, name: string): Promise<void> {
+      folderLabel(el, name).click()
+      await el.updateComplete
+    }
+
+    function subfolderNames(el: MbrBrowseElement): string[] {
+      return texts(el, '.middle-pane .subfolder-row .subfolder-name')
+    }
+
+    async function openSubfolder(el: MbrBrowseElement, name: string): Promise<void> {
+      const row = [...root(el).querySelectorAll('.middle-pane .subfolder-row')].find(
+        b => b.querySelector('.subfolder-name')?.textContent?.trim() === name
+      ) as HTMLElement | undefined
+      expect(row, `subfolder row "${name}" not rendered`).toBeDefined()
+      row!.click()
+      await el.updateComplete
+    }
+
+    it('lists the subfolders of a folder that holds only folders', async () => {
+      const el = await mount(files(), '/')
+      await selectFolder(el, 'projects')
+
+      expect(subfolderNames(el)).toEqual(['Alpha', 'beta'])
+      expect(texts(el, '.middle-pane .subfolder-count')).toEqual(['4', '1'])
+      expect(root(el).querySelectorAll('.middle-pane .file-card')).toHaveLength(0)
+      // The old dead-end message is gone, and this is not "empty".
+      expect(root(el).querySelector('.middle-pane .no-results')).toBeNull()
+      expect(root(el).querySelector('.middle-pane')?.textContent).not.toContain('folder tree')
+      // The header count agrees with the tree row: notes below, recursively.
+      expect(root(el).querySelector('.pane-count')?.textContent?.trim()).toBe('5')
+    })
+
+    it('lists subfolders above the notes when a folder has both', async () => {
+      const el = await mount(files(), '/')
+      await selectFolder(el, 'projects')
+      await openSubfolder(el, 'Alpha')
+
+      expect(subfolderNames(el)).toEqual(['deep'])
+      expect(texts(el, '.middle-pane .file-title')).toEqual(['Alpha', 'One', 'Two'])
+      expect(texts(el, '.middle-pane .pane-group-label')).toEqual(['Folders', 'Notes'])
+      const content = root(el).querySelector('.middle-pane .pane-content')!
+      const list = content.querySelector('.subfolder-list')!
+      const firstCard = content.querySelector('.file-card')!
+      expect(list.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+
+    it('omits the folder group for a folder without subfolders', async () => {
+      const el = await mount(files(), '/')
+      await selectFolder(el, 'projects')
+      await openSubfolder(el, 'beta')
+
+      expect(root(el).querySelector('.middle-pane .subfolder-list')).toBeNull()
+      expect(root(el).querySelector('.middle-pane .pane-group-label')).toBeNull()
+      expect(texts(el, '.middle-pane .file-title')).toEqual(['B1'])
+    })
+
+    it('navigates into a subfolder the way the tree does', async () => {
+      const el = await mount(files(), '/')
+      await selectFolder(el, 'projects')
+      await openSubfolder(el, 'Alpha')
+
+      const selection = (el as any)._currentSelection
+      expect(selection).toEqual({ type: 'folder', value: '/projects/alpha/', label: 'Alpha' })
+      expect(root(el).querySelector('.pane-header h3')?.textContent?.trim()).toBe('Alpha')
+      // The tree is expanded down to the row, which is selected.
+      const expanded = (el as any)._expandedFolders as Set<string>
+      expect(expanded.has('/projects/')).toBe(true)
+      expect(texts(el, '.tree-row.selected .label-text')).toEqual(['Alpha'])
+
+      await openSubfolder(el, 'deep')
+      expect(((el as any)._expandedFolders as Set<string>).has('/projects/alpha/')).toBe(true)
+      expect(texts(el, '.tree-row.selected .label-text')).toEqual(['deep'])
+      expect(texts(el, '.middle-pane .file-title')).toEqual(['X'])
+    })
+
+    it('says a folder is empty only when it has neither notes nor subfolders', async () => {
+      const el = await mount(files(), '/')
+      // No markdown file can yield a truly empty FolderNode from site.json,
+      // so select a path with no node and no files.
+      ;(el as any)._selectFolder('/nowhere/', 'Nowhere')
+      await el.updateComplete
+      expect(texts(el, '.middle-pane .no-results')).toEqual(['This folder is empty'])
+
+      await selectFolder(el, 'projects')
+      expect(root(el).querySelector('.middle-pane .no-results')).toBeNull()
+    })
+
+    it('keeps "No files found" for an empty non-folder selection', async () => {
+      const el = await mount(files(), '/')
+      ;(el as any)._selectTag('missing', 'missing')
+      await el.updateComplete
+      expect(texts(el, '.middle-pane .no-results')).toEqual(['No files found'])
+    })
+
+    it('pages a large set of subfolders separately from the notes', async () => {
+      const many: MarkdownFile[] = [
+        makeFile('/big/readme/', 'big/readme.md', { title: 'Readme' }),
+        ...Array.from({ length: 250 }, (_, i) => {
+          const n = String(i).padStart(4, '0')
+          return makeFile(`/big/f${n}/note/`, `big/f${n}/note.md`, { title: `Note ${n}` })
+        }),
+      ]
+      const el = await mount(many, '/')
+      await selectFolder(el, 'big')
+
+      expect(root(el).querySelectorAll('.middle-pane .subfolder-row')).toHaveLength(100)
+      expect(root(el).querySelectorAll('.middle-pane .file-card')).toHaveLength(1)
+      const more = root(el).querySelector('.middle-pane .show-more-folders') as HTMLElement
+      expect(more?.textContent).toContain('100 of 250')
+      more.click()
+      await el.updateComplete
+      expect(root(el).querySelectorAll('.middle-pane .subfolder-row')).toHaveLength(200)
+
+      // A new selection starts the folder list back at one page.
+      await openSubfolder(el, 'f0000')
+      await selectFolder(el, 'big')
+      expect(root(el).querySelectorAll('.middle-pane .subfolder-row')).toHaveLength(100)
+    })
+  })
+
   describe('frontmatter value counts', () => {
     function statusFiles(): MarkdownFile[] {
       return [
@@ -680,5 +822,55 @@ describe('MbrBrowseElement with site data', () => {
 
       expect(valueRows(el)).toEqual([['draft', '7'], ['final', '5']])
     })
+  })
+})
+
+/**
+ * Regression: on a phone, tapping a folder slid in a full-screen file pane
+ * fixed at `top: 0`, outside the container's safe-area padding. In the iOS
+ * app (viewport-fit=cover, pages laid out under the status and native
+ * navigation bars) its header — the only way back — and its first cards sat
+ * under the native bar, so a folder with a file or two, or only subfolders
+ * ("No files found"), showed a blank screen with nothing to tap.
+ */
+describe('MbrBrowseElement narrow layout', () => {
+  const css = (customElements.get('mbr-browse') as unknown as { styles: { cssText: string } }).styles.cssText
+  const narrow = css.slice(css.indexOf('@media (max-width: 768px)'))
+  const middlePane = narrow.slice(narrow.indexOf('.middle-pane {'), narrow.indexOf('}', narrow.indexOf('.middle-pane {')))
+
+  it('keeps the full-screen file pane clear of the safe areas', () => {
+    expect(middlePane).toContain('position: fixed')
+    expect(middlePane).toContain('top: 0')
+    expect(middlePane).toContain('box-sizing: border-box')
+    expect(middlePane).toContain('padding-top: env(safe-area-inset-top, 0px)')
+    expect(middlePane).toContain('padding-bottom: env(safe-area-inset-bottom, 0px)')
+    expect(middlePane).toContain('padding-left: env(safe-area-inset-left, 0px)')
+    expect(middlePane).toContain('padding-right: env(safe-area-inset-right, 0px)')
+  })
+})
+
+/**
+ * Regression: the current page's card used --pico-primary-background (Pico's
+ * solid primary fill, dark blue in the default theme) behind the normal text
+ * colours, which left the title and metadata nearly unreadable.
+ */
+describe('MbrBrowseElement current file card', () => {
+  const css = (customElements.get('mbr-browse') as unknown as { styles: { cssText: string } }).styles.cssText
+  const start = css.indexOf('.file-card.current {')
+  const rule = css.slice(start, css.indexOf('}', start))
+
+  it('tints the card instead of filling it with the primary background', () => {
+    expect(start).toBeGreaterThan(-1)
+    expect(rule).not.toContain('--pico-primary-background')
+    expect(rule).toMatch(/color-mix\(\s*in srgb,\s*var\(--pico-primary[^)]*\)\s*1[0-5]%/)
+    expect(rule).toContain('var(--pico-background-color')
+    expect(rule).toMatch(/border-left: \d+px solid var\(--pico-primary/)
+    expect(rule).toContain('color: var(--pico-color')
+  })
+
+  it('lifts the muted text on the tint to AA contrast', () => {
+    const muted = css.slice(css.indexOf('.file-card.current .file-meta'))
+    const body = muted.slice(0, muted.indexOf('}'))
+    expect(body).toMatch(/color-mix\(\s*in srgb,\s*var\(--pico-muted-color[^)]*\)\s*70%,\s*var\(--pico-color/)
   })
 })

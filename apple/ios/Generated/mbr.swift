@@ -1621,6 +1621,15 @@ public struct OpenReport: Equatable, Hashable {
      * [`MbrApp::config_error`]).
      */
     public var configError: String?
+    /**
+     * Files in `.mbr/` (or the template folder) the provider had not
+     * downloaded at open, whose download was requested then. Nothing else
+     * asks for them — the scan skips hidden folders — so until they arrive
+     * the vault runs without them (default templates, configuration or
+     * styles). When non-zero, [`MbrApp::refresh`] a few seconds later picks
+     * them up.
+     */
+    public var mbrDownloadsRequested: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1647,7 +1656,15 @@ public struct OpenReport: Equatable, Hashable {
          * Why the vault's `.mbr/config.toml` was not used, when it could not be
          * loaded: the vault opened with the default configuration instead (see
          * [`MbrApp::config_error`]).
-         */configError: String?) {
+         */configError: String?, 
+        /**
+         * Files in `.mbr/` (or the template folder) the provider had not
+         * downloaded at open, whose download was requested then. Nothing else
+         * asks for them — the scan skips hidden folders — so until they arrive
+         * the vault runs without them (default templates, configuration or
+         * styles). When non-zero, [`MbrApp::refresh`] a few seconds later picks
+         * them up.
+         */mbrDownloadsRequested: UInt32) {
         self.fromCache = fromCache
         self.restoredFiles = restoredFiles
         self.indexedFiles = indexedFiles
@@ -1655,6 +1672,7 @@ public struct OpenReport: Equatable, Hashable {
         self.readyMs = readyMs
         self.refresh = refresh
         self.configError = configError
+        self.mbrDownloadsRequested = mbrDownloadsRequested
     }
 
     
@@ -1679,7 +1697,8 @@ public struct FfiConverterTypeOpenReport: FfiConverterRustBuffer {
                 scanMs: FfiConverterUInt64.read(from: &buf), 
                 readyMs: FfiConverterUInt64.read(from: &buf), 
                 refresh: FfiConverterTypeRefreshSummary.read(from: &buf), 
-                configError: FfiConverterOptionString.read(from: &buf)
+                configError: FfiConverterOptionString.read(from: &buf), 
+                mbrDownloadsRequested: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -1691,6 +1710,7 @@ public struct FfiConverterTypeOpenReport: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.readyMs, into: &buf)
         FfiConverterTypeRefreshSummary.write(value.refresh, into: &buf)
         FfiConverterOptionString.write(value.configError, into: &buf)
+        FfiConverterUInt32.write(value.mbrDownloadsRequested, into: &buf)
     }
 }
 
@@ -1924,6 +1944,13 @@ public struct RefreshSummary: Equatable, Hashable {
      * cleared when it was fixed.
      */
     public var configError: String?
+    /**
+     * Files in `.mbr/` (or the template folder) still not downloaded, whose
+     * download this refresh asked for again. When non-zero, refresh again in
+     * a few seconds: their arrival shows up as `config_reloaded`,
+     * `templates_reloaded` or `assets_changed`.
+     */
+    public var mbrDownloadsRequested: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1965,7 +1992,13 @@ public struct RefreshSummary: Equatable, Hashable {
          * The configuration problem after this refresh, as
          * [`MbrApp::config_error`] reports it: set when a `config.toml` broke,
          * cleared when it was fixed.
-         */configError: String?) {
+         */configError: String?, 
+        /**
+         * Files in `.mbr/` (or the template folder) still not downloaded, whose
+         * download this refresh asked for again. When non-zero, refresh again in
+         * a few seconds: their arrival shows up as `config_reloaded`,
+         * `templates_reloaded` or `assets_changed`.
+         */mbrDownloadsRequested: UInt32) {
         self.added = added
         self.changed = changed
         self.removed = removed
@@ -1976,6 +2009,7 @@ public struct RefreshSummary: Equatable, Hashable {
         self.templatesReloaded = templatesReloaded
         self.assetsChanged = assetsChanged
         self.configError = configError
+        self.mbrDownloadsRequested = mbrDownloadsRequested
     }
 
     
@@ -2003,7 +2037,8 @@ public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
                 configReloaded: FfiConverterBool.read(from: &buf), 
                 templatesReloaded: FfiConverterBool.read(from: &buf), 
                 assetsChanged: FfiConverterBool.read(from: &buf), 
-                configError: FfiConverterOptionString.read(from: &buf)
+                configError: FfiConverterOptionString.read(from: &buf), 
+                mbrDownloadsRequested: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -2018,6 +2053,7 @@ public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
         FfiConverterBool.write(value.templatesReloaded, into: &buf)
         FfiConverterBool.write(value.assetsChanged, into: &buf)
         FfiConverterOptionString.write(value.configError, into: &buf)
+        FfiConverterUInt32.write(value.mbrDownloadsRequested, into: &buf)
     }
 }
 
