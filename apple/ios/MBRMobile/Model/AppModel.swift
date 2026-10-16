@@ -101,6 +101,6 @@ final class AppModel {
         guard self.wasInBackground else { return }
         self.wasInBackground = false
         guard let session else { return }
-        Task { await session.refresh(reason: "foreground") }
+        Task { await session.refresh(reason: "foreground", askProvider: true) }
     }
 }

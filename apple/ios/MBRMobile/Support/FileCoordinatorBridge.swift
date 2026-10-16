@@ -107,9 +107,10 @@ final class FileCoordinatorBridge: FileCoordinator, @unchecked Sendable {
     }
 
     /// Returns at once; the downloads happen on a background queue. Folders
-    /// are listed (see `list`); iCloud files are asked to download; any other
-    /// file gets a coordinated read, which is what makes a third-party
-    /// provider (Dropbox, Working Copy) materialize the file.
+    /// are listed (see `list`); ubiquitous files (iCloud Drive, and a
+    /// replicated File Provider's: Dropbox, OneDrive) are asked to download;
+    /// any other file gets a coordinated read, which is what makes an older
+    /// third-party provider (Working Copy) materialize the file.
     func requestDownload(paths: [String]) {
         Log.info("coordinator: download requested for \(paths.count) item(s): "
             + paths.prefix(3).joined(separator: ", "))
@@ -157,11 +158,14 @@ final class FileCoordinatorBridge: FileCoordinator, @unchecked Sendable {
         }
         let ubiquitous = (try? url.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem ?? false
         if ubiquitous {
+            // Not only iCloud: a third-party File Provider's items (Dropbox,
+            // OneDrive, …) are ubiquitous too, and this downloads them.
+            let provider = ProviderRefresh.providerName(for: path)
             do {
                 try FileManager.default.startDownloadingUbiquitousItem(at: url)
-                Log.info("coordinator: iCloud download started for \(path)")
+                Log.info("coordinator: download started (\(provider)) for \(path)")
             } catch {
-                Log.info("coordinator: iCloud download of \(path) failed: \(error.localizedDescription)")
+                Log.info("coordinator: download (\(provider)) of \(path) failed: \(error.localizedDescription)")
             }
             return
         }

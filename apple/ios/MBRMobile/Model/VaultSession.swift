@@ -292,7 +292,15 @@ extension VaultSession {
     /// `always` (the Refresh menu item) reloads the page whatever the
     /// refresh found: the reader asked for it, and the index may have changed
     /// before they did (a background refresh, the initial indexing).
-    func refresh(reason: String, always: Bool = false) async {
+    ///
+    /// `askProvider` (the Refresh menu item, coming back to the foreground)
+    /// first asks a file provider to update the page on screen and its folder
+    /// (`askProviderForUpdates`): the stat-diff alone only sees the provider's
+    /// local replica, which can lag the cloud indefinitely.
+    func refresh(reason: String, always: Bool = false, askProvider: Bool = false) async {
+        if askProvider {
+            await self.askProviderForUpdates()
+        }
         do {
             let summary = try await app.refresh()
             self.lastRefresh = summary

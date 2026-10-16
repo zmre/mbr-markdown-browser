@@ -60,7 +60,7 @@ struct VaultActionsMenu: View {
             }
             Section {
                 Button("Refresh", systemImage: "arrow.clockwise") {
-                    Task { await self.session.refresh(reason: "button", always: true) }
+                    Task { await self.session.refresh(reason: "button", always: true, askProvider: true) }
                 }
                 Button("Home", systemImage: "house") {
                     Task {

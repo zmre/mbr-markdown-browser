@@ -169,6 +169,7 @@ enum SelfTest {
         await record("taskToggle", self.taskToggle(session))
         await record("flashcardReview", self.flashcardReview(session))
         await record("videoSeek", self.videoSeek(session))
+        await record("providerRefresh", self.providerRefresh(session))
 
         // A slashless URL: mbr answers 301 to /modes/, which WebKit would not
         // follow from a scheme handler; the transport replays it in the page.

@@ -238,7 +238,7 @@ xcrun simctl launch --console-pty --terminate-running-process "iPhone 17" com.zm
 
 | Mode | Checks |
 |------|--------|
-| `full` | On the sample vault, with fixtures written to `selftest/`: open timings and `fromCache`, viewport/desktop layout, localStorage across launches, components, no live-reload socket, mermaid, lazy `import()`, `POST /.mbr/search`, `Range: bytes=0-99` → 206 + 100 bytes, a task toggle and a flashcard review through the real UI and the `FileCoordinator` (each verified on disk), `<video>` seek, and a slashless URL landing on its canonical page |
+| `full` | On the sample vault, with fixtures written to `selftest/`: open timings and `fromCache`, viewport/desktop layout, localStorage across launches, components, no live-reload socket, mermaid, lazy `import()`, `POST /.mbr/search`, `Range: bytes=0-99` → 206 + 100 bytes, a task toggle and a flashcard review through the real UI and the `FileCoordinator` (each verified on disk), `<video>` seek, the pre-refresh provider request's mechanics (`providerRefresh`: presenters + coordinated read, idle cost = budget, a change ends the wait early), and a slashless URL landing on its canonical page |
 | `single` | A file from `simctl openurl file://…` (or `-mbrOpenFile <path under Documents>`): it renders, `/` lands on it, and Grant Folder Access is offered |
 | `config` | A vault with a broken `.mbr/config.toml` opens, reports the error, and `errors.json` carries `config_parse_error` |
 | `refresh` | Opens the sample vault and waits. Background the app, edit a file in its container, then bring it back: `refresh (foreground)` reports the change and the page reloads |
