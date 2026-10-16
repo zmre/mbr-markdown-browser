@@ -121,6 +121,54 @@ code fence at the end of the file swallows anything added after it, for
 instance), the editor asks before saving the whole note in its own spelling,
 listing the lines that would change.
 
+### Checking your own notes
+
+To find out, ahead of time, which of your notes the editor would rewrite, run
+the round-trip checker from a checkout of mbr (it needs [bun](https://bun.sh)):
+
+```bash
+cd components
+bun install
+bun run roundtrip-check ~/notes --out /tmp/mbr-roundtrip
+```
+
+It opens and re-saves every `.md`/`.markdown` note under the folder exactly as
+the editor does — the same code, run in a headless DOM — without writing to
+your notes. Hidden folders (`.git`, `.obsidian`, `.mbr`) are skipped. The
+terminal shows only counts (notes checked, unchanged, would change, errors,
+time) and the report's path, never a note's name or text, so the output is
+safe to paste into an issue. `--minimize-seconds N` (default 10) bounds the
+time spent shrinking each reproduction.
+
+The report folder holds `index.md`, a table of the notes that would change
+(their path, how many lines change, a guess at the markdown involved, and
+whether the anonymized reproduction still reproduces), and a numbered folder
+for each of them:
+
+| File | What it is |
+|------|------------|
+| `diff.patch` | The note → what saving it in the editor's spelling writes, after the lines the notice lists |
+| `repro.md` | A minimal reproduction: just the blocks that change (plus the frontmatter and definitions they need), shrunk while the editor still rewrites it the same way |
+| `repro.anon.md` | The reproduction with every letter replaced by `x`/`X` and every digit by `0`, keeping the markdown syntax and the words mbr reads (`TODO`, `[!NOTE]`, `@due(...)`, review ratings, `type: flashcard`, …) |
+| `repro.diff.patch`, `repro.anon.diff.patch` | What the editor does to each reproduction |
+
+To turn a finding into a test case for mbr:
+
+1. Read `repro.anon.md`. Anonymization is automatic and keeps punctuation,
+   numbers in list markers and dates, URL schemes and HTML tag names, so
+   check that nothing you would not publish survives, and redact by hand if
+   it does. If the index says `differs (review repro.md manually)`, the
+   anonymized file no longer shows the problem; write a small example by hand
+   from `repro.md` instead.
+2. Copy the approved file to `tests/fixtures/editor-roundtrip/<name>.md`.
+3. From the repository root, generate its renderer outline with
+   `MBR_UPDATE_OUTLINES=1 cargo test -p mbr-core editor_parity`, and review
+   the new `<name>.outline.json`.
+4. `cd components && bun run test`: the parity harness now holds the editor
+   to the fixture. Until the editor handles it, list it in
+   `ROUND_TRIP_FAILS` in `components/src/editor-parity.test.ts` with the
+   reason.
+
 ### Starting a new note
 
 In the editor, ⋯ → **New note…** asks for a path, prefilled with the note's own

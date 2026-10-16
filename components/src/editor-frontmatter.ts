@@ -94,3 +94,36 @@ export function withLineEnding(text: string, ending: LineEnding): string {
   return ending === '\n' ? text : toLf(text).replace(/\n/g, '\r\n');
 }
 
+/** A file as the editor opens it: LF, split, and how to write it back. */
+export interface OpenedDocument {
+  /** The ending a save writes ({@link lineEndingOf} of the file as loaded). */
+  lineEnding: LineEnding;
+  /** The YAML the frontmatter textarea starts with, `null` without frontmatter. */
+  frontmatter: string | null;
+  /** The markdown body Crepe is opened on (LF). */
+  body: string;
+  /** Lines before the body (the frontmatter), so body line N is file line N + this. */
+  bodyLineOffset: number;
+}
+
+/**
+ * Opens `raw` the way the editor does: in LF, split into frontmatter and body.
+ * The one derivation shared by `openEditor`, the tests and the
+ * `roundtrip-check` tool, so none of them can disagree about where the body
+ * starts or which ending a save writes.
+ */
+export function openDocument(raw: string): OpenedDocument {
+  const lineEnding = lineEndingOf(raw);
+  const lf = toLf(raw);
+  const { frontmatter, body } = splitFrontmatter(lf);
+  const bodyLineOffset = lf.slice(0, lf.length - body.length).split('\n').length - 1;
+  return { lineEnding, frontmatter, body, bodyLineOffset };
+}
+
+/**
+ * The file a save writes for `doc`: the frontmatter textarea's `yaml` and the
+ * body, recombined and written with the file's own line ending.
+ */
+export function documentToSave(doc: OpenedDocument, yaml: string, body: string): string {
+  return withLineEnding(recombine(yaml, body), doc.lineEnding);
+}

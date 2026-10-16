@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "bench": "vitest bench --reporter=verbose"
+    "bench": "vitest bench --reporter=verbose",
+    "roundtrip-check": "bun scripts/roundtrip-check.ts"
   },
   "dependencies": {
     "@milkdown/crepe": "^7.22.2",

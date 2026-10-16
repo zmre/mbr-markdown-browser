@@ -17,7 +17,7 @@ import { editorViewCtx, remarkCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
-import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
+import { documentToSave, openDocument } from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
 import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
@@ -690,11 +690,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   }
 
   // The editor works in LF; a CRLF file is saved back as CRLF (`currentContent`).
-  const lineEnding = lineEndingOf(raw);
-  const lfRaw = toLf(raw);
-  const { frontmatter, body } = splitFrontmatter(lfRaw);
-  // Lines before the body (frontmatter), so body line numbers can be shown as file lines.
-  const bodyLineOffset = lfRaw.slice(0, lfRaw.length - body.length).split('\n').length - 1;
+  // `bodyLineOffset`: lines before the body, so body lines can be shown as file lines.
+  const opened = openDocument(raw);
+  const { frontmatter, body, bodyLineOffset } = opened;
   loading.remove();
 
   // Build modal chrome: Cancel | title | ⋯ Save, as a native editing sheet.
@@ -983,7 +981,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     if (!crepe) return savedContent;
     const next = saver.body();
     wholeBody = next.whole;
-    return withLineEnding(recombine(fmTextarea.value, next.body), lineEnding);
+    return documentToSave(opened, fmTextarea.value, next.body);
   };
   // Baseline for dirty-tracking: what a save would write right now (the
   // loaded file itself when the round trip is exact).

@@ -9,7 +9,7 @@ import { editorViewCtx, remarkCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { CREPE_FEATURE_CONFIGS, CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
-import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
+import { documentToSave, openDocument, splitFrontmatter } from './editor-frontmatter.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
 
 /** Set by `vitest.config.ts` from `tests/fixtures/editor-roundtrip/`. */
@@ -53,14 +53,18 @@ export function destroyEditors(): void {
  */
 export async function savedFile(source: string, edit?: (crepe: Crepe) => void): Promise<string> {
   // `openEditor` opens the file as LF and saves it with its own line ending.
-  const lineEnding = lineEndingOf(source);
-  const { frontmatter, body } = splitFrontmatter(toLf(source));
-  const crepe = await openCrepe(body);
+  const doc = openDocument(source);
+  const crepe = await openCrepe(doc.body);
   edit?.(crepe);
-  // A textarea's value normalizes line breaks to LF (HTML's "API value"), and
-  // the frontmatter is read back from `fmTextarea.value`.
-  const yaml = (frontmatter ?? '').replace(/\r\n?/g, '\n');
-  return withLineEnding(recombine(yaml, serializeBody(crepe)), lineEnding);
+  return documentToSave(doc, textareaValue(doc.frontmatter), serializeBody(crepe));
+}
+
+/**
+ * The frontmatter as `openEditor` reads it back from `fmTextarea.value`: a
+ * textarea's value normalizes line breaks to LF (HTML's "API value").
+ */
+export function textareaValue(frontmatter: string | null): string {
+  return (frontmatter ?? '').replace(/\r\n?/g, '\n');
 }
 
 /**
