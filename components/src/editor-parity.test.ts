@@ -36,9 +36,8 @@
  *   then opens a new code block that swallows the rest of the document**
  *   (`flashcards-loose`).
  * - `[-]` / `[>]` tasks (item 2) → `\[-]` / `\[>]`, no longer tasks.
- * - `--- {attrs}` (item 3) → `\--- {attrs}`, no longer a section rule. The
- *   setext-position case (`--- {…}` directly under a paragraph) is a
- *   paragraph continuation to the renderer too, but is escaped the same way.
+ * - ~~`--- {attrs}` (item 3) → `\--- {attrs}`~~ — fixed by
+ *   `editor-plugins/section-attrs.ts`, both positions.
  * - Math (new, item 5): `$…$`/`$$…$$` are plain text to the editor (Crepe's
  *   LaTeX feature is off), so CommonMark backslash escapes inside them are
  *   consumed: `\,` → `,`, `\;` → `;`, `\{a\}` → `{a}`. Silent LaTeX damage.
@@ -61,17 +60,17 @@
  * - Setext headings → ATX; indented code → fenced; `~~~` fences → backticks;
  *   two-space hard breaks → `\`; `2 * 3` → `2 \* 3`.
  *
- * Survive untouched: wikilinks in every form (after `unescapeWikilinks`),
+ * Survive untouched: wikilinks in every form (`editor-plugins/wikilinks.ts`),
  * `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`, raw HTML blocks and
  * inline HTML, ```` ```chat ```` fences, `TODO:`/`TK`/`FIXME`/`XXX` markers,
  * task annotations (`@due(...)`, `@done(...)`, `#tag`, `!!`, `> date`),
- * heading attributes `{#id .class}` (as text), `__strong__`/`_em_`, flat
+ * heading attributes `{#id .class}` (text; structure from
+ * `editor-plugins/heading-attrs.ts`), `__strong__`/`_em_`, flat
  * definition lines (`: x` as paragraph text), and the already-damaged
  * T1-B11 (a fixed point).
  *
- * Structure only (bytes survive, outline differs): heading attributes (no
- * `id`/`classes` in the editor — item 5), flat definition lists and the
- * damaged deck (item 1).
+ * Structure only (bytes survive, outline differs): flat definition lists and
+ * the damaged deck (item 1).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './editor-test-support.js';
@@ -86,14 +85,12 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
   'flashcards-b11': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
   'flashcards-dash-history': 'item 1: `-` history list hoisted out of its definition',
   'flashcards-loose': 'item 1: fence in a definition escaped; the rest of the file becomes code',
-  'kitchen-sink': 'items 1, 2, 3, 6',
+  'kitchen-sink': 'items 1, 2, 6',
   'lists-dash': 'item 6: `-` → `*`',
   'lists-ordered-paren': 'item 6: `1)` → `1.` and adjacent-list delimiters swapped',
   marginalia: 'item 6: `>>>` → `> > >`',
   math: 'item 5: backslash escapes inside math consumed (`\\,` → `,`)',
   rules: 'item 6: `---` → `***`',
-  'section-attrs': 'item 3: `--- {attrs}` → `\\--- {attrs}`',
-  'section-attrs-setext': 'item 3: `--- {attrs}` under a paragraph → `\\--- {attrs}`',
   tables: 'item 6: tables re-padded',
   tasks: 'item 2: `[-]`/`[>]` escaped; item 6: `-` → `*`, `[X]` → `[x]`',
 };
@@ -108,9 +105,7 @@ const OUTLINE_FAILS: Record<string, string> = {
   'flashcards-dash-history': 'item 1: no definition list',
   'flashcards-flat': 'item 1: no definition list',
   'flashcards-loose': 'item 1: no definition list',
-  'heading-attrs': 'item 5: no heading attributes',
-  'kitchen-sink': 'items 1, 2, 3, 5',
-  'section-attrs': 'item 3: no section break',
+  'kitchen-sink': 'items 1, 2',
   tasks: 'item 2: no `[-]`/`[>]` status',
 };
 
