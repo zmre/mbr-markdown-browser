@@ -17,7 +17,7 @@ import { editorViewCtx, remarkCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
-import { documentToSave, openDocument } from './editor-frontmatter.js';
+import { documentToSave, frontmatterRewrites, openDocument } from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
 import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
@@ -882,7 +882,8 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
    */
   const showRoundTripNotice = (saverInfo: BodySaver): void => {
     const { ifEdited, onSave } = saverInfo.rewritten;
-    if (ifEdited.length === 0 && onSave.length === 0) return;
+    const fmRewrites = frontmatterRewrites(opened);
+    if (ifEdited.length === 0 && onSave.length === 0 && fmRewrites.length === 0) return;
     const notice = document.createElement('div');
     notice.className = 'mbr-editor-notice';
     notice.setAttribute('role', 'note');
@@ -896,6 +897,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     }
     if (onSave.length > 0) {
       parts.push(`Line${plural(onSave)} ${formatLineRanges(onSave, bodyLineOffset)} will be rewritten when you save.`);
+    }
+    if (fmRewrites.length > 0) {
+      // Unedited frontmatter is saved as loaded; an edited one is normalized.
+      parts.push(`If you edit the frontmatter (lines 1–${bodyLineOffset}), ${fmRewrites.join(' and ')}.`);
     }
     text.textContent = parts.join(' ');
     const dismiss = document.createElement('button');

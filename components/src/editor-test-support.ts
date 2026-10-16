@@ -9,7 +9,7 @@ import { editorViewCtx, remarkCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { CREPE_FEATURE_CONFIGS, CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
-import { documentToSave, openDocument, splitFrontmatter } from './editor-frontmatter.js';
+import { documentToSave, openDocument, textareaValue } from './editor-frontmatter.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
 
 /** Set by `vitest.config.ts` from `tests/fixtures/editor-roundtrip/`. */
@@ -48,7 +48,7 @@ export function destroyEditors(): void {
 /**
  * What the editor writes when a whole file is opened and saved, with an
  * optional edit in between: the frontmatter goes through the YAML textarea,
- * the body through Crepe, and `recombine` joins them — `openEditor`'s
+ * the body through Crepe, and `documentToSave` joins them — `openEditor`'s
  * `currentContent()`.
  */
 export async function savedFile(source: string, edit?: (crepe: Crepe) => void): Promise<string> {
@@ -63,9 +63,7 @@ export async function savedFile(source: string, edit?: (crepe: Crepe) => void): 
  * The frontmatter as `openEditor` reads it back from `fmTextarea.value`: a
  * textarea's value normalizes line breaks to LF (HTML's "API value").
  */
-export function textareaValue(frontmatter: string | null): string {
-  return (frontmatter ?? '').replace(/\r\n?/g, '\n');
-}
+export { textareaValue } from './editor-frontmatter.js';
 
 /**
  * The editor's outline of a whole file: the body parsed exactly as Milkdown's
@@ -74,15 +72,14 @@ export function textareaValue(frontmatter: string | null): string {
  * shifted past the frontmatter.
  */
 export async function editorOutline(source: string): Promise<OutlineNode[]> {
-  const { body } = splitFrontmatter(source);
+  // Split as the editor opens the file, so the outline and a save agree on where the body starts.
+  const { body, bodyLineOffset } = openDocument(source);
   const crepe = await openCrepe(body);
   const tree = crepe.editor.action((ctx) => {
     const remark = ctx.get(remarkCtx);
     return remark.runSync(remark.parse(body), body);
   }) as unknown as MdastNode;
-  const prefix = source.slice(0, source.length - body.length);
-  const lineOffset = prefix.split('\n').length - 1;
-  return mdastOutline(tree, body, lineOffset);
+  return mdastOutline(tree, body, bodyLineOffset);
 }
 
 // Driving the editor the way a user does: cursor, keys, typing.

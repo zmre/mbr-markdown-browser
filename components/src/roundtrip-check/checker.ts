@@ -24,7 +24,7 @@ import type { Crepe } from '@milkdown/crepe';
 import { remarkCtx } from '@milkdown/kit/core';
 import { replaceAll } from '@milkdown/kit/utils';
 import { createBodySaver, serializeBody } from '../editor-crepe.js';
-import { documentToSave, openDocument, toLf, type OpenedDocument } from '../editor-frontmatter.js';
+import { documentToSave, frontmatterRewrites, openDocument, toLf, type OpenedDocument } from '../editor-frontmatter.js';
 import { splitBlocks, type BlockSplit, type LineRange, type ParsedRoot } from '../editor-minimal-diff.js';
 import { destroyEditors, openCrepe, textareaValue } from '../editor-test-support.js';
 import { diffLines, linesOf } from './diff.js';
@@ -52,8 +52,11 @@ export interface RoundTrip {
    * with no edit at all writes nothing: the editor is not dirty.)
    */
   untouchedSave: string;
-  /** The open-time notice: lines kept unless edited, and lines any save rewrites. */
-  notice: { ifEdited: LineRange[]; onSave: LineRange[] };
+  /**
+   * The open-time notice: lines kept unless edited, lines any save rewrites,
+   * and what editing the frontmatter would normalize (`frontmatterRewrites`).
+   */
+  notice: { ifEdited: LineRange[]; onSave: LineRange[]; frontmatter: string[] };
   /** The body's top-level blocks (`null` if the parser gave no positions). */
   blocks: BlockSplit | null;
   /** Indices into `blocks` of the blocks the notice names or the round trip touches. */
@@ -82,7 +85,11 @@ export class RoundTripChecker {
     const untouchedSave = documentToSave(doc, yaml, saver.body().body);
     const shift = (ranges: readonly LineRange[]) =>
       ranges.map(({ first, last }) => ({ first: first + doc.bodyLineOffset, last: last + doc.bodyLineOffset }));
-    const notice = { ifEdited: shift(saver.rewritten.ifEdited), onSave: shift(saver.rewritten.onSave) };
+    const notice = {
+      ifEdited: shift(saver.rewritten.ifEdited),
+      onSave: shift(saver.rewritten.onSave),
+      frontmatter: frontmatterRewrites(doc),
+    };
     const blockNodes = (this.parse(doc.body) as unknown as { children: MdastBlock[] }).children;
     const blocks = splitBlocks(doc.body, (markdown) => this.parse(markdown));
     // Body lines the round trip touches: the notice's blocks, and every line

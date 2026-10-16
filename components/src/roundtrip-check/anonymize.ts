@@ -27,6 +27,8 @@
  * same shape, and every bracket naming it is rewritten to match.
  */
 
+import { frontmatterCloseLine } from '../editor-frontmatter.js';
+
 /** Words markdown or mbr reads, kept wherever they stand. */
 const KEPT_WORD = /\b(?:TODO|TK|FIXME|XXX)\b/;
 
@@ -198,13 +200,8 @@ function maskFrontmatterLine(line: string, labels: ReadonlyMap<string, string>):
 export function anonymize(markdown: string): string {
   const labels = labelNames(markdown);
   const lines = markdown.split('\n');
-  // The editor's frontmatter rule (`splitFrontmatter`): `---` on the first
-  // line (after a BOM), closed by the next `---` or `...` line.
-  const bare = (line: string) => line.replace(/^\uFEFF/, '').trimEnd();
-  let fmEnd = -1;
-  if (lines.length > 0 && bare(lines[0]) === '---') {
-    fmEnd = lines.findIndex((line, i) => i > 0 && (bare(line) === '---' || bare(line) === '...'));
-  }
+  // The editor's frontmatter rule (`frontmatterCloseLine`), after a BOM.
+  const fmEnd = frontmatterCloseLine([lines[0]?.replace(/^\uFEFF/, '') ?? '', ...lines.slice(1)]);
   return lines
     .map((line, i) => {
       if (fmEnd > 0 && i <= fmEnd) return i === 0 || i === fmEnd ? line : maskFrontmatterLine(line, labels);

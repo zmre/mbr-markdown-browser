@@ -21,10 +21,13 @@ afterAll(() => rmSync(temp, { recursive: true, force: true }));
 const SECRETS = ['Zanzibar', 'Quarterly', 'lossy', 'kitchen', 'tasks', 'hidden'];
 
 /**
- * Rewritten by any editor (by design, not for want of a plugin): blank lines
- * ending the frontmatter are dropped, and the unclosed fence is closed.
+ * Rewritten by a full re-serialization (by design, not for want of a
+ * plugin): a paragraph directly under a heading gets a blank line between,
+ * and the unclosed fence is closed. The blank line ending the frontmatter is
+ * kept: an unedited frontmatter is saved as loaded.
  */
-const LOSSY = '---\ntitle: Quarterly Plan\n\n---\n# Quarterly Plan\n\nMeet in Zanzibar on 2026-03-04.\n\n```js\nlet secret = 42\n';
+const LOSSY =
+  '---\ntitle: Quarterly Plan\n\n---\n# Quarterly Plan\nKickoff.\n\nMeet in Zanzibar on 2026-03-04.\n\n```js\nlet secret = 42\n';
 
 function write(path: string, text: string): void {
   mkdirSync(join(path, '..'), { recursive: true });
@@ -99,18 +102,24 @@ describe('roundtrip-check end to end', () => {
       'repro.md',
     ]);
     const patch = readFileSync(join(out, '0001', 'diff.patch'), 'utf8');
-    expect(patch).toContain('Notice at open, saved as written unless edited: 9–11');
+    expect(patch).toContain('Notice at open, saved as written unless edited: 10–12');
+    expect(patch).toContain('Notice at open, if the frontmatter is edited: blank lines at its end are dropped');
+    // The unedited frontmatter, its trailing blank line included, is not part of the diff.
+    expect(patch).toContain('Any save writes the parts you did not edit as: the note unchanged');
+    expect(patch).toContain(' # Quarterly Plan\n+\n Kickoff.\n');
     expect(patch).toContain('--- a/deep/lossy.md\n+++ b/deep/lossy.md\n');
     expect(patch).toContain('+```\n');
 
-    // The reproduction keeps both rewrites and drops the paragraph neither needs.
+    // The reproduction keeps both rewrites and drops what neither needs: the
+    // paragraphs, and the frontmatter (no longer rewritten).
     const repro = readFileSync(join(out, '0001', 'repro.md'), 'utf8');
     expect(repro).not.toContain('Zanzibar');
-    expect(repro).toContain('```js');
-    expect(repro).toContain('title: Quarterly Plan\n\n---');
+    expect(repro).not.toContain('title:');
+    expect(repro).toContain('# Quarterly Plan\n');
+    expect(repro).toContain('```js\n');
     const anon = readFileSync(join(out, '0001', 'repro.anon.md'), 'utf8');
     expect(anon).toBe(anonymize(repro));
-    expect(anon).toContain('xxxxx: Xxxxxxxxx Xxxx\n\n---\n');
+    expect(anon).toContain('# Xxxxxxxxx Xxxx\n');
     expect(index).toContain(ANON_REPRODUCES);
     expect(readFileSync(join(out, '0001', 'repro.anon.diff.patch'), 'utf8')).toContain('+```\n');
 

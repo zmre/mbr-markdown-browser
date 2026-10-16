@@ -6,8 +6,9 @@
  * see `editor-test-support.ts`):
  *
  * (a) **Round trip.** Opening the file and saving it untouched writes it back
- *     byte for byte (frontmatter through the YAML textarea, body through
- *     Crepe, `recombine`d — `openEditor`'s own save path).
+ *     byte for byte (frontmatter through the YAML textarea, unedited so
+ *     written as loaded; body through Crepe — `documentToSave`, `openEditor`'s
+ *     own save path).
  * (b) **Structure.** The editor's block outline of the file — built from the
  *     mdast Milkdown parses into (`editor-outline.ts`) — equals the renderer's,
  *     `<fixture>.outline.json`, which mbr-core's `editor_parity` test writes
@@ -47,9 +48,16 @@
  * (`references.ts`); untitled images were deleted and a standalone image's
  * alt became Crepe's ratio `![1.00](src)` (`images.ts`). CRLF files were
  * rewritten as LF (`openEditor`/`savedFile` now keep the file's ending).
+ * Unedited frontmatter lost blank lines at its end, its `...` closer and the
+ * blank lines before the body, and a byte-order mark (`openDocument` now
+ * keeps everything before the body as loaded — `frontmatter-*`). The editor
+ * also hid `---`/`---` and a block whose first line is blank as frontmatter,
+ * where the renderer reads rules (and a setext heading): it now splits
+ * frontmatter by the renderer's rule (`frontmatterCloseLine`).
  *
  * Cosmetic (same structure — item 6), still normalized:
- * - A paragraph directly under a heading gets a blank line between.
+ * - A paragraph directly under a heading gets a blank line between, and so
+ *   does a rule directly under a rule (`frontmatter-empty`).
  * - A lazy continuation line in a list item or block quote is indented
  *   (`deflist-edge`); in a definition it is kept.
  * - A definition, once edited, is printed `: ` + two-space continuations.
@@ -86,6 +94,7 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 const ROUND_TRIP_FAILS: Record<string, string> = {
   'deflist-edge':
     'item 6: a blank line added after a heading; a `:` lazy line in a list item or quote indented and escaped',
+  'frontmatter-empty': 'item 6: a blank line added between two rules with none between them',
 };
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */

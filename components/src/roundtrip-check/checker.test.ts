@@ -5,7 +5,7 @@
  */
 import { afterAll, describe, expect, it } from 'vitest';
 import { createBodySaver } from '../editor-crepe.js';
-import { openDocument } from '../editor-frontmatter.js';
+import { frontmatterRewrites, openDocument } from '../editor-frontmatter.js';
 import { EDITOR_FIXTURES, destroyEditors, openCrepe, savedFile } from '../editor-test-support.js';
 import { constructGuess, RoundTripChecker, touchedLines } from './checker.js';
 
@@ -13,7 +13,8 @@ import { constructGuess, RoundTripChecker, touchedLines } from './checker.js';
 const CLEAN = '# Title\n\nSome *text*.\n\n* one\n* two\n';
 /**
  * Rewritten by design, not for want of a plugin: an unclosed fence at the end
- * is closed, and blank lines ending the frontmatter are dropped (`recombine`).
+ * is closed. The blank line ending the frontmatter is kept (an unedited
+ * frontmatter is saved as loaded); editing the frontmatter would drop it.
  */
 const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\n```js\nlet x = 1\n';
 
@@ -24,15 +25,19 @@ describe('RoundTripChecker', () => {
   it('reports a clean note unchanged and a lossy one changed, with the notice in file lines', async () => {
     const clean = await checker.check(CLEAN);
     expect(clean.changed).toBe(false);
-    expect(clean.notice).toEqual({ ifEdited: [], onSave: [] });
+    expect(clean.notice).toEqual({ ifEdited: [], onSave: [], frontmatter: [] });
 
     const lossy = await checker.check(LOSSY);
     expect(lossy.changed).toBe(true);
-    expect(lossy.saved).toBe('---\ntitle: t\n---\n# Heading\n\n```js\nlet x = 1\n```\n');
-    // The body's unedited blocks are kept; the frontmatter goes through the textarea.
-    expect(lossy.untouchedSave).toBe('---\ntitle: t\n---\n# Heading\n\n```js\nlet x = 1\n');
-    expect(lossy.notice).toEqual({ ifEdited: [{ first: 7, last: 9 }], onSave: [] });
-    expect(constructGuess(LOSSY, lossy)).toBe('code block, frontmatter');
+    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\n```js\nlet x = 1\n```\n');
+    // The body's unedited blocks are kept, and so is the unedited frontmatter.
+    expect(lossy.untouchedSave).toBe(LOSSY);
+    expect(lossy.notice).toEqual({
+      ifEdited: [{ first: 7, last: 9 }],
+      onSave: [],
+      frontmatter: ['blank lines at its end are dropped'],
+    });
+    expect(constructGuess(LOSSY, lossy)).toBe('code block');
   });
 
   it('keeps CRLF and names a lost byte-order mark', async () => {
@@ -53,7 +58,11 @@ describe('RoundTripChecker', () => {
       const shift = (ranges: { first: number; last: number }[]) =>
         ranges.map((r) => ({ first: r.first + doc.bodyLineOffset, last: r.last + doc.bodyLineOffset }));
       expect(trip.saved, name).toBe(await savedFile(source));
-      expect(trip.notice, name).toEqual({ ifEdited: shift(saver.rewritten.ifEdited), onSave: shift(saver.rewritten.onSave) });
+      expect(trip.notice, name).toEqual({
+        ifEdited: shift(saver.rewritten.ifEdited),
+        onSave: shift(saver.rewritten.onSave),
+        frontmatter: frontmatterRewrites(doc),
+      });
       // `destroyEditors` would take the checker's editor too; drop only the fresh ones.
       await fresh.destroy();
     }

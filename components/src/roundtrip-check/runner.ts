@@ -197,6 +197,7 @@ function noticeHeader(trip: RoundTrip, stored: string): string {
     'Editor round trip (file line numbers).\n' +
     `Notice at open, saved as written unless edited: ${ranges(trip.notice.ifEdited)}\n` +
     `Notice at open, rewritten by any save: ${ranges(trip.notice.onSave)}\n` +
+    `Notice at open, if the frontmatter is edited: ${trip.notice.frontmatter.join('; ') || 'none'}\n` +
     `Any save writes the parts you did not edit as: ${untouched}\n` +
     'Below: the note -> what a full re-serialize writes (any edit to a listed block writes that block this way).\n\n'
   );

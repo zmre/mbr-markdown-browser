@@ -116,6 +116,16 @@ as it was in the file, including anything the editor would spell differently.
 Editing only the frontmatter leaves the body untouched, and saving without
 changes writes nothing.
 
+Frontmatter you did not touch is written back byte for byte: its `---` (or
+`...`) fences, blank lines at its end, the blank lines between it and the body,
+its line endings. Once you edit it, it is saved as `---`, your YAML without
+trailing blank lines, `---`; the blank lines before the body are kept. When
+that would change more than your edit (a `...` closer, say, or blank lines at
+the end of the block), the notice above the editor says so. The editor finds
+frontmatter exactly as the page does: a `---`/`---` pair with nothing between,
+or a `---` followed by a blank line, is not frontmatter (the page shows rules)
+and is edited as part of the body.
+
 When a note contains markdown the editor would write differently, a notice
 above the editor names those lines. They are kept as written unless you edit
 them; if you do, that block is saved the editor's way (same meaning — for

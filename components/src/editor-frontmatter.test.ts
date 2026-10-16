@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
+import {
+  documentToSave,
+  frontmatterCloseLine,
+  frontmatterRewrites,
+  lineEndingOf,
+  openDocument,
+  recombine,
+  splitFrontmatter,
+  toLf,
+  withLineEnding,
+} from './editor-frontmatter.js';
 
 describe('splitFrontmatter', () => {
   it('splits a document with frontmatter', () => {
@@ -79,5 +89,114 @@ describe('line endings', () => {
     const raw = '---\r\ntitle: T\r\n---\r\n# H\r\n\r\nBody\r\n';
     const { frontmatter, body } = splitFrontmatter(toLf(raw));
     expect(withLineEnding(recombine(frontmatter, body), lineEndingOf(raw))).toBe(raw);
+  });
+});
+
+describe('frontmatterCloseLine: the renderer\'s rule (pulldown-cmark)', () => {
+  const close = (text: string) => frontmatterCloseLine(text.split('\n'));
+
+  it('finds `---` and `...` closers, with trailing spaces and CR', () => {
+    expect(close('---\na: 1\n---\nbody')).toBe(2);
+    expect(close('---\na: 1\n...\nbody')).toBe(2);
+    expect(close('---  \na: 1\n---  \nbody')).toBe(2);
+    expect(close('---\r\na: 1\r\n---\r\nbody')).toBe(2);
+    expect(close('---\n# only a comment\n---\n')).toBe(2);
+  });
+
+  it('is no frontmatter when the first line is blank or a closer, or nothing closes it', () => {
+    expect(close('---\n---\n# H')).toBe(-1);
+    expect(close('---\n...\n# H')).toBe(-1);
+    expect(close('---\n\na: 1\n---\n')).toBe(-1);
+    expect(close('---\n  \na: 1\n---\n')).toBe(-1);
+    expect(close('---\na: 1\n')).toBe(-1);
+    expect(close('----\na: 1\n----\n')).toBe(-1);
+    expect(close('--- x\na: 1\n---\n')).toBe(-1);
+    expect(close('# H\n---\na: 1\n---\n')).toBe(-1);
+  });
+
+  it('splits on it', () => {
+    expect(splitFrontmatter('---\n---\n# H').frontmatter).toBeNull();
+    expect(splitFrontmatter('---\ntitle: t\n\n...\n# H')).toEqual({ frontmatter: 'title: t\n', body: '# H' });
+  });
+});
+
+describe('openDocument / documentToSave', () => {
+  /** An untouched save: the textarea as opened, the body as opened. */
+  const untouched = (raw: string) => {
+    const doc = openDocument(raw);
+    return documentToSave(doc, doc.frontmatter ?? '', doc.body);
+  };
+
+  const exact = [
+    '---\ntitle: t\n\n\n---\n# H\n\nBody\n',
+    '---\ntitle: t\n---\n\n\n# H\n',
+    '---   \ntitle: t\n...  \n\nBody\n',
+    '---\n# comment only\n---\nBody\n',
+    '\uFEFF---\r\ntitle: t\r\n\r\n---\r\n\r\nBody\r\n',
+    '---\r\ntitle: t\n---\r\n\r\nmixed endings in the frontmatter\r\n',
+    '---\ntitle: t\n---',
+    '---\ntitle: t\n---\n',
+    '---\n---\n\n# H\n',
+    '\uFEFF# no frontmatter\n',
+    '\n\n# leading blank lines\n',
+    '',
+  ];
+  for (const raw of exact) {
+    it(`writes untouched frontmatter back byte for byte: ${JSON.stringify(raw.slice(0, 30))}`, () => {
+      expect(untouched(raw)).toBe(raw);
+    });
+  }
+
+  it('opens the body without the frontmatter, its separator or a byte-order mark', () => {
+    const doc = openDocument('\uFEFF---\r\ntitle: t\r\n\r\n---\r\n\r\n\r\n# H\r\n');
+    expect(doc).toEqual({
+      lineEnding: '\r\n',
+      frontmatter: 'title: t\n',
+      body: '# H\n',
+      bodyLineOffset: 6,
+      head: '\uFEFF---\r\ntitle: t\r\n\r\n---\r\n\r\n\r\n',
+      separator: '\n\n',
+    });
+    expect(openDocument('---\n---\n\n# H\n')).toMatchObject({ frontmatter: null, body: '---\n---\n\n# H\n', bodyLineOffset: 0 });
+  });
+
+  it('keeps the frontmatter as loaded when only the body is edited', () => {
+    const doc = openDocument('---\ntitle: t\n\n...\n\n# H\n');
+    expect(documentToSave(doc, 'title: t\n', '# Edited\n')).toBe('---\ntitle: t\n\n...\n\n# Edited\n');
+    // A textarea hands CRLF back as LF: still unedited.
+    const crlf = openDocument('---\r\ntitle: t\r\n---\r\n# H\r\n');
+    expect(documentToSave(crlf, 'title: t', '# H\n')).toBe('---\r\ntitle: t\r\n---\r\n# H\r\n');
+  });
+
+  it('normalizes an edited frontmatter, keeping the separator, ending and byte-order mark', () => {
+    const doc = openDocument('\uFEFF---  \r\ntitle: t\r\n\r\n...\r\n\r\n# H\r\n');
+    expect(documentToSave(doc, 'title: u\n', '# H\n')).toBe('\uFEFF---\r\ntitle: u\r\n---\r\n\r\n# H\r\n');
+    // Cleared: no block, and no blank lines left at the top of the file.
+    expect(documentToSave(doc, '  ', '# H\n')).toBe('\uFEFF# H\r\n');
+    // Added to a file without one.
+    expect(documentToSave(openDocument('# H\n'), 'title: t', '# H\n')).toBe('---\ntitle: t\n---\n# H\n');
+  });
+});
+
+describe('frontmatterRewrites: what editing the frontmatter normalizes', () => {
+  const rewrites = (raw: string) => frontmatterRewrites(openDocument(raw));
+
+  it('is empty when an edit writes the block as it was spelled', () => {
+    expect(rewrites('# no frontmatter\n')).toEqual([]);
+    expect(rewrites('---\ntitle: t\n---\n\n# H\n')).toEqual([]);
+    expect(rewrites('---\r\ntitle: t\r\n---\r\n# H\r\n')).toEqual([]);
+    expect(rewrites('\uFEFF---\ntitle: t\n---\n# H\n')).toEqual([]);
+    expect(rewrites('---\ntitle: t\n---')).toEqual([]);
+  });
+
+  it('names fences, blank lines at the end, and mixed line endings', () => {
+    expect(rewrites('---\ntitle: t\n\n---\n# H\n')).toEqual(['blank lines at its end are dropped']);
+    expect(rewrites('---\ntitle: t\n...\n# H\n')).toEqual(['its fences are written `---`']);
+    expect(rewrites('--- \ntitle: t\n---\n# H\n')).toEqual(['its fences are written `---`']);
+    expect(rewrites('---\ntitle: t\n\n...\n# H\n')).toEqual([
+      'its fences are written `---`',
+      'blank lines at its end are dropped',
+    ]);
+    expect(rewrites('---\r\ntitle: t\n---\r\n# H\r\n')).toEqual(['its line endings are made uniform']);
   });
 });
