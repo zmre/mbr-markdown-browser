@@ -78,7 +78,6 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 
 /** Fixtures whose untouched save is not byte-identical today, and why. */
 const ROUND_TRIP_FAILS: Record<string, string> = {
-  alerts: 'item 5: `[!NOTE]` → `\\[!NOTE]`',
   'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized; item 5: reference definition dropped',
   crlf: 'item 6: CRLF → LF; `-` → `*`',
   escapes: 'item 5: entities decoded (`&nbsp;` → U+00A0); `*` escaped',
@@ -95,12 +94,11 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
   'section-attrs': 'item 3: `--- {attrs}` → `\\--- {attrs}`',
   'section-attrs-setext': 'item 3: `--- {attrs}` under a paragraph → `\\--- {attrs}`',
   tables: 'item 6: tables re-padded',
-  tasks: 'item 2: `[-]`/`[>]` escaped; item 6: `-` → `*`, `[X]` → `[x]`',
+  tasks: 'item 6: `-` → `*`',
 };
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
 const OUTLINE_FAILS: Record<string, string> = {
-  alerts: 'item 5: no alert recognition',
   crlf: 'item 1: no definition list',
   'flashcards-a09': 'item 1: no definition list',
   'flashcards-b11': 'item 1: no definition list',
@@ -111,7 +109,6 @@ const OUTLINE_FAILS: Record<string, string> = {
   'heading-attrs': 'item 5: no heading attributes',
   'kitchen-sink': 'items 1, 2, 3, 5',
   'section-attrs': 'item 3: no section break',
-  tasks: 'item 2: no `[-]`/`[>]` status',
 };
 
 const names = Object.keys(EDITOR_FIXTURES);

@@ -26,6 +26,8 @@ import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
 import { noteDir } from './editor-upload.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
+import { alerts } from './editor-plugins/alerts.js';
+import { taskMarkers } from './editor-plugins/task-markers.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -102,7 +104,7 @@ export const CREPE_FEATURES = {
  * syntax (link autocomplete, media double-click) are registered in
  * `openEditor` only.
  */
-export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [];
+export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [taskMarkers, alerts];
 
 /** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
 export function useMarkdownExtensions(crepe: Crepe): void {
