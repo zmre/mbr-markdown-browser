@@ -1,0 +1,11 @@
+[
+  {"depth":0,"kind":"dl","lines":[1,4],"tight":true},
+  {"depth":1,"kind":"dt","lines":[1,1]},
+  {"depth":1,"kind":"dd","lines":[2,2]},
+  {"depth":2,"kind":"paragraph","lines":[2,2]},
+  {"depth":1,"kind":"dd","lines":[3,3]},
+  {"depth":2,"kind":"paragraph","lines":[3,3]},
+  {"depth":1,"kind":"dd","lines":[4,4]},
+  {"depth":2,"kind":"blockquote","lines":[4,4]},
+  {"depth":3,"kind":"paragraph","lines":[4,4]}
+]

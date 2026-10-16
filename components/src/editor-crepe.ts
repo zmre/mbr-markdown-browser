@@ -16,7 +16,7 @@ import crepeCommonCss from '@milkdown/crepe/theme/common/style.css?inline';
 import { editorViewCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
-import type { Ctx } from '@milkdown/kit/ctx';
+import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
 import { recombine, splitFrontmatter, unescapeWikilinks } from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
@@ -82,13 +82,41 @@ export interface OpenEditorOptions {
  * math still saves as `$…$` (rendered on the page by the existing katex
  * component); only the in-editor helpers are dropped.
  *
- * Exported so `editor-roundtrip.test.ts` parses and serializes with exactly the
- * configuration a real save uses.
+ * Exported so `editor-roundtrip.test.ts` and `editor-parity.test.ts` parse and
+ * serialize with exactly the configuration a real save uses.
  */
 export const CREPE_FEATURES = {
   [CrepeFeature.CodeMirror]: false,
   [CrepeFeature.Latex]: false,
 } as const;
+
+/**
+ * The Milkdown plugins that teach the editor mbr's markdown extensions
+ * (definition lists, `[-]`/`[>]` tasks, `--- {attrs}`, wikilinks, …), one per
+ * `editor-plugins/<name>.ts`.
+ *
+ * **This list is the registration point.** `openEditor` and the parity
+ * harness (`editor-parity.test.ts`) both install exactly these, so a plugin is
+ * held to the byte-identical round trip and to the renderer's block outline
+ * the moment it is listed here. Plugins that are editing aids rather than
+ * syntax (link autocomplete, media double-click) are registered in
+ * `openEditor` only.
+ */
+export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [];
+
+/** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
+export function useMarkdownExtensions(crepe: Crepe): void {
+  for (const plugin of MARKDOWN_EXTENSION_PLUGINS) crepe.editor.use(plugin);
+}
+
+/**
+ * The body a save writes: Crepe's serialization plus mbr's post-processing.
+ * The one definition, shared by the editor's dirty check / save and the
+ * round-trip tests, so the tests cannot drift from what a save does.
+ */
+export function serializeBody(crepe: Crepe): string {
+  return unescapeWikilinks(crepe.getMarkdown());
+}
 
 let stylesInjected = false;
 
@@ -764,6 +792,8 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
         },
       },
     });
+    // mbr's markdown syntax first, so the editing aids below see its nodes.
+    useMarkdownExtensions(crepe);
     // Register the `[[` link-autocomplete plugin on the underlying Milkdown
     // editor before create() — the Crepe 7.21.3 plugin-injection point.
     crepe.editor.use(
@@ -791,7 +821,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // Baseline for dirty-tracking: Crepe normalizes markdown on load, so capture
   // the normalized content now rather than comparing against the raw source.
   const currentContent = (): string =>
-    crepe ? recombine(fmTextarea.value, unescapeWikilinks(crepe.getMarkdown())) : savedContent;
+    crepe ? recombine(fmTextarea.value, serializeBody(crepe)) : savedContent;
   const isDirty = (): boolean => ready && currentContent() !== savedContent;
   savedContent = currentContent();
   ready = true;

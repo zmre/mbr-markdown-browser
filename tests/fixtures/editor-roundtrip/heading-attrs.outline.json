@@ -1,0 +1,6 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1,"id":"custom-id"},
+  {"depth":0,"kind":"heading","lines":[3,3],"level":2,"classes":["lead","wide"]},
+  {"depth":0,"kind":"heading","lines":[5,5],"level":3,"id":"both","classes":["note"]},
+  {"depth":0,"kind":"heading","lines":[7,7],"level":4}
+]
