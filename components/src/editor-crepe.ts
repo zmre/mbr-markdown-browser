@@ -17,7 +17,7 @@ import { editorViewCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
-import { recombine, splitFrontmatter } from './editor-frontmatter.js';
+import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
 import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
@@ -31,6 +31,10 @@ import { taskMarkers } from './editor-plugins/task-markers.js';
 import { headingAttrsPlugin } from './editor-plugins/heading-attrs.js';
 import { sectionAttrsPlugin } from './editor-plugins/section-attrs.js';
 import { wikilinksPlugin } from './editor-plugins/wikilinks.js';
+import { mathPlugin } from './editor-plugins/math.js';
+import { escapesPlugin } from './editor-plugins/escapes.js';
+import { referencesPlugin } from './editor-plugins/references.js';
+import { imagesPlugin } from './editor-plugins/images.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -113,6 +117,10 @@ export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlug
   wikilinksPlugin,
   taskMarkers,
   alerts,
+  mathPlugin,
+  escapesPlugin,
+  referencesPlugin,
+  imagesPlugin,
 ];
 
 /** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
@@ -584,7 +592,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     return;
   }
 
-  const { frontmatter, body } = splitFrontmatter(raw);
+  // The editor works in LF; a CRLF file is saved back as CRLF (`currentContent`).
+  const lineEnding = lineEndingOf(raw);
+  const { frontmatter, body } = splitFrontmatter(toLf(raw));
   loading.remove();
 
   // Build modal chrome: Cancel | title | ⋯ Save, as a native editing sheet.
@@ -832,7 +842,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // Baseline for dirty-tracking: Crepe normalizes markdown on load, so capture
   // the normalized content now rather than comparing against the raw source.
   const currentContent = (): string =>
-    crepe ? recombine(fmTextarea.value, serializeBody(crepe)) : savedContent;
+    crepe ? withLineEnding(recombine(fmTextarea.value, serializeBody(crepe)), lineEnding) : savedContent;
   const isDirty = (): boolean => ready && currentContent() !== savedContent;
   savedContent = currentContent();
   ready = true;

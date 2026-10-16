@@ -95,6 +95,14 @@ describe('round trip', () => {
     ]);
   });
 
+  it('leaves `[-]`/`[>]` to a reference link when the document defines that label, as the renderer does', async () => {
+    const body = '* [-] a\n* [>] b\n* [x] c\n\n[-]: /dash\n[>]: /gt\n[x]: /x\n';
+    expect(await savedFile(body)).toBe(body);
+    const outline = await editorOutline(body);
+    // GFM's check outranks a `[x]` reference; `[-]`/`[>]` are mbr's, read after links.
+    expect(outline.filter((node) => node.kind === 'item').map((node) => node.task)).toEqual([undefined, undefined, 'x']);
+  });
+
   it('needs content after the box, as GFM does', async () => {
     const outline = await editorOutline('* [-]\n* [>]   \n* [-] x\n');
     expect(outline.filter((node) => node.kind === 'item').map((node) => node.task)).toEqual([

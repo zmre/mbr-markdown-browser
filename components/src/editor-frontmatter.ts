@@ -60,3 +60,37 @@ export function recombine(frontmatter: string | null, body: string): string {
   }
   return `---\n${fm}\n---\n${body}`;
 }
+
+/** A document's line ending: what a save writes between lines. */
+export type LineEnding = '\n' | '\r\n';
+
+/**
+ * The line ending `raw` is written with: CRLF when most of its line breaks
+ * are CRLF, else LF (also for a file with no line break at all).
+ *
+ * The editor works in LF — the frontmatter textarea normalizes to LF and
+ * Crepe serializes with LF — so a CRLF file is opened as LF ({@link toLf})
+ * and saved back with {@link withLineEnding}. A file mixing both is saved
+ * with its majority ending: it cannot round-trip byte for byte, but it no
+ * longer silently becomes all-LF.
+ */
+export function lineEndingOf(raw: string): LineEnding {
+  let crlf = 0;
+  let lf = 0;
+  for (let i = raw.indexOf('\n'); i !== -1; i = raw.indexOf('\n', i + 1)) {
+    if (i > 0 && raw.charCodeAt(i - 1) === 13) crlf += 1;
+    else lf += 1;
+  }
+  return crlf > lf ? '\r\n' : '\n';
+}
+
+/** `text` with every CRLF turned into LF. */
+export function toLf(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
+/** `text` (LF, as the editor produces it) written with `ending`. */
+export function withLineEnding(text: string, ending: LineEnding): string {
+  return ending === '\n' ? text : toLf(text).replace(/\n/g, '\r\n');
+}
+

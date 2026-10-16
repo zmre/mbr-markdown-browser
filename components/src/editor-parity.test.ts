@@ -35,20 +35,19 @@
  *   (`\`\`\`rust`), its indented body loses its indent, and the closing fence
  *   then opens a new code block that swallows the rest of the document**
  *   (`flashcards-loose`).
- * - `[-]` / `[>]` tasks (item 2) → `\[-]` / `\[>]`, no longer tasks.
- * - ~~`--- {attrs}` (item 3) → `\--- {attrs}`~~ — fixed by
- *   `editor-plugins/section-attrs.ts`, both positions.
- * - Math (new, item 5): `$…$`/`$$…$$` are plain text to the editor (Crepe's
- *   LaTeX feature is off), so CommonMark backslash escapes inside them are
- *   consumed: `\,` → `,`, `\;` → `;`, `\{a\}` → `{a}`. Silent LaTeX damage.
- * - GitHub alerts (new, item 5): `> [!NOTE]` → `> \[!NOTE]`, which the
- *   renderer no longer treats as an alert.
- * - Entities (new, item 5): `&amp;` → `&`, `&copy;` → `©`, `&nbsp;` → a
- *   literal U+00A0 (an invisible change).
- * - Reference links (new, item 5/6): `[text][ref]` is inlined to
- *   `[text](url "title")` and the `[ref]: …` definition is deleted.
- * - Line endings (new, item 6): CRLF files are rewritten with LF throughout,
- *   frontmatter included.
+ *
+ * Fixed by a plugin in `editor-plugins/` (kept here so a regression is
+ * recognisable): `[-]`/`[>]` tasks were escaped (`task-markers.ts`);
+ * `> [!NOTE]` alerts became `> \[!NOTE]` (`alerts.ts`); `--- {attrs}` became
+ * `\--- {attrs}` in both positions (`section-attrs.ts`); heading attributes
+ * had no structure (`heading-attrs.ts`); wikilinks were escaped
+ * (`wikilinks.ts`); backslash escapes inside `$…$`/`$$…$$` were consumed
+ * (`math.ts`); `&amp;`/`&nbsp;` were decoded and `\$` lost its backslash
+ * (`escapes.ts` — still decoded, same meaning, in link destinations and alt
+ * text); `[text][ref]` was inlined and its definition deleted
+ * (`references.ts`); untitled images were deleted and a standalone image's
+ * alt became Crepe's ratio `![1.00](src)` (`images.ts`). CRLF files were
+ * rewritten as LF (`openEditor`/`savedFile` now keep the file's ending).
  *
  * Cosmetic (same structure, whole-file diff — item 6):
  * - `-` and `+` bullets → `*`; `[X]` → `[x]`.
@@ -60,26 +59,25 @@
  * - Setext headings → ATX; indented code → fenced; `~~~` fences → backticks;
  *   two-space hard breaks → `\`; `2 * 3` → `2 \* 3`.
  *
- * Survive untouched: wikilinks in every form (`editor-plugins/wikilinks.ts`),
- * `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`, raw HTML blocks and
- * inline HTML, ```` ```chat ```` fences, `TODO:`/`TK`/`FIXME`/`XXX` markers,
- * task annotations (`@due(...)`, `@done(...)`, `#tag`, `!!`, `> date`),
- * heading attributes `{#id .class}` (text; structure from
- * `editor-plugins/heading-attrs.ts`), `__strong__`/`_em_`, flat
+ * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
+ * raw HTML blocks and inline HTML, ```` ```chat ```` fences,
+ * `TODO:`/`TK`/`FIXME`/`XXX` markers, task annotations (`@due(...)`,
+ * `@done(...)`, `#tag`, `!!`, `> date`), `__strong__`/`_em_`, flat
  * definition lines (`: x` as paragraph text), and the already-damaged
  * T1-B11 (a fixed point).
  *
  * Structure only (bytes survive, outline differs): flat definition lists and
- * the damaged deck (item 1).
+ * the damaged deck (item 1); a standalone image (Crepe's image-block has no
+ * source position).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './editor-test-support.js';
 
 /** Fixtures whose untouched save is not byte-identical today, and why. */
 const ROUND_TRIP_FAILS: Record<string, string> = {
-  'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized; item 5: reference definition dropped',
-  crlf: 'item 6: CRLF → LF; `-` → `*`',
-  escapes: 'item 5: entities decoded (`&nbsp;` → U+00A0); `*` escaped',
+  'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized',
+  crlf: 'item 6: `-` → `*`',
+  escapes: 'item 6: `2 * 3` → `2 \\* 3`',
   'flashcards-a09': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
   'flashcards-b11': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
   'flashcards-dash-history': 'item 1: `-` history list hoisted out of its definition',
@@ -88,7 +86,6 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
   'lists-dash': 'item 6: `-` → `*`',
   'lists-ordered-paren': 'item 6: `1)` → `1.` and adjacent-list delimiters swapped',
   marginalia: 'item 6: `>>>` → `> > >`',
-  math: 'item 5: backslash escapes inside math consumed (`\\,` → `,`)',
   rules: 'item 6: `---` → `***`',
   tables: 'item 6: tables re-padded',
   tasks: 'item 6: `-` → `*`',
@@ -103,6 +100,7 @@ const OUTLINE_FAILS: Record<string, string> = {
   'flashcards-dash-history': 'item 1: no definition list',
   'flashcards-flat': 'item 1: no definition list',
   'flashcards-loose': 'item 1: no definition list',
+  images: "Crepe's image-block (a lone image) carries no source position, so the outline cannot place it",
   'kitchen-sink': 'item 1',
 };
 

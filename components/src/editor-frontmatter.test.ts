@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recombine, splitFrontmatter } from './editor-frontmatter.js';
+import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
 
 describe('splitFrontmatter', () => {
   it('splits a document with frontmatter', () => {
@@ -56,4 +56,28 @@ describe('round-trip', () => {
       expect(recombine(frontmatter, body)).toBe(raw);
     });
   }
+});
+
+describe('line endings', () => {
+  it('detects CRLF and LF by majority', () => {
+    expect(lineEndingOf('a\r\nb\r\n')).toBe('\r\n');
+    expect(lineEndingOf('a\nb\n')).toBe('\n');
+    expect(lineEndingOf('a\r\nb\r\nc\n')).toBe('\r\n');
+    expect(lineEndingOf('a\r\nb\nc\n')).toBe('\n');
+    expect(lineEndingOf('no line break')).toBe('\n');
+    expect(lineEndingOf('')).toBe('\n');
+  });
+
+  it('converts to LF and back', () => {
+    expect(toLf('a\r\nb\r\n')).toBe('a\nb\n');
+    expect(withLineEnding('a\nb\n', '\r\n')).toBe('a\r\nb\r\n');
+    expect(withLineEnding('a\r\nb\n', '\r\n')).toBe('a\r\nb\r\n');
+    expect(withLineEnding('a\nb\n', '\n')).toBe('a\nb\n');
+  });
+
+  it('round-trips a CRLF document with frontmatter', () => {
+    const raw = '---\r\ntitle: T\r\n---\r\n# H\r\n\r\nBody\r\n';
+    const { frontmatter, body } = splitFrontmatter(toLf(raw));
+    expect(withLineEnding(recombine(frontmatter, body), lineEndingOf(raw))).toBe(raw);
+  });
 });

@@ -81,6 +81,26 @@ describe('outline', () => {
       { depth: 0, kind: 'blockquote', lines: [5, 5], alert: 'tip' },
     ]);
   });
+
+  it('stays an alert when the document defines a `[!kind]` label (a reference link to remark)', async () => {
+    // pulldown-cmark reads the tag line before resolving links; `references.ts`
+    // makes the tag a shortcut reference, which must not hide the alert.
+    for (const body of [
+      '> [!WARNING]\n> Body.\n\n[!warning]: /w\n',
+      '> [!WARNING]\n\n[!WARNING]: /w\n',
+      '> [!NOTE]\n> [x] then text.\n\n[!note]: /n\n[x]: /x\n',
+    ]) {
+      expect(await roundTrip(body)).toBe(body);
+      const outline = await editorOutline(body);
+      expect(outline.filter((node) => node.kind === 'blockquote').map((node) => node.alert), body).not.toContain(
+        undefined,
+      );
+    }
+    expect(await editorOutline('> [!WARNING]\n> Body.\n\n[!warning]: /w\n')).toEqual([
+      { depth: 0, kind: 'blockquote', lines: [1, 2], alert: 'warning' },
+      { depth: 1, kind: 'paragraph', lines: [2, 2] },
+    ]);
+  });
 });
 
 function editorDom(crepe: Crepe): HTMLElement {

@@ -7,7 +7,7 @@
 import { Crepe } from '@milkdown/crepe';
 import { remarkCtx } from '@milkdown/kit/core';
 import { CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
-import { recombine, splitFrontmatter } from './editor-frontmatter.js';
+import { lineEndingOf, recombine, splitFrontmatter, toLf, withLineEnding } from './editor-frontmatter.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
 
 /** Set by `vitest.config.ts` from `tests/fixtures/editor-roundtrip/`. */
@@ -50,13 +50,15 @@ export function destroyEditors(): void {
  * `currentContent()`.
  */
 export async function savedFile(source: string, edit?: (crepe: Crepe) => void): Promise<string> {
-  const { frontmatter, body } = splitFrontmatter(source);
+  // `openEditor` opens the file as LF and saves it with its own line ending.
+  const lineEnding = lineEndingOf(source);
+  const { frontmatter, body } = splitFrontmatter(toLf(source));
   const crepe = await openCrepe(body);
   edit?.(crepe);
   // A textarea's value normalizes line breaks to LF (HTML's "API value"), and
   // the frontmatter is read back from `fmTextarea.value`.
   const yaml = (frontmatter ?? '').replace(/\r\n?/g, '\n');
-  return recombine(yaml, serializeBody(crepe));
+  return withLineEnding(recombine(yaml, serializeBody(crepe)), lineEnding);
 }
 
 /**

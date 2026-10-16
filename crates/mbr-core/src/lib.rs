@@ -48,6 +48,8 @@ pub mod constants;
 pub mod contact;
 pub mod edit_auth;
 #[cfg(test)]
+mod editor_math_parity;
+#[cfg(test)]
 mod editor_parity;
 pub mod embedded_hljs;
 pub mod embedded_katex;

@@ -173,6 +173,13 @@ function tokenizeTaskListCheck(
     // `-` and `>` are not done, so they reuse GFM's "unchecked" token: its
     // from-markdown handler then sets `checked: false` and strips the space,
     // and ours reads the actual character off the source.
+    if (code === DASH || code === GREATER_THAN) {
+      // `[-]`/`[>]` are valid link labels (`[ ]` is not, and GFM's check
+      // outranks a `[x]` reference): when the document defines one, the
+      // renderer reads a shortcut reference link there and no task, so we
+      // decline and let the reference parse.
+      if (self.parser.defined.includes(String.fromCharCode(code))) return nok(code);
+    }
     if (markdownLineEndingOrSpace(code) || code === DASH || code === GREATER_THAN) {
       effects.enter('taskListCheckValueUnchecked');
       effects.consume(code);

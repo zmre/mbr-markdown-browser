@@ -88,6 +88,29 @@ export interface AlertData {
 type AlertBlockquote = Blockquote & { data?: Blockquote['data'] & AlertData };
 
 /**
+ * `children` with a leading `[!KIND]` that parsed as a shortcut reference link
+ * (the document defines a `[!kind]: …` label) read back as the text it was
+ * written as, merged with the text after it. pulldown-cmark recognizes the
+ * tag line before resolving links, so it is still an alert to the renderer.
+ * Anything else is returned unchanged.
+ */
+function tagAsText(children: PhrasingContent[], tag: string): PhrasingContent[] {
+  const [head, next, ...rest] = children as (PhrasingContent & { referenceType?: string; label?: string })[];
+  // `mbrLinkReference` once `references.ts` renamed it, `linkReference` without it.
+  const isReference = head?.type === 'linkReference' || (head?.type as string) === 'mbrLinkReference';
+  if (!isReference || head.referenceType !== 'shortcut' || `[${head.label}]` !== tag) return children;
+  const following = next?.type === 'text' ? next : undefined;
+  const start = head.position?.start;
+  const end = (following ?? head).position?.end;
+  const text: PhrasingContent = {
+    type: 'text',
+    value: tag + (following?.value ?? ''),
+    ...(start && end ? { position: { start, end } } : {}),
+  };
+  return following ? [text, ...rest] : [text, ...(next ? [next] : []), ...rest];
+}
+
+/**
  * Removes the tag line from the front of `paragraph`. Returns false (and
  * changes nothing) when the paragraph does not start with it, which can only
  * mean remark and pulldown-cmark disagree about the line — then it is not
@@ -100,19 +123,20 @@ function stripTagLine(
   tag: string,
   nextLine: { line: number; column: number; offset: number } | undefined,
 ): boolean {
-  const [head, second] = paragraph.children;
+  const children = tagAsText(paragraph.children, tag);
+  const [head, second] = children;
   if (head?.type !== 'text' || !head.value.startsWith(tag)) return false;
   const rest = head.value.slice(tag.length);
   const lineBreak = /^[ \t]*\r?\n/.exec(rest);
   let remaining: PhrasingContent[];
   if (lineBreak) {
     // `[!NOTE]\nbody…`: the body continues in the same text node.
-    remaining = [{ ...head, value: rest.slice(lineBreak[0].length) }, ...paragraph.children.slice(1)];
+    remaining = [{ ...head, value: rest.slice(lineBreak[0].length) }, ...children.slice(1)];
     if (remaining[0].position && nextLine) remaining[0].position = { ...remaining[0].position, start: nextLine };
   } else if (/^[ \t]*$/.test(rest) && (second === undefined || second.type === 'break')) {
     // `[!NOTE]` alone in its text node: the paragraph ends there, or a hard
     // break (trailing spaces after the tag) ends the line.
-    remaining = paragraph.children.slice(second ? 2 : 1);
+    remaining = children.slice(second ? 2 : 1);
   } else {
     return false;
   }
