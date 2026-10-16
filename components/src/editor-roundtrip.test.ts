@@ -11,10 +11,10 @@
  *
  * The byte-identical target for every construct lives in the parity harness
  * (`editor-parity.test.ts`, over `tests/fixtures/editor-roundtrip/`). This file
- * pins the *exact* current damage to the user's flashcard decks, so a Milkdown
- * upgrade that changes it is noticed, plus behaviour around a save (an edit
- * elsewhere, a second save, the no-change save). When definition lists land
- * (TODO item 1) these pins change to the fixture itself.
+ * pins the user's flashcard decks — damaged by saves before definition lists
+ * were taught to the editor (`editor-plugins/definition-list.ts`) — plus
+ * behaviour around a save (an edit elsewhere, a second save, the no-change
+ * save).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Crepe } from '@milkdown/crepe'
@@ -40,24 +40,6 @@ function typeAtStart(text: string) {
 // The user's card, verbatim (T1-A09), with deck frontmatter.
 const CARD_A09 = fixture('flashcards-a09')
 
-// Everything above `: Memory aids:` survives; the two nested lists do not.
-// `  * x` interrupts the `: Memory aids:` paragraph as a top-level list (blank
-// line + column 0), and `: ___Review History___` becomes a lazy continuation of
-// that list item's paragraph, printed under it at the item's indent.
-const SAVED_A09 = CARD_A09.replace(
-  `: Memory aids:
-  * Remember: "Frequency coordinator" = someone recognized by local/regional amateur operators (not an FCC office).
-: ___Review History___
-  * 2026-10-07 14:53 - Good
-`,
-  `: Memory aids:
-
-* Remember: "Frequency coordinator" = someone recognized by local/regional amateur operators (not an FCC office).
-  : ___Review History___
-* 2026-10-07 14:53 - Good
-`,
-)
-
 // The presumed original of the user's second damaged card (T1-B11).
 const CARD_B11 = fixture('flashcards-b11')
 
@@ -69,17 +51,19 @@ const DAMAGED_B11 = fixture('flashcards-b11-damaged')
 const bodyOf = (source: string): string => source.slice(source.indexOf('\n---\n', 1) + 5)
 
 describe('editor round trip: definition lists (flashcard decks)', () => {
-  it('a save with no edits rewrites the nested lists (exact current output)', async () => {
-    expect(await saved(CARD_A09)).toBe(SAVED_A09)
+  it('a save with no edits writes the deck back byte for byte', async () => {
+    expect(await saved(CARD_A09)).toBe(CARD_A09)
   })
 
-  it('a save after editing an unrelated paragraph does the same damage', async () => {
+  it('a save after editing an unrelated paragraph changes only that paragraph', async () => {
     const out = await saved(CARD_A09, typeAtStart('EDITED '))
-    expect(out).toBe(SAVED_A09.replace('**T1-A09', '**EDITED T1-A09'))
+    expect(out).toBe(CARD_A09.replace('**T1-A09', '**EDITED T1-A09'))
   })
 
-  it('reproduces the user\'s damaged T1-B11 card from its presumed original in one save', async () => {
-    expect(bodyOf(await saved(CARD_B11))).toBe(DAMAGED_B11)
+  it('no longer turns T1-B11 into the damaged card the user found', async () => {
+    const out = await saved(CARD_B11)
+    expect(out).toBe(CARD_B11)
+    expect(bodyOf(out)).not.toBe(DAMAGED_B11)
   })
 
   it('the damaged form is a fixed point: later saves change nothing more', async () => {

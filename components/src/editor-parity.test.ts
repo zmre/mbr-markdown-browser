@@ -28,13 +28,13 @@
  * # Inventory: what an untouched save changes today (2026-10-15, Crepe 7.22.2)
  *
  * Structural / lossy:
- * - Definition lists (item 1): parsed as one paragraph; an indented nested
- *   list under `: def` becomes a top-level list and the next `: def` is folded
- *   into its last item (T1-A09/T1-B11 damage). **A fenced code block in a
- *   `: def` (`: ```rust`) is worse: the opening fence is escaped
- *   (`\`\`\`rust`), its indented body loses its indent, and the closing fence
- *   then opens a new code block that swallows the rest of the document**
- *   (`flashcards-loose`).
+ * - Definition lists (item 1, fixed by `editor-plugins/definition-list.ts`):
+ *   were parsed as one paragraph; an indented nested list under `: def`
+ *   became a top-level list and the next `: def` was folded into its last item
+ *   (T1-A09/T1-B11 damage), and a fenced code block in a `: def` swallowed the
+ *   rest of the document (`flashcards-loose`). Now structural parity with the
+ *   renderer (`deflist-edge` covers its start/continue/end rules); only
+ *   cosmetics remain (`:` spacing, lazy lines — item 6).
  * - `[-]` / `[>]` tasks (item 2) → `\[-]` / `\[>]`, no longer tasks.
  * - `--- {attrs}` (item 3) → `\--- {attrs}`, no longer a section rule. The
  *   setext-position case (`--- {…}` directly under a paragraph) is a
@@ -65,13 +65,12 @@
  * `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`, raw HTML blocks and
  * inline HTML, ```` ```chat ```` fences, `TODO:`/`TK`/`FIXME`/`XXX` markers,
  * task annotations (`@due(...)`, `@done(...)`, `#tag`, `!!`, `> date`),
- * heading attributes `{#id .class}` (as text), `__strong__`/`_em_`, flat
- * definition lines (`: x` as paragraph text), and the already-damaged
- * T1-B11 (a fixed point).
+ * heading attributes `{#id .class}` (as text), `__strong__`/`_em_`, and
+ * definition lists in house style (`: ` + two-space continuations), the
+ * damaged T1-B11 included.
  *
  * Structure only (bytes survive, outline differs): heading attributes (no
- * `id`/`classes` in the editor — item 5), flat definition lists and the
- * damaged deck (item 1).
+ * `id`/`classes` in the editor — item 5).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './editor-test-support.js';
@@ -82,11 +81,9 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
   'commonmark-variants': 'item 6: setext/indented/tilde/hard-break/`+` normalized; item 5: reference definition dropped',
   crlf: 'item 6: CRLF → LF; `-` → `*`',
   escapes: 'item 5: entities decoded (`&nbsp;` → U+00A0); `*` escaped',
-  'flashcards-a09': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
-  'flashcards-b11': 'item 1: nested list under `: def` hoisted, next `: def` folded in',
-  'flashcards-dash-history': 'item 1: `-` history list hoisted out of its definition',
-  'flashcards-loose': 'item 1: fence in a definition escaped; the rest of the file becomes code',
-  'kitchen-sink': 'items 1, 2, 3, 6',
+  'deflist-edge': 'item 6: `:` spacing and lazy lines normalized, indented code fenced, `-` → `*`, table re-padded',
+  'flashcards-dash-history': 'item 6: `-` → `*`',
+  'kitchen-sink': 'items 2, 3, 6',
   'lists-dash': 'item 6: `-` → `*`',
   'lists-ordered-paren': 'item 6: `1)` → `1.` and adjacent-list delimiters swapped',
   marginalia: 'item 6: `>>>` → `> > >`',
@@ -101,15 +98,8 @@ const ROUND_TRIP_FAILS: Record<string, string> = {
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
 const OUTLINE_FAILS: Record<string, string> = {
   alerts: 'item 5: no alert recognition',
-  crlf: 'item 1: no definition list',
-  'flashcards-a09': 'item 1: no definition list',
-  'flashcards-b11': 'item 1: no definition list',
-  'flashcards-b11-damaged': 'item 1: no definition list',
-  'flashcards-dash-history': 'item 1: no definition list',
-  'flashcards-flat': 'item 1: no definition list',
-  'flashcards-loose': 'item 1: no definition list',
   'heading-attrs': 'item 5: no heading attributes',
-  'kitchen-sink': 'items 1, 2, 3, 5',
+  'kitchen-sink': 'items 2, 3, 5',
   'section-attrs': 'item 3: no section break',
   tasks: 'item 2: no `[-]`/`[>]` status',
 };

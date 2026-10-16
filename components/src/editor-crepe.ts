@@ -26,6 +26,11 @@ import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
 import { noteDir } from './editor-upload.js';
 import { mediaProxyURL } from './editor-media-proxy.js';
+import {
+  DEFINITION_LIST_CSS,
+  addDefinitionListMenuItem,
+  definitionListPlugins,
+} from './editor-plugins/definition-list.js';
 
 export interface OpenEditorOptions {
   /** URL of the raw-markdown endpoint for the current file. */
@@ -102,7 +107,9 @@ export const CREPE_FEATURES = {
  * syntax (link autocomplete, media double-click) are registered in
  * `openEditor` only.
  */
-export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [];
+export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlugin[])[] = [
+  definitionListPlugins,
+];
 
 /** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
 export function useMarkdownExtensions(crepe: Crepe): void {
@@ -135,6 +142,7 @@ function injectStyles(): void {
     crepeCommonCss,
     THEME_CSS,
     FOOTNOTE_CSS,
+    DEFINITION_LIST_CSS,
     MODAL_CSS,
     HEADER_CSS,
     PICKER_CSS,
@@ -790,6 +798,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
           onUpload: (file: File) => uploadFile(file),
           proxyDomURL: (url: string) => mediaProxyURL(url),
         },
+        [CrepeFeature.BlockEdit]: { buildMenu: addDefinitionListMenuItem },
       },
     });
     // mbr's markdown syntax first, so the editing aids below see its nodes.
