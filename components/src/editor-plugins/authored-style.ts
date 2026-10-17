@@ -863,7 +863,7 @@ function authoredGap(left: unknown, right: unknown): number | undefined {
  */
 function authoredItemGapsHold(list: List): boolean {
   const items = list.children;
-  let loose = items.some((item) => item.spread && item.children.length > 1);
+  let loose = items.some((item) => item.spread && (item.children?.length ?? 0) > 1);
   for (let i = 0; i < items.length - 1; i++) {
     const gap = authoredGap(items[i], items[i + 1]) ?? (list.spread ? 1 : 0);
     if (gap > 0) loose = true;
@@ -882,11 +882,19 @@ const EMPTY_LINE_PLACEHOLDER = /^<br\s*\/?\s*>$/i;
 function isEmptyFlow(children: readonly RootContent[] | undefined): boolean {
   if (!children || children.length === 0) return true;
   if (children.length !== 1 || children[0].type !== 'paragraph') return false;
-  const inline = children[0].children;
+  const inline = children[0].children ?? [];
   return (
     inline.length === 0 ||
     (inline.length === 1 && inline[0].type === 'html' && EMPTY_LINE_PLACEHOLDER.test(inline[0].value.trim()))
   );
+}
+
+/**
+ * The last of `children`, which may be missing: Milkdown's serializer leaves
+ * `children` off a node it pushed nothing into.
+ */
+function lastOf<T>(children: readonly T[] | undefined): T | undefined {
+  return children && children.length > 0 ? children[children.length - 1] : undefined;
 }
 
 /** Whether a list item prints as its marker alone. */
@@ -961,7 +969,7 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
   }
   if (isEmptyItem(node)) return bullet + (style?.empty ?? '');
   // `- - x`: the editor's empty first paragraph is not in the source.
-  if (style?.leadingBlock && node.children.length > 1 && isEmptyFlow(node.children.slice(0, 1))) {
+  if (style?.leadingBlock && (node.children?.length ?? 0) > 1 && isEmptyFlow(node.children.slice(0, 1))) {
     node = { ...node, children: node.children.slice(1) };
   }
   // `*  x`: the list's gap after the marker as typed (two to four spaces).
@@ -1175,7 +1183,7 @@ const printTable: Handle<Table> = (node, parent, state, info) => {
   if (!style?.rows || style.rows.length < 2) return fresh();
   const [header, delimiter, ...body] = style.rows;
   const authored = [header, ...body];
-  const columns = Math.max(...node.children.map((row) => row.children.length));
+  const columns = Math.max(...node.children.map((row) => row.children?.length ?? 0));
   const cells = printedCells(node, state, info);
   // Each printed row takes the next authored row (in order) with the same cells.
   let next = 0;
@@ -1234,7 +1242,7 @@ function isIndentedCode(node: RootContent): boolean {
 
 /** A list that may start right under a paragraph (CommonMark: not empty, an ordered one at 1). */
 function interruptsParagraph(list: List): boolean {
-  if (isEmptyItem(list.children[0])) return false;
+  if (isEmptyItem(list.children?.[0])) return false;
   return !list.ordered || list.start === 1 || list.start == null;
 }
 
@@ -1268,7 +1276,7 @@ export function adjacentIsSafe(left: RootContent, right: RootContent): boolean {
   // A footnote's `[^x]:` starts the next one.
   if (type === 'footnoteDefinition') return (right.type as string) === 'footnoteDefinition';
   // An empty last item has no paragraph to continue; a list like it would continue the list.
-  if (left.type === 'list' && isEmptyItem(left.children[left.children.length - 1])) {
+  if (left.type === 'list' && isEmptyItem(lastOf(left.children))) {
     if (right.type === 'list') return startsAnotherList(left, right);
     return !isIndentedCode(right);
   }
@@ -1298,7 +1306,7 @@ const joinAuthoredGaps: Join = (left, right, parent) => {
   if (parent.type !== 'root') return undefined;
   const gap = authoredGap(left, right);
   if (isIndentedCode(right as RootContent)) {
-    if (left.type === 'list') return isEmptyItem(left.children[left.children.length - 1]) ? Math.max(gap ?? 1, 1) : undefined;
+    if (left.type === 'list') return isEmptyItem(lastOf(left.children)) ? Math.max(gap ?? 1, 1) : undefined;
     // Two indented blocks are one, however many blank lines are between.
     if (left.type === 'code') return undefined;
   }

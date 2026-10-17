@@ -4,6 +4,7 @@
  * `lists-*`, `rules`, `marginalia`, `tables`), and a block made in the editor
  * gets the house style.
  */
+import { remarkCtx } from '@milkdown/kit/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { serializeBody } from '../editor-crepe.js';
 import { destroyEditors, openCrepe, placeCursor, press, typeText, viewOf } from '../editor-test-support.js';
@@ -410,5 +411,23 @@ describe('blocks with no blank line between them', () => {
     expect(adjacentIsSafe(list, node('paragraph'))).toBe(true);
     expect(adjacentIsSafe(list, node('list', { children: [item()] }))).toBe(false);
     expect(adjacentIsSafe(node('list', { children: [item()] }), node('paragraph'))).toBe(false);
+  });
+});
+
+describe('nodes Milkdown serializes without children', () => {
+  // Milkdown's serializer leaves `children` off a node it pushed nothing
+  // into; the two `roundtrip-check` errors were this TypeError (`length`).
+  it('print without throwing', async () => {
+    const crepe = await openCrepe('x\n');
+    const remark = crepe.editor.action((ctx) => ctx.get(remarkCtx));
+    const tree = {
+      type: 'root',
+      children: [
+        { type: 'paragraph' },
+        { type: 'list', ordered: false, spread: true, children: [{ type: 'listItem', spread: true }, { type: 'listItem' }] },
+        { type: 'list', ordered: false, spread: false, children: [{ type: 'listItem', children: [{ type: 'paragraph' }] }] },
+      ],
+    };
+    expect(() => remark.stringify(tree as never)).not.toThrow();
   });
 });

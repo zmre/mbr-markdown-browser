@@ -540,7 +540,7 @@ export function groupDefinitionTerms(tree: Root): undefined {
  */
 function endedAtEmptyDefinition(list: DefList, next: Nodes): boolean {
   const last = list.children[list.children.length - 1];
-  return last?.type === 'defListDescription' && last.children.length === 0 && blankLinesBetween(last, next) > 0;
+  return last?.type === 'defListDescription' && (last.children?.length ?? 0) === 0 && blankLinesBetween(last, next) > 0;
 }
 
 function measureSpacing(list: DefList): void {
@@ -599,7 +599,8 @@ const paragraphHandler: Handle = (node: Paragraph, parent, state: ToMarkdownStat
   const value = state.containerPhrasing(node, info);
   phrasing();
   exit();
-  const htmlBlock = node.children.length === 1 && node.children[0].type === 'html';
+  // `children` may be missing: Milkdown's serializer leaves it off a node it pushed nothing into.
+  const htmlBlock = node.children?.length === 1 && node.children[0].type === 'html';
   if (htmlBlock) return value;
   const style = styleOf<ParagraphStyle>(node);
   const printed = escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source));

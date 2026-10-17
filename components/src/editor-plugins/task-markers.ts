@@ -257,7 +257,7 @@ export function taskMarkerFromMarkdown(): FromMarkdownExtension {
 /** remark-gfm's `listItem` handler, but the box comes from {@link effectiveMarker}. */
 function listItemWithTaskMarker(node: TaskListItem, parent: Parents | undefined, state: State, info: Info): string {
   const marker = effectiveMarker(node.checked, node.marker);
-  const head = node.children[0];
+  const head = node.children?.[0];
   // A definition list's term is the item's first paragraph to the renderer
   // (`- [ ] Term` / `  : def`), so the box goes in front of it as well.
   const checkable = marker !== undefined && (head?.type === 'paragraph' || (head?.type as string) === 'defList');
