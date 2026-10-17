@@ -40,6 +40,7 @@ import { authoredStylePlugin } from './editor-plugins/authored-style.js';
 import { autolinkLiteralsPlugin } from './editor-plugins/autolink-literals.js';
 import { linkEdgesPlugin } from './editor-plugins/link-spaces.js';
 import { nestedMarksPlugin } from './editor-plugins/nested-marks.js';
+import { nestedListStartPlugin } from './editor-plugins/nested-list-start.js';
 import { indentedCodePlugin } from './editor-plugins/indented-code.js';
 import { canonicalOf, minimalEscapesPlugin, type Parser } from './editor-plugins/minimal-escapes.js';
 import { taskMarkers } from './editor-plugins/task-markers.js';
@@ -146,6 +147,7 @@ export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlug
   headingAttrsPlugin,
   wikilinksPlugin,
   taskMarkers,
+  nestedListStartPlugin,
   alerts,
   mathPlugin,
   escapesPlugin,
@@ -1473,7 +1475,7 @@ function selectedImageNode(crepe: Crepe): EditTarget | null {
  * result (video with timestamps) is written as literal `{{ vid(...) }}` text —
  * a paragraph when replacing a block image, inline otherwise.
  */
-function applyMediaResult(
+export function applyMediaResult(
   crepe: Crepe,
   result: MediaPickResult,
   editTarget: EditTarget | null,
@@ -1504,7 +1506,7 @@ function applyMediaResult(
     } else if (result.form === 'image') {
       const imageType = schema.nodes.image;
       if (!imageType) return;
-      const node = imageType.create({ src: result.src, alt: result.caption, title: null });
+      const node = imageType.create({ src: result.src, alt: result.caption, title: '' });
       tr = tr.replaceSelectionWith(node, false);
     } else {
       tr = tr.insertText(result.shortcode);

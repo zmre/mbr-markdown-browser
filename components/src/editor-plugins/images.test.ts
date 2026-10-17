@@ -5,7 +5,8 @@
  */
 import { editorViewCtx } from '@milkdown/kit/core';
 import { afterEach, describe, expect, it } from 'vitest';
-import { destroyEditors, savedFile } from '../editor-test-support.js';
+import { applyMediaResult } from '../editor-crepe.js';
+import { destroyEditors, placeCursor, savedFile, viewOf } from '../editor-test-support.js';
 import { ratioFromAlt, restoreImageBlockPositions } from './images.js';
 
 afterEach(destroyEditors);
@@ -73,5 +74,22 @@ describe('image-block positions', () => {
   it('keeps a rule right above a lone image', async () => {
     const source = '---\n![](a.png)\n';
     expect(await savedFile(source)).toBe(source);
+  });
+});
+
+describe('inserting media from the picker', () => {
+  it('inserts an image (the image node requires a string title)', async () => {
+    let thrown: unknown = null;
+    const saved = await savedFile('Before\n', (crepe) => {
+      const view = viewOf(crepe);
+      placeCursor(view, 'Before', 6);
+      try {
+        applyMediaResult(crepe, { form: 'image', src: 'pics/a.png', caption: 'A cat' }, null);
+      } catch (err) {
+        thrown = err;
+      }
+    });
+    expect(thrown).toBeNull();
+    expect(saved).toContain('![A cat](pics/a.png)');
   });
 });
