@@ -57,8 +57,9 @@
  * frontmatter by the renderer's rule (`frontmatterCloseLine`).
  *
  * Cosmetic (same structure — item 6), still normalized:
- * - A lazy continuation line in a list item or block quote is indented
- *   (`deflist-edge`); in a definition it is kept.
+ * - A lazy continuation line in a footnote is indented (in a list item, a
+ *   quote or a definition it is kept as typed until edited — `deflist-edge`).
+ * - A list's gap after the marker is its first item's (`*  a` / `* b`).
  * - A definition, once edited, is printed `: ` + two-space continuations.
  * - An unneeded escape the author wrote in a paragraph or heading is kept
  *   (its source rides along); one in a table cell may be dropped.
@@ -86,7 +87,9 @@
  * definitions and at the end of the file were dropped, and a final line
  * break was added (`withAuthoredEnd`); a loose list got a blank line
  * between every item (per-item `GapStyle`); a lone image lost the blank
- * lines around it (`images.ts`). Structural: indented code after an
+ * lines around it (`images.ts`); a lazy continuation line in a list item or
+ * quote was indented (`LAZY_LINE`), and whitespace-only blank lines emptied
+ * (`withAuthoredBlankLines`). Structural: indented code after an
  * empty list item was split in two by micromark and saved that way, which
  * any save rewrote (`indented-code.ts`).
  *
@@ -105,9 +108,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './editor-test-support.js';
 
 /** Fixtures whose untouched save is not byte-identical today, and why. */
-const ROUND_TRIP_FAILS: Record<string, string> = {
-  'deflist-edge': 'item 6: a `:` lazy line in a list item or quote indented and escaped',
-};
+const ROUND_TRIP_FAILS: Record<string, string> = {};
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
 const OUTLINE_FAILS: Record<string, string> = {};

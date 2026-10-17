@@ -17,7 +17,7 @@ import { editorViewCtx, remarkCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
-import { documentToSave, frontmatterRewrites, openDocument } from './editor-frontmatter.js';
+import { documentToSave, frontmatterRewrites, openDocument, withAuthoredBlankLines } from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
 import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
@@ -188,8 +188,10 @@ export interface BodySaver {
  * before any edit, with the body `crepe` was given.
  */
 export function createBodySaver(crepe: Crepe, original: string): BodySaver {
-  const baseline = serializeBody(crepe);
-  const whole = () => ({ body: serializeBody(crepe), whole: false });
+  // Whitespace-only lines the printer empties are put back where their neighbours are unchanged.
+  const printed = () => withAuthoredBlankLines(serializeBody(crepe), original);
+  const baseline = printed();
+  const whole = () => ({ body: printed(), whole: false });
   // The round trip is exact: every unedited block already prints as loaded.
   if (baseline === original) return { body: whole, rewritten: { ifEdited: [], onSave: [] } };
   const remark = crepe.editor.action((ctx) => ctx.get(remarkCtx)) as unknown as Parser;
@@ -197,11 +199,11 @@ export function createBodySaver(crepe: Crepe, original: string): BodySaver {
   const base = prepareBaseline(original, baseline, parse, canonicalOf(remark));
   if (!base) {
     const lines = changedLines(original, baseline);
-    return { body: () => ({ body: serializeBody(crepe), whole: true }), rewritten: { ifEdited: [], onSave: lines } };
+    return { body: () => ({ body: printed(), whole: true }), rewritten: { ifEdited: [], onSave: lines } };
   }
   return {
     body: () => {
-      const current = serializeBody(crepe);
+      const current = printed();
       const body = minimalDiff(base, current, parse);
       return body === null ? { body: current, whole: true } : { body, whole: false };
     },

@@ -200,7 +200,54 @@ function editedHead(doc: OpenedDocument, yaml: string): string {
  */
 export function documentToSave(doc: OpenedDocument, yaml: string, body: string): string {
   const head = frontmatterUnchanged(doc, yaml) ? doc.head : editedHead(doc, yaml);
-  return head + withLineEnding(withAuthoredEnd(body, doc.body), doc.lineEnding);
+  const ended = withAuthoredEnd(withAuthoredBlankLines(body, doc.body), doc.body);
+  return head + withLineEnding(ended, doc.lineEnding);
+}
+
+/** Calls `visit(index, key)` for each blank line of `lines`: its non-blank neighbours and place in its run. */
+function eachBlankLine(lines: readonly string[], visit: (index: number, key: string) => void): void {
+  let before = '\u0001start';
+  let run: number[] = [];
+  const flush = (after: string) => {
+    run.forEach((index, k) => visit(index, `${before}\u0000${after}\u0000${k}`));
+    run = [];
+  };
+  lines.forEach((line, index) => {
+    if (line.trim() === '') {
+      run.push(index);
+    } else {
+      flush(line);
+      before = line;
+    }
+  });
+  flush('\u0001end');
+}
+
+/**
+ * `printed` (a serialization, LF) with the whitespace of `original`'s
+ * whitespace-only lines put back: a printed empty line between the same two
+ * non-blank lines, at the same place among the blank lines there, as a
+ * whitespace-only line of the loaded body becomes that line again. Either is
+ * a blank line to markdown; the printer writes every blank line empty. A
+ * blank line whose neighbours were edited stays empty.
+ */
+export function withAuthoredBlankLines(printed: string, original: string): string {
+  if (!/^[ \t]+$/m.test(original)) return printed;
+  const source = original.split('\n');
+  const wanted = new Map<string, string[]>();
+  eachBlankLine(source, (index, key) => {
+    if (source[index] === '') return;
+    const queue = wanted.get(key) ?? [];
+    queue.push(source[index]);
+    wanted.set(key, queue);
+  });
+  if (wanted.size === 0) return printed;
+  const out = printed.split('\n');
+  eachBlankLine(out, (index, key) => {
+    const whitespace = out[index] === '' ? wanted.get(key)?.shift() : undefined;
+    if (whitespace !== undefined) out[index] = whitespace;
+  });
+  return out.join('\n');
 }
 
 /**

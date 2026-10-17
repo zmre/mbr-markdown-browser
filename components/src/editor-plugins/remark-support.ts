@@ -43,3 +43,16 @@ export function addRemarkExtensions(processor: unknown, extensions: RemarkExtens
   push('fromMarkdownExtensions', extensions.fromMarkdown);
   push('toMarkdownExtensions', extensions.toMarkdown);
 }
+
+/**
+ * Marks a lazy continuation line of a paragraph (recorded by `authored-style.ts`) in a list item or quote
+ * (`- item` then `more` unindented): the line as typed, which the item and
+ * quote printers leave without their prefix. The `root` printer
+ * (`minimal-escapes.ts`) removes the mark, so it never reaches any output.
+ */
+export const LAZY_LINE = '\u0000mbr-lazy\u0000';
+
+/** `text` without {@link LAZY_LINE} marks. */
+export function withoutLazyMarks(text: string): string {
+  return text.includes(LAZY_LINE) ? text.split(LAZY_LINE).join('') : text;
+}

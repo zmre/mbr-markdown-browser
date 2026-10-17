@@ -12,12 +12,12 @@ import { constructGuess, RoundTripChecker, touchedLines } from './checker.js';
 /** A note in the editor's own spelling: unchanged by an untouched save. */
 const CLEAN = '# Title\n\nSome *text*.\n\n* one\n* two\n';
 /**
- * Rewritten by design, not for want of a plugin: a lazy continuation line in
- * a list item is indented. The blank line ending the frontmatter is kept (an
- * unedited frontmatter is saved as loaded); editing the frontmatter would
- * drop it.
+ * Rewritten by design, not for want of a plugin: a list's gap after the
+ * marker is its first item's, so `* other` is printed `*  other`. The blank
+ * line ending the frontmatter is kept (an unedited frontmatter is saved as
+ * loaded); editing the frontmatter would drop it.
  */
-const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\n- item\nlazy line\n';
+const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\n*  item\n* other\n';
 
 describe('RoundTripChecker', () => {
   const checker = new RoundTripChecker();
@@ -30,7 +30,7 @@ describe('RoundTripChecker', () => {
 
     const lossy = await checker.check(LOSSY);
     expect(lossy.changed).toBe(true);
-    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\n- item\n  lazy line\n');
+    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\n*  item\n*  other\n');
     // The body's unedited blocks are kept, and so is the unedited frontmatter.
     expect(lossy.untouchedSave).toBe(LOSSY);
     expect(lossy.notice).toEqual({

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  withAuthoredBlankLines,
   withAuthoredEnd,
   documentToSave,
   frontmatterCloseLine,
@@ -216,5 +217,23 @@ describe('withAuthoredEnd: the body ends as loaded', () => {
     expect(withAuthoredEnd('a', 'a\n')).toBe('a');
     expect(withAuthoredEnd('a\n\n', 'a')).toBe('a\n\n');
     expect(withAuthoredEnd('a\n', '')).toBe('a\n');
+  });
+});
+
+describe('withAuthoredBlankLines: whitespace-only lines as loaded', () => {
+  it('puts the whitespace back between the same neighbours', () => {
+    expect(withAuthoredBlankLines('a\n\nb\n\nc\n', 'a\n  \nb\n\t\nc\n')).toBe('a\n  \nb\n\t\nc\n');
+  });
+
+  it('matches each line of a run of blank lines by its place in the run', () => {
+    expect(withAuthoredBlankLines('a\n\n\nb\n', 'a\n\n  \nb\n')).toBe('a\n\n  \nb\n');
+  });
+
+  it('leaves a blank line whose neighbours changed empty', () => {
+    expect(withAuthoredBlankLines('a!\n\nb\n', 'a\n  \nb\n')).toBe('a!\n\nb\n');
+  });
+
+  it('never touches a non-empty line', () => {
+    expect(withAuthoredBlankLines('a\n    x\nb\n', 'a\n  \nb\n')).toBe('a\n    x\nb\n');
   });
 });

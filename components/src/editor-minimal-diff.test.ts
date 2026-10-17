@@ -122,8 +122,8 @@ describe('the save', () => {
   });
 
   it('reports the lines the round trip changes', async () => {
-    // A lazy continuation line in a list item is printed indented.
-    const source = 'Fine\n\n- item\nlazy line\n\nAlso fine\n';
+    // A list's gap after the marker is its first item's: `* other` is printed `*  other`.
+    const source = 'Fine\n\n*  item\n* other\n\nAlso fine\n';
     const crepe = await openCrepe(source);
     expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 4 }], onSave: [] });
   });

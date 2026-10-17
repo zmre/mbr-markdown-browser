@@ -319,6 +319,20 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
     expect(await afterTyping('AT\\&T ~x~\n\nOther\n', 'AT', 2, 'X')).toBe('ATX&T ~~x~~\n\nOther\n');
   });
 
+  it('a lazy line stays lazy until its paragraph is edited', async () => {
+    expect(await afterTyping('- item\nlazy line\n- next\n', 'next', 4, '!')).toBe('- item\nlazy line\n- next!\n');
+    expect(await afterTyping('- item\nlazy line\n- next\n', 'item', 4, '!')).toBe('- item!\n  lazy line\n- next\n');
+    expect(await afterTyping('> quote\nlazy\n\nafter\n', 'after', 5, '!')).toBe('> quote\nlazy\n\nafter!\n');
+  });
+
+  it('an item whose content starts on the next line keeps it there', async () => {
+    expect(await afterTyping('*\n\t* a\n* b\n', 'b', 1, '!')).toBe('*\n\t* a\n* b!\n');
+  });
+
+  it('indented code written with tabs keeps them', async () => {
+    expect(await afterTyping('Text.\n\n\tcode\n\t\tdeeper\n', 'Text', 4, '!')).toBe('Text!.\n\n\tcode\n\t\tdeeper\n');
+  });
+
   it('a quote keeps `> ` on its blank lines', async () => {
     expect(await afterTyping('> a\n> \n> b\n', 'b', 1, 'X')).toBe('> a\n> \n> bX\n');
   });

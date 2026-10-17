@@ -63,7 +63,7 @@ import {
 } from '@milkdown/kit/preset/commonmark';
 import { tableSchema } from '@milkdown/kit/preset/gfm';
 import { minimizeBlockEscapes, sameBlockMeaning, samePhrasing } from './minimal-escapes.js';
-import { addRemarkExtensions, type MdNode } from './remark-support.js';
+import { addRemarkExtensions, LAZY_LINE, withoutLazyMarks, type MdNode } from './remark-support.js';
 
 // ============================================================================
 // Styles
@@ -100,6 +100,8 @@ export interface CodeStyle {
   meta?: string;
   /** A fence never closed (the block runs to the end of the note). */
   unclosed?: true;
+  /** Indented code whose every line is indented with a tab, not four spaces. */
+  tab?: true;
 }
 
 /**
@@ -177,6 +179,8 @@ export interface ListItemStyle {
   indent?: string;
   /** The item's first block is not a paragraph of text (`- - x`, `- ## x`, a lone image): no paragraph in front of it. */
   leadingBlock?: true;
+  /** Nothing follows the marker on its line: the first block starts on the next line, after `indent`. */
+  leadingBreak?: true;
   /** An ordered item's number as typed (`1.`, `3.`, `3.`): only the first one means anything. */
   number?: number;
 }
@@ -259,9 +263,15 @@ export function headingStyleFrom(source: string, heading: Positioned): HeadingSt
  * removed from every line after the first; the first starts at the node, or
  * — `prefix` 0, a block not inside any container — at its line's start, so
  * its indentation is kept. `undefined` when a later line does not have the
- * prefix (a lazy continuation inside a container), or a position is missing.
+ * prefix (a lazy continuation inside a container), or a position is missing —
+ * unless `lazy`: then such a line is kept whole, marked {@link LAZY_LINE}.
  */
-export function authoredLines(source: string, node: Positioned, prefix: number | string): string[] | undefined {
+export function authoredLines(
+  source: string,
+  node: Positioned,
+  prefix: number | string,
+  lazy = false,
+): string[] | undefined {
   let start = node.position?.start.offset;
   let end = node.position?.end.offset;
   if (start === undefined || end === undefined) return undefined;
@@ -278,14 +288,14 @@ export function authoredLines(source: string, node: Positioned, prefix: number |
       lines.push(line);
       continue;
     }
-    if (typeof prefix === 'string') {
-      // The container's prefix as typed (a list item's `indent`): tabs included.
-      if (!line.startsWith(prefix)) return undefined;
-      lines.push(line.slice(prefix.length));
+    // The container's prefix as typed (a list item's `indent`, tabs included), or its width.
+    const prefixed = typeof prefix === 'string' ? line.startsWith(prefix) : /^[ >]*$/.test(line.slice(0, prefix));
+    if (!prefixed) {
+      if (!lazy) return undefined;
+      lines.push(LAZY_LINE + line);
       continue;
     }
-    if (!/^[ >]*$/.test(line.slice(0, prefix))) return undefined;
-    lines.push(line.slice(prefix));
+    lines.push(line.slice(typeof prefix === 'string' ? prefix.length : prefix));
   }
   return lines;
 }
@@ -302,13 +312,15 @@ function prefixOf(node: Positioned, inContainer: boolean): number {
  * `linePrefix`: the literal prefix of the container's lines after its first,
  * when the container is a list item that records it ({@link ListItemStyle}):
  * the paragraph's lines are kept relative to it, since that is what the item
- * prints them under.
+ * prints them under. `lazyLines`: every container around it is a list item
+ * or quote, whose printers leave a lazy line ({@link LAZY_LINE}) as typed.
  */
 export function paragraphStyleFrom(
   source: string,
   paragraph: Positioned,
   inContainer = false,
   linePrefix?: string,
+  lazyLines = false,
 ): ParagraphStyle | undefined {
   const text = sliceOf(paragraph, source);
   if (text === undefined) return undefined;
@@ -317,7 +329,7 @@ export function paragraphStyleFrom(
   // whitespace the printer drops.
   if (text.includes('\\')) style.source = text;
   const prefix = inContainer && linePrefix !== undefined ? linePrefix : prefixOf(paragraph, inContainer);
-  const lines = authoredLines(source, paragraph, prefix);
+  const lines = authoredLines(source, paragraph, prefix, inContainer && lazyLines);
   // A task item's box is in its paragraph's source but printed by the item.
   if (lines && /^\[[ \txX>-]\][ \t]/.test(lines[0])) lines[0] = lines[0].replace(/^\[.\][ \t]+/, '');
   if (lines) style.lines = lines;
@@ -355,8 +367,9 @@ export function keepAuthoredLines(printed: string, lines: readonly string[] | un
   const out = printed.split('\n');
   if (out.length !== lines.length) return printed;
   for (let i = 0; i < out.length; i++) {
-    if (out[i].trim() !== lines[i].trim()) return printed;
-    if (i < out.length - 1 && trailingSpace(out[i]) !== trailingSpace(lines[i])) return printed;
+    const line = withoutLazyMarks(lines[i]);
+    if (out[i].trim() !== line.trim()) return printed;
+    if (i < out.length - 1 && trailingSpace(out[i]) !== trailingSpace(line)) return printed;
   }
   return authoredText(lines, indentFirst);
 }
@@ -385,7 +398,8 @@ export function keepAuthoredText(
   const kept = keepAuthoredLines(printed, lines, indentFirst);
   if (kept !== printed || !lines) return kept;
   const authored = authoredText(lines, indentFirst);
-  return authored !== printed && sameBlockMeaning(state, authored, printed) ? authored : printed;
+  // Compared with its lazy lines lazy: the wrap leaves marked lines unprefixed.
+  return withoutLazyMarks(authored) !== printed && sameBlockMeaning(state, authored, printed) ? authored : printed;
 }
 
 /** Whether an indented paragraph right after `node` (blank lines between) would continue it instead. */
@@ -461,7 +475,12 @@ export function codeStyleFrom(source: string, code: Positioned & { meta?: string
   if (at === undefined) return undefined;
   const fence = /^(`{3,}|~{3,})/.exec(source.slice(at))?.[1];
   const style: CodeStyle = {};
-  if (!fence) style.indented = true;
+  if (!fence) {
+    style.indented = true;
+    const column = (code.position?.start.column ?? 1) - 1;
+    const lines = (sliceOf(code, source) ?? '').split('\n').map((line, i) => (i === 0 ? line : line.slice(column)));
+    if (column === 0 && lines.every((line) => line.trim() === '' || line.startsWith('\t'))) style.tab = true;
+  }
   else if (fence !== '```') style.fence = fence;
   if (fence) {
     const lines = (sliceOf(code, source) ?? '').replace(/\r?\n$/, '').split('\n');
@@ -544,9 +563,12 @@ export function listItemStyleFrom(
           ...(number !== undefined ? { number: Number(number) } : {}),
         }
       : undefined;
-  const second = children[1]?.position?.start.offset;
-  if (parentPrefix === undefined || second === undefined) return { style: leading };
   const lead = source.slice(lineStartOf(source, start), start);
+  // `*` then the item's first block on the next line: the prefix is that block's.
+  const firstAt = first.position?.start.offset;
+  const breaks = firstAt !== undefined && lineStartOf(source, firstAt) > start;
+  const second = breaks ? firstAt : children[1]?.position?.start.offset;
+  if (parentPrefix === undefined || second === undefined) return { style: leading };
   const secondLine = lineStartOf(source, second);
   const linePrefix = source.slice(secondLine, second);
   if (lead !== parentPrefix || secondLine <= start || !/^[ \t]+$/.test(linePrefix) || !linePrefix.startsWith(lead)) {
@@ -554,7 +576,10 @@ export function listItemStyleFrom(
   }
   const lines = source.slice(start, end).split('\n').slice(1);
   if (lines.some((line) => /\S/.test(line) && !line.startsWith(linePrefix))) return { style: leading };
-  return { style: { ...leading, indent: linePrefix.slice(lead.length) }, linePrefix };
+  return {
+    style: { ...leading, indent: linePrefix.slice(lead.length), ...(breaks ? { leadingBreak: true as const } : {}) },
+    linePrefix,
+  };
 }
 
 /**
@@ -581,7 +606,7 @@ export function tableStyleFrom(source: string, table: Positioned): TableStyle | 
 
 const RECORDERS: Record<
   string,
-  (source: string, node: Positioned, inContainer: boolean, linePrefix: string | undefined) => unknown
+  (source: string, node: Positioned, inContainer: boolean, linePrefix: string | undefined, lazyLines: boolean) => unknown
 > = {
   paragraph: paragraphStyleFrom,
   defListTerm: paragraphStyleFrom,
@@ -599,7 +624,8 @@ const RECORDERS: Record<
 export function recordAuthoredStyles(tree: MdNode, source: string): void {
   // `prefix`: the literal prefix of the lines `node` is printed under, when
   // known — `''` at the top level, a list item's for its paragraphs and lists.
-  const visit = (node: MdNode, inContainer: boolean, prefix: string | undefined): void => {
+  // `lazyLines`: every container so far prints lazy lines as typed (list items, quotes).
+  const visit = (node: MdNode, inContainer: boolean, prefix: string | undefined, lazyLines: boolean): void => {
     let childPrefix: string | undefined;
     if (node.type === 'listItem') {
       const { style, linePrefix } = listItemStyleFrom(source, node as Positioned, prefix);
@@ -608,16 +634,17 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
     } else {
       const record = RECORDERS[node.type];
       if (record) {
-        const style = record(source, node as Positioned, inContainer, prefix);
+        const style = record(source, node as Positioned, inContainer, prefix, lazyLines);
         if (style) mergeStyle(node, style);
       }
       childPrefix = node.type === 'root' || node.type === 'list' ? prefix : undefined;
     }
     if (node.type === 'list') recordItemGaps(node as MdNode & { spread?: boolean | null });
     const nested = inContainer || CONTAINERS.has(node.type);
-    for (const child of node.children ?? []) visit(child, nested, childPrefix);
+    const lazy = lazyLines && (!CONTAINERS.has(node.type) || node.type === 'listItem' || node.type === 'blockquote');
+    for (const child of node.children ?? []) visit(child, nested, childPrefix, lazy);
   };
-  visit(tree, false, '');
+  visit(tree, false, '', true);
   recordGaps(tree);
 }
 
@@ -965,8 +992,12 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
   const exit = state.enter('listItem');
   frames.push({ depth, lines: marker === undefined ? undefined : marker + prefix });
   try {
+    // `*` alone on its line, the first block under it — only with the authored prefix, which keeps it in the item.
+    const leadingBreak = Boolean(style?.leadingBreak) && prefix === style?.indent;
     return state.indentLines(state.containerFlow(node, tracker.current()), (line, index, blank) => {
+      if (index && line.startsWith(LAZY_LINE)) return line;
       if (index) return (blank ? '' : prefix) + line;
+      if (leadingBreak && !blank) return `${bullet}\n${prefix}${line}`;
       return (blank ? bullet : bullet + ' '.repeat(size - bullet.length)) + line;
     });
   } finally {
@@ -1028,6 +1059,10 @@ const printCode: Handle<Code> = (node, parent, state, info) => {
   const value = withOptions(state, { fences: !style?.indented, fence: fenceChar }, () =>
     defaultHandlers.code(withMeta, parent, state, info),
   );
+  if (style?.indented && style.tab && !value.startsWith(fenceChar)) {
+    // The printer indents with four spaces; the author used a tab (the same column).
+    return value.replace(/^ {4}/gm, '\t');
+  }
   const fenced = withAuthoredFence(value, style?.fence, fenceChar);
   // A fence never closed, still ending the note: no closing line.
   const last = parent?.type === 'root' && parent.children[parent.children.length - 1] === node;
@@ -1065,6 +1100,7 @@ export const printBlockquote: Handle<Blockquote> = (node, _parent, state, info) 
   tracker.shift(2);
   const value = state.indentLines(state.containerFlow(node, tracker.current()), (line, _index, blank) => {
     if (blank) return `>${style?.blank ?? ''}${line}`;
+    if (line.startsWith(LAZY_LINE)) return line;
     return compact && line.startsWith('>') ? `>${line}` : `> ${line}`;
   });
   exit();

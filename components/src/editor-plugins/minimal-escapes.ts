@@ -26,7 +26,7 @@ import type { Parents, Root } from 'mdast';
 import type { Ctx } from '@milkdown/kit/ctx';
 import { remarkCtx } from '@milkdown/kit/core';
 import { $remark } from '@milkdown/kit/utils';
-import { addRemarkExtensions, type MdNode } from './remark-support.js';
+import { addRemarkExtensions, LAZY_LINE, withoutLazyMarks, type MdNode } from './remark-support.js';
 
 /** Beyond this many escapes in one block, leave the block as printed. */
 export const MAX_CANDIDATES = 32;
@@ -156,10 +156,11 @@ function containerWrap(state: State): (text: string) => string {
     for (const { first, rest } of [...prefixes].reverse()) {
       out = out
         .split('\n')
-        .map((line, i) => (i === 0 ? first : rest) + line)
+        // A lazy line (`authored-style.ts`) is written without the containers' prefixes.
+        .map((line, i) => (line.startsWith(LAZY_LINE) ? line : (i === 0 ? first : rest) + line))
         .join('\n');
     }
-    return out;
+    return withoutLazyMarks(out);
   };
 }
 
@@ -211,7 +212,8 @@ export function samePhrasing(state: State, a: string, b: string): boolean {
 /** Records the document's definitions for {@link minimizeBlockEscapes}, then prints it. */
 function printRoot(node: Root, parent: Parents | undefined, state: State, info: Info): string {
   definitionsByState.set(state, collectDefinitions(node as unknown as MdNode));
-  return defaultHandlers.root(node, parent, state, info);
+  // Lazy-line marks (`authored-style.ts`) have done their work in the containers.
+  return withoutLazyMarks(defaultHandlers.root(node, parent, state, info));
 }
 
 /** The parts of a unified processor {@link canonicalOf} uses. */
