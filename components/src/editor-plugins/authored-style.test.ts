@@ -100,6 +100,17 @@ describe('code blocks', () => {
     expect(await afterTyping('````\nx\n````\n', 'x', 1, 'y')).toBe('````\nxy\n````\n');
   });
 
+  it('a code block is printed as typed until its text or language is edited', async () => {
+    for (const source of ['``` js\nx\n```  \n\nT\n', ' ```\nx\n ```\n\nT\n', 'T\n\n\tcode\n\n\tmore\n', '- a\n\n      code\n- b\n']) {
+      expect(serializeBody(await openCrepe(source))).toBe(source);
+    }
+    expect(await afterTyping('``` js\nx\n```  \n\nT\n', 'x', 1, 'y')).toBe('```js\nxy\n```\n\nT\n');
+  });
+
+  it('a rule keeps the spaces after it', async () => {
+    expect(await afterTyping('---  \n\nT\n', 'T', 1, '!')).toBe('---  \n\nT!\n');
+  });
+
   it('a fence stays as short as typed while no line of the code could close it', async () => {
     // remark lengthens the fence for any line starting with backticks.
     expect(await afterTyping('```\n```x` y\n```\n', 'y', 1, 'z')).toBe('```\n```x` yz\n```\n');

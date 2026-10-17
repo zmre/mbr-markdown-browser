@@ -102,6 +102,13 @@ export interface CodeStyle {
   unclosed?: true;
   /** Indented code whose every line is indented with a tab, not four spaces. */
   tab?: true;
+  /** The whole block as typed, printed back while its language and text are as loaded ({@link BlockSource}). */
+  typed?: BlockSource;
+}
+
+/** What a code block compares by: its language and text (`meta` is kept apart, and Milkdown has no other field). */
+function codeKey(code: Code): string {
+  return JSON.stringify([code.lang || '', code.value]);
 }
 
 /**
@@ -149,6 +156,8 @@ export interface GapStyle {
 /** The line of a thematic break as typed (`---`, `* * *`). */
 export interface RuleStyle {
   source: string;
+  /** Whitespace after it on its line, kept while it is printed as typed. */
+  trailing?: string;
 }
 
 /** The whitespace before a hard break's line ending (`'  '`); a `\` break has none. */
@@ -165,22 +174,24 @@ export interface BlockquoteStyle {
   empty?: string;
   /** What follows `>` on the quote's blank lines, when every one has it (`'> '`). */
   blank?: string;
-  /** The whole quote as typed, printed back while it holds what was loaded ({@link QuoteSource}). */
-  typed?: QuoteSource;
+  /** The whole quote as typed, printed back while it holds what was loaded ({@link BlockSource}). */
+  typed?: BlockSource;
 }
 
 /**
- * A quote as typed, for printing it back byte for byte while it holds what
- * was loaded — `key`, the {@link contentKey} of the quote, set when the editor
- * parses it. Keeps what the quote printer normalizes: `>` and `> ` mixed on
- * blank lines, a tab after `>`, no blank line between two of its blocks
- * (`> text⏎> * item`), its own indentation, lazy lines. Not for an alert,
- * whose tag line is printed apart.
+ * A quote or code block as typed, for printing it back byte for byte while
+ * it holds what was loaded — `key`, set when the editor parses it
+ * ({@link keyedStyle}). For a quote that keeps what its printer normalizes:
+ * `>` and `> ` mixed on blank lines, a tab after `>`, no blank line between
+ * two of its blocks (`> text⏎> * item`), its own indentation, lazy lines
+ * (not for an alert, whose tag line is printed apart); for code, the space
+ * before the info string, spaces after a fence, an indented fence, the blank
+ * lines ending an unclosed one.
  */
-export interface QuoteSource {
-  /** What precedes its first `>` on that line: container prefixes and its own indentation. */
+export interface BlockSource {
+  /** What precedes the block on its first line: container prefixes and its own indentation. */
   lead: string;
-  /** Its lines, the first from its `>`, the others whole. */
+  /** Its lines, the first from where the block starts, the others whole. */
   lines: string[];
   /** Every container around it leaves a lazy line unprefixed ({@link LAZY_LINE}). */
   lazyOk: boolean;
@@ -590,7 +601,10 @@ export function codeStyleFrom(source: string, code: Positioned & { meta?: string
 
 export function ruleStyleFrom(source: string, rule: Positioned): RuleStyle | undefined {
   const text = sliceOf(rule, source)?.replace(/[ \t]+$/, '');
-  return text ? { source: text } : undefined;
+  if (!text) return undefined;
+  const end = rule.position?.end.offset ?? 0;
+  const trailing = (sliceOf(rule, source) ?? '').slice(text.length) + (/^[ \t]*(?=\r?\n|$)/.exec(source.slice(end))?.[0] ?? '');
+  return trailing ? { source: text, trailing } : { source: text };
 }
 
 export function breakStyleFrom(source: string, hardBreak: Positioned): BreakStyle | undefined {
@@ -720,11 +734,11 @@ function itemBlocks(children: readonly RootContent[] | undefined): readonly Root
   return children.length > 1 && isEmptyFlow(children.slice(0, 1)) ? children.slice(1) : children;
 }
 
-/** A quote's {@link QuoteSource}; `undefined` where its `>` is not first on its line but for container prefixes. */
-export function quoteSourceFrom(source: string, quote: Positioned, lazyOk: boolean): QuoteSource | undefined {
-  const start = quote.position?.start.offset;
-  let end = quote.position?.end.offset;
-  if (start === undefined || end === undefined || source[start] !== '>') return undefined;
+/** A quote's or code block's {@link BlockSource}; `undefined` where it is not first on its line but for container prefixes. */
+export function blockSourceFrom(source: string, block: Positioned, lazyOk: boolean): BlockSource | undefined {
+  const start = block.position?.start.offset;
+  let end = block.position?.end.offset;
+  if (start === undefined || end === undefined) return undefined;
   const lead = source.slice(lineStartOf(source, start), start);
   if (!/^[ \t>]*$/.test(lead)) return undefined;
   end += /^[ \t]*(?=\r?\n|$)/.exec(source.slice(end))?.[0].length ?? 0;
@@ -834,8 +848,12 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
         if (style) mergeStyle(node, withoutTaskBox(style, node, parent));
       }
       childPrefix = node.type === 'root' || node.type === 'list' ? prefix : undefined;
-      if (node.type === 'blockquote') {
-        const typed = quoteSourceFrom(source, node as Positioned, lazyLines);
+      if (node.type === 'blockquote' || node.type === 'code') {
+        const typed = blockSourceFrom(source, node as Positioned, lazyLines);
+        // Indented code ends at its last line with text; mdast counts whitespace-only lines after it in.
+        if (typed && styleOf<CodeStyle>(node)?.indented) {
+          while (typed.lines.length > 1 && /^[\s>]*$/.test(typed.lines[typed.lines.length - 1])) typed.lines.pop();
+        }
         if (typed) mergeStyle(node, { typed });
       }
     }
@@ -1011,12 +1029,12 @@ export function carryAuthoredStyle<T extends string>(schema: $NodeSchema<T>): $N
   });
 }
 
-/** A node's `mbrStyle`, with the key of an item or quote recorded as typed ({@link ItemSource}, {@link QuoteSource}). */
+/** A node's `mbrStyle`, with the key of an item, quote or code block recorded as typed ({@link ItemSource}, {@link BlockSource}). */
 function keyedStyle(node: unknown): unknown {
-  const style = styleOf<ListItemStyle | BlockquoteStyle>(node);
+  const style = styleOf<ListItemStyle | BlockquoteStyle | CodeStyle>(node);
   const type = (node as { type?: unknown }).type;
-  if (!style?.typed || (type !== 'listItem' && type !== 'blockquote')) return style;
-  const key = type === 'listItem' ? itemKey(node as ListItem) : contentKey([node]);
+  if (!style?.typed || (type !== 'listItem' && type !== 'blockquote' && type !== 'code')) return style;
+  const key = type === 'listItem' ? itemKey(node as ListItem) : type === 'code' ? codeKey(node as Code) : contentKey([node]);
   return { ...style, typed: { ...style.typed, key } };
 }
 
@@ -1324,10 +1342,12 @@ function asTyped(node: ListItem, style: ListItemStyle | undefined, bullet: strin
  * that paragraph's setext underline: there it is `***`.
  */
 const printRule: Handle<ThematicBreak> = (node, parent, state) => {
-  const value = styleOf<RuleStyle>(node)?.source ?? defaultHandlers.thematicBreak(node, parent, state);
-  if (!value.startsWith('-') || !parent || !('spread' in parent) || parent.spread !== false) return value;
+  const style = styleOf<RuleStyle>(node);
+  const value = style?.source ?? defaultHandlers.thematicBreak(node, parent, state);
+  const asTyped = value + (style?.trailing ?? '');
+  if (!value.startsWith('-') || !parent || !('spread' in parent) || parent.spread !== false) return asTyped;
   const previous = parent.children[parent.children.indexOf(node as never) - 1];
-  return previous?.type === 'paragraph' ? '***' : value;
+  return previous?.type === 'paragraph' ? '***' : asTyped;
 };
 
 const printHeading: Handle<Heading> = (node, parent, state, info) => {
@@ -1367,6 +1387,10 @@ function printHeadingAs(
 
 const printCode: Handle<Code> = (node, parent, state, info) => {
   const style = styleOf<CodeStyle>(node);
+  // An unclosed fence is printed as typed only while it still ends the note (see below).
+  const ends = !style?.unclosed || (parent?.type === 'root' && parent.children[parent.children.length - 1] === node);
+  const typed = ends && style?.typed?.key === codeKey(node) ? blockAsTyped(style.typed, parent) : undefined;
+  if (typed !== undefined) return typed;
   const meta = node.meta ?? style?.meta;
   const withMeta = meta && node.lang ? { ...node, meta } : node;
   const fenceChar = style?.fence?.[0] === '~' ? '~' : '`';
@@ -1435,14 +1459,18 @@ export const printBlockquote: Handle<Blockquote> = (node, parent, state, info) =
 };
 
 /**
- * `node` as typed ({@link QuoteSource}) when it holds what was loaded: at
+ * `node` as typed ({@link BlockSource}) when it holds what was loaded: at
  * the top level whole, its own indentation included; in a container
  * relative to its first line, unless a tab in it could land on another
  * column there.
  */
-function quoteAsTyped(node: Blockquote, parent: Parents | undefined, typed: QuoteSource | undefined): string | undefined {
+function quoteAsTyped(node: Blockquote, parent: Parents | undefined, typed: BlockSource | undefined): string | undefined {
   if (!typed?.key || (node.data as { alert?: unknown } | undefined)?.alert) return undefined;
-  if (typed.key !== contentKey([node])) return undefined;
+  return typed.key === contentKey([node]) ? blockAsTyped(typed, parent) : undefined;
+}
+
+/** A block's {@link BlockSource} lines, under `parent` (see {@link quoteAsTyped}). */
+function blockAsTyped(typed: BlockSource, parent: Parents | undefined): string | undefined {
   const [first, ...rest] = typed.lines;
   if (parent?.type === 'root') {
     const ownIndent = /^ {0,3}$/.test(typed.lead) ? typed.lead : '';
