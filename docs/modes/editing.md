@@ -112,7 +112,16 @@ nothing needs (`2 * 3` stays `2 * 3`). New lists get `*` bullets and new
 rules `---`. A definition (`: …`) is written exactly as typed until you edit
 it — the spacing after the `:`, unindented continuation lines, a list
 indented further than it needs, the blank lines inside it, trailing spaces —
-and so are indented paragraphs and questions, a paragraph or heading spelled
+and so is each list item (a tab before one nested item and four spaces
+before the next, a tab after the marker, a repeated number, an empty task's
+trailing space; editing an item rewrites that item, not its untouched
+neighbours or nested items), each quote (`>` and `> ` mixed on blank lines,
+its own indentation) and each code block (a space before the info string,
+spaces after a fence, an indented fence). Links keep the spaces at the edges
+of their text (`[docs ](…)`, a spacer link `[ ](…)`), a link with no text,
+and two links side by side to the same page; bold or strike around a link
+stays outside it (`~~[x](…)~~`), and emphasis inside emphasis (`*a _b_ c*`)
+keeps the outer emphasis to its end. So are indented paragraphs and questions, a paragraph or heading spelled
 another way that reads the same (`AT\&T`, `~x~`, a link written out for an
 address), the blank lines between blocks (none under a heading, two or more
 anywhere, a blank line between only some items of a list, spaces on a blank
