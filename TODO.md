@@ -2,6 +2,8 @@
 
 ## What's Next
 
+* **Quicklook**
+  * Lets setup the thumbnail generation, too
 * **GUI**
   * Right now our icons for things are all different styles.  We don't have a single style language. For example, the i button for info is a heavy solid thing that might be a unicode character. Tasks is a clipboard (which doesnt read as tasks) that's a simple outline.  There are more examples through the interface, like the folders used in the browser.  Also, it's inconcistent in the header how we have a border around the magnifying glass icon but not around other icons.
   * I want to do a full review of buttons that use icons throughout the interface, pick a design language for them, and bring consistency so it looks well designed.
