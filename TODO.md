@@ -34,6 +34,7 @@
   * [ ] Flashcard writer: files with lone `\r` line endings put every card on "line 1"; ordered history lists copy the last item's number. Add an integration test for 401 / symlink escape on `/.mbr/flashcard-review`.
   * [ ] `templates/_head.html` hard-codes the concentric threshold default `0.7` alongside `DEFAULT_FLASHCARDS_CONCENTRIC_THRESHOLD`; pass it from Rust.
   * [ ] `scripts/update-assets.sh` example version strings (hljs 11.11.2, mermaid 11.16.1) are stale.
+  * [ ] Update the vendored highlight.js (`templates/hljs*.js`): CodeQL flags `js/bad-tag-filter` in `hljs.11.12.0.js` and `hljs.lang.xml.11.12.0.js` (alerts 88/89, dismissed as third-party on 2026-10-17 pending the update).
 
 * **Relationships & genealogy** (see [docs](docs/markdown/relationships.md))
   * [ ] Edit-mode support for structured person data: a friendlier way to view/edit the person frontmatter (born, died, born_place, gender, aliases, relationships) than hand-editing raw YAML in the in-browser editor — e.g. a small form for the known fields.
