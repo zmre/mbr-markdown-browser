@@ -81,6 +81,19 @@ describe('in the editor', () => {
     expect(await edited('- [-]\n- b\n', 'b', 'X')).toBe('- [-]\n- bX\n');
   });
 
+  it.each([
+    ['x [**y**](https://a.b/) z', 'the link outside the emphasis'],
+    ['x ~~[https://a.b/c](https://a.b/c)~~ z', 'the strike outside the link'],
+    ['**0.**[**https://a.b/c**](https://a.b/c) z', 'two strong runs, one in a link'],
+    ['**__x__** y', 'strong inside strong'],
+  ])('keeps marks as typed while the paragraph reads the same: %j (%s)', async (source) => {
+    expect(serializeBody(await openCrepe(`${source}\n`))).toBe(`${source}\n`);
+  });
+
+  it('prints an edit to marked text, whatever their order was', async () => {
+    expect(await edited('x [**y**](https://a.b/) z\n', 'y', 'Y')).toBe('x **[yY](https://a.b/)** z\n');
+  });
+
   it('applies to headings', async () => {
     expect(await edited('# 2 * 3 & AT&T\n', 'AT&T', 'X')).toBe('# 2 * 3 & AT&TX\n');
   });

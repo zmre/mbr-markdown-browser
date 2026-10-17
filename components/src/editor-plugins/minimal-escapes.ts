@@ -121,9 +121,51 @@ export function minimizeEscapes(
   return current;
 }
 
-/** The tree as JSON, without positions (which an escape shifts) and recorded source styles. */
+/**
+ * The tree as JSON, without positions (which an escape shifts) and recorded
+ * source styles, and with inline content as ProseMirror holds it: runs of
+ * text and inline nodes, each with its set of marks ({@link markRuns}). So
+ * `[**x**](u)` and `**[x](u)**`, `**a**[**b**](u)` and `**a[b](u)**`, or
+ * `**__x__**` and `**x**` read the same — they draw the same, and the editor prints one for the
+ * other — while any edit a reader can see changes a run.
+ */
 function treeKey(tree: unknown): string {
-  return JSON.stringify(tree, (key, value: unknown) => (key === 'position' || key === 'mbrStyle' ? undefined : value));
+  const replacer = (key: string, value: unknown): unknown => {
+    if (key === 'position' || key === 'mbrStyle') return undefined;
+    const node = value as MdNode | null;
+    if (!node || typeof node !== 'object' || Array.isArray(node) || !node.children?.some((child) => MARK_TYPES.has(child.type))) {
+      return value;
+    }
+    return { ...node, children: markRuns(node.children) };
+  };
+  return JSON.stringify(tree, replacer);
+}
+
+/** Inline wrappers that are marks in the editor. */
+const MARK_TYPES = new Set(['emphasis', 'strong', 'delete', 'link', 'linkReference', 'mbrLinkReference']);
+
+/** A mark wrapper without its content or its spelling (`marker`: `*` or `_`), as a comparable label. */
+function markLabel(wrapper: MdNode): string {
+  return JSON.stringify({ ...wrapper, children: undefined, position: undefined, mbrStyle: undefined, marker: undefined });
+}
+
+/** Phrasing as runs: every leaf with the set of marks around it (sorted labels), adjacent texts with one set merged. */
+function markRuns(children: readonly MdNode[], marks: readonly string[] = [], out: MdNode[] = []): MdNode[] {
+  for (const child of children) {
+    if (MARK_TYPES.has(child.type)) {
+      markRuns(child.children ?? [], [...marks, markLabel(child)], out);
+      continue;
+    }
+    // A set: `**__x__**` draws as `**x**`, and ProseMirror holds it so.
+    const sorted = [...new Set(marks)].sort().join('|');
+    const previous = out[out.length - 1] as (MdNode & { marks?: string }) | undefined;
+    if (child.type === 'text' && previous?.type === 'text' && previous.marks === sorted) {
+      out[out.length - 1] = { ...previous, value: (previous.value ?? '') + (child.value ?? '') } as MdNode;
+    } else {
+      out.push({ ...child, marks: sorted } as MdNode);
+    }
+  }
+  return out;
 }
 
 /** Definitions (`[a]: …`, `[^a]: …`) of the document being printed, per serialization. */
