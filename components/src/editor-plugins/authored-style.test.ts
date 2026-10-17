@@ -360,6 +360,15 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
     expect(await afterTyping(source, 'Text', 4, '!')).toBe('Text!.\n\n![a b](https://x.y/p?a=b&c=d)\n');
   });
 
+  it('a quote is printed as typed until it is edited', async () => {
+    const source = ' > p\n > * a\n >\n> b\n> \n> c\nlazy\n';
+    expect(serializeBody(await openCrepe(source))).toBe(source);
+    // Edited: printed again (`>` blank lines as the quote spelled them most, no indentation).
+    expect(await afterTyping(source, 'p', 1, 'X')).not.toBe(source.replace('p', 'pX'));
+    // In an item that is edited, an untouched quote keeps its lines.
+    expect(await afterTyping('* x\n\n  > a\n  >\n  > b\n  > \n', 'x', 1, '!')).toBe('* x!\n\n  > a\n  >\n  > b\n  > \n');
+  });
+
   it('a quote keeps `> ` on its blank lines', async () => {
     expect(await afterTyping('> a\n> \n> b\n', 'b', 1, 'X')).toBe('> a\n> \n> bX\n');
   });

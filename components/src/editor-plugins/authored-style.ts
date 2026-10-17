@@ -165,6 +165,26 @@ export interface BlockquoteStyle {
   empty?: string;
   /** What follows `>` on the quote's blank lines, when every one has it (`'> '`). */
   blank?: string;
+  /** The whole quote as typed, printed back while it holds what was loaded ({@link QuoteSource}). */
+  typed?: QuoteSource;
+}
+
+/**
+ * A quote as typed, for printing it back byte for byte while it holds what
+ * was loaded — `key`, the {@link contentKey} of the quote, set when the editor
+ * parses it. Keeps what the quote printer normalizes: `>` and `> ` mixed on
+ * blank lines, a tab after `>`, no blank line between two of its blocks
+ * (`> text⏎> * item`), its own indentation, lazy lines. Not for an alert,
+ * whose tag line is printed apart.
+ */
+export interface QuoteSource {
+  /** What precedes its first `>` on that line: container prefixes and its own indentation. */
+  lead: string;
+  /** Its lines, the first from its `>`, the others whole. */
+  lines: string[];
+  /** Every container around it leaves a lazy line unprefixed ({@link LAZY_LINE}). */
+  lazyOk: boolean;
+  key?: string;
 }
 
 /**
@@ -702,6 +722,22 @@ function itemBlocks(children: readonly RootContent[] | undefined): readonly Root
   return children.length > 1 && isEmptyFlow(children.slice(0, 1)) ? children.slice(1) : children;
 }
 
+/** A quote's {@link QuoteSource}; `undefined` where its `>` is not first on its line but for container prefixes. */
+export function quoteSourceFrom(source: string, quote: Positioned, lazyOk: boolean): QuoteSource | undefined {
+  const start = quote.position?.start.offset;
+  let end = quote.position?.end.offset;
+  if (start === undefined || end === undefined || source[start] !== '>') return undefined;
+  const lead = source.slice(lineStartOf(source, start), start);
+  if (!/^[ \t>]*$/.test(lead)) return undefined;
+  end += /^[ \t]*(?=\r?\n|$)/.exec(source.slice(end))?.[0].length ?? 0;
+  const lines = source
+    .slice(start, end)
+    .split('\n')
+    .map((line) => line.replace(/\r$/, ''));
+  if (lines.some((line) => line.includes('\r'))) return undefined;
+  return { lead, lines, lazyOk };
+}
+
 /**
  * What an item's content compares by ({@link ItemSource}): its task state and
  * the {@link contentKey} of its blocks ({@link itemBlocks}).
@@ -800,6 +836,10 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
         if (style) mergeStyle(node, style);
       }
       childPrefix = node.type === 'root' || node.type === 'list' ? prefix : undefined;
+      if (node.type === 'blockquote') {
+        const typed = quoteSourceFrom(source, node as Positioned, lazyLines);
+        if (typed) mergeStyle(node, { typed });
+      }
     }
     if (node.type === 'list') recordItemGaps(node as MdNode & { spread?: boolean | null }, lines);
     const nested = inContainer || CONTAINERS.has(node.type);
@@ -961,11 +1001,13 @@ export function carryAuthoredStyle<T extends string>(schema: $NodeSchema<T>): $N
   });
 }
 
-/** A node's `mbrStyle`, with the key of an item recorded as typed ({@link ItemSource}). */
+/** A node's `mbrStyle`, with the key of an item or quote recorded as typed ({@link ItemSource}, {@link QuoteSource}). */
 function keyedStyle(node: unknown): unknown {
-  const style = styleOf<ListItemStyle>(node);
-  if (!style?.typed || (node as { type?: unknown }).type !== 'listItem') return style;
-  return { ...style, typed: { ...style.typed, key: itemKey(node as ListItem) } };
+  const style = styleOf<ListItemStyle | BlockquoteStyle>(node);
+  const type = (node as { type?: unknown }).type;
+  if (!style?.typed || (type !== 'listItem' && type !== 'blockquote')) return style;
+  const key = type === 'listItem' ? itemKey(node as ListItem) : contentKey([node]);
+  return { ...style, typed: { ...style.typed, key } };
 }
 
 /** {@link withFirstNode} for the serializer, whose two calls put `props` at different positions. */
@@ -1362,8 +1404,10 @@ const printBreak: Handle<Break> = (node, parent, state, info) => {
  * quote's when the authored quote was compact (`>>>`). The one blockquote
  * printer — `alerts.ts` prints an alert's body through it.
  */
-export const printBlockquote: Handle<Blockquote> = (node, _parent, state, info) => {
+export const printBlockquote: Handle<Blockquote> = (node, parent, state, info) => {
   const style = styleOf<BlockquoteStyle>(node);
+  const typed = quoteAsTyped(node, parent, style?.typed);
+  if (typed !== undefined) return typed;
   // An empty quote: as typed, not `> <br />` (Milkdown's empty paragraph).
   if (isEmptyFlow(node.children)) return `>${style?.empty ?? ''}`;
   const compact = Boolean(style?.compact);
@@ -1379,6 +1423,30 @@ export const printBlockquote: Handle<Blockquote> = (node, _parent, state, info) 
   exit();
   return value;
 };
+
+/**
+ * `node` as typed ({@link QuoteSource}) when it holds what was loaded: at
+ * the top level whole, its own indentation included; in a container
+ * relative to its first line, unless a tab in it could land on another
+ * column there.
+ */
+function quoteAsTyped(node: Blockquote, parent: Parents | undefined, typed: QuoteSource | undefined): string | undefined {
+  if (!typed?.key || (node.data as { alert?: unknown } | undefined)?.alert) return undefined;
+  if (typed.key !== contentKey([node])) return undefined;
+  const [first, ...rest] = typed.lines;
+  if (parent?.type === 'root') {
+    const ownIndent = /^ {0,3}$/.test(typed.lead) ? typed.lead : '';
+    return ownIndent + [first, ...rest].join('\n');
+  }
+  if (typed.lines.some((line) => line.includes('\t')) || typed.lead.includes('\t')) return undefined;
+  const lines = [first];
+  for (const line of rest) {
+    const relative = relativeItemLine(line, typed.lead);
+    if (!relative || (relative.lazy && !typed.lazyOk)) return undefined;
+    lines.push(relative.lazy ? LAZY_LINE + relative.text : relative.text);
+  }
+  return lines.join('\n');
+}
 
 const gfmTable = gfmTableToMarkdown().handlers?.table as Handle<Table>;
 

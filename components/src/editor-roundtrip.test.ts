@@ -148,13 +148,13 @@ describe('openEditor: the safety net', () => {
     document.querySelector('.mbr-editor-overlay')?.remove()
   })
 
-  // A tab after a quote's `>` before a nested item is printed as spaces: `>   - second`.
-  const INEXACT = '---\ntitle: t\n---\n# Note\n\n> - item\n>\t- second item\n\nIntro.\n'
+  // An ordered number equal to the one before is counted on: `3. third` is printed `4. third`.
+  const INEXACT = '---\ntitle: t\n---\n# Note\n\n1. item\n3. second item\n3. third\n\nIntro.\n'
 
   it('names the lines the editor would write differently', async () => {
     const { modal } = await openOn(INEXACT)
     const notice = modal.querySelector('.mbr-editor-notice')
-    expect(notice?.textContent).toContain('Lines 6–7')
+    expect(notice?.textContent).toContain('Lines 6–8')
     expect(notice?.textContent).toContain('saved as written unless you edit them')
   })
 

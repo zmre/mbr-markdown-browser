@@ -122,10 +122,10 @@ describe('the save', () => {
   });
 
   it('reports the lines the round trip changes', async () => {
-    // A tab after a quote's `>` before a nested item is printed as spaces: `>   * other`.
-    const source = 'Fine\n\n> * item\n>\t* other\n\nAlso fine\n';
+    // An ordered number equal to the one before is counted on: `3. third` is printed `4. third`.
+    const source = 'Fine\n\n1. item\n3. other\n3. third\n\nAlso fine\n';
     const crepe = await openCrepe(source);
-    expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 4 }], onSave: [] });
+    expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 5 }], onSave: [] });
   });
 
   it('reports nothing for an exact round trip', async () => {
