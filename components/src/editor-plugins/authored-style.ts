@@ -61,7 +61,7 @@ import {
   orderedListSchema,
   paragraphSchema,
 } from '@milkdown/kit/preset/commonmark';
-import { tableSchema } from '@milkdown/kit/preset/gfm';
+import { footnoteDefinitionSchema, tableSchema } from '@milkdown/kit/preset/gfm';
 import { minimizeBlockEscapes, sameBlockMeaning, samePhrasing } from './minimal-escapes.js';
 import { addRemarkExtensions, LAZY_LINE, withoutLazyMarks, type MdNode } from './remark-support.js';
 
@@ -179,8 +179,8 @@ export interface ListItemStyle {
   indent?: string;
   /** The item's first block is not a paragraph of text (`- - x`, `- ## x`, a lone image): no paragraph in front of it. */
   leadingBlock?: true;
-  /** Nothing follows the marker on its line: the first block starts on the next line, after `indent`. */
-  leadingBreak?: true;
+  /** Only this whitespace follows the marker on its line: the first block starts on the next line, after `indent`. */
+  leadingBreak?: string;
   /** An ordered item's number as typed (`1.`, `3.`, `3.`): only the first one means anything. */
   number?: number;
 }
@@ -577,7 +577,11 @@ export function listItemStyleFrom(
   const lines = source.slice(start, end).split('\n').slice(1);
   if (lines.some((line) => /\S/.test(line) && !line.startsWith(linePrefix))) return { style: leading };
   return {
-    style: { ...leading, indent: linePrefix.slice(lead.length), ...(breaks ? { leadingBreak: true as const } : {}) },
+    style: {
+      ...leading,
+      indent: linePrefix.slice(lead.length),
+      ...(breaks ? { leadingBreak: /^(?:[*+-]|\d{1,9}[.)])([ \t]*)/.exec(source.slice(start))?.[1] ?? '' } : {}),
+    },
     linePrefix,
   };
 }
@@ -993,11 +997,11 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
   frames.push({ depth, lines: marker === undefined ? undefined : marker + prefix });
   try {
     // `*` alone on its line, the first block under it — only with the authored prefix, which keeps it in the item.
-    const leadingBreak = Boolean(style?.leadingBreak) && prefix === style?.indent;
+    const leadingBreak = style?.leadingBreak !== undefined && prefix === style.indent ? style.leadingBreak : undefined;
     return state.indentLines(state.containerFlow(node, tracker.current()), (line, index, blank) => {
       if (index && line.startsWith(LAZY_LINE)) return line;
       if (index) return (blank ? '' : prefix) + line;
-      if (leadingBreak && !blank) return `${bullet}\n${prefix}${line}`;
+      if (leadingBreak !== undefined && !blank) return `${bullet}${leadingBreak}\n${prefix}${line}`;
       return (blank ? bullet : bullet + ' '.repeat(size - bullet.length)) + line;
     });
   } finally {
@@ -1023,8 +1027,10 @@ const printHeading: Handle<Heading> = (node, parent, state, info) => {
   const value = printHeadingAs(style, node, parent, state, info);
   // Trailing whitespace on the heading's line, which nothing means.
   const source = style?.source;
-  if (source === undefined || source.includes('\n') || value.includes('\n')) return value;
-  if (/[ \t]$/.test(source) && value === source.replace(/[ \t]+$/, '')) return source;
+  if (source === undefined) return value;
+  // Trailing whitespace on the heading's lines (a setext underline's too), which nothing means here.
+  if (/[ \t]$/m.test(source) && value === source.replace(/[ \t]+$/gm, '')) return source;
+  if (source.includes('\n') || value.includes('\n')) return value;
   // Spelled differently, read the same (`###  x`, an escape the printer does not write).
   return source !== value && sameBlockMeaning(state, source, value) ? source : value;
 };
@@ -1232,6 +1238,14 @@ function interruptsParagraph(list: List): boolean {
   return !list.ordered || list.start === 1 || list.start == null;
 }
 
+/** Whether `right` is a list of another kind than `left` (bullet vs number, another marker), so not its continuation. */
+function startsAnotherList(left: List, right: List): boolean {
+  if (Boolean(left.ordered) !== Boolean(right.ordered)) return true;
+  const a = styleOf<ListStyle>(left)?.marker;
+  const b = styleOf<ListStyle>(right)?.marker;
+  return a !== undefined && b !== undefined && a !== b;
+}
+
 /** A rule that may follow a paragraph line: not `-`, which would underline it as a heading. */
 function ruleAfterParagraph(rule: ThematicBreak): boolean {
   const source = styleOf<RuleStyle>(rule)?.source ?? HOUSE_STYLE.rule;
@@ -1247,18 +1261,25 @@ function ruleAfterParagraph(rule: ThematicBreak): boolean {
  * edit from making them merge.
  */
 export function adjacentIsSafe(left: RootContent, right: RootContent): boolean {
-  if (left.type === 'heading' || left.type === 'thematicBreak' || isFencedCode(left)) return true;
+  const type = left.type as string;
+  if (type === 'heading' || type === 'thematicBreak' || type === 'sectionBreak' || isFencedCode(left)) return true;
   // Indented code ends at a line indented less; only more indented code would join it.
   if (left.type === 'code') return !isIndentedCode(right);
-  // An empty last item has no paragraph to continue; a list would continue the list.
+  // A footnote's `[^x]:` starts the next one.
+  if (type === 'footnoteDefinition') return (right.type as string) === 'footnoteDefinition';
+  // An empty last item has no paragraph to continue; a list like it would continue the list.
   if (left.type === 'list' && isEmptyItem(left.children[left.children.length - 1])) {
-    return right.type !== 'list' && !isIndentedCode(right);
+    if (right.type === 'list') return startsAnotherList(left, right);
+    return !isIndentedCode(right);
   }
   const interrupts =
     isAtxHeading(right) ||
     isFencedCode(right) ||
     (right.type === 'thematicBreak' && ruleAfterParagraph(right));
-  if (left.type === 'list') return interrupts;
+  // A list of another kind (`-` then `*`, `1.` then `1)`) may start right under one.
+  if (left.type === 'list') {
+    return interrupts || (right.type === 'list' && startsAnotherList(left, right) && interruptsParagraph(right));
+  }
   if (left.type === 'paragraph' || left.type === 'blockquote') {
     return interrupts || right.type === 'blockquote' || (right.type === 'list' && interruptsParagraph(right));
   }
@@ -1326,6 +1347,8 @@ export const authoredStyleSchemas = [
   carryAuthoredStyle(codeBlockSchema),
   carryAuthoredStyle(hardbreakSchema),
   carryAuthoredStyle(tableSchema),
+  // For the blank lines between footnotes (`GapStyle`).
+  carryAuthoredStyle(footnoteDefinitionSchema),
 ];
 
 /** Everything item 6 registers, for `MARKDOWN_EXTENSION_PLUGINS`. */

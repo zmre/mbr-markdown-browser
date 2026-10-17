@@ -18,5 +18,22 @@
   {"depth":1,"kind":"item","lines":[12,12]},
   {"depth":2,"kind":"paragraph","lines":[12,12]},
   {"depth":0,"kind":"paragraph","lines":[14,14]},
-  {"depth":0,"kind":"paragraph","lines":[20,20]}
+  {"depth":0,"kind":"list","lines":[20,21],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[20,21]},
+  {"depth":2,"kind":"paragraph","lines":[20,20]},
+  {"depth":2,"kind":"list","lines":[21,21],"ordered":false,"tight":true},
+  {"depth":3,"kind":"item","lines":[21,21]},
+  {"depth":4,"kind":"paragraph","lines":[21,21]},
+  {"depth":0,"kind":"list","lines":[22,22],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[22,22]},
+  {"depth":2,"kind":"paragraph","lines":[22,22]},
+  {"depth":0,"kind":"list","lines":[23,23],"ordered":true,"start":1,"tight":true},
+  {"depth":1,"kind":"item","lines":[23,23]},
+  {"depth":2,"kind":"paragraph","lines":[23,23]},
+  {"depth":0,"kind":"paragraph","lines":[25,25]},
+  {"depth":0,"kind":"footnote","lines":[27,27],"label":"a"},
+  {"depth":1,"kind":"paragraph","lines":[27,27]},
+  {"depth":0,"kind":"footnote","lines":[28,28],"label":"b"},
+  {"depth":1,"kind":"paragraph","lines":[28,28]},
+  {"depth":0,"kind":"paragraph","lines":[30,30]}
 ]

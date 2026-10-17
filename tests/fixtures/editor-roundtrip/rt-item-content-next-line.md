@@ -7,3 +7,6 @@
 
 -
   A paragraph on the line after the marker.
+
+- 
+    - after a marker with a trailing space

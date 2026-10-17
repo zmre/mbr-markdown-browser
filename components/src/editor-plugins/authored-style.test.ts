@@ -395,6 +395,16 @@ describe('blocks with no blank line between them', () => {
     expect(adjacentIsSafe(para, node('paragraph'))).toBe(false);
   });
 
+  it('may be a list of another kind right under a list', () => {
+    const dash = node('list', { ordered: false, mbrStyle: { marker: '-' }, children: [item()] });
+    const star = node('list', { ordered: false, mbrStyle: { marker: '*' }, children: [item()] });
+    expect(adjacentIsSafe(dash, star)).toBe(true);
+    expect(adjacentIsSafe(dash, dash)).toBe(false);
+    expect(adjacentIsSafe(dash, node('list', { ordered: true, start: 1, children: [item()] }))).toBe(true);
+    // `2.` cannot start a list under a paragraph: it would be the item's text.
+    expect(adjacentIsSafe(dash, node('list', { ordered: true, start: 2, children: [item()] }))).toBe(false);
+  });
+
   it('may follow a list whose last item is empty, unless it would join the list', () => {
     const list = node('list', { children: [item(), item([])] });
     expect(adjacentIsSafe(list, node('paragraph'))).toBe(true);

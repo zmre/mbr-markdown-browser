@@ -7,3 +7,6 @@ Text.
 ### Date 1/2/23  
 
 - item
+
+Setext with a trailing space 
+---
