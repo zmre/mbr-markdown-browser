@@ -1,0 +1,251 @@
+[
+ {
+  "source": "Inline $E = mc^2$ in a sentence.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "E = mc^2"
+   }
+  ]
+ },
+ {
+  "source": "Price is $5 and $10, not math.\n",
+  "math": []
+ },
+ {
+  "source": "Opener before whitespace: $ x$.\n",
+  "math": []
+ },
+ {
+  "source": "Closer after whitespace: $x $.\n",
+  "math": []
+ },
+ {
+  "source": "Display $$x$$ inline.\n",
+  "math": [
+   {
+    "display": true,
+    "tex": "x"
+   }
+  ]
+ },
+ {
+  "source": "Display with spaces $$ x + y $$.\n",
+  "math": [
+   {
+    "display": true,
+    "tex": " x + y "
+   }
+  ]
+ },
+ {
+  "source": "$$\n\\int_0^1 x^2 \\, dx \\\\\na \\; b\n$$\n",
+  "math": [
+   {
+    "display": true,
+    "tex": "\n\\int_0^1 x^2 \\, dx \\\\\na \\; b\n"
+   }
+  ]
+ },
+ {
+  "source": "A set $\\{a, b\\}$.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "\\{a, b\\}"
+   }
+  ]
+ },
+ {
+  "source": "Nested $\\text{$x$}$ dollars.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "\\text{$x$}"
+   }
+  ]
+ },
+ {
+  "source": "Brace ${$}$ context.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "{$}"
+   }
+  ]
+ },
+ {
+  "source": "Unbalanced a $b} $c$ d.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "c"
+   }
+  ]
+ },
+ {
+  "source": "Escaped \\$x$ and $y$.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "y"
+   }
+  ]
+ },
+ {
+  "source": "Escape inside $a \\$ b$.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "a \\$ b"
+   }
+  ]
+ },
+ {
+  "source": "Escaped backslash \\\\$x$.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x"
+   }
+  ]
+ },
+ {
+  "source": "Code first `$a$` and $b$.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "b"
+   }
+  ]
+ },
+ {
+  "source": "Math first $a`b$ c`.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "a`b"
+   }
+  ]
+ },
+ {
+  "source": "Failed display $$x$ falls back.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x"
+   }
+  ]
+ },
+ {
+  "source": "Trailing $x$$ dollar.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x"
+   }
+  ]
+ },
+ {
+  "source": "Run $x$y$ on.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x"
+   }
+  ]
+ },
+ {
+  "source": "Money $5 and $10$ end.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "10"
+   }
+  ]
+ },
+ {
+  "source": "Unclosed $x here.\n",
+  "math": []
+ },
+ {
+  "source": "# Heading $x^2$\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x^2"
+   }
+  ]
+ },
+ {
+  "source": "A [link $x$ text](u) here.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x"
+   }
+  ]
+ },
+ {
+  "source": "> Quoted $a\n> b$ end.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "a\nb"
+   }
+  ]
+ },
+ {
+  "source": "- item $$\n  x\n  $$\n",
+  "math": [
+   {
+    "display": true,
+    "tex": "\nx\n"
+   }
+  ]
+ },
+ {
+  "source": "Soft $a\nb$ break.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "a\nb"
+   }
+  ]
+ },
+ {
+  "source": "Empty $$$$ display.\n",
+  "math": [
+   {
+    "display": true,
+    "tex": ""
+   }
+  ]
+ },
+ {
+  "source": "| a | b |\n|---|---|\n| $x$ | $y + z$ |\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "x"
+   },
+   {
+    "display": false,
+    "tex": "y + z"
+   }
+  ]
+ },
+ {
+  "source": "Two $a$ and $$b$$.\n",
+  "math": [
+   {
+    "display": false,
+    "tex": "a"
+   },
+   {
+    "display": true,
+    "tex": "b"
+   }
+  ]
+ }
+]

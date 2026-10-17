@@ -391,6 +391,21 @@ pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
 /// Em dash character (U+2014) - what `---` becomes with smart punctuation
 const EM_DASH: &str = "\u{2014}";
 
+/// The `{…}` attribute block of a `--- {attrs}` section rule, given the text
+/// of the paragraph pulldown-cmark makes of that line.
+///
+/// `---` followed by anything is not a thematic break in CommonMark, so the
+/// line arrives as paragraph text, and smart punctuation has already turned
+/// the `---` into an em dash: `— {#id .class}`. A paragraph whose whole
+/// (merged) text matches is a section rule — even when the attributes do not
+/// parse, in which case the rule simply has none. The single definition of
+/// the pattern, shared by the renderer and the editor parity outline.
+pub(crate) fn section_rule_attrs(text: &str) -> Option<&str> {
+    text.strip_prefix(EM_DASH)
+        .filter(|rest| rest.starts_with(" {") && rest.ends_with('}'))
+        .map(str::trim)
+}
+
 /// Maps a non-standard [remark-hint](https://github.com/sergioramos/remark-hint)
 /// paragraph prefix to its GitHub-alert equivalent.
 ///
@@ -1012,7 +1027,7 @@ fn task_marker_status(event: &Event<'_>, at_item_start: bool) -> Option<TaskStat
 /// renderer as ordinary text and mbr has to pick them out itself. The marker
 /// must be followed by whitespace or end the run, matching the grammar in
 /// [`crate::tasks`], so `[-]x` is not a checkbox.
-fn split_extended_marker(text: &str) -> Option<(TaskStatus, &str)> {
+pub(crate) fn split_extended_marker(text: &str) -> Option<(TaskStatus, &str)> {
     let rest = text
         .strip_prefix("[-]")
         .or_else(|| text.strip_prefix("[>]"))?;
@@ -1400,28 +1415,16 @@ fn collect_events_and_headings<'a>(
                 let len = events.len();
                 // Need at least 2 prior events to form the pattern
                 if len >= 2 {
-                    let is_rule_attrs = matches!(
-                        (&events[len - 2], &events[len - 1]),
-                        (Event::Start(Tag::Paragraph), Event::Text(_))
-                    ) && {
-                        if let Event::Text(text) = &events[len - 1] {
-                            text.starts_with(EM_DASH)
-                                && text.strip_prefix(EM_DASH).is_some_and(|rest| {
-                                    rest.starts_with(" {") && rest.ends_with('}')
-                                })
-                        } else {
-                            false
+                    let rule_attrs = match (&events[len - 2], &events[len - 1]) {
+                        (Event::Start(Tag::Paragraph), Event::Text(text)) => {
+                            section_rule_attrs(text)
                         }
+                        _ => None,
                     };
 
-                    if is_rule_attrs {
+                    if let Some(attrs) = rule_attrs {
                         // Extract and parse attrs from the text event
-                        let parsed = if let Event::Text(text) = &events[len - 1] {
-                            text.strip_prefix(EM_DASH)
-                                .and_then(|rest| ParsedAttrs::parse(rest.trim()))
-                        } else {
-                            None
-                        };
+                        let parsed = ParsedAttrs::parse(attrs);
 
                         // Remove the Start(Paragraph) and Text events. The Text
                         // is recorded, and the `Rule` pushed below reuses its
@@ -2138,11 +2141,46 @@ async fn read_source_blocking(
         })?
 }
 
+/// A markdown source as read for a page render, with its fingerprint.
+#[derive(Debug, Clone)]
+pub struct FingerprintedSource {
+    /// The file's text, exactly as read.
+    pub text: String,
+    /// [`crate::edit_auth::content_hash`] of `text`'s bytes: the version of the
+    /// file the page was rendered from, which the write endpoints compare
+    /// against (`base_hash`) so a page cannot patch a file it never saw.
+    pub hash: String,
+}
+
+/// [`read_source`] plus the source's fingerprint, both on tokio's blocking
+/// pool (hashing a large note is not something to do on an executor thread).
+///
+/// For the server's page render, the one render whose output can drive a
+/// write; every other render skips the hash.
+pub async fn read_source_fingerprinted(
+    vault: Arc<dyn crate::vault::Vault>,
+    file: PathBuf,
+) -> Result<FingerprintedSource, MarkdownError> {
+    let key = file.clone();
+    tokio::task::spawn_blocking(move || {
+        read_source(vault.as_ref(), &key).map(|text| FingerprintedSource {
+            hash: crate::edit_auth::content_hash(text.as_bytes()),
+            text,
+        })
+    })
+    .await
+    .map_err(|e| MarkdownError::ReadFailed {
+        path: file,
+        source: std::io::Error::other(e),
+    })?
+}
+
 /// The async render of already-read text: [`render_str`] plus network
 /// OpenGraph enrichment. Shared by [`render_with_cache`] and
 /// [`render_from_vault_with_cache`], which differ only in where the text
-/// comes from.
-async fn render_text_with_cache(
+/// comes from, and by the server's page render, which reads the text itself
+/// ([`read_source_fingerprinted`]).
+pub async fn render_text_with_cache(
     raw_markdown_input: &str,
     file: &Path,
     opts: RenderOptions<'_>,

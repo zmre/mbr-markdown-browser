@@ -42,7 +42,7 @@ export type ReviewOutcome =
 export type ReviewRecorder = (target: ReviewTarget) => Promise<ReviewOutcome>
 
 /** A file's source lines as `task-toggle.ts` reads them (mirrors its `SourceRead`). */
-export type SourceLines = { ok: true; lines: string[] } | { ok: false; status: number }
+export type SourceLines = { ok: true; lines: string[]; hash: string | null } | { ok: false; status: number }
 
 /**
  * The main-bundle state the writer needs, injected by the `<mbr-flashcards>`
@@ -60,6 +60,10 @@ export interface ReviewServices {
   readonly forget: (path: string) => void
   /** `noteSelfWrite` */
   readonly selfWrite: (path: string) => void
+  /** `noteSourceHash`: the version a successful write left the file at. */
+  readonly noteHash: (path: string, hash: string | null) => void
+  /** `serializeWrite`: one write per file in flight, shared with task toggles. */
+  readonly serialize: <T>(path: string, write: () => Promise<T>) => Promise<T>
   /** `editAuthHeaders` */
   readonly headers: (extra?: Record<string, string>) => Record<string, string>
   /** `noteEditTokenRequired` */

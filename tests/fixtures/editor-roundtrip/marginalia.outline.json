@@ -1,0 +1,12 @@
+[
+  {"depth":0,"kind":"paragraph","lines":[1,1]},
+  {"depth":0,"kind":"blockquote","lines":[3,3]},
+  {"depth":1,"kind":"blockquote","lines":[3,3]},
+  {"depth":2,"kind":"blockquote","lines":[3,3]},
+  {"depth":3,"kind":"paragraph","lines":[3,3]},
+  {"depth":0,"kind":"blockquote","lines":[5,5]},
+  {"depth":1,"kind":"blockquote","lines":[5,5]},
+  {"depth":2,"kind":"paragraph","lines":[5,5]},
+  {"depth":0,"kind":"blockquote","lines":[7,7]},
+  {"depth":1,"kind":"paragraph","lines":[7,7]}
+]

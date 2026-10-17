@@ -38,7 +38,7 @@ impl Vid {
         let ext = Self::extension_from_url(url);
         match ext.as_deref() {
             Some("mp4") | Some("mpg") | Some("avi") | Some("ogv") | Some("ogg") | Some("m4v")
-            | Some("mkv") | Some("mov") => Some(Self {
+            | Some("mkv") | Some("mov") | Some("m3u8") => Some(Self {
                 url: url.to_string(),
                 ext,
                 start,
@@ -89,6 +89,7 @@ impl Vid {
     pub fn to_mime_type(&self) -> String {
         match self.ext.as_deref() {
             Some("m4v") => "video/mpeg".to_string(),
+            Some("m3u8") => "application/vnd.apple.mpegurl".to_string(),
             Some("mov") => "video/quicktime".to_string(),
             Some("avi") => "video/x-msvideo".to_string(),
             Some("ogg") | Some("ogv") => "video/ogg".to_string(),

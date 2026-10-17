@@ -13,10 +13,15 @@
           Retry-After/Refresh (the page reloads itself until the note arrives),
           but not drawn as an error: downloading on first access is normal. -#}
       <article class="mbr-downloading" aria-live="polite">
-        <progress aria-label="Downloading"></progress>
-        <h1 class="mbr-downloading-title">Downloading{% if download_provider %} from {{ download_provider }}{% endif %}…</h1>
+        {#- Two states, chosen by CSS: the iOS app sets `html.mbr-offline`
+            (at document start, so every Refresh reload keeps it) while the
+            device has no network path. Nothing else sets it. -#}
+        <progress class="mbr-downloading-online" aria-label="Downloading"></progress>
+        <h1 class="mbr-downloading-title mbr-downloading-online">Downloading{% if download_provider %} from {{ download_provider }}{% endif %}…</h1>
+        <h1 class="mbr-downloading-title mbr-downloading-offline">You're offline.</h1>
         <p class="mbr-downloading-name">{{ note_name }}</p>
-        <p><small>This note isn't on this device yet. It opens as soon as it arrives.</small></p>
+        <p class="mbr-downloading-online"><small>This note isn't on this device yet. It opens as soon as it arrives.</small></p>
+        <p class="mbr-downloading-offline"><small>This note will download when you're back online.</small></p>
       </article>
       {% else %}
       <article class="error-page">

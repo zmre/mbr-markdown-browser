@@ -1,0 +1,10 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"paragraph","lines":[3,3]},
+  {"depth":0,"kind":"paragraph","lines":[5,5]},
+  {"depth":0,"kind":"paragraph","lines":[7,7]},
+  {"depth":0,"kind":"list","lines":[9,9],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[9,9]},
+  {"depth":2,"kind":"paragraph","lines":[9,9]},
+  {"depth":0,"kind":"paragraph","lines":[11,11]}
+]

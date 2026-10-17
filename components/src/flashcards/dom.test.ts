@@ -233,3 +233,13 @@ describe('cardSections', () => {
     expect(result.sections.map((s) => s.id)).toEqual(['deck', 'geo'])
   })
 })
+
+describe('deck stylesheet', () => {
+  it('fills a rating button on hover only where the pointer can hover', () => {
+    // A touch screen keeps :hover on whatever was last tapped, so the next
+    // card's rating button under the finger looked pre-selected.
+    const outsideMedia = DECK_CSS.replace(/@media \(hover: hover\) \{[\s\S]*?\n\}/g, '')
+    expect(outsideMedia).not.toMatch(/\.mbr-fc-ratings button:hover/)
+    expect(DECK_CSS).toMatch(/@media \(hover: hover\) \{\s*\.mbr-fc-ratings button:hover/)
+  })
+})

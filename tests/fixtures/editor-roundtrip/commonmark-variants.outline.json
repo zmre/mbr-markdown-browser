@@ -1,0 +1,14 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,2],"level":1},
+  {"depth":0,"kind":"heading","lines":[4,5],"level":2},
+  {"depth":0,"kind":"paragraph","lines":[7,7]},
+  {"depth":0,"kind":"code","lines":[9,9],"fenced":false},
+  {"depth":0,"kind":"list","lines":[11,12],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[11,11]},
+  {"depth":2,"kind":"paragraph","lines":[11,11]},
+  {"depth":1,"kind":"item","lines":[12,12]},
+  {"depth":2,"kind":"paragraph","lines":[12,12]},
+  {"depth":0,"kind":"code","lines":[14,16],"fenced":true,"lang":"python"},
+  {"depth":0,"kind":"paragraph","lines":[18,20]},
+  {"depth":0,"kind":"paragraph","lines":[22,22]}
+]

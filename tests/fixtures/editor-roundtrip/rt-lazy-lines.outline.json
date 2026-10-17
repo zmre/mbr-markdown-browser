@@ -1,0 +1,16 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"list","lines":[3,7],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[3,4]},
+  {"depth":2,"kind":"paragraph","lines":[3,4]},
+  {"depth":1,"kind":"item","lines":[5,7]},
+  {"depth":2,"kind":"paragraph","lines":[5,5]},
+  {"depth":2,"kind":"list","lines":[6,7],"ordered":false,"tight":true},
+  {"depth":3,"kind":"item","lines":[6,7]},
+  {"depth":4,"kind":"paragraph","lines":[6,7]},
+  {"depth":0,"kind":"blockquote","lines":[9,10]},
+  {"depth":1,"kind":"paragraph","lines":[9,10]},
+  {"depth":0,"kind":"list","lines":[12,13],"ordered":true,"start":1,"tight":true},
+  {"depth":1,"kind":"item","lines":[12,13]},
+  {"depth":2,"kind":"paragraph","lines":[12,13]}
+]

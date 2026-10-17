@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::ExitCode;
 
 use clap::Parser;
 #[cfg(feature = "gui")]
@@ -32,8 +33,46 @@ fn needs_folder_picker(path: &Path) -> bool {
     }
 }
 
+/// Runs mbr and turns a failure into a readable message and exit code 1.
+///
+/// Returning `Result` from `main` would make the standard library print the
+/// error's `Debug` form (`Error: Config(EditingRequiresToken)`), which names
+/// an enum variant instead of telling the user what to do.
 #[tokio::main]
-async fn main() -> Result<(), MbrError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", error_report(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Formats an error and its `source()` chain for the terminal:
+/// `Error: <message>` followed by one `  caused by: <message>` line per source.
+///
+/// A source whose message is already part of the line before it is skipped:
+/// wrapper variants such as `MbrError::Config` print their inner error
+/// (`"Configuration error: {0}"`) *and* expose it as the source, which would
+/// otherwise print the same sentence twice.
+fn error_report(error: &dyn std::error::Error) -> String {
+    let mut report = format!("Error: {error}");
+    let mut previous = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let message = cause.to_string();
+        if !previous.contains(&message) {
+            report.push_str("\n  caused by: ");
+            report.push_str(&message);
+        }
+        previous = message;
+        source = cause.source();
+    }
+    report
+}
+
+async fn run() -> Result<(), MbrError> {
     // Suppress ffmpeg warnings/info messages from the metadata crate
     // These would otherwise clutter stdout/stderr when processing video files
     #[cfg(feature = "media-metadata")]
@@ -385,9 +424,55 @@ async fn main() -> Result<(), MbrError> {
         let templates =
             templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
                 .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
+        // The same context builder the server and the static build use, so a
+        // key the templates read (`sidebar_style`, …) cannot go missing here.
+        // A single file has no siblings and no live repository; URLs stay
+        // absolute, as before.
+        let readability = mbr::readability::scores(&mbr::readability::ReadabilityCounts {
+            words: render_result.word_count,
+            sentences: render_result.sentence_count,
+            syllables: render_result.syllable_count,
+        });
+        let file_path = path_relative_to_root.to_string_lossy();
+        let modified_secs = std::fs::metadata(&absolute_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let mut extra_context = mbr::page_context::markdown_extra_context(
+            &mbr::page_context::MarkdownPageParams {
+                breadcrumb_path: &path_relative_to_root,
+                headings: &render_result.headings,
+                has_h1: render_result.has_h1,
+                word_count: render_result.word_count,
+                readability: &readability,
+                file_path: &file_path,
+                modified_secs,
+                current_url: "",
+                siblings: &[],
+            },
+            &mbr::page_context::MarkdownContextOptions {
+                tag_sources: &config.tag_sources,
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
+                flashcards_concentric_threshold: config.flashcards_concentric_threshold,
+                flashcards_progress_indicators: config.flashcards_progress_indicators,
+                // No server behind stdout output: no task browser, and the
+                // render above emitted no `data-mbr-line`.
+                tasks_enabled: false,
+                review_enabled: false,
+                tasks_default_include: config.tasks_default_include,
+                title_prefix: &config.title_prefix,
+                title_suffix: &config.title_suffix,
+                root_dir: None,
+            },
+            &mbr::page_context::UrlMode::Absolute,
+        );
+        let mut frontmatter = render_result.frontmatter;
+        frontmatter.insert("server_mode".to_string(), false.into());
         // A contact note still gets its card; with no repository there is no
         // relationship index to link `company` through, and no backlinks.
-        let mut extra_context = std::collections::HashMap::new();
         mbr::page_context::insert_contact(
             &mut extra_context,
             render_result.contact,
@@ -395,11 +480,8 @@ async fn main() -> Result<(), MbrError> {
             None,
             &mbr::page_context::UrlMode::Absolute,
         );
-        let html_output = templates.render_markdown(
-            &render_result.html,
-            render_result.frontmatter,
-            extra_context,
-        )?;
+        let html_output =
+            templates.render_markdown(&render_result.html, frontmatter, extra_context)?;
         println!("{}", html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
@@ -513,6 +595,36 @@ mod tests {
     use super::*;
     #[cfg(feature = "gui")]
     use std::path::Path;
+
+    #[test]
+    fn test_error_report_uses_display_not_debug() {
+        let report = error_report(&MbrError::Config(ConfigError::EditingRequiresToken));
+        assert!(
+            report.starts_with("Error: Configuration error: Editing is enabled"),
+            "{report}"
+        );
+        assert!(!report.contains("EditingRequiresToken"), "{report}");
+    }
+
+    #[test]
+    fn test_error_report_skips_a_source_repeated_by_its_wrapper() {
+        let report = error_report(&MbrError::Config(ConfigError::EditingRequiresToken));
+        assert!(!report.contains("caused by"), "{report}");
+    }
+
+    #[test]
+    fn test_error_report_lists_each_distinct_source() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err = mbr::errors::MarkdownError::ReadFailed {
+            path: "notes/a.md".into(),
+            source: io,
+        };
+        let report = error_report(&MbrError::Markdown(err));
+        assert_eq!(
+            report,
+            "Error: Markdown error: Failed to read markdown file: notes/a.md\n  caused by: no such file"
+        );
+    }
 
     #[test]
     fn test_is_loopback_host_loopback_addresses() {

@@ -604,6 +604,12 @@ public protocol FileCoordinator: AnyObject, Sendable {
      * third-party provider (Dropbox, Working Copy), a coordinated read on a
      * background queue, which is what makes those materialize. Completion
      * needs no answer: the files simply become readable.
+     *
+     * A path may also be a **folder** whose listing is not on the device (a
+     * *dataless* iCloud Drive folder fails `readdir` on mbr's threads, see
+     * `iopolicy`): list it, recursively, on a thread allowed to wait. That
+     * fetches names and sizes only, never a file's contents; the next
+     * refresh indexes what it lists.
      */
     func requestDownload(paths: [String]) 
     
@@ -728,6 +734,12 @@ open func coordinatedRemove(path: String)throws   {try rustCallWithError(FfiConv
      * third-party provider (Dropbox, Working Copy), a coordinated read on a
      * background queue, which is what makes those materialize. Completion
      * needs no answer: the files simply become readable.
+     *
+     * A path may also be a **folder** whose listing is not on the device (a
+     * *dataless* iCloud Drive folder fails `readdir` on mbr's threads, see
+     * `iopolicy`): list it, recursively, on a thread allowed to wait. That
+     * fetches names and sizes only, never a file's contents; the next
+     * refresh indexes what it lists.
      */
 open func requestDownload(paths: [String])  {try! rustCall() {
     uniffi_mbr_ffi_fn_method_filecoordinator_request_download(
@@ -1630,6 +1642,13 @@ public struct OpenReport: Equatable, Hashable {
      * them up.
      */
     public var mbrDownloadsRequested: UInt32
+    /**
+     * Folders the indexing could not list because the provider has not
+     * fetched their contents yet, whose download was requested (see
+     * [`RefreshSummary::folders_not_downloaded`]). When non-zero,
+     * [`MbrApp::refresh`] a few seconds later indexes what has arrived.
+     */
+    public var foldersNotDownloaded: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1664,7 +1683,13 @@ public struct OpenReport: Equatable, Hashable {
          * the vault runs without them (default templates, configuration or
          * styles). When non-zero, [`MbrApp::refresh`] a few seconds later picks
          * them up.
-         */mbrDownloadsRequested: UInt32) {
+         */mbrDownloadsRequested: UInt32, 
+        /**
+         * Folders the indexing could not list because the provider has not
+         * fetched their contents yet, whose download was requested (see
+         * [`RefreshSummary::folders_not_downloaded`]). When non-zero,
+         * [`MbrApp::refresh`] a few seconds later indexes what has arrived.
+         */foldersNotDownloaded: UInt32) {
         self.fromCache = fromCache
         self.restoredFiles = restoredFiles
         self.indexedFiles = indexedFiles
@@ -1673,6 +1698,7 @@ public struct OpenReport: Equatable, Hashable {
         self.refresh = refresh
         self.configError = configError
         self.mbrDownloadsRequested = mbrDownloadsRequested
+        self.foldersNotDownloaded = foldersNotDownloaded
     }
 
     
@@ -1698,7 +1724,8 @@ public struct FfiConverterTypeOpenReport: FfiConverterRustBuffer {
                 readyMs: FfiConverterUInt64.read(from: &buf), 
                 refresh: FfiConverterTypeRefreshSummary.read(from: &buf), 
                 configError: FfiConverterOptionString.read(from: &buf), 
-                mbrDownloadsRequested: FfiConverterUInt32.read(from: &buf)
+                mbrDownloadsRequested: FfiConverterUInt32.read(from: &buf), 
+                foldersNotDownloaded: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -1711,6 +1738,7 @@ public struct FfiConverterTypeOpenReport: FfiConverterRustBuffer {
         FfiConverterTypeRefreshSummary.write(value.refresh, into: &buf)
         FfiConverterOptionString.write(value.configError, into: &buf)
         FfiConverterUInt32.write(value.mbrDownloadsRequested, into: &buf)
+        FfiConverterUInt32.write(value.foldersNotDownloaded, into: &buf)
     }
 }
 
@@ -1946,11 +1974,22 @@ public struct RefreshSummary: Equatable, Hashable {
     public var configError: String?
     /**
      * Files in `.mbr/` (or the template folder) still not downloaded, whose
-     * download this refresh asked for again. When non-zero, refresh again in
-     * a few seconds: their arrival shows up as `config_reloaded`,
-     * `templates_reloaded` or `assets_changed`.
+     * download this refresh asked for again — including a changed
+     * `config.toml`, template or asset whose new version is still in the
+     * cloud, which is not acted on until it arrives (the vault keeps running
+     * with what it had). When non-zero, refresh again in a few seconds:
+     * their arrival shows up as `config_reloaded`, `templates_reloaded` or
+     * `assets_changed`.
      */
     public var mbrDownloadsRequested: UInt32
+    /**
+     * Folders whose contents the provider has not fetched yet (an iCloud
+     * Drive folder on iOS stays *dataless* until something lists it), so
+     * their notes are not indexed; their download was requested again.
+     * When non-zero, refresh again in a few seconds: once listed, their
+     * files arrive as `added`.
+     */
+    public var foldersNotDownloaded: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1995,10 +2034,20 @@ public struct RefreshSummary: Equatable, Hashable {
          */configError: String?, 
         /**
          * Files in `.mbr/` (or the template folder) still not downloaded, whose
-         * download this refresh asked for again. When non-zero, refresh again in
-         * a few seconds: their arrival shows up as `config_reloaded`,
-         * `templates_reloaded` or `assets_changed`.
-         */mbrDownloadsRequested: UInt32) {
+         * download this refresh asked for again — including a changed
+         * `config.toml`, template or asset whose new version is still in the
+         * cloud, which is not acted on until it arrives (the vault keeps running
+         * with what it had). When non-zero, refresh again in a few seconds:
+         * their arrival shows up as `config_reloaded`, `templates_reloaded` or
+         * `assets_changed`.
+         */mbrDownloadsRequested: UInt32, 
+        /**
+         * Folders whose contents the provider has not fetched yet (an iCloud
+         * Drive folder on iOS stays *dataless* until something lists it), so
+         * their notes are not indexed; their download was requested again.
+         * When non-zero, refresh again in a few seconds: once listed, their
+         * files arrive as `added`.
+         */foldersNotDownloaded: UInt32) {
         self.added = added
         self.changed = changed
         self.removed = removed
@@ -2010,6 +2059,7 @@ public struct RefreshSummary: Equatable, Hashable {
         self.assetsChanged = assetsChanged
         self.configError = configError
         self.mbrDownloadsRequested = mbrDownloadsRequested
+        self.foldersNotDownloaded = foldersNotDownloaded
     }
 
     
@@ -2038,7 +2088,8 @@ public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
                 templatesReloaded: FfiConverterBool.read(from: &buf), 
                 assetsChanged: FfiConverterBool.read(from: &buf), 
                 configError: FfiConverterOptionString.read(from: &buf), 
-                mbrDownloadsRequested: FfiConverterUInt32.read(from: &buf)
+                mbrDownloadsRequested: FfiConverterUInt32.read(from: &buf), 
+                foldersNotDownloaded: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -2054,6 +2105,7 @@ public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
         FfiConverterBool.write(value.assetsChanged, into: &buf)
         FfiConverterOptionString.write(value.configError, into: &buf)
         FfiConverterUInt32.write(value.mbrDownloadsRequested, into: &buf)
+        FfiConverterUInt32.write(value.foldersNotDownloaded, into: &buf)
     }
 }
 
@@ -2693,7 +2745,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mbr_ffi_checksum_method_filecoordinator_coordinated_remove() != 25691) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mbr_ffi_checksum_method_filecoordinator_request_download() != 23585) {
+    if (uniffi_mbr_ffi_checksum_method_filecoordinator_request_download() != 53759) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_ffi_checksum_method_mbrresponse_headers() != 18497) {

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
@@ -30,11 +30,35 @@ const themeCss = readFileSync(
 const readRepoFile = (relative: string): string =>
   readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
 
+/**
+ * The editor parity corpus, `tests/fixtures/editor-roundtrip/`: every `*.md`
+ * fixture with its renderer outline golden (`*.outline.json`, written by
+ * mbr-core's `editor_parity` test), keyed by fixture name. Read byte for byte
+ * — `crlf.md` must reach the test with its `\r\n`s. A fixture without a
+ * golden maps to `null`, which the parity test reports as a failure.
+ */
+const readEditorFixtures = (): Record<string, { source: string; outline: string | null }> => {
+  const dir = fileURLToPath(new URL('../tests/fixtures/editor-roundtrip/', import.meta.url))
+  const fixtures: Record<string, { source: string; outline: string | null }> = {}
+  for (const file of readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
+    const name = file.slice(0, -'.md'.length)
+    let outline: string | null = null
+    try {
+      outline = readFileSync(`${dir}${name}.outline.json`, 'utf8')
+    } catch {
+      outline = null
+    }
+    fixtures[name] = { source: readFileSync(`${dir}${file}`, 'utf8'), outline }
+  }
+  return fixtures
+}
+
 export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
     __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
     __MBR_APP_BRIDGE_SWIFT__: JSON.stringify(readRepoFile('../apple/ios/MBRMobile/Web/AppBridge.swift')),
+    __MBR_EDITOR_FIXTURES__: JSON.stringify(readEditorFixtures()),
   },
   test: {
     environment: 'happy-dom',

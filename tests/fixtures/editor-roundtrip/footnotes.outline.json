@@ -1,0 +1,7 @@
+[
+  {"depth":0,"kind":"paragraph","lines":[1,1]},
+  {"depth":0,"kind":"footnote","lines":[3,3],"label":"1"},
+  {"depth":1,"kind":"paragraph","lines":[3,3]},
+  {"depth":0,"kind":"footnote","lines":[5,6],"label":"note"},
+  {"depth":1,"kind":"paragraph","lines":[5,6]}
+]

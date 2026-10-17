@@ -330,15 +330,33 @@ describe('in-document checkbox toggling', () => {
     expect(alertMock).toHaveBeenCalledOnce()
   })
 
-  it('reverts and explains a 409', async () => {
+  it('reverts a 409 and offers to reload the changed note', async () => {
     routeFetch(409)
+    const confirmMock = vi.fn((_question?: string) => false)
+    window.confirm = confirmMock
     element = await mount()
 
     checkbox(3).click()
     await flush()
 
     expect(checkbox(3).dataset.mbrTaskStatus).toBe('open')
-    expect(alertMock.mock.calls[0][0]).toMatch(/changed on disk/)
+    expect(alertMock).not.toHaveBeenCalled()
+    expect(confirmMock).toHaveBeenCalledOnce()
+    expect(confirmMock.mock.calls[0][0]).toMatch(/changed somewhere else.*Reload it/)
+  })
+
+  it('explains a note that is still downloading without offering a reload', async () => {
+    routeFetch(503)
+    const confirmMock = vi.fn((_question?: string) => false)
+    window.confirm = confirmMock
+    element = await mount()
+
+    checkbox(3).click()
+    await flush()
+
+    expect(checkbox(3).dataset.mbrTaskStatus).toBe('open')
+    expect(confirmMock).not.toHaveBeenCalled()
+    expect(alertMock.mock.calls[0][0]).toMatch(/still downloading/)
   })
 
   it('ignores a click on a marker span, which is nobody’s checkbox', async () => {

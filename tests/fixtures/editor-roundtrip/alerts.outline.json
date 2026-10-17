@@ -1,0 +1,6 @@
+[
+  {"depth":0,"kind":"blockquote","lines":[1,2],"alert":"note"},
+  {"depth":1,"kind":"paragraph","lines":[2,2]},
+  {"depth":0,"kind":"blockquote","lines":[4,5],"alert":"warning"},
+  {"depth":1,"kind":"paragraph","lines":[5,5]}
+]

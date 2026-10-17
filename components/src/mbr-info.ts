@@ -125,7 +125,7 @@ export class MbrInfoElement extends LitElement {
     this._noteMeta.get(canonicalizeNotePath(path));
 
   // Keys to skip (internal/technical fields)
-  private static skipKeys = new Set(['markdown_source', 'server_mode', 'gui_mode']);
+  private static skipKeys = new Set(['markdown_source', 'markdown_source_hash', 'server_mode', 'gui_mode']);
 
   // Preferred display order for common keys
   private static preferredOrder = [

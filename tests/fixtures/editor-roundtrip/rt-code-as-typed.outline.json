@@ -1,0 +1,15 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"code","lines":[3,5],"fenced":true,"lang":"js"},
+  {"depth":0,"kind":"code","lines":[7,9],"fenced":true},
+  {"depth":0,"kind":"paragraph","lines":[11,11]},
+  {"depth":0,"kind":"code","lines":[13,15],"fenced":false},
+  {"depth":0,"kind":"list","lines":[17,20],"ordered":false,"tight":false},
+  {"depth":1,"kind":"item","lines":[17,19]},
+  {"depth":2,"kind":"paragraph","lines":[17,17]},
+  {"depth":2,"kind":"code","lines":[19,19],"fenced":false},
+  {"depth":1,"kind":"item","lines":[20,20]},
+  {"depth":2,"kind":"paragraph","lines":[20,20]},
+  {"depth":0,"kind":"rule","lines":[22,22]},
+  {"depth":0,"kind":"paragraph","lines":[24,24]}
+]

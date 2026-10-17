@@ -10,7 +10,11 @@ struct RootView: View {
         @Bindable var model = model
         NavigationStack(path: $model.path) {
             VaultListView()
-                .navigationDestination(for: Route.self) { VaultScreen(route: $0) }
+                // Keyed by the route: a document handed to the app (or
+                // Grant Folder Access, or a re-pick) replaces the path's one
+                // route, and SwiftUI would otherwise reuse the screen at that
+                // position, with the old route's session in its state.
+                .navigationDestination(for: Route.self) { VaultScreen(route: $0).id($0) }
         }
         .sheet(isPresented: $model.showSettings) {
             NavigationStack { SettingsView() }

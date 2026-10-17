@@ -1,0 +1,20 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"list","lines":[3,7],"ordered":true,"start":1,"tight":false},
+  {"depth":1,"kind":"item","lines":[3,3]},
+  {"depth":2,"kind":"paragraph","lines":[3,3]},
+  {"depth":1,"kind":"item","lines":[4,4]},
+  {"depth":2,"kind":"paragraph","lines":[4,4]},
+  {"depth":1,"kind":"item","lines":[5,5]},
+  {"depth":2,"kind":"paragraph","lines":[5,5]},
+  {"depth":1,"kind":"item","lines":[7,7]},
+  {"depth":2,"kind":"paragraph","lines":[7,7]},
+  {"depth":0,"kind":"paragraph","lines":[9,9]},
+  {"depth":0,"kind":"list","lines":[11,13],"ordered":true,"start":5,"tight":true},
+  {"depth":1,"kind":"item","lines":[11,11]},
+  {"depth":2,"kind":"paragraph","lines":[11,11]},
+  {"depth":1,"kind":"item","lines":[12,12]},
+  {"depth":2,"kind":"paragraph","lines":[12,12]},
+  {"depth":1,"kind":"item","lines":[13,13]},
+  {"depth":2,"kind":"paragraph","lines":[13,13]}
+]

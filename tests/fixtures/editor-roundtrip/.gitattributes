@@ -1,0 +1,4 @@
+# Byte-exact fixtures: crlf.md must keep its CRLF line endings, and every
+# fixture is compared byte for byte by the editor round-trip test. The root
+# .gitattributes already says `* -text`; this keeps it true if that changes.
+* -text

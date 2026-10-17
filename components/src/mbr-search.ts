@@ -4,6 +4,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { getBasePath, resolveUrl, isNewTabModifier, openInNewTab, safeDecodePath, siteNav } from './shared.js'
 import { getMbrAssetBase } from './dynamic-loader.js'
 import type { MbrOverlay } from './overlay.js'
+import { trackVisualViewport } from './visual-viewport.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
 
 // Dynamically import the media browser component when needed
@@ -229,6 +230,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   @state()
   private _isOpen = false;
+  /** Stops `--mbr-vvh` tracking; set only while the modal is open. */
+  private _stopViewportTracking: (() => void) | null = null;
 
   /**
    * Index into `_results` of the highlighted row, or -1 for none. This is the
@@ -338,6 +341,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   override disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this._handleGlobalKeydown);
+    this._stopViewportTracking?.();
+    this._stopViewportTracking = null;
     if (this._debounceTimeout) {
       clearTimeout(this._debounceTimeout);
     }
@@ -443,6 +448,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   private _openSearch() {
     this._isOpen = true;
     this._lastPointer = null;
+    // Size the modal to the part of the screen the keyboard leaves visible
+    // (see visual-viewport.ts); set before the render so it opens at that size.
+    this._stopViewportTracking ??= trackVisualViewport(this);
     if (getMbrConfig().serverMode) this._loadSiteFacets();
     // Render now and focus in the same call stack. iOS WebKit raises the
     // software keyboard only for a focus() made while it still considers the
@@ -486,6 +494,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _closeSearch() {
     this._isOpen = false;
+    this._stopViewportTracking?.();
+    this._stopViewportTracking = null;
     this._query = '';
     this._setResults([]);
     this._lastPointer = null;
@@ -931,7 +941,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 @input=${this._handleInput}
                 @keydown=${this._handleKeydown}
                 autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
                 spellcheck="false"
+                enterkeyhint="search"
               />
               ${this._isLoading ? html`<span class="loading-indicator" aria-busy="true">Searching...</span>` : nothing}
             </div>
@@ -1115,15 +1128,24 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     }
 
     /* Modal backdrop */
+    /* Covers the visual viewport, not the layout one: iOS Safari leaves the
+       layout viewport (and so inset, vh and dvh) at full height under the
+       on-screen keyboard. --mbr-vvh / --mbr-vv-top come from
+       visual-viewport.ts while the modal is open; without them this is
+       inset: 0. Box-sizing so the padding is inside that height. */
     .modal-backdrop {
+      --mbr-search-top: calc(env(safe-area-inset-top, 0px) + min(10dvh, var(--mbr-vvh, 100dvh) * 0.1));
       position: fixed;
       inset: 0;
+      top: var(--mbr-vv-top, 0px);
+      height: var(--mbr-vvh, 100%);
+      box-sizing: border-box;
       background: rgba(0, 0, 0, 0.5);
       display: flex;
       align-items: flex-start;
       justify-content: center;
       padding-top: 10vh;
-      padding-top: calc(env(safe-area-inset-top, 0px) + 10dvh);
+      padding-top: var(--mbr-search-top);
       z-index: 1000;
     }
 
@@ -1132,8 +1154,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       width: 100%;
       max-width: 600px;
       max-height: 70vh;
-      /* dvh: shrinks with the on-screen keyboard, so the results stay above it. */
-      max-height: 70dvh;
+      /* Never past the bottom of the visible area (the keyboard's top edge),
+         so the end of the results list can always be scrolled into view. */
+      max-height: min(70dvh, calc(var(--mbr-vvh, 100dvh) - var(--mbr-search-top) - 0.75rem));
       margin: 0 1rem;
       background: var(--pico-background-color, #fff);
       border-radius: 12px;
